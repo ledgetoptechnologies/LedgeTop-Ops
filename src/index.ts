@@ -1,5 +1,6 @@
 import { authenticateIntegration, authenticateStaff, requireAdmin, requireScope } from "./auth";
 import { constantTimeEqual, hmac, randomToken, sha256, verifyPassword } from "./crypto";
+import { listFolder, normalizeObjectKey } from "./files";
 import { html, HttpError, json, parseCookies, readJson } from "./http";
 import { createShare, getShareByToken, listShares, revokeShare } from "./shares";
 import type { Env, Principal, ShareRecord } from "./types";
@@ -12,6 +13,25 @@ function errorResponse(error: unknown, wantsHtml = false): Response {
   const message = error instanceof Error && status < 500 ? error.message : "An unexpected error occurred";
   if (!(error instanceof HttpError)) console.error(error);
   return wantsHtml ? html(renderError(status === 404 ? "Not found" : "Request failed", message, status), status) : json({ error: message }, status);
+}
+
+async function streamDownload(request: Request, bucket: R2Bucket, key: string): Promise<Response> {
+  const range = request.headers.get("range") ? request.headers : undefined;
+  const object = await bucket.get(key, range ? { range } : undefined);
+  if (!object) throw new HttpError(404, "File not found");
+  const headers = new Headers();
+  object.writeHttpMetadata(headers);
+  headers.set("ETag", object.httpEtag);
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(key.split("/").pop() || "download")}`);
+  headers.set("X-Content-Type-Options", "nosniff");
+  if (range && object.range) {
+    const offset = ("offset" in object.range ? object.range.offset : 0) ?? 0;
+    const length = ("length" in object.range ? object.range.length : object.size) ?? object.size;
+    headers.set("Content-Range", `bytes ${offset}-${offset + length - 1}/${object.size}`);
+    headers.set("Content-Length", String(length));
+  }
+  return new Response(object.body, { status: range ? 206 : 200, headers });
 }
 
 async function sessionIsValid(request: Request, env: Env, share: ShareRecord): Promise<boolean> {
@@ -54,22 +74,7 @@ async function handleShare(request: Request, env: Env, url: URL, token: string, 
   if (action === "download" && request.method === "GET") {
     const key = url.searchParams.get("key") || "";
     if (!key.startsWith(share.r2_prefix) || key === share.r2_prefix) throw new HttpError(403, "File is outside this delivery");
-    const range = request.headers.get("range") ? request.headers : undefined;
-    const object = await env.DATA_BUCKET.get(key, range ? { range } : undefined);
-    if (!object) throw new HttpError(404, "File not found");
-    const headers = new Headers();
-    object.writeHttpMetadata(headers);
-    headers.set("ETag", object.httpEtag);
-    headers.set("Accept-Ranges", "bytes");
-    headers.set("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(key.split("/").pop() || "download")}`);
-    headers.set("X-Content-Type-Options", "nosniff");
-    if (range && object.range) {
-      const offset = ("offset" in object.range ? object.range.offset : 0) ?? 0;
-      const length = ("length" in object.range ? object.range.length : object.size) ?? object.size;
-      headers.set("Content-Range", `bytes ${offset}-${offset + length - 1}/${object.size}`);
-      headers.set("Content-Length", String(length));
-    }
-    return new Response(object.body, { status: range ? 206 : 200, headers });
+    return streamDownload(request, env.DATA_BUCKET, key);
   }
 
   if (request.method !== "GET") throw new HttpError(405, "Method not allowed");
@@ -95,6 +100,12 @@ async function handleStaffApi(request: Request, env: Env, url: URL): Promise<Res
   const principal = await authenticateStaff(request, env);
   const subpath = url.pathname.slice("/api/v1/admin".length) || "/";
   if (subpath === "/me" && request.method === "GET") return json({ user: principal });
+  if (subpath === "/files" && request.method === "GET") {
+    return json(await listFolder(env.DATA_BUCKET, url.searchParams.get("prefix") || "", url.searchParams.get("cursor") || undefined));
+  }
+  if (subpath === "/files/download" && request.method === "GET") {
+    return streamDownload(request, env.DATA_BUCKET, normalizeObjectKey(url.searchParams.get("key") || ""));
+  }
   if (subpath === "/shares" && request.method === "GET") return json({ shares: await listShares(env) });
   if (subpath === "/shares" && request.method === "POST") return json({ share: await createShare(env, principal, await readJson(request)) }, 201);
   const revokeMatch = subpath.match(/^\/shares\/([0-9a-f-]+)$/i);
@@ -114,9 +125,23 @@ async function handleStaffApi(request: Request, env: Env, url: URL): Promise<Res
     ).bind(id, email, body.display_name?.trim() || null, role).run();
     return json({ staff: { id, email, role } }, 201);
   }
+  if (subpath === "/staff" && request.method === "GET") {
+    requireAdmin(principal);
+    const result = await env.DB.prepare(
+      "SELECT id, email, display_name, role, active, created_at, last_seen_at FROM staff_users ORDER BY role, display_name, email",
+    ).all();
+    return json({ staff: result.results });
+  }
   if (subpath === "/api-keys" && request.method === "POST") {
     requireAdmin(principal);
     return json(await createApiKey(env, principal.id, await readJson(request)), 201);
+  }
+  if (subpath === "/api-keys" && request.method === "GET") {
+    requireAdmin(principal);
+    const result = await env.DB.prepare(
+      "SELECT id, name, key_prefix, scopes, active, created_at, last_used_at FROM api_keys ORDER BY created_at DESC",
+    ).all();
+    return json({ api_keys: result.results });
   }
   throw new HttpError(404, "API route not found");
 }

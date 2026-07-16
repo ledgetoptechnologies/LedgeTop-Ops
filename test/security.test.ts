@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { constantTimeEqual, hashPassword, verifyPassword } from "../src/crypto";
+import { normalizeFolderPrefix, normalizeObjectKey } from "../src/files";
 import { normalizePrefix } from "../src/shares";
 
 describe("R2 prefix scoping", () => {
@@ -11,6 +12,19 @@ describe("R2 prefix scoping", () => {
   it("rejects root and traversal prefixes", () => {
     expect(() => normalizePrefix("/")).toThrow();
     expect(() => normalizePrefix("clients/acme/../private")).toThrow();
+  });
+});
+
+describe("staff file explorer paths", () => {
+  it("supports root and nested folder navigation", () => {
+    expect(normalizeFolderPrefix("")).toBe("");
+    expect(normalizeFolderPrefix("/clients/acme/project")).toBe("clients/acme/project/");
+  });
+
+  it("rejects traversal and folder markers as downloads", () => {
+    expect(() => normalizeFolderPrefix("clients/../private")).toThrow();
+    expect(() => normalizeObjectKey("clients/acme/project/")).toThrow();
+    expect(normalizeObjectKey("/clients/acme/project/video.mp4")).toBe("clients/acme/project/video.mp4");
   });
 });
 

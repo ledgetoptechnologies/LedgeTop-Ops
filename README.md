@@ -28,10 +28,12 @@ Project Alpha -- scoped API key ----+
 | `GET /s/:token` | Share token; optional access code | List project files |
 | `POST /s/:token/unlock` | Public | Unlock a protected share for 12 hours |
 | `GET /s/:token/download?key=...` | Unlocked share | Stream a scoped R2 object, including range requests |
-| `GET /admin` | Cloudflare Access + active D1 staff user | Staff dashboard |
+| `GET /admin`, `/admin/deliveries`, `/admin/settings` | Cloudflare Access + active D1 staff user | Files, delivery links, and administration workspace |
 | `/api/v1/admin/*` | Cloudflare Access + D1 role | Staff, share, and API-key management |
 | `/api/v1/integrations/shares` | Scoped API key | Project Alpha share creation/listing |
 | `GET /health` | Public | Health response; does not expose dependencies |
+
+The staff Files view browses R2 with folder breadcrumbs and secured downloads. It is intentionally read-only because TrueNAS and its scheduled sync remain the authoritative source for file changes.
 
 Tokens and API keys are only stored as SHA-256 hashes. Access codes use salted PBKDF2-SHA-256 and are limited to 10 attempts per share per minute at each Cloudflare location. Project Alpha creation requires an idempotency key and derives a stable, high-entropy link token, so a safe retry returns the same URL without storing that token in plaintext.
 
