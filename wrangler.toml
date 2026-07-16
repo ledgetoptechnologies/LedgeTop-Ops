@@ -1,0 +1,19 @@
+name = "client-data-server"
+main = "src/index.js"
+compatibility_date = "2025-06-15"
+
+[observability]
+enabled = true
+
+# R2 bucket binding — create the bucket in Cloudflare dashboard first,
+# then update the bucket_name below to match.
+[[r2_buckets]]
+binding = "DATA_BUCKET"
+bucket_name = "client-data"
+
+# D1 database binding — create the database via `npx wrangler d1 create client-data`
+# then update the database_id below.
+[[d1_databases]]
+binding = "DB"
+database_name = "client-data"
+database_id = "REPLACE_WITH_D1_ID"
