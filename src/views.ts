@@ -27,7 +27,7 @@ function layout(title: string, content: string, script = ""): string {
     button.secondary,.button.secondary{background:#111;color:var(--gold)}button.danger{background:#9c2330}button:disabled{opacity:.55;cursor:wait}
     table{border-collapse:collapse;width:100%}th,td{text-align:left;padding:12px 9px;border-bottom:1px solid #e7eaed;vertical-align:top}th{font-size:.77rem;text-transform:uppercase;color:var(--muted)}
     .files{list-style:none;padding:0;margin:0}.file{display:flex;gap:16px;align-items:center;padding:15px 0;border-bottom:1px solid #e7eaed}.file:last-child{border:0}.file-info{min-width:0;flex:1}.file-name{font-weight:700;overflow-wrap:anywhere}
-    .notice{padding:12px 14px;border-radius:8px;background:#fff5cf;border-left:4px solid var(--gold);margin:16px 0}.error{background:#fff0f1;border-left-color:#b12635}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.right{margin-left:auto}
+    .notice{padding:12px 14px;border-radius:8px;background:#fff5cf;border-left:4px solid var(--gold);margin:16px 0}.error{background:#fff0f1;border-left-color:#b12635}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.landing-actions{display:flex;justify-content:space-between;align-items:flex-end;gap:14px;flex-wrap:wrap;margin-top:30px}.right{margin-left:auto}
     code{background:#eef1f3;padding:2px 5px;border-radius:4px}dialog{border:0;border-radius:14px;box-shadow:0 20px 70px #0006;max-width:560px;width:calc(100% - 30px)}dialog::backdrop{background:#0008}
     @media(max-width:700px){main{margin-top:22px}.card{padding:19px}table thead{display:none}table tr,table td{display:block}table tr{padding:12px 0;border-bottom:1px solid #ddd}table td{border:0;padding:3px 0}}
   </style>
@@ -45,7 +45,7 @@ export function renderLanding(): string {
     <div class="eyebrow">Secure delivery portal</div>
     <h1>Your project files, delivered simply.</h1>
     <p class="muted">Open the private link supplied by Ledge Top Drone Services to view and download your files.</p>
-    <div class="actions"><a class="button secondary" href="${BRAND.website}">Visit our website</a><a class="button" href="/admin">Staff sign in</a></div>
+    <div class="landing-actions"><a class="button" href="/admin">Staff sign in</a><a class="button secondary" href="${BRAND.website}">Visit our website</a></div>
   </section>`);
 }
 
