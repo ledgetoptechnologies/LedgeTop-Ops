@@ -1,4 +1,5 @@
 import { hashPassword, hmac, randomToken, sha256 } from "./crypto";
+import { containsHiddenSegment } from "./files";
 import { HttpError } from "./http";
 import type { Env, Principal, ShareRecord } from "./types";
 
@@ -16,7 +17,7 @@ interface CreateShareInput {
 
 export function normalizePrefix(value: string): string {
   const prefix = value.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/{2,}/g, "/");
-  if (!prefix || prefix === "/" || prefix.split("/").includes("..")) {
+  if (!prefix || prefix === "/" || prefix.split("/").includes("..") || containsHiddenSegment(prefix)) {
     throw new HttpError(400, "r2_prefix must be a safe, non-root object prefix");
   }
   return prefix.endsWith("/") ? prefix : `${prefix}/`;

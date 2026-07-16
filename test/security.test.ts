@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { constantTimeEqual, hashPassword, verifyPassword } from "../src/crypto";
-import { normalizeFolderPrefix, normalizeObjectKey } from "../src/files";
+import { containsHiddenSegment, mediaTypeForKey, normalizeFolderPrefix, normalizeObjectKey } from "../src/files";
 import { normalizePrefix } from "../src/shares";
 
 describe("R2 prefix scoping", () => {
@@ -25,6 +25,13 @@ describe("staff file explorer paths", () => {
     expect(() => normalizeFolderPrefix("clients/../private")).toThrow();
     expect(() => normalizeObjectKey("clients/acme/project/")).toThrow();
     expect(normalizeObjectKey("/clients/acme/project/video.mp4")).toBe("clients/acme/project/video.mp4");
+  });
+
+  it("recognizes hidden dump paths and previewable media dynamically", () => {
+    expect(containsHiddenSegment("jobs/2026/Acme/dump/raw.dng")).toBe(true);
+    expect(containsHiddenSegment("jobs/recurring/Dump Truck/edited/photo.jpg")).toBe(false);
+    expect(mediaTypeForKey("jobs/2026/Acme/edited/photo.JPG")).toBe("image");
+    expect(mediaTypeForKey("jobs/2026/Acme/edited/flight.mp4")).toBe("video");
   });
 });
 

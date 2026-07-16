@@ -25,15 +25,17 @@ Project Alpha -- scoped API key ----+
 | Route | Access | Purpose |
 | --- | --- | --- |
 | `GET /` | Public | Branded landing page |
-| `GET /s/:token` | Share token; optional access code | List project files |
+| `GET /s/:token?prefix=...` | Share token; optional access code | Dynamically browse the shared R2 folder tree |
 | `POST /s/:token/unlock` | Public | Unlock a protected share for 12 hours |
 | `GET /s/:token/download?key=...` | Unlocked share | Stream a scoped R2 object, including range requests |
+| `GET /s/:token/view?key=...` | Unlocked share | Inline image, video, PDF, or text preview with range support |
+| `GET /s/:token/thumbnail?key=...` | Unlocked share | Generate a bandwidth-friendly image thumbnail |
 | `GET /admin`, `/admin/deliveries`, `/admin/settings` | Cloudflare Access + active D1 staff user | Files, delivery links, and administration workspace |
 | `/api/v1/admin/*` | Cloudflare Access + D1 role | Staff, share, and API-key management |
 | `/api/v1/integrations/shares` | Scoped API key | Project Alpha share creation/listing |
 | `GET /health` | Public | Health response; does not expose dependencies |
 
-The staff Files view browses R2 with folder breadcrumbs and secured downloads. It is intentionally read-only because TrueNAS and its scheduled sync remain the authoritative source for file changes.
+The staff Files view browses R2 with folder breadcrumbs, grid/list views, previews, secured downloads, and a Share button on each folder. It is intentionally read-only because TrueNAS and its scheduled sync remain the authoritative source for file changes. Both the staff workspace and every client share list R2 at request time: no year, client, project, or `edited` folder is hard-coded, so later TrueNAS reorganizations appear automatically after sync. A path segment named `dump` is the sole structural exclusion and is rejected at both listing and download time.
 
 Tokens and API keys are only stored as SHA-256 hashes. Access codes use salted PBKDF2-SHA-256 and are limited to 10 attempts per share per minute at each Cloudflare location. Project Alpha creation requires an idempotency key and derives a stable, high-entropy link token, so a safe retry returns the same URL without storing that token in plaintext.
 
@@ -86,14 +88,16 @@ The Access-protected admin routes require a real Access JWT, so public routes ar
 
 6. Add `delivery.ledgetopdroneservices.com` as the Worker's custom domain.
 
-7. In Cloudflare Zero Trust, create a self-hosted Access application for both paths:
+7. In **Images > Transformations**, enable transformations for the zone. The portal uses one 520-by-340 transformation per image for grid thumbnails and falls back to file artwork if a source exceeds Cloudflare's remote-image limits. The original R2 objects remain private.
+
+8. In Cloudflare Zero Trust, create a self-hosted Access application for both paths:
 
    - `delivery.ledgetopdroneservices.com/admin*`
    - `delivery.ledgetopdroneservices.com/api/v1/admin*`
 
    Allow only `beaukoltz@ledgetopdroneservices.com` and `kstirn@ledgetopdroneservices.com` (or a tightly controlled company identity group). Do **not** put the public `/s/*` or `/api/v1/integrations/*` paths behind that application. The integration route has its own scoped key authentication.
 
-8. Visit `/admin` as Beau, then create the Project Alpha API key. The migrations seed Beau as `admin` and Kollins as `staff`; the raw integration key is shown once.
+9. Visit `/admin` as Beau, then create the Project Alpha API key. The migrations seed Beau as `admin` and Kollins as `staff`; the raw integration key is shown once.
 
 The configuration disables `workers.dev` and preview URLs so they cannot bypass path-based Access policy on the custom domain.
 
@@ -117,7 +121,7 @@ no_check_bucket = true
 Recommended scheduled command:
 
 ```bash
-rclone sync /mnt/POOL/CLIENT_DATA ltds-r2:client-data/clients \
+rclone sync /mnt/POOL/jobs ltds-r2:client-data/jobs \
   --exclude "dump/**" \
   --exclude "**/dump/**" \
   --fast-list \
@@ -131,13 +135,14 @@ rclone sync /mnt/POOL/CLIENT_DATA ltds-r2:client-data/clients \
 
 `sync` makes R2 mirror the source, including remote deletions. Start with `--dry-run`; if remote deletion is not desired, use `copy` instead. The two excludes skip a folder named `dump` at the root or at any nested level. Schedule it with a TrueNAS cron job or init/service wrapper after confirming the exact dataset path.
 
-Expected object layout:
+The portal does not require a fixed schema, but this mirrors the current server layout:
 
 ```text
-clients/<client-slug>/<project-slug>/...
+jobs/<year>/<client-or-company>/<any-subfolders>/...
+jobs/recurring/<client-or-organization>/<any-subfolders>/...
 ```
 
-The prefix entered in the dashboard must end at a project boundary, for example `clients/acme/roof-july/`.
+Folders named exactly `dump` at any depth are excluded from sync and independently blocked by the Worker. A folder named `unedited` is treated normally and can be shared. Any browsable folder can be the root of a delivery link; for example, `jobs/2026/Acme Construction/edited/`. Files added beneath that prefix later appear through the existing link automatically.
 
 ## Project Alpha contract
 
@@ -151,7 +156,7 @@ Content-Type: application/json
 {
   "client_name": "Acme Construction",
   "project_name": "Roof inspection - July",
-  "r2_prefix": "clients/acme/roof-july/",
+  "r2_prefix": "jobs/2026/Acme Construction/edited/",
   "external_ref": "project-alpha:project:1234",
   "idempotency_key": "delivery-link:project:1234:v1",
   "generate_access_code": true,

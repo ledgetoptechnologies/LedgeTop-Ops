@@ -1,12 +1,13 @@
 import { authenticateIntegration, authenticateStaff, requireAdmin, requireScope } from "./auth";
 import { constantTimeEqual, hmac, randomToken, sha256, verifyPassword } from "./crypto";
-import { listFolder, normalizeObjectKey } from "./files";
+import { containsHiddenSegment, listFolder, mediaTypeForKey, mimeTypeForKey, normalizeFolderPrefix, normalizeObjectKey } from "./files";
 import { html, HttpError, json, parseCookies, readJson } from "./http";
 import { createShare, getShareByToken, listShares, revokeShare } from "./shares";
 import type { Env, Principal, ShareRecord } from "./types";
 import { renderAdmin, renderError, renderLanding, renderPortal, renderUnlock } from "./views";
 
-const SHARE_ROUTE = /^\/s\/([^/]+)(?:\/(unlock|download))?$/;
+const SHARE_ROUTE = /^\/s\/([^/]+)(?:\/(unlock|download|view|thumbnail))?$/;
+const MEDIA_ROUTE = /^\/media\/(admin|share)\/([a-f0-9]{64})$/;
 
 function errorResponse(error: unknown, wantsHtml = false): Response {
   const status = error instanceof HttpError ? error.status : 500;
@@ -15,15 +16,30 @@ function errorResponse(error: unknown, wantsHtml = false): Response {
   return wantsHtml ? html(renderError(status === 404 ? "Not found" : "Request failed", message, status), status) : json({ error: message }, status);
 }
 
-async function streamDownload(request: Request, bucket: R2Bucket, key: string): Promise<Response> {
+async function streamObject(request: Request, bucket: R2Bucket, key: string, disposition: "attachment" | "inline"): Promise<Response> {
+  if (containsHiddenSegment(key)) throw new HttpError(404, "File not found");
+  if (request.method === "HEAD") {
+    const object = await bucket.head(key);
+    if (!object) throw new HttpError(404, "File not found");
+    const headers = new Headers();
+    object.writeHttpMetadata(headers);
+    if (!headers.has("Content-Type")) headers.set("Content-Type", mimeTypeForKey(key));
+    headers.set("ETag", object.httpEtag);
+    headers.set("Accept-Ranges", "bytes");
+    headers.set("Content-Length", String(object.size));
+    headers.set("Content-Disposition", `${disposition}; filename*=UTF-8''${encodeURIComponent(key.split("/").pop() || "file")}`);
+    headers.set("X-Content-Type-Options", "nosniff");
+    return new Response(null, { headers });
+  }
   const range = request.headers.get("range") ? request.headers : undefined;
   const object = await bucket.get(key, range ? { range } : undefined);
   if (!object) throw new HttpError(404, "File not found");
   const headers = new Headers();
   object.writeHttpMetadata(headers);
+  if (!headers.has("Content-Type")) headers.set("Content-Type", mimeTypeForKey(key));
   headers.set("ETag", object.httpEtag);
   headers.set("Accept-Ranges", "bytes");
-  headers.set("Content-Disposition", `attachment; filename*=UTF-8''${encodeURIComponent(key.split("/").pop() || "download")}`);
+  headers.set("Content-Disposition", `${disposition}; filename*=UTF-8''${encodeURIComponent(key.split("/").pop() || "file")}`);
   headers.set("X-Content-Type-Options", "nosniff");
   if (range && object.range) {
     const offset = ("offset" in object.range ? object.range.offset : 0) ?? 0;
@@ -32,6 +48,58 @@ async function streamDownload(request: Request, bucket: R2Bucket, key: string): 
     headers.set("Content-Length", String(length));
   }
   return new Response(object.body, { status: range ? 206 : 200, headers });
+}
+
+function requireShareKey(share: ShareRecord, value: string): string {
+  const key = normalizeObjectKey(value);
+  if (!key.startsWith(share.r2_prefix) || key === share.r2_prefix || containsHiddenSegment(key)) {
+    throw new HttpError(403, "File is outside this delivery");
+  }
+  return key;
+}
+
+function requireShareFolder(share: ShareRecord, value: string | null): string {
+  const prefix = normalizeFolderPrefix(value || share.r2_prefix);
+  if (!prefix.startsWith(share.r2_prefix) || containsHiddenSegment(prefix)) throw new HttpError(403, "Folder is outside this delivery");
+  return prefix;
+}
+
+async function imageThumbnail(request: Request, env: Env, context: "admin" | "share", key: string, share?: ShareRecord): Promise<Response> {
+  if (mediaTypeForKey(key) !== "image") throw new HttpError(415, "A thumbnail is not available for this file");
+  const signatureContext = context === "share" ? `share-media:${share?.id}:${key}` : `admin-media:${key}`;
+  const signature = await hmac(env.APP_SECRET, signatureContext);
+  const source = new URL(`/media/${context}/${signature}`, request.url);
+  source.searchParams.set("key", key);
+  if (share) source.searchParams.set("token", new URL(request.url).pathname.split("/")[2] || "");
+  const transformed = await fetch(source, {
+    cf: { image: { width: 520, height: 340, fit: "cover", quality: 72, format: "webp", metadata: "none" } },
+  });
+  if (!transformed.ok) throw new HttpError(502, "Thumbnail transformation is unavailable");
+  const headers = new Headers(transformed.headers);
+  headers.set("Cache-Control", "private, max-age=3600");
+  headers.set("Content-Disposition", "inline");
+  headers.set("X-Content-Type-Options", "nosniff");
+  return new Response(transformed.body, { status: transformed.status, headers });
+}
+
+async function handleMediaSource(request: Request, env: Env, url: URL, context: string, signature: string): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "HEAD") throw new HttpError(405, "Method not allowed");
+  const key = normalizeObjectKey(url.searchParams.get("key") || "");
+  if (containsHiddenSegment(key)) throw new HttpError(404, "File not found");
+  let expected: string;
+  if (context === "share") {
+    const share = await getShareByToken(env, url.searchParams.get("token") || "");
+    if (!share) throw new HttpError(404, "File not found");
+    requireShareKey(share, key);
+    expected = await hmac(env.APP_SECRET, `share-media:${share.id}:${key}`);
+  } else {
+    expected = await hmac(env.APP_SECRET, `admin-media:${key}`);
+  }
+  if (!constantTimeEqual(expected, signature)) throw new HttpError(404, "File not found");
+  const response = await streamObject(request, env.DATA_BUCKET, key, "inline");
+  const headers = new Headers(response.headers);
+  headers.set("Cache-Control", "public, max-age=86400, immutable");
+  return new Response(response.body, { status: response.status, headers });
 }
 
 async function sessionIsValid(request: Request, env: Env, share: ShareRecord): Promise<boolean> {
@@ -71,17 +139,21 @@ async function handleShare(request: Request, env: Env, url: URL, token: string, 
   const unlocked = await sessionIsValid(request, env, share);
   if (!unlocked) return html(renderUnlock(share, token));
 
-  if (action === "download" && request.method === "GET") {
-    const key = url.searchParams.get("key") || "";
-    if (!key.startsWith(share.r2_prefix) || key === share.r2_prefix) throw new HttpError(403, "File is outside this delivery");
-    return streamDownload(request, env.DATA_BUCKET, key);
+  if ((action === "download" || action === "view") && (request.method === "GET" || request.method === "HEAD")) {
+    const key = requireShareKey(share, url.searchParams.get("key") || "");
+    return streamObject(request, env.DATA_BUCKET, key, action === "download" ? "attachment" : "inline");
+  }
+
+  if (action === "thumbnail" && request.method === "GET") {
+    const key = requireShareKey(share, url.searchParams.get("key") || "");
+    return imageThumbnail(request, env, "share", key, share);
   }
 
   if (request.method !== "GET") throw new HttpError(405, "Method not allowed");
   const cursor = url.searchParams.get("cursor") || undefined;
-  const listed = await env.DATA_BUCKET.list({ prefix: share.r2_prefix, limit: 250, cursor });
+  const listed = await listFolder(env.DATA_BUCKET, requireShareFolder(share, url.searchParams.get("prefix")), cursor);
   await env.DB.prepare("UPDATE shares SET access_count = access_count + 1, last_accessed_at = datetime('now') WHERE id = ?").bind(share.id).run();
-  return html(renderPortal(share, token, listed.objects, listed.truncated ? listed.cursor : undefined));
+  return html(renderPortal(share, token, listed));
 }
 
 async function createApiKey(env: Env, staffId: string, body: { name?: string; scopes?: string }) {
@@ -104,7 +176,15 @@ async function handleStaffApi(request: Request, env: Env, url: URL): Promise<Res
     return json(await listFolder(env.DATA_BUCKET, url.searchParams.get("prefix") || "", url.searchParams.get("cursor") || undefined));
   }
   if (subpath === "/files/download" && request.method === "GET") {
-    return streamDownload(request, env.DATA_BUCKET, normalizeObjectKey(url.searchParams.get("key") || ""));
+    return streamObject(request, env.DATA_BUCKET, normalizeObjectKey(url.searchParams.get("key") || ""), "attachment");
+  }
+  if (subpath === "/files/view" && (request.method === "GET" || request.method === "HEAD")) {
+    return streamObject(request, env.DATA_BUCKET, normalizeObjectKey(url.searchParams.get("key") || ""), "inline");
+  }
+  if (subpath === "/files/thumbnail" && request.method === "GET") {
+    const key = normalizeObjectKey(url.searchParams.get("key") || "");
+    if (containsHiddenSegment(key)) throw new HttpError(404, "File not found");
+    return imageThumbnail(request, env, "admin", key);
   }
   if (subpath === "/shares" && request.method === "GET") return json({ shares: await listShares(env) });
   if (subpath === "/shares" && request.method === "POST") return json({ share: await createShare(env, principal, await readJson(request)) }, 201);
@@ -172,6 +252,8 @@ export default {
       }
       if (url.pathname.startsWith("/api/v1/admin/")) return await handleStaffApi(request, env, url);
       if (url.pathname.startsWith("/api/v1/integrations/")) return await handleIntegrationApi(request, env, url);
+      const mediaMatch = url.pathname.match(MEDIA_ROUTE);
+      if (mediaMatch) return await handleMediaSource(request, env, url, mediaMatch[1] || "", mediaMatch[2] || "");
       const shareMatch = url.pathname.match(SHARE_ROUTE);
       if (shareMatch) return await handleShare(request, env, url, decodeURIComponent(shareMatch[1] || ""), shareMatch[2]);
       throw new HttpError(404, "Page not found");
