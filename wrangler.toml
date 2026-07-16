@@ -6,8 +6,8 @@ preview_urls = false
 
 [vars]
 PUBLIC_BASE_URL = "https://delivery.ledgetopdroneservices.com"
-TEAM_DOMAIN = "https://REPLACE_WITH_TEAM_NAME.cloudflareaccess.com"
-POLICY_AUD = "REPLACE_WITH_ACCESS_APPLICATION_AUD"
+TEAM_DOMAIN = "https://ledgetoptechnologies.cloudflareaccess.com"
+POLICY_AUD = "3b287fcd289bcb39813051b2d98d2dbffa04c1bcf1904a5a7c8d2de52394ee23"
 BOOTSTRAP_ADMIN_EMAIL = "beaukoltz@ledgetopdroneservices.com"
 
 [observability]
