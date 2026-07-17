@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DeliveryItem, DeliveryManifest } from "@ltds/shared";
 import { Brand, EmptyState, Loading } from "@ltds/ui";
+import { parseDeliveryRoute } from "./route";
 
-type Gate = "loading" | "code" | "ready" | "error";
+type Gate = "landing" | "loading" | "code" | "ready" | "error";
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { credentials: "same-origin", ...init });
@@ -30,10 +31,10 @@ function iconFor(item: DeliveryItem): string {
 }
 
 export function DeliveryApp() {
-  const initialRouteId = useMemo(() => location.pathname.split("/").filter(Boolean)[1] || "", []);
-  const [publicId, setPublicId] = useState(initialRouteId);
-  const [secret, setSecret] = useState(() => location.hash.startsWith("#") ? decodeURIComponent(location.hash.slice(1)) : initialRouteId.length > 30 ? initialRouteId : "");
-  const [gate, setGate] = useState<Gate>("loading");
+  const initialRoute = useMemo(() => parseDeliveryRoute(location.pathname, location.hash), []);
+  const [publicId, setPublicId] = useState(initialRoute.publicId);
+  const [secret, setSecret] = useState(initialRoute.secret);
+  const [gate, setGate] = useState<Gate>(initialRoute.publicId ? "loading" : "landing");
   const [error, setError] = useState("");
   const [manifest, setManifest] = useState<DeliveryManifest | null>(null);
   const [folder, setFolder] = useState("");
@@ -47,9 +48,9 @@ export function DeliveryApp() {
   }, []);
 
   const exchange = useCallback(async (accessCode?: string) => {
-    if (!secret) { await loadManifest(publicId); return; }
     setGate("loading"); setError("");
     try {
+      if (!secret) { await loadManifest(publicId); return; }
       const result = await requestJson<{ publicId: string; canonicalPath: string }>(`/api/public/shares/${encodeURIComponent(publicId)}/session`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -65,11 +66,12 @@ export function DeliveryApp() {
     }
   }, [loadManifest, publicId, secret]);
 
-  useEffect(() => { void exchange(); }, []); // Exchange the URL fragment once on first load.
+  useEffect(() => { if (publicId) void exchange(); }, []); // Exchange the URL fragment once on first load.
 
   function changeView(next: "grid" | "list") { setView(next); localStorage.setItem("ltds-delivery-view", next); }
   async function openFolder(item: DeliveryItem) { await loadManifest(publicId, item.id); window.scrollTo({ top: 0, behavior: "smooth" }); }
 
+  if (gate === "landing") return <PublicFrame><DeliveryLanding /></PublicFrame>;
   if (gate === "loading") return <PublicFrame><Loading /></PublicFrame>;
   if (gate === "code") return <PublicFrame><AccessCodeForm onSubmit={exchange} error={error} /></PublicFrame>;
   if (gate === "error" || !manifest) return <PublicFrame><EmptyState title="Delivery unavailable" detail={error || "This link is invalid, expired, or has been revoked."} /></PublicFrame>;
@@ -94,6 +96,15 @@ export function DeliveryApp() {
     </section>
     {preview && <Preview item={preview} onClose={() => setPreview(null)} />}
   </PublicFrame>;
+}
+
+function DeliveryLanding() {
+  return <section className="delivery-landing">
+    <span className="eyebrow">Secure client delivery</span>
+    <h1>Open your delivery from the link we sent you.</h1>
+    <p>Each client delivery has a private, unique link. Use that link to view, preview, and download your files.</p>
+    <small>If your link has expired or is not opening, contact your Ledge Top Drone Services project representative.</small>
+  </section>;
 }
 
 function PublicFrame({ children }: { children: React.ReactNode }) {

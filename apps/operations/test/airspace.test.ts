@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { bbox, intersectsWI, regionalWfsUrl, suaStatus, tfrStatus } from "../src/worker/airspace";
+import { airspaceRetentionCutoff, bbox, intersectsWI, isWisconsinSua, isWisconsinTfr, regionalWfsUrl, suaStatus, tfrStatus } from "../src/worker/airspace";
 
 describe("FAA status normalization",()=>{
   beforeEach(()=>{vi.useFakeTimers();vi.setSystemTime(new Date("2026-07-16T18:00:00Z"));});afterEach(()=>vi.useRealTimers());
@@ -10,8 +10,16 @@ describe("FAA status normalization",()=>{
 describe("Wisconsin geometry prefilter",()=>{
   it("finds polygon bounds that cross the state",()=>{const box=bbox({type:"Polygon",coordinates:[[[-93,44],[-90,44],[-90,46],[-93,46],[-93,44]]]});expect(box).toEqual({minLon:-93,maxLon:-90,minLat:44,maxLat:46});expect(intersectsWI(box)).toBe(true);});
   it("rejects a distant polygon",()=>{expect(intersectsWI(bbox({type:"Polygon",coordinates:[[[-105,39],[-104,39],[-104,40],[-105,40],[-105,39]]]}))).toBe(false);});
+  it("keeps a Wisconsin-tagged TFR even when it has no geometry",()=>{expect(isWisconsinTfr({state:"WI"})).toBe(true);});
+  it("rejects nationwide and other-state TFR rows without Wisconsin geometry",()=>{expect(isWisconsinTfr({state:"USA"})).toBe(false);expect(isWisconsinTfr({STATE:"MN"})).toBe(false);});
+  it("keeps a TFR whose mapped geometry intersects Wisconsin",()=>{expect(isWisconsinTfr({state:"USA"},[{type:"Feature",geometry:{type:"Polygon",coordinates:[[[-90,44],[-89,44],[-89,45],[-90,45],[-90,44]]]},properties:{STATE:"USA"}}])).toBe(true);});
+  it("limits SUA ingestion to Wisconsin SAA records, including MOAs",()=>{expect(isWisconsinSua({state:"WI",type_class:"SAA",airspace_type:"M"})).toBe(true);expect(isWisconsinSua({state:"MI",type_class:"SAA",airspace_type:"M"})).toBe(false);expect(isWisconsinSua({state:"WI",type_class:"TFR"})).toBe(false);});
 });
 
 describe("FAA WFS request",()=>{
   it("bounds the source request to Wisconsin without unsupported pagination",()=>{const url=new URL(regionalWfsUrl("https://sua.faa.gov/geoserver/wfs?service=WFS"));expect(url.searchParams.get("bbox")).toBe("-92.89,42.49,-86.25,47.31,EPSG:4326");expect(url.searchParams.get("maxFeatures")).toBe("1000");expect(url.searchParams.has("startIndex")).toBe(false);expect(url.searchParams.has("count")).toBe(false);});
+});
+
+describe("airspace retention",()=>{
+  it("keeps expired operational records for only 24 hours",()=>{expect(airspaceRetentionCutoff(new Date("2026-07-17T18:00:00Z").getTime())).toBe("2026-07-16T18:00:00.000Z");});
 });

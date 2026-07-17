@@ -5,6 +5,7 @@ const TFR_NO_SHAPE = "https://tfr.faa.gov/tfrapi/noShapeTfrList";
 const TFR_WFS = "https://tfr.faa.gov/geoserver/TFR/ows?service=WFS&version=1.1.0&request=GetFeature&typeName=TFR:V_TFR_LOC&outputFormat=application%2Fjson&srsname=EPSG:4326";
 const SUA_WFS = "https://sua.faa.gov/geoserver/wfs?service=WFS&version=1.1.0&request=GetFeature&typeName=SUA:schedule&outputFormat=application%2Fjson&srsName=EPSG%3A4326";
 const WI = { minLat: 42.49, minLon: -92.89, maxLat: 47.31, maxLon: -86.25 };
+const AIRSPACE_RETENTION_MS = 24 * 60 * 60 * 1000;
 type JsonRow = Record<string, unknown>;
 interface Geometry { type: string; coordinates: unknown }
 interface Feature { type: string; id?: string; geometry?: Geometry; properties: JsonRow }
@@ -22,6 +23,14 @@ export function bbox(geometry: Geometry | undefined): { minLat: number; minLon: 
   return { minLon: Math.min(...values.map(value => value[0]!)), maxLon: Math.max(...values.map(value => value[0]!)), minLat: Math.min(...values.map(value => value[1]!)), maxLat: Math.max(...values.map(value => value[1]!)) };
 }
 export function intersectsWI(box: ReturnType<typeof bbox>): boolean { return Boolean(box && box.minLon <= WI.maxLon && box.maxLon >= WI.minLon && box.minLat <= WI.maxLat && box.maxLat >= WI.minLat); }
+function stateCode(value: unknown): string { return String(value || "").trim().toUpperCase(); }
+export function isWisconsinTfr(row: JsonRow, features: Feature[] = []): boolean {
+  return stateCode(row.state ?? row.STATE) === "WI" || features.some(feature => intersectsWI(bbox(feature.geometry)));
+}
+export function isWisconsinSua(properties: JsonRow): boolean {
+  return stateCode(properties.state ?? properties.STATE) === "WI" && stateCode(properties.type_class) === "SAA";
+}
+export function airspaceRetentionCutoff(now = Date.now()): string { return new Date(now - AIRSPACE_RETENTION_MS).toISOString(); }
 export function tfrStatus(start: string | null, end: string | null): "scheduled" | "active" | "expired" | "unknown" { const now = Date.now(), a = start ? new Date(start).getTime() : NaN, b = end ? new Date(end).getTime() : NaN; if (Number.isFinite(b) && b < now) return "expired"; if (Number.isFinite(a) && a > now) return "scheduled"; if (Number.isFinite(a) && Number.isFinite(b) && a <= now && b >= now) return "active"; return "unknown"; }
 export function suaStatus(value: unknown, start: string | null, end: string | null): "active" | "upcoming" | "pending" | "not_listed" | "expired" | "unknown" { if (!start && !end) return "not_listed"; if (end && new Date(end).getTime() < Date.now()) return "expired"; const status = String(value || "").toUpperCase(); if (status === "H" || status.includes("HOT")) return "active"; if (status === "W" || status.includes("WAITING")) return "upcoming"; if (status === "P" || status.includes("PENDING")) return "pending"; return "unknown"; }
 
@@ -67,19 +76,22 @@ export async function refreshTfrs(env: Env): Promise<number> {
     const rows = new Map<string, JsonRow>();
     for (const row of [...asRows(listedRaw), ...asRows(noShapeRaw)]) { const key = normalizeNotam(row.notam_id ?? row.NOTAM_KEY); if (key) rows.set(key, row); }
     for (const [key, values] of geometryByNotam) if (!rows.has(key)) rows.set(key, values[0]!.properties);
-    const selected = [...rows.entries()].filter(([key, row]) => { const state = String(row.state ?? row.STATE ?? "").toUpperCase(); return state === "WI" || state === "USA" || (geometryByNotam.get(key) || []).some(feature => intersectsWI(bbox(feature.geometry))); });
+    const selected = [...rows.entries()].filter(([key, row]) => isWisconsinTfr(row, geometryByNotam.get(key) || []));
     const details = new Map<string, Awaited<ReturnType<typeof detail>>>();
     for (let index = 0; index < selected.length; index += 8) { const chunk = selected.slice(index, index + 8), values = await Promise.all(chunk.map(([key]) => detail(key))); chunk.forEach(([key], item) => details.set(key, values[item]!)); }
     const statements: D1PreparedStatement[] = [env.OPS_DB.prepare("UPDATE tfr_notices SET missing_snapshots=missing_snapshots+1")];
     for (const [key, row] of selected) {
       const id = `tfr-${key.replace(/[^a-z0-9]/gi, "-")}`, info = details.get(key)!, geometries = geometryByNotam.get(key) || [], status = info.intervals.length ? statusForIntervals(info.intervals) : tfrStatus(info.start, info.end);
-      statements.push(env.OPS_DB.prepare(`INSERT INTO tfr_notices (id,notam_id,facility,state,type,title,description,status,issued_at,effective_at,expires_at,official_url,geometry_available,missing_snapshots,source_updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?) ON CONFLICT(notam_id) DO UPDATE SET facility=excluded.facility,state=excluded.state,type=excluded.type,title=excluded.title,description=excluded.description,status=excluded.status,issued_at=excluded.issued_at,effective_at=excluded.effective_at,expires_at=excluded.expires_at,official_url=excluded.official_url,geometry_available=excluded.geometry_available,missing_snapshots=0,source_updated_at=excluded.source_updated_at,updated_at=datetime('now')`).bind(id, key, row.facility ?? null, row.state ?? row.STATE ?? null, row.type ?? null, row.description ?? row.TITLE ?? key, row.description ?? null, status, info.issued, info.start, info.end, `https://tfr.faa.gov/tfr3/?page=detail_${key.replace("/", "_")}`, geometries.length ? 1 : 0, row.mod_date ?? row.LAST_MODIFICATION_DATETIME ?? null));
+      statements.push(env.OPS_DB.prepare(`INSERT INTO tfr_notices (id,notam_id,facility,state,type,title,description,status,issued_at,effective_at,expires_at,official_url,geometry_available,missing_snapshots,source_updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?) ON CONFLICT(notam_id) DO UPDATE SET facility=excluded.facility,state=excluded.state,type=excluded.type,title=excluded.title,description=excluded.description,status=excluded.status,issued_at=excluded.issued_at,effective_at=excluded.effective_at,expires_at=excluded.expires_at,official_url=excluded.official_url,geometry_available=excluded.geometry_available,missing_snapshots=0,source_updated_at=excluded.source_updated_at,updated_at=datetime('now')`).bind(id, key, row.facility ?? null, "WI", row.type ?? null, row.description ?? row.TITLE ?? key, row.description ?? null, status, info.issued, info.start, info.end, `https://tfr.faa.gov/tfr3/?page=detail_${key.replace("/", "_")}`, geometries.length ? 1 : 0, row.mod_date ?? row.LAST_MODIFICATION_DATETIME ?? null));
       statements.push(env.OPS_DB.prepare("DELETE FROM tfr_effective_intervals WHERE tfr_id=?").bind(id), env.OPS_DB.prepare("DELETE FROM tfr_geometries WHERE tfr_id=?").bind(id));
       for (const interval of info.intervals) statements.push(env.OPS_DB.prepare("INSERT INTO tfr_effective_intervals (id,tfr_id,starts_at,ends_at) VALUES (?,?,?,?)").bind(crypto.randomUUID(), id, interval.start, interval.end));
       if (!info.intervals.length && info.start && info.end) statements.push(env.OPS_DB.prepare("INSERT INTO tfr_effective_intervals (id,tfr_id,starts_at,ends_at) VALUES (?,?,?,?)").bind(crypto.randomUUID(), id, info.start, info.end));
       for (const feature of geometries) { const box = bbox(feature.geometry); statements.push(env.OPS_DB.prepare("INSERT INTO tfr_geometries (id,tfr_id,geojson,min_lat,min_lon,max_lat,max_lon) VALUES (?,?,?,?,?,?,?)").bind(crypto.randomUUID(), id, JSON.stringify(feature.geometry), box?.minLat ?? null, box?.minLon ?? null, box?.maxLat ?? null, box?.maxLon ?? null)); }
     }
-    statements.push(env.OPS_DB.prepare("UPDATE tfr_notices SET status='withdrawn' WHERE missing_snapshots>=2 AND status NOT IN ('expired','withdrawn')")); await batches(env.OPS_DB, statements); await health(env, "faa-tfr", "fresh"); return selected.length;
+    statements.push(
+      env.OPS_DB.prepare("UPDATE tfr_notices SET status='withdrawn',updated_at=datetime('now') WHERE UPPER(TRIM(COALESCE(state,'')))<>'WI' AND status NOT IN ('expired','withdrawn')"),
+      env.OPS_DB.prepare("UPDATE tfr_notices SET status='withdrawn' WHERE missing_snapshots>=2 AND status NOT IN ('expired','withdrawn')"),
+    ); await batches(env.OPS_DB, statements); await health(env, "faa-tfr", "fresh"); return selected.length;
   } catch (error) { await health(env, "faa-tfr", "error", error instanceof Error ? error.message.slice(0, 100) : "unknown"); throw error; }
 }
 
@@ -87,7 +99,7 @@ export async function refreshSua(env: Env): Promise<number> {
   try {
     const features = await fetchWfs(SUA_WFS), statements: D1PreparedStatement[] = [env.OPS_DB.prepare("UPDATE sua_reservations SET missing_snapshots=missing_snapshots+1")]; let count = 0;
     for (const feature of features) {
-      const properties = feature.properties, box = bbox(feature.geometry); if (!intersectsWI(box) || !feature.geometry) continue;
+      const properties = feature.properties, box = bbox(feature.geometry); if (!isWisconsinSua(properties) || !intersectsWI(box) || !feature.geometry) continue;
       const airspaceId = String(properties.airspace_id ?? feature.id ?? ""), gid = String(properties.gid ?? feature.id ?? ""); if (!airspaceId) continue;
       const areaId = `${airspaceId}:${gid || airspaceId}`, start = iso(String(properties.start_time ?? "") || null), end = iso(String(properties.end_time ?? "") || null), schedule = String(properties.sched_id ?? "0"), reservationId = `${areaId}:${schedule}`;
       statements.push(env.OPS_DB.prepare(`INSERT INTO sua_areas (id,gid,name,airspace_type,geojson,low_altitude,high_altitude,min_lat,min_lon,max_lat,max_lon) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET gid=excluded.gid,name=excluded.name,airspace_type=excluded.airspace_type,geojson=excluded.geojson,low_altitude=excluded.low_altitude,high_altitude=excluded.high_altitude,min_lat=excluded.min_lat,min_lon=excluded.min_lon,max_lat=excluded.max_lat,max_lon=excluded.max_lon,updated_at=datetime('now')`).bind(areaId, gid, String(properties.airspace_name ?? airspaceId), String(properties.airspace_type ?? "unknown"), JSON.stringify(feature.geometry), properties.low_altitude ?? null, properties.high_altitude ?? null, box!.minLat, box!.minLon, box!.maxLat, box!.maxLon));
@@ -122,10 +134,22 @@ export async function rebuildOperationAirspaceMatches(env: Env): Promise<number>
 }
 
 export async function markAirspaceStaleAndPurge(env: Env): Promise<void> {
-  await env.OPS_DB.batch([env.OPS_DB.prepare("UPDATE airspace_source_health SET status='stale',updated_at=datetime('now') WHERE status='fresh' AND last_success_at<datetime('now','-15 minutes')"), env.OPS_DB.prepare("DELETE FROM tfr_effective_intervals WHERE tfr_id IN (SELECT id FROM tfr_notices WHERE status IN ('expired','withdrawn') AND COALESCE(expires_at,updated_at)<datetime('now','-24 hours'))"), env.OPS_DB.prepare("DELETE FROM tfr_geometries WHERE tfr_id IN (SELECT id FROM tfr_notices WHERE status IN ('expired','withdrawn') AND COALESCE(expires_at,updated_at)<datetime('now','-24 hours'))"), env.OPS_DB.prepare("DELETE FROM tfr_notices WHERE status IN ('expired','withdrawn') AND COALESCE(expires_at,updated_at)<datetime('now','-24 hours')"), env.OPS_DB.prepare("DELETE FROM sua_reservations WHERE status='expired' AND COALESCE(ends_at,updated_at)<datetime('now','-24 hours')")]);
+  const cutoff = airspaceRetentionCutoff();
+  await env.OPS_DB.batch([
+    env.OPS_DB.prepare("UPDATE airspace_source_health SET status='stale',updated_at=datetime('now') WHERE status='fresh' AND last_success_at<datetime('now','-15 minutes')"),
+    env.OPS_DB.prepare("UPDATE tfr_notices SET status='expired',updated_at=datetime('now') WHERE status IN ('scheduled','active','unknown') AND expires_at IS NOT NULL AND datetime(expires_at)<datetime('now')"),
+    env.OPS_DB.prepare("UPDATE sua_reservations SET status='expired',updated_at=datetime('now') WHERE status IN ('active','upcoming','pending','unknown') AND ends_at IS NOT NULL AND datetime(ends_at)<datetime('now')"),
+    env.OPS_DB.prepare("DELETE FROM operation_airspace_matches WHERE source_type='tfr' AND source_id IN (SELECT id FROM tfr_notices WHERE status IN ('expired','withdrawn') AND datetime(COALESCE(expires_at,updated_at))<datetime(?))").bind(cutoff),
+    env.OPS_DB.prepare("DELETE FROM operation_airspace_matches WHERE source_type='sua' AND source_id IN (SELECT id FROM sua_reservations WHERE status='expired' AND datetime(COALESCE(ends_at,updated_at))<datetime(?))").bind(cutoff),
+    env.OPS_DB.prepare("DELETE FROM tfr_effective_intervals WHERE tfr_id IN (SELECT id FROM tfr_notices WHERE status IN ('expired','withdrawn') AND datetime(COALESCE(expires_at,updated_at))<datetime(?))").bind(cutoff),
+    env.OPS_DB.prepare("DELETE FROM tfr_geometries WHERE tfr_id IN (SELECT id FROM tfr_notices WHERE status IN ('expired','withdrawn') AND datetime(COALESCE(expires_at,updated_at))<datetime(?))").bind(cutoff),
+    env.OPS_DB.prepare("DELETE FROM tfr_notices WHERE status IN ('expired','withdrawn') AND datetime(COALESCE(expires_at,updated_at))<datetime(?)").bind(cutoff),
+    env.OPS_DB.prepare("DELETE FROM sua_reservations WHERE status='expired' AND datetime(COALESCE(ends_at,updated_at))<datetime(?)").bind(cutoff),
+    env.OPS_DB.prepare("DELETE FROM sua_areas WHERE id NOT IN (SELECT area_id FROM sua_reservations)"),
+  ]);
 }
 
 export async function airspaceView(env: Env) {
-  const [healthRows, tfrs, sua, matches] = await Promise.all([env.OPS_DB.prepare("SELECT * FROM airspace_source_health ORDER BY source").all(), env.OPS_DB.prepare("SELECT id,notam_id,title,description,status,effective_at,expires_at,official_url,geometry_available,state,type FROM tfr_notices WHERE status IN ('active','scheduled','unknown') ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END,effective_at LIMIT 200").all(), env.OPS_DB.prepare("SELECT r.id,r.status,r.starts_at,r.ends_at,r.low_altitude,r.high_altitude,r.remarks,a.name,a.airspace_type FROM sua_reservations r JOIN sua_areas a ON a.id=r.area_id WHERE r.status IN ('active','upcoming','pending','not_listed','unknown') ORDER BY CASE r.status WHEN 'active' THEN 0 WHEN 'upcoming' THEN 1 ELSE 2 END,r.starts_at LIMIT 250").all(), env.OPS_DB.prepare("SELECT m.operation_id,m.source_type,m.source_id,m.match_type,o.title operation_title,CASE m.source_type WHEN 'tfr' THEN COALESCE((SELECT n.notam_id || ' · ' || n.title FROM tfr_notices n WHERE n.id=m.source_id),'TFR') ELSE COALESCE((SELECT a.name FROM sua_reservations r JOIN sua_areas a ON a.id=r.area_id WHERE r.id=m.source_id),'SUA / MOA') END source_title FROM operation_airspace_matches m JOIN operations o ON o.id=m.operation_id ORDER BY o.scheduled_start").all()]);
+  const [healthRows, tfrs, sua, matches] = await Promise.all([env.OPS_DB.prepare("SELECT * FROM airspace_source_health ORDER BY source").all(), env.OPS_DB.prepare("SELECT id,notam_id,title,description,status,effective_at,expires_at,official_url,geometry_available,state,type FROM tfr_notices WHERE status IN ('active','scheduled','unknown') AND UPPER(TRIM(COALESCE(state,'')))='WI' ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'scheduled' THEN 1 ELSE 2 END,effective_at LIMIT 200").all(), env.OPS_DB.prepare("SELECT r.id,r.status,r.starts_at,r.ends_at,r.low_altitude,r.high_altitude,r.remarks,a.name,a.airspace_type FROM sua_reservations r JOIN sua_areas a ON a.id=r.area_id WHERE r.status IN ('active','upcoming','pending','not_listed','unknown') ORDER BY CASE r.status WHEN 'active' THEN 0 WHEN 'upcoming' THEN 1 ELSE 2 END,r.starts_at LIMIT 250").all(), env.OPS_DB.prepare("SELECT m.operation_id,m.source_type,m.source_id,m.match_type,o.title operation_title,CASE m.source_type WHEN 'tfr' THEN COALESCE((SELECT n.notam_id || ' · ' || n.title FROM tfr_notices n WHERE n.id=m.source_id),'TFR') ELSE COALESCE((SELECT a.name FROM sua_reservations r JOIN sua_areas a ON a.id=r.area_id WHERE r.id=m.source_id),'SUA / MOA') END source_title FROM operation_airspace_matches m JOIN operations o ON o.id=m.operation_id ORDER BY o.scheduled_start").all()]);
   return { sources: healthRows.results, tfrs: tfrs.results, sua: sua.results, operationMatches: matches.results, disclaimer: "Situational awareness only. Verify current NOTAMs, TFRs, SUA status, and authorization with official FAA sources before flight. No listed restriction is not a clearance." };
 }
