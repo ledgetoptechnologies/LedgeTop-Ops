@@ -55,7 +55,30 @@ export function keyWithinRoot(rootValue: string, relative: string): string {
 
 export function isHiddenKey(key: string): boolean {
   const segments = key.replace(/\\/g, "/").split("/").filter(Boolean);
-  return segments.some(segment => segment.toLowerCase() === "dump") || segments[0]?.toLowerCase() === "_ltds";
+  return segments.some(segment => segment.toLowerCase() === "dump" || segment.toLowerCase() === "_ltds");
+}
+
+export interface VisibleContentBucket {
+  list(options:{prefix:string;delimiter:"/";limit:number;cursor?:string}):Promise<{objects:Array<{key:string}>;delimitedPrefixes:string[];truncated:boolean;cursor?:string}>;
+}
+
+export async function prefixHasVisibleContent(bucket: VisibleContentBucket, rootValue: string): Promise<boolean> {
+  const root = normalizeRoot(rootValue);
+  const pending = [root];
+  const visited = new Set<string>();
+  while (pending.length) {
+    const directory = pending.shift()!;
+    if (visited.has(directory) || isHiddenKey(directory)) continue;
+    visited.add(directory);
+    let cursor: string | undefined;
+    do {
+      const listed = await bucket.list({ prefix: directory, delimiter: "/", limit: 1000, cursor });
+      if (listed.objects.some(object => object.key !== directory && !object.key.endsWith("/") && !isHiddenKey(object.key))) return true;
+      for (const child of listed.delimitedPrefixes) if (!isHiddenKey(child)) pending.push(child);
+      cursor = listed.truncated ? listed.cursor : undefined;
+    } while (cursor);
+  }
+  return false;
 }
 
 function extension(key: string): string { const name = key.split("/").pop() || ""; return name.includes(".") ? (name.split(".").pop() || "").toLowerCase() : ""; }

@@ -7,7 +7,7 @@ import { authenticateStaff } from "./auth";
 import { airspaceView, markAirspaceStaleAndPurge, rebuildOperationAirspaceMatches, refreshSua, refreshTfrs } from "./airspace";
 import { buildScopedWhere, permissionKeys, requirePermission, sqlScope } from "./acl";
 import { consumeFileEvents, reconcileFileIndex, refreshStreamStatuses, type R2Notification } from "./file-events";
-import { authorizeItem, createDeliveryShare, decodeRef, listDeliveryFolder, listDeliveryShares, mediaKind, mime, revokeDeliveryShare } from "./delivery";
+import { authorizeItem, createDeliveryShare, decodeRef, getActiveDeliveryShare, listDeliveryFolder, listDeliveryShares, mediaKind, mime, revokeDeliveryShare } from "./delivery";
 import { syncProjectAlpha } from "./project-alpha";
 import { auditStatement, csrfToken, requireMutationSecurity } from "./request-security";
 import type { Env, StaffPrincipal } from "./types";
@@ -49,6 +49,7 @@ app.patch("/api/tasks/:id",async c=>{const principal=c.get("principal"),id=c.req
 app.get("/api/airspace/tfrs",async c=>{await requirePermission(c.env,c.get("principal"),"airspace.view");return c.json(await airspaceView(c.env));});
 app.get("/api/delivery/folders",async c=>c.json(await listDeliveryFolder(c.env,c.get("principal"),c.req.query("prefix")||"",c.req.query("cursor"))));
 app.get("/api/delivery/shares",async c=>c.json({shares:await listDeliveryShares(c.env,c.get("principal"))}));
+app.get("/api/delivery/shares/active",async c=>{const prefix=c.req.query("prefix");if(!prefix)throw new HTTPException(400,{message:"prefix is required"});return c.json({share:await getActiveDeliveryShare(c.env,c.get("principal"),prefix)});});
 app.post("/api/delivery/shares",async c=>{const value=await c.req.json();return c.json({share:await createDeliveryShare(c.env,c.req.raw,c.get("principal"),value,c.req.header("Idempotency-Key")||"")},201);});
 app.delete("/api/delivery/shares/:id",async c=>{await revokeDeliveryShare(c.env,c.req.raw,c.get("principal"),c.req.param("id"));return c.json({success:true});});
 

@@ -4,10 +4,20 @@ import { Brand, EmptyState, Loading } from "@ltds/ui";
 import { openDeliveryRoute, parseDeliveryRoute } from "./route";
 
 type Gate = "landing" | "loading" | "code" | "ready" | "error";
+type ErrorView = "unavailable" | "invalid-link";
+
+interface RequestErrorBody {
+  error?: string;
+  code?: string;
+}
+
+type RequestError = Error & { status?: number; body?: RequestErrorBody };
+
+const invalidLinkDetail = "This folder has been moved, removed, or is no longer being shared. Contact your Ledge Top Drone Services representative for a current delivery link.";
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, { credentials: "same-origin", ...init });
-  const body = await response.json().catch(() => ({})) as { error?: string } & T;
+  const body = await response.json().catch(() => ({})) as RequestErrorBody & T;
   if (!response.ok) throw Object.assign(new Error(body.error || "Request failed"), { status: response.status, body });
   return body;
 }
@@ -36,6 +46,7 @@ export function DeliveryApp() {
   const [secret, setSecret] = useState(initialRoute.secret);
   const [gate, setGate] = useState<Gate>(initialRoute.publicId ? "loading" : "landing");
   const [error, setError] = useState("");
+  const [errorView, setErrorView] = useState<ErrorView>("unavailable");
   const [manifest, setManifest] = useState<DeliveryManifest | null>(null);
   const [folder, setFolder] = useState("");
   const [view, setView] = useState<"grid" | "list">(() => localStorage.getItem("ltds-delivery-view") === "list" ? "list" : "grid");
@@ -47,8 +58,21 @@ export function DeliveryApp() {
     setManifest(data); setFolder(folderId); setGate("ready");
   }, []);
 
+  const showRequestError = useCallback((caught: unknown) => {
+    const value = caught as RequestError;
+    if (value.status === 410 || value.body?.code === "SHARED_FOLDER_UNAVAILABLE") {
+      setErrorView("invalid-link");
+      setError(invalidLinkDetail);
+    } else {
+      setErrorView("unavailable");
+      setError(value.message || "This delivery could not be opened.");
+    }
+    setGate("error");
+  }, []);
+
   const exchange = useCallback(async (accessCode?: string) => {
-    setGate("loading"); setError("");
+    if (accessCode === undefined) setGate("loading");
+    setError("");
     try {
       const result = await openDeliveryRoute({ publicId, secret, accessCode }, {
         createSession: route => requestJson<{ publicId: string; canonicalPath: string }>(`/api/public/shares/${encodeURIComponent(route.publicId)}/session`, {
@@ -62,21 +86,36 @@ export function DeliveryApp() {
       setPublicId(result.publicId); setSecret("");
       history.replaceState(null, "", result.canonicalPath);
     } catch (caught) {
-      const value = caught as Error & { status?: number; body?: { code?: string } };
-      if (value.status === 401 && value.body?.code === "ACCESS_CODE_REQUIRED") { setGate("code"); return; }
-      setError(value.message); setGate("error");
+      const value = caught as RequestError;
+      if (value.status === 401 && (value.body?.code === "ACCESS_CODE_REQUIRED" || value.body?.code === "ACCESS_CODE_INVALID")) {
+        setError(accessCode === undefined && value.body.code === "ACCESS_CODE_REQUIRED" ? "" : value.message);
+        setGate("code");
+        return;
+      }
+      showRequestError(caught);
     }
-  }, [loadManifest, publicId, secret]);
+  }, [loadManifest, publicId, secret, showRequestError]);
 
   useEffect(() => { if (publicId) void exchange(); }, []); // Exchange the URL fragment once on first load.
 
   function changeView(next: "grid" | "list") { setView(next); localStorage.setItem("ltds-delivery-view", next); }
-  async function openFolder(item: DeliveryItem) { await loadManifest(publicId, item.id); window.scrollTo({ top: 0, behavior: "smooth" }); }
+  async function navigateToFolder(folderId = "") {
+    try {
+      await loadManifest(publicId, folderId);
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    } catch (caught) {
+      showRequestError(caught);
+    }
+  }
+  async function openFolder(item: DeliveryItem) { await navigateToFolder(item.id); }
 
   if (gate === "landing") return <PublicFrame><DeliveryLanding /></PublicFrame>;
   if (gate === "loading") return <PublicFrame><Loading /></PublicFrame>;
   if (gate === "code") return <PublicFrame><AccessCodeForm onSubmit={exchange} error={error} /></PublicFrame>;
-  if (gate === "error" || !manifest) return <PublicFrame><EmptyState title="Delivery unavailable" detail={error || "This link is invalid, expired, or has been revoked."} /></PublicFrame>;
+  if (gate === "error" || !manifest) return <PublicFrame><EmptyState
+    title={errorView === "invalid-link" ? "This link is no longer valid" : "Delivery unavailable"}
+    detail={error || "This link is invalid, expired, or has been revoked."}
+  /></PublicFrame>;
 
   return <PublicFrame>
     <section className="delivery-heading">
@@ -86,8 +125,8 @@ export function DeliveryApp() {
     <section className="delivery-browser">
       <div className="browser-toolbar">
         <nav className="breadcrumbs" aria-label="Folder path">
-          <button onClick={() => void loadManifest(publicId)}>All files</button>
-          {manifest.folder.breadcrumbs.map(crumb => <span key={crumb.id}><b>/</b><button onClick={() => void loadManifest(publicId, crumb.id)}>{crumb.name}</button></span>)}
+          <button onClick={() => void navigateToFolder()}>All files</button>
+          {manifest.folder.breadcrumbs.map(crumb => <span key={crumb.id}><b>/</b><button onClick={() => void navigateToFolder(crumb.id)}>{crumb.name}</button></span>)}
         </nav>
         <div className="view-switch" aria-label="View style"><button className={view === "grid" ? "active" : ""} onClick={() => changeView("grid")}>Grid</button><button className={view === "list" ? "active" : ""} onClick={() => changeView("list")}>List</button></div>
       </div>

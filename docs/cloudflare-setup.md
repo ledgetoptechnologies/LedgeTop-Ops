@@ -14,6 +14,10 @@ Configure the Git repository `ledgetoptechnologies/LTDS-Ops` twice:
 
 Do not add runtime secrets to Build variables. The application secrets are Worker runtime secrets.
 
+Delivery access codes use a shared HMAC pepper. Generate one cryptographically random value of at least 32 bytes and store the exact same value as the `DELIVERY_ACCESS_CODE_PEPPER` runtime secret on both `ltds-ops` and `ltds-delivery`. The value must never be committed, printed in logs, or placed in build variables. Ops hashes new codes and Delivery verifies them; neither Worker stores a plaintext code.
+
+`DELIVERY_TOKEN_SECRET` remains an Ops-only runtime secret. It encrypts recoverable link fragments for authorized staff; the public Delivery Worker authenticates only the link hash and does not receive this secret.
+
 ## 2. Operations hostname and Access
 
 1. Attach `ops.ledgetopdroneservices.com` to Worker `ltds-ops`.

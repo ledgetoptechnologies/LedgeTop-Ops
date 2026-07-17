@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
 import type { DeliveryItem, DeliveryManifest } from "@ltds/shared";
-import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, safeFileName } from "./files";
+import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName } from "./files";
 import { createSessionCookie, hmac, parseCookie, randomSecret, sha256, verifyAccessCode, verifySessionCookie } from "./security";
 import type { Env, ShareRow } from "./types";
 
@@ -31,9 +31,15 @@ app.use("*", async (c, next) => {
 });
 
 function activeShareSql(extra: string): string {
-  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.expires_at,s.revoked_at,
-    p.client_name,p.project_name,p.r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id
+  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,
+    p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) AS r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id
     WHERE ${extra} AND s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`;
+}
+
+function unavailableShareSql(extra: string): string {
+  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,
+    p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) AS r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id
+    WHERE ${extra} AND s.revoked_at IS NOT NULL AND s.revoked_reason='folder_unavailable'`;
 }
 
 async function findByPublicId(env: Env, publicId: string): Promise<ShareRow | null> {
@@ -45,14 +51,47 @@ async function findBySecret(env: Env, secret: string): Promise<ShareRow | null> 
   return env.DELIVERY_DB.prepare(activeShareSql("s.token_hash=?")).bind(await sha256(secret)).first<ShareRow>();
 }
 
-async function ensurePublicId(env: Env, share: ShareRow): Promise<string> {
-  if (share.public_id) return share.public_id;
+async function findUnavailableBySecret(env: Env, secret: string): Promise<ShareRow | null> {
+  if (secret.length < 32 || secret.length > 128) return null;
+  return env.DELIVERY_DB.prepare(unavailableShareSql("s.token_hash=?")).bind(await sha256(secret)).first<ShareRow>();
+}
+
+export async function markUnavailableFolder(env:{DELIVERY_DB:PublicIdDatabase},share:ShareRow):Promise<never>{
+  if(!share.revoked_at){
+    const revoked=await env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='folder_unavailable' WHERE id=? AND revoked_at IS NULL AND unavailable_since IS NOT NULL AND datetime(unavailable_since)<=datetime('now','-5 minutes')").bind(share.id).run();
+    if(revoked.meta.changes)await env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('system','delivery-worker','share.auto_revoked','share',?,?)").bind(share.id,JSON.stringify({reason:"folder_unavailable",r2Prefix:share.r2_prefix})).run();
+    else await env.DELIVERY_DB.prepare("UPDATE shares SET unavailable_since=COALESCE(unavailable_since,datetime('now')) WHERE id=? AND revoked_at IS NULL").bind(share.id).run();
+  }
+  throw new HTTPException(410,{message:"This link is no longer valid because the shared folder was moved or removed.",cause:{code:"SHARED_FOLDER_UNAVAILABLE"}});
+}
+
+async function requireAvailableFolder(env:Env,share:ShareRow):Promise<void>{
+  if(!(await prefixHasVisibleContent(env.DATA_BUCKET,share.r2_prefix)))await markUnavailableFolder(env,share);
+  if(share.unavailable_since)await env.DELIVERY_DB.prepare("UPDATE shares SET unavailable_since=NULL WHERE id=? AND revoked_at IS NULL").bind(share.id).run();
+}
+
+interface PublicIdStatement {
+  bind(...values:unknown[]):PublicIdStatement;
+  run():Promise<{meta:{changes:number}}>;
+  first<T>():Promise<T|null>;
+}
+interface PublicIdDatabase {prepare(query:string):PublicIdStatement}
+
+export async function ensurePublicId(env: {DELIVERY_DB:PublicIdDatabase}, share: ShareRow): Promise<{publicId:string;shareVersion:number}> {
+  let expectedVersion=share.share_version;
+  if (share.public_id) {
+    const current=await env.DELIVERY_DB.prepare("SELECT public_id,share_version FROM shares WHERE id=? AND token_hash=? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=1)").bind(share.id,share.token_hash).first<{public_id:string|null;share_version:number}>();
+    if(current?.public_id)return{publicId:current.public_id,shareVersion:current.share_version};
+    throw new HTTPException(404,{message:"This delivery link is invalid, expired, or revoked"});
+  }
   for (let attempt = 0; attempt < 3; attempt += 1) {
     const publicId = randomSecret(16);
-    const result = await env.DELIVERY_DB.prepare("UPDATE shares SET public_id=?, share_version=2 WHERE id=? AND public_id IS NULL").bind(publicId, share.id).run();
-    if (result.meta.changes) return publicId;
-    const current = await env.DELIVERY_DB.prepare("SELECT public_id FROM shares WHERE id=?").bind(share.id).first<{ public_id: string | null }>();
-    if (current?.public_id) return current.public_id;
+    const result = await env.DELIVERY_DB.prepare("UPDATE shares SET public_id=?,share_version=share_version+1 WHERE id=? AND token_hash=? AND public_id IS NULL AND share_version=? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=1)").bind(publicId,share.id,share.token_hash,expectedVersion).run();
+    if (result.meta.changes) return{publicId,shareVersion:expectedVersion+1};
+    const current = await env.DELIVERY_DB.prepare("SELECT public_id,share_version FROM shares WHERE id=? AND token_hash=? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=1)").bind(share.id,share.token_hash).first<{ public_id: string | null;share_version:number }>();
+    if (current?.public_id) return{publicId:current.public_id,shareVersion:current.share_version};
+    if(!current)throw new HTTPException(404,{message:"This delivery link is invalid, expired, or revoked"});
+    expectedVersion=current.share_version;
   }
   throw new HTTPException(503, { message: "Delivery link could not be upgraded" });
 }
@@ -83,39 +122,44 @@ app.post("/api/public/shares/:routeId/session", async c => {
   const candidateSecret = body.secret || (routeId.length > 30 ? routeId : "");
   const byPublic = routeId.length <= 30 ? await findByPublicId(c.env, routeId) : null;
   const share = candidateSecret ? await findBySecret(c.env, candidateSecret) : null;
-  if (!share || (byPublic && byPublic.id !== share.id)) throw new HTTPException(404, { message: "This delivery link is invalid, expired, or revoked" });
+  if (!share || (byPublic && byPublic.id !== share.id)) {
+    const unavailable=candidateSecret?await findUnavailableBySecret(c.env,candidateSecret):null;
+    if(unavailable&&(routeId.length>30||unavailable.public_id===routeId))await markUnavailableFolder(c.env,unavailable);
+    throw new HTTPException(404, { message: "This delivery link is invalid, expired, or revoked" });
+  }
+  await requireAvailableFolder(c.env,share);
 
   if (share.password_hash && share.password_salt && share.password_iterations) {
+    if (!body.accessCode) return c.json({ error: "Access code required", code: "ACCESS_CODE_REQUIRED" }, 401);
     const addressHash = await clientHash(c.env, c.req.raw);
     const [shareLimit, clientLimit] = await Promise.all([
       c.env.ACCESS_CODE_RATE_LIMITER.limit({ key: `${share.id}:${addressHash}` }),
       c.env.ACCESS_CODE_RATE_LIMITER.limit({ key: `client:${addressHash}` }),
     ]);
     if (!shareLimit.success || !clientLimit.success) throw new HTTPException(429, { message: "Too many attempts. Please wait before trying again." });
-    if (!body.accessCode) return c.json({ error: "Access code required", code: "ACCESS_CODE_REQUIRED" }, 401);
-    if (!(await verifyAccessCode(body.accessCode, share.password_hash, share.password_salt, share.password_iterations))) {
+    if (!(await verifyAccessCode(body.accessCode, share.password_hash, share.password_salt, share.password_iterations,share.password_algorithm,c.env.DELIVERY_ACCESS_CODE_PEPPER))) {
       c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, "unlock.failed"));
-      return c.json({ error: "The access code is not correct", code: "ACCESS_CODE_REQUIRED" }, 401);
+      return c.json({ error: "The access code is not correct", code: "ACCESS_CODE_INVALID" }, 401);
     }
   }
 
-  const publicId = await ensurePublicId(c.env, share);
+  const route = await ensurePublicId(c.env, share);
   const shareExpiry = share.expires_at ? new Date(share.expires_at).getTime() : Number.POSITIVE_INFINITY;
   const expiresAt = Math.min(Date.now() + 12 * 60 * 60 * 1000, shareExpiry);
-  c.header("Set-Cookie", await createSessionCookie(c.env.DELIVERY_SESSION_SECRET, c.env.SESSION_KEY_ID, share.id, expiresAt));
+  c.header("Set-Cookie", await createSessionCookie(c.env.DELIVERY_SESSION_SECRET, c.env.SESSION_KEY_ID, share.id,route.shareVersion, expiresAt));
   c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, "session.created"));
-  return c.json({ publicId, canonicalPath: `/s/${publicId}` });
+  return c.json({ publicId:route.publicId, canonicalPath: `/s/${route.publicId}` });
 });
 
 app.use("/api/public/shares/:publicId/*", async (c, next) => {
   const session = await verifySessionCookie(c.env.DELIVERY_SESSION_SECRET, c.env.SESSION_KEY_ID, parseCookie(c.req.header("Cookie"), COOKIE_NAME));
-  const share = await c.env.DELIVERY_DB.prepare(activeShareSql("s.id=? AND s.public_id=?")).bind(session.shareId, c.req.param("publicId")).first<ShareRow>();
-  if (!share) throw new HTTPException(404, { message: "This delivery link is invalid, expired, or revoked" });
+  const share = await c.env.DELIVERY_DB.prepare(activeShareSql("s.id=? AND s.public_id=? AND s.share_version=?")).bind(session.shareId, c.req.param("publicId"),session.shareVersion).first<ShareRow>();
+  if (!share){const unavailable=await c.env.DELIVERY_DB.prepare(unavailableShareSql("s.id=? AND s.public_id=?")).bind(session.shareId,c.req.param("publicId")).first<ShareRow>();if(unavailable)await markUnavailableFolder(c.env,unavailable);throw new HTTPException(404, { message: "This delivery link is invalid, expired, or revoked" });}
   c.set("share", share); await next();
 });
 
 app.get("/api/public/shares/:publicId/manifest", async c => {
-  const share = c.get("share"); const root = normalizeRoot(share.r2_prefix);
+  const share = c.get("share"); await requireAvailableFolder(c.env,share); const root = normalizeRoot(share.r2_prefix);
   const folderRef = c.req.query("folder") || ""; const relativeFolder = folderRef ? decodeItemRef(folderRef) : "";
   const prefix = relativeFolder ? `${keyWithinRoot(root, relativeFolder).replace(/\/$/, "")}/` : root;
   const listed = await c.env.DATA_BUCKET.list({ prefix, delimiter: "/", limit: 500, cursor: c.req.query("cursor") });
@@ -185,7 +229,8 @@ app.notFound(c => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {
   const status = error instanceof HTTPException ? error.status : 500;
   if (status >= 500) console.error(JSON.stringify({ event: "delivery.error", status, message: error instanceof Error ? error.message : "unknown" }));
-  return c.json({ error: status >= 500 ? "An unexpected error occurred" : error.message }, status);
+  const code=error instanceof Error&&(error.cause as {code?:string}|undefined)?.code;
+  return c.json({ error: status >= 500 ? "An unexpected error occurred" : error.message,...(code?{code}:{}) }, status);
 });
 
 export default { fetch: app.fetch } satisfies ExportedHandler<Env>;

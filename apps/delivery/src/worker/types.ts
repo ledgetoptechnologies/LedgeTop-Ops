@@ -16,6 +16,7 @@ export interface Env {
   ENVIRONMENT: string;
   SESSION_KEY_ID: string;
   DELIVERY_SESSION_SECRET: string;
+  DELIVERY_ACCESS_CODE_PEPPER: string;
   AUDIT_IP_SECRET: string;
   STREAM_CUSTOMER_CODE?: string;
 }
@@ -29,8 +30,12 @@ export interface ShareRow {
   password_hash: string | null;
   password_salt: string | null;
   password_iterations: number | null;
+  password_algorithm: string | null;
   expires_at: string | null;
   revoked_at: string | null;
+  revoked_reason: string | null;
+  unavailable_since: string | null;
+  share_version: number;
   client_name: string;
   project_name: string;
   r2_prefix: string;

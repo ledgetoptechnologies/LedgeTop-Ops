@@ -31,8 +31,13 @@ export function constantTimeEqual(left: string, right: string): boolean {
   return difference === 0;
 }
 
-export async function verifyAccessCode(code: string, expected: string, salt: string, iterations: number): Promise<boolean> {
-  if (code.length < 8 || iterations < 50_000 || iterations > 1_000_000) return false;
+export async function verifyAccessCode(code: string, expected: string, salt: string, iterations: number, algorithm: string | null, pepper?: string): Promise<boolean> {
+  if (code.length < 8) return false;
+  if (algorithm === "hmac-sha256-v1") {
+    if (!pepper) throw new Error("DELIVERY_ACCESS_CODE_PEPPER is required");
+    return constantTimeEqual(await hmac(pepper, `access-code:v1:${salt}:${code}`), expected);
+  }
+  if (algorithm !== "pbkdf2-sha256-v1" || iterations < 50_000 || iterations > 1_000_000) return false;
   const material = await crypto.subtle.importKey("raw", encoder.encode(code), "PBKDF2", false, ["deriveBits"]);
   const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", hash: "SHA-256", salt: encoder.encode(salt), iterations }, material, 256);
   return constantTimeEqual(base64Url(new Uint8Array(bits)), expected);
@@ -46,21 +51,22 @@ export function parseCookie(header: string | undefined, name: string): string | 
   return null;
 }
 
-export async function createSessionCookie(secret: string, keyId: string, shareId: string, expiresAt: number): Promise<string> {
-  const signature = await hmac(secret, `${keyId}:${shareId}:${expiresAt}`);
-  const value = `${keyId}.${shareId}.${expiresAt}.${signature}`;
+export async function createSessionCookie(secret: string, keyId: string, shareId: string, shareVersion: number, expiresAt: number): Promise<string> {
+  const signature = await hmac(secret, `${keyId}:${shareId}:${shareVersion}:${expiresAt}`);
+  const value = `${keyId}.${shareId}.${shareVersion}.${expiresAt}.${signature}`;
   const maxAge = Math.max(0, Math.floor((expiresAt - Date.now()) / 1000));
   return `__Host-ltds_delivery=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`;
 }
 
-export async function verifySessionCookie(secret: string, expectedKeyId: string, value: string | null): Promise<{ shareId: string; expiresAt: number }> {
+export async function verifySessionCookie(secret: string, expectedKeyId: string, value: string | null): Promise<{ shareId: string; shareVersion: number; expiresAt: number }> {
   if (!value) throw new HTTPException(401, { message: "Delivery session required" });
-  const [keyId, shareId, expiresRaw, signature] = value.split(".");
+  const [keyId, shareId, versionRaw, expiresRaw, signature] = value.split(".");
+  const shareVersion = Number(versionRaw);
   const expiresAt = Number(expiresRaw);
-  if (!keyId || keyId !== expectedKeyId || !shareId || !signature || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
+  if (!keyId || keyId !== expectedKeyId || !shareId || !signature || !Number.isSafeInteger(shareVersion) || shareVersion < 1 || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
     throw new HTTPException(401, { message: "Delivery session expired" });
   }
-  const expected = await hmac(secret, `${keyId}:${shareId}:${expiresAt}`);
+  const expected = await hmac(secret, `${keyId}:${shareId}:${shareVersion}:${expiresAt}`);
   if (!constantTimeEqual(expected, signature)) throw new HTTPException(401, { message: "Invalid delivery session" });
-  return { shareId, expiresAt };
+  return { shareId, shareVersion, expiresAt };
 }
