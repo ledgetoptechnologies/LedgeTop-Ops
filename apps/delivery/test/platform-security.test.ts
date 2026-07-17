@@ -3,6 +3,11 @@ import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, parseRange } 
 import { createSessionCookie, verifySessionCookie } from "../src/worker/security";
 import { hashAccessCode } from "../../operations/src/worker/crypto";
 import { verifyAccessCode } from "../src/worker/security";
+import { serveAppShell } from "../src/worker/index";
+
+describe("delivery app shell",()=>{
+  it("preserves the public share path when requesting the SPA fallback",async()=>{let requestedPath="";const response=await serveAppShell(new Request("https://delivery.ledgetopdroneservices.com/s/public-id"),{fetch:async input=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("app shell",{status:200});}});expect(requestedPath).toBe("/s/public-id");expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();});
+});
 
 describe("public item references",()=>{
   it("round-trips safe relative paths without exposing raw R2 keys",()=>{const ref=encodeItemRef("edited/video 01.mp4");expect(ref).not.toContain("/");expect(decodeItemRef(ref)).toBe("edited/video 01.mp4");expect(keyWithinRoot("jobs/2026/Client/","edited/video 01.mp4")).toBe("jobs/2026/Client/edited/video 01.mp4");});

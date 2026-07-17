@@ -69,12 +69,13 @@ function audit(env: Env, request: Request, shareId: string, eventType: string, i
 
 app.get("/health", c => c.json({ status: "ok", service: "ltds-delivery" }));
 
-app.get("/s/:publicId", async c => {
-  const assetRequest = new Request(new URL("/index.html", c.req.url), c.req.raw);
-  const response = await c.env.ASSETS.fetch(assetRequest);
+export async function serveAppShell(request: Request, assets: Pick<Fetcher, "fetch">): Promise<Response> {
+  const response = await assets.fetch(request);
   const headers = new Headers(response.headers); headers.set("Cache-Control", "no-store"); headers.set("X-Robots-Tag", "noindex, nofollow");
   return new Response(response.body, { status: response.status, headers });
-});
+}
+
+app.get("/s/:publicId", c => serveAppShell(c.req.raw, c.env.ASSETS));
 
 app.post("/api/public/shares/:routeId/session", async c => {
   const body: { secret?: string; accessCode?: string } = await c.req.json<{ secret?: string; accessCode?: string }>().catch(() => ({}));

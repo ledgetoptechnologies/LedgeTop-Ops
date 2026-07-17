@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { resolveDivisionAssociation, resolveShareExpiration } from "../src/worker/delivery";
+import { deriveShareMetadata, resolveDivisionAssociation, resolveShareExpiration } from "../src/worker/delivery";
+
+describe("delivery share metadata", () => {
+  it("derives required legacy project metadata from the shared folder", () => {
+    expect(deriveShareMetadata("jobs/2026/Client/Real Estate photos/")).toEqual({
+      clientName: "Real Estate photos",
+      projectName: "Real Estate photos",
+    });
+  });
+
+  it("preserves optional metadata supplied by future integrations", () => {
+    expect(deriveShareMetadata("jobs/2026/client/edited/", {
+      clientName: "Client record",
+      projectName: "Project record",
+    })).toEqual({ clientName: "Client record", projectName: "Project record" });
+  });
+});
 
 describe("delivery share scope inference", () => {
   it("uses the most specific folder association", () => {
