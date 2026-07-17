@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { DeliveryItem, DeliveryManifest } from "@ltds/shared";
 import { Brand, EmptyState, Loading } from "@ltds/ui";
-import { parseDeliveryRoute } from "./route";
+import { openDeliveryRoute, parseDeliveryRoute } from "./route";
 
 type Gate = "landing" | "loading" | "code" | "ready" | "error";
 
@@ -50,15 +50,17 @@ export function DeliveryApp() {
   const exchange = useCallback(async (accessCode?: string) => {
     setGate("loading"); setError("");
     try {
-      if (!secret) { await loadManifest(publicId); return; }
-      const result = await requestJson<{ publicId: string; canonicalPath: string }>(`/api/public/shares/${encodeURIComponent(publicId)}/session`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ secret, accessCode }),
+      const result = await openDeliveryRoute({ publicId, secret, accessCode }, {
+        createSession: route => requestJson<{ publicId: string; canonicalPath: string }>(`/api/public/shares/${encodeURIComponent(route.publicId)}/session`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ secret: route.secret, accessCode: route.accessCode }),
+        }),
+        loadManifest,
       });
+      if (!result) return;
       setPublicId(result.publicId); setSecret("");
       history.replaceState(null, "", result.canonicalPath);
-      await loadManifest(result.publicId);
     } catch (caught) {
       const value = caught as Error & { status?: number; body?: { code?: string } };
       if (value.status === 401 && value.body?.code === "ACCESS_CODE_REQUIRED") { setGate("code"); return; }
