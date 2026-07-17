@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { bbox, intersectsWI, suaStatus, tfrStatus } from "../src/worker/airspace";
+import { bbox, intersectsWI, regionalWfsUrl, suaStatus, tfrStatus } from "../src/worker/airspace";
 
 describe("FAA status normalization",()=>{
   beforeEach(()=>{vi.useFakeTimers();vi.setSystemTime(new Date("2026-07-16T18:00:00Z"));});afterEach(()=>vi.useRealTimers());
@@ -10,4 +10,8 @@ describe("FAA status normalization",()=>{
 describe("Wisconsin geometry prefilter",()=>{
   it("finds polygon bounds that cross the state",()=>{const box=bbox({type:"Polygon",coordinates:[[[-93,44],[-90,44],[-90,46],[-93,46],[-93,44]]]});expect(box).toEqual({minLon:-93,maxLon:-90,minLat:44,maxLat:46});expect(intersectsWI(box)).toBe(true);});
   it("rejects a distant polygon",()=>{expect(intersectsWI(bbox({type:"Polygon",coordinates:[[[-105,39],[-104,39],[-104,40],[-105,40],[-105,39]]]}))).toBe(false);});
+});
+
+describe("FAA WFS request",()=>{
+  it("bounds the source request to Wisconsin without unsupported pagination",()=>{const url=new URL(regionalWfsUrl("https://sua.faa.gov/geoserver/wfs?service=WFS"));expect(url.searchParams.get("bbox")).toBe("-92.89,42.49,-86.25,47.31,EPSG:4326");expect(url.searchParams.get("maxFeatures")).toBe("1000");expect(url.searchParams.has("startIndex")).toBe(false);expect(url.searchParams.has("count")).toBe(false);});
 });

@@ -8,9 +8,9 @@ Configure the Git repository `ledgetoptechnologies/LTDS-Ops` twice:
 |---|---|---|
 | Production branch | `main` | `main` |
 | Root directory | `/apps/operations` | `/apps/delivery` |
-| Build command | none | none |
-| Deploy command | `npm run deploy` | `npm run deploy` |
-| Version command | `npm run deploy` | `npm run deploy` |
+| Build command | `npm run build` | `npm run build` |
+| Deploy command | `npx wrangler deploy` | `npx wrangler deploy` |
+| Version command | `npx wrangler versions upload` | `npx wrangler versions upload` |
 
 Do not add runtime secrets to Build variables. The application secrets are Worker runtime secrets.
 

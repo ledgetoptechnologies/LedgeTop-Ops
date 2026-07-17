@@ -8,7 +8,7 @@ const WI = { minLat: 42.49, minLon: -92.89, maxLat: 47.31, maxLon: -86.25 };
 type JsonRow = Record<string, unknown>;
 interface Geometry { type: string; coordinates: unknown }
 interface Feature { type: string; id?: string; geometry?: Geometry; properties: JsonRow }
-interface FeatureCollection { type: string; features: Feature[]; numberMatched?: number | string; numberReturned?: number | string }
+interface FeatureCollection { type: string; features: Feature[]; totalFeatures?: number | string; numberMatched?: number | string; numberReturned?: number | string }
 interface Interval { start: string; end: string }
 
 function normalizeNotam(value: unknown): string { return String(value || "").toUpperCase().replace(/\s+/g, "").match(/\d+\/\d+/)?.[0] || String(value || "").trim(); }
@@ -35,16 +35,18 @@ function detailIntervals(xml: string): Interval[] {
 async function fetchJson(url: string): Promise<unknown> { const response = await fetch(url, { headers: { Accept: "application/json", "User-Agent": "LTDS-Ops/1.0 airspace-awareness" } }); if (!response.ok) throw new Error(`http-${response.status}`); return response.json(); }
 function asRows(value: unknown): JsonRow[] { if (Array.isArray(value)) return value as JsonRow[]; if (value && typeof value === "object") { for (const key of ["data", "items", "tfrList", "results"]) { const rows = (value as JsonRow)[key]; if (Array.isArray(rows)) return rows as JsonRow[]; } } throw new Error("invalid-list-schema"); }
 
+export function regionalWfsUrl(source: string): string {
+  const url = new URL(source);
+  url.searchParams.set("bbox", `${WI.minLon},${WI.minLat},${WI.maxLon},${WI.maxLat},EPSG:4326`);
+  url.searchParams.set("maxFeatures", "1000");
+  return url.toString();
+}
 async function fetchWfs(source: string): Promise<Feature[]> {
-  const features: Feature[] = []; const pageSize = 1000;
-  for (let page = 0; page < 20; page += 1) {
-    const url = new URL(source); url.searchParams.set("count", String(pageSize)); url.searchParams.set("startIndex", String(page * pageSize));
-    const raw = await fetchJson(url.toString()) as FeatureCollection;
-    if (raw?.type !== "FeatureCollection" || !Array.isArray(raw.features)) throw new Error("invalid-wfs-schema");
-    features.push(...raw.features); const matched = Number(raw.numberMatched);
-    if (raw.features.length < pageSize || (Number.isFinite(matched) && features.length >= matched)) return features;
-  }
-  throw new Error("wfs-page-limit");
+  const raw = await fetchJson(regionalWfsUrl(source)) as FeatureCollection;
+  if (raw?.type !== "FeatureCollection" || !Array.isArray(raw.features)) throw new Error("invalid-wfs-schema");
+  const total = Number(raw.totalFeatures ?? raw.numberMatched);
+  if (Number.isFinite(total) && total > raw.features.length) throw new Error("wfs-truncated");
+  return raw.features;
 }
 async function detail(notam: string): Promise<{ issued: string | null; intervals: Interval[]; start: string | null; end: string | null }> {
   const response = await fetch(`https://tfr.faa.gov/download/detail_${notam.replace("/", "_")}.xml`, { headers: { Accept: "application/xml" } });
