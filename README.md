@@ -1,11 +1,13 @@
 # LTDS Ops
 
-LTDS Ops is the operating and client-delivery platform for Ledge Top Drone Services. It contains two independently deployed Cloudflare Workers in one repository:
+LTDS Ops is the operating and client-delivery platform for Ledge Top Drone Services. It contains three independently deployed Cloudflare Workers in one repository:
 
 - `ltds-ops` at `ops.ledgetopdroneservices.com` — private staff operations, projects, tasks, airspace awareness, ACL, and delivery administration.
 - `ltds-delivery` at `delivery.ledgetopdroneservices.com` — public, tokenized client file browsing, previews, and downloads.
 
-Project Alpha remains authoritative for financial and project master data. LTDS Ops owns operational security, missions, tasks, airspace matching, R2 folder associations, and delivery shares.
+- `ltds-ops-sync` at `ops-sync.ledgetopdroneservices.com` receives signed Project Alpha entitlement webhooks and reconciles the Cloudflare Access group.
+
+Project Alpha is authoritative for users, business-unit access, projects, operations, tasks, and calendar data. LTDS Ops keeps a last-known-good read-only projection and owns airspace matching, R2 folder associations, delivery shares, and its protected break-glass Owner.
 
 ## Repository
 
@@ -13,6 +15,7 @@ Project Alpha remains authoritative for financial and project master data. LTDS 
 apps/
   operations/  React/Vite staff UI + Hono Worker API
   delivery/    React/Vite client UI + Hono Worker API
+  ops-sync/    Project Alpha webhook + Cloudflare Access reconciliation Worker
 packages/
   shared/      permission and API contracts
   ui/          LTDS branding and reusable React UI
@@ -26,12 +29,14 @@ Each app intentionally has its own `package.json`, lockfile, `wrangler.jsonc`, m
 |---|---|---|
 | `ltds-ops` | `/apps/operations` | `npm run deploy` |
 | `ltds-delivery` | `/apps/delivery` | `npm run deploy` |
+| `ltds-ops-sync` | `/apps/ops-sync` | `npm run deploy` |
 
 ## Local verification
 
 ```powershell
 npm.cmd --prefix apps/delivery install
 npm.cmd --prefix apps/operations install
+npm.cmd --prefix apps/ops-sync install
 npm.cmd run check
 npm.cmd test
 npm.cmd run build

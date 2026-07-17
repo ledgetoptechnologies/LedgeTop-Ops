@@ -1,0 +1,2 @@
+CF_ACCESS_GROUP_API_TOKEN=replace-with-a-scoped-access-groups-api-token
+PROJECT_ALPHA_WEBHOOK_HMAC_SECRET=replace-with-the-shared-random-hmac-secret

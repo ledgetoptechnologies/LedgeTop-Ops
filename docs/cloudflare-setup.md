@@ -2,15 +2,15 @@
 
 ## 1. Worker Builds
 
-Configure the Git repository `ledgetoptechnologies/LTDS-Ops` twice:
+Configure the Git repository `ledgetoptechnologies/LTDS-Ops` three times:
 
-| Setting | Operations | Delivery |
-|---|---|---|
-| Production branch | `main` | `main` |
-| Root directory | `/apps/operations` | `/apps/delivery` |
-| Build command | `npm run build` | `npm run build` |
-| Deploy command | `npx wrangler deploy` | `npx wrangler deploy` |
-| Version command | `npx wrangler versions upload` | `npx wrangler versions upload` |
+| Setting | Operations | Delivery | Ops Sync |
+|---|---|---|---|
+| Production branch | `main` | `main` | `main` |
+| Root directory | `/apps/operations` | `/apps/delivery` | `/apps/ops-sync` |
+| Build command | `npm run build` | `npm run build` | `npm run build` |
+| Deploy command | `npx wrangler deploy` | `npx wrangler deploy` | `npm run deploy` |
+| Version command | `npx wrangler versions upload` | `npx wrangler versions upload` | `npx wrangler versions upload` |
 
 Do not add runtime secrets to Build variables. The application secrets are Worker runtime secrets.
 
@@ -23,9 +23,7 @@ Delivery access codes use a shared HMAC pepper. Generate one cryptographically r
 1. Attach `ops.ledgetopdroneservices.com` to Worker `ltds-ops`.
 2. Create a Cloudflare Access self-hosted application named **LTDS Operations**.
 3. Set its only production destination to `ops.ledgetopdroneservices.com/*`.
-4. Create an Allow policy with explicit emails:
-   - `beaukoltz@ledgetopdroneservices.com`
-   - `kstirn@ledgetopdroneservices.com`
+4. Under **Access controls > Policies > Rule groups**, create the dedicated automation-owned **LTDS Ops Users** rule group. Create an Allow policy whose Include rule references that group, and keep the protected Owner in the group.
 5. Keep One-time PIN enabled, or select the intended identity provider. Enable instant authentication when only one provider is available.
 6. Optionally enable Cloudflare One Client authentication for enrolled WARP devices. WARP reduces prompts but does not bypass LTDS ACL.
 7. Copy the application **Audience (AUD) tag** from the application Overview/Settings page into `OPERATIONS_AUD` in `apps/operations/wrangler.jsonc`.
@@ -67,6 +65,17 @@ npx.cmd wrangler secret put PROJECT_ALPHA_API_KEY --name ltds-ops
 ```
 
 Set `PROJECT_ALPHA_BASE_URL` to the production Project Alpha origin. The key must have only `ops.sync.read`.
+
+Create a separate self-hosted Access application named **LTDS Ops Sync** for `ops-sync.ledgetopdroneservices.com/*`. Add a Service Auth policy whose include rule is the Project Alpha service token. Copy that application's AUD into `CF_ACCESS_AUD` on `ltds-ops-sync`. Its service-token client ID and secret belong only in Project Alpha.
+
+Set `CF_ACCOUNT_ID`, `CF_ACCESS_GROUP_ID`, and `APPLICATION_KEY=ltds_ops` on `ltds-ops-sync`. Bind `OPS_DB` to the existing `ltds-ops` D1 database and add these Worker secrets:
+
+```powershell
+npx.cmd wrangler secret put CF_ACCESS_GROUP_API_TOKEN --name ltds-ops-sync
+npx.cmd wrangler secret put PROJECT_ALPHA_WEBHOOK_HMAC_SECRET --name ltds-ops-sync
+```
+
+The Access Groups API token belongs only on the sync Worker, never in Project Alpha. The exact same generated HMAC value must be entered on both sides.
 
 ## 6. Staging before rollout
 

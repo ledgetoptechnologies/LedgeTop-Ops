@@ -1,0 +1,24 @@
+{
+  "name": "@ltds/ops-sync",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "wrangler deploy --dry-run --outdir dist",
+    "check": "tsc --noEmit",
+    "deploy": "wrangler deploy --keep-vars",
+    "test": "vitest run --config vitest.config.ts",
+    "cf-typegen": "wrangler types worker-configuration.d.ts"
+  },
+  "dependencies": {
+    "jose": "^6.2.3",
+    "zod": "^4.1.11"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "miniflare": "^4.20260714.0",
+    "typescript": "^5.9.3",
+    "vitest": "^4.1.0",
+    "wrangler": "^4.111.0"
+  }
+}

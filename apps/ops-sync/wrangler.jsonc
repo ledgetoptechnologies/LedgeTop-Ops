@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ltds-ops-sync",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "vars": {
+    "EXPECTED_HOST": "ops-sync.ledgetopdroneservices.com",
+    "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
+    "CF_ACCESS_AUD": "f79106bcbbbb22997ccc1b13d4f1badeb0396d0b4283b1416e43b79370957e23",
+    "CF_ACCOUNT_ID": "REPLACE_CLOUDFLARE_ACCOUNT_ID",
+    "CF_ACCESS_GROUP_ID": "REPLACE_LTDS_OPS_USERS_RULE_GROUP_ID",
+    "APPLICATION_KEY": "ltds_ops"
+  },
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "d1_databases": [
+    {
+      "binding": "OPS_DB",
+      "database_name": "ltds-ops",
+      "database_id": "6ebf7514-d306-4615-ae56-ad869c874dbd",
+      "migrations_dir": "../operations/migrations"
+    }
+  ]
+}
