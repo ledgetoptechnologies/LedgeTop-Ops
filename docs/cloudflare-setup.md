@@ -16,9 +16,9 @@ Do not add runtime secrets to Build variables. The application secrets are Worke
 
 ## 2. Operations hostname and Access
 
-1. Attach `operations.ledgetopdroneservices.com` to Worker `ltds-ops`.
+1. Attach `ops.ledgetopdroneservices.com` to Worker `ltds-ops`.
 2. Create a Cloudflare Access self-hosted application named **LTDS Operations**.
-3. Set its only production destination to `operations.ledgetopdroneservices.com/*`.
+3. Set its only production destination to `ops.ledgetopdroneservices.com/*`.
 4. Create an Allow policy with explicit emails:
    - `beaukoltz@ledgetopdroneservices.com`
    - `kstirn@ledgetopdroneservices.com`

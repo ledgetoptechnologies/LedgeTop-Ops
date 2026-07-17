@@ -2,7 +2,7 @@
 
 LTDS Ops is the operating and client-delivery platform for Ledge Top Drone Services. It contains two independently deployed Cloudflare Workers in one repository:
 
-- `ltds-ops` at `operations.ledgetopdroneservices.com` — private staff operations, projects, tasks, airspace awareness, ACL, and delivery administration.
+- `ltds-ops` at `ops.ledgetopdroneservices.com` — private staff operations, projects, tasks, airspace awareness, ACL, and delivery administration.
 - `ltds-delivery` at `delivery.ledgetopdroneservices.com` — public, tokenized client file browsing, previews, and downloads.
 
 Project Alpha remains authoritative for financial and project master data. LTDS Ops owns operational security, missions, tasks, airspace matching, R2 folder associations, and delivery shares.

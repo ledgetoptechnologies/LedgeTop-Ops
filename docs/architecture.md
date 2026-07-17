@@ -6,7 +6,7 @@
 Cloudflare Access
       |
       v
-operations.ledgetopdroneservices.com
+ops.ledgetopdroneservices.com
       |-- OPS_DB: staff, ACL, projects, operations, tasks, FAA, audit
       |-- DELIVERY_DB: share administration and file index
       |-- private R2: staff browsing
