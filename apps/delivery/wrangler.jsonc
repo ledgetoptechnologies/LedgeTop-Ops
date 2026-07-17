@@ -1,0 +1,43 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ltds-delivery",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist/client",
+    "not_found_handling": "none",
+    "run_worker_first": ["/api/*", "/s/*", "/health"]
+  },
+  "vars": {
+    "PUBLIC_BASE_URL": "https://delivery.ledgetopdroneservices.com",
+    "EXPECTED_HOST": "delivery.ledgetopdroneservices.com",
+    "ENVIRONMENT": "production",
+    "SESSION_KEY_ID": "v1",
+    "STREAM_CUSTOMER_CODE": ""
+  },
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "ratelimits": [
+    {
+      "name": "ACCESS_CODE_RATE_LIMITER",
+      "namespace_id": "19462026",
+      "simple": { "limit": 10, "period": 60 }
+    }
+  ],
+  "r2_buckets": [
+    { "binding": "DATA_BUCKET", "bucket_name": "client-data" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "DELIVERY_DB",
+      "database_name": "client-data",
+      "database_id": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "images": { "binding": "IMAGES" },
+  "stream": { "binding": "STREAM" }
+}

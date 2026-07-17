@@ -1,24 +1,10 @@
 {
-  "name": "client-data-server",
-  "version": "0.1.0",
+  "name": "ltds-ops-monorepo",
+  "version": "0.2.0",
   "private": true,
-  "type": "module",
   "scripts": {
-    "check": "tsc --noEmit",
-    "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
-    "db:migrate:local": "wrangler d1 migrations apply client-data --local",
-    "db:migrate:remote": "wrangler d1 migrations apply client-data --remote",
-    "test": "vitest run"
-  },
-  "dependencies": {
-    "jose": "^6.2.3"
-  },
-  "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.18.5",
-    "@cloudflare/workers-types": "^5.20260716.1",
-    "typescript": "^5.9.3",
-    "vitest": "^4.1.0",
-    "wrangler": "^4.111.0"
+    "check": "npm --prefix apps/delivery run check && npm --prefix apps/operations run check",
+    "test": "npm --prefix apps/delivery test && npm --prefix apps/operations test",
+    "build": "npm --prefix apps/delivery run build && npm --prefix apps/operations run build"
   }
 }

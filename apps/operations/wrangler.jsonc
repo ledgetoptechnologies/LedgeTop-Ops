@@ -1,0 +1,55 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ltds-ops",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist/client",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/health"]
+  },
+  "vars": {
+    "PUBLIC_BASE_URL": "https://operations.ledgetopdroneservices.com",
+    "EXPECTED_HOST": "operations.ledgetopdroneservices.com",
+    "ENVIRONMENT": "production",
+    "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
+    "OPERATIONS_AUD": "REPLACE_WITH_OPERATIONS_ACCESS_AUDIENCE",
+    "DELIVERY_BASE_URL": "https://delivery.ledgetopdroneservices.com",
+    "PROJECT_ALPHA_BASE_URL": "",
+    "TFR_REGION": "WI",
+    "DISPLAY_TIMEZONE": "America/Chicago",
+    "MAP_STYLE_URL": "",
+    "STREAM_ACCOUNT_ID": "",
+    "STREAM_CUSTOMER_CODE": ""
+  },
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "triggers": {
+    "crons": ["*/5 * * * *", "*/15 * * * *", "17 8 * * *"]
+  },
+  "r2_buckets": [
+    { "binding": "DATA_BUCKET", "bucket_name": "client-data" }
+  ],
+  "d1_databases": [
+    {
+      "binding": "OPS_DB",
+      "database_name": "ltds-ops",
+      "database_id": "6ebf7514-d306-4615-ae56-ad869c874dbd",
+      "migrations_dir": "migrations"
+    },
+    {
+      "binding": "DELIVERY_DB",
+      "database_name": "client-data",
+      "database_id": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
+      "migrations_dir": "../delivery/migrations"
+    }
+  ],
+  "queues": {
+    "consumers": [{ "queue": "ltds-file-events", "max_batch_size": 25, "max_batch_timeout": 10, "max_retries": 5 }]
+  },
+  "images": { "binding": "IMAGES" },
+  "stream": { "binding": "STREAM" }
+}

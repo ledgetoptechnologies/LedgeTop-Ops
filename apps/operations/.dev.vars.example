@@ -1,0 +1,9 @@
+OPERATIONS_SESSION_SECRET=replace-with-32-or-more-random-bytes
+DELIVERY_TOKEN_SECRET=replace-with-a-different-32-or-more-random-bytes
+DELIVERY_ACCESS_CODE_PEPPER=replace-with-another-32-or-more-random-bytes
+AUDIT_IP_SECRET=replace-with-a-different-32-or-more-random-bytes
+PROJECT_ALPHA_API_KEY=
+STREAM_ACCOUNT_ID=
+STREAM_API_TOKEN=
+SUA_GATEWAY_USER=
+SUA_GATEWAY_PASSWORD=
