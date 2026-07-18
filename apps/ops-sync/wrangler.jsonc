@@ -6,6 +6,12 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "ops-sync.ledgetopdroneservices.com",
+      "custom_domain": true
+    }
+  ],
   "vars": {
     "EXPECTED_HOST": "ops-sync.ledgetopdroneservices.com",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",

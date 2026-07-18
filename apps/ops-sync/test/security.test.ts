@@ -22,6 +22,7 @@ describe("Project Alpha webhook validation", () => {
     expect(event.entitlement.business_unit_ids).toEqual(["20","30"]);
     expect(() => parseEntitlementEvent({...baseEvent,schema_version:2},"ltds_ops")).toThrow();
     expect(() => parseEntitlementEvent(baseEvent,"another_app")).toThrow("application-key-mismatch");
+    expect(parseEntitlementEvent({...baseEvent,entitlement:{...baseEvent.entitlement,role_key:"role-admin"}},"ltds_ops").entitlement.role_key).toBe("role-admin");
   });
 
   it("enforces the five minute timestamp window", () => {

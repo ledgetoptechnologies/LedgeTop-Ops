@@ -4,6 +4,7 @@ export type Env = Cloudflare.Env & {
 };
 
 export const SUPPORTED_ROLES = [
+  "role-admin",
   "role-operator",
   "role-delivery-coordinator",
   "role-division-manager",

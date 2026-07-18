@@ -63,14 +63,25 @@ describe("Project Alpha snapshot synchronization", () => {
     expect(sql).toContain("INSERT OR IGNORE INTO staff_role_assignments");
   });
 
-  it("fails closed by creating no role assignment for an enabled entitlement with empty scope", async () => {
+  it("keeps an empty-scope employee authenticated without granting a business-unit scope", async () => {
     const db = new Database();
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(page({
       application_entitlements: [{ id: 9, user_id: 7, application_key: "ltds_ops", enabled: true, role_key: "role-operator", business_unit_ids: [] }],
     })))));
 
     await syncProjectAlpha(environment(db));
-    expect(db.allSql()).not.toContain("INSERT OR IGNORE INTO staff_role_assignments");
-    expect(db.allSql()).toContain("DELETE FROM staff_role_assignments");
+    expect(db.allSql()).toContain("'role-operator','assigned'");
+    expect(db.allSql()).not.toContain("INSERT OR IGNORE INTO staff_divisions");
+  });
+
+  it("maps a PA administrator to the immutable global administrator role", async () => {
+    const db = new Database();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(page({
+      application_entitlements: [{ id: 9, user_id: 7, application_key: "ltds_ops", enabled: true, role_key: "role-admin", business_unit_ids: [] }],
+    })))));
+
+    await syncProjectAlpha(environment(db));
+    expect(db.allSql()).toContain("'role-admin','global'");
+    expect(db.allSql()).not.toContain("INSERT OR IGNORE INTO staff_divisions");
   });
 });

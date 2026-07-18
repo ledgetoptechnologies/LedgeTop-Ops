@@ -36,12 +36,16 @@ export async function applyEntitlementEvent(env: Env, event: EntitlementEvent, p
       env.OPS_DB.prepare("DELETE FROM staff_role_assignments WHERE staff_id=? AND role_id<>'role-owner'").bind(id),
       env.OPS_DB.prepare("DELETE FROM staff_divisions WHERE staff_id=?").bind(id),
     ]);
-    if (enabled && event.entitlement.business_unit_ids.length > 0) {
+    if (enabled && event.entitlement.role_key !== "role-admin" && event.entitlement.business_unit_ids.length > 0) {
       const placeholders = event.entitlement.business_unit_ids.map(() => "?").join(",");
-      await env.OPS_DB.batch([
-        env.OPS_DB.prepare(`INSERT OR IGNORE INTO staff_divisions (staff_id,division_id,is_primary) SELECT ?,id,0 FROM divisions WHERE project_alpha_business_unit_id IN (${placeholders}) AND active=1`).bind(id,...event.entitlement.business_unit_ids),
-        env.OPS_DB.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) SELECT 'assignment-pa-' || ? || '-' || id,?,?, 'division',id,id FROM divisions WHERE project_alpha_business_unit_id IN (${placeholders}) AND active=1`).bind(event.user.id,id,event.entitlement.role_key,...event.entitlement.business_unit_ids),
-      ]);
+      await env.OPS_DB.prepare(`INSERT OR IGNORE INTO staff_divisions (staff_id,division_id,is_primary) SELECT ?,id,0 FROM divisions WHERE project_alpha_business_unit_id IN (${placeholders}) AND active=1`).bind(id,...event.entitlement.business_unit_ids).run();
+    }
+    if (enabled && event.entitlement.role_key === "role-admin") {
+      await env.OPS_DB.prepare("INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-admin','global',NULL,'global')")
+        .bind(`assignment-pa-${event.user.id}-global`,id).run();
+    } else if (enabled) {
+      await env.OPS_DB.prepare("INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-operator','assigned',NULL,'assigned')")
+        .bind(`assignment-pa-${event.user.id}-assigned`,id).run();
     }
   }
   return "applied";

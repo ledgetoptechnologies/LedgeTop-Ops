@@ -13,6 +13,10 @@ export async function loadGrants(env: Env, staffId: string): Promise<GrantRow[]>
   return result.results;
 }
 
+export async function isAdministrator(env: Env, principal: StaffPrincipal): Promise<boolean> {
+  return Boolean(await env.OPS_DB.prepare("SELECT 1 ok FROM staff_role_assignments WHERE staff_id=? AND role_id IN ('role-owner','role-admin') AND scope='global' LIMIT 1").bind(principal.id).first());
+}
+
 function matches(grant: GrantRow, principal: StaffPrincipal, context?: ResourceContext): boolean {
   if (!context) return true;
   if (grant.scope === "global") return true;

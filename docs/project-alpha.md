@@ -10,7 +10,7 @@ The endpoint uses Project Alpha's existing hashed API-key authentication and req
 
 Ops runs a complete snapshot every 15 minutes and provides an Owner-only manual Sync action. Records are upserted by Project Alpha ID. Missing projected rows are marked inactive only after every page succeeds; partial/failed runs never deactivate data.
 
-Project Alpha entitlements provision Ops staff, roles, and business-unit scopes. Immutable Project Alpha IDs are authoritative; normalized email is used only for initial matching. An entitlement with no business units can authenticate but sees no PA-owned records. The local global Owner is synchronization-protected.
+Project Alpha's `ltds_ops` entitlement is the Operations login ACL. An enabled entitlement derived from the PA `admin` role grants immutable global `role-admin` access; every enabled non-admin entitlement is reduced to assignment-scoped `role-operator` access within its selected business units. A PA `owner` is not implicitly an Ops administrator. An employee entitlement with no business units can authenticate and view global airspace, but sees no PA-owned work records. Immutable Project Alpha IDs are authoritative, normalized email is used only for initial matching, and the local global Owner remains synchronization-protected.
 
 Project Alpha sends entitlement changes to `POST https://ops-sync.ledgetopdroneservices.com/v1/project-alpha/events`. Requests must pass the dedicated Cloudflare Access Service Auth policy and include the signed `X-PA-Event-ID`, `X-PA-Timestamp`, and `X-PA-Signature` headers. Duplicate delivery is safe, and out-of-order events are ignored.
 

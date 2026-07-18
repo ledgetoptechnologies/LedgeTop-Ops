@@ -26,7 +26,7 @@ describe("entitlement projection",()=>{
   beforeEach(async()=>{
     miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await miniflare.getD1Database("OPS_DB") as D1Database;
-    for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql"]){
+    for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql"]){
       const sql=await readFile(resolve(import.meta.dirname,"../../operations/migrations",migration),"utf8");
       for(const statement of sql.replace(/\r\n/g,"\n").split(";").map((part)=>part.trim()).filter((part)=>part && !part.startsWith("PRAGMA foreign_keys"))){
         await db.prepare(statement).run();
@@ -41,6 +41,8 @@ describe("entitlement projection",()=>{
     await expect(applyEntitlementEvent(env(),grant,"hash-a")).resolves.toBe("applied");
     expect(await db.prepare("SELECT status FROM staff_users WHERE project_alpha_user_id='42'").first("status")).toBe("active");
     expect(await db.prepare("SELECT role_id FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("role_id")).toBe("role-operator");
+    expect(await db.prepare("SELECT scope FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("scope")).toBe("assigned");
+    expect(await db.prepare("SELECT division_id FROM staff_divisions WHERE staff_id='staff-pa-42'").first("division_id")).toBe("division-pa-30");
     await expect(applyEntitlementEvent(env(),grant,"hash-a")).resolves.toBe("applied");
     await completeEvent(env(),grant);
     await expect(applyEntitlementEvent(env(),grant,"hash-a")).resolves.toBe("duplicate");
@@ -49,6 +51,24 @@ describe("entitlement projection",()=>{
     await expect(applyEntitlementEvent(env(),revoke,"hash-b")).resolves.toBe("applied");
     expect(await db.prepare("SELECT status FROM staff_users WHERE project_alpha_user_id='42'").first("status")).toBe("inactive");
     expect(await db.prepare("SELECT count(*) AS total FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("total")).toBe(0);
+  });
+
+  it("maps PA administrators to immutable global admin access",async()=>{
+    const admin=event({entitlement:{application_key:"ltds_ops",enabled:true,role_key:"role-admin",business_unit_ids:["30"]}});
+    await expect(applyEntitlementEvent(env(),admin,"admin-hash")).resolves.toBe("applied");
+    expect(await db.prepare("SELECT immutable FROM roles WHERE id='role-admin'").first("immutable")).toBe(1);
+    expect(await db.prepare("SELECT role_id FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("role_id")).toBe("role-admin");
+    expect(await db.prepare("SELECT scope FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("scope")).toBe("global");
+    expect(await db.prepare("SELECT count(*) AS total FROM staff_divisions WHERE staff_id='staff-pa-42'").first("total")).toBe(0);
+  });
+
+  it("downgrades legacy PA manager roles to assignment-scoped employee access",async()=>{
+    const legacy=event({entitlement:{application_key:"ltds_ops",enabled:true,role_key:"role-division-manager",business_unit_ids:["30"]}});
+    await expect(applyEntitlementEvent(env(),legacy,"legacy-hash")).resolves.toBe("applied");
+    const assignment=await db.prepare("SELECT role_id,scope,division_id FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first<{role_id:string;scope:string;division_id:string|null}>();
+    expect(assignment).toEqual({role_id:"role-operator",scope:"assigned",division_id:null});
+    expect(await db.prepare("SELECT role_key FROM pa_application_entitlements WHERE user_id='42'").first("role_key")).toBe("role-division-manager");
+    expect(await db.prepare("SELECT division_id FROM staff_divisions WHERE staff_id='staff-pa-42'").first("division_id")).toBe("division-pa-30");
   });
 
   it("ignores older events and never changes the protected Owner",async()=>{

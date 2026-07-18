@@ -28,7 +28,7 @@ interface Snapshot extends SnapshotCollections {
 }
 
 const APPLICATION_KEY = "ltds_ops";
-const SUPPORTED_ROLES = new Set(["role-operator", "role-delivery-coordinator", "role-division-manager"]);
+const SUPPORTED_ROLES = new Set(["role-admin", "role-operator", "role-delivery-coordinator", "role-division-manager"]);
 
 function text(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
@@ -232,15 +232,24 @@ function reconciliationStatements(db: D1Database, data: SnapshotCollections, syn
   for (const row of data.application_entitlements) {
     const userId = text(row.user_id), role = text(row.role_key);
     if (!userId || !role || !SUPPORTED_ROLES.has(role) || text(row.application_key) !== APPLICATION_KEY || !isTrue(row.enabled)) continue;
-    // Empty scope intentionally creates no role or division assignments (fail closed).
+    if (role === "role-admin") {
+      statements.push(db.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key)
+        SELECT ?,s.id,'role-admin','global',NULL,'global' FROM staff_users s
+        WHERE s.project_alpha_user_id=? AND s.sync_protected=0 AND s.status='active'`)
+        .bind(stableId("pa-role", `${userId}-role-admin-global`), userId));
+      continue;
+    }
+
+    // All non-admin PA entitlements are deliberately reduced to the employee role.
+    // Business units constrain record visibility; assignment scope prevents division-wide access.
+    statements.push(db.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key)
+      SELECT ?,s.id,'role-operator','assigned',NULL,'assigned' FROM staff_users s
+      WHERE s.project_alpha_user_id=? AND s.sync_protected=0 AND s.status='active'`)
+      .bind(stableId("pa-role", `${userId}-role-operator-assigned`), userId));
     for (const unitId of businessUnitIds(row.business_unit_ids)) {
       statements.push(db.prepare(`INSERT OR IGNORE INTO staff_divisions (staff_id,division_id,is_primary)
         SELECT s.id,d.id,0 FROM staff_users s JOIN divisions d ON d.project_alpha_business_unit_id=? AND d.active=1
         WHERE s.project_alpha_user_id=? AND s.sync_protected=0 AND s.status='active'`).bind(unitId, userId));
-      statements.push(db.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key)
-        SELECT ?,s.id,?,'division',d.id,d.id FROM staff_users s JOIN divisions d ON d.project_alpha_business_unit_id=? AND d.active=1
-        WHERE s.project_alpha_user_id=? AND s.sync_protected=0 AND s.status='active'`)
-        .bind(stableId("pa-role", `${userId}-${role}-${unitId}`), role, unitId, userId));
     }
   }
   return statements;
