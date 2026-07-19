@@ -17,7 +17,7 @@
     "EXPECTED_HOST": "ops.ledgetopdroneservices.com",
     "ENVIRONMENT": "production",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
-    "OPERATIONS_AUD": "92be7b80204b8d1d4ee4537296ccfb2367e088d873518b598f6d0d77fde6641d",
+    "OPERATIONS_AUD": "d09e298c864b9c8f4491b4b42a4dbe2ecbf558b5868d18258443740e56032407",
     "DELIVERY_BASE_URL": "https://delivery.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "",
     "TFR_REGION": "WI",
@@ -28,7 +28,7 @@
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "triggers": {
-    "crons": ["*/5 * * * *", "*/15 * * * *", "17 8 * * *"]
+    "crons": ["*/15 * * * *", "7 */2 * * *", "23 8 * * *", "17 8 * * *"]
   },
   "r2_buckets": [
     { "binding": "DATA_BUCKET", "bucket_name": "client-data" }

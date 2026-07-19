@@ -60,4 +60,4 @@ TFRs and special-use airspace are deliberately separate:
 - Restricted/prohibited areas retain their regulatory type.
 - A missing SUA reservation is `not_listed`, never inactive or clear.
 
-FAA data is stale after 15 minutes without a complete successful refresh. Failed parses retain the last known snapshot. Expired/withdrawn TFR and expired SUA reservation rows are purged after 24 hours; stable SUA geometry remains for future matching. The UI never displays “clear to fly.”
+FAA data is checked every two hours and is stale after three hours without a complete successful refresh. Stable source and record fingerprints prevent unchanged snapshots from rewriting D1; only changed or missing records are reconciled. Failed parses retain the last known snapshot. Expired/withdrawn TFR and expired SUA reservation rows are purged after 24 hours; stable SUA geometry remains for future matching. The UI never displays “clear to fly.”

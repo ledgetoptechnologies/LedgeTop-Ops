@@ -68,9 +68,36 @@ app.patch("/api/admin/staff/:id",()=>managedInProjectAlpha());
 app.get("/api/admin/roles",async c=>{await requireGlobal(c.env,c.get("principal"),"roles.manage");const [roles,permissions]=await Promise.all([c.env.OPS_DB.prepare("SELECT r.id,r.name,r.description,r.immutable,GROUP_CONCAT(rp.permission_key) permissions FROM roles r LEFT JOIN role_permissions rp ON rp.role_id=r.id GROUP BY r.id ORDER BY r.name").all(),c.env.OPS_DB.prepare("SELECT key,description FROM permissions ORDER BY key").all()]);return c.json({roles:roles.results,permissions:permissions.results});});
 app.put("/api/admin/roles/:id",async c=>{const principal=c.get("principal");await requireGlobal(c.env,principal,"roles.manage");const id=c.req.param("id"),role=await c.env.OPS_DB.prepare("SELECT immutable FROM roles WHERE id=?").bind(id).first<{immutable:number}>();if(!role)throw new HTTPException(404,{message:"Role not found"});if(role.immutable)throw new HTTPException(409,{message:"Built-in roles are immutable"});const value=await body(c,z.object({name:z.string().min(1).max(100),description:z.string().max(500),permissions:z.array(z.string()).max(100)}));await c.env.OPS_DB.batch([c.env.OPS_DB.prepare("UPDATE roles SET name=?,description=?,updated_at=datetime('now') WHERE id=?").bind(value.name,value.description,id),c.env.OPS_DB.prepare("DELETE FROM role_permissions WHERE role_id=?").bind(id),...value.permissions.map(permission=>c.env.OPS_DB.prepare("INSERT INTO role_permissions (role_id,permission_key) VALUES (?,?)").bind(id,permission)),await auditStatement(c.env,c.req.raw,principal,"role.updated","role",id,null,{permissions:value.permissions})]);return c.json({success:true});});
 app.get("/api/admin/audit",async c=>{await requireGlobal(c.env,c.get("principal"),"audit.view");return c.json({events:(await c.env.OPS_DB.prepare("SELECT id,actor_type,actor_email,actor_display_name,action,entity_type,entity_id,division_id,details_json,created_at FROM audit_events ORDER BY created_at DESC LIMIT 500").all()).results});});
-app.post("/api/admin/integrations/project-alpha/sync",async c=>{const principal=c.get("principal");await requireGlobal(c.env,principal,"integrations.manage");const result=await syncProjectAlpha(c.env);await c.env.OPS_DB.batch([await auditStatement(c.env,c.req.raw,principal,"integration.sync","integration","project-alpha",null,result)]);return c.json(result);});
+app.post("/api/admin/integrations/project-alpha/sync",async c=>{const principal=c.get("principal");await requireGlobal(c.env,principal,"integrations.manage");const result=await syncProjectAlpha(c.env);if(result.changedCollections.some(collection=>collection==="operations"||collection==="service_locations"))await rebuildOperationAirspaceMatches(c.env);await c.env.OPS_DB.batch([await auditStatement(c.env,c.req.raw,principal,"integration.sync","integration","project-alpha",null,result)]);return c.json(result);});
 
 app.notFound(c=>c.json({error:"Not found"},404));app.onError((error,c)=>{const status=error instanceof HTTPException?error.status:500;if(status>=500)console.error(JSON.stringify({event:"ops.error",status,message:error instanceof Error?error.message:"unknown"}));return c.json({error:status>=500?"An unexpected error occurred":error.message},status);});
 
-async function scheduled(event:ScheduledController,env:Env,ctx:ExecutionContext){const minute=new Date(event.scheduledTime).getUTCMinutes(),hour=new Date(event.scheduledTime).getUTCHours();if(minute%5===0){ctx.waitUntil(Promise.all([refreshTfrs(env),refreshSua(env)]).then(()=>rebuildOperationAirspaceMatches(env)));ctx.waitUntil(markAirspaceStaleAndPurge(env));ctx.waitUntil(refreshStreamStatuses(env));}if(minute%15===0)ctx.waitUntil(syncProjectAlpha(env));if(hour===8&&minute===17)ctx.waitUntil(reconcileFileIndex(env));}
+const STREAM_STATUS_CRON="*/15 * * * *";
+const AIRSPACE_CRON="7 */2 * * *";
+const PROJECT_ALPHA_CRON="23 8 * * *";
+const FILE_INDEX_CRON="17 8 * * *";
+
+async function scheduled(event:ScheduledController,env:Env,ctx:ExecutionContext){
+  switch(event.cron){
+    case STREAM_STATUS_CRON:
+      ctx.waitUntil(refreshStreamStatuses(env));
+      break;
+    case AIRSPACE_CRON:
+      ctx.waitUntil((async()=>{
+        const [tfrs,sua]=await Promise.all([refreshTfrs(env),refreshSua(env)]);
+        if(tfrs.changed||sua.changed)await rebuildOperationAirspaceMatches(env);
+        await markAirspaceStaleAndPurge(env);
+      })());
+      break;
+    case PROJECT_ALPHA_CRON:
+      ctx.waitUntil((async()=>{
+        const result=await syncProjectAlpha(env);
+        if(result.changedCollections.some(collection=>collection==="operations"||collection==="service_locations"))await rebuildOperationAirspaceMatches(env);
+      })());
+      break;
+    case FILE_INDEX_CRON:
+      ctx.waitUntil(reconcileFileIndex(env));
+      break;
+  }
+}
 export default{fetch:app.fetch,queue:consumeFileEvents,scheduled}satisfies ExportedHandler<Env,R2Notification>;

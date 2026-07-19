@@ -4,16 +4,25 @@ import type { Env } from "../src/worker/types";
 
 class Statement {
   values: unknown[] = [];
-  constructor(readonly sql: string) {}
+  constructor(readonly sql: string, private readonly database: Database) {}
   bind(...values: unknown[]): this { this.values = values; return this; }
   async run(): Promise<object> { return {}; }
+  async all<T>(): Promise<{ results: T[] }> {
+    return { results: (this.sql.includes("FROM pa_projection_fingerprints") ? this.database.fingerprints : []) as T[] };
+  }
 }
 
 class Database {
   batches: Statement[][] = [];
-  prepare(sql: string): Statement { return new Statement(sql); }
+  fingerprints: Array<{ collection: string; fingerprint: string }> = [];
+  prepare(sql: string): Statement { return new Statement(sql, this); }
   async batch(statements: Statement[]): Promise<object[]> { this.batches.push(statements); return statements.map(() => ({})); }
   allSql(): string { return this.batches.flat().map((statement) => statement.sql).join("\n"); }
+  rememberFingerprints(): void {
+    this.fingerprints = this.batches.flat()
+      .filter((statement) => statement.sql.includes("INSERT INTO pa_projection_fingerprints"))
+      .map((statement) => ({ collection: String(statement.values[0]), fingerprint: String(statement.values[1]) }));
+  }
 }
 
 const collectionNames = ["users","business_units","worker_business_units","clients","organizations","projects","project_assignments","service_locations","application_entitlements","operations","operation_assignments","tasks","calendar_events"] as const;
@@ -83,5 +92,47 @@ describe("Project Alpha snapshot synchronization", () => {
     await syncProjectAlpha(environment(db));
     expect(db.allSql()).toContain("'role-admin','global'");
     expect(db.allSql()).not.toContain("INSERT OR IGNORE INTO staff_divisions");
+  });
+
+  it("does not rewrite unchanged snapshot collections", async () => {
+    const db = new Database();
+    const snapshot = page({
+      users: [{ id: 7, email: "pilot@example.com", display_name: "Pilot" }],
+      operations: [{ id: 100, project_id: 50, title: "Survey", status: "scheduled" }],
+    });
+    vi.stubGlobal("fetch", vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify(snapshot)))));
+
+    await syncProjectAlpha(environment(db));
+    db.rememberFingerprints();
+    db.batches = [];
+
+    await syncProjectAlpha(environment(db));
+    const sql = db.allSql();
+    expect(sql).not.toContain("INSERT INTO pa_users");
+    expect(sql).not.toContain("INSERT INTO pa_operations");
+    expect(sql).not.toContain("DELETE FROM staff_role_assignments");
+    expect(sql).not.toContain("INSERT INTO pa_projection_fingerprints");
+    expect(sql).toContain("status='success'");
+  });
+
+  it("reconciles only the collection whose snapshot content changed", async () => {
+    const db = new Database();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(new Response(JSON.stringify(page({
+      users: [{ id: 7, email: "pilot@example.com" }],
+      operations: [{ id: 100, project_id: 50, title: "Survey", status: "scheduled" }],
+    })))).mockResolvedValueOnce(new Response(JSON.stringify(page({
+      users: [{ id: 7, email: "pilot@example.com" }],
+      operations: [],
+    })))));
+
+    await syncProjectAlpha(environment(db));
+    db.rememberFingerprints();
+    db.batches = [];
+
+    await syncProjectAlpha(environment(db));
+    const sql = db.allSql();
+    expect(sql).toContain("UPDATE pa_operations SET active=0");
+    expect(sql).not.toContain("UPDATE pa_users SET active=0");
+    expect(sql).not.toContain("INSERT INTO pa_users");
   });
 });

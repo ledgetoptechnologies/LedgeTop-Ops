@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { airspaceRetentionCutoff, bbox, intersectsWI, isWisconsinSua, isWisconsinTfr, regionalWfsUrl, suaStatus, tfrStatus } from "../src/worker/airspace";
+import { airspaceRetentionCutoff, bbox, contentFingerprint, intersectsWI, isWisconsinSua, isWisconsinTfr, regionalWfsUrl, suaStatus, tfrStatus } from "../src/worker/airspace";
 
 describe("FAA status normalization",()=>{
   beforeEach(()=>{vi.useFakeTimers();vi.setSystemTime(new Date("2026-07-16T18:00:00Z"));});afterEach(()=>vi.useRealTimers());
@@ -22,4 +22,9 @@ describe("FAA WFS request",()=>{
 
 describe("airspace retention",()=>{
   it("keeps expired operational records for only 24 hours",()=>{expect(airspaceRetentionCutoff(new Date("2026-07-17T18:00:00Z").getTime())).toBe("2026-07-16T18:00:00.000Z");});
+});
+
+describe("airspace content fingerprints",()=>{
+  it("is stable when object key order changes",async()=>{expect(await contentFingerprint({status:"active",nested:{b:2,a:1}})).toBe(await contentFingerprint({nested:{a:1,b:2},status:"active"}));});
+  it("changes when source content changes",async()=>{expect(await contentFingerprint({status:"active",endsAt:"2026-07-18T19:00:00Z"})).not.toBe(await contentFingerprint({status:"active",endsAt:"2026-07-18T20:00:00Z"}));});
 });

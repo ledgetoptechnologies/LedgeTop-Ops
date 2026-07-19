@@ -11,10 +11,23 @@ interface Geometry { type: string; coordinates: unknown }
 interface Feature { type: string; id?: string; geometry?: Geometry; properties: JsonRow }
 interface FeatureCollection { type: string; features: Feature[]; totalFeatures?: number | string; numberMatched?: number | string; numberReturned?: number | string }
 interface Interval { start: string; end: string }
+export interface AirspaceRefreshResult { records: number; changed: boolean }
 
 function normalizeNotam(value: unknown): string { return String(value || "").toUpperCase().replace(/\s+/g, "").match(/\d+\/\d+/)?.[0] || String(value || "").trim(); }
 function tag(xml: string, name: string): string | null { const match = new RegExp(`<[^>]*${name}[^>]*>([^<]+)<\\/[^>]*${name}>`, "i").exec(xml); return match ? match[1]!.trim() : null; }
 function iso(value: string | null): string | null { if (!value) return null; const parsed = new Date(value); return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString(); }
+
+function stableSerialize(value: unknown): string {
+  if (value === null || value === undefined) return "null";
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(",")}]`;
+  if (typeof value === "object") return `{${Object.keys(value as JsonRow).sort().map(key => `${JSON.stringify(key)}:${stableSerialize((value as JsonRow)[key])}`).join(",")}}`;
+  return JSON.stringify(value);
+}
+
+export async function contentFingerprint(value: unknown): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stableSerialize(value)));
+  return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
+}
 
 export function bbox(geometry: Geometry | undefined): { minLat: number; minLon: number; maxLat: number; maxLon: number } | null {
   if (!geometry) return null; const values: number[][] = [];
@@ -64,11 +77,11 @@ async function detail(notam: string): Promise<{ issued: string | null; intervals
   return { issued: iso(tag(xml, "dateIssued")), intervals, start: intervals.length ? intervals.map(value => value.start).sort()[0]! : iso(tag(xml, "dateEffective")), end: intervals.length ? intervals.map(value => value.end).sort().at(-1)! : iso(tag(xml, "dateExpire")) };
 }
 async function batches(db: D1Database, statements: D1PreparedStatement[]) { for (let index = 0; index < statements.length; index += 75) await db.batch(statements.slice(index, index + 75)); }
-async function health(env: Env, source: string, status: "fresh" | "error", error?: string) {
-  await env.OPS_DB.prepare(`INSERT INTO airspace_source_health (source,last_attempt_at,last_success_at,status,consecutive_failures,last_error_code,updated_at) VALUES (?,datetime('now'),${status === "fresh" ? "datetime('now')" : "NULL"},?,${status === "fresh" ? "0" : "1"},?,datetime('now')) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=${status === "fresh" ? "datetime('now')" : "last_success_at"},status=?,consecutive_failures=${status === "fresh" ? "0" : "consecutive_failures+1"},last_error_code=?,updated_at=datetime('now')`).bind(source, status, error || null, status, error || null).run();
+async function health(env: Env, source: string, status: "fresh" | "error", error?: string, fingerprint?: string) {
+  await env.OPS_DB.prepare(`INSERT INTO airspace_source_health (source,last_attempt_at,last_success_at,status,consecutive_failures,last_error_code,content_fingerprint,updated_at) VALUES (?,datetime('now'),${status === "fresh" ? "datetime('now')" : "NULL"},?,${status === "fresh" ? "0" : "1"},?,?,datetime('now')) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=${status === "fresh" ? "datetime('now')" : "last_success_at"},status=?,consecutive_failures=${status === "fresh" ? "0" : "consecutive_failures+1"},last_error_code=?,content_fingerprint=CASE WHEN ? IS NULL THEN content_fingerprint ELSE ? END,updated_at=datetime('now')`).bind(source, status, error || null, fingerprint ?? null, status, error || null, fingerprint ?? null, fingerprint ?? null).run();
 }
 
-export async function refreshTfrs(env: Env): Promise<number> {
+export async function refreshTfrs(env: Env): Promise<AirspaceRefreshResult> {
   try {
     const [listedRaw, noShapeRaw, features] = await Promise.all([fetchJson(TFR_LIST), fetchJson(TFR_NO_SHAPE), fetchWfs(TFR_WFS)]);
     const geometryByNotam = new Map<string, Feature[]>();
@@ -79,34 +92,85 @@ export async function refreshTfrs(env: Env): Promise<number> {
     const selected = [...rows.entries()].filter(([key, row]) => isWisconsinTfr(row, geometryByNotam.get(key) || []));
     const details = new Map<string, Awaited<ReturnType<typeof detail>>>();
     for (let index = 0; index < selected.length; index += 8) { const chunk = selected.slice(index, index + 8), values = await Promise.all(chunk.map(([key]) => detail(key))); chunk.forEach(([key], item) => details.set(key, values[item]!)); }
-    const statements: D1PreparedStatement[] = [env.OPS_DB.prepare("UPDATE tfr_notices SET missing_snapshots=missing_snapshots+1")];
-    for (const [key, row] of selected) {
-      const id = `tfr-${key.replace(/[^a-z0-9]/gi, "-")}`, info = details.get(key)!, geometries = geometryByNotam.get(key) || [], status = info.intervals.length ? statusForIntervals(info.intervals) : tfrStatus(info.start, info.end);
-      statements.push(env.OPS_DB.prepare(`INSERT INTO tfr_notices (id,notam_id,facility,state,type,title,description,status,issued_at,effective_at,expires_at,official_url,geometry_available,missing_snapshots,source_updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?) ON CONFLICT(notam_id) DO UPDATE SET facility=excluded.facility,state=excluded.state,type=excluded.type,title=excluded.title,description=excluded.description,status=excluded.status,issued_at=excluded.issued_at,effective_at=excluded.effective_at,expires_at=excluded.expires_at,official_url=excluded.official_url,geometry_available=excluded.geometry_available,missing_snapshots=0,source_updated_at=excluded.source_updated_at,updated_at=datetime('now')`).bind(id, key, row.facility ?? null, "WI", row.type ?? null, row.description ?? row.TITLE ?? key, row.description ?? null, status, info.issued, info.start, info.end, `https://tfr.faa.gov/tfr3/?page=detail_${key.replace("/", "_")}`, geometries.length ? 1 : 0, row.mod_date ?? row.LAST_MODIFICATION_DATETIME ?? null));
-      statements.push(env.OPS_DB.prepare("DELETE FROM tfr_effective_intervals WHERE tfr_id=?").bind(id), env.OPS_DB.prepare("DELETE FROM tfr_geometries WHERE tfr_id=?").bind(id));
-      for (const interval of info.intervals) statements.push(env.OPS_DB.prepare("INSERT INTO tfr_effective_intervals (id,tfr_id,starts_at,ends_at) VALUES (?,?,?,?)").bind(crypto.randomUUID(), id, interval.start, interval.end));
-      if (!info.intervals.length && info.start && info.end) statements.push(env.OPS_DB.prepare("INSERT INTO tfr_effective_intervals (id,tfr_id,starts_at,ends_at) VALUES (?,?,?,?)").bind(crypto.randomUUID(), id, info.start, info.end));
-      for (const feature of geometries) { const box = bbox(feature.geometry); statements.push(env.OPS_DB.prepare("INSERT INTO tfr_geometries (id,tfr_id,geojson,min_lat,min_lon,max_lat,max_lon) VALUES (?,?,?,?,?,?,?)").bind(crypto.randomUUID(), id, JSON.stringify(feature.geometry), box?.minLat ?? null, box?.minLon ?? null, box?.maxLat ?? null, box?.maxLon ?? null)); }
+    const desired = await Promise.all(selected.map(async ([key, row]) => {
+      const id = `tfr-${key.replace(/[^a-z0-9]/gi, "-")}`, info = details.get(key)!, geometries = geometryByNotam.get(key) || [];
+      const intervals = info.intervals.length ? [...info.intervals] : info.start && info.end ? [{ start: info.start, end: info.end }] : [];
+      const status = info.intervals.length ? statusForIntervals(info.intervals) : tfrStatus(info.start, info.end);
+      const geometryData = geometries.map(feature => ({ geometry: feature.geometry, box: bbox(feature.geometry) })).sort((a, b) => stableSerialize(a.geometry).localeCompare(stableSerialize(b.geometry)));
+      const data = { id, key, facility: row.facility ?? null, state: "WI", type: row.type ?? null, title: row.description ?? row.TITLE ?? key, description: row.description ?? null, status, issued: info.issued, start: info.start, end: info.end, officialUrl: `https://tfr.faa.gov/tfr3/?page=detail_${key.replace("/", "_")}`, geometryAvailable: geometries.length ? 1 : 0, sourceUpdatedAt: row.mod_date ?? row.LAST_MODIFICATION_DATETIME ?? null, intervals, geometryData };
+      return { ...data, fingerprint: await contentFingerprint(data) };
+    }));
+    desired.sort((a, b) => a.key.localeCompare(b.key));
+    const sourceFingerprint = await contentFingerprint(desired.map(value => [value.key, value.fingerprint]));
+    const sourceState = await env.OPS_DB.prepare("SELECT content_fingerprint FROM airspace_source_health WHERE source='faa-tfr'").first<{ content_fingerprint: string | null }>();
+    if (sourceState?.content_fingerprint === sourceFingerprint) { await health(env, "faa-tfr", "fresh", undefined, sourceFingerprint); return { records: desired.length, changed: false }; }
+
+    const currentRows = await env.OPS_DB.prepare("SELECT notam_id,content_fingerprint,missing_snapshots,status FROM tfr_notices").all<{ notam_id: string; content_fingerprint: string | null; missing_snapshots: number; status: string }>();
+    const current = new Map(currentRows.results.map(value => [value.notam_id, value]));
+    const desiredKeys = new Set(desired.map(value => value.key));
+    const statements: D1PreparedStatement[] = [];
+    let changed = false, pendingAbsence = false;
+    for (const item of desired) {
+      const previous = current.get(item.key);
+      if (previous?.content_fingerprint === item.fingerprint && previous.missing_snapshots === 0) continue;
+      changed = true;
+      statements.push(env.OPS_DB.prepare(`INSERT INTO tfr_notices (id,notam_id,facility,state,type,title,description,status,issued_at,effective_at,expires_at,official_url,geometry_available,missing_snapshots,source_updated_at,content_fingerprint) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,NULL) ON CONFLICT(notam_id) DO UPDATE SET facility=excluded.facility,state=excluded.state,type=excluded.type,title=excluded.title,description=excluded.description,status=excluded.status,issued_at=excluded.issued_at,effective_at=excluded.effective_at,expires_at=excluded.expires_at,official_url=excluded.official_url,geometry_available=excluded.geometry_available,missing_snapshots=0,source_updated_at=excluded.source_updated_at,updated_at=datetime('now')`).bind(item.id, item.key, item.facility, item.state, item.type, item.title, item.description, item.status, item.issued, item.start, item.end, item.officialUrl, item.geometryAvailable, item.sourceUpdatedAt));
+      statements.push(env.OPS_DB.prepare("DELETE FROM tfr_effective_intervals WHERE tfr_id=?").bind(item.id), env.OPS_DB.prepare("DELETE FROM tfr_geometries WHERE tfr_id=?").bind(item.id));
+      for (const interval of item.intervals) statements.push(env.OPS_DB.prepare("INSERT INTO tfr_effective_intervals (id,tfr_id,starts_at,ends_at) VALUES (?,?,?,?)").bind(crypto.randomUUID(), item.id, interval.start, interval.end));
+      for (const geometry of item.geometryData) statements.push(env.OPS_DB.prepare("INSERT INTO tfr_geometries (id,tfr_id,geojson,min_lat,min_lon,max_lat,max_lon) VALUES (?,?,?,?,?,?,?)").bind(crypto.randomUUID(), item.id, JSON.stringify(geometry.geometry), geometry.box?.minLat ?? null, geometry.box?.minLon ?? null, geometry.box?.maxLat ?? null, geometry.box?.maxLon ?? null));
+      statements.push(env.OPS_DB.prepare("UPDATE tfr_notices SET content_fingerprint=? WHERE notam_id=?").bind(item.fingerprint, item.key));
     }
-    statements.push(
-      env.OPS_DB.prepare("UPDATE tfr_notices SET status='withdrawn',updated_at=datetime('now') WHERE UPPER(TRIM(COALESCE(state,'')))<>'WI' AND status NOT IN ('expired','withdrawn')"),
-      env.OPS_DB.prepare("UPDATE tfr_notices SET status='withdrawn' WHERE missing_snapshots>=2 AND status NOT IN ('expired','withdrawn')"),
-    ); await batches(env.OPS_DB, statements); await health(env, "faa-tfr", "fresh"); return selected.length;
+    for (const previous of currentRows.results) {
+      if (desiredKeys.has(previous.notam_id) || previous.status === "expired" || previous.status === "withdrawn") continue;
+      changed = true;
+      if (previous.missing_snapshots < 1) { pendingAbsence = true; statements.push(env.OPS_DB.prepare("UPDATE tfr_notices SET missing_snapshots=1,updated_at=datetime('now') WHERE notam_id=?").bind(previous.notam_id)); }
+      else statements.push(env.OPS_DB.prepare("UPDATE tfr_notices SET missing_snapshots=missing_snapshots+1,status='withdrawn',updated_at=datetime('now') WHERE notam_id=?").bind(previous.notam_id));
+    }
+    if (statements.length) await batches(env.OPS_DB, statements);
+    await health(env, "faa-tfr", "fresh", undefined, pendingAbsence ? `pending:${sourceFingerprint}` : sourceFingerprint);
+    return { records: desired.length, changed };
   } catch (error) { await health(env, "faa-tfr", "error", error instanceof Error ? error.message.slice(0, 100) : "unknown"); throw error; }
 }
 
-export async function refreshSua(env: Env): Promise<number> {
+export async function refreshSua(env: Env): Promise<AirspaceRefreshResult> {
   try {
-    const features = await fetchWfs(SUA_WFS), statements: D1PreparedStatement[] = [env.OPS_DB.prepare("UPDATE sua_reservations SET missing_snapshots=missing_snapshots+1")]; let count = 0;
+    const features = await fetchWfs(SUA_WFS), desiredById = new Map<string, {
+      reservationId: string; areaId: string; gid: string; name: string; airspaceType: string; geometry: Geometry; box: NonNullable<ReturnType<typeof bbox>>;
+      lowAltitude: unknown; highAltitude: unknown; status: ReturnType<typeof suaStatus>; start: string | null; end: string | null; remarks: unknown; sourceUpdatedAt: unknown;
+    }>();
     for (const feature of features) {
-      const properties = feature.properties, box = bbox(feature.geometry); if (!isWisconsinSua(properties) || !intersectsWI(box) || !feature.geometry) continue;
+      const properties = feature.properties, box = bbox(feature.geometry); if (!isWisconsinSua(properties) || !box || !intersectsWI(box) || !feature.geometry) continue;
       const airspaceId = String(properties.airspace_id ?? feature.id ?? ""), gid = String(properties.gid ?? feature.id ?? ""); if (!airspaceId) continue;
       const areaId = `${airspaceId}:${gid || airspaceId}`, start = iso(String(properties.start_time ?? "") || null), end = iso(String(properties.end_time ?? "") || null), schedule = String(properties.sched_id ?? "0"), reservationId = `${areaId}:${schedule}`;
-      statements.push(env.OPS_DB.prepare(`INSERT INTO sua_areas (id,gid,name,airspace_type,geojson,low_altitude,high_altitude,min_lat,min_lon,max_lat,max_lon) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET gid=excluded.gid,name=excluded.name,airspace_type=excluded.airspace_type,geojson=excluded.geojson,low_altitude=excluded.low_altitude,high_altitude=excluded.high_altitude,min_lat=excluded.min_lat,min_lon=excluded.min_lon,max_lat=excluded.max_lat,max_lon=excluded.max_lon,updated_at=datetime('now')`).bind(areaId, gid, String(properties.airspace_name ?? airspaceId), String(properties.airspace_type ?? "unknown"), JSON.stringify(feature.geometry), properties.low_altitude ?? null, properties.high_altitude ?? null, box!.minLat, box!.minLon, box!.maxLat, box!.maxLon));
-      statements.push(env.OPS_DB.prepare(`INSERT INTO sua_reservations (id,area_id,status,starts_at,ends_at,low_altitude,high_altitude,remarks,source_updated_at,missing_snapshots) VALUES (?,?,?,?,?,?,?,?,?,0) ON CONFLICT(id) DO UPDATE SET area_id=excluded.area_id,status=excluded.status,starts_at=excluded.starts_at,ends_at=excluded.ends_at,low_altitude=excluded.low_altitude,high_altitude=excluded.high_altitude,remarks=excluded.remarks,source_updated_at=excluded.source_updated_at,missing_snapshots=0,updated_at=datetime('now')`).bind(reservationId, areaId, suaStatus(properties.status_id, start, end), start, end, properties.low_altitude ?? null, properties.high_altitude ?? null, properties.remarks ?? null, properties.update_date ?? null)); count += 1;
+      desiredById.set(reservationId, { reservationId, areaId, gid, name: String(properties.airspace_name ?? airspaceId), airspaceType: String(properties.airspace_type ?? "unknown"), geometry: feature.geometry, box, lowAltitude: properties.low_altitude ?? null, highAltitude: properties.high_altitude ?? null, status: suaStatus(properties.status_id, start, end), start, end, remarks: properties.remarks ?? null, sourceUpdatedAt: properties.update_date ?? null });
     }
-    statements.push(env.OPS_DB.prepare("UPDATE sua_reservations SET status='expired',updated_at=datetime('now') WHERE missing_snapshots>=2 AND status<>'expired'"));
-    await batches(env.OPS_DB, statements); await health(env, "faa-sua", "fresh"); return count;
+    const desired = await Promise.all([...desiredById.values()].map(async value => ({ ...value, fingerprint: await contentFingerprint(value) })));
+    desired.sort((a, b) => a.reservationId.localeCompare(b.reservationId));
+    const sourceFingerprint = await contentFingerprint(desired.map(value => [value.reservationId, value.fingerprint]));
+    const sourceState = await env.OPS_DB.prepare("SELECT content_fingerprint FROM airspace_source_health WHERE source='faa-sua'").first<{ content_fingerprint: string | null }>();
+    if (sourceState?.content_fingerprint === sourceFingerprint) { await health(env, "faa-sua", "fresh", undefined, sourceFingerprint); return { records: desired.length, changed: false }; }
+
+    const currentRows = await env.OPS_DB.prepare("SELECT id,content_fingerprint,missing_snapshots,status FROM sua_reservations").all<{ id: string; content_fingerprint: string | null; missing_snapshots: number; status: string }>();
+    const current = new Map(currentRows.results.map(value => [value.id, value]));
+    const desiredIds = new Set(desired.map(value => value.reservationId));
+    const statements: D1PreparedStatement[] = [];
+    let changed = false, pendingAbsence = false;
+    for (const item of desired) {
+      const previous = current.get(item.reservationId);
+      if (previous?.content_fingerprint === item.fingerprint && previous.missing_snapshots === 0) continue;
+      changed = true;
+      statements.push(env.OPS_DB.prepare(`INSERT INTO sua_areas (id,gid,name,airspace_type,geojson,low_altitude,high_altitude,min_lat,min_lon,max_lat,max_lon) VALUES (?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET gid=excluded.gid,name=excluded.name,airspace_type=excluded.airspace_type,geojson=excluded.geojson,low_altitude=excluded.low_altitude,high_altitude=excluded.high_altitude,min_lat=excluded.min_lat,min_lon=excluded.min_lon,max_lat=excluded.max_lat,max_lon=excluded.max_lon,updated_at=datetime('now')`).bind(item.areaId, item.gid, item.name, item.airspaceType, JSON.stringify(item.geometry), item.lowAltitude, item.highAltitude, item.box.minLat, item.box.minLon, item.box.maxLat, item.box.maxLon));
+      statements.push(env.OPS_DB.prepare(`INSERT INTO sua_reservations (id,area_id,status,starts_at,ends_at,low_altitude,high_altitude,remarks,source_updated_at,missing_snapshots,content_fingerprint) VALUES (?,?,?,?,?,?,?,?,?,0,?) ON CONFLICT(id) DO UPDATE SET area_id=excluded.area_id,status=excluded.status,starts_at=excluded.starts_at,ends_at=excluded.ends_at,low_altitude=excluded.low_altitude,high_altitude=excluded.high_altitude,remarks=excluded.remarks,source_updated_at=excluded.source_updated_at,missing_snapshots=0,content_fingerprint=excluded.content_fingerprint,updated_at=datetime('now')`).bind(item.reservationId, item.areaId, item.status, item.start, item.end, item.lowAltitude, item.highAltitude, item.remarks, item.sourceUpdatedAt, item.fingerprint));
+    }
+    for (const previous of currentRows.results) {
+      if (desiredIds.has(previous.id) || previous.status === "expired") continue;
+      changed = true;
+      if (previous.missing_snapshots < 1) { pendingAbsence = true; statements.push(env.OPS_DB.prepare("UPDATE sua_reservations SET missing_snapshots=1,updated_at=datetime('now') WHERE id=?").bind(previous.id)); }
+      else statements.push(env.OPS_DB.prepare("UPDATE sua_reservations SET missing_snapshots=missing_snapshots+1,status='expired',updated_at=datetime('now') WHERE id=?").bind(previous.id));
+    }
+    if (statements.length) await batches(env.OPS_DB, statements);
+    await health(env, "faa-sua", "fresh", undefined, pendingAbsence ? `pending:${sourceFingerprint}` : sourceFingerprint);
+    return { records: desired.length, changed };
   } catch (error) { await health(env, "faa-sua", "error", error instanceof Error ? error.message.slice(0, 100) : "unknown"); throw error; }
 }
 
@@ -138,7 +202,7 @@ export async function rebuildOperationAirspaceMatches(env: Env): Promise<number>
 export async function markAirspaceStaleAndPurge(env: Env): Promise<void> {
   const cutoff = airspaceRetentionCutoff();
   await env.OPS_DB.batch([
-    env.OPS_DB.prepare("UPDATE airspace_source_health SET status='stale',updated_at=datetime('now') WHERE status='fresh' AND last_success_at<datetime('now','-15 minutes')"),
+    env.OPS_DB.prepare("UPDATE airspace_source_health SET status='stale',updated_at=datetime('now') WHERE status='fresh' AND last_success_at<datetime('now','-3 hours')"),
     env.OPS_DB.prepare("UPDATE tfr_notices SET status='expired',updated_at=datetime('now') WHERE status IN ('scheduled','active','unknown') AND expires_at IS NOT NULL AND datetime(expires_at)<datetime('now')"),
     env.OPS_DB.prepare("UPDATE sua_reservations SET status='expired',updated_at=datetime('now') WHERE status IN ('active','upcoming','pending','unknown') AND ends_at IS NOT NULL AND datetime(ends_at)<datetime('now')"),
     env.OPS_DB.prepare("DELETE FROM pa_operation_airspace_matches WHERE source_type='tfr' AND source_id IN (SELECT id FROM tfr_notices WHERE status IN ('expired','withdrawn') AND datetime(COALESCE(expires_at,updated_at))<datetime(?))").bind(cutoff),

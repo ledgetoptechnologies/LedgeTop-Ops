@@ -15,7 +15,7 @@
   "vars": {
     "EXPECTED_HOST": "ops-sync.ledgetopdroneservices.com",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
-    "CF_ACCESS_AUD": "f79106bcbbbb22997ccc1b13d4f1badeb0396d0b4283b1416e43b79370957e23",
+    "CF_ACCESS_AUD": "ce63abfebd59f3183002cce6c9f7a86419d1cda6f4507885c11b8b17af3ccb3c",
     "CF_ACCOUNT_ID": "REPLACE_CLOUDFLARE_ACCOUNT_ID",
     "CF_ACCESS_GROUP_ID": "REPLACE_LTDS_OPS_USERS_RULE_GROUP_ID",
     "APPLICATION_KEY": "ltds_ops"
