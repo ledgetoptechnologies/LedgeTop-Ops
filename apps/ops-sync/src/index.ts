@@ -1,6 +1,6 @@
 import { ZodError } from "zod";
 import { reconcileAccessGroup } from "./access-group";
-import { completeEvent, applyEntitlementEvent, applyProjectionEvent, recordAccessFailure } from "./projection";
+import { completeEvent, applyEntitlementEvent, applyProjectionEvent, recordAccessFailure, recordAccessSuccess } from "./projection";
 import { parseIntegrationEvent } from "./schema";
 import { MAX_BODY_BYTES, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookHmac } from "./security";
 import type { Env } from "./types";
@@ -45,15 +45,22 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
       ? await applyProjectionEvent(env,event,await sha256Hex(rawBody))
       : await applyEntitlementEvent(env,event,await sha256Hex(rawBody));
     if (result === "duplicate" || result === "ignored") return json(200,{ok:true,event_id:event.event_id,status:result});
-    try {
-      const emails = event.event_type === "projection.changed" ? [] : await reconcileAccessGroup(env);
-      await completeEvent(env,event);
-      return json(200,{ok:true,event_id:event.event_id,status:"completed",access_members:emails.length});
-    } catch (error) {
-      const message = error instanceof Error?error.message:"access-group-error";
-      await recordAccessFailure(env,event.event_id,message);
-      throw error;
+    let accessMembers = 0;
+    let accessPending = false;
+    if (event.event_type !== "projection.changed") {
+      try {
+        const emails = await reconcileAccessGroup(env);
+        accessMembers = emails.length;
+        await recordAccessSuccess(env);
+      } catch (error) {
+        const message = error instanceof Error?error.message:"access-group-error";
+        await recordAccessFailure(env,event.event_id,message);
+        console.error(JSON.stringify({event:"ops_sync_access_reconciliation_pending",error:message}));
+        accessPending = true;
+      }
     }
+    await completeEvent(env,event);
+    return json(accessPending?202:200,{ok:true,event_id:event.event_id,status:accessPending?"completed-access-reconciliation-pending":"completed",access_members:accessMembers});
   } catch (error) {
     const message = error instanceof ZodError ? "event-schema-invalid" : error instanceof SyntaxError ? "json-invalid" : error instanceof Error ? error.message : "internal-error";
     console.error(JSON.stringify({event:"ops_sync_request_failed",error:message}));
@@ -61,6 +68,20 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
   }
 }
 
+export async function reconcileScheduledAccess(env: Env): Promise<number> {
+  try {
+    const emails = await reconcileAccessGroup(env);
+    await recordAccessSuccess(env);
+    return emails.length;
+  } catch (error) {
+    const message = error instanceof Error?error.message:"access-group-error";
+    await recordAccessFailure(env,null,message);
+    console.error(JSON.stringify({event:"ops_sync_scheduled_access_reconciliation_failed",error:message}));
+    throw error;
+  }
+}
+
 export default {
   fetch(request,env): Promise<Response> { return handleRequest(request,env); },
+  scheduled(_event,env,ctx): void { ctx.waitUntil(reconcileScheduledAccess(env)); },
 } satisfies ExportedHandler<Env>;

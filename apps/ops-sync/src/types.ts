@@ -1,5 +1,6 @@
 export type Env = Cloudflare.Env & {
   CF_ACCESS_GROUP_API_TOKEN: string;
+  CF_ACCESS_GROUP_NAME?: string;
   PROJECT_ALPHA_WEBHOOK_HMAC_SECRET: string;
 };
 

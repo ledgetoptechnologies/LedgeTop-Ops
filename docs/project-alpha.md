@@ -34,4 +34,6 @@ Projects may include `manager_user_id`. A Project Manager receives Project conte
 
 Project Alpha posts signed incremental changes to `/v1/project-alpha/events`. The receiver validates Cloudflare Access, the configured application key, schema version, event ID, timestamp, and HMAC. Event receipts make delivery idempotent; per-entity source timestamps prevent older events from overwriting newer data.
 
+The receiver acknowledges a valid event after its D1 projection is committed. Cloudflare Access-group membership is reconciled immediately and independently every five minutes, so a temporary Cloudflare control-plane failure cannot block Project Alpha's outbox. Configure both `CF_ACCESS_GROUP_ID` and the exact deployment-specific `CF_ACCESS_GROUP_NAME`; the name provides a safe recovery path if Cloudflare rotates or replaces the group identifier.
+
 A complete snapshot runs daily for recovery and reconciliation. Collection fingerprints skip unchanged projection writes. Missing rows are marked inactive only after every snapshot page succeeds, so a partial run cannot erase the last known good projection.

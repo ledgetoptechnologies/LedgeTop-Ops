@@ -101,13 +101,21 @@ export async function applyProjectionEvent(env: Env, event: ProjectionEvent, pay
 export async function completeEvent(env: Env, event: IntegrationEvent): Promise<void> {
   await env.OPS_DB.batch([
     env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='completed',processed_at=datetime('now'),last_error=NULL WHERE event_id=?").bind(event.event_id),
-    env.OPS_DB.prepare("UPDATE integration_reconciliation SET last_event_at=?,last_access_success_at=datetime('now'),last_access_error=NULL,updated_at=datetime('now') WHERE integration='project-alpha'").bind(event.occurred_at),
+    env.OPS_DB.prepare("UPDATE integration_reconciliation SET last_event_at=?,updated_at=datetime('now') WHERE integration='project-alpha'").bind(event.occurred_at),
   ]);
 }
 
-export async function recordAccessFailure(env: Env, eventId: string, error: string): Promise<void> {
-  await env.OPS_DB.batch([
-    env.OPS_DB.prepare("UPDATE integration_event_receipts SET last_error=? WHERE event_id=?").bind(error.slice(0,500),eventId),
-    env.OPS_DB.prepare("UPDATE integration_reconciliation SET last_access_attempt_at=datetime('now'),last_access_error=?,updated_at=datetime('now') WHERE integration='project-alpha'").bind(error.slice(0,500)),
-  ]);
+export async function recordAccessSuccess(env: Env): Promise<void> {
+  await env.OPS_DB.prepare("UPDATE integration_reconciliation SET last_access_attempt_at=datetime('now'),last_access_success_at=datetime('now'),last_access_error=NULL,updated_at=datetime('now') WHERE integration='project-alpha'").run();
+}
+
+export async function recordAccessFailure(env: Env, eventId: string | null, error: string): Promise<void> {
+  const safeError = error.slice(0, 500);
+  const statements = [
+    env.OPS_DB.prepare("UPDATE integration_reconciliation SET last_access_attempt_at=datetime('now'),last_access_error=?,updated_at=datetime('now') WHERE integration='project-alpha'").bind(safeError),
+  ];
+  if (eventId) {
+    statements.unshift(env.OPS_DB.prepare("UPDATE integration_event_receipts SET last_error=? WHERE event_id=?").bind(safeError,eventId));
+  }
+  await env.OPS_DB.batch(statements);
 }

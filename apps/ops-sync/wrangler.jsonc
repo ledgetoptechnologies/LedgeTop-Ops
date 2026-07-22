@@ -18,9 +18,11 @@
     "CF_ACCESS_AUD": "ce63abfebd59f3183002cce6c9f7a86419d1cda6f4507885c11b8b17af3ccb3c",
     "CF_ACCOUNT_ID": "846c924bf17bf4f3dd15c97a4c5d1d51",
     "CF_ACCESS_GROUP_ID": "f4dd9211-6ec4-4213-abe0-c67b8326ad02",
+    "CF_ACCESS_GROUP_NAME": "LTDS Ops Users",
     "APPLICATION_KEY": "ltds_ops"
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "triggers": { "crons": ["*/5 * * * *"] },
   "d1_databases": [
     {
       "binding": "OPS_DB",
