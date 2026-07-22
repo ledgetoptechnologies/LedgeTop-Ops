@@ -25,13 +25,13 @@ class Database {
   }
 }
 
-const collectionNames = ["users","business_units","worker_business_units","clients","organizations","projects","project_assignments","service_locations","application_entitlements","operations","operation_assignments","tasks","calendar_events"] as const;
+const collectionNames = ["users","business_units","worker_business_units","clients","organizations","projects","project_assignments","service_locations","application_entitlements","operations","operation_assignments","tasks","task_assignments","calendar_events"] as const;
 function page(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return { generated_at: "2026-07-17T12:00:00Z", ...Object.fromEntries(collectionNames.map((name) => [name, []])), has_more: false, next_page: null, ...overrides };
 }
 
 function environment(db: Database): Env {
-  return { OPS_DB: db as unknown as D1Database, PROJECT_ALPHA_BASE_URL: "https://pa.example.test", PROJECT_ALPHA_API_KEY: "secret" } as Env;
+  return { OPS_DB: db as unknown as D1Database, PROJECT_ALPHA_BASE_URL: "https://pa.example.test", PROJECT_ALPHA_API_KEY: "secret", APPLICATION_KEY: "external_operations" } as unknown as Env;
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -53,10 +53,11 @@ describe("Project Alpha snapshot synchronization", () => {
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(page({
       users: [{ id: 7, email: "Pilot@Example.com", display_name: "Pilot" }],
       business_units: [{ id: 30, name: "Flight", code: "flight", is_active: true }],
-      application_entitlements: [{ id: 9, user_id: 7, application_key: "ltds_ops", enabled: true, role_key: "role-operator", business_unit_ids: [30] }],
+      application_entitlements: [{ id: 9, user_id: 7, application_key: "external_operations", enabled: true, role_key: "role-operator", oversight_business_unit_ids: [30] }],
       operations: [{ id: 100, project_id: 50, business_unit_id: 30, title: "Survey", status: "scheduled" }],
       operation_assignments: [{ operation_id: 100, user_id: 7 }],
       tasks: [{ id: 110, project_id: 50, business_unit_id: 30, title: "Fly", status: "todo" }],
+      task_assignments: [{ task_id: 110, user_id: 7 }],
       calendar_events: [{ source_type: "operation", source_id: 100, title: "Survey", start_at: "2026-07-18T12:00:00Z", business_unit_id: 30 }],
     })))));
 
@@ -66,16 +67,50 @@ describe("Project Alpha snapshot synchronization", () => {
     expect(sql).toContain("INSERT INTO pa_application_entitlements");
     expect(sql).toContain("INSERT INTO pa_operations");
     expect(sql).toContain("INSERT INTO pa_tasks");
+    expect(sql).toContain("INSERT INTO pa_task_assignments");
     expect(sql).toContain("INSERT INTO pa_calendar_events");
     expect(sql).toContain("project_alpha_business_unit_id");
     expect(sql).toContain("s.sync_protected=0");
     expect(sql).toContain("INSERT OR IGNORE INTO staff_role_assignments");
+    expect(sql).toContain("SET status=CASE WHEN project_alpha_user_id IN");
+  });
+
+  it("keeps ended Project Team memberships inactive during snapshot recovery", async () => {
+    const db = new Database();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(page({
+      project_assignments: [{ id: 12, project_id: 50, user_id: 7, ends_at: "2000-01-01T00:00:00.000000Z" }],
+    })))));
+
+    await syncProjectAlpha(environment(db));
+    const assignment = db.batches.flat().find((statement) => statement.sql.includes("INSERT INTO pa_project_assignments"));
+    expect(assignment?.values[3]).toBe(0);
+    expect(assignment?.sql).toContain("active=excluded.active");
+  });
+
+  it("rejects an invalid application key before requesting a snapshot", async () => {
+    const db = new Database();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const invalid = { ...environment(db), APPLICATION_KEY: "not valid" };
+
+    await expect(syncProjectAlpha(invalid)).rejects.toThrow("project-alpha-application-key-invalid");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("requires HTTPS for a non-local Project Alpha origin", async () => {
+    const db = new Database();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const insecure = { ...environment(db), PROJECT_ALPHA_BASE_URL: "http://pa.example.test" };
+
+    await expect(syncProjectAlpha(insecure)).rejects.toThrow("project-alpha-base-url-invalid");
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("keeps an empty-scope employee authenticated without granting a business-unit scope", async () => {
     const db = new Database();
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(page({
-      application_entitlements: [{ id: 9, user_id: 7, application_key: "ltds_ops", enabled: true, role_key: "role-operator", business_unit_ids: [] }],
+      application_entitlements: [{ id: 9, user_id: 7, application_key: "external_operations", enabled: true, role_key: "role-operator", oversight_business_unit_ids: [] }],
     })))));
 
     await syncProjectAlpha(environment(db));
@@ -86,7 +121,7 @@ describe("Project Alpha snapshot synchronization", () => {
   it("maps a PA administrator to the immutable global administrator role", async () => {
     const db = new Database();
     vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(page({
-      application_entitlements: [{ id: 9, user_id: 7, application_key: "ltds_ops", enabled: true, role_key: "role-admin", business_unit_ids: [] }],
+      application_entitlements: [{ id: 9, user_id: 7, application_key: "external_operations", enabled: true, role_key: "role-admin", oversight_business_unit_ids: [] }],
     })))));
 
     await syncProjectAlpha(environment(db));

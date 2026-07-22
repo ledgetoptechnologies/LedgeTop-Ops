@@ -15,6 +15,7 @@ const SNAPSHOT_COLLECTIONS = [
   "operations",
   "operation_assignments",
   "tasks",
+  "task_assignments",
   "calendar_events",
 ] as const;
 
@@ -28,7 +29,6 @@ interface Snapshot extends SnapshotCollections {
   next_page: number | null;
 }
 
-const APPLICATION_KEY = "ltds_ops";
 const SUPPORTED_ROLES = new Set(["role-admin", "role-operator", "role-delivery-coordinator", "role-division-manager"]);
 
 function text(value: unknown): string | null {
@@ -45,6 +45,29 @@ function enabled(value: unknown): number {
 
 function sourceActive(row: Row): number {
   return row.active === false || row.active === 0 || row.is_active === false || row.is_active === 0 || isTrue(row.is_disabled) || isTrue(row.archived) || row.deleted_at ? 0 : 1;
+}
+
+function membershipActive(row: Row): number {
+  const end = text(row.ends_at)?.trim();
+  if (!end) return 1;
+  const timestamp = Date.parse(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/.test(end) ? `${end.replace(" ", "T")}Z` : end);
+  return Number.isFinite(timestamp) && timestamp > Date.now() ? 1 : 0;
+}
+
+function configuredApplicationKey(value: string): string {
+  const key = value.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9_-]{1,63}$/.test(key)) throw new Error("project-alpha-application-key-invalid");
+  return key;
+}
+
+function snapshotBaseUrl(value: string): URL {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error("project-alpha-base-url-invalid"); }
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+  if ((url.protocol !== "https:" && !(local && url.protocol === "http:")) || url.username || url.password) {
+    throw new Error("project-alpha-base-url-invalid");
+  }
+  return url;
 }
 
 function normalizedEmail(value: unknown): string | null {
@@ -103,9 +126,10 @@ function validatePage(value: unknown): Snapshot {
 
 async function fetchCompleteSnapshot(env: Env): Promise<SnapshotCollections> {
   const result = emptyCollections();
+  const baseUrl = snapshotBaseUrl(env.PROJECT_ALPHA_BASE_URL);
   let pageNumber = 1;
   for (let pagesRead = 0; pagesRead < 1000; pagesRead += 1) {
-    const url = new URL("/api/v1/ops/snapshot", env.PROJECT_ALPHA_BASE_URL);
+    const url = new URL("/api/v1/ops/snapshot", baseUrl);
     url.searchParams.set("page", String(pageNumber));
     url.searchParams.set("limit", "500");
     const response = await fetch(url, {
@@ -127,7 +151,7 @@ async function runBatches(db: D1Database, statements: D1PreparedStatement[]): Pr
   }
 }
 
-function projectionStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>): D1PreparedStatement[] {
+function projectionStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, applicationKey: string): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = [];
   if (changed.has("users")) for (const row of data.users) {
     const id = text(row.id);
@@ -171,8 +195,8 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
     const userId = text(row.user_id), unitId = text(row.business_unit_id);
     if (!userId || !unitId) continue;
     statements.push(db.prepare(`INSERT INTO pa_worker_business_units (user_id,business_unit_id,is_lead,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?)
-      ON CONFLICT(user_id,business_unit_id) DO UPDATE SET is_lead=excluded.is_lead,active=1,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id`)
-      .bind(userId, unitId, enabled(row.is_lead), 1, JSON.stringify(row), syncId));
+      ON CONFLICT(user_id,business_unit_id) DO UPDATE SET is_lead=excluded.is_lead,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id`)
+      .bind(userId, unitId, enabled(row.is_lead), membershipActive(row), JSON.stringify(row), syncId));
   }
 
   if (changed.has("clients")) for (const row of data.clients) {
@@ -189,15 +213,15 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
   }
   if (changed.has("projects")) for (const row of data.projects) {
     const id = text(row.id); if (!id) continue;
-    statements.push(db.prepare(`INSERT INTO pa_projects (id,client_id,organization_id,name,status,start_date,end_date,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id,organization_id=excluded.organization_id,name=excluded.name,status=excluded.status,start_date=excluded.start_date,end_date=excluded.end_date,active=1,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`)
-      .bind(id, text(row.client_id), text(row.organization_id), text(row.name) || `Project ${id}`, text(row.status), text(row.start_date) || text(row.estimated_start), text(row.end_date) || text(row.estimated_end), 1, JSON.stringify(row), syncId));
+    statements.push(db.prepare(`INSERT INTO pa_projects (id,client_id,organization_id,business_unit_id,name,status,start_date,end_date,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id,organization_id=excluded.organization_id,business_unit_id=excluded.business_unit_id,name=excluded.name,status=excluded.status,start_date=excluded.start_date,end_date=excluded.end_date,active=1,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`)
+      .bind(id, text(row.client_id), text(row.organization_id), text(row.business_unit_id), text(row.name) || `Project ${id}`, text(row.status), text(row.start_date) || text(row.estimated_start), text(row.end_date) || text(row.estimated_end), 1, JSON.stringify(row), syncId));
   }
   if (changed.has("project_assignments")) for (const row of data.project_assignments) {
     const id = text(row.id), projectId = text(row.project_id), userId = text(row.user_id); if (!id || !projectId || !userId) continue;
     statements.push(db.prepare(`INSERT INTO pa_project_assignments (id,project_id,user_id,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,user_id=excluded.user_id,active=1,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id`)
-      .bind(id, projectId, userId, 1, JSON.stringify(row), syncId));
+      ON CONFLICT(id) DO UPDATE SET project_id=excluded.project_id,user_id=excluded.user_id,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id`)
+      .bind(id, projectId, userId, membershipActive(row), JSON.stringify(row), syncId));
   }
   if (changed.has("service_locations")) for (const row of data.service_locations) {
     const id = text(row.id); if (!id) continue;
@@ -208,11 +232,11 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
 
   if (changed.has("application_entitlements")) for (const row of data.application_entitlements) {
     const id = text(row.id), userId = text(row.user_id), role = text(row.role_key);
-    if (!id || !userId || !role || !SUPPORTED_ROLES.has(role) || text(row.application_key) !== APPLICATION_KEY) continue;
-    const unitIds = businessUnitIds(row.business_unit_ids);
+    if (!id || !userId || !role || !SUPPORTED_ROLES.has(role) || text(row.application_key) !== applicationKey) continue;
+    const unitIds = businessUnitIds(row.oversight_business_unit_ids ?? row.business_unit_ids);
     statements.push(db.prepare(`INSERT INTO pa_application_entitlements (id,user_id,application_key,enabled,role_key,business_unit_ids_json,payload_json,last_sync_id,active) VALUES (?,?,?,?,?,?,?,?,1)
       ON CONFLICT(user_id) DO UPDATE SET application_key=excluded.application_key,enabled=excluded.enabled,role_key=excluded.role_key,business_unit_ids_json=excluded.business_unit_ids_json,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,active=1,updated_at=datetime('now')`)
-      .bind(id, userId, APPLICATION_KEY, enabled(row.enabled), role, JSON.stringify(unitIds), JSON.stringify(row), syncId));
+      .bind(id, userId, applicationKey, enabled(row.enabled), role, JSON.stringify(unitIds), JSON.stringify(row), syncId));
   }
   if (changed.has("operations")) for (const row of data.operations) {
     const id = text(row.id), projectId = text(row.project_id), title = text(row.title), status = text(row.status);
@@ -233,6 +257,12 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
       ON CONFLICT(id) DO UPDATE SET operation_id=excluded.operation_id,project_id=excluded.project_id,business_unit_id=excluded.business_unit_id,assignee_user_id=excluded.assignee_user_id,title=excluded.title,status=excluded.status,due_at=excluded.due_at,notes=excluded.notes,created_by_user_id=excluded.created_by_user_id,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,active=1,updated_at=datetime('now')`)
       .bind(id, text(row.operation_id), projectId, text(row.business_unit_id), text(row.assignee_user_id), title, status, text(row.due_at), text(row.notes), text(row.created_by), JSON.stringify(row), syncId));
   }
+  if (changed.has("task_assignments")) for (const row of data.task_assignments) {
+    const taskId = text(row.task_id), userId = text(row.user_id); if (!taskId || !userId) continue;
+    statements.push(db.prepare(`INSERT INTO pa_task_assignments (task_id,user_id,assigned_by_user_id,assigned_at,payload_json,last_sync_id,active) VALUES (?,?,?,?,?,?,1)
+      ON CONFLICT(task_id,user_id) DO UPDATE SET assigned_by_user_id=excluded.assigned_by_user_id,assigned_at=excluded.assigned_at,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,active=1`)
+      .bind(taskId,userId,text(row.assigned_by),text(row.assigned_at),JSON.stringify(row),syncId));
+  }
   if (changed.has("calendar_events")) for (const row of data.calendar_events) {
     const sourceType = text(row.source_type), sourceId = text(row.source_id), title = text(row.title), startAt = text(row.start_at);
     if (!sourceType || !sourceId || !title || !startAt) continue;
@@ -244,13 +274,13 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
   return statements;
 }
 
-function reconciliationStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>): D1PreparedStatement[] {
+function reconciliationStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, applicationKey: string): D1PreparedStatement[] {
   const tables: Record<CollectionName, string> = {
     users: "pa_users", business_units: "pa_business_units", worker_business_units: "pa_worker_business_units",
     clients: "pa_clients", organizations: "pa_organizations", projects: "pa_projects",
     project_assignments: "pa_project_assignments", service_locations: "pa_service_locations",
     application_entitlements: "pa_application_entitlements", operations: "pa_operations",
-    operation_assignments: "pa_operation_assignments", tasks: "pa_tasks", calendar_events: "pa_calendar_events",
+    operation_assignments: "pa_operation_assignments", tasks: "pa_tasks", task_assignments: "pa_task_assignments", calendar_events: "pa_calendar_events",
   };
   const statements: D1PreparedStatement[] = SNAPSHOT_COLLECTIONS
     .filter((collection) => changed.has(collection))
@@ -260,15 +290,21 @@ function reconciliationStatements(db: D1Database, data: SnapshotCollections, syn
   if (!authorizationChanged) return statements;
 
   statements.push(
-    db.prepare(`UPDATE staff_users SET status='inactive',updated_at=datetime('now') WHERE provisioning_source='project-alpha' AND sync_protected=0
-      AND status<>'inactive' AND (project_alpha_user_id NOT IN (SELECT id FROM pa_users WHERE active=1) OR project_alpha_user_id NOT IN (SELECT user_id FROM pa_application_entitlements WHERE active=1 AND enabled=1))`),
+    db.prepare(`UPDATE staff_users
+      SET status=CASE WHEN project_alpha_user_id IN (
+        SELECT e.user_id FROM pa_application_entitlements e
+        JOIN pa_users u ON u.id=e.user_id
+        WHERE e.active=1 AND e.enabled=1 AND u.active=1
+      ) THEN 'active' ELSE 'inactive' END,
+      updated_at=datetime('now')
+      WHERE provisioning_source='project-alpha' AND sync_protected=0`),
     db.prepare(`DELETE FROM staff_role_assignments WHERE staff_id IN (SELECT id FROM staff_users WHERE provisioning_source='project-alpha' AND sync_protected=0)`),
     db.prepare(`DELETE FROM staff_divisions WHERE staff_id IN (SELECT id FROM staff_users WHERE provisioning_source='project-alpha' AND sync_protected=0)`),
   );
 
   for (const row of data.application_entitlements) {
     const userId = text(row.user_id), role = text(row.role_key);
-    if (!userId || !role || !SUPPORTED_ROLES.has(role) || text(row.application_key) !== APPLICATION_KEY || !isTrue(row.enabled)) continue;
+    if (!userId || !role || !SUPPORTED_ROLES.has(role) || text(row.application_key) !== applicationKey || !isTrue(row.enabled)) continue;
     if (role === "role-admin") {
       statements.push(db.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key)
         SELECT ?,s.id,'role-admin','global',NULL,'global' FROM staff_users s
@@ -283,7 +319,7 @@ function reconciliationStatements(db: D1Database, data: SnapshotCollections, syn
       SELECT ?,s.id,'role-operator','assigned',NULL,'assigned' FROM staff_users s
       WHERE s.project_alpha_user_id=? AND s.sync_protected=0 AND s.status='active'`)
       .bind(stableId("pa-role", `${userId}-role-operator-assigned`), userId));
-    for (const unitId of businessUnitIds(row.business_unit_ids)) {
+    for (const unitId of businessUnitIds(row.oversight_business_unit_ids ?? row.business_unit_ids)) {
       statements.push(db.prepare(`INSERT OR IGNORE INTO staff_divisions (staff_id,division_id,is_primary)
         SELECT s.id,d.id,0 FROM staff_users s JOIN divisions d ON d.project_alpha_business_unit_id=? AND d.active=1
         WHERE s.project_alpha_user_id=? AND s.sync_protected=0 AND s.status='active'`).bind(unitId, userId));
@@ -310,6 +346,7 @@ export async function syncProjectAlpha(env: Env): Promise<ProjectAlphaSyncResult
     await env.OPS_DB.prepare("UPDATE integration_health SET status='disabled',updated_at=datetime('now') WHERE integration='project-alpha'").run();
     return { status: "disabled", records: 0, changedCollections: [] };
   }
+  const applicationKey = configuredApplicationKey(env.APPLICATION_KEY);
   const syncId = crypto.randomUUID();
   const runId = crypto.randomUUID();
   await env.OPS_DB.batch([
@@ -323,8 +360,8 @@ export async function syncProjectAlpha(env: Env): Promise<ProjectAlphaSyncResult
     const records = SNAPSHOT_COLLECTIONS.reduce((count, key) => count + data[key].length, 0);
     const fingerprints = await collectionFingerprints(data);
     const changed = await changedCollections(env.OPS_DB, fingerprints);
-    await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed));
-    await runBatches(env.OPS_DB, reconciliationStatements(env.OPS_DB, data, syncId, changed));
+    await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed, applicationKey));
+    await runBatches(env.OPS_DB, reconciliationStatements(env.OPS_DB, data, syncId, changed, applicationKey));
     await runBatches(env.OPS_DB, fingerprintStatements(env.OPS_DB, fingerprints, changed, syncId));
     await env.OPS_DB.batch([
       env.OPS_DB.prepare("UPDATE sync_runs SET status='success',completed_at=datetime('now'),records_seen=? WHERE id=?").bind(records, runId),

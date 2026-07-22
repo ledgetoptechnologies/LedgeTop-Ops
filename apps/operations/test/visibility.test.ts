@@ -14,29 +14,29 @@ describe("operations visibility", () => {
     expect(employeePermissions(permissions, true)).toEqual(permissions);
   });
 
-  it("requires both business-unit and user assignment for employee operations", () => {
+  it("allows direct operation assignment or manual business-unit oversight", () => {
     const filter = paResourceFilter(scope, employee, false, "o", "operation");
     expect(filter.sql).toContain("visible_division.project_alpha_business_unit_id=o.business_unit_id");
     expect(filter.sql).toContain("visible_assignment.operation_id=o.id");
-    expect(filter.sql).toContain(" AND ");
-    expect(filter.values).toEqual(["division-30", "7"]);
+    expect(filter.sql).toContain(" OR ");
+    expect(filter.values).toEqual(["7", "division-30"]);
   });
 
-  it("requires task assignment and business-unit membership", () => {
+  it("uses multi-worker task assignment or business-unit oversight", () => {
     const filter = paResourceFilter(scope, employee, false, "t", "task");
-    expect(filter.sql).toContain("t.assignee_user_id=?");
+    expect(filter.sql).toContain("pa_task_assignments");
     expect(filter.sql).toContain("COALESCE(t.business_unit_id");
     expect(filter.sql).not.toContain("visible_assignment.operation_id=t.operation_id");
-    expect(filter.values).toEqual(["division-30", "7"]);
+    expect(filter.values).toEqual(["7", "division-30"]);
   });
 
-  it("requires an assigned project in an employee business unit", () => {
+  it("shows project context from team, operation, task, or oversight scope", () => {
     const filter = paProjectFilter(scope, employee, false);
     expect(filter.sql).toContain("visible_project.user_id=?");
     expect(filter.sql).toContain("visible_operation_assignment.user_id=?");
-    expect(filter.sql).toContain("visible_task.assignee_user_id=?");
-    expect(filter.sql).toContain("COALESCE(visible_task.business_unit_id,visible_parent.business_unit_id)");
-    expect(filter.values).toEqual(["7", "7", "division-30", "7", "division-30"]);
+    expect(filter.sql).toContain("visible_task_assignment.user_id=?");
+    expect(filter.sql).toContain("visible_division.project_alpha_business_unit_id=p.business_unit_id");
+    expect(filter.values).toEqual(["7", "7", "7", "division-30"]);
   });
 
   it("shows employees only directly assigned operation and task calendar events", () => {
@@ -45,8 +45,8 @@ describe("operations visibility", () => {
     expect(filter.sql).toContain("e.source_type='task'");
     expect(filter.sql).not.toContain("contract");
     expect(filter.sql).not.toContain("invoice");
-    expect(filter.sql).toContain("COALESCE(visible_task.business_unit_id,visible_parent.business_unit_id)");
-    expect(filter.values).toEqual(["7", "division-30", "7", "division-30"]);
+    expect(filter.sql).toContain("pa_task_assignments");
+    expect(filter.values).toEqual(["7", "7", "division-30"]);
   });
 
   it("gives administrators global active-record visibility", () => {

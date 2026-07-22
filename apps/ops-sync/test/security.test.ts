@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
-import { parseEntitlementEvent } from "../src/schema";
+import { parseEntitlementEvent, parseIntegrationEvent } from "../src/schema";
 import { validateRequestTimestamp, verifyAccessAssertion, verifyWebhookHmac } from "../src/security";
 
 const baseEvent = {
@@ -29,6 +29,13 @@ describe("Project Alpha webhook validation", () => {
     const now = Date.parse("2026-07-17T20:00:00Z");
     expect(validateRequestTimestamp("2026-07-17T19:55:01Z",now)).toBeTruthy();
     expect(() => validateRequestTimestamp("2026-07-17T19:54:59Z",now)).toThrow("timestamp-invalid");
+  });
+
+  it("accepts versioned projection changes only for the configured application", () => {
+    const projection={event_id:"8db76af1-d6c8-41b3-a717-6517a8f50508",event_type:"projection.changed",occurred_at:"2026-07-17T20:00:00.000000Z",schema_version:1,application_key:"community_operations",projection:{entity_type:"task_assignment",entity_id:"110:42",action:"upsert",source_updated_at:"2026-07-17T19:59:00.000000Z",data:{task_id:110,user_id:42}}};
+    expect(parseIntegrationEvent(projection,"community_operations").event_type).toBe("projection.changed");
+    expect(()=>parseIntegrationEvent(projection,"another_application")).toThrow("application-key-mismatch");
+    expect(()=>parseIntegrationEvent({...projection,projection:{...projection.projection,entity_type:"password"}},"community_operations")).toThrow();
   });
 
   it("verifies the timestamp and raw body HMAC", async () => {

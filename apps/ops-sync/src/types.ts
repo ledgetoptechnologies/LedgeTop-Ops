@@ -28,5 +28,27 @@ export interface EntitlementEvent {
     enabled: boolean;
     role_key: SupportedRole;
     business_unit_ids: string[];
+    oversight_business_unit_ids?: string[];
+    manual_access?: boolean;
+    automatic_access?: boolean;
+    unit_oversight?: boolean;
   };
 }
+
+export type ProjectionEntityType = "project" | "project_assignment" | "business_unit" | "operation" | "operation_assignment" | "task" | "task_assignment";
+export interface ProjectionEvent {
+  event_id: string;
+  event_type: "projection.changed";
+  occurred_at: string;
+  schema_version: 1;
+  application_key: string;
+  projection: {
+    entity_type: ProjectionEntityType;
+    entity_id: string;
+    action: "upsert" | "revoke";
+    source_updated_at: string;
+    data: Record<string, unknown>;
+  };
+}
+
+export type IntegrationEvent = EntitlementEvent | ProjectionEvent;

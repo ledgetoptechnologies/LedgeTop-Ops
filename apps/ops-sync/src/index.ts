@@ -1,7 +1,7 @@
 import { ZodError } from "zod";
 import { reconcileAccessGroup } from "./access-group";
-import { completeEvent, applyEntitlementEvent, recordAccessFailure } from "./projection";
-import { parseEntitlementEvent } from "./schema";
+import { completeEvent, applyEntitlementEvent, applyProjectionEvent, recordAccessFailure } from "./projection";
+import { parseIntegrationEvent } from "./schema";
 import { MAX_BODY_BYTES, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookHmac } from "./security";
 import type { Env } from "./types";
 
@@ -39,12 +39,14 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
     const timestamp = validateRequestTimestamp(request.headers.get("X-PA-Timestamp"));
     await verifyWebhookHmac(rawBody,timestamp,request.headers.get("X-PA-Signature"),env.PROJECT_ALPHA_WEBHOOK_HMAC_SECRET);
     const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
-    const event = parseEntitlementEvent(parsed,env.APPLICATION_KEY);
+    const event = parseIntegrationEvent(parsed,env.APPLICATION_KEY);
     if (request.headers.get("X-PA-Event-ID") !== event.event_id) return json(422,{error:"event-id-mismatch"});
-    const result = await applyEntitlementEvent(env,event,await sha256Hex(rawBody));
+    const result = event.event_type === "projection.changed"
+      ? await applyProjectionEvent(env,event,await sha256Hex(rawBody))
+      : await applyEntitlementEvent(env,event,await sha256Hex(rawBody));
     if (result === "duplicate" || result === "ignored") return json(200,{ok:true,event_id:event.event_id,status:result});
     try {
-      const emails = await reconcileAccessGroup(env);
+      const emails = event.event_type === "projection.changed" ? [] : await reconcileAccessGroup(env);
       await completeEvent(env,event);
       return json(200,{ok:true,event_id:event.event_id,status:"completed",access_members:emails.length});
     } catch (error) {

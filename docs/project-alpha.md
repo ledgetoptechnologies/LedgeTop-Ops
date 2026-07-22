@@ -1,29 +1,33 @@
 # Project Alpha integration
 
-Project Alpha now exposes:
+Project Alpha is authoritative for Business Units, Projects, Project Team memberships, Operations, Tasks, assignments, and external access entitlements. This repository stores a last-known-good, read-only D1 projection.
 
-```text
-GET /api/v1/ops/snapshot?page=<n>&limit=500
-```
+## Deployment configuration
 
-The endpoint uses Project Alpha's existing hashed API-key authentication and requires `ops.sync.read`. It returns independently paginated users, business units, worker/business-unit assignments, clients, organizations, projects, project assignments, service locations, Ops entitlements, operations, operation assignments, tasks, and normalized calendar events. Password/auth data, public project tokens, pay rates, payments, and accounting details are excluded.
+Choose a deployment-specific application key such as `field_operations`. Configure that same value as `APPLICATION_KEY` on both the provisioning Worker and the Operations snapshot importer, and in Project Alpha’s Custom Integrations settings. The display label, Worker names, URLs, D1 database, Access application, Access group, and application key are deployment choices.
 
-Ops runs one complete recovery snapshot daily and provides an Owner-only manual Sync action. Entitlement webhooks remain the immediate path for access grants, revocations, email changes, and scope changes. Project, operation, task, and other projection changes currently become visible on the daily snapshot until Project Alpha emits entity-specific webhooks for them. Collection fingerprints skip unchanged projection writes. Records are upserted by Project Alpha ID, and missing projected rows are marked inactive only after every page succeeds; partial/failed runs never deactivate data.
+This repository's current LTDS production deployment uses `ltds_ops`. That value is deployment configuration, not an application default: forks must choose their own key and use it consistently on all three components.
 
-Project Alpha's `ltds_ops` entitlement is the Operations login ACL. An enabled entitlement derived from the PA `admin` role grants immutable global `role-admin` access; every enabled non-admin entitlement is reduced to assignment-scoped `role-operator` access within its selected business units. A PA `owner` is not implicitly an Ops administrator. An employee entitlement with no business units can authenticate and view global airspace, but sees no PA-owned work records. Immutable Project Alpha IDs are authoritative, normalized email is used only for initial matching, and the local global Owner remains synchronization-protected.
-
-Project Alpha sends entitlement changes to `POST https://ops-sync.ledgetopdroneservices.com/v1/project-alpha/events`. Requests must pass the dedicated Cloudflare Access Service Auth policy and include the signed `X-PA-Event-ID`, `X-PA-Timestamp`, and `X-PA-Signature` headers. Duplicate delivery is safe, and out-of-order events are ignored.
-
-## Production key
-
-Create a dedicated Project Alpha API key named `LTDS Ops Sync` with only:
+Create a dedicated Project Alpha API key with only:
 
 ```text
 ops.sync.read
 ```
 
-Store its plaintext value once as the `PROJECT_ALPHA_API_KEY` secret on `ltds-ops`. Project Alpha stores only its hash. Do not reuse a Dropbox, R2, Worker build, or administrator key.
+Store its plaintext value as the Operations Worker’s `PROJECT_ALPHA_API_KEY` secret. Store a separate 32-byte-or-longer `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET` on the provisioning Worker and in Project Alpha. The Access service-token ID and secret belong only in Project Alpha; the Access Groups API token belongs only on the provisioning Worker.
 
-Generate a separate random HMAC secret of at least 32 bytes. Store the same value as `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET` on `ltds-ops-sync` and in Project Alpha's External Operations settings. Store the Access Service Token client ID and secret only in Project Alpha. Store `CF_ACCESS_GROUP_API_TOKEN` only on `ltds-ops-sync`; it needs Cloudflare One / Zero Trust Access Groups read and edit permissions.
+## Projection and visibility
 
-The later Project Alpha Delivery resolver should use separate service authentication plus an LTDS integration key with only `folders.resolve` and, when explicitly enabled, `shares.create`. It must return review-required on ambiguous folder matches and must never create parent-level shares automatically.
+The snapshot includes users, Business Units, worker/unit membership, clients, organizations, Business Unit-aware Projects, Project Team membership, service locations, entitlements, Operations, Operation assignments, Tasks, multi-worker Task assignments, and calendar events. It excludes passwords, authentication material, private tokens, pay rates, financial details, and secrets.
+
+Visibility rules are assignment-driven:
+
+- Project Team membership grants Project context.
+- Direct Operation assignment grants the Operation without another Business Unit checkbox.
+- Direct Task assignment grants the Task without another Business Unit checkbox.
+- A manual exception grants read-only oversight for selected Business Units.
+- Project Alpha administrators receive global synchronized visibility.
+
+Project Alpha posts signed incremental changes to `/v1/project-alpha/events`. The receiver validates Cloudflare Access, the configured application key, schema version, event ID, timestamp, and HMAC. Event receipts make delivery idempotent; per-entity source timestamps prevent older events from overwriting newer data.
+
+A complete snapshot runs daily for recovery and reconciliation. Collection fingerprints skip unchanged projection writes. Missing rows are marked inactive only after every snapshot page succeeds, so a partial run cannot erase the last known good projection.

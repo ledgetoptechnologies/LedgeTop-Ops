@@ -2,7 +2,7 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "jsx": "react-jsx",
-    "types": ["@cloudflare/workers-types", "vite/client"],
+    "types": ["@types/node", "./worker-configuration.d.ts", "vite/client"],
     "baseUrl": "."
   },
   "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts", "vite.config.ts"]

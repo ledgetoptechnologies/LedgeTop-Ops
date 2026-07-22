@@ -2,8 +2,8 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
-import { applyEntitlementEvent, completeEvent } from "../src/projection";
-import type { EntitlementEvent, Env } from "../src/types";
+import { applyEntitlementEvent, applyProjectionEvent, completeEvent } from "../src/projection";
+import type { EntitlementEvent, Env, ProjectionEvent } from "../src/types";
 
 let miniflare: Miniflare;
 let db: D1Database;
@@ -26,7 +26,7 @@ describe("entitlement projection",()=>{
   beforeEach(async()=>{
     miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await miniflare.getD1Database("OPS_DB") as D1Database;
-    for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql"]){
+    for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql","0007_pa_projection_fingerprints.sql","0008_project_units_task_assignments.sql"]){
       const sql=await readFile(resolve(import.meta.dirname,"../../operations/migrations",migration),"utf8");
       for(const statement of sql.replace(/\r\n/g,"\n").split(";").map((part)=>part.trim()).filter((part)=>part && !part.startsWith("PRAGMA foreign_keys"))){
         await db.prepare(statement).run();
@@ -93,5 +93,32 @@ describe("entitlement projection",()=>{
     expect(await db.prepare("SELECT email FROM staff_users WHERE project_alpha_user_id='42'").first("email")).toBe("new-pilot@example.com");
     await expect(applyEntitlementEvent(env(),first,"first")).resolves.toBe("ignored");
     expect(await db.prepare("SELECT email FROM staff_users WHERE project_alpha_user_id='42'").first("email")).toBe("new-pilot@example.com");
+  });
+
+  it("accepts the task-assignment fingerprint added by migration 0008",async()=>{
+    await expect(db.prepare("INSERT INTO pa_projection_fingerprints (collection,fingerprint,last_sync_id) VALUES ('task_assignments','abc','sync-1')").run()).resolves.toBeTruthy();
+    expect(await db.prepare("SELECT collection FROM pa_projection_fingerprints WHERE collection='task_assignments'").first("collection")).toBe("task_assignments");
+  });
+
+  it("projects business units and derives task calendar changes incrementally",async()=>{
+    const businessUnit:ProjectionEvent={event_id:"a0928e33-f38b-4a7c-88df-b601bb6d719e",event_type:"projection.changed",occurred_at:"2026-07-22T05:00:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"business_unit",entity_id:"30",action:"upsert",source_updated_at:"2026-07-22T05:00:00.000000Z",data:{id:30,name:"Green Bay",code:"green-bay",is_active:true}}};
+    await expect(applyProjectionEvent(env(),businessUnit,"unit-hash")).resolves.toBe("applied");
+    expect(await db.prepare("SELECT name FROM divisions WHERE project_alpha_business_unit_id='30'").first("name")).toBe("Green Bay");
+
+    const task:ProjectionEvent={event_id:"ff2b7f4d-09a5-44e0-83cb-0423d41021d1",event_type:"projection.changed",occurred_at:"2026-07-22T05:01:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"task",entity_id:"110",action:"upsert",source_updated_at:"2026-07-22T05:01:00.000000Z",data:{id:110,project_id:40,business_unit_id:30,title:"Map site",status:"todo",due_at:"2026-07-23T18:00:00.000000Z"}}};
+    await expect(applyProjectionEvent(env(),task,"task-hash")).resolves.toBe("applied");
+    expect(await db.prepare("SELECT title FROM pa_calendar_events WHERE id='task:110' AND active=1").first("title")).toBe("Map site");
+
+    const unscheduled:ProjectionEvent={...task,event_id:"d2266134-bd9a-47d9-aee2-46f771078e86",occurred_at:"2026-07-22T05:02:00.000000Z",projection:{...task.projection,source_updated_at:"2026-07-22T05:02:00.000000Z",data:{...task.projection.data,due_at:null}}};
+    await expect(applyProjectionEvent(env(),unscheduled,"task-unscheduled-hash")).resolves.toBe("applied");
+    expect(await db.prepare("SELECT active FROM pa_calendar_events WHERE id='task:110'").first("active")).toBe(0);
+  });
+
+  it("ignores an out-of-order incremental projection for the same entity",async()=>{
+    const newer:ProjectionEvent={event_id:"2fab1100-9992-4fd1-b013-26b330a9db34",event_type:"projection.changed",occurred_at:"2026-07-22T05:03:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"project",entity_id:"40",action:"upsert",source_updated_at:"2026-07-22T05:03:00.000000Z",data:{id:40,name:"New name",business_unit_id:30}}};
+    const older:ProjectionEvent={...newer,event_id:"dcf7d00b-f313-45a7-815e-3cb97fe60fd0",occurred_at:"2026-07-22T05:02:00.000000Z",projection:{...newer.projection,source_updated_at:"2026-07-22T05:02:00.000000Z",data:{id:40,name:"Old name",business_unit_id:30}}};
+    await expect(applyProjectionEvent(env(),newer,"newer-project-hash")).resolves.toBe("applied");
+    await expect(applyProjectionEvent(env(),older,"older-project-hash")).resolves.toBe("ignored");
+    expect(await db.prepare("SELECT name FROM pa_projects WHERE id='40'").first("name")).toBe("New name");
   });
 });
