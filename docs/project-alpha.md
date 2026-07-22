@@ -25,8 +25,12 @@ Visibility rules are assignment-driven:
 - Project Team membership grants Project context.
 - Direct Operation assignment grants the Operation without another Business Unit checkbox.
 - Direct Task assignment grants the Task without another Business Unit checkbox.
-- A manual exception grants read-only oversight for selected Business Units.
 - Project Alpha administrators receive global synchronized visibility.
+- Business Unit membership is organizational metadata and does not grant Operations access.
+
+Only explicitly enabled Project Alpha entitlements provision an Operations account. An enabled non-administrator with no Project, Operation, or Task assignment can authenticate but receives an empty operational workspace.
+
+Projects may include `manager_user_id`. A Project Manager receives Project context in the same way as a Project Team member; Project Alpha remains responsible for making the manager a Team member and for choosing the Project's Business Unit.
 
 Project Alpha posts signed incremental changes to `/v1/project-alpha/events`. The receiver validates Cloudflare Access, the configured application key, schema version, event ID, timestamp, and HMAC. Event receipts make delivery idempotent; per-entity source timestamps prevent older events from overwriting newer data.
 

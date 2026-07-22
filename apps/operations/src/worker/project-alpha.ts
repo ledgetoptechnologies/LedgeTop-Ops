@@ -79,11 +79,6 @@ function stableId(prefix: string, value: string): string {
   return `${prefix}-${value.replace(/[^a-zA-Z0-9_-]/g, "-")}`;
 }
 
-function businessUnitIds(value: unknown): string[] {
-  if (!Array.isArray(value)) return [];
-  return [...new Set(value.map(text).filter((id): id is string => Boolean(id)))];
-}
-
 function emptyCollections(): SnapshotCollections {
   const collections = {} as SnapshotCollections;
   for (const key of SNAPSHOT_COLLECTIONS) collections[key] = [];
@@ -213,9 +208,9 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
   }
   if (changed.has("projects")) for (const row of data.projects) {
     const id = text(row.id); if (!id) continue;
-    statements.push(db.prepare(`INSERT INTO pa_projects (id,client_id,organization_id,business_unit_id,name,status,start_date,end_date,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id,organization_id=excluded.organization_id,business_unit_id=excluded.business_unit_id,name=excluded.name,status=excluded.status,start_date=excluded.start_date,end_date=excluded.end_date,active=1,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`)
-      .bind(id, text(row.client_id), text(row.organization_id), text(row.business_unit_id), text(row.name) || `Project ${id}`, text(row.status), text(row.start_date) || text(row.estimated_start), text(row.end_date) || text(row.estimated_end), 1, JSON.stringify(row), syncId));
+    statements.push(db.prepare(`INSERT INTO pa_projects (id,client_id,organization_id,business_unit_id,manager_user_id,name,status,start_date,end_date,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id,organization_id=excluded.organization_id,business_unit_id=excluded.business_unit_id,manager_user_id=excluded.manager_user_id,name=excluded.name,status=excluded.status,start_date=excluded.start_date,end_date=excluded.end_date,active=1,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`)
+      .bind(id, text(row.client_id), text(row.organization_id), text(row.business_unit_id), text(row.manager_user_id), text(row.name) || `Project ${id}`, text(row.status), text(row.start_date) || text(row.estimated_start), text(row.end_date) || text(row.estimated_end), 1, JSON.stringify(row), syncId));
   }
   if (changed.has("project_assignments")) for (const row of data.project_assignments) {
     const id = text(row.id), projectId = text(row.project_id), userId = text(row.user_id); if (!id || !projectId || !userId) continue;
@@ -233,10 +228,9 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
   if (changed.has("application_entitlements")) for (const row of data.application_entitlements) {
     const id = text(row.id), userId = text(row.user_id), role = text(row.role_key);
     if (!id || !userId || !role || !SUPPORTED_ROLES.has(role) || text(row.application_key) !== applicationKey) continue;
-    const unitIds = businessUnitIds(row.oversight_business_unit_ids ?? row.business_unit_ids);
     statements.push(db.prepare(`INSERT INTO pa_application_entitlements (id,user_id,application_key,enabled,role_key,business_unit_ids_json,payload_json,last_sync_id,active) VALUES (?,?,?,?,?,?,?,?,1)
       ON CONFLICT(user_id) DO UPDATE SET application_key=excluded.application_key,enabled=excluded.enabled,role_key=excluded.role_key,business_unit_ids_json=excluded.business_unit_ids_json,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,active=1,updated_at=datetime('now')`)
-      .bind(id, userId, applicationKey, enabled(row.enabled), role, JSON.stringify(unitIds), JSON.stringify(row), syncId));
+      .bind(id, userId, applicationKey, enabled(row.enabled), role, "[]", JSON.stringify(row), syncId));
   }
   if (changed.has("operations")) for (const row of data.operations) {
     const id = text(row.id), projectId = text(row.project_id), title = text(row.title), status = text(row.status);
@@ -314,16 +308,11 @@ function reconciliationStatements(db: D1Database, data: SnapshotCollections, syn
     }
 
     // All non-admin PA entitlements are deliberately reduced to the employee role.
-    // Business units constrain record visibility; assignment scope prevents division-wide access.
+    // Project, Operation, and Task assignments are the only record-visibility grants.
     statements.push(db.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key)
       SELECT ?,s.id,'role-operator','assigned',NULL,'assigned' FROM staff_users s
       WHERE s.project_alpha_user_id=? AND s.sync_protected=0 AND s.status='active'`)
       .bind(stableId("pa-role", `${userId}-role-operator-assigned`), userId));
-    for (const unitId of businessUnitIds(row.oversight_business_unit_ids ?? row.business_unit_ids)) {
-      statements.push(db.prepare(`INSERT OR IGNORE INTO staff_divisions (staff_id,division_id,is_primary)
-        SELECT s.id,d.id,0 FROM staff_users s JOIN divisions d ON d.project_alpha_business_unit_id=? AND d.active=1
-        WHERE s.project_alpha_user_id=? AND s.sync_protected=0 AND s.status='active'`).bind(unitId, userId));
-    }
   }
   return statements;
 }

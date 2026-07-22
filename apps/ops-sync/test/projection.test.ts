@@ -26,7 +26,7 @@ describe("entitlement projection",()=>{
   beforeEach(async()=>{
     miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await miniflare.getD1Database("OPS_DB") as D1Database;
-    for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql","0007_pa_projection_fingerprints.sql","0008_project_units_task_assignments.sql"]){
+    for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql","0007_pa_projection_fingerprints.sql","0008_project_units_task_assignments.sql","0009_project_managers.sql"]){
       const sql=await readFile(resolve(import.meta.dirname,"../../operations/migrations",migration),"utf8");
       for(const statement of sql.replace(/\r\n/g,"\n").split(";").map((part)=>part.trim()).filter((part)=>part && !part.startsWith("PRAGMA foreign_keys"))){
         await db.prepare(statement).run();
@@ -42,7 +42,7 @@ describe("entitlement projection",()=>{
     expect(await db.prepare("SELECT status FROM staff_users WHERE project_alpha_user_id='42'").first("status")).toBe("active");
     expect(await db.prepare("SELECT role_id FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("role_id")).toBe("role-operator");
     expect(await db.prepare("SELECT scope FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("scope")).toBe("assigned");
-    expect(await db.prepare("SELECT division_id FROM staff_divisions WHERE staff_id='staff-pa-42'").first("division_id")).toBe("division-pa-30");
+    expect(await db.prepare("SELECT count(*) AS total FROM staff_divisions WHERE staff_id='staff-pa-42'").first("total")).toBe(0);
     await expect(applyEntitlementEvent(env(),grant,"hash-a")).resolves.toBe("applied");
     await completeEvent(env(),grant);
     await expect(applyEntitlementEvent(env(),grant,"hash-a")).resolves.toBe("duplicate");
@@ -68,7 +68,7 @@ describe("entitlement projection",()=>{
     const assignment=await db.prepare("SELECT role_id,scope,division_id FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first<{role_id:string;scope:string;division_id:string|null}>();
     expect(assignment).toEqual({role_id:"role-operator",scope:"assigned",division_id:null});
     expect(await db.prepare("SELECT role_key FROM pa_application_entitlements WHERE user_id='42'").first("role_key")).toBe("role-division-manager");
-    expect(await db.prepare("SELECT division_id FROM staff_divisions WHERE staff_id='staff-pa-42'").first("division_id")).toBe("division-pa-30");
+    expect(await db.prepare("SELECT count(*) AS total FROM staff_divisions WHERE staff_id='staff-pa-42'").first("total")).toBe(0);
   });
 
   it("ignores older events and never changes the protected Owner",async()=>{
@@ -115,10 +115,11 @@ describe("entitlement projection",()=>{
   });
 
   it("ignores an out-of-order incremental projection for the same entity",async()=>{
-    const newer:ProjectionEvent={event_id:"2fab1100-9992-4fd1-b013-26b330a9db34",event_type:"projection.changed",occurred_at:"2026-07-22T05:03:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"project",entity_id:"40",action:"upsert",source_updated_at:"2026-07-22T05:03:00.000000Z",data:{id:40,name:"New name",business_unit_id:30}}};
+    const newer:ProjectionEvent={event_id:"2fab1100-9992-4fd1-b013-26b330a9db34",event_type:"projection.changed",occurred_at:"2026-07-22T05:03:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"project",entity_id:"40",action:"upsert",source_updated_at:"2026-07-22T05:03:00.000000Z",data:{id:40,name:"New name",business_unit_id:30,manager_user_id:42}}};
     const older:ProjectionEvent={...newer,event_id:"dcf7d00b-f313-45a7-815e-3cb97fe60fd0",occurred_at:"2026-07-22T05:02:00.000000Z",projection:{...newer.projection,source_updated_at:"2026-07-22T05:02:00.000000Z",data:{id:40,name:"Old name",business_unit_id:30}}};
     await expect(applyProjectionEvent(env(),newer,"newer-project-hash")).resolves.toBe("applied");
     await expect(applyProjectionEvent(env(),older,"older-project-hash")).resolves.toBe("ignored");
     expect(await db.prepare("SELECT name FROM pa_projects WHERE id='40'").first("name")).toBe("New name");
+    expect(await db.prepare("SELECT manager_user_id FROM pa_projects WHERE id='40'").first("manager_user_id")).toBe("42");
   });
 });
