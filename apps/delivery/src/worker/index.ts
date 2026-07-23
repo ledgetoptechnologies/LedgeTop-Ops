@@ -208,7 +208,7 @@ async function streamItem(c: any, disposition: "inline" | "attachment", raw = fa
     const sourceUrl = new URL(c.req.url); sourceUrl.pathname = sourceUrl.pathname.replace(/\/preview$/, "/source");
     const sourceHeaders = new Headers(c.req.raw.headers); sourceHeaders.delete("Host");
     const transformed = await fetch(sourceUrl, { headers: sourceHeaders, cf: { image: { width: 2400, height: 1800, fit: "scale-down", format: "webp", quality: 84 } } } as RequestInit & { cf: unknown });
-    if (!transformed.ok) throw new HTTPException(transformed.status as 400, { message: "Preview unavailable" });
+    if (!transformed.ok) { const original = await c.env.DATA_BUCKET.get(key); if (!original) throw new HTTPException(404, { message: "Preview unavailable" }); const fallbackHeaders = new Headers(); fallbackHeaders.set("Content-Type", mimeForKey(key)); fallbackHeaders.set("Cache-Control", "private, max-age=3600"); fallbackHeaders.set("Content-Disposition", `inline; filename=\"${safeFileName(key)}\"`); return new Response(original.body, { headers: fallbackHeaders }); }
     const headers = new Headers(transformed.headers); headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("Content-Disposition", `inline; filename=\"${safeFileName(key)}\"`); headers.set("X-Content-Type-Options", "nosniff");
     return new Response(transformed.body, { status: transformed.status, headers });
   }
@@ -232,7 +232,7 @@ app.get("/api/public/shares/:publicId/items/:itemRef/thumbnail", async c => {
   const sourceUrl = new URL(`/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${encodeURIComponent(itemRef)}/source`, c.req.url);
   const sourceHeaders = new Headers(c.req.raw.headers); sourceHeaders.delete("Host");
   const transformed = await fetch(sourceUrl, { headers: sourceHeaders, cf: { image: { width: 520, height: 340, fit: "cover", format: "webp", quality: 72 } } } as RequestInit & { cf: unknown });
-  if (!transformed.ok) throw new HTTPException(transformed.status as 400, { message: "Thumbnail unavailable" });
+  if (!transformed.ok) { const original = await c.env.DATA_BUCKET.get(key); if (!original) throw new HTTPException(404, { message: "Thumbnail unavailable" }); const fallbackHeaders = new Headers(); fallbackHeaders.set("Content-Type", mimeForKey(key)); fallbackHeaders.set("Cache-Control", "private, max-age=3600"); fallbackHeaders.set("Content-Disposition", "inline"); return new Response(original.body, { headers: fallbackHeaders }); }
   const headers = new Headers(transformed.headers); headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("Content-Disposition", "inline"); headers.set("X-Content-Type-Options", "nosniff");
   return new Response(transformed.body, { status: transformed.status, headers });
 });
