@@ -52,6 +52,7 @@ export function DeliveryApp() {
   const [view, setView] = useState<"grid" | "list">(() => localStorage.getItem("ltds-delivery-view") === "list" ? "list" : "grid");
   const [preview, setPreview] = useState<DeliveryItem | null>(null);
   const [selectedItems, setSelectedItems] = useState<Set<string>>(() => new Set());
+  const [selectionMode, setSelectionMode] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState("");
 
@@ -130,6 +131,13 @@ export function DeliveryApp() {
     });
   }
 
+  function toggleSelectionMode() {
+    setSelectionMode(current => {
+      if (current) setSelectedItems(new Set());
+      return !current;
+    });
+  }
+
   async function downloadBulk(all = false) {
     if (!all && selectedItems.size === 0) return;
     setBulkBusy(true); setBulkError("");
@@ -137,21 +145,20 @@ export function DeliveryApp() {
       const response = await fetch(`/api/public/shares/${encodeURIComponent(publicId)}/bulk-download`, {
         method: "POST",
         credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
         body: JSON.stringify(all ? { all: true } : { items: [...selectedItems] }),
       });
       if (!response.ok) {
         const body = await response.json().catch(() => ({})) as RequestErrorBody;
         throw new Error(body.error || "The download could not be prepared.");
       }
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
+      const body = await response.json() as { downloadUrl?: string };
+      if (!body.downloadUrl) throw new Error("The download could not be prepared.");
       const anchor = document.createElement("a");
-      anchor.href = url;
+      anchor.href = body.downloadUrl;
       const safeName = (manifest?.share.projectName || "delivery").replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "") || "delivery";
       anchor.download = `${safeName}.zip`;
       document.body.appendChild(anchor); anchor.click(); anchor.remove();
-      URL.revokeObjectURL(url);
     } catch (caught) {
       setBulkError(caught instanceof Error ? caught.message : "The download could not be prepared.");
     } finally {
@@ -180,18 +187,19 @@ export function DeliveryApp() {
         </nav>
         <div className="view-switch" aria-label="View style"><button className={view === "grid" ? "active" : ""} onClick={() => changeView("grid")}>Grid</button><button className={view === "list" ? "active" : ""} onClick={() => changeView("list")}>List</button></div>
       </div>
-      <div className="download-toolbar" aria-label="Download files">
-        <label className="select-current"><input type="checkbox" checked={manifest.items.length > 0 && manifest.items.every(item => selectedItems.has(item.id))} onChange={toggleCurrentList} /> Select current list</label>
-        <span className="selection-count">{selectedItems.size ? `${selectedItems.size} selected` : "Select files or folders to download"}</span>
+      <div className={`download-toolbar${selectionMode ? " selection-mode" : ""}`} aria-label="Download files">
+        <button className={selectionMode ? "button-orange button-small" : "button-ghost button-small"} onClick={toggleSelectionMode}>{selectionMode ? "Done" : "Select"}</button>
+        {selectionMode && <label className="select-current"><input type="checkbox" checked={manifest.items.length > 0 && manifest.items.every(item => selectedItems.has(item.id))} onChange={toggleCurrentList} /> Select current list</label>}
+        <span className="selection-count">{selectionMode ? (selectedItems.size ? `${selectedItems.size} selected` : "Click any card to select") : ""}</span>
         <div className="download-actions">
-          <button className="button-ghost button-small" disabled={bulkBusy || selectedItems.size === 0} onClick={() => void downloadBulk()}> {bulkBusy ? "Preparing…" : "Download selected"}</button>
+          {selectionMode && <button className="button-ghost button-small" disabled={bulkBusy || selectedItems.size === 0} onClick={() => void downloadBulk()}> {bulkBusy ? "Preparing…" : "Download selected"}</button>}
           <button className="button-orange button-small" disabled={bulkBusy} onClick={() => void downloadBulk(true)}>{bulkBusy ? "Preparing…" : "Download all"}</button>
         </div>
       </div>
       {bulkError && <p className="bulk-error" role="alert">{bulkError}</p>}
       {manifest.items.length === 0 ? <EmptyState title="This folder is empty" detail="New synced files will appear here automatically." /> : view === "grid" ?
-        <div className="item-grid">{manifest.items.map(item => <ItemCard key={item.id} item={item} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div> :
-        <div className="item-list">{manifest.items.map(item => <ItemRow key={item.id} item={item} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div>}
+        <div className="item-grid">{manifest.items.map(item => <ItemCard key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div> :
+        <div className="item-list">{manifest.items.map(item => <ItemRow key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div>}
       <footer>{manifest.items.length} item{manifest.items.length === 1 ? "" : "s"}{manifest.nextCursor ? " · More items are available" : ""}</footer>
     </section>
     {preview && <Preview item={preview} onClose={() => setPreview(null)} />}
@@ -220,22 +228,29 @@ function AccessCodeForm({ onSubmit, error }: { onSubmit: (code: string) => Promi
   </form>;
 }
 
-function ItemCard({ item, selected, onToggle, onFolder, onPreview }: { item: DeliveryItem; selected: boolean; onToggle: (itemId: string) => void; onFolder: (item: DeliveryItem) => void; onPreview: (item: DeliveryItem) => void }) {
-  const action = item.kind === "folder" ? () => void onFolder(item) : () => onPreview(item);
-  return <article className={`item-card${selected ? " selected" : ""}`}><label className="item-select"><input type="checkbox" checked={selected} onChange={() => onToggle(item.id)} aria-label={`Select ${item.name}`} /></label><button className="item-visual" onClick={action} aria-label={`${item.kind === "folder" ? "Open" : "Preview"} ${item.name}`}>
+function ItemCard({ item, selectionMode, selected, onToggle, onFolder, onPreview }: { item: DeliveryItem; selectionMode: boolean; selected: boolean; onToggle: (itemId: string) => void; onFolder: (item: DeliveryItem) => void; onPreview: (item: DeliveryItem) => void }) {
+  const action = selectionMode ? () => onToggle(item.id) : item.kind === "folder" ? () => void onFolder(item) : () => onPreview(item);
+  return <article className={`item-card${selected ? " selected" : ""}${selectionMode ? " selectable" : ""}`} onClick={selectionMode ? action : undefined}><button className="item-visual" onClick={event => { event.stopPropagation(); if (selectionMode) event.preventDefault(); action(); }} aria-label={`${selectionMode ? "Select" : item.kind === "folder" ? "Open" : "Preview"} ${item.name}`}>
     {item.thumbnailUrl ? <img src={item.thumbnailUrl} loading="lazy" alt="" /> : item.kind === "folder" ? <span className="folder-shape" /> : <span className="file-kind">{iconFor(item)}</span>}
-    {item.kind === "video" && <span className="play">▶</span>}
+    {item.kind === "video" && <span className="play">▶</span>}{item.kind === "video" && item.previewStatus === "processing" && <span className="media-status">Preparing preview…</span>}
   </button><div className="item-info"><strong title={item.name}>{item.name}</strong><span>{formatBytes(item.size)}{item.uploadedAt ? ` · ${new Date(item.uploadedAt).toLocaleDateString()}` : ""}</span></div>
     {item.downloadUrl && <a className="download-chip" href={item.downloadUrl}>Download</a>}
   </article>;
 }
 
-function ItemRow({ item, selected, onToggle, onFolder, onPreview }: { item: DeliveryItem; selected: boolean; onToggle: (itemId: string) => void; onFolder: (item: DeliveryItem) => void; onPreview: (item: DeliveryItem) => void }) {
-  return <div className={`item-row${selected ? " selected" : ""}`}><label className="row-select"><input type="checkbox" checked={selected} onChange={() => onToggle(item.id)} aria-label={`Select ${item.name}`} /></label><button className="row-name" onClick={() => item.kind === "folder" ? void onFolder(item) : onPreview(item)}><span>{item.kind === "folder" ? "▰" : "▧"}</span><strong>{item.name}</strong></button><span>{formatBytes(item.size)}</span><span>{item.uploadedAt ? new Date(item.uploadedAt).toLocaleDateString() : "—"}</span>{item.downloadUrl ? <a href={item.downloadUrl}>Download</a> : <span />}</div>;
+function ItemRow({ item, selectionMode, selected, onToggle, onFolder, onPreview }: { item: DeliveryItem; selectionMode: boolean; selected: boolean; onToggle: (itemId: string) => void; onFolder: (item: DeliveryItem) => void; onPreview: (item: DeliveryItem) => void }) {
+  return <div className={`item-row${selected ? " selected" : ""}${selectionMode ? " selectable" : ""}`} onClick={selectionMode ? () => onToggle(item.id) : undefined}><button className="row-name" onClick={event => { event.stopPropagation(); selectionMode ? onToggle(item.id) : item.kind === "folder" ? void onFolder(item) : onPreview(item); }}><span>{item.kind === "folder" ? "▰" : "▧"}</span><strong>{item.name}</strong></button><span>{formatBytes(item.size)}</span><span>{item.uploadedAt ? new Date(item.uploadedAt).toLocaleDateString() : "—"}</span>{!selectionMode && item.downloadUrl ? <a href={item.downloadUrl}>Download</a> : <span />}</div>;
 }
 
 function Preview({ item, onClose }: { item: DeliveryItem; onClose: () => void }) {
   return <div className="preview-backdrop" role="dialog" aria-modal="true" aria-label={`Preview ${item.name}`} onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}><section className="preview-dialog"><header><strong>{item.name}</strong>{item.downloadUrl && <a className="button button-orange button-small" href={item.downloadUrl}>Download</a>}<button className="button-ghost button-small" onClick={onClose}>Close</button></header><div className="preview-stage">
-    {item.kind === "image" && item.previewUrl ? <img src={item.previewUrl} alt={item.name} /> : item.kind === "video" && item.streamUrl ? <iframe src={item.streamUrl} title={item.name} allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture" allowFullScreen /> : item.kind === "video" && item.previewUrl ? <video src={item.previewUrl} controls autoPlay playsInline /> : item.kind === "audio" && item.previewUrl ? <audio src={item.previewUrl} controls autoPlay /> : (item.kind === "pdf" || item.kind === "text") && item.previewUrl ? <iframe src={item.previewUrl} title={item.name} /> : <EmptyState title="Preview unavailable" detail="Download this file to open it in its original application." />}
+    {item.kind === "image" && item.previewUrl ? <img src={item.previewUrl} alt={item.name} /> : item.kind === "video" ? <VideoPreview item={item} /> : item.kind === "audio" && item.previewUrl ? <audio src={item.previewUrl} controls autoPlay /> : (item.kind === "pdf" || item.kind === "text") && item.previewUrl ? <iframe src={item.previewUrl} title={item.name} /> : <EmptyState title="Preview unavailable" detail="Download this file to open it in its original application." />}
   </div></section></div>;
+}
+
+function VideoPreview({ item }: { item: DeliveryItem }) {
+  const [loading, setLoading] = useState(true); const [buffered, setBuffered] = useState(0);
+  if (item.streamUrl) return <div className="video-preview">{loading && <span className="media-status">Opening video preview…</span>}<iframe src={item.streamUrl} title={item.name} onLoad={() => setLoading(false)} allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture" allowFullScreen /></div>;
+  if (!item.previewUrl) return <EmptyState title={item.previewStatus === "processing" ? "Video preview is being prepared" : "Preview unavailable"} detail="You can still download the original video." />;
+  return <div className="video-preview">{(loading || item.previewStatus === "processing") && <span className="media-status">{buffered ? `Buffering preview… ${buffered}%` : "Preparing video preview…"}</span>}<video src={item.previewUrl} controls autoPlay playsInline preload="metadata" onLoadStart={() => setLoading(true)} onCanPlay={() => setLoading(false)} onPlaying={() => setLoading(false)} onProgress={event => { const video = event.currentTarget; if (video.duration && video.buffered.length) setBuffered(Math.min(100, Math.round((video.buffered.end(video.buffered.length - 1) / video.duration) * 100))); }} /></div>;
 }

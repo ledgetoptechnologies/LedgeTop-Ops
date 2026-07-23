@@ -41,6 +41,7 @@ export interface DeliveryItem {
   previewUrl?: string;
   downloadUrl?: string;
   streamUrl?: string | null;
+  previewStatus?: "ready" | "processing" | "unavailable";
 }
 
 export interface DeliveryManifest {

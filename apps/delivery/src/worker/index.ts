@@ -175,7 +175,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
     if (object.key === prefix || object.key.endsWith("/") || isHiddenKey(object.key)) continue;
     const relative = object.key.slice(root.length); const id = encodeItemRef(relative); const kind = kindForKey(object.key);
     const base = `/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${id}`;
-    const item: DeliveryItem = { id, name: relative.split("/").pop() || relative, kind, size: object.size, uploadedAt: object.uploaded.toISOString(), downloadUrl: `${base}/download` };
+    const item: DeliveryItem = { id, name: relative.split("/").pop() || relative, kind, size: object.size, uploadedAt: object.uploaded.toISOString(), downloadUrl: `${base}/download`, previewStatus: kind === "video" ? "processing" : undefined };
     if (["image", "video", "audio", "pdf", "text"].includes(kind)) item.previewUrl = `${base}/preview`;
     if (kind === "image") item.thumbnailUrl = `${base}/thumbnail`;
     if (kind === "video") videos.push({ index: items.length, key: object.key });
@@ -189,6 +189,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
         const token = await c.env.STREAM.video(row.stream_uid).generateToken();
         item.streamUrl = `https://customer-${c.env.STREAM_CUSTOMER_CODE}.cloudflarestream.com/${token}/iframe`;
         item.thumbnailUrl = `https://customer-${c.env.STREAM_CUSTOMER_CODE}.cloudflarestream.com/${token}/thumbnails/thumbnail.jpg?time=1s&height=340`;
+        item.previewStatus = "ready";
       }
     }));
   }
@@ -199,15 +200,16 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   return c.json(manifest);
 });
 
-async function streamItem(c: any, disposition: "inline" | "attachment"): Promise<Response> {
+async function streamItem(c: any, disposition: "inline" | "attachment", raw = false): Promise<Response> {
   const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const relative = decodeItemRef(itemRef); const key = keyWithinRoot(share.r2_prefix, relative);
   const kind = kindForKey(key); if (disposition === "inline" && !["image", "video", "audio", "pdf", "text"].includes(kind)) throw new HTTPException(415, { message: "Preview is not available for this file" });
   const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" });
-  if (disposition === "inline" && kind === "image") {
-    const object = await c.env.DATA_BUCKET.get(key); if (!object) throw new HTTPException(404, { message: "File not found" });
-    const output = await c.env.IMAGES.input(object.body).transform({ width: 2400, height: 1800, fit: "scale-down" }).output({ format: "image/webp", quality: 84 });
-    const transformed = output.response(); const headers = new Headers(transformed.headers);
-    headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("ETag", `W/\"${head.httpEtag}-preview\"`); headers.set("Content-Disposition", `inline; filename=\"${safeFileName(key)}\"`); headers.set("X-Content-Type-Options", "nosniff");
+  if (!raw && disposition === "inline" && kind === "image") {
+    const sourceUrl = new URL(c.req.url); sourceUrl.pathname = sourceUrl.pathname.replace(/\/preview$/, "/source");
+    const sourceHeaders = new Headers(c.req.raw.headers); sourceHeaders.delete("Host");
+    const transformed = await fetch(sourceUrl, { headers: sourceHeaders, cf: { image: { width: 2400, height: 1800, fit: "scale-down", format: "webp", quality: 84 } } } as RequestInit & { cf: unknown });
+    if (!transformed.ok) throw new HTTPException(transformed.status as 400, { message: "Preview unavailable" });
+    const headers = new Headers(transformed.headers); headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("Content-Disposition", `inline; filename=\"${safeFileName(key)}\"`); headers.set("X-Content-Type-Options", "nosniff");
     return new Response(transformed.body, { status: transformed.status, headers });
   }
   let range: { offset: number; length: number } | undefined;
@@ -216,20 +218,22 @@ async function streamItem(c: any, disposition: "inline" | "attachment"): Promise
   if (range) { headers.set("Content-Range", `bytes ${range.offset}-${range.offset + range.length - 1}/${head.size}`); headers.set("Content-Length", String(range.length)); } else headers.set("Content-Length", String(head.size));
   if (c.req.method === "HEAD") return new Response(null, { status: range ? 206 : 200, headers });
   const object = await c.env.DATA_BUCKET.get(key, range ? { range } : undefined); if (!object) throw new HTTPException(404, { message: "File not found" });
-  c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, disposition === "attachment" ? "download.started" : "preview.viewed", itemRef));
+  if (!raw) c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, disposition === "attachment" ? "download.started" : "preview.viewed", itemRef));
   return new Response(object.body, { status: range ? 206 : 200, headers });
 }
 
 app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/preview", c => streamItem(c, "inline"));
 app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/download", c => streamItem(c, "attachment"));
+app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/source", c => streamItem(c, "inline", true));
 
 app.get("/api/public/shares/:publicId/items/:itemRef/thumbnail", async c => {
   const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
   if (kindForKey(key) !== "image") throw new HTTPException(415, { message: "Thumbnail unavailable" });
-  const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" }); if (head.size > 20 * 1024 * 1024) throw new HTTPException(415, { message: "Image is too large for a thumbnail" });
-  const object = await c.env.DATA_BUCKET.get(key); if (!object) throw new HTTPException(404, { message: "File not found" });
-  const output = await c.env.IMAGES.input(object.body).transform({ width: 520, height: 340, fit: "cover" }).output({ format: "image/webp", quality: 72 });
-  const transformed = output.response(); const headers = new Headers(transformed.headers); headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("Content-Disposition", "inline"); headers.set("X-Content-Type-Options", "nosniff");
+  const sourceUrl = new URL(`/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${encodeURIComponent(itemRef)}/source`, c.req.url);
+  const sourceHeaders = new Headers(c.req.raw.headers); sourceHeaders.delete("Host");
+  const transformed = await fetch(sourceUrl, { headers: sourceHeaders, cf: { image: { width: 520, height: 340, fit: "cover", format: "webp", quality: 72 } } } as RequestInit & { cf: unknown });
+  if (!transformed.ok) throw new HTTPException(transformed.status as 400, { message: "Thumbnail unavailable" });
+  const headers = new Headers(transformed.headers); headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("Content-Disposition", "inline"); headers.set("X-Content-Type-Options", "nosniff");
   return new Response(transformed.body, { status: transformed.status, headers });
 });
 
@@ -265,9 +269,25 @@ app.post("/api/public/shares/:publicId/bulk-download", async c => {
   const share = c.get("share") as ShareRow; const sources = await enumerateBulkSources(c);
   if (!sources.length) throw new HTTPException(404, { message: "There are no files available to download." });
   c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, "download.started", `bulk:${sources.length}`));
-  const filename = `${(share.client_name || share.project_name || "delivery").replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "") || "delivery"}.zip`;
-  return new Response(streamZip(sources), { headers: { "Content-Type": "application/zip", "Content-Disposition": `attachment; filename=\"${filename}\"`, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } });
+  const token = randomSecret(); const key = `_ltds/tmp-zips/${share.public_id}/${token}.zip`;
+  await c.env.DATA_BUCKET.put(key, streamZip(sources), { httpMetadata: { contentType: "application/zip", contentDisposition: "attachment" }, customMetadata: { expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(), shareId: share.id } });
+  const downloadUrl = `/api/public/shares/${encodeURIComponent(share.public_id!)}/bulk-download/${token}`;
+  if ((c.req.header("Accept") || "").includes("application/json")) return c.json({ downloadUrl });
+  return c.redirect(downloadUrl, 303);
 });
+
+app.get("/api/public/shares/:publicId/bulk-download/:token", async c => {
+  const token = c.req.param("token"); if (!/^[A-Za-z0-9_-]{40,}$/.test(token)) throw new HTTPException(404, { message: "Download not found" });
+  const share = c.get("share") as ShareRow; const object = await c.env.DATA_BUCKET.get(`_ltds/tmp-zips/${share.public_id}/${token}.zip`); if (!object) throw new HTTPException(404, { message: "Download expired" });
+  const filename = `${(share.client_name || share.project_name || "delivery").replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "") || "delivery"}.zip`;
+  const headers = new Headers(); headers.set("Content-Type", "application/zip"); headers.set("Content-Disposition", `attachment; filename=\"${filename}\"`); headers.set("Cache-Control", "private, no-store"); headers.set("X-Content-Type-Options", "nosniff"); if (object.size !== undefined) headers.set("Content-Length", String(object.size));
+  return new Response(object.body, { headers });
+});
+
+async function cleanupTemporaryZips(env: Env): Promise<void> {
+  const cutoff = Date.now() - 24 * 60 * 60 * 1000; let cursor: string | undefined;
+  do { const listed = await env.DATA_BUCKET.list({ prefix: "_ltds/tmp-zips/", limit: 1000, cursor }); const expired = listed.objects.filter(object => object.uploaded.getTime() < cutoff).map(object => object.key); if (expired.length) await env.DATA_BUCKET.delete(expired); cursor = listed.truncated ? listed.cursor : undefined; } while (cursor);
+}
 
 app.notFound(c => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {
@@ -277,4 +297,4 @@ app.onError((error, c) => {
   return c.json({ error: status >= 500 ? "An unexpected error occurred" : error.message,...(code?{code}:{}) }, status);
 });
 
-export default { fetch: app.fetch } satisfies ExportedHandler<Env>;
+export default { fetch: app.fetch, scheduled: (_event, env, ctx) => ctx.waitUntil(cleanupTemporaryZips(env)) } satisfies ExportedHandler<Env>;
