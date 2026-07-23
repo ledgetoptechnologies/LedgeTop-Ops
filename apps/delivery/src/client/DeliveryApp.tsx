@@ -51,6 +51,9 @@ export function DeliveryApp() {
   const [folder, setFolder] = useState("");
   const [view, setView] = useState<"grid" | "list">(() => localStorage.getItem("ltds-delivery-view") === "list" ? "list" : "grid");
   const [preview, setPreview] = useState<DeliveryItem | null>(null);
+  const [selectedItems, setSelectedItems] = useState<Set<string>>(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkError, setBulkError] = useState("");
 
   const loadManifest = useCallback(async (id: string, folderId = "") => {
     const query = folderId ? `?folder=${encodeURIComponent(folderId)}` : "";
@@ -109,6 +112,53 @@ export function DeliveryApp() {
   }
   async function openFolder(item: DeliveryItem) { await navigateToFolder(item.id); }
 
+  function toggleSelected(itemId: string) {
+    setSelectedItems(current => {
+      const next = new Set(current);
+      if (next.has(itemId)) next.delete(itemId); else next.add(itemId);
+      return next;
+    });
+  }
+
+  function toggleCurrentList() {
+    const currentIds = manifest?.items.map(item => item.id) || [];
+    setSelectedItems(current => {
+      const next = new Set(current);
+      const allSelected = currentIds.length > 0 && currentIds.every(id => next.has(id));
+      currentIds.forEach(id => allSelected ? next.delete(id) : next.add(id));
+      return next;
+    });
+  }
+
+  async function downloadBulk(all = false) {
+    if (!all && selectedItems.size === 0) return;
+    setBulkBusy(true); setBulkError("");
+    try {
+      const response = await fetch(`/api/public/shares/${encodeURIComponent(publicId)}/bulk-download`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(all ? { all: true } : { items: [...selectedItems] }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => ({})) as RequestErrorBody;
+        throw new Error(body.error || "The download could not be prepared.");
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      const safeName = (manifest?.share.projectName || "delivery").replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "") || "delivery";
+      anchor.download = `${safeName}.zip`;
+      document.body.appendChild(anchor); anchor.click(); anchor.remove();
+      URL.revokeObjectURL(url);
+    } catch (caught) {
+      setBulkError(caught instanceof Error ? caught.message : "The download could not be prepared.");
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   if (gate === "landing") return <PublicFrame><DeliveryLanding /></PublicFrame>;
   if (gate === "loading") return <PublicFrame><Loading /></PublicFrame>;
   if (gate === "code") return <PublicFrame><AccessCodeForm onSubmit={exchange} error={error} /></PublicFrame>;
@@ -130,9 +180,18 @@ export function DeliveryApp() {
         </nav>
         <div className="view-switch" aria-label="View style"><button className={view === "grid" ? "active" : ""} onClick={() => changeView("grid")}>Grid</button><button className={view === "list" ? "active" : ""} onClick={() => changeView("list")}>List</button></div>
       </div>
+      <div className="download-toolbar" aria-label="Download files">
+        <label className="select-current"><input type="checkbox" checked={manifest.items.length > 0 && manifest.items.every(item => selectedItems.has(item.id))} onChange={toggleCurrentList} /> Select current list</label>
+        <span className="selection-count">{selectedItems.size ? `${selectedItems.size} selected` : "Select files or folders to download"}</span>
+        <div className="download-actions">
+          <button className="button-ghost button-small" disabled={bulkBusy || selectedItems.size === 0} onClick={() => void downloadBulk()}> {bulkBusy ? "Preparing…" : "Download selected"}</button>
+          <button className="button-orange button-small" disabled={bulkBusy} onClick={() => void downloadBulk(true)}>{bulkBusy ? "Preparing…" : "Download all"}</button>
+        </div>
+      </div>
+      {bulkError && <p className="bulk-error" role="alert">{bulkError}</p>}
       {manifest.items.length === 0 ? <EmptyState title="This folder is empty" detail="New synced files will appear here automatically." /> : view === "grid" ?
-        <div className="item-grid">{manifest.items.map(item => <ItemCard key={item.id} item={item} onFolder={openFolder} onPreview={setPreview} />)}</div> :
-        <div className="item-list">{manifest.items.map(item => <ItemRow key={item.id} item={item} onFolder={openFolder} onPreview={setPreview} />)}</div>}
+        <div className="item-grid">{manifest.items.map(item => <ItemCard key={item.id} item={item} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div> :
+        <div className="item-list">{manifest.items.map(item => <ItemRow key={item.id} item={item} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div>}
       <footer>{manifest.items.length} item{manifest.items.length === 1 ? "" : "s"}{manifest.nextCursor ? " · More items are available" : ""}</footer>
     </section>
     {preview && <Preview item={preview} onClose={() => setPreview(null)} />}
@@ -161,9 +220,9 @@ function AccessCodeForm({ onSubmit, error }: { onSubmit: (code: string) => Promi
   </form>;
 }
 
-function ItemCard({ item, onFolder, onPreview }: { item: DeliveryItem; onFolder: (item: DeliveryItem) => void; onPreview: (item: DeliveryItem) => void }) {
+function ItemCard({ item, selected, onToggle, onFolder, onPreview }: { item: DeliveryItem; selected: boolean; onToggle: (itemId: string) => void; onFolder: (item: DeliveryItem) => void; onPreview: (item: DeliveryItem) => void }) {
   const action = item.kind === "folder" ? () => void onFolder(item) : () => onPreview(item);
-  return <article className="item-card"><button className="item-visual" onClick={action} aria-label={`${item.kind === "folder" ? "Open" : "Preview"} ${item.name}`}>
+  return <article className={`item-card${selected ? " selected" : ""}`}><label className="item-select"><input type="checkbox" checked={selected} onChange={() => onToggle(item.id)} aria-label={`Select ${item.name}`} /></label><button className="item-visual" onClick={action} aria-label={`${item.kind === "folder" ? "Open" : "Preview"} ${item.name}`}>
     {item.thumbnailUrl ? <img src={item.thumbnailUrl} loading="lazy" alt="" /> : item.kind === "folder" ? <span className="folder-shape" /> : <span className="file-kind">{iconFor(item)}</span>}
     {item.kind === "video" && <span className="play">▶</span>}
   </button><div className="item-info"><strong title={item.name}>{item.name}</strong><span>{formatBytes(item.size)}{item.uploadedAt ? ` · ${new Date(item.uploadedAt).toLocaleDateString()}` : ""}</span></div>
@@ -171,8 +230,8 @@ function ItemCard({ item, onFolder, onPreview }: { item: DeliveryItem; onFolder:
   </article>;
 }
 
-function ItemRow({ item, onFolder, onPreview }: { item: DeliveryItem; onFolder: (item: DeliveryItem) => void; onPreview: (item: DeliveryItem) => void }) {
-  return <div className="item-row"><button className="row-name" onClick={() => item.kind === "folder" ? void onFolder(item) : onPreview(item)}><span>{item.kind === "folder" ? "▰" : "▧"}</span><strong>{item.name}</strong></button><span>{formatBytes(item.size)}</span><span>{item.uploadedAt ? new Date(item.uploadedAt).toLocaleDateString() : "—"}</span>{item.downloadUrl ? <a href={item.downloadUrl}>Download</a> : <span />}</div>;
+function ItemRow({ item, selected, onToggle, onFolder, onPreview }: { item: DeliveryItem; selected: boolean; onToggle: (itemId: string) => void; onFolder: (item: DeliveryItem) => void; onPreview: (item: DeliveryItem) => void }) {
+  return <div className={`item-row${selected ? " selected" : ""}`}><label className="row-select"><input type="checkbox" checked={selected} onChange={() => onToggle(item.id)} aria-label={`Select ${item.name}`} /></label><button className="row-name" onClick={() => item.kind === "folder" ? void onFolder(item) : onPreview(item)}><span>{item.kind === "folder" ? "▰" : "▧"}</span><strong>{item.name}</strong></button><span>{formatBytes(item.size)}</span><span>{item.uploadedAt ? new Date(item.uploadedAt).toLocaleDateString() : "—"}</span>{item.downloadUrl ? <a href={item.downloadUrl}>Download</a> : <span />}</div>;
 }
 
 function Preview({ item, onClose }: { item: DeliveryItem; onClose: () => void }) {

@@ -114,18 +114,31 @@ export async function refreshStreamStatuses(env: Env): Promise<number> {
 
 export async function reconcileFileIndex(env: Env): Promise<number> {
   const marker = crypto.randomUUID(); let cursor: string | undefined; let count = 0;
+  const activeShares = await env.DELIVERY_DB.prepare(`SELECT s.id,COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.unavailable_since FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{ id:string; r2_prefix:string; unavailable_since:string|null }>();
+  const presentShares = new Set<string>();
   try {
     do {
       const listed = await env.DATA_BUCKET.list({ limit: 1000, cursor }); const statements: D1PreparedStatement[] = [];
       for (const object of listed.objects) {
         if (object.key.endsWith("/") || hidden(object.key)) continue;
+        for (const share of activeShares.results) if (object.key.startsWith(share.r2_prefix.endsWith("/") ? share.r2_prefix : `${share.r2_prefix}/`)) presentShares.add(share.id);
         statements.push(env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,last_seen_reconcile) VALUES (?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,last_seen_reconcile=excluded.last_seen_reconcile,updated_at=datetime('now')`).bind(object.key, object.httpEtag, object.size, object.uploaded.toISOString(), mime(object.key), mediaKind(object.key), marker)); count += 1;
       }
       if (statements.length) await env.DELIVERY_DB.batch(statements); cursor = listed.truncated ? listed.cursor : undefined;
     } while (cursor);
+    const shareUpdates:D1PreparedStatement[]=[];
+    for(const share of activeShares.results){
+      if(presentShares.has(share.id)){if(share.unavailable_since)shareUpdates.push(env.DELIVERY_DB.prepare("UPDATE shares SET unavailable_since=NULL WHERE id=? AND revoked_at IS NULL").bind(share.id));continue;}
+      if(!share.unavailable_since)shareUpdates.push(env.DELIVERY_DB.prepare("UPDATE shares SET unavailable_since=datetime('now') WHERE id=? AND revoked_at IS NULL AND unavailable_since IS NULL").bind(share.id));
+      else if(Date.parse(`${share.unavailable_since.replace(" ","T")}Z`)+24*60*60*1000<=Date.now()){
+        shareUpdates.push(env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='folder_unavailable' WHERE id=? AND revoked_at IS NULL").bind(share.id));
+        shareUpdates.push(env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('system','reconciliation','share.auto_revoked','share',?,?)").bind(share.id,JSON.stringify({reason:"folder_unavailable",r2Prefix:share.r2_prefix})));
+      }
+    }
     await env.DELIVERY_DB.batch([
       env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE last_seen_reconcile IS NOT NULL AND last_seen_reconcile<>?").bind(marker),
       env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,last_success_at,status,object_count) VALUES ('reconciliation',datetime('now'),datetime('now'),'healthy',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=datetime('now'),status='healthy',object_count=excluded.object_count,updated_at=datetime('now')`).bind(count),
+      ...shareUpdates,
     ]);
     return count;
   } catch (error) {

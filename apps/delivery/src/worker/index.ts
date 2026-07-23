@@ -4,6 +4,7 @@ import { secureHeaders } from "hono/secure-headers";
 import type { DeliveryItem, DeliveryManifest } from "@ltds/shared";
 import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName } from "./files";
 import { createSessionCookie, hmac, parseCookie, randomSecret, sha256, verifyAccessCode, verifySessionCookie } from "./security";
+import { streamZip, type ZipSource } from "./zip";
 import type { Env, ShareRow } from "./types";
 
 type Variables = { share: ShareRow };
@@ -58,9 +59,9 @@ async function findUnavailableBySecret(env: Env, secret: string): Promise<ShareR
 
 export async function markUnavailableFolder(env:{DELIVERY_DB:PublicIdDatabase},share:ShareRow):Promise<never>{
   if(!share.revoked_at){
-    const revoked=await env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='folder_unavailable' WHERE id=? AND revoked_at IS NULL AND unavailable_since IS NOT NULL AND datetime(unavailable_since)<=datetime('now','-5 minutes')").bind(share.id).run();
+    const revoked=await env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='folder_unavailable' WHERE id=? AND revoked_at IS NULL AND unavailable_since IS NOT NULL AND datetime(unavailable_since)<=datetime('now','-24 hours')").bind(share.id).run();
     if(revoked.meta.changes)await env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('system','delivery-worker','share.auto_revoked','share',?,?)").bind(share.id,JSON.stringify({reason:"folder_unavailable",r2Prefix:share.r2_prefix})).run();
-    else await env.DELIVERY_DB.prepare("UPDATE shares SET unavailable_since=COALESCE(unavailable_since,datetime('now')) WHERE id=? AND revoked_at IS NULL").bind(share.id).run();
+    else await env.DELIVERY_DB.prepare("UPDATE shares SET unavailable_since=datetime('now') WHERE id=? AND revoked_at IS NULL AND unavailable_since IS NULL").bind(share.id).run();
   }
   throw new HTTPException(410,{message:"This link is no longer valid because the shared folder was moved or removed.",cause:{code:"SHARED_FOLDER_UNAVAILABLE"}});
 }
@@ -202,6 +203,13 @@ async function streamItem(c: any, disposition: "inline" | "attachment"): Promise
   const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const relative = decodeItemRef(itemRef); const key = keyWithinRoot(share.r2_prefix, relative);
   const kind = kindForKey(key); if (disposition === "inline" && !["image", "video", "audio", "pdf", "text"].includes(kind)) throw new HTTPException(415, { message: "Preview is not available for this file" });
   const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" });
+  if (disposition === "inline" && kind === "image") {
+    const object = await c.env.DATA_BUCKET.get(key); if (!object) throw new HTTPException(404, { message: "File not found" });
+    const output = await c.env.IMAGES.input(object.body).transform({ width: 2400, height: 1800, fit: "scale-down" }).output({ format: "image/webp", quality: 84 });
+    const transformed = output.response(); const headers = new Headers(transformed.headers);
+    headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("ETag", `W/\"${head.httpEtag}-preview\"`); headers.set("Content-Disposition", `inline; filename=\"${safeFileName(key)}\"`); headers.set("X-Content-Type-Options", "nosniff");
+    return new Response(transformed.body, { status: transformed.status, headers });
+  }
   let range: { offset: number; length: number } | undefined;
   try { range = parseRange(c.req.header("Range"), head.size); } catch (error) { if (error instanceof HTTPException && error.status === 416) return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${head.size}`, "Accept-Ranges": "bytes" } }); throw error; }
   const headers = new Headers(); head.writeHttpMetadata(headers); headers.set("Content-Type", mimeForKey(key)); headers.set("ETag", head.httpEtag); headers.set("Accept-Ranges", "bytes"); headers.set("Cache-Control", "private, no-store"); headers.set("X-Content-Type-Options", "nosniff"); headers.set("Content-Disposition", `${disposition}; filename="${safeFileName(key)}"`);
@@ -221,8 +229,44 @@ app.get("/api/public/shares/:publicId/items/:itemRef/thumbnail", async c => {
   const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" }); if (head.size > 20 * 1024 * 1024) throw new HTTPException(415, { message: "Image is too large for a thumbnail" });
   const object = await c.env.DATA_BUCKET.get(key); if (!object) throw new HTTPException(404, { message: "File not found" });
   const output = await c.env.IMAGES.input(object.body).transform({ width: 520, height: 340, fit: "cover" }).output({ format: "image/webp", quality: 72 });
-  const transformed = output.response(); const headers = new Headers(transformed.headers); headers.set("Cache-Control", "private, max-age=3600"); headers.set("Content-Disposition", "inline"); headers.set("X-Content-Type-Options", "nosniff");
+  const transformed = output.response(); const headers = new Headers(transformed.headers); headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("Content-Disposition", "inline"); headers.set("X-Content-Type-Options", "nosniff");
   return new Response(transformed.body, { status: transformed.status, headers });
+});
+
+async function enumerateBulkSources(c: any): Promise<ZipSource[]> {
+  const share = c.get("share") as ShareRow;
+  const body = await c.req.json().catch(() => ({})) as { all?: boolean; items?: string[] };
+  const refs = Array.isArray(body.items) ? body.items.slice(0, 2000) : [];
+  const prefixes = new Set<string>(); const files = new Map<string, { size: number }>();
+  if (body.all || !refs.length) prefixes.add(normalizeRoot(share.r2_prefix));
+  for (const ref of refs) {
+    const relative = decodeItemRef(ref); const key = keyWithinRoot(share.r2_prefix, relative);
+    const head = await c.env.DATA_BUCKET.head(key);
+    if (head) files.set(key, { size: head.size });
+    else prefixes.add(key.endsWith("/") ? key : `${key}/`);
+  }
+  for (const prefix of prefixes) {
+    let cursor: string | undefined;
+    do {
+      const listed = await c.env.DATA_BUCKET.list({ prefix, limit: 1000, cursor });
+      for (const object of listed.objects) if (!object.key.endsWith("/") && !isHiddenKey(object.key)) files.set(object.key, { size: object.size });
+      cursor = listed.truncated ? listed.cursor : undefined;
+    } while (cursor);
+  }
+  const entries = [...files.entries()].sort(([a], [b]) => a.localeCompare(b));
+  const total = entries.reduce((sum, [, value]) => sum + value.size, 0);
+  if (entries.length > 2000) throw new HTTPException(413, { message: "This selection contains more than 2,000 files." });
+  if (total > 20 * 1024 * 1024 * 1024) throw new HTTPException(413, { message: "This selection is larger than the 20 GB download limit." });
+  const root = normalizeRoot(share.r2_prefix);
+  return entries.map(([key, value]) => ({ name: key.slice(root.length), size: value.size, open: async () => { const object = await c.env.DATA_BUCKET.get(key); if (!object) throw new Error("A selected file is no longer available"); return object.body; } }));
+}
+
+app.post("/api/public/shares/:publicId/bulk-download", async c => {
+  const share = c.get("share") as ShareRow; const sources = await enumerateBulkSources(c);
+  if (!sources.length) throw new HTTPException(404, { message: "There are no files available to download." });
+  c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, "download.started", `bulk:${sources.length}`));
+  const filename = `${(share.client_name || share.project_name || "delivery").replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "") || "delivery"}.zip`;
+  return new Response(streamZip(sources), { headers: { "Content-Type": "application/zip", "Content-Disposition": `attachment; filename=\"${filename}\"`, "Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff" } });
 });
 
 app.notFound(c => c.json({ error: "Not found" }, 404));
