@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "wrangler deploy --dry-run --outdir dist",
+    "build": "node scripts/build.mjs",
     "check": "tsc --noEmit",
     "deploy": "wrangler deploy --keep-vars",
     "test": "vitest run --config vitest.config.ts",

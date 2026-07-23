@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "vite build",
+    "build": "node scripts/build.mjs",
     "check": "tsc --noEmit",
     "dev": "vite dev",
     "deploy": "vite build && wrangler deploy",
