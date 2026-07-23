@@ -12,7 +12,7 @@ const eventSchema = z.object({
   user: z.object({
     id: identifier,
     email: normalizedEmail,
-    display_name: z.string().trim().min(1).max(200),
+    display_name: z.string().trim().min(1).max(255),
     active: z.boolean(),
   }).strict(),
   entitlement: z.object({
@@ -29,7 +29,7 @@ const eventSchema = z.object({
 
 export function parseEntitlementEvent(value: unknown, applicationKey: string): EntitlementEvent {
   const event = eventSchema.parse(value);
-  if (event.entitlement.application_key !== applicationKey) throw new Error("application-key-mismatch");
+  if (event.entitlement.application_key !== applicationKey.trim().toLowerCase()) throw new Error("application-key-mismatch");
   return event;
 }
 
@@ -45,7 +45,7 @@ const projectionEventSchema = z.object({
 export function parseIntegrationEvent(value: unknown, applicationKey: string): IntegrationEvent {
   if (value && typeof value === "object" && (value as {event_type?:unknown}).event_type === "projection.changed") {
     const event = projectionEventSchema.parse(value) as ProjectionEvent;
-    if (event.application_key !== applicationKey) throw new Error("application-key-mismatch");
+    if (event.application_key !== applicationKey.trim().toLowerCase()) throw new Error("application-key-mismatch");
     return event;
   }
   return parseEntitlementEvent(value,applicationKey);

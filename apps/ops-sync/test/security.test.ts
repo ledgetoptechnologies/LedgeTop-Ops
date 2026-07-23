@@ -20,6 +20,8 @@ describe("Project Alpha webhook validation", () => {
     expect(event.user.id).toBe("42");
     expect(event.user.email).toBe("user@example.com");
     expect(event.entitlement.business_unit_ids).toEqual(["20","30"]);
+    expect(parseEntitlementEvent(baseEvent," LTDS_OPS ").entitlement.application_key).toBe("ltds_ops");
+    expect(parseEntitlementEvent({...baseEvent,user:{...baseEvent.user,display_name:"A".repeat(255)}},"ltds_ops").user.display_name).toHaveLength(255);
     expect(() => parseEntitlementEvent({...baseEvent,schema_version:2},"ltds_ops")).toThrow();
     expect(() => parseEntitlementEvent(baseEvent,"another_app")).toThrow("application-key-mismatch");
     expect(parseEntitlementEvent({...baseEvent,entitlement:{...baseEvent.entitlement,role_key:"role-admin"}},"ltds_ops").entitlement.role_key).toBe("role-admin");
