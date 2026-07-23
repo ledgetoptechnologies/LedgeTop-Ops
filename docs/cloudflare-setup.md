@@ -2,15 +2,15 @@
 
 ## 1. Worker Builds
 
-Configure the Git repository `ledgetoptechnologies/LTDS-Ops` three times:
+Configure the Git repository `ledgetoptechnologies/LTDS-Ops` four times:
 
-| Setting | Operations | Delivery | Ops Sync |
-|---|---|---|---|
-| Production branch | `main` | `main` | `main` |
-| Root directory | `/apps/operations` | `/apps/delivery` | `/apps/ops-sync` |
-| Build command | `npm run build` | `npm run build` | `npm run build` |
-| Deploy command | `npx wrangler deploy` | `npx wrangler deploy` | `npm run deploy` |
-| Version command | `npx wrangler versions upload` | `npx wrangler versions upload` | `npx wrangler versions upload` |
+| Setting | Operations | Delivery | Ops Sync | Incoming |
+|---|---|---|---|---|
+| Production branch | `main` | `main` | `main` | `main` |
+| Root directory | `/apps/operations` | `/apps/delivery` | `/apps/ops-sync` | `/apps/incoming` |
+| Build command | `npm run build` | `npm run build` | `npm run build` | `npm run build` |
+| Deploy command | `npx wrangler deploy` | `npx wrangler deploy` | `npm run deploy` | `npm run deploy` |
+| Version command | `npx wrangler versions upload` | `npx wrangler versions upload` | `npx wrangler versions upload` | `npx wrangler versions upload` |
 
 Do not add runtime secrets to Build variables. The application secrets are Worker runtime secrets.
 
@@ -56,6 +56,14 @@ npx.cmd wrangler secret put STREAM_API_TOKEN --name ltds-ops
 
 Set `STREAM_ACCOUNT_ID` and `STREAM_CUSTOMER_CODE` as non-secret runtime variables. Do not give the Delivery Worker the Stream management token.
 
+Create a dedicated R2 API credential with read-only access to `client-data` for short-lived original-file and ZIP tickets. Do not reuse the TrueNAS write credential:
+
+```powershell
+Set-Location apps/delivery
+npx.cmd wrangler secret put R2_ACCESS_KEY_ID
+npx.cmd wrangler secret put R2_SECRET_ACCESS_KEY
+```
+
 ## 5. Project Alpha
 
 Set the Ops runtime secret:
@@ -75,20 +83,56 @@ The checked-in LTDS production configuration uses `ltds_ops`; this is not a Proj
 ```powershell
 npx.cmd wrangler secret put CF_ACCESS_GROUP_API_TOKEN --name ltds-ops-sync
 npx.cmd wrangler secret put PROJECT_ALPHA_WEBHOOK_HMAC_SECRET --name ltds-ops-sync
+npx.cmd wrangler secret put PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY --name ltds-ops-sync
 ```
 
-The Access Groups API token belongs only on the sync Worker, never in Project Alpha. The exact same generated HMAC value must be entered on both sides.
+Use `PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY` only during rotation. The Access Groups API token belongs only on the sync Worker, never in Project Alpha. Production has legacy HMAC disabled; verify Ed25519 in staging before that configuration is deployed.
 
 ## 6. Staging before rollout
 
-Create separate `ltds-ops-staging` and `ltds-delivery-staging` Workers, D1 databases, R2 bucket, queue, secrets, hostnames, and Access applications. Never bind staging to production D1/R2. Test Beau, Kollins, an Operator account, and a public client flow before the production Workers build from `main`.
+Create separate staging Workers for all four services, D1 databases, R2 buckets, Workflow, queue, secrets, hostnames, and Access applications. Never bind staging to production D1/R2. Test Beau, Kollins, an Operator account, a public client flow, an inbound multipart upload, and successful/failed ZIP jobs before production builds from `main`.
 
-## 7. Current provisioned resources
+## 7. Incoming requests
+
+Create the private `ltds-incoming` bucket, attach `incoming.ledgetopdroneservices.com`, create a Turnstile widget restricted to that hostname, set `TURNSTILE_SITE_KEY`, and provision:
+
+```powershell
+Set-Location apps/incoming
+npx.cmd wrangler secret put TURNSTILE_SECRET
+npx.cmd wrangler secret put INCOMING_SESSION_SECRET
+npx.cmd wrangler secret put INCOMING_ACCESS_CODE_PEPPER
+npx.cmd wrangler secret put AUDIT_IP_SECRET
+npx.cmd wrangler secret put R2_INCOMING_ACCESS_KEY_ID
+npx.cmd wrangler secret put R2_INCOMING_SECRET_ACCESS_KEY
+npx.cmd wrangler secret put INCOMING_PICKUP_SECRET
+```
+
+The R2 credential is scoped only to multipart writes in `ltds-incoming`. Apply the browser CORS policy from `docs/inbound-requests.md`, expose `ETag`, and configure a 14-day lifecycle backstop for quarantine objects and abandoned multipart uploads. Deployment creates the `ltds-incoming-upload-lifecycle` Workflow, which aborts incomplete uploads after 24 hours and expires unclaimed quarantine after 14 days without consuming an account Cron Trigger. TrueNAS calls the authenticated pickup-receipt endpoint only after ClamAV, checksum verification, durable local promotion, and removal of the quarantine object.
+
+## 8. Migrations and Workflow rollout
+
+Export both production D1 databases before migration. Then apply Operations migrations to `ltds-ops` and Delivery migrations to `client-data`:
+
+```powershell
+Set-Location apps/operations
+npm.cmd run db:migrate:remote
+Set-Location ../delivery
+npm.cmd run db:migrate:remote
+```
+
+Confirm Delivery `0006`, `0007`, `0008`, `0090`, `0091`, and Operations `0010` appear in the remote migration list before deploying dependent Workers. Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding. Each successful job sleeps for its 24-hour retention and then deletes its own archive, so Delivery does not require a Cron Trigger. Verify one completed job, one intentionally failed job, multipart cleanup, the 24-hour archive expiry, and the three-per-hour exact quota.
+
+## 9. Email alerts
+
+Onboard the sending domain in Cloudflare Email Service, add an `EMAIL` send-email binding to `ltds-ops`, and set non-empty `ALERT_FROM` and `ALERT_TO`. Until all three are present, alerts deliberately remain disabled. Send a staging reconciliation alert and verify delivery before enabling production automation.
+
+## 10. Current provisioned resources
 
 - Ops D1: `ltds-ops` / `6ebf7514-d306-4615-ae56-ad869c874dbd`
 - Delivery D1: `client-data` / `7f40a7b7-c3ec-470e-a626-e798867f71f8`
 - R2: `client-data`
+- Incoming R2: `ltds-incoming` (private; production-origin CORS and quarantine lifecycle configured)
 - Queue: `ltds-file-events`
 - R2 notifications: object-create and object-delete to `ltds-file-events`
 
-The Ops schema and delivery schema migrations have been applied. An ignored pre-migration Delivery export is stored locally under `.backups/`.
+Do not infer migration or secret readiness from this file; verify the remote resources during each rollout.

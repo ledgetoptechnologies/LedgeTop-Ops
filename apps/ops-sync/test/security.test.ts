@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { parseEntitlementEvent, parseIntegrationEvent } from "../src/schema";
-import { validateRequestTimestamp, verifyAccessAssertion, verifyWebhookHmac } from "../src/security";
+import { validateRequestTimestamp, verifyAccessAssertion, verifyWebhookHmac, verifyWebhookSignature } from "../src/security";
 
 const baseEvent = {
   event_id: "0d80755c-2945-4d7e-94cd-288d341d501d",
@@ -49,6 +49,21 @@ describe("Project Alpha webhook validation", () => {
     const hex = [...signature].map((byte) => byte.toString(16).padStart(2,"0")).join("");
     await expect(verifyWebhookHmac(body,timestamp,`sha256=${hex}`,secret)).resolves.toBeUndefined();
     await expect(verifyWebhookHmac(body,timestamp,`sha256=${"0".repeat(64)}`,secret)).rejects.toThrow("signature-invalid");
+  });
+
+  it("prefers Ed25519 and permits the previous key during rotation", async () => {
+    const body = new TextEncoder().encode(JSON.stringify(baseEvent));
+    const timestamp = "2026-07-17T20:00:00Z";
+    const { privateKey, publicKey } = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+    const rawKey = new Uint8Array(await crypto.subtle.exportKey("raw", publicKey));
+    const publicValue = btoa(String.fromCharCode(...rawKey)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    const message = new TextEncoder().encode(`${timestamp}.${new TextDecoder().decode(body)}`);
+    const rawSignature = new Uint8Array(await crypto.subtle.sign("Ed25519", privateKey, message));
+    const signature = btoa(String.fromCharCode(...rawSignature)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    const invalidRawSignature = rawSignature.slice(); invalidRawSignature[0] = invalidRawSignature[0]! ^ 1;
+    const invalidSignature = btoa(String.fromCharCode(...invalidRawSignature)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    await expect(verifyWebhookSignature(body, timestamp, `ed25519=${signature}`, undefined, publicValue, null, "", false)).resolves.toBe("ed25519-previous");
+    await expect(verifyWebhookSignature(body, timestamp, `ed25519=${invalidSignature}`, publicValue, undefined, null, "", true)).rejects.toThrow("signature-invalid");
   });
 
   it("verifies issuer, audience, algorithm, and signature on the Access assertion", async () => {

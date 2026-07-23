@@ -18,6 +18,11 @@ export async function sha256(value: string): Promise<string> {
   return base64Url(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value))));
 }
 
+export async function sha256Hex(value: string): Promise<string> {
+  const bytes = new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(value)));
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export async function hmac(secret: string, value: string): Promise<string> {
   if (secret.length < 32) throw new Error("A cryptographic Worker secret is missing or too short");
   const key = await crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
@@ -69,4 +74,78 @@ export async function verifySessionCookie(secret: string, expectedKeyId: string,
   const expected = await hmac(secret, `${keyId}:${shareId}:${shareVersion}:${expiresAt}`);
   if (!constantTimeEqual(expected, signature)) throw new HTTPException(401, { message: "Invalid delivery session" });
   return { shareId, shareVersion, expiresAt };
+}
+
+export async function verifyRotatingSessionCookie(
+  value: string | null,
+  current: { keyId: string; secret: string },
+  previous?: { keyId: string; secret: string } | null,
+): Promise<{ shareId: string; shareVersion: number; expiresAt: number }> {
+  const keyId = value?.split(".", 1)[0];
+  if (keyId === current.keyId) return verifySessionCookie(current.secret, current.keyId, value);
+  if (previous?.keyId && previous.secret && keyId === previous.keyId) return verifySessionCookie(previous.secret, previous.keyId, value);
+  throw new HTTPException(401, { message: "Delivery session expired" });
+}
+
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, value => value.toString(16).padStart(2, "0")).join("");
+}
+
+async function hmacBytes(key: BufferSource, value: string): Promise<ArrayBuffer> {
+  const cryptoKey = await crypto.subtle.importKey("raw", key, { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  return crypto.subtle.sign("HMAC", cryptoKey, encoder.encode(value));
+}
+
+function awsEncode(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function canonicalPath(value: string): string {
+  return value.split("/").map(segment => awsEncode(segment)).join("/") || "/";
+}
+
+export interface R2PresignConfig {
+  endpoint: string;
+  bucket: string;
+  accessKeyId: string;
+  secretAccessKey: string;
+  expiresInSeconds?: number;
+  downloadName?: string;
+}
+
+export async function presignR2Get(config: R2PresignConfig, key: string, now = new Date()): Promise<{ url: string; expiresAt: string }> {
+  const expiresIn = Math.min(120, Math.max(1, config.expiresInSeconds ?? 120));
+  const endpoint = new URL(config.endpoint);
+  const host = endpoint.host;
+  const date = now.toISOString().replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+  const shortDate = date.slice(0, 8);
+  const credentialScope = `${shortDate}/auto/s3/aws4_request`;
+  const path = `${endpoint.pathname.replace(/\/$/, "")}/${config.bucket}/${key}`;
+  const expiresAt = new Date(now.getTime() + expiresIn * 1000).toISOString();
+  const query: Record<string, string> = {
+    "X-Amz-Algorithm": "AWS4-HMAC-SHA256",
+    "X-Amz-Credential": `${config.accessKeyId}/${credentialScope}`,
+    "X-Amz-Date": date,
+    "X-Amz-Expires": String(expiresIn),
+    "X-Amz-SignedHeaders": "host",
+    "X-Amz-Content-Sha256": "UNSIGNED-PAYLOAD",
+  };
+  if (config.downloadName) {
+    const normalized = config.downloadName.normalize("NFC");
+    const ascii = normalized.replace(/[^\x20-\x7e]/g, "_").replace(/[\0-\x1f\x7f"\\]/g, "_").slice(0, 180) || "download";
+    query["response-content-disposition"] = `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(normalized)}`;
+  }
+  const canonicalQuery = Object.keys(query).sort().map(name => `${awsEncode(name)}=${awsEncode(query[name]!)}`).join("&");
+  const canonicalRequest = `GET\n${canonicalPath(path)}\n${canonicalQuery}\nhost:${host}\n\nhost\nUNSIGNED-PAYLOAD`;
+  const requestHash = hex(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(canonicalRequest))));
+  const stringToSign = `AWS4-HMAC-SHA256\n${date}\n${credentialScope}\n${requestHash}`;
+  const dateKey = await hmacBytes(encoder.encode(`AWS4${config.secretAccessKey}`), shortDate);
+  const regionKey = await hmacBytes(dateKey, "auto");
+  const serviceKey = await hmacBytes(regionKey, "s3");
+  const signingKey = await hmacBytes(serviceKey, "aws4_request");
+  const signature = hex(new Uint8Array(await hmacBytes(signingKey, stringToSign)));
+  const url = new URL(endpoint.toString()); url.pathname = path;
+  for (const [name, value] of Object.entries(query)) url.searchParams.set(name, value);
+  url.searchParams.set("X-Amz-Signature", signature);
+  return { url: url.toString(), expiresAt };
 }

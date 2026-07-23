@@ -42,6 +42,46 @@ export async function verifyWebhookHmac(rawBody: Uint8Array, timestamp: string, 
   if (!(await crypto.subtle.verify("HMAC", key, supplied, message))) throw new Error("signature-invalid");
 }
 
+function base64UrlBytes(value: string): Uint8Array {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("signature-invalid");
+  const raw = atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "="));
+  return Uint8Array.from(raw, (character) => character.charCodeAt(0));
+}
+
+async function verifyEd25519(rawBody: Uint8Array, timestamp: string, signature: Uint8Array, publicKey: string): Promise<boolean> {
+  const keyBytes = base64UrlBytes(publicKey);
+  if (keyBytes.byteLength !== 32 || signature.byteLength !== 64) return false;
+  const encoder = new TextEncoder();
+  const prefix = encoder.encode(`${timestamp}.`);
+  const message = new Uint8Array(prefix.length + rawBody.length);
+  message.set(prefix);
+  message.set(rawBody, prefix.length);
+  const key = await crypto.subtle.importKey("raw", keyBytes.buffer as ArrayBuffer, { name: "Ed25519" }, false, ["verify"]);
+  return crypto.subtle.verify("Ed25519", key, signature.buffer as ArrayBuffer, message.buffer as ArrayBuffer);
+}
+
+export async function verifyWebhookSignature(
+  rawBody: Uint8Array,
+  timestamp: string,
+  ed25519Header: string | null,
+  currentPublicKey: string | undefined,
+  previousPublicKey: string | undefined,
+  legacyHmacHeader: string | null,
+  legacyHmacSecret: string,
+  allowLegacyHmac: boolean,
+): Promise<"ed25519-current" | "ed25519-previous" | "hmac-legacy"> {
+  if (ed25519Header) {
+    if (!ed25519Header.startsWith("ed25519=")) throw new Error("signature-invalid");
+    const signature = base64UrlBytes(ed25519Header.slice("ed25519=".length));
+    if (currentPublicKey && await verifyEd25519(rawBody, timestamp, signature, currentPublicKey)) return "ed25519-current";
+    if (previousPublicKey && await verifyEd25519(rawBody, timestamp, signature, previousPublicKey)) return "ed25519-previous";
+    throw new Error("signature-invalid");
+  }
+  if (!allowLegacyHmac) throw new Error("signature-required");
+  await verifyWebhookHmac(rawBody, timestamp, legacyHmacHeader, legacyHmacSecret);
+  return "hmac-legacy";
+}
+
 export async function sha256Hex(value: Uint8Array): Promise<string> {
   const copy = new Uint8Array(value);
   const digest = await crypto.subtle.digest("SHA-256", copy.buffer);

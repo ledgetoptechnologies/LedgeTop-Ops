@@ -11,13 +11,28 @@ export interface Env {
   IMAGES: ImagesBindingLike;
   STREAM: { video(id: string): { generateToken(): Promise<string> } };
   ACCESS_CODE_RATE_LIMITER: RateLimit;
+  PUBLIC_SESSION_RATE_LIMITER: RateLimit;
+  PUBLIC_MANIFEST_RATE_LIMITER: RateLimit;
+  PUBLIC_MEDIA_RATE_LIMITER: RateLimit;
+  PUBLIC_THUMBNAIL_RATE_LIMITER: RateLimit;
+  PUBLIC_DOWNLOAD_RATE_LIMITER: RateLimit;
+  PUBLIC_STREAM_RATE_LIMITER: RateLimit;
+  PUBLIC_BULK_RATE_LIMITER: RateLimit;
   PUBLIC_BASE_URL: string;
   EXPECTED_HOST: string;
   ENVIRONMENT: string;
   SESSION_KEY_ID: string;
+  PREVIOUS_SESSION_KEY_ID?: string;
   DELIVERY_SESSION_SECRET: string;
+  DELIVERY_PREVIOUS_SESSION_SECRET?: string;
   DELIVERY_ACCESS_CODE_PEPPER: string;
+  DELIVERY_PREVIOUS_ACCESS_CODE_PEPPER?: string;
   AUDIT_IP_SECRET: string;
+  R2_S3_ENDPOINT: string;
+  R2_BUCKET_NAME: string;
+  R2_ACCESS_KEY_ID: string;
+  R2_SECRET_ACCESS_KEY: string;
+  BULK_DOWNLOAD_WORKFLOW: Workflow;
   STREAM_CUSTOMER_CODE?: string;
 }
 
@@ -39,4 +54,5 @@ export interface ShareRow {
   client_name: string;
   project_name: string;
   r2_prefix: string;
+  recipient_email?: string | null;
 }

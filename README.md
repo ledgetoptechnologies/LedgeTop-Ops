@@ -20,7 +20,8 @@ packages/
   shared/      permission and API contracts
   ui/          LTDS branding and reusable React UI
 docs/
-  truenas/     R2 synchronization runbook
+  truenas/     R2 synchronization and media-preview runbook
+  operations/  production operations and recovery runbooks
 ```
 
 Each app intentionally has its own `package.json`, lockfile, `wrangler.jsonc`, migrations, and deploy lifecycle. Cloudflare Builds must use the application directory as its root and run `npm run deploy`.
@@ -60,5 +61,7 @@ Both production configurations disable `workers.dev` and version preview URLs an
 ## Before the first production code deployment
 
 Complete [Cloudflare setup](docs/cloudflare-setup.md), including the Operations Access audience and account activation for Images/Stream. Then create a scoped Project Alpha key as described in [Project Alpha integration](docs/project-alpha.md). Follow the [TrueNAS runbook](docs/truenas/README.md) only after a staging delivery has passed.
+
+For production operations, use the [operations runbook](docs/operations/README.md), the [media-preview contract](docs/truenas/preview-pipeline.md), and the [inbound request design](docs/inbound-requests.md). These documents distinguish repository behavior from operator-owned Cloudflare, TrueNAS, Hermes, and alerting configuration.
 
 The Worker code is production-packaged, but a production deploy should not be performed with `OPERATIONS_AUD` still set to its placeholder or before the Access application protects the Operations hostname.

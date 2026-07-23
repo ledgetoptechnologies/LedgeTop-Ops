@@ -18,5 +18,5 @@ export function EmptyState({ title, detail }: { title: string; detail: string })
 }
 
 export function Loading() {
-  return <div className="loading-state" role="status">Loading&hellip;</div>;
+  return <div className="loading-state skeleton-loading" role="status" aria-label="Loading"><span /><span /><span /><span /></div>;
 }

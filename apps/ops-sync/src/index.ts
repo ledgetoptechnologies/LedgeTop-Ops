@@ -2,7 +2,7 @@ import { ZodError } from "zod";
 import { reconcileAccessGroup } from "./access-group";
 import { completeEvent, applyEntitlementEvent, applyProjectionEvent, recordAccessFailure, recordAccessSuccess } from "./projection";
 import { parseIntegrationEvent } from "./schema";
-import { MAX_BODY_BYTES, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookHmac } from "./security";
+import { MAX_BODY_BYTES, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookSignature } from "./security";
 import type { Env } from "./types";
 
 type AccessVerifier = (request: Request, env: Env) => Promise<unknown>;
@@ -37,7 +37,16 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
     const rawBody = new Uint8Array(await request.arrayBuffer());
     if (rawBody.byteLength === 0 || rawBody.byteLength > MAX_BODY_BYTES) return json(413,{error:"payload-size-invalid"});
     const timestamp = validateRequestTimestamp(request.headers.get("X-PA-Timestamp"));
-    await verifyWebhookHmac(rawBody,timestamp,request.headers.get("X-PA-Signature"),env.PROJECT_ALPHA_WEBHOOK_HMAC_SECRET);
+    await verifyWebhookSignature(
+      rawBody,
+      timestamp,
+      request.headers.get("X-PA-Signature-Ed25519"),
+      env.PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY,
+      env.PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY,
+      request.headers.get("X-PA-Signature"),
+      env.PROJECT_ALPHA_WEBHOOK_HMAC_SECRET,
+      env.PROJECT_ALPHA_ALLOW_LEGACY_HMAC === "true",
+    );
     const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
     const event = parseIntegrationEvent(parsed,env.APPLICATION_KEY);
     if (request.headers.get("X-PA-Event-ID") !== event.event_id) return json(422,{error:"event-id-mismatch"});

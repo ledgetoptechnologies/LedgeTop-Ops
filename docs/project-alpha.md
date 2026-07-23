@@ -14,7 +14,7 @@ Create a dedicated Project Alpha API key with only:
 ops.sync.read
 ```
 
-Store its plaintext value as the Operations Worker’s `PROJECT_ALPHA_API_KEY` secret. Store a separate 32-byte-or-longer `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET` on the provisioning Worker and in Project Alpha. The Access service-token ID and secret belong only in Project Alpha; the Access Groups API token belongs only on the provisioning Worker.
+Store its plaintext value as the Operations Worker’s `PROJECT_ALPHA_API_KEY` secret. Project Alpha signs `${timestamp}.${rawBody}` with Ed25519 and sends `X-PA-Signature-Ed25519: ed25519=<base64url signature>`. Store the base64url raw public key as `PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY`; keep the previous public key only during rotation. The legacy HMAC secret is accepted only while `PROJECT_ALPHA_ALLOW_LEGACY_HMAC=true` during rollout. The Access service-token ID and secret belong only in Project Alpha; the Access Groups API token belongs only on the provisioning Worker.
 
 ## Projection and visibility
 
@@ -32,7 +32,7 @@ Only explicitly enabled Project Alpha entitlements provision an Operations accou
 
 Projects may include `manager_user_id`. A Project Manager receives Project context in the same way as a Project Team member; Project Alpha remains responsible for making the manager a Team member and for choosing the Project's Business Unit.
 
-Project Alpha posts signed incremental changes to `/v1/project-alpha/events`. The receiver validates Cloudflare Access, the configured application key, schema version, event ID, timestamp, and HMAC. Event receipts make delivery idempotent; per-entity source timestamps prevent older events from overwriting newer data.
+Project Alpha posts signed incremental changes to `/v1/project-alpha/events`. The receiver validates Cloudflare Access, the configured application key, schema version, event ID, timestamp, and Ed25519 signature. An invalid Ed25519 signature never downgrades to HMAC. Event receipts make delivery idempotent; per-entity source timestamps prevent older events from overwriting newer data.
 
 The receiver acknowledges a valid event after its D1 projection is committed. Cloudflare Access-group membership is reconciled immediately and independently every five minutes, so a temporary Cloudflare control-plane failure cannot block Project Alpha's outbox. Configure both `CF_ACCESS_GROUP_ID` and the exact deployment-specific `CF_ACCESS_GROUP_NAME`; the name provides a safe recovery path if Cloudflare rotates or replaces the group identifier.
 

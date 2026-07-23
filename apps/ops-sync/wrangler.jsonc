@@ -19,7 +19,8 @@
     "CF_ACCOUNT_ID": "846c924bf17bf4f3dd15c97a4c5d1d51",
     "CF_ACCESS_GROUP_ID": "f4dd9211-6ec4-4213-abe0-c67b8326ad02",
     "CF_ACCESS_GROUP_NAME": "LTDS Ops Users",
-    "APPLICATION_KEY": "ltds_ops"
+    "APPLICATION_KEY": "ltds_ops",
+    "PROJECT_ALPHA_ALLOW_LEGACY_HMAC": "false"
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "triggers": { "crons": ["*/5 * * * *"] },

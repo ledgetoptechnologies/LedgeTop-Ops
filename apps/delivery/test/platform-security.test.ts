@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
 import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, parseRange, prefixHasVisibleContent, type VisibleContentBucket } from "../src/worker/files";
-import { createSessionCookie, verifySessionCookie } from "../src/worker/security";
+import { createSessionCookie, presignR2Get, verifyRotatingSessionCookie, verifySessionCookie } from "../src/worker/security";
 import { hashAccessCode } from "../../operations/src/worker/crypto";
 import { verifyAccessCode } from "../src/worker/security";
 import { ensurePublicId, markUnavailableFolder, serveAppShell } from "../src/worker/index";
@@ -31,6 +32,7 @@ describe("shared folder unavailability grace",()=>{
 describe("delivery sessions",()=>{
   it("uses a host-only secure HttpOnly cookie and verifies its signature",async()=>{const secret="s".repeat(48),expires=Date.now()+60_000;const header=await createSessionCookie(secret,"v1","share-1",3,expires);expect(header).toContain("__Host-ltds_delivery=");expect(header).toContain("HttpOnly");expect(header).toContain("Secure");expect(header).toContain("SameSite=Lax");expect(header).toContain("Path=/");const value=decodeURIComponent(header.split(";")[0]!.split("=").slice(1).join("="));await expect(verifySessionCookie(secret,"v1",value)).resolves.toEqual({shareId:"share-1",shareVersion:3,expiresAt:expires});});
   it("rejects a modified cookie and invalidates sessions when the share version rotates",async()=>{const secret="s".repeat(48),expires=Date.now()+60_000;const header=await createSessionCookie(secret,"v1","share-1",3,expires);const value=decodeURIComponent(header.split(";")[0]!.split("=").slice(1).join("="));await expect(verifySessionCookie(secret,"v1",`${value}x`)).rejects.toThrow();const rotated=value.replace(".3.",".4.");await expect(verifySessionCookie(secret,"v1",rotated)).rejects.toThrow();});
+  it("accepts the previous signing key only during the rotation window",async()=>{const expires=Date.now()+60_000;const header=await createSessionCookie("p".repeat(48),"v0","share-1",3,expires);const value=decodeURIComponent(header.split(";")[0]!.split("=").slice(1).join("="));await expect(verifyRotatingSessionCookie(value,{keyId:"v1",secret:"c".repeat(48)},{keyId:"v0",secret:"p".repeat(48)})).resolves.toMatchObject({shareId:"share-1"});await expect(verifyRotatingSessionCookie(value,{keyId:"v1",secret:"c".repeat(48)},null)).rejects.toThrow();});
 });
 
 describe("legacy public-id upgrades",()=>{
@@ -47,4 +49,18 @@ describe("access-code interoperability",()=>{
 describe("single byte range parsing",()=>{
   it("supports prefix, open, and suffix ranges",()=>{expect(parseRange("bytes=0-99",1000)).toEqual({offset:0,length:100});expect(parseRange("bytes=900-",1000)).toEqual({offset:900,length:100});expect(parseRange("bytes=-100",1000)).toEqual({offset:900,length:100});});
   it("rejects multiple, malformed, and unsatisfiable ranges",()=>{for(const value of ["bytes=0-1,4-5","items=0-1","bytes=1000-1200","bytes=20-10"])expect(()=>parseRange(value,1000)).toThrow();});
+});
+
+describe("R2 download tickets",()=>{
+  it("creates a short-lived SigV4 URL without accepting a raw client key",async()=>{
+    const ticket=await presignR2Get({endpoint:"https://account.r2.cloudflarestorage.com",bucket:"client-data",accessKeyId:"access",secretAccessKey:"s".repeat(40),expiresInSeconds:120,downloadName:"Client photo.jpg"},"jobs/client/photo.jpg",new Date("2026-07-23T12:34:56.000Z"));
+    const url=new URL(ticket.url);
+    expect(url.searchParams.get("X-Amz-Algorithm")).toBe("AWS4-HMAC-SHA256");
+    expect(url.searchParams.get("X-Amz-Expires")).toBe("120");
+    expect(url.searchParams.get("X-Amz-Content-Sha256")).toBe("UNSIGNED-PAYLOAD");
+    expect(url.searchParams.get("X-Amz-SignedHeaders")).toBe("host");
+    expect(url.searchParams.get("response-content-disposition")).toContain('filename="Client photo.jpg"');
+    expect(url.searchParams.get("X-Amz-Signature")).toMatch(/^[a-f0-9]{64}$/);
+    expect(ticket.expiresAt).toBe("2026-07-23T12:36:56.000Z");
+  });
 });

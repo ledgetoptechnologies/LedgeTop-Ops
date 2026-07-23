@@ -3,8 +3,8 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
-    "check": "npm --prefix apps/delivery run check && npm --prefix apps/operations run check && npm --prefix apps/ops-sync run check",
-    "test": "npm --prefix apps/delivery test && npm --prefix apps/operations test && npm --prefix apps/ops-sync test",
-    "build": "npm --prefix apps/delivery run build && npm --prefix apps/operations run build && npm --prefix apps/ops-sync run build"
+    "check": "npm --prefix apps/delivery run check && npm --prefix apps/operations run check && npm --prefix apps/ops-sync run check && npm --prefix apps/incoming run check",
+    "test": "npm --prefix apps/delivery test && npm --prefix apps/operations test && npm --prefix apps/ops-sync test && npm --prefix apps/incoming test",
+    "build": "npm --prefix apps/delivery run build && npm --prefix apps/operations run build && npm --prefix apps/ops-sync run build && npm --prefix apps/incoming run build"
   }
 }

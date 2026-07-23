@@ -13,6 +13,21 @@ interface RequestErrorBody {
 
 type RequestError = Error & { status?: number; body?: RequestErrorBody };
 
+interface BulkDownloadResponse {
+  downloadUrl?: string;
+  ticket?: string;
+  downloadTicket?: string;
+  statusUrl?: string;
+  progressUrl?: string;
+  status?: "queued" | "processing" | "running" | "ready" | "failed" | "complete";
+  progress?: number;
+  percent?: number;
+  message?: string;
+  processedBytes?: number;
+  totalBytes?: number;
+  error?: { code?: string; message?: string } | null;
+}
+
 const invalidLinkDetail = "This folder has been moved, removed, or is no longer being shared. Contact your Ledge Top Drone Services representative for a current delivery link.";
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
@@ -55,6 +70,7 @@ export function DeliveryApp() {
   const [selectionMode, setSelectionMode] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState("");
+  const [bulkProgress, setBulkProgress] = useState<{ status: string; percent: number | null; message?: string } | null>(null);
 
   const loadManifest = useCallback(async (id: string, folderId = "") => {
     const query = folderId ? `?folder=${encodeURIComponent(folderId)}` : "";
@@ -104,6 +120,7 @@ export function DeliveryApp() {
 
   function changeView(next: "grid" | "list") { setView(next); localStorage.setItem("ltds-delivery-view", next); }
   async function navigateToFolder(folderId = "") {
+    setGate("loading");
     try {
       await loadManifest(publicId, folderId);
       window.scrollTo({ top: 0, behavior: "smooth" });
@@ -140,7 +157,7 @@ export function DeliveryApp() {
 
   async function downloadBulk(all = false) {
     if (!all && selectedItems.size === 0) return;
-    setBulkBusy(true); setBulkError("");
+    setBulkBusy(true); setBulkError(""); setBulkProgress({ status: "Preparing download", percent: null });
     try {
       const response = await fetch(`/api/public/shares/${encodeURIComponent(publicId)}/bulk-download`, {
         method: "POST",
@@ -152,22 +169,40 @@ export function DeliveryApp() {
         const body = await response.json().catch(() => ({})) as RequestErrorBody;
         throw new Error(body.error || "The download could not be prepared.");
       }
-      const body = await response.json() as { downloadUrl?: string };
-      if (!body.downloadUrl) throw new Error("The download could not be prepared.");
+      let body = await response.json() as BulkDownloadResponse;
+      const statusUrl = body.statusUrl || body.progressUrl;
+      if (!body.downloadUrl && statusUrl) {
+        for (let attempt = 0; attempt < 1800; attempt += 1) {
+          await new Promise(resolve => window.setTimeout(resolve, 2000));
+          const status = await requestJson<BulkDownloadResponse>(statusUrl);
+          body = { ...body, ...status };
+          const calculated = body.totalBytes && typeof body.processedBytes === "number" ? Math.min(100, Math.round(body.processedBytes / body.totalBytes * 100)) : null;
+          const percent = typeof body.progress === "number" ? body.progress : typeof body.percent === "number" ? body.percent : calculated;
+          setBulkProgress({ status: body.status === "ready" || body.status === "complete" ? "Download ready" : "Building ZIP", percent, message: body.message });
+          if (body.status === "failed") throw new Error(body.error?.message || body.message || "The download could not be prepared.");
+          if (body.downloadUrl || body.ticket || body.downloadTicket || body.status === "ready" || body.status === "complete") break;
+        }
+      }
+      const ticket = body.ticket || body.downloadTicket;
+      const downloadUrl = body.downloadUrl || (ticket ? `/api/public/shares/${encodeURIComponent(publicId)}/bulk-download/${encodeURIComponent(ticket)}` : "");
+      if (!downloadUrl) throw new Error("The download could not be prepared.");
       const anchor = document.createElement("a");
-      anchor.href = body.downloadUrl;
+      anchor.href = downloadUrl;
+      anchor.rel = "noreferrer";
       const safeName = (manifest?.share.projectName || "delivery").replace(/[^a-z0-9-_]+/gi, "-").replace(/^-+|-+$/g, "") || "delivery";
       anchor.download = `${safeName}.zip`;
       document.body.appendChild(anchor); anchor.click(); anchor.remove();
     } catch (caught) {
       setBulkError(caught instanceof Error ? caught.message : "The download could not be prepared.");
+      setBulkProgress({ status: "Download failed", percent: null });
     } finally {
       setBulkBusy(false);
+      window.setTimeout(() => setBulkProgress(null), 1800);
     }
   }
 
   if (gate === "landing") return <PublicFrame><DeliveryLanding /></PublicFrame>;
-  if (gate === "loading") return <PublicFrame><Loading /></PublicFrame>;
+  if (gate === "loading") return <PublicFrame><DeliveryLoadingSkeleton /></PublicFrame>;
   if (gate === "code") return <PublicFrame><AccessCodeForm onSubmit={exchange} error={error} /></PublicFrame>;
   if (gate === "error" || !manifest) return <PublicFrame><EmptyState
     title={errorView === "invalid-link" ? "This link is no longer valid" : "Delivery unavailable"}
@@ -197,12 +232,13 @@ export function DeliveryApp() {
         </div>
       </div>
       {bulkError && <p className="bulk-error" role="alert">{bulkError}</p>}
+      {bulkProgress && <BulkProgress progress={bulkProgress} />}
       {manifest.items.length === 0 ? <EmptyState title="This folder is empty" detail="New synced files will appear here automatically." /> : view === "grid" ?
         <div className="item-grid">{manifest.items.map(item => <ItemCard key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div> :
         <div className="item-list">{manifest.items.map(item => <ItemRow key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div>}
       <footer>{manifest.items.length} item{manifest.items.length === 1 ? "" : "s"}{manifest.nextCursor ? " · More items are available" : ""}</footer>
     </section>
-    {preview && <Preview item={preview} onClose={() => setPreview(null)} />}
+    {preview && <Preview item={preview} publicId={publicId} onClose={() => setPreview(null)} />}
   </PublicFrame>;
 }
 
@@ -219,6 +255,14 @@ function PublicFrame({ children }: { children: React.ReactNode }) {
   return <><header className="public-header"><Brand product="Client Delivery" /></header><main className="delivery-main">{children}</main><footer className="public-footer">Secure delivery by Ledge Top Drone Services</footer></>;
 }
 
+function DeliveryLoadingSkeleton() {
+  return <section className="delivery-loading" aria-label="Loading delivery"><div className="skeleton skeleton-heading" /><div className="skeleton-toolbar"><span className="skeleton skeleton-control" /><span className="skeleton skeleton-control" /></div><div className="skeleton-grid">{Array.from({ length: 8 }, (_, index) => <div className="skeleton-card" key={index}><span className="skeleton skeleton-media" /><span className="skeleton skeleton-line wide" /><span className="skeleton skeleton-line" /></div>)}</div></section>;
+}
+
+function BulkProgress({ progress }: { progress: { status: string; percent: number | null; message?: string } }) {
+  return <div className="bulk-progress" role="status"><div><strong>{progress.status}</strong><span>{progress.message || (progress.percent === null ? "Large downloads may take a moment." : `${progress.percent}%`)}</span></div><div className="progress-track"><span style={{ width: `${progress.percent === null ? 35 : progress.percent}%` }} /></div></div>;
+}
+
 function AccessCodeForm({ onSubmit, error }: { onSubmit: (code: string) => Promise<void>; error: string }) {
   const [code, setCode] = useState(""); const [busy, setBusy] = useState(false);
   return <form className="code-gate" onSubmit={async event => { event.preventDefault(); setBusy(true); await onSubmit(code); setBusy(false); }}>
@@ -230,11 +274,15 @@ function AccessCodeForm({ onSubmit, error }: { onSubmit: (code: string) => Promi
 
 function ItemCard({ item, selectionMode, selected, onToggle, onFolder, onPreview }: { item: DeliveryItem; selectionMode: boolean; selected: boolean; onToggle: (itemId: string) => void; onFolder: (item: DeliveryItem) => void; onPreview: (item: DeliveryItem) => void }) {
   const action = selectionMode ? () => onToggle(item.id) : item.kind === "folder" ? () => void onFolder(item) : () => onPreview(item);
-  return <article className={`item-card${selected ? " selected" : ""}${selectionMode ? " selectable" : ""}`} onClick={selectionMode ? action : undefined}><button className="item-visual" onClick={event => { event.stopPropagation(); if (selectionMode) event.preventDefault(); action(); }} aria-label={`${selectionMode ? "Select" : item.kind === "folder" ? "Open" : "Preview"} ${item.name}`}>
-    {item.thumbnailUrl ? <img src={item.thumbnailUrl} loading="lazy" alt="" /> : item.kind === "folder" ? <span className="folder-shape" /> : <span className="file-kind">{iconFor(item)}</span>}
+  return <article className={`item-card${selected ? " selected" : ""}${selectionMode ? " selectable" : ""}`} onClick={selectionMode ? action : undefined}
+    tabIndex={selectionMode ? 0 : undefined} role={selectionMode ? "button" : undefined} aria-pressed={selectionMode ? selected : undefined}
+    onKeyDown={selectionMode ? event => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); action(); } } : undefined}>
+    <button className="item-visual" onClick={event => { event.stopPropagation(); if (selectionMode) event.preventDefault(); action(); }} aria-label={`${selectionMode ? selected ? "Deselect" : "Select" : item.kind === "folder" ? "Open" : "Preview"} ${item.name}`}>
+    {selectionMode && <span className="selection-checkbox" aria-hidden="true">{selected ? "✓" : ""}</span>}
+    {item.thumbnailUrl ? <Thumbnail item={item} /> : item.kind === "folder" ? <span className="folder-shape" /> : <span className="file-kind">{iconFor(item)}</span>}
     {item.kind === "video" && <span className="play">▶</span>}{item.kind === "video" && item.previewStatus === "processing" && <span className="media-status">Preparing preview…</span>}
   </button><div className="item-info"><strong title={item.name}>{item.name}</strong><span>{formatBytes(item.size)}{item.uploadedAt ? ` · ${new Date(item.uploadedAt).toLocaleDateString()}` : ""}</span></div>
-    {item.downloadUrl && <a className="download-chip" href={item.downloadUrl}>Download</a>}
+    {!selectionMode && item.downloadUrl && <a className="download-chip" href={item.downloadUrl}>Download</a>}
   </article>;
 }
 
@@ -242,15 +290,39 @@ function ItemRow({ item, selectionMode, selected, onToggle, onFolder, onPreview 
   return <div className={`item-row${selected ? " selected" : ""}${selectionMode ? " selectable" : ""}`} onClick={selectionMode ? () => onToggle(item.id) : undefined}><button className="row-name" onClick={event => { event.stopPropagation(); selectionMode ? onToggle(item.id) : item.kind === "folder" ? void onFolder(item) : onPreview(item); }}><span>{item.kind === "folder" ? "▰" : "▧"}</span><strong>{item.name}</strong></button><span>{formatBytes(item.size)}</span><span>{item.uploadedAt ? new Date(item.uploadedAt).toLocaleDateString() : "—"}</span>{!selectionMode && item.downloadUrl ? <a href={item.downloadUrl}>Download</a> : <span />}</div>;
 }
 
-function Preview({ item, onClose }: { item: DeliveryItem; onClose: () => void }) {
+function Preview({ item, publicId, onClose }: { item: DeliveryItem; publicId: string; onClose: () => void }) {
+  useEffect(() => {
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onClose]);
   return <div className="preview-backdrop" role="dialog" aria-modal="true" aria-label={`Preview ${item.name}`} onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}><section className="preview-dialog"><header><strong>{item.name}</strong>{item.downloadUrl && <a className="button button-orange button-small" href={item.downloadUrl}>Download</a>}<button className="button-ghost button-small" onClick={onClose}>Close</button></header><div className="preview-stage">
-    {item.kind === "image" && item.previewUrl ? <img src={item.previewUrl} alt={item.name} /> : item.kind === "video" ? <VideoPreview item={item} /> : item.kind === "audio" && item.previewUrl ? <audio src={item.previewUrl} controls autoPlay /> : (item.kind === "pdf" || item.kind === "text") && item.previewUrl ? <iframe src={item.previewUrl} title={item.name} /> : <EmptyState title="Preview unavailable" detail="Download this file to open it in its original application." />}
+    {item.kind === "image" && item.previewUrl ? <ImagePreview item={item} /> : item.kind === "video" ? <VideoPreview item={item} publicId={publicId} /> : item.kind === "audio" && item.previewUrl ? <audio src={item.previewUrl} controls autoPlay /> : (item.kind === "pdf" || item.kind === "text") && item.previewUrl ? <iframe src={item.previewUrl} title={item.name} /> : <EmptyState title="Preview unavailable" detail="Download this file to open it in its original application." />}
   </div></section></div>;
 }
 
-function VideoPreview({ item }: { item: DeliveryItem }) {
+function ImagePreview({ item }: { item: DeliveryItem }) {
+  const [original, setOriginal] = useState(false); const [loaded, setLoaded] = useState(false);
+  const media = item as DeliveryItem & { originalUrl?: string; sourceUrl?: string };
+  const originalUrl = media.originalUrl || media.sourceUrl || item.downloadUrl;
+  const large = (item.size || 0) >= 25 * 1024 * 1024;
+  function viewOriginal() { if (!originalUrl) return; if (large && !window.confirm("This original image is 25 MB or larger and may load slowly. View it anyway?")) return; setOriginal(true); }
+  return <div className="image-preview">{!loaded && <SkeletonViewer />}<img src={original ? originalUrl : item.previewUrl} alt={item.name} loading="eager" decoding="async" onLoad={() => setLoaded(true)} />{originalUrl && !original && <button className="viewer-action" onClick={viewOriginal}>View original anyway{large ? ` (${formatBytes(item.size)})` : ""}</button>}</div>;
+}
+
+function SkeletonViewer() { return <span className="skeleton-viewer" aria-label="Loading preview" />; }
+
+function VideoPreview({ item, publicId }: { item: DeliveryItem; publicId: string }) {
   const [loading, setLoading] = useState(true); const [buffered, setBuffered] = useState(0);
-  if (item.streamUrl) return <div className="video-preview">{loading && <span className="media-status">Opening video preview…</span>}<iframe src={item.streamUrl} title={item.name} onLoad={() => setLoading(false)} allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture" allowFullScreen /></div>;
+  const [streamUrl, setStreamUrl] = useState<string | null>(null);
+  useEffect(() => { let cancelled = false; requestJson<{ streamUrl?: string; url?: string }>(`/api/public/shares/${encodeURIComponent(publicId)}/items/${encodeURIComponent(item.id)}/stream-ticket`, { method: "POST" }).then(result => { if (!cancelled) setStreamUrl(result.streamUrl || result.url || null); }).catch(() => { if (!cancelled) setStreamUrl(item.streamUrl || null); }); return () => { cancelled = true; }; }, [item.id, item.streamUrl, publicId]);
+  if (streamUrl) return <div className="video-preview">{loading && <span className="media-status">Opening video preview…</span>}<iframe src={streamUrl} title={item.name} onLoad={() => setLoading(false)} allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture" allowFullScreen /></div>;
   if (!item.previewUrl) return <EmptyState title={item.previewStatus === "processing" ? "Video preview is being prepared" : "Preview unavailable"} detail="You can still download the original video." />;
-  return <div className="video-preview">{(loading || item.previewStatus === "processing") && <span className="media-status">{buffered ? `Buffering preview… ${buffered}%` : "Preparing video preview…"}</span>}<video src={item.previewUrl} controls autoPlay playsInline preload="metadata" onLoadStart={() => setLoading(true)} onCanPlay={() => setLoading(false)} onPlaying={() => setLoading(false)} onProgress={event => { const video = event.currentTarget; if (video.duration && video.buffered.length) setBuffered(Math.min(100, Math.round((video.buffered.end(video.buffered.length - 1) / video.duration) * 100))); }} /></div>;
+  return <div className="video-preview">{(loading || item.previewStatus === "processing") && <span className="media-status">{buffered ? `Buffering preview… ${buffered}%` : "Preparing video preview…"}</span>}<video src={item.previewUrl} poster={item.thumbnailUrl} controls autoPlay playsInline preload="metadata" onLoadStart={() => setLoading(true)} onCanPlay={() => setLoading(false)} onPlaying={() => setLoading(false)} onProgress={event => { const video = event.currentTarget; if (video.duration && video.buffered.length) setBuffered(Math.min(100, Math.round((video.buffered.end(video.buffered.length - 1) / video.duration) * 100))); }} /></div>;
+}
+
+function Thumbnail({ item }: { item: DeliveryItem }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return <span className="file-kind">{iconFor(item)}</span>;
+  return <img src={item.thumbnailUrl} loading="lazy" decoding="async" alt="" onError={() => setFailed(true)} />;
 }

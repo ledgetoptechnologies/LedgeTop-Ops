@@ -8,6 +8,8 @@ export const PERMISSIONS = [
   "tasks.update",
   "airspace.view",
   "delivery.browse",
+  "delivery.rename",
+  "delivery.delete",
   "delivery.share.create",
   "delivery.share.revoke",
   "delivery.share.audit",
@@ -42,6 +44,7 @@ export interface DeliveryItem {
   downloadUrl?: string;
   streamUrl?: string | null;
   previewStatus?: "ready" | "processing" | "unavailable";
+  displayName?: string;
 }
 
 export interface DeliveryManifest {

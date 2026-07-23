@@ -25,8 +25,12 @@
     "DISPLAY_TIMEZONE": "America/Chicago",
     "MAP_STYLE_URL": "",
     "STREAM_ACCOUNT_ID": "",
-    "STREAM_CUSTOMER_CODE": ""
+    "STREAM_CUSTOMER_CODE": "",
+    "ALERT_FROM": "",
+    "ALERT_TO": "",
+    "NOTIFICATION_FROM": "delivery@ledgetopdroneservices.com"
   },
+  "send_email": [{ "name": "NOTIFICATION_EMAIL", "allowed_sender_addresses": ["delivery@ledgetopdroneservices.com"] }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "triggers": { "crons": ["*/15 * * * *"] },
   "r2_buckets": [

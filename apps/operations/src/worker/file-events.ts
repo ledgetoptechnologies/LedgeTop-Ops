@@ -1,5 +1,8 @@
 import { mediaKind, mime } from "./delivery";
 import type { Env } from "./types";
+import { artifactDirectory } from "./artifacts";
+import { sendAdminAlert } from "./alerts";
+import { notificationStatement } from "./notifications";
 
 export interface R2Notification {
   action: string;
@@ -11,13 +14,35 @@ interface TusState { etag: string; stream_uid: string | null; stream_status: str
 const TUS_VERSION = "1.0.0";
 const TUS_CHUNK = 50 * 1024 * 1024;
 
-function hidden(key: string): boolean {
+export function hidden(key: string): boolean {
   const parts = key.replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts.some(part => part.toLowerCase() === "dump") || parts[0]?.toLowerCase() === "_ltds";
+  return parts.some(part => part.toLowerCase() === "dump" || part.toLowerCase() === "_ltds");
 }
 function created(action: string): boolean { return ["PutObject", "CopyObject", "CompleteMultipartUpload"].some(value => action.includes(value)); }
 function removed(action: string): boolean { return action.includes("Delete") || action.includes("Lifecycle"); }
 function metadata(value: string): string { let binary = ""; for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte); return btoa(binary); }
+
+function previewManifest(key: string): boolean {
+  return /(?:^|\/)_ltds\/previews\/[a-f0-9]{64}\/manifest\.json$/i.test(key);
+}
+
+async function recordPreviewManifest(env: Env, key: string, etag: string): Promise<void> {
+  const object = await env.DATA_BUCKET.get(key, { range: { offset: 0, length: 64 * 1024 } });
+  if (!object) return;
+  const manifest = await object.json<{ sourceKey?: unknown; sourceEtag?: unknown; sourceSize?: unknown; producerVersion?: unknown; createdAt?: unknown }>().catch(() => null);
+  if (!manifest || typeof manifest.sourceKey !== "string" || hidden(manifest.sourceKey) ||
+    typeof manifest.sourceEtag !== "string" || typeof manifest.sourceSize !== "number" ||
+    typeof manifest.producerVersion !== "string" || !manifest.producerVersion.trim() ||
+    typeof manifest.createdAt !== "string" || !Number.isFinite(Date.parse(manifest.createdAt))) return;
+  const prefix = key.slice(0, -"manifest.json".length);
+  if (prefix !== await artifactDirectory(manifest.sourceKey)) return;
+  await env.DELIVERY_DB.prepare(`INSERT INTO preview_artifacts(artifact_prefix,source_key,source_etag,manifest_etag)
+    VALUES(?,?,?,?) ON CONFLICT(artifact_prefix) DO UPDATE SET source_key=excluded.source_key,
+    source_etag=excluded.source_etag,manifest_etag=excluded.manifest_etag,missing_since=NULL,
+    last_seen_at=datetime('now'),updated_at=datetime('now')`).bind(
+    prefix, manifest.sourceKey, manifest.sourceEtag, etag,
+  ).run();
+}
 
 async function beginTusUpload(env: Env, key: string, size: number, etag: string): Promise<{ uid: string; url: string; offset: number }> {
   const response = await fetch(`https://api.cloudflare.com/client/v4/accounts/${env.STREAM_ACCOUNT_ID}/stream`, {
@@ -77,6 +102,11 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
     try {
       const event = message.body; const key = event.object?.key;
       if (!key) { message.ack(); continue; }
+      if (previewManifest(key)) {
+        if (removed(event.action)) await env.DELIVERY_DB.prepare("DELETE FROM preview_artifacts WHERE artifact_prefix=?").bind(key.slice(0, -"manifest.json".length)).run();
+        else if (created(event.action)) { const head = await env.DATA_BUCKET.head(key); if (head) await recordPreviewManifest(env, key, head.httpEtag); }
+        message.ack(); continue;
+      }
       if (removed(event.action) || hidden(key)) { await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run(); message.ack(); continue; }
       if (!created(event.action)) { message.ack(); continue; }
       const head = await env.DATA_BUCKET.head(key); if (!head) { message.retry(); continue; }
@@ -113,36 +143,73 @@ export async function refreshStreamStatuses(env: Env): Promise<number> {
 }
 
 export async function reconcileFileIndex(env: Env): Promise<number> {
-  const marker = crypto.randomUUID(); let cursor: string | undefined; let count = 0;
-  const activeShares = await env.DELIVERY_DB.prepare(`SELECT s.id,COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.unavailable_since FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{ id:string; r2_prefix:string; unavailable_since:string|null }>();
+  const marker = crypto.randomUUID(); let cursor: string | undefined; let count = 0; let visibleBytes = 0;
+  const activeShares = await env.DELIVERY_DB.prepare(`SELECT s.id,COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.unavailable_since,s.recipient_email,s.public_id,p.client_name,p.project_name FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{ id:string; r2_prefix:string; unavailable_since:string|null; recipient_email:string|null; public_id:string|null; client_name:string; project_name:string }>();
   const presentShares = new Set<string>();
   try {
     do {
       const listed = await env.DATA_BUCKET.list({ limit: 1000, cursor }); const statements: D1PreparedStatement[] = [];
       for (const object of listed.objects) {
         if (object.key.endsWith("/") || hidden(object.key)) continue;
+        visibleBytes += object.size;
         for (const share of activeShares.results) if (object.key.startsWith(share.r2_prefix.endsWith("/") ? share.r2_prefix : `${share.r2_prefix}/`)) presentShares.add(share.id);
         statements.push(env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,last_seen_reconcile) VALUES (?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,last_seen_reconcile=excluded.last_seen_reconcile,updated_at=datetime('now')`).bind(object.key, object.httpEtag, object.size, object.uploaded.toISOString(), mime(object.key), mediaKind(object.key), marker)); count += 1;
       }
       if (statements.length) await env.DELIVERY_DB.batch(statements); cursor = listed.truncated ? listed.cursor : undefined;
     } while (cursor);
-    const shareUpdates:D1PreparedStatement[]=[];
+    const shareUpdates:D1PreparedStatement[]=[]; let revocationCount = 0;
     for(const share of activeShares.results){
       if(presentShares.has(share.id)){if(share.unavailable_since)shareUpdates.push(env.DELIVERY_DB.prepare("UPDATE shares SET unavailable_since=NULL WHERE id=? AND revoked_at IS NULL").bind(share.id));continue;}
       if(!share.unavailable_since)shareUpdates.push(env.DELIVERY_DB.prepare("UPDATE shares SET unavailable_since=datetime('now') WHERE id=? AND revoked_at IS NULL AND unavailable_since IS NULL").bind(share.id));
       else if(Date.parse(`${share.unavailable_since.replace(" ","T")}Z`)+24*60*60*1000<=Date.now()){
-        shareUpdates.push(env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='folder_unavailable' WHERE id=? AND revoked_at IS NULL").bind(share.id));
+        shareUpdates.push(env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='folder_unavailable',share_version=share_version+1 WHERE id=? AND revoked_at IS NULL").bind(share.id));
         shareUpdates.push(env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('system','reconciliation','share.auto_revoked','share',?,?)").bind(share.id,JSON.stringify({reason:"folder_unavailable",r2Prefix:share.r2_prefix})));
+        const notification = notificationStatement(env, { shareId: share.id, kind: "share_revoked", recipientEmail: share.recipient_email, payload: { publicId: share.public_id, clientName: share.client_name, projectName: share.project_name, r2Prefix: share.r2_prefix } });
+        if (notification) shareUpdates.push(notification);
+        revocationCount += 1;
       }
+    }
+    const previous = await env.OPS_DB.prepare("SELECT last_visible_count,last_visible_bytes FROM delivery_reconciliation_state WHERE source='truenas'").first<{last_visible_count:number;last_visible_bytes:number}>();
+    const visibleDrop = Boolean(previous && previous.last_visible_count > 0 && count < previous.last_visible_count * 0.5);
+    if (visibleDrop || revocationCount > 5) {
+      const details = { visibleCount: count, previousVisibleCount: previous?.last_visible_count || 0, visibleBytes, previousVisibleBytes: previous?.last_visible_bytes || 0, revocationCount, reasons: [visibleDrop ? "visible_object_drop_over_50_percent" : null, revocationCount > 5 ? "revocation_count_over_5" : null].filter(Boolean) };
+      await env.OPS_DB.prepare("INSERT INTO delivery_reconciliation_alerts(source,alert_type,details_json) VALUES('truenas','circuit_breaker',?)").bind(JSON.stringify(details)).run();
+      await env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,status,details_json) VALUES ('reconciliation',datetime('now'),'error',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),status='error',details_json=excluded.details_json,updated_at=datetime('now')`).bind(JSON.stringify({ error: "reconciliation circuit breaker", ...details })).run();
+      await sendAdminAlert(env, "Delivery reconciliation paused", `Automatic share revocation and pruning were paused. ${JSON.stringify(details)}`);
+      return count;
     }
     await env.DELIVERY_DB.batch([
       env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE last_seen_reconcile IS NOT NULL AND last_seen_reconcile<>?").bind(marker),
       env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,last_success_at,status,object_count) VALUES ('reconciliation',datetime('now'),datetime('now'),'healthy',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=datetime('now'),status='healthy',object_count=excluded.object_count,updated_at=datetime('now')`).bind(count),
       ...shareUpdates,
     ]);
+    await env.OPS_DB.prepare(`INSERT INTO delivery_reconciliation_state(source,last_success_at,last_visible_count,last_visible_bytes) VALUES('truenas',datetime('now'),?,?) ON CONFLICT(source) DO UPDATE SET last_success_at=datetime('now'),last_visible_count=excluded.last_visible_count,last_visible_bytes=excluded.last_visible_bytes,updated_at=datetime('now')`).bind(count, visibleBytes).run();
+    const artifacts = await env.DELIVERY_DB.prepare(`SELECT artifact_prefix,source_key,missing_since FROM preview_artifacts
+      WHERE NOT EXISTS (SELECT 1 FROM file_index WHERE r2_key=preview_artifacts.source_key) OR missing_since IS NOT NULL LIMIT 200`)
+      .all<{artifact_prefix:string;source_key:string;missing_since:string|null}>();
+    for (const artifact of artifacts.results) {
+      const source = await env.DATA_BUCKET.head(artifact.source_key);
+      if (source) {
+        if (artifact.missing_since) await env.DELIVERY_DB.prepare("UPDATE preview_artifacts SET missing_since=NULL,updated_at=datetime('now') WHERE artifact_prefix=?").bind(artifact.artifact_prefix).run();
+        continue;
+      }
+      if (!artifact.missing_since) {
+        await env.DELIVERY_DB.prepare("UPDATE preview_artifacts SET missing_since=datetime('now'),updated_at=datetime('now') WHERE artifact_prefix=? AND missing_since IS NULL").bind(artifact.artifact_prefix).run();
+        continue;
+      }
+      if (Date.parse(`${artifact.missing_since.replace(" ","T")}Z`) + 24 * 60 * 60 * 1000 > Date.now()) continue;
+      let artifactCursor: string | undefined;
+      do {
+        const page = await env.DATA_BUCKET.list({ prefix: artifact.artifact_prefix, limit: 1000, cursor: artifactCursor });
+        if (page.objects.length) await env.DATA_BUCKET.delete(page.objects.map(object => object.key));
+        artifactCursor = page.truncated ? page.cursor : undefined;
+      } while (artifactCursor);
+      await env.DELIVERY_DB.prepare("DELETE FROM preview_artifacts WHERE artifact_prefix=?").bind(artifact.artifact_prefix).run();
+    }
     return count;
   } catch (error) {
     await env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,status,details_json) VALUES ('reconciliation',datetime('now'),'error',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),status='error',details_json=excluded.details_json,updated_at=datetime('now')`).bind(JSON.stringify({ error: error instanceof Error ? error.message : "unknown" })).run();
+    await sendAdminAlert(env, "Delivery reconciliation failed", error instanceof Error ? error.message : "Unknown reconciliation error");
     throw error;
   }
 }

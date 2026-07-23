@@ -19,14 +19,51 @@
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "POLICY_AUD": "3b287fcd289bcb39813051b2d98d2dbffa04c1bcf1904a5a7c8d2de52394ee23",
     "SESSION_KEY_ID": "v1",
-    "STREAM_CUSTOMER_CODE": ""
+    "PREVIOUS_SESSION_KEY_ID": "",
+    "STREAM_CUSTOMER_CODE": "",
+    "R2_S3_ENDPOINT": "https://846c924bf17bf4f3dd15c97a4c5d1d51.r2.cloudflarestorage.com",
+    "R2_BUCKET_NAME": "client-data"
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "triggers": { "crons": ["17 * * * *"] },
   "ratelimits": [
     {
       "name": "ACCESS_CODE_RATE_LIMITER",
       "namespace_id": "19462026",
+      "simple": { "limit": 10, "period": 60 }
+    },
+    {
+      "name": "PUBLIC_SESSION_RATE_LIMITER",
+      "namespace_id": "19462027",
+      "simple": { "limit": 20, "period": 60 }
+    },
+    {
+      "name": "PUBLIC_MANIFEST_RATE_LIMITER",
+      "namespace_id": "19462028",
+      "simple": { "limit": 120, "period": 60 }
+    },
+    {
+      "name": "PUBLIC_MEDIA_RATE_LIMITER",
+      "namespace_id": "19462029",
+      "simple": { "limit": 180, "period": 60 }
+    },
+    {
+      "name": "PUBLIC_BULK_RATE_LIMITER",
+      "namespace_id": "19462030",
+      "simple": { "limit": 3, "period": 60 }
+    },
+    {
+      "name": "PUBLIC_THUMBNAIL_RATE_LIMITER",
+      "namespace_id": "19462031",
+      "simple": { "limit": 300, "period": 60 }
+    },
+    {
+      "name": "PUBLIC_DOWNLOAD_RATE_LIMITER",
+      "namespace_id": "19462032",
+      "simple": { "limit": 30, "period": 60 }
+    },
+    {
+      "name": "PUBLIC_STREAM_RATE_LIMITER",
+      "namespace_id": "19462033",
       "simple": { "limit": 10, "period": 60 }
     }
   ],
@@ -43,4 +80,11 @@
   ],
   "images": { "binding": "IMAGES" },
   "stream": { "binding": "STREAM" }
+  ,"workflows": [
+    {
+      "name": "ltds-bulk-download",
+      "binding": "BULK_DOWNLOAD_WORKFLOW",
+      "class_name": "BulkDownloadWorkflow"
+    }
+  ]
 }
