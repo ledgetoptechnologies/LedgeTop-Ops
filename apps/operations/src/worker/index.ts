@@ -74,32 +74,28 @@ app.post("/api/admin/integrations/project-alpha/sync",async c=>{const principal=
 
 app.notFound(c=>c.json({error:"Not found"},404));app.onError((error,c)=>{const status=error instanceof HTTPException?error.status:500;if(status>=500)console.error(JSON.stringify({event:"ops.error",status,message:error instanceof Error?error.message:"unknown"}));return c.json({error:status>=500?"An unexpected error occurred":error.message},status);});
 
-const STREAM_STATUS_CRON="*/15 * * * *";
-const AIRSPACE_CRON="7 */2 * * *";
-const PROJECT_ALPHA_CRON="23 8 * * *";
-const FILE_INDEX_CRON="17 8 * * *";
+const CONSOLIDATED_CRON="*/15 * * * *";
 
 async function scheduled(event:ScheduledController,env:Env,ctx:ExecutionContext){
-  switch(event.cron){
-    case STREAM_STATUS_CRON:
-      ctx.waitUntil(refreshStreamStatuses(env));
-      break;
-    case AIRSPACE_CRON:
-      ctx.waitUntil((async()=>{
-        const [tfrs,sua]=await Promise.all([refreshTfrs(env),refreshSua(env)]);
-        if(tfrs.changed||sua.changed)await rebuildOperationAirspaceMatches(env);
-        await markAirspaceStaleAndPurge(env);
-      })());
-      break;
-    case PROJECT_ALPHA_CRON:
-      ctx.waitUntil((async()=>{
-        const result=await syncProjectAlpha(env);
-        if(result.changedCollections.some(collection=>collection==="operations"||collection==="service_locations"))await rebuildOperationAirspaceMatches(env);
-      })());
-      break;
-    case FILE_INDEX_CRON:
-      ctx.waitUntil(reconcileFileIndex(env));
-      break;
-  }
+  if(event.cron!==CONSOLIDATED_CRON)return;
+
+  ctx.waitUntil(refreshStreamStatuses(env));
+  const scheduledAt=new Date(event.scheduledTime);
+  const minute=scheduledAt.getUTCMinutes();
+  const hour=scheduledAt.getUTCHours();
+
+  if(minute===0&&hour%2===0)ctx.waitUntil((async()=>{
+    const [tfrs,sua]=await Promise.all([refreshTfrs(env),refreshSua(env)]);
+    if(tfrs.changed||sua.changed)await rebuildOperationAirspaceMatches(env);
+    await markAirspaceStaleAndPurge(env);
+  })());
+
+  // Keep the former daily syncs on the same trigger. They run at 08:15 and
+  // 08:30 UTC, preserving their order while using one account-level trigger.
+  if(hour===8&&minute===15)ctx.waitUntil((async()=>{
+    const result=await syncProjectAlpha(env);
+    if(result.changedCollections.some(collection=>collection==="operations"||collection==="service_locations"))await rebuildOperationAirspaceMatches(env);
+  })());
+  if(hour===8&&minute===30)ctx.waitUntil(reconcileFileIndex(env));
 }
 export default{fetch:app.fetch,queue:consumeFileEvents,scheduled}satisfies ExportedHandler<Env,R2Notification>;

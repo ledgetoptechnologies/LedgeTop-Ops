@@ -28,9 +28,7 @@
     "STREAM_CUSTOMER_CODE": ""
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "triggers": {
-    "crons": ["*/15 * * * *", "7 */2 * * *", "23 8 * * *", "17 8 * * *"]
-  },
+  "triggers": { "crons": ["*/15 * * * *"] },
   "r2_buckets": [
     { "binding": "DATA_BUCKET", "bucket_name": "client-data" }
   ],
