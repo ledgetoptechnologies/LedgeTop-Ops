@@ -17,7 +17,7 @@ export function validateDisplayName(value: unknown): string {
   const lower = name.toLowerCase();
   const windowsDevice = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(name);
   if (!name || name.length > 160 || CONTROL.test(name) || name === "." || name === ".." || /[\\/:*?"<>|]/.test(name) ||
-    name.endsWith(".") || name.endsWith(" ") || lower === "_ltds" || lower === "dump" || windowsDevice) {
+    name.endsWith(".") || name.endsWith(" ") || lower === "_ltds" || lower === ".previews" || lower === "dump" || windowsDevice) {
     throw new HTTPException(400, { message: "Display name is invalid" });
   }
   return name;
@@ -26,7 +26,7 @@ export function validateDisplayName(value: unknown): string {
 export function normalizeAliasKey(value: string): string {
   const clean = value.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/{2,}/g, "/");
   const parts = clean.replace(/\/$/, "").split("/");
-  if (!clean || parts.some(part => !part || part === "." || part === ".." || part.toLowerCase() === "dump" || part.toLowerCase() === "_ltds")) throw new HTTPException(400, { message: "Physical key is invalid" });
+  if (!clean || parts.some(part => !part || part === "." || part === ".." || part.toLowerCase() === "dump" || part.toLowerCase() === "_ltds" || part.toLowerCase() === ".previews")) throw new HTTPException(400, { message: "Physical key is invalid" });
   return clean.endsWith("/") ? `${clean.replace(/\/+$/, "")}/` : clean;
 }
 

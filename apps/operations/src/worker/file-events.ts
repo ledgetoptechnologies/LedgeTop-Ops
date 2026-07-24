@@ -16,21 +16,28 @@ const TUS_CHUNK = 50 * 1024 * 1024;
 
 export function hidden(key: string): boolean {
   const parts = key.replace(/\\/g, "/").split("/").filter(Boolean);
-  return parts.some(part => part.toLowerCase() === "dump" || part.toLowerCase() === "_ltds");
+  return parts.some(part => {
+    const value = part.toLowerCase();
+    return value === "dump" || value === "_ltds" || value === ".previews";
+  });
 }
 function created(action: string): boolean { return ["PutObject", "CopyObject", "CompleteMultipartUpload"].some(value => action.includes(value)); }
 function removed(action: string): boolean { return action.includes("Delete") || action.includes("Lifecycle"); }
 function metadata(value: string): string { let binary = ""; for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte); return btoa(binary); }
 
-function previewManifest(key: string): boolean {
-  return /(?:^|\/)_ltds\/previews\/[a-f0-9]{64}\/manifest\.json$/i.test(key);
+export function previewManifest(key: string): boolean {
+  return /(?:^|\/)\.previews\/[a-f0-9]{64}\/manifest\.json$/i.test(key);
+}
+
+export function canonicalPreviewSource(key: string): boolean {
+  return key.startsWith("Jobs/Clients/") && !hidden(key);
 }
 
 async function recordPreviewManifest(env: Env, key: string, etag: string): Promise<void> {
   const object = await env.DATA_BUCKET.get(key, { range: { offset: 0, length: 64 * 1024 } });
-  if (!object) return;
+  if (!object) throw new Error("preview-manifest-unavailable-after-create-event");
   const manifest = await object.json<{ sourceKey?: unknown; sourceEtag?: unknown; sourceSize?: unknown; producerVersion?: unknown; createdAt?: unknown }>().catch(() => null);
-  if (!manifest || typeof manifest.sourceKey !== "string" || hidden(manifest.sourceKey) ||
+  if (!manifest || typeof manifest.sourceKey !== "string" || !canonicalPreviewSource(manifest.sourceKey) ||
     typeof manifest.sourceEtag !== "string" || typeof manifest.sourceSize !== "number" ||
     typeof manifest.producerVersion !== "string" || !manifest.producerVersion.trim() ||
     typeof manifest.createdAt !== "string" || !Number.isFinite(Date.parse(manifest.createdAt))) return;
@@ -103,8 +110,7 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       const event = message.body; const key = event.object?.key;
       if (!key) { message.ack(); continue; }
       if (previewManifest(key)) {
-        if (removed(event.action)) await env.DELIVERY_DB.prepare("DELETE FROM preview_artifacts WHERE artifact_prefix=?").bind(key.slice(0, -"manifest.json".length)).run();
-        else if (created(event.action)) { const head = await env.DATA_BUCKET.head(key); if (head) await recordPreviewManifest(env, key, head.httpEtag); }
+        if (created(event.action)) { const head = await env.DATA_BUCKET.head(key); if (!head) throw new Error("preview-manifest-head-unavailable-after-create-event"); await recordPreviewManifest(env, key, head.httpEtag); }
         message.ack(); continue;
       }
       if (removed(event.action) || hidden(key)) { await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run(); message.ack(); continue; }

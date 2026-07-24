@@ -2,69 +2,109 @@
 
 This is the production contract between TrueNAS, Hermes, the preview producer, and LTDS Delivery. Cards and normal viewers use prepared derivatives; originals remain explicit download or opt-in fallback sources.
 
-## Lifecycle
+## Canonical source layout
+
+The synchronized source root is always:
 
 ```text
-TrueNAS source -> rclone COPY -> R2 Jobs/ -> clean/quarantine decision
-                                           -> preview job
-                                           -> derivative verification
-                                           -> manifest-last publish
-                                           -> Delivery reads derivative metadata
+Jobs/Clients/<client-or-organization>/...
 ```
 
-The source object is authoritative. Derivatives are disposable read models. A preview failure must leave the original downloadable and must not make a healthy source file disappear from the browser. Publish the source to R2 first, obtain that exact R2 object's ETag and size, and only then publish the derivative manifest; a local pre-upload checksum cannot be substituted for the R2 ETag field.
+`Jobs` and `Clients` use exactly that casing. Every path segment whose name is exactly `Dump`, compared case-insensitively, is excluded from synchronization. Names such as `Dumpsters` are not excluded by this rule. The producer must apply the same rule independently of rclone filters.
 
-## Identity and layout
-
-For a source key such as `Jobs/2026/Acme/edited/IMG_0042.JPG`, normalize the filename including extension to Unicode NFC, hash that filename with SHA-256, and publish siblings under:
+For a source such as:
 
 ```text
-Jobs/2026/Acme/edited/_ltds/previews/<sha256>/thumb.webp
-Jobs/2026/Acme/edited/_ltds/previews/<sha256>/preview.webp
-Jobs/2026/Acme/edited/_ltds/previews/<sha256>/poster.webp
-Jobs/2026/Acme/edited/_ltds/previews/<sha256>/manifest.json
+Jobs/Clients/Acme/edited/IMG_0042.JPG
 ```
 
-Videos use `poster.webp`; PDFs use `preview.webp`. The Worker requires `sourceKey`, the exact post-upload R2 `sourceEtag`, `sourceSize`, a non-empty `producerVersion`, and an ISO-8601 `createdAt`. Store derivative MIME/dimensions and a source SHA-256 as additional producer/audit data. A changed file cannot reuse a stale derivative.
+the leaf is `IMG_0042.JPG`, normalized to Unicode NFC including its extension before hashing. Derivatives are stored in the containing directory under a reserved `.previews` directory:
+
+```text
+Jobs/Clients/Acme/edited/.previews/<sha256-of-NFC-leaf-including-extension>/thumb.webp
+Jobs/Clients/Acme/edited/.previews/<sha256-of-NFC-leaf-including-extension>/preview.webp
+Jobs/Clients/Acme/edited/.previews/<sha256-of-NFC-leaf-including-extension>/poster.webp
+Jobs/Clients/Acme/edited/.previews/<sha256-of-NFC-leaf-including-extension>/manifest.json
+```
+
+Never recurse into `.previews` while scanning source files, and never treat a derivative as source media. The dedicated upload phase must still send generated `.previews` artifacts to R2. The hash is lowercase hexadecimal SHA-256 of the NFC leaf filename, including its extension; do not lowercase the filename before hashing.
+
+## Derivative contract
+
+- Images publish `thumb.webp` and `preview.webp`.
+- Videos publish `poster.webp`; FFmpeg encodes the poster as WebP. Video playback remains Cloudflare Stream or the original range-enabled object.
+- PDFs publish `thumb.webp` and `preview.webp`; Poppler rasterizes the first page before WebP encoding.
+
+Thumbnail output must be no larger than 100 KiB. Viewer preview output has a hard cap of 500 KiB (512000 bytes), with a preferred target of 450 KiB. The producer first iterates WebP quality downward, then reduces dimensions and repeats quality reduction until the target is met or the 512000-byte cap is reached. An output that still exceeds the hard cap is rejected and must not be published as current.
+
+Operations and Delivery independently reject prepared artifacts above those hard caps, so an incorrectly configured producer cannot turn the preview route back into a large-file delivery path.
+
+The source object is authoritative. Derivatives are disposable read models. Publish the source to R2 first, obtain that exact R2 object's ETag and size, and only then publish the derivative manifest. A local checksum cannot substitute for the exact post-upload R2 ETag or size.
+
+The final manifest is written last, after every referenced derivative has been uploaded and verified. It must contain at least:
 
 ```json
 {
-  "sourceKey": "Jobs/2026/Acme/edited/IMG_0042.JPG",
-  "sourceEtag": "\"the-r2-object-etag\"",
+  "sourceKey": "Jobs/Clients/Acme/edited/IMG_0042.JPG",
+  "sourceEtag": "\"the-exact-r2-object-etag\"",
   "sourceSize": 209715200,
-  "sourceSha256": "optional-but-recommended-64-hex-value",
+  "sourceSha256": "optional-64-hex-audit-value",
   "producerVersion": "ltds-preview/1.0.0",
-  "createdAt": "2026-07-23T12:00:00.000Z"
+  "createdAt": "2026-07-24T12:00:00.000Z",
+  "derivatives": {
+    "thumb": { "key": ".../thumb.webp", "bytes": 98304 },
+    "preview": { "key": ".../preview.webp", "bytes": 460800 }
+  }
 }
 ```
 
-## Producer behavior
+The manifest is valid only when each referenced object exists, has the expected WebP MIME type, dimensions, and byte size, and the manifest's `sourceKey`, exact R2 `sourceEtag`, and `sourceSize` still match the source. A changed source cannot reuse a stale derivative.
 
-Use libvips for still-image derivatives, ffmpeg for video posters and optional low-resolution proxies, and Poppler for the first PDF page. Preserve EXIF orientation while removing unnecessary metadata from public previews. Derivative MIME types must be checked after production, not inferred only from filenames.
+## Lifecycle
+
+```text
+TrueNAS source -> rclone COPY -> R2 Jobs/Clients/<client-or-organization>/
+                                      -> full source scan
+                                      -> preview job in local staging
+                                      -> derivative verification
+                                      -> manifest-last publish
+                                      -> Delivery reads derivative metadata
+```
 
 The producer must:
 
 1. Claim one source and record a job idempotency key from source identity plus checksum.
 2. Read from a read-only source location.
 3. Write to a private temporary directory outside the published prefix.
-4. Enforce CPU, memory, decoded-pixel, disk, duration, and concurrency limits.
-5. Validate dimensions, MIME, byte size, and image decodability.
-6. Upload derivatives to temporary keys.
+4. Enforce CPU, memory, decoded-pixel, disk, duration, process-count, and concurrency limits.
+5. Validate dimensions, MIME, byte size, WebP decodability, and the thumbnail/preview size caps.
+6. Upload derivatives to temporary keys in the correct `.previews/<hash>/` directory.
 7. Upload `manifest.json` last.
-8. Remove superseded derivatives only after the manifest is known-good.
+8. Remove superseded derivatives only after the replacement manifest is known-good.
 
-No preview process receives cloud credentials that can delete `Jobs/` objects. No preview process publishes client-visible paths directly.
+No preview process receives cloud credentials that can delete `Jobs/` source objects. No preview process publishes client-visible paths directly.
+
+## Stale artifact pruning
+
+The producer must never prune from a partial scan. After, and only after, a full successful local source scan, it may identify local `.previews` directories whose source leaf is absent. Those stale artifacts remain eligible for local deletion only after a 24-hour grace period. A failed scan, empty/unavailable source mount, transient rclone error, or partial traversal cancels pruning for that run.
+
+Prune local stale artifacts before the next source-to-R2 COPY can resurrect them. Pruning deletes only `.previews/<hash>/` artifacts and never source originals. R2 reconciliation remains authoritative for R2 cleanup; a single delete notification is not sufficient evidence for destructive R2 action.
 
 ## Inbound quarantine
 
-Files from an inbound request are not immediately part of `Jobs/`. They remain in a private incoming area with a request id and upload id. ClamAV scanning, size/quota validation, checksum verification, and operator acceptance happen before rclone or Hermes moves them into the normal source workflow. Malware, scan errors, incomplete multipart uploads, and policy violations remain quarantined for review or expiry.
+Files from an inbound request are not immediately part of `Jobs/Clients/`. They remain in a private incoming area with a request id and upload id. ClamAV scanning, size/quota validation, checksum verification, and operator acceptance happen before rclone or Hermes moves them into the normal source workflow. Malware, scan errors, incomplete multipart uploads, and policy violations remain quarantined for review or expiry.
 
 ## Failure and recovery rules
 
 - A failed preview leaves the source available and marks the derivative job failed.
 - A failed upload leaves temporary keys eligible for cleanup; it cannot replace the current manifest.
 - A partial rclone run does not prune previews or revoke delivery links.
-- A complete reconciliation can mark missing derivatives for pruning, but only after the configured grace period.
 - Restore source media from TrueNAS/ZFS first; rebuild derivatives from source rather than treating previews as backups.
 
 The same `client-data` bucket is used for source and hidden derivatives. A separate artifact bucket is intentionally not part of this design.
+
+## Security and sandbox boundary
+
+Treat every synchronized or uploaded media file as untrusted input. The producer must run as a non-root account in a sandbox or isolated service with no network access, a read-only source mount, a separate writable output directory, and explicit limits for input bytes, decoded pixels, CPU time, memory, temporary disk, process count, and concurrency. Reject decompression bombs, malformed containers, unexpected output MIME types, and files that exceed the configured media quota. Never pass source filenames through a shell; use argument arrays and safe path joins.
+
+Inbound files are quarantined and scanned with ClamAV before Hermes or the preview producer can read them. A positive or unavailable scan keeps the object quarantined and alerts staff. Only a clean, checksum-verified object can enter the normal inbound staging queue.

@@ -5,15 +5,16 @@ function hex(bytes: ArrayBuffer): string {
 }
 
 export async function previewIdentity(sourceKey: string): Promise<string> {
-  const leaf = sourceKey.replace(/\/$/, "").split("/").pop()?.normalize("NFC") || "";
+  const normalized = sourceKey.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/{2,}/g, "/").replace(/\/$/, "");
+  const leaf = normalized.split("/").pop()?.normalize("NFC") || "";
   return hex(await crypto.subtle.digest("SHA-256", encoder.encode(leaf)));
 }
 
 export async function artifactDirectory(sourceKey: string): Promise<string> {
-  const clean = sourceKey.replace(/\/$/, "");
+  const clean = sourceKey.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/{2,}/g, "/").replace(/\/$/, "");
   const slash = clean.lastIndexOf("/");
   const parent = slash < 0 ? "" : clean.slice(0, slash + 1);
-  return `${parent}_ltds/previews/${await previewIdentity(clean)}/`;
+  return `${parent}.previews/${await previewIdentity(clean)}/`;
 }
 
 export async function artifactKey(sourceKey: string, variant: "thumb" | "preview" | "poster" | "manifest"): Promise<string> {

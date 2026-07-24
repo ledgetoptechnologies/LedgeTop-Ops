@@ -10,6 +10,11 @@ const MIME: Record<string, string> = {
   pdf: "application/pdf", txt: "text/plain; charset=utf-8", csv: "text/csv; charset=utf-8", json: "application/json; charset=utf-8",
 };
 
+function reservedSegment(segment: string): boolean {
+  const value = segment.toLowerCase();
+  return value === "dump" || value === "_ltds" || value === ".previews";
+}
+
 function bytesToBase64Url(bytes: Uint8Array): string {
   let binary = ""; for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
@@ -32,7 +37,7 @@ export function decodeItemRef(value: string): string {
 export function validateRelativePath(value: string): string {
   if (!value || value.startsWith("/") || value.includes("\\") || /[\0-\x1f\x7f]/.test(value)) throw new HTTPException(400, { message: "Invalid item path" });
   const segments = value.split("/");
-  if (segments.some(segment => !segment || segment === "." || segment === ".." || segment.toLowerCase() === "dump") || segments[0]?.toLowerCase() === "_ltds") {
+  if (segments.some(segment => !segment || segment === "." || segment === ".." || reservedSegment(segment))) {
     throw new HTTPException(404, { message: "Item not found" });
   }
   return segments.join("/");
@@ -40,7 +45,7 @@ export function validateRelativePath(value: string): string {
 
 export function normalizeRoot(value: string): string {
   const root = value.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/{2,}/g, "/").replace(/\/$/, "");
-  if (!root || root.split("/").some(segment => !segment || segment === "." || segment === ".." || segment.toLowerCase() === "dump") || root.split("/")[0]?.toLowerCase() === "_ltds") {
+  if (!root || root.split("/").some(segment => !segment || segment === "." || segment === ".." || reservedSegment(segment))) {
     throw new HTTPException(500, { message: "Delivery folder is invalid" });
   }
   return root.endsWith("/") ? root : `${root}/`;
@@ -55,7 +60,7 @@ export function keyWithinRoot(rootValue: string, relative: string): string {
 
 export function isHiddenKey(key: string): boolean {
   const segments = key.replace(/\\/g, "/").split("/").filter(Boolean);
-  return segments.some(segment => segment.toLowerCase() === "dump" || segment.toLowerCase() === "_ltds");
+  return segments.some(reservedSegment);
 }
 
 export interface VisibleContentBucket {

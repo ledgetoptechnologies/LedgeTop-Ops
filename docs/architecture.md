@@ -49,7 +49,7 @@ The fragment is never transmitted in an HTTP request. The browser posts it once,
 
 Optional access codes are PBKDF2-derived with a random salt, application pepper, bounded iteration count, and rate limiting by share/client and client across shares. A session cannot outlive its share. Every manifest, preview, and download rechecks revocation and expiration.
 
-R2 paths use opaque base64url item references. Validation rejects traversal, backslashes, controls, absolute paths, `dump` components, and the reserved `_ltds` root. Unsafe formats such as HTML, XML, JavaScript, and SVG are downloads rather than inline content.
+R2 paths use opaque base64url item references. Validation rejects traversal, backslashes, controls, absolute paths, exact `dump` components, nested `.previews` artifacts, and the reserved `_ltds` root. Unsafe formats such as HTML, XML, JavaScript, and SVG are downloads rather than inline content.
 
 ## Airspace safety model
 

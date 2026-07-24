@@ -38,10 +38,10 @@ Provision `TURNSTILE_SECRET`, `INCOMING_SESSION_SECRET`, `INCOMING_ACCESS_CODE_P
 
 ## Pickup and promotion
 
-TrueNAS/Hermes polls the request prefix on its normal interval. It downloads only completed, clean, checksum-verified objects into a local quarantine/staging area, then moves accepted files into the operator-selected `Jobs/` destination. The promotion should be idempotent and retain the request id/upload id in a sidecar manifest or local job log.
+TrueNAS/Hermes polls the request prefix on its normal interval. It downloads only completed, clean, checksum-verified objects into a local quarantine/staging area, then moves accepted files into the operator-selected `Jobs/Clients/<client-or-organization>/...` destination. The promotion should be idempotent and retain the request id/upload id in a sidecar manifest or local job log.
 
 Delete the inbound R2 object only after local verification and successful promotion. Object disappearance alone is never treated as acceptance. After ClamAV succeeds, the SHA-256 checksum is verified, the local copy is durable, and the quarantine object is removed, call `POST /api/internal/uploads/:uploadId/accepted` with `Authorization: Bearer <INCOMING_PICKUP_SECRET>` and JSON `{ "sha256": "<64 hex characters>" }`. The Worker rejects the receipt while the quarantine object still exists. If pickup fails, leave the object for retry and alert rather than deleting it. Configure an R2 lifecycle backstop for `quarantine/` after 14 days; the Worker also aborts day-old incomplete uploads and expires completed quarantine objects after 14 days.
 
 ## Implemented boundary
 
-The Worker owns request authorization, Turnstile verification, exact quotas, multipart coordination, basic type checks, and request status. TrueNAS/Hermes owns malware scanning, checksum verification, durable local staging, promotion into `Jobs/`, and confirmation of local integrity. No inbound request object is eligible for a client Delivery share until promotion is complete.
+The Worker owns request authorization, Turnstile verification, exact quotas, multipart coordination, basic type checks, and request status. TrueNAS/Hermes owns malware scanning, checksum verification, durable local staging, promotion into `Jobs/Clients/<client-or-organization>/...`, and confirmation of local integrity. No inbound request object is eligible for a client Delivery share until promotion is complete.

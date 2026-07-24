@@ -10,7 +10,7 @@ Maintain separate staging Workers, D1 databases, R2 buckets, queues, hostnames, 
 
 D1 stores share metadata, access-code hashes, lifecycle state, file-index metadata, and audit records. Export production D1 daily to a separate protected R2 prefix or offline destination, retain at least 30 daily copies, and periodically restore into staging. Record the restore owner, timestamp, database version, row counts, and validation results.
 
-TrueNAS ZFS snapshots remain the primary recovery source for originals. R2 is a delivery mirror, not the only backup. Keep the rclone task configuration, R2 bucket lifecycle configuration, Worker bindings, and secret inventory in the operator password manager. Pull `_ltds/audit-archive/**` with a separate protected backup task. The normal `Jobs/` push may publish only nested `**/_ltds/previews/**`; it must exclude top-level Worker-owned `_ltds` paths and all other reserved subtrees. A recovery exercise must cover: restore D1, restore a sample source tree from ZFS, replay or rebuild file index, regenerate previews, and verify one client link.
+TrueNAS ZFS snapshots remain the primary recovery source for originals. R2 is a delivery mirror, not the only backup. Keep the rclone task configuration, R2 bucket lifecycle configuration, Worker bindings, and secret inventory in the operator password manager. Pull `_ltds/audit-archive/**` with a separate protected backup task. The normal `Jobs/Clients/` push may publish nested `**/.previews/**`; it must exclude top-level Worker-owned `_ltds` paths and all other reserved subtrees. A recovery exercise must cover: restore D1, restore a sample source tree from ZFS, replay or rebuild file index, regenerate previews, and verify one client link.
 
 ## Key rotation
 

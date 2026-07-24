@@ -13,13 +13,13 @@ describe("delivery app shell",()=>{
 
 describe("public item references",()=>{
   it("round-trips safe relative paths without exposing raw R2 keys",()=>{const ref=encodeItemRef("edited/video 01.mp4");expect(ref).not.toContain("/");expect(decodeItemRef(ref)).toBe("edited/video 01.mp4");expect(keyWithinRoot("jobs/2026/Client/","edited/video 01.mp4")).toBe("jobs/2026/Client/edited/video 01.mp4");});
-  it("rejects traversal, backslashes, dump, and reserved metadata",()=>{for(const value of ["../secret","edited\\secret","dump/raw.dng","_ltds/index.json"])expect(()=>keyWithinRoot("jobs/client/",value)).toThrow();expect(isHiddenKey("jobs/client/dump/raw.dng")).toBe(true);expect(isHiddenKey("_ltds/cache/file")).toBe(true);expect(isHiddenKey("jobs/client/unedited/photo.jpg")).toBe(false);});
+  it("rejects traversal, backslashes, dump, and reserved metadata",()=>{for(const value of ["../secret","edited\\secret","dump/raw.dng","_ltds/index.json",".previews/hash/thumb.webp"])expect(()=>keyWithinRoot("jobs/client/",value)).toThrow();expect(isHiddenKey("jobs/client/dump/raw.dng")).toBe(true);expect(isHiddenKey("_ltds/cache/file")).toBe(true);expect(isHiddenKey("jobs/client/edited/.previews/hash/thumb.webp")).toBe(true);expect(isHiddenKey("jobs/client/unedited/photo.jpg")).toBe(false);});
 });
 
 describe("shared folder availability",()=>{
   function bucket(tree:Record<string,{objects?:string[];folders?:string[]}>):VisibleContentBucket{return{async list({prefix}){const value=tree[prefix]||{};return{objects:(value.objects||[]).map(key=>({key})),delimitedPrefixes:value.folders||[],truncated:false};}};}
   it("finds visible content recursively",async()=>{await expect(prefixHasVisibleContent(bucket({"jobs/client/":{folders:["jobs/client/edited/"]},"jobs/client/edited/":{objects:["jobs/client/edited/photo.jpg"]}}),"jobs/client/")).resolves.toBe(true);});
-  it("does not treat dump, reserved metadata, or folder markers as client content",async()=>{await expect(prefixHasVisibleContent(bucket({"jobs/client/":{objects:["jobs/client/"],folders:["jobs/client/dump/","jobs/client/_ltds/"]}}),"jobs/client/")).resolves.toBe(false);expect(isHiddenKey("jobs/client/_ltds/index.json")).toBe(true);});
+  it("does not treat dump, reserved metadata, previews, or folder markers as client content",async()=>{await expect(prefixHasVisibleContent(bucket({"jobs/client/":{objects:["jobs/client/"],folders:["jobs/client/dump/","jobs/client/_ltds/","jobs/client/.previews/"]}}),"jobs/client/")).resolves.toBe(false);expect(isHiddenKey("jobs/client/_ltds/index.json")).toBe(true);expect(isHiddenKey("jobs/client/.previews/hash/preview.webp")).toBe(true);});
 });
 
 describe("shared folder unavailability grace",()=>{

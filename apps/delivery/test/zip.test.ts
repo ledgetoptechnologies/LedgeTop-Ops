@@ -56,8 +56,8 @@ describe("TrueNAS prepared artifacts", () => {
   it("uses the normalized full source filename and manifest-last variants", async () => {
     const source = "jobs\\2026//Client//photo.JPG";
     expect(normalizedSourceFilename(source)).toBe("photo.JPG");
-    await expect(preparedKey(source, "thumb")).resolves.toMatch(/^jobs\/2026\/Client\/_ltds\/previews\/[a-f0-9]{64}\/thumb\.webp$/);
-    await expect(preparedKey(source, "preview")).resolves.toMatch(/^jobs\/2026\/Client\/_ltds\/previews\/[a-f0-9]{64}\/preview\.webp$/);
-    await expect(preparedKey(source, "poster")).resolves.toMatch(/^jobs\/2026\/Client\/_ltds\/previews\/[a-f0-9]{64}\/poster\.webp$/);
+    await expect(preparedKey(source, "thumb")).resolves.toMatch(/^jobs\/2026\/Client\/\.previews\/[a-f0-9]{64}\/thumb\.webp$/);
+    await expect(preparedKey(source, "preview")).resolves.toMatch(/^jobs\/2026\/Client\/\.previews\/[a-f0-9]{64}\/preview\.webp$/);
+    await expect(preparedKey(source, "poster")).resolves.toMatch(/^jobs\/2026\/Client\/\.previews\/[a-f0-9]{64}\/poster\.webp$/);
   });
 });

@@ -177,8 +177,9 @@ async function requirePreparedImage(c: any, key: string, variant: "thumbnail" | 
     throw new HTTPException(404, { message: "Prepared preview unavailable" });
   }
   const object = await c.env.DATA_BUCKET.get(await preparedKey(key, preparedVariant));
-  if (!object) throw new HTTPException(404, { message: "Prepared preview unavailable" });
-  const headers = new Headers(); headers.set("Content-Type", "image/webp"); headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("Content-Disposition", "inline"); headers.set("X-Content-Type-Options", "nosniff");
+  const maxBytes = preparedVariant === "preview" ? 512_000 : 100 * 1024;
+  if (!object || object.size > maxBytes) throw new HTTPException(404, { message: "Prepared preview unavailable" });
+  const headers = new Headers(); headers.set("Content-Type", "image/webp"); headers.set("Content-Length", String(object.size)); headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("Content-Disposition", "inline"); headers.set("X-Content-Type-Options", "nosniff");
   return new Response(object.body, { headers });
 }
 

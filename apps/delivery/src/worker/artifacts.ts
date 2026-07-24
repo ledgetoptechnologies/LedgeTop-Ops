@@ -8,5 +8,5 @@ export function normalizedSourceFilename(sourceKey: string): string {
 export async function preparedKey(sourceKey: string, variant: "thumb" | "preview" | "poster"): Promise<string> {
   const normalizedPath = sourceKey.trim().replace(/\\/g, "/").replace(/^\/+/, "").replace(/\/{2,}/g, "/");
   const directory = normalizedPath.includes("/") ? normalizedPath.slice(0, normalizedPath.lastIndexOf("/")) : "";
-  return `${directory ? `${directory}/` : ""}_ltds/previews/${await sha256Hex(normalizedSourceFilename(sourceKey))}/${variant}.webp`;
+  return `${directory ? `${directory}/` : ""}.previews/${await sha256Hex(normalizedSourceFilename(sourceKey))}/${variant}.webp`;
 }
