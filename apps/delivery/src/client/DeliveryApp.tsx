@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import type { DeliveryItem, DeliveryManifest } from "@ltds/shared";
+import { BRAND, MAX_INLINE_ORIGINAL_PREVIEW_BYTES, canInlineOriginalPreview, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
 import { Brand, EmptyState, Loading } from "@ltds/ui";
 import { openDeliveryRoute, parseDeliveryRoute } from "./route";
 
@@ -256,11 +256,11 @@ function PublicFrame({ children }: { children: React.ReactNode }) {
 }
 
 function DeliveryLoadingSkeleton() {
-  return <section className="delivery-loading" aria-label="Loading delivery"><div className="skeleton skeleton-heading" /><div className="skeleton-toolbar"><span className="skeleton skeleton-control" /><span className="skeleton skeleton-control" /></div><div className="skeleton-grid">{Array.from({ length: 8 }, (_, index) => <div className="skeleton-card" key={index}><span className="skeleton skeleton-media" /><span className="skeleton skeleton-line wide" /><span className="skeleton skeleton-line" /></div>)}</div></section>;
+  return <section className="delivery-loading" role="status" aria-label="Loading delivery"><div className="skeleton skeleton-heading" /><div className="skeleton-toolbar"><span className="skeleton skeleton-control" /><span className="skeleton skeleton-control" /></div><div className="skeleton-grid">{Array.from({ length: 8 }, (_, index) => <div className="skeleton-card" key={index}><span className="skeleton skeleton-media" /><span className="skeleton skeleton-line wide" /><span className="skeleton skeleton-line" /></div>)}</div></section>;
 }
 
 function BulkProgress({ progress }: { progress: { status: string; percent: number | null; message?: string } }) {
-  return <div className="bulk-progress" role="status"><div><strong>{progress.status}</strong><span>{progress.message || (progress.percent === null ? "Large downloads may take a moment." : `${progress.percent}%`)}</span></div><div className="progress-track"><span style={{ width: `${progress.percent === null ? 35 : progress.percent}%` }} /></div></div>;
+  return <div className="bulk-progress" role="status" aria-live="polite"><div><strong>{progress.status}</strong><span>{progress.message || (progress.percent === null ? "Large downloads may take a moment." : `${progress.percent}%`)}</span></div><div className={`progress-track${progress.percent === null ? " pending" : ""}`}><span style={{ width: `${progress.percent === null ? 35 : progress.percent}%` }} /></div></div>;
 }
 
 function AccessCodeForm({ onSubmit, error }: { onSubmit: (code: string) => Promise<void>; error: string }) {
@@ -296,33 +296,39 @@ function Preview({ item, publicId, onClose }: { item: DeliveryItem; publicId: st
     document.addEventListener("keydown", closeOnEscape);
     return () => document.removeEventListener("keydown", closeOnEscape);
   }, [onClose]);
-  return <div className="preview-backdrop" role="dialog" aria-modal="true" aria-label={`Preview ${item.name}`} onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}><section className="preview-dialog"><header><strong>{item.name}</strong>{item.downloadUrl && <a className="button button-orange button-small" href={item.downloadUrl}>Download</a>}<button className="button-ghost button-small" onClick={onClose}>Close</button></header><div className="preview-stage">
-    {item.kind === "image" && item.previewUrl ? <ImagePreview item={item} /> : item.kind === "video" ? <VideoPreview item={item} publicId={publicId} /> : item.kind === "audio" && item.previewUrl ? <audio src={item.previewUrl} controls autoPlay /> : (item.kind === "pdf" || item.kind === "text") && item.previewUrl ? <iframe src={item.previewUrl} title={item.name} /> : <EmptyState title="Preview unavailable" detail="Download this file to open it in its original application." />}
+  return <div className="preview-backdrop" role="dialog" aria-modal="true" aria-label={`Preview ${item.name}`} onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}><section className="preview-dialog"><header><strong>{item.name}</strong><DownloadOriginal item={item} compact /><button className="button-ghost button-small" onClick={onClose}>Close</button></header><div className="preview-stage">
+    {item.kind === "image" || item.kind === "pdf" ? <ImagePreview item={item} /> : item.kind === "video" ? <VideoPreview item={item} publicId={publicId} /> : item.kind === "audio" && item.previewUrl && canInlineOriginalPreview(item.kind, item.size ?? -1) ? <audio src={item.previewUrl} controls autoPlay /> : item.kind === "text" && item.previewUrl && canInlineOriginalPreview(item.kind, item.size ?? -1) ? <iframe src={item.previewUrl} title={item.name} loading="lazy" /> : <PreparedPlaceholder item={item} />}
   </div></section></div>;
 }
 
 function ImagePreview({ item }: { item: DeliveryItem }) {
-  const [original, setOriginal] = useState(false); const [loaded, setLoaded] = useState(false);
-  const media = item as DeliveryItem & { originalUrl?: string; sourceUrl?: string };
-  const originalUrl = media.originalUrl || media.sourceUrl || item.downloadUrl;
-  const large = (item.size || 0) >= 25 * 1024 * 1024;
-  function viewOriginal() { if (!originalUrl) return; if (large && !window.confirm("This original image is 25 MB or larger and may load slowly. View it anyway?")) return; setOriginal(true); }
-  return <div className="image-preview">{!loaded && <SkeletonViewer />}<img src={original ? originalUrl : item.previewUrl} alt={item.name} loading="eager" decoding="async" onLoad={() => setLoaded(true)} />{originalUrl && !original && <button className="viewer-action" onClick={viewOriginal}>View original anyway{large ? ` (${formatBytes(item.size)})` : ""}</button>}</div>;
+  const [failed, setFailed] = useState(!item.previewUrl); const [loaded, setLoaded] = useState(false);
+  if (failed) return <PreparedPlaceholder item={item} />;
+  return <div className="image-preview" aria-busy={!loaded}>{!loaded && <SkeletonViewer />}<img src={item.previewUrl} alt={item.name} loading="lazy" decoding="async" onLoad={() => setLoaded(true)} onError={() => setFailed(true)} /></div>;
 }
 
-function SkeletonViewer() { return <span className="skeleton-viewer" aria-label="Loading preview" />; }
+function SkeletonViewer() { return <span className="skeleton-viewer" role="status" aria-label="Loading preview" />; }
+
+function DownloadOriginal({ item, compact = false }: { item: DeliveryItem; compact?: boolean }) {
+  if (!item.downloadUrl) return null;
+  return <a className={compact ? "button button-orange button-small" : "viewer-download"} href={item.downloadUrl}>Download original</a>;
+}
+
+function PreparedPlaceholder({ item }: { item: DeliveryItem }) {
+  return <div className="prepared-placeholder"><img className="preview-brand-logo" src={BRAND.logoUrl} alt={BRAND.shortName} /><strong>No preview generated yet</strong><p>{item.size !== null && item.size > MAX_INLINE_ORIGINAL_PREVIEW_BYTES ? "This file is larger than 10 MB, so its original will not load automatically." : "A prepared preview is not available yet."} The original file is still available.</p><DownloadOriginal item={item} /></div>;
+}
 
 function VideoPreview({ item, publicId }: { item: DeliveryItem; publicId: string }) {
-  const [loading, setLoading] = useState(true); const [buffered, setBuffered] = useState(0);
+  const [loading, setLoading] = useState(true); const [ticketLoading, setTicketLoading] = useState(item.previewStatus === "ready");
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
-  useEffect(() => { let cancelled = false; requestJson<{ streamUrl?: string; url?: string }>(`/api/public/shares/${encodeURIComponent(publicId)}/items/${encodeURIComponent(item.id)}/stream-ticket`, { method: "POST" }).then(result => { if (!cancelled) setStreamUrl(result.streamUrl || result.url || null); }).catch(() => { if (!cancelled) setStreamUrl(item.streamUrl || null); }); return () => { cancelled = true; }; }, [item.id, item.streamUrl, publicId]);
+  useEffect(() => { let cancelled = false; if (item.previewStatus !== "ready") { setTicketLoading(false); return () => { cancelled = true; }; } requestJson<{ streamUrl?: string; url?: string }>(`/api/public/shares/${encodeURIComponent(publicId)}/items/${encodeURIComponent(item.id)}/stream-ticket`, { method: "POST" }).then(result => { if (!cancelled) setStreamUrl(result.streamUrl || result.url || null); }).catch(() => { if (!cancelled) setStreamUrl(null); }).finally(() => { if (!cancelled) setTicketLoading(false); }); return () => { cancelled = true; }; }, [item.id, item.previewStatus, publicId]);
   if (streamUrl) return <div className="video-preview">{loading && <span className="media-status">Opening video preview…</span>}<iframe src={streamUrl} title={item.name} onLoad={() => setLoading(false)} allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture" allowFullScreen /></div>;
-  if (!item.previewUrl) return <EmptyState title={item.previewStatus === "processing" ? "Video preview is being prepared" : "Preview unavailable"} detail="You can still download the original video." />;
-  return <div className="video-preview">{(loading || item.previewStatus === "processing") && <span className="media-status">{buffered ? `Buffering preview… ${buffered}%` : "Preparing video preview…"}</span>}<video src={item.previewUrl} poster={item.thumbnailUrl} controls autoPlay playsInline preload="metadata" onLoadStart={() => setLoading(true)} onCanPlay={() => setLoading(false)} onPlaying={() => setLoading(false)} onProgress={event => { const video = event.currentTarget; if (video.duration && video.buffered.length) setBuffered(Math.min(100, Math.round((video.buffered.end(video.buffered.length - 1) / video.duration) * 100))); }} /></div>;
+  if (ticketLoading) return <div className="video-preview" aria-busy="true"><SkeletonViewer /><span className="media-status">Opening video preview…</span></div>;
+  return <PreparedPlaceholder item={item} />;
 }
 
 function Thumbnail({ item }: { item: DeliveryItem }) {
-  const [failed, setFailed] = useState(false);
-  if (failed) return <span className="file-kind">{iconFor(item)}</span>;
-  return <img src={item.thumbnailUrl} loading="lazy" decoding="async" alt="" onError={() => setFailed(true)} />;
+  const [failed, setFailed] = useState(false); const [loaded, setLoaded] = useState(false);
+  if (failed) return <span className="media-placeholder branded-media-placeholder" aria-label={`${iconFor(item)} preview unavailable`}><img src={BRAND.logoUrl} alt="" loading="lazy" decoding="async" /><small>No preview generated yet</small></span>;
+  return <>{!loaded && <span className="thumbnail-skeleton" aria-hidden="true" />}<img src={item.thumbnailUrl} loading="lazy" decoding="async" alt="" onLoad={() => setLoaded(true)} onError={() => setFailed(true)} /></>;
 }

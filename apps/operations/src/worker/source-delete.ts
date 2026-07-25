@@ -46,7 +46,7 @@ export async function previewSourceDelete(env: Env, itemRef: string): Promise<De
     (COALESCE(s.r2_prefix,p.r2_prefix)=? OR substr(COALESCE(s.r2_prefix,p.r2_prefix),1,length(?))=?)`)
     .bind(target.key, sharePrefix, sharePrefix).first<{ count: number }>();
   const typedName = target.key.replace(/\/$/, "").split("/").pop() || target.key;
-  return { key: target.key, isFolder: target.isFolder, typedName, objectCount: target.objects.length, byteCount: target.objects.reduce((sum, object) => sum + object.size, 0), shareCount: Number(shares?.count || 0), warnings: ["TrueNAS is the source of truth and can resync this path.", "The source will be hidden immediately and purged from R2 after 30 days unless restored.", ...(target.isFolder ? ["All descendants will be moved to Trash together."] : []), ...(Number(shares?.count || 0) ? ["Descendant delivery shares will be revoked immediately."] : [])] };
+  return { key: target.key, isFolder: target.isFolder, typedName, objectCount: target.objects.length, byteCount: target.objects.reduce((sum, object) => sum + object.size, 0), shareCount: Number(shares?.count || 0), warnings: ["TrueNAS is the source of truth and can resync this path.", "The source will be hidden immediately and purged from R2 after 7 days unless restored.", ...(target.isFolder ? ["All descendants will be moved to Trash together."] : []), ...(Number(shares?.count || 0) ? ["Descendant delivery shares will be revoked immediately."] : [])] };
 }
 
 export async function executeSourceDelete(env: Env, principal: StaffPrincipal, itemRef: string, confirmation: unknown): Promise<DeletePreview> {
@@ -75,5 +75,5 @@ export async function executeSourceDelete(env: Env, principal: StaffPrincipal, i
     throw error;
   }
   await env.OPS_DB.batch([env.OPS_DB.prepare("INSERT INTO audit_events(actor_type,actor_id,actor_email,actor_display_name,action,entity_type,entity_id,details_json) VALUES('staff',?,?,?,?,?,?,?)").bind(principal.id, principal.email, principal.displayName, "delivery.source_deleted", "file", preview.key, JSON.stringify({ reason: "staff_deleted_source", objectCount: preview.objectCount, byteCount: preview.byteCount, shareCount: affected.results.length }))]);
-  return { ...preview, key: tombstone.physical_key, warnings: [...preview.warnings, "The source remains in Trash for 30 days and can be restored by an administrator."] };
+  return { ...preview, key: tombstone.physical_key, warnings: [...preview.warnings, "The source remains in Trash for 7 days and can be restored by an administrator."] };
 }

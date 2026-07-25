@@ -1,6 +1,6 @@
 # Hermes preview pipeline
 
-This is the production contract between TrueNAS, Hermes, the preview producer, and LTDS Delivery. Cards and normal viewers use prepared derivatives; originals remain explicit download or opt-in fallback sources.
+This is the production contract between TrueNAS, Hermes, the preview producer, and LTDS Delivery. Cards and normal viewers prefer prepared derivatives. Browser-safe original images are a bounded compatibility fallback only when the source is at most 10 MiB; larger originals remain explicit downloads.
 
 ## Canonical source layout
 
@@ -38,6 +38,14 @@ Never recurse into `.previews` while scanning source files, and never treat a de
 Thumbnail output must be no larger than 100 KiB. Viewer preview output has a hard cap of 500 KiB (512000 bytes), with a preferred target of 450 KiB. The producer first iterates WebP quality downward, then reduces dimensions and repeats quality reduction until the target is met or the 512000-byte cap is reached. An output that still exceeds the hard cap is rejected and must not be published as current.
 
 Operations and Delivery independently reject prepared artifacts above those hard caps, so an incorrectly configured producer cannot turn the preview route back into a large-file delivery path.
+
+## Browser fallback behavior
+
+Thumbnail and viewer images use explicit dimensions, asynchronous decoding, and browser-native lazy loading. If a valid prepared image artifact is unavailable, the Workers may serve the original image inline only when its R2 object size is at most 10 MiB. The Worker checks the authoritative R2 size before reading the body.
+
+Files above 10 MiB do not use their originals as automatic thumbnails or viewer content. PDFs without a valid prepared artifact, raw videos without ready Stream playback, and unsupported media follow the same safe presentation: the LTDS logo, **No preview generated yet**, and an explicit **Download original** action. This keeps a folder containing several large drone files responsive while Hermes finishes—or has not yet produced—its artifacts.
+
+The original-file fallback is intentionally a transition aid, not a replacement for the preview pipeline. A folder containing many sub-10-MiB originals can still transfer more data than prepared WebP thumbnails, so normal production data should publish valid artifacts.
 
 The source object is authoritative. Derivatives are disposable read models. Publish the source to R2 first, obtain that exact R2 object's ETag and size, and only then publish the derivative manifest. A local checksum cannot substitute for the exact post-upload R2 ETag or size.
 
@@ -102,6 +110,12 @@ Files from an inbound request are not immediately part of `Jobs/Clients/`. They 
 - Restore source media from TrueNAS/ZFS first; rebuild derivatives from source rather than treating previews as backups.
 
 The same `client-data` bucket is used for source and hidden derivatives. A separate artifact bucket is intentionally not part of this design.
+
+## Optional R2-only upload processing
+
+Operations uploads that did not pass through TrueNAS can initially remain download-only and use the safe placeholder above. If automatic processing becomes necessary, use R2 object-create notifications with a Cloudflare Queue configured for HTTP pull. A sandboxed Hermes service on TrueNAS can pull and acknowledge jobs over outbound HTTPS, retrieve the source directly from R2, and publish the normal adjacent `.previews` artifacts. Delivery must not call the TrueNAS server during a client page request.
+
+The consumer must ignore `Dump`, `.previews`, `_ltds`, temporary upload, trash, and recovery paths; deduplicate by source key and R2 identity; acknowledge generated-artifact events without processing them; and periodically reconcile sources lacking valid manifests so an expired or missed event cannot leave permanent gaps.
 
 ## Security and sandbox boundary
 

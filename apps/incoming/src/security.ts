@@ -133,6 +133,14 @@ export function validateIncomingFile(name: string, contentType: string, size: nu
   return normalized;
 }
 
+export function incomingMultipartPartSize(size: number): number {
+  if (!Number.isSafeInteger(size) || size <= 0) throw new HTTPException(400, { message: "Invalid upload size" });
+  const minimum = 32 * 1024 ** 2;
+  const fiveMiB = 5 * 1024 ** 2;
+  const required = Math.ceil(size / 10_000);
+  return Math.max(minimum, Math.ceil(required / fiveMiB) * fiveMiB);
+}
+
 export function hasBlockedMagic(bytes: Uint8Array): boolean {
   if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a) return true;
   const prefix = new TextDecoder().decode(bytes.slice(0, 256)).trimStart().toLowerCase();

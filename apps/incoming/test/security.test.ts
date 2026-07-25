@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasBlockedMagic, presignR2Part, validateIncomingFile } from "../src/security";
+import { hasBlockedMagic, incomingMultipartPartSize, presignR2Part, validateIncomingFile } from "../src/security";
 
 describe("incoming upload security", () => {
   it("rejects executable and active web content", () => {
@@ -33,5 +33,13 @@ describe("incoming upload security", () => {
     expect(url).toMatch(/X-Amz-Signature=[a-f0-9]{64}$/);
     const unsignedNames = new URL(url).search.slice(1).split("&").slice(0, -1).map(part => part.split("=")[0]);
     expect(unsignedNames).toEqual([...unsignedNames].sort());
+  });
+
+  it("increases part size before reaching R2's 10,000-part ceiling", () => {
+    expect(incomingMultipartPartSize(200 * 1024 ** 2)).toBe(32 * 1024 ** 2);
+    const twoTiB = 2 * 1024 ** 4;
+    const partSize = incomingMultipartPartSize(twoTiB);
+    expect(Math.ceil(twoTiB / partSize)).toBeLessThanOrEqual(10_000);
+    expect(partSize % (5 * 1024 ** 2)).toBe(0);
   });
 });

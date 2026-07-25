@@ -4,7 +4,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { requestPage } from "./page";
-import { constantTimeEqual, createUploadSession, hasBlockedMagic, hmac, presignR2Part, validateIncomingFile, verifyUploadSession } from "./security";
+import { constantTimeEqual, createUploadSession, hasBlockedMagic, hmac, incomingMultipartPartSize, presignR2Part, validateIncomingFile, verifyUploadSession } from "./security";
 
 type Env = {
   OPS_DB: D1Database;
@@ -132,10 +132,10 @@ async function staff(request: Request, env: Env): Promise<{ id: string; email: s
     if (bound.meta.changes !== 1) throw new HTTPException(403, { message: "Staff identity could not be bound" });
   }
   const permission = await env.OPS_DB.withSession("first-primary").prepare(`SELECT
-    EXISTS(SELECT 1 FROM staff_permission_overrides WHERE staff_id=? AND permission_key='delivery.share' AND effect='deny' AND scope='global') AS denied,
-    (EXISTS(SELECT 1 FROM staff_permission_overrides WHERE staff_id=? AND permission_key='delivery.share' AND effect='allow' AND scope='global')
+    EXISTS(SELECT 1 FROM staff_permission_overrides WHERE staff_id=? AND permission_key='delivery.share.create' AND effect='deny' AND scope='global') AS denied,
+    (EXISTS(SELECT 1 FROM staff_permission_overrides WHERE staff_id=? AND permission_key='delivery.share.create' AND effect='allow' AND scope='global')
       OR EXISTS(SELECT 1 FROM staff_role_assignments a JOIN role_permissions p ON p.role_id=a.role_id
-        WHERE a.staff_id=? AND a.scope='global' AND p.permission_key='delivery.share')) AS allowed`)
+        WHERE a.staff_id=? AND a.scope='global' AND p.permission_key='delivery.share.create')) AS allowed`)
     .bind(user.id, user.id, user.id).first<{ denied: number; allowed: number }>();
   if (!permission || permission.denied || !permission.allowed) throw new HTTPException(403, { message: "Global delivery administration is required" });
   return { id: user.id, email };
@@ -225,7 +225,7 @@ app.post("/api/public/requests/:publicId/files/init", async (c) => {
       await c.env.DELIVERY_DB.prepare("DELETE FROM file_request_uploads WHERE id=?").bind(fileId).run();
       throw workflowError;
     }
-    return c.json({ fileId, partSize: 32 * 1024 * 1024 });
+    return c.json({ fileId, partSize: incomingMultipartPartSize(input.size) });
   } catch (error) {
     await c.env.DELIVERY_DB.prepare("UPDATE file_requests SET reserved_files=MAX(0,reserved_files-1),reserved_bytes=MAX(0,reserved_bytes-?) WHERE id=?")
       .bind(input.size, row.id).run();

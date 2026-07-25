@@ -3,18 +3,21 @@ import { HTTPException } from "hono/http-exception";
 import type { Env, GrantRow, ResourceContext, StaffPrincipal } from "./types";
 
 export async function loadGrants(env: Env, staffId: string): Promise<GrantRow[]> {
-  const result = await env.OPS_DB.prepare(`
+  const result = await env.OPS_DB.withSession("first-primary").prepare(`
     SELECT rp.permission_key permission,'allow' effect,a.scope,a.division_id divisionId,'role' source
     FROM staff_role_assignments a JOIN role_permissions rp ON rp.role_id=a.role_id WHERE a.staff_id=?
     UNION ALL
+    SELECT rp.permission_key permission,'allow' effect,a.scope,a.division_id divisionId,'role' source
+    FROM local_staff_role_assignments a JOIN role_permissions rp ON rp.role_id=a.role_id WHERE a.staff_id=?
+    UNION ALL
     SELECT permission_key permission,effect,scope,division_id divisionId,'override' source
     FROM staff_permission_overrides WHERE staff_id=?
-  `).bind(staffId, staffId).all<GrantRow>();
+  `).bind(staffId, staffId, staffId).all<GrantRow>();
   return result.results;
 }
 
 export async function isAdministrator(env: Env, principal: StaffPrincipal): Promise<boolean> {
-  return Boolean(await env.OPS_DB.prepare("SELECT 1 ok FROM staff_role_assignments WHERE staff_id=? AND role_id IN ('role-owner','role-admin') AND scope='global' LIMIT 1").bind(principal.id).first());
+  return Boolean(await env.OPS_DB.withSession("first-primary").prepare("SELECT 1 ok FROM staff_role_assignments WHERE staff_id=? AND role_id IN ('role-owner','role-admin') AND scope='global' LIMIT 1").bind(principal.id).first());
 }
 
 function matches(grant: GrantRow, principal: StaffPrincipal, context?: ResourceContext): boolean {

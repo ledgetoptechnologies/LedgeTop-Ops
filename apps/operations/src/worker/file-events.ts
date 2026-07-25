@@ -115,6 +115,8 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       }
       if (removed(event.action) || hidden(key)) { await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run(); message.ack(); continue; }
       if (!created(event.action)) { message.ack(); continue; }
+      const suppressed=await env.OPS_DB.prepare("DELETE FROM r2_event_suppressions WHERE object_key=? AND event_kind='create' AND datetime(expires_at)>datetime('now') RETURNING object_key").bind(key).first();
+      if(suppressed){message.ack();continue;}
       const head = await env.DATA_BUCKET.head(key); if (!head) { message.retry(); continue; }
       const kind = mediaKind(key);
       const existing = await env.DELIVERY_DB.prepare("SELECT etag,stream_uid,stream_status,stream_upload_url,stream_upload_offset FROM file_index WHERE r2_key=?").bind(key).first<TusState>();

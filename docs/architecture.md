@@ -21,6 +21,10 @@ delivery.ledgetopdroneservices.com
 
 Delivery never receives an `OPS_DB` binding. R2 has no public bucket domain. Both Workers stream object bodies and HTTP byte ranges rather than buffering media.
 
+Operations state changes deny non-administrators by default and also require the matching D1 permission. The only delegated mutation exceptions are delivery-link creation/revocation; authenticated Delivery Coordinators may also request short-lived Stream preview tickets. Project Alpha controls which identities may sign in; local D1 roles control what those identities may do after authentication. Delivery Coordinators can browse and manage links without receiving R2 mutation permissions.
+
+Large staff uploads use short-lived, object-specific R2 authorization and browser-to-R2 transfer. The Worker validates the destination before issuing authorization and never accepts a caller-supplied unrestricted R2 key. Recursive copy, move, rename, replacement, and purge work is represented by durable operation records and processed in bounded, idempotent steps. Folder copy, move, and rename requests are rejected when the destination is the source itself or any descendant of the source, and the job processor repeats that validation before touching R2.
+
 ## Staff authentication and ACL
 
 Cloudflare Access authenticates people; it does not grant LTDS permissions. The Ops Worker verifies the Access JWT signature, issuer, expiry, exact Operations audience, `RS256`, `type=app`, nonempty human subject, and email. The email must match an active provisioned account. On first successful login, that account binds to the Access subject and rejects future subject mismatches.
@@ -49,7 +53,9 @@ The fragment is never transmitted in an HTTP request. The browser posts it once,
 
 Optional access codes are PBKDF2-derived with a random salt, application pepper, bounded iteration count, and rate limiting by share/client and client across shares. A session cannot outlive its share. Every manifest, preview, and download rechecks revocation and expiration.
 
-R2 paths use opaque base64url item references. Validation rejects traversal, backslashes, controls, absolute paths, exact `dump` components, nested `.previews` artifacts, and the reserved `_ltds` root. Unsafe formats such as HTML, XML, JavaScript, and SVG are downloads rather than inline content.
+R2 paths use opaque base64url item references. Validation rejects traversal, backslashes, controls, absolute paths, exact case-insensitive `dump` components, nested `.previews` artifacts, and the reserved `_ltds` root. Unsafe formats such as HTML, XML, JavaScript, and SVG are downloads rather than inline content.
+
+Prepared `.previews` artifacts are preferred for photo and PDF cards and viewers. When an image artifact is absent or invalid, a browser-safe original image may be loaded lazily only when the source is at most 10 MiB. Originals above 10 MiB, PDFs without prepared artifacts, raw videos, and other unsupported media are never loaded automatically; the interface shows the LTDS logo, “No preview generated yet,” and an explicit original-download action. The 10 MiB check is enforced by the Worker as well as the UI, so a modified client cannot turn a preview route into an unbounded original-file response.
 
 ## Airspace safety model
 

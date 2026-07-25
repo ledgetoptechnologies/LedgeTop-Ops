@@ -10,6 +10,12 @@ export const PERMISSIONS = [
   "delivery.browse",
   "delivery.rename",
   "delivery.delete",
+  "delivery.files.create",
+  "delivery.files.copy",
+  "delivery.files.move",
+  "delivery.files.upload",
+  "delivery.files.batch",
+  "delivery.files.restore",
   "delivery.share.create",
   "delivery.share.revoke",
   "delivery.share.audit",
@@ -58,6 +64,13 @@ export interface DeliveryManifest {
   folder: { id: string; name: string; breadcrumbs: Array<{ id: string; name: string }> };
   items: DeliveryItem[];
   nextCursor: string | null;
+}
+
+export const MAX_INLINE_ORIGINAL_PREVIEW_BYTES = 10 * 1024 * 1024;
+
+export function canInlineOriginalPreview(kind: DeliveryItem["kind"], size: number): boolean {
+  return (kind === "image" || kind === "audio" || kind === "text") &&
+    Number.isSafeInteger(size) && size >= 0 && size <= MAX_INLINE_ORIGINAL_PREVIEW_BYTES;
 }
 
 export const BRAND = {

@@ -39,7 +39,7 @@ export async function createTombstone(env: Env, principal: StaffPrincipal, key: 
   const physicalKey = isFolder ? normalizePrefix(key) : key;
   const id = crypto.randomUUID();
   const deletedAt = new Date();
-  const purgeAfter = new Date(deletedAt.getTime() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  const purgeAfter = new Date(deletedAt.getTime() + 7 * 24 * 60 * 60 * 1000).toISOString();
   await env.DELIVERY_DB.prepare(`INSERT INTO delivery_tombstones
     (id,physical_key,tombstone_kind,deleted_by,deleted_at,purge_after) VALUES (?,?,?,?,?,?)`)
     .bind(id, physicalKey, isFolder ? "prefix" : "exact", principal.id, deletedAt.toISOString(), purgeAfter).run();

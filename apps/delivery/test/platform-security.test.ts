@@ -6,6 +6,7 @@ import { hashAccessCode } from "../../operations/src/worker/crypto";
 import { verifyAccessCode } from "../src/worker/security";
 import { ensurePublicId, markUnavailableFolder, serveAppShell } from "../src/worker/index";
 import type { ShareRow } from "../src/worker/types";
+import { canInlineOriginalPreview } from "@ltds/shared";
 
 describe("delivery app shell",()=>{
   it("preserves the public share path when requesting the SPA fallback",async()=>{let requestedPath="";const response=await serveAppShell(new Request("https://delivery.ledgetopdroneservices.com/s/public-id"),{fetch:async input=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("app shell",{status:200});}});expect(requestedPath).toBe("/s/public-id");expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();});
@@ -49,6 +50,17 @@ describe("access-code interoperability",()=>{
 describe("single byte range parsing",()=>{
   it("supports prefix, open, and suffix ranges",()=>{expect(parseRange("bytes=0-99",1000)).toEqual({offset:0,length:100});expect(parseRange("bytes=900-",1000)).toEqual({offset:900,length:100});expect(parseRange("bytes=-100",1000)).toEqual({offset:900,length:100});});
   it("rejects multiple, malformed, and unsatisfiable ranges",()=>{for(const value of ["bytes=0-1,4-5","items=0-1","bytes=1000-1200","bytes=20-10"])expect(()=>parseRange(value,1000)).toThrow();});
+});
+
+describe("bounded original preview fallback",()=>{
+  it("allows only safe media kinds through 10 MiB",()=>{
+    expect(canInlineOriginalPreview("image",10*1024*1024)).toBe(true);
+    expect(canInlineOriginalPreview("image",10*1024*1024+1)).toBe(false);
+    expect(canInlineOriginalPreview("text",1024)).toBe(true);
+    expect(canInlineOriginalPreview("pdf",1024)).toBe(false);
+    expect(canInlineOriginalPreview("video",1024)).toBe(false);
+    expect(canInlineOriginalPreview("image",-1)).toBe(false);
+  });
 });
 
 describe("R2 download tickets",()=>{
