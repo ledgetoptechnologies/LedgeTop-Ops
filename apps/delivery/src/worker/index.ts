@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
-import { canInlineOriginalPreview, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
+import { type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
 import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName } from "./files";
 import { createSessionCookie, hmac, parseCookie, presignR2Get, randomSecret, sha256, verifyAccessCode, verifyRotatingSessionCookie } from "./security";
 import { preparedKey } from "./artifacts";
@@ -183,18 +183,13 @@ async function requirePreparedImage(c: any, key: string, variant: "thumbnail" | 
   return new Response(object.body, { headers });
 }
 
-async function preparedOrSmallOriginalImage(c: any, key: string, variant: "thumbnail" | "preview"): Promise<Response> {
+async function preparedOrOriginalImage(c: any, key: string, variant: "thumbnail" | "preview"): Promise<Response> {
   try {
     return await requirePreparedImage(c, key, variant);
   } catch (error) {
     if (!(error instanceof HTTPException) || error.status !== 404) throw error;
   }
-  const head = await c.env.DATA_BUCKET.head(key);
-  if (!head) throw new HTTPException(404, { message: "File not found" });
-  if (!canInlineOriginalPreview("image", head.size)) {
-    throw new HTTPException(404, { message: "No preview generated yet" });
-  }
-  return streamItem(c, "inline");
+  return streamItem(c, "inline", true);
 }
 
 app.get("/health", c => c.json({ status: "ok", service: "ltds-delivery" }));
@@ -299,6 +294,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
     const base = `/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${id}`;
     const item: DeliveryItem = { id, name: aliases.get(object.key) || relative.split("/").pop() || relative, kind, size: object.size, uploadedAt: object.uploaded.toISOString(), downloadUrl: `${base}/download`, previewStatus: kind === "video" ? "processing" : undefined };
     if (["image", "audio", "pdf", "text"].includes(kind)) item.previewUrl = `${base}/preview`;
+    if (["image", "video", "audio", "pdf", "text"].includes(kind)) item.sourceUrl = `${base}/source`;
     if (kind === "image" || kind === "video" || kind === "pdf") item.thumbnailUrl = `${base}/thumbnail`;
     if (kind === "video") item.previewUrl = undefined;
     if (kind === "video") videos.push({ index: items.length, key: object.key });
@@ -320,13 +316,13 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   return c.json(manifest);
 });
 
-async function streamItem(c: any, disposition: "inline" | "attachment"): Promise<Response> {
+export async function streamItem(c: any, disposition: "inline" | "attachment", raw = false): Promise<Response> {
   const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const relative = decodeItemRef(itemRef); const key = keyWithinRoot(share.r2_prefix, relative);
   await assertNotTrashed(c.env, key);
   const kind = kindForKey(key); if (disposition === "inline" && !["image", "video", "audio", "pdf", "text"].includes(kind)) throw new HTTPException(415, { message: "Preview is not available for this file" });
   const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" });
-  if (disposition === "inline" && (kind === "image" || kind === "pdf")) return requirePreparedImage(c, key, "preview");
-  if (disposition === "inline" && kind === "video") throw new HTTPException(409, { message: "Video preview is available through Stream" });
+  if (!raw && disposition === "inline" && (kind === "image" || kind === "pdf")) return requirePreparedImage(c, key, "preview");
+  if (!raw && disposition === "inline" && kind === "video") throw new HTTPException(409, { message: "Video preview is available through Stream" });
   let range: { offset: number; length: number } | undefined;
   try { range = parseRange(c.req.header("Range"), head.size); } catch (error) { if (error instanceof HTTPException && error.status === 416) return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${head.size}`, "Accept-Ranges": "bytes" } }); throw error; }
   const headers = new Headers(); head.writeHttpMetadata(headers); headers.set("Content-Type", mimeForKey(key)); headers.set("ETag", head.httpEtag); headers.set("Accept-Ranges", "bytes"); headers.set("Cache-Control", "private, no-store"); headers.set("X-Content-Type-Options", "nosniff"); headers.set("Content-Disposition", `${disposition}; filename="${safeFileName(key)}"`);
@@ -341,16 +337,13 @@ app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/preview", a
   const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
   await assertNotTrashed(c.env, key);
   const kind = kindForKey(key);
-  if (kind === "image") return preparedOrSmallOriginalImage(c, key, "preview");
+  if (kind === "image") return preparedOrOriginalImage(c, key, "preview");
   if (kind === "pdf") return requirePreparedImage(c, key, "preview");
-  if (kind === "audio" || kind === "text") {
-    const head = await c.env.DATA_BUCKET.head(key);
-    if (!head) throw new HTTPException(404, { message: "File not found" });
-    if (!canInlineOriginalPreview(kind, head.size)) throw new HTTPException(404, { message: "No preview generated yet" });
-    return streamItem(c, "inline");
-  }
+  if (kind === "audio" || kind === "text") return streamItem(c, "inline", true);
   throw new HTTPException(415, { message: "Preview unavailable" });
 });
+
+app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/source", c => streamItem(c, "inline", true));
 
 async function downloadTicket(c: any): Promise<{ url: string; expiresAt: string }> {
   const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));

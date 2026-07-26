@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { BRAND, MAX_INLINE_ORIGINAL_PREVIEW_BYTES, canInlineOriginalPreview, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
+import { BRAND, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
 import { Brand, EmptyState, Loading } from "@ltds/ui";
 import { openDeliveryRoute, parseDeliveryRoute } from "./route";
 
@@ -307,7 +307,7 @@ function Preview({ item, items, publicId, onSelect, onClose }: { item: DeliveryI
   }, [next, onClose, onSelect, previous]);
   return <div className="preview-backdrop" role="dialog" aria-modal="true" aria-label={`Preview ${item.name}`} onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}><section className="preview-dialog"><header><strong>{item.name}</strong>{index >= 0 && <span className="preview-position" aria-live="polite">{index + 1} of {items.length}</span>}<DownloadOriginal item={item} compact /><button className="button-ghost button-small" onClick={onClose}>Close</button></header><div className="preview-stage">
     <button className="preview-nav previous" disabled={!previous} aria-label="Previous file" onClick={() => previous && onSelect(previous)}>‹</button>
-    <div className="preview-media">{item.kind === "image" || item.kind === "pdf" ? <ImagePreview key={item.id} item={item} /> : item.kind === "video" ? <VideoPreview key={item.id} item={item} publicId={publicId} /> : item.kind === "audio" && item.previewUrl && canInlineOriginalPreview(item.kind, item.size ?? -1) ? <audio src={item.previewUrl} controls autoPlay /> : item.kind === "text" && item.previewUrl && canInlineOriginalPreview(item.kind, item.size ?? -1) ? <iframe src={item.previewUrl} title={item.name} loading="lazy" /> : <PreparedPlaceholder item={item} />}</div>
+    <div className="preview-media">{item.kind === "image" ? <ImagePreview key={item.id} item={item} /> : item.kind === "pdf" ? <PdfPreview key={item.id} item={item} /> : item.kind === "video" ? <VideoPreview key={item.id} item={item} publicId={publicId} /> : item.kind === "audio" && (item.sourceUrl || item.previewUrl) ? <audio src={item.sourceUrl || item.previewUrl} controls /> : item.kind === "text" && (item.sourceUrl || item.previewUrl) ? <iframe src={item.sourceUrl || item.previewUrl} title={item.name} loading="lazy" /> : <PreparedPlaceholder item={item} />}</div>
     <button className="preview-nav next" disabled={!next} aria-label="Next file" onClick={() => next && onSelect(next)}>›</button>
   </div>{items.length > 1 && <div className="preview-filmstrip" aria-label="Nearby files in this folder">{filmstripItems.map(candidate => <button key={candidate.id} className={candidate.id === item.id ? "active" : ""} aria-current={candidate.id === item.id ? "true" : undefined} title={candidate.name} onClick={() => onSelect(candidate)}>{candidate.thumbnailUrl ? <Thumbnail item={candidate} /> : <span className="file-kind">{iconFor(candidate)}</span>}</button>)}</div>}</section></div>;
 }
@@ -318,6 +318,12 @@ function ImagePreview({ item }: { item: DeliveryItem }) {
   return <div className="image-preview" aria-busy={!loaded}>{!loaded && <SkeletonViewer />}<img src={item.previewUrl} alt={item.name} loading="lazy" decoding="async" onLoad={() => setLoaded(true)} onError={() => setFailed(true)} /></div>;
 }
 
+function PdfPreview({ item }: { item: DeliveryItem }) {
+  const [preparedFailed, setPreparedFailed] = useState(!item.previewUrl); const [loaded, setLoaded] = useState(false);
+  if (preparedFailed) return item.sourceUrl ? <iframe src={item.sourceUrl} title={item.name} loading="lazy" /> : <PreparedPlaceholder item={item} />;
+  return <div className="image-preview" aria-busy={!loaded}>{!loaded && <SkeletonViewer />}<img src={item.previewUrl} alt={`${item.name} first page`} loading="lazy" decoding="async" onLoad={() => setLoaded(true)} onError={() => setPreparedFailed(true)} /></div>;
+}
+
 function SkeletonViewer() { return <span className="skeleton-viewer" role="status" aria-label="Loading preview" />; }
 
 function DownloadOriginal({ item, compact = false }: { item: DeliveryItem; compact?: boolean }) {
@@ -326,7 +332,7 @@ function DownloadOriginal({ item, compact = false }: { item: DeliveryItem; compa
 }
 
 function PreparedPlaceholder({ item }: { item: DeliveryItem }) {
-  return <div className="prepared-placeholder"><img className="preview-brand-logo" src={BRAND.logoUrl} alt={BRAND.shortName} /><strong>No preview generated yet</strong><p>{item.size !== null && item.size > MAX_INLINE_ORIGINAL_PREVIEW_BYTES ? "This file is larger than 10 MB, so its original will not load automatically." : "A prepared preview is not available yet."} The original file is still available.</p><DownloadOriginal item={item} /></div>;
+  return <div className="prepared-placeholder"><img className="preview-brand-logo" src={BRAND.logoUrl} alt={BRAND.shortName} /><strong>This file could not be displayed</strong><p>Your browser may not support this file format. The original file is still available to download.</p><DownloadOriginal item={item} /></div>;
 }
 
 function VideoPreview({ item, publicId }: { item: DeliveryItem; publicId: string }) {
@@ -335,7 +341,13 @@ function VideoPreview({ item, publicId }: { item: DeliveryItem; publicId: string
   useEffect(() => { let cancelled = false; if (item.previewStatus !== "ready") { setTicketLoading(false); return () => { cancelled = true; }; } requestJson<{ streamUrl?: string; url?: string }>(`/api/public/shares/${encodeURIComponent(publicId)}/items/${encodeURIComponent(item.id)}/stream-ticket`, { method: "POST" }).then(result => { if (!cancelled) setStreamUrl(result.streamUrl || result.url || null); }).catch(() => { if (!cancelled) setStreamUrl(null); }).finally(() => { if (!cancelled) setTicketLoading(false); }); return () => { cancelled = true; }; }, [item.id, item.previewStatus, publicId]);
   if (streamUrl) return <div className="video-preview">{loading && <span className="media-status">Opening video preview…</span>}<iframe src={streamUrl} title={item.name} onLoad={() => setLoading(false)} allow="accelerometer; gyroscope; autoplay; encrypted-media; picture-in-picture" allowFullScreen /></div>;
   if (ticketLoading) return <div className="video-preview" aria-busy="true"><SkeletonViewer /><span className="media-status">Opening video preview…</span></div>;
-  return <PreparedPlaceholder item={item} />;
+  return item.sourceUrl ? <OriginalVideo item={item} /> : <PreparedPlaceholder item={item} />;
+}
+
+function OriginalVideo({ item }: { item: DeliveryItem }) {
+  const [loading, setLoading] = useState(true); const [failed, setFailed] = useState(false);
+  if (failed) return <PreparedPlaceholder item={item} />;
+  return <div className="video-preview" aria-busy={loading}>{loading && <><SkeletonViewer /><span className="media-status">Opening original video…</span></>}<video src={item.sourceUrl} controls playsInline preload="metadata" onLoadedMetadata={() => setLoading(false)} onError={() => setFailed(true)} /></div>;
 }
 
 function Thumbnail({ item }: { item: DeliveryItem }) {

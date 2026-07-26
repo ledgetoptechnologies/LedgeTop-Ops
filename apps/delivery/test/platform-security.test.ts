@@ -4,9 +4,8 @@ import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, parseRange, p
 import { createSessionCookie, presignR2Get, verifyRotatingSessionCookie, verifySessionCookie } from "../src/worker/security";
 import { hashAccessCode } from "../../operations/src/worker/crypto";
 import { verifyAccessCode } from "../src/worker/security";
-import { ensurePublicId, markUnavailableFolder, serveAppShell } from "../src/worker/index";
+import { ensurePublicId, markUnavailableFolder, serveAppShell, streamItem } from "../src/worker/index";
 import type { ShareRow } from "../src/worker/types";
-import { canInlineOriginalPreview } from "@ltds/shared";
 
 describe("delivery app shell",()=>{
   it("preserves the public share path when requesting the SPA fallback",async()=>{let requestedPath="";const response=await serveAppShell(new Request("https://delivery.ledgetopdroneservices.com/s/public-id"),{fetch:async input=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("app shell",{status:200});}});expect(requestedPath).toBe("/s/public-id");expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();});
@@ -52,14 +51,52 @@ describe("single byte range parsing",()=>{
   it("rejects multiple, malformed, and unsatisfiable ranges",()=>{for(const value of ["bytes=0-1,4-5","items=0-1","bytes=1000-1200","bytes=20-10"])expect(()=>parseRange(value,1000)).toThrow();});
 });
 
-describe("bounded original preview fallback",()=>{
-  it("allows only safe media kinds through 10 MiB",()=>{
-    expect(canInlineOriginalPreview("image",10*1024*1024)).toBe(true);
-    expect(canInlineOriginalPreview("image",10*1024*1024+1)).toBe(false);
-    expect(canInlineOriginalPreview("text",1024)).toBe(true);
-    expect(canInlineOriginalPreview("pdf",1024)).toBe(false);
-    expect(canInlineOriginalPreview("video",1024)).toBe(false);
-    expect(canInlineOriginalPreview("image",-1)).toBe(false);
+describe("authenticated original object streaming",()=>{
+  const share:ShareRow={id:"share-1",public_id:"public",project_id:"project-1",token_hash:"hash",label:null,password_hash:null,password_salt:null,password_iterations:null,password_algorithm:null,expires_at:null,revoked_at:null,revoked_reason:null,unavailable_since:null,share_version:2,client_name:"Client",project_name:"Delivery",r2_prefix:"jobs/client/"};
+  function context(method:"GET"|"HEAD",range?:string){
+    const reads:Array<{key:string;options?:{range:{offset:number;length:number}}}>=[];
+    const pending:Promise<unknown>[]=[];
+    const statement={bind(){return statement;},async all(){return{results:[]};},async run(){return{meta:{changes:1}};}};
+    const database={prepare(){return statement;},withSession(){return database;}};
+    const request=new Request("https://delivery.example/api/source",{method,headers:range?{Range:range}:undefined});
+    const c:any={
+      get:(name:string)=>name==="share"?share:undefined,
+      req:{param:()=>encodeItemRef("edited/photo.jpg"),header:(name:string)=>request.headers.get(name)??undefined,method,raw:request},
+      env:{
+        AUDIT_IP_SECRET:"a".repeat(48),
+        DELIVERY_DB:database,
+        DATA_BUCKET:{
+          async head(key:string){expect(key).toBe("jobs/client/edited/photo.jpg");return{size:100,httpEtag:"\"etag\"",writeHttpMetadata(){}};},
+          async get(key:string,options?:{range:{offset:number;length:number}}){reads.push({key,options});const length=options?.range.length??100;return{body:new Blob([new Uint8Array(length)]).stream()};},
+        },
+      },
+      executionCtx:{waitUntil(promise:Promise<unknown>){pending.push(promise);}},
+    };
+    return{c,reads,pending};
+  }
+  it("streams a single range from R2 with private response headers",async()=>{
+    const value=context("GET","bytes=10-19");
+    const response=await streamItem(value.c,"inline",true);
+    expect(response.status).toBe(206);
+    expect(response.headers.get("Content-Range")).toBe("bytes 10-19/100");
+    expect(response.headers.get("Content-Length")).toBe("10");
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(value.reads).toEqual([{key:"jobs/client/edited/photo.jpg",options:{range:{offset:10,length:10}}}]);
+    expect((await response.arrayBuffer()).byteLength).toBe(10);
+    await Promise.all(value.pending);
+  });
+  it("answers HEAD without reading the object body and rejects invalid ranges",async()=>{
+    const head=context("HEAD");
+    const headResponse=await streamItem(head.c,"inline",true);
+    expect(headResponse.status).toBe(200);
+    expect(headResponse.headers.get("Content-Length")).toBe("100");
+    expect(head.reads).toHaveLength(0);
+    const invalid=context("GET","bytes=100-200");
+    const invalidResponse=await streamItem(invalid.c,"inline",true);
+    expect(invalidResponse.status).toBe(416);
+    expect(invalidResponse.headers.get("Content-Range")).toBe("bytes */100");
+    expect(invalid.reads).toHaveLength(0);
   });
 });
 

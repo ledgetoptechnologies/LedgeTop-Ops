@@ -92,7 +92,7 @@ Outputs are:
 
 `thumb.webp` must be at most 100 KiB. `preview.webp` has a hard cap of 500 KiB (`512000` bytes) and a preferred target of 450 KiB. Reduce WebP quality iteratively first; if the target is not met, reduce dimensions and repeat quality reduction. Reject any preview that remains above the hard cap.
 
-Operations and Delivery lazily use a browser-safe original image only when no valid prepared artifact is available and the source is at most 10 MiB. Larger originals are never fetched automatically for a card or viewer. They show the LTDS logo and **No preview generated yet** with an explicit original-download action. This limit is enforced by the Worker, not only by browser code.
+Operations and Delivery never load originals for cards or filmstrips. When a user deliberately opens a file, the viewer prefers the prepared artifact and otherwise streams that one original regardless of size. Videos use Cloudflare Stream when ready and fall back to the range-enabled original with metadata-only preloading. Unsupported browser formats retain an explicit original-download action.
 
 The manifest must record the exact post-upload R2 ETag and size of the source, plus source key, derivative keys, dimensions, MIME type, producer version, and creation time. The exact R2 ETag/size—not a local pre-upload checksum—determines whether a derivative is current.
 

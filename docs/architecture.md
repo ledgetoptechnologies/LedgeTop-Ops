@@ -55,7 +55,7 @@ Optional access codes are PBKDF2-derived with a random salt, application pepper,
 
 R2 paths use opaque base64url item references. Validation rejects traversal, backslashes, controls, absolute paths, exact case-insensitive `dump` components, nested `.previews` artifacts, and the reserved `_ltds` root. Unsafe formats such as HTML, XML, JavaScript, and SVG are downloads rather than inline content.
 
-Prepared `.previews` artifacts are preferred for photo and PDF cards and viewers. When an image artifact is absent or invalid, a browser-safe original image may be loaded lazily only when the source is at most 10 MiB. Originals above 10 MiB, PDFs without prepared artifacts, raw videos, and other unsupported media are never loaded automatically; the interface shows the LTDS logo, “No preview generated yet,” and an explicit original-download action. The 10 MiB check is enforced by the Worker as well as the UI, so a modified client cannot turn a preview route into an unbounded original-file response.
+Prepared `.previews` artifacts are preferred for photo and PDF cards and viewers. Folder grids and viewer filmstrips never request originals. When a user deliberately opens an item and its prepared artifact is absent or invalid, the authenticated viewer streams only that original regardless of size. Videos prefer Cloudflare Stream and otherwise use the original R2 object with byte-range support and metadata-only preloading. Unsupported browser formats retain an explicit original-download action.
 
 ## Airspace safety model
 
