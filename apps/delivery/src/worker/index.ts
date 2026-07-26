@@ -383,7 +383,7 @@ app.get("/api/public/shares/:publicId/items/:itemRef/thumbnail", async c => {
   const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
   await assertNotTrashed(c.env, key);
   if (!(await c.env.DATA_BUCKET.head(key))) throw new HTTPException(404, { message: "File not found" });
-  if (kindForKey(key) === "image") return preparedOrSmallOriginalImage(c, key, "thumbnail");
+  if (kindForKey(key) === "image") return requirePreparedImage(c, key, "thumbnail");
   if (kindForKey(key) === "pdf") return requirePreparedImage(c, key, "thumbnail");
   if (kindForKey(key) === "video") return requirePreparedImage(c, key, "poster");
   throw new HTTPException(415, { message: "Thumbnail unavailable" });

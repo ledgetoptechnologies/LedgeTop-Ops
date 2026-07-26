@@ -238,7 +238,7 @@ export function DeliveryApp() {
         <div className="item-list">{manifest.items.map(item => <ItemRow key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div>}
       <footer>{manifest.items.length} item{manifest.items.length === 1 ? "" : "s"}{manifest.nextCursor ? " · More items are available" : ""}</footer>
     </section>
-    {preview && <Preview item={preview} publicId={publicId} onClose={() => setPreview(null)} />}
+    {preview && <Preview item={preview} items={manifest.items.filter(item => item.kind !== "folder")} publicId={publicId} onSelect={setPreview} onClose={() => setPreview(null)} />}
   </PublicFrame>;
 }
 
@@ -290,15 +290,26 @@ function ItemRow({ item, selectionMode, selected, onToggle, onFolder, onPreview 
   return <div className={`item-row${selected ? " selected" : ""}${selectionMode ? " selectable" : ""}`} onClick={selectionMode ? () => onToggle(item.id) : undefined}><button className="row-name" onClick={event => { event.stopPropagation(); selectionMode ? onToggle(item.id) : item.kind === "folder" ? void onFolder(item) : onPreview(item); }}><span>{item.kind === "folder" ? "▰" : "▧"}</span><strong>{item.name}</strong></button><span>{formatBytes(item.size)}</span><span>{item.uploadedAt ? new Date(item.uploadedAt).toLocaleDateString() : "—"}</span>{!selectionMode && item.downloadUrl ? <a href={item.downloadUrl}>Download</a> : <span />}</div>;
 }
 
-function Preview({ item, publicId, onClose }: { item: DeliveryItem; publicId: string; onClose: () => void }) {
+function Preview({ item, items, publicId, onSelect, onClose }: { item: DeliveryItem; items: DeliveryItem[]; publicId: string; onSelect: (item: DeliveryItem) => void; onClose: () => void }) {
+  const index = items.findIndex(candidate => candidate.id === item.id);
+  const previous = index > 0 ? items[index - 1] : undefined;
+  const next = index >= 0 && index < items.length - 1 ? items[index + 1] : undefined;
+  const filmstripItems = index < 0 ? [] : items.slice(Math.max(0, index - 4), Math.min(items.length, index + 5));
   useEffect(() => {
-    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") onClose(); };
-    document.addEventListener("keydown", closeOnEscape);
-    return () => document.removeEventListener("keydown", closeOnEscape);
-  }, [onClose]);
-  return <div className="preview-backdrop" role="dialog" aria-modal="true" aria-label={`Preview ${item.name}`} onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}><section className="preview-dialog"><header><strong>{item.name}</strong><DownloadOriginal item={item} compact /><button className="button-ghost button-small" onClick={onClose}>Close</button></header><div className="preview-stage">
-    {item.kind === "image" || item.kind === "pdf" ? <ImagePreview item={item} /> : item.kind === "video" ? <VideoPreview item={item} publicId={publicId} /> : item.kind === "audio" && item.previewUrl && canInlineOriginalPreview(item.kind, item.size ?? -1) ? <audio src={item.previewUrl} controls autoPlay /> : item.kind === "text" && item.previewUrl && canInlineOriginalPreview(item.kind, item.size ?? -1) ? <iframe src={item.previewUrl} title={item.name} loading="lazy" /> : <PreparedPlaceholder item={item} />}
-  </div></section></div>;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement)?.tagName)) return;
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowLeft" && previous) onSelect(previous);
+      if (event.key === "ArrowRight" && next) onSelect(next);
+    };
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [next, onClose, onSelect, previous]);
+  return <div className="preview-backdrop" role="dialog" aria-modal="true" aria-label={`Preview ${item.name}`} onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}><section className="preview-dialog"><header><strong>{item.name}</strong>{index >= 0 && <span className="preview-position" aria-live="polite">{index + 1} of {items.length}</span>}<DownloadOriginal item={item} compact /><button className="button-ghost button-small" onClick={onClose}>Close</button></header><div className="preview-stage">
+    <button className="preview-nav previous" disabled={!previous} aria-label="Previous file" onClick={() => previous && onSelect(previous)}>‹</button>
+    <div className="preview-media">{item.kind === "image" || item.kind === "pdf" ? <ImagePreview key={item.id} item={item} /> : item.kind === "video" ? <VideoPreview key={item.id} item={item} publicId={publicId} /> : item.kind === "audio" && item.previewUrl && canInlineOriginalPreview(item.kind, item.size ?? -1) ? <audio src={item.previewUrl} controls autoPlay /> : item.kind === "text" && item.previewUrl && canInlineOriginalPreview(item.kind, item.size ?? -1) ? <iframe src={item.previewUrl} title={item.name} loading="lazy" /> : <PreparedPlaceholder item={item} />}</div>
+    <button className="preview-nav next" disabled={!next} aria-label="Next file" onClick={() => next && onSelect(next)}>›</button>
+  </div>{items.length > 1 && <div className="preview-filmstrip" aria-label="Nearby files in this folder">{filmstripItems.map(candidate => <button key={candidate.id} className={candidate.id === item.id ? "active" : ""} aria-current={candidate.id === item.id ? "true" : undefined} title={candidate.name} onClick={() => onSelect(candidate)}>{candidate.thumbnailUrl ? <Thumbnail item={candidate} /> : <span className="file-kind">{iconFor(candidate)}</span>}</button>)}</div>}</section></div>;
 }
 
 function ImagePreview({ item }: { item: DeliveryItem }) {

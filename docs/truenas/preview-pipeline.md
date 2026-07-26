@@ -41,7 +41,7 @@ Operations and Delivery independently reject prepared artifacts above those hard
 
 ## Browser fallback behavior
 
-Thumbnail and viewer images use explicit dimensions, asynchronous decoding, and browser-native lazy loading. If a valid prepared image artifact is unavailable, the Workers may serve the original image inline only when its R2 object size is at most 10 MiB. The Worker checks the authoritative R2 size before reading the body.
+Thumbnail and viewer images use explicit dimensions, asynchronous decoding, and browser-native lazy loading. Thumbnail routes are prepared-artifact-only and return a lightweight branded placeholder when `thumb.webp` is unavailable, so opening a folder or viewer filmstrip never fans out into original-image reads. The viewer may serve the original image inline only when a valid prepared preview is unavailable and its authoritative R2 object size is at most 10 MiB.
 
 Files above 10 MiB do not use their originals as automatic thumbnails or viewer content. PDFs without a valid prepared artifact, raw videos without ready Stream playback, and unsupported media follow the same safe presentation: the LTDS logo, **No preview generated yet**, and an explicit **Download original** action. This keeps a folder containing several large drone files responsive while Hermes finishes—or has not yet produced—its artifacts.
 
