@@ -8,6 +8,8 @@ import {
   type RequestError,
 } from "./bulk-download";
 import { openDeliveryRoute, parseDeliveryRoute } from "./route";
+import { CloudTransferDialog } from "./CloudTransferDialog";
+import { notifyCloudTransferOpener, parseCloudTransferCallback, type CloudTransferProvider, type CloudTransferScope } from "./cloud-transfer";
 
 type Gate = "landing" | "loading" | "code" | "ready" | "error";
 type ErrorView = "unavailable" | "invalid-link";
@@ -49,6 +51,11 @@ export function DeliveryApp() {
   const bulkRequestActive = useRef(false);
   const [bulkError, setBulkError] = useState("");
   const [bulkProgress, setBulkProgress] = useState<{ status: string; percent: number | null; message?: string } | null>(null);
+  const [cloudTransferScope, setCloudTransferScope] = useState<CloudTransferScope | null>(null);
+  const cloudProviders = useMemo<CloudTransferProvider[]>(() => {
+    const capabilities = manifest?.capabilities?.cloudTransfer;
+    return [...(capabilities?.dropbox ? ["dropbox" as const] : []), ...(capabilities?.googleDrive ? ["google-drive" as const] : [])];
+  }, [manifest]);
 
   const loadManifest = useCallback(async (id: string, folderId = "") => {
     const query = folderId ? `?folder=${encodeURIComponent(folderId)}` : "";
@@ -94,7 +101,13 @@ export function DeliveryApp() {
     }
   }, [loadManifest, publicId, secret, showRequestError]);
 
-  useEffect(() => { if (publicId) void exchange(); }, []); // Exchange the URL fragment once on first load.
+  useEffect(() => {
+    if (parseCloudTransferCallback(location.href)) {
+      if (notifyCloudTransferOpener(location.href)) window.close();
+      return;
+    }
+    if (publicId) void exchange();
+  }, []); // Exchange the URL fragment once on first load, or complete an OAuth popup.
 
   function changeView(next: "grid" | "list") { setView(next); localStorage.setItem("ltds-delivery-view", next); }
   async function navigateToFolder(folderId = "") {
@@ -196,6 +209,8 @@ export function DeliveryApp() {
         {selectionMode && <label className="select-current"><input type="checkbox" checked={manifest.items.length > 0 && manifest.items.every(item => selectedItems.has(item.id))} onChange={toggleCurrentList} /> Select current list</label>}
         <span className="selection-count">{selectionMode ? (selectedItems.size ? `${selectedItems.size} selected` : "Click any card to select") : ""}</span>
         <div className="download-actions">
+          {selectionMode && cloudProviders.length > 0 && <button className="button-ghost button-small" disabled={selectedItems.size === 0} onClick={() => setCloudTransferScope({ items: [...selectedItems] })}>Copy selected to cloud</button>}
+          {!selectionMode && cloudProviders.length > 0 && <button className="button-ghost button-small" onClick={() => setCloudTransferScope({ all: true })}>Copy all to cloud</button>}
           {selectionMode && <button className="button-ghost button-small" disabled={bulkBusy || selectedItems.size === 0} onClick={() => void downloadBulk()}> {bulkBusy ? "Preparing…" : "Download selected"}</button>}
           <button className="button-orange button-small" disabled={bulkBusy} onClick={() => void downloadBulk(true)}>{bulkBusy ? "Preparing…" : "Download all"}</button>
         </div>
@@ -207,6 +222,7 @@ export function DeliveryApp() {
         <div className="item-list">{manifest.items.map(item => <ItemRow key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div>}
       <footer>{manifest.items.length} item{manifest.items.length === 1 ? "" : "s"}{manifest.nextCursor ? " · More items are available" : ""}</footer>
     </section>
+    {cloudTransferScope && <CloudTransferDialog publicId={publicId} scope={cloudTransferScope} enabledProviders={cloudProviders} onClose={() => setCloudTransferScope(null)} />}
     {preview && <Preview item={preview} items={manifest.items.filter(item => item.kind !== "folder")} publicId={publicId} onSelect={setPreview} onClose={() => setPreview(null)} />}
   </PublicFrame>;
 }

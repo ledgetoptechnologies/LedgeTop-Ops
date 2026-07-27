@@ -3,18 +3,49 @@ import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
 import { type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
 import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName } from "./files";
-import { createSessionCookie, hmac, parseCookie, presignR2Get, randomSecret, sha256, verifyAccessCode, verifyRotatingSessionCookie } from "./security";
+import { createSessionCookie, hmac, parseCookie, randomSecret, sha256, verifyAccessCode, verifyRotatingSessionCookie } from "./security";
 import { matchesEtag, servePreparedImage } from "./prepared-images";
 import { recordFirstAccessNotification } from "./notifications";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
+export { CloudTransferWorkflow } from "./cloud-transfer/workflow";
+import { cleanupCloudTransfers } from "./cloud-transfer/cleanup";
+import { decryptCloudSecret, decryptWithRotation, encryptCloudSecret, readGrantedSource } from "./cloud-transfer/grants";
+import { activatePendingGoogleJob, cloudDb, getAuthorizedCloudJob, getGooglePickerAuthorization, listCloudItems, requestCloudCancellation, retryFailedCloudItems, validGoogleFolderId } from "./cloud-transfer/repository";
+import { friendlyCloudFailure } from "./cloud-transfer/errors";
+import { buildDropboxAuthorizationUrl, buildGoogleAuthorizationUrl, createOAuthState, createPkce, exchangeDropboxCode, exchangeGoogleCode, refreshGoogleToken } from "./cloud-transfer/oauth";
+import type { CloudCredential } from "./cloud-transfer/types";
+import { createCloudProviderAdapter } from "./cloud-transfer/providers";
+import type { CloudProvider, CloudTransferEnv } from "./cloud-transfer/types";
 export { friendlyBulkFailure } from "./bulk-download-errors";
 
 type Variables = { share: ShareRow };
 interface Tombstone { physical_key: string; tombstone_kind: "exact" | "prefix"; }
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 const COOKIE_NAME = "__Host-ltds_delivery";
+
+function cloudEnv(env:Env):CloudTransferEnv{if(!env.CLOUD_TRANSFER_TOKEN_SECRET)throw new HTTPException(503,{message:"Cloud copy is not configured"});return env as CloudTransferEnv;}
+function cloudProvider(value:string):CloudProvider{if(value==="dropbox")return"dropbox";if(value==="google"||value==="google-drive")return"google";throw new HTTPException(404,{message:"Cloud provider not found"});}
+function cloudProviderEnabled(env:Env,provider:CloudProvider):boolean{
+ if(!env.CLOUD_TRANSFER_TOKEN_SECRET||!env.CLOUD_TRANSFER_WORKFLOW)return false;
+ return provider==="dropbox"?env.CLOUD_TRANSFER_DROPBOX_ENABLED==="true"&&Boolean(env.DROPBOX_CLIENT_ID&&env.DROPBOX_CLIENT_SECRET):env.CLOUD_TRANSFER_GOOGLE_ENABLED==="true"&&Boolean(env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET);
+}
+function requireSameOrigin(request:Request,env:Env):void{const origin=request.headers.get("Origin");if(!origin||origin!==new URL(env.PUBLIC_BASE_URL).origin)throw new HTTPException(403,{message:"This request is not allowed"});}
+function cloudRedirectUri(env:Env,provider:CloudProvider):string{return`${env.PUBLIC_BASE_URL}/api/public/cloud-transfers/oauth/${provider}/callback`;}
+function cloudStatus(value:string):string{return value==="partial"?"failed":value;}
+function providerPublicName(provider:CloudProvider):"dropbox"|"google-drive"{return provider==="google"?"google-drive":"dropbox";}
+
+async function googlePickerCredential(env:CloudTransferEnv,authorizationId:string,row:{credential_ciphertext:string;credential_iv:string;key_id:string}):Promise<CloudCredential>{
+ let credential=await decryptWithRotation<CloudCredential>({ciphertext:row.credential_ciphertext,iv:row.credential_iv,keyId:row.key_id},env,`authorization:${authorizationId}:google`);
+ if(credential.expiresAt&&Date.parse(credential.expiresAt)<=Date.now()+120000){
+  if(!credential.refreshToken||!env.GOOGLE_CLIENT_ID||!env.GOOGLE_CLIENT_SECRET)throw new HTTPException(401,{message:"Google authorization expired"});
+  const refreshed=await refreshGoogleToken({clientId:env.GOOGLE_CLIENT_ID,clientSecret:env.GOOGLE_CLIENT_SECRET,refreshToken:credential.refreshToken});credential={...credential,...refreshed,refreshToken:refreshed.refreshToken||credential.refreshToken};
+  const encrypted=await encryptCloudSecret(credential,env.CLOUD_TRANSFER_TOKEN_SECRET,`authorization:${authorizationId}:google`);
+  await cloudDb(env).prepare("UPDATE cloud_transfer_authorizations SET credential_ciphertext=?,credential_iv=?,key_id=?,token_expires_at=?,last_used_at=datetime('now') WHERE id=? AND revoked_at IS NULL").bind(encrypted.ciphertext,encrypted.iv,env.CLOUD_TRANSFER_KEY_ID||"v1",credential.expiresAt||null,authorizationId).run();
+ }
+ return credential;
+}
 
 export function framePolicyForPath(path: string, method = "GET"): { frameAncestors: "'self'" | "'none'"; xFrameOptions: "SAMEORIGIN" | "DENY" } {
   const inlinePdf = (method === "GET" || method === "HEAD") && /^\/api\/public\/shares\/[^/]+\/items\/[^/]+\/pdf$/.test(path);
@@ -172,7 +203,7 @@ export function classifyPublicRateLimit(method: string, path: string): PublicRat
   if (method === "POST" && new RegExp(`^${bulkBase}$`).test(path)) {
     return { binding: "PUBLIC_BULK_RATE_LIMITER", scope: "bulk-create" };
   }
-  if (method === "GET" && new RegExp(`^${bulkBase}/[^/]+/file$`).test(path)) {
+  if ((method === "GET" || method === "HEAD") && new RegExp(`^${bulkBase}/[^/]+/file$`).test(path)) {
     return { binding: "PUBLIC_DOWNLOAD_RATE_LIMITER", scope: "bulk-file" };
   }
   if (method === "GET" && new RegExp(`^${bulkBase}/[^/]+$`).test(path)) {
@@ -353,7 +384,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   let physicalBreadcrumb = root;
   for (const segment of relativeFolder.split("/").filter(Boolean)) { built = built ? `${built}/${segment}` : segment; physicalBreadcrumb += `${segment}/`; breadcrumbs.push({ id: encodeItemRef(built), name: aliases.get(physicalBreadcrumb) || segment }); }
   const currentPhysical = relativeFolder ? prefix : root;
-  const manifest: DeliveryManifest = { share: { publicId: share.public_id!, label: share.label, clientName: share.client_name, projectName: aliases.get(root) || share.project_name, expiresAt: share.expires_at }, folder: { id: folderRef, name: aliases.get(currentPhysical) || relativeFolder.split("/").pop() || share.project_name, breadcrumbs }, items, nextCursor: listed.truncated ? listed.cursor : null };
+  const dropbox=cloudProviderEnabled(c.env,"dropbox"),google=cloudProviderEnabled(c.env,"google"); const manifest: DeliveryManifest = { share: { publicId: share.public_id!, label: share.label, clientName: share.client_name, projectName: aliases.get(root) || share.project_name, expiresAt: share.expires_at }, folder: { id: folderRef, name: aliases.get(currentPhysical) || relativeFolder.split("/").pop() || share.project_name, breadcrumbs }, items, nextCursor: listed.truncated ? listed.cursor : null, capabilities: { cloudTransfer: { dropbox, googleDrive: google, googlePicker: google && Boolean(c.env.GOOGLE_PICKER_API_KEY&&c.env.GOOGLE_CLOUD_PROJECT_NUMBER) } } };
   c.executionCtx.waitUntil(Promise.all([audit(c.env, c.req.raw, share.id, "manifest.viewed", folderRef), primaryDb(c.env).prepare("UPDATE shares SET access_count=access_count+1,last_accessed_at=datetime('now') WHERE id=?").bind(share.id).run()]));
   return c.json(manifest);
 });
@@ -392,19 +423,45 @@ app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/preview", a
 app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/source", c => streamItem(c, "inline", true));
 app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/pdf", c => streamItem(c, "inline", true, "pdf"));
 
-async function downloadTicket(c: any): Promise<{ url: string; expiresAt: string }> {
-  const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
+async function downloadItem(c: any): Promise<Response> {
+  const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string;
+  const relative = decodeItemRef(itemRef); const key = keyWithinRoot(share.r2_prefix, relative);
   await assertNotTrashed(c.env, key);
   const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" });
-  if (!c.env.R2_S3_ENDPOINT || !c.env.R2_BUCKET_NAME || !c.env.R2_ACCESS_KEY_ID || !c.env.R2_SECRET_ACCESS_KEY) throw new HTTPException(503, { message: "Downloads are temporarily unavailable" });
-  const alias = await primaryDb(c.env).prepare("SELECT display_name FROM file_aliases WHERE physical_key=?").bind(key).first<{display_name:string}>();
-  const ticket = await presignR2Get({ endpoint: c.env.R2_S3_ENDPOINT, bucket: c.env.R2_BUCKET_NAME, accessKeyId: c.env.R2_ACCESS_KEY_ID, secretAccessKey: c.env.R2_SECRET_ACCESS_KEY, expiresInSeconds: 120, downloadName: alias?.display_name || safeFileName(key) }, key);
+  const alias = await primaryDb(c.env).prepare("SELECT display_name FROM file_aliases WHERE physical_key=?").bind(key).first<{ display_name: string }>();
+  const rawName = alias?.display_name || safeFileName(key);
+  const downloadName = rawName.replace(/[\0-\x1f\x7f"\\]/g, "_").slice(0, 180) || "file";
+  let range: { offset: number; length: number } | undefined;
+  const rangeHeader = c.req.header("Range"), ifRange = c.req.header("If-Range");
+  try { range = parseRange(!ifRange || matchesEtag(ifRange, head.httpEtag) ? rangeHeader : undefined, head.size); }
+  catch (error) { if (error instanceof HTTPException && error.status === 416) return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${head.size}`, "Accept-Ranges": "bytes" } }); throw error; }
+  const headers = new Headers(); head.writeHttpMetadata(headers);
+  headers.set("Content-Type", mimeForKey(key));
+  headers.set("ETag", head.httpEtag);
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Cache-Control", "private, no-store");
+  headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Content-Disposition", `attachment; filename="${downloadName}"`);
+  if (range) { headers.set("Content-Range", `bytes ${range.offset}-${range.offset + range.length - 1}/${head.size}`); headers.set("Content-Length", String(range.length)); }
+  else headers.set("Content-Length", String(head.size));
+  if (c.req.method === "HEAD") return new Response(null, { status: range ? 206 : 200, headers });
+  const object = await c.env.DATA_BUCKET.get(key, range ? { range } : undefined); if (!object) throw new HTTPException(404, { message: "File not found" });
   c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, "download.started", itemRef));
-  return ticket;
+  return new Response(object.body, { status: range ? 206 : 200, headers });
 }
 
-app.get("/api/public/shares/:publicId/items/:itemRef/download-ticket", async c => c.json(await downloadTicket(c)));
-app.get("/api/public/shares/:publicId/items/:itemRef/download", async c => c.redirect((await downloadTicket(c)).url, 302));
+app.get("/api/public/shares/:publicId/items/:itemRef/download-ticket", async c => {
+  const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string;
+  const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
+  await assertNotTrashed(c.env, key);
+  const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" });
+  const base = baseForItem(share, itemRef);
+  const sessionMaxMs = 12 * 60 * 60 * 1000;
+  const shareRemainingMs = share.expires_at ? Math.max(0, new Date(share.expires_at).getTime() - Date.now()) : sessionMaxMs;
+  const expiresAt = new Date(Date.now() + Math.min(sessionMaxMs, shareRemainingMs)).toISOString();
+  return c.json({ url: `${c.env.PUBLIC_BASE_URL}${base}/download`, expiresAt });
+});
+app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/download", c => downloadItem(c));
 
 async function createStreamTicket(c: any): Promise<{ url: string; expiresAt: string }> {
   const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
@@ -461,10 +518,27 @@ async function getBulkJob(c: any, jobId: string): Promise<any> {
   return primaryDb(c.env).prepare("SELECT id,status,file_count,processed_files,total_bytes,processed_bytes,archive_size,error_code,error_message,expires_at,manifest_key,archive_key FROM bulk_download_jobs WHERE id=? AND share_id=? AND share_version=?").bind(jobId, share.id, share.share_version).first<any>();
 }
 
-async function archiveTicket(c: any, job: any): Promise<{ url: string; expiresAt: string }> {
-  if (!c.env.R2_S3_ENDPOINT || !c.env.R2_BUCKET_NAME || !c.env.R2_ACCESS_KEY_ID || !c.env.R2_SECRET_ACCESS_KEY) throw new HTTPException(503, { message: "Downloads are temporarily unavailable" });
+async function streamArchive(c: any, job: any): Promise<Response> {
   const share = c.get("share") as ShareRow;
-  return presignR2Get({ endpoint: c.env.R2_S3_ENDPOINT, bucket: c.env.R2_BUCKET_NAME, accessKeyId: c.env.R2_ACCESS_KEY_ID, secretAccessKey: c.env.R2_SECRET_ACCESS_KEY, expiresInSeconds: 120, downloadName: `${share.project_name || share.client_name || "delivery"}.zip` }, job.archive_key);
+  const head = await c.env.DATA_BUCKET.head(job.archive_key); if (!head) throw new HTTPException(404, { message: "Archive not found" });
+  const rangeHeader = c.req.header("Range"), ifRange = c.req.header("If-Range");
+  let range: { offset: number; length: number } | undefined;
+  try { range = parseRange(!ifRange || matchesEtag(ifRange, head.httpEtag) ? rangeHeader : undefined, head.size); }
+  catch (error) { if (error instanceof HTTPException && error.status === 416) return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${head.size}`, "Accept-Ranges": "bytes" } }); throw error; }
+  const normalized = `${share.project_name || share.client_name || "delivery"}.zip`.normalize("NFC");
+  const ascii = normalized.replace(/[^\x20-\x7e]/g, "_").replace(/[\0-\x1f\x7f"\\]/g, "_").slice(0, 180) || "delivery.zip";
+  const headers = new Headers();
+  headers.set("Content-Type", "application/zip");
+  headers.set("Content-Disposition", `attachment; filename="${ascii}"; filename*=UTF-8''${encodeURIComponent(normalized)}`);
+  headers.set("ETag", head.httpEtag);
+  headers.set("Accept-Ranges", "bytes");
+  headers.set("Cache-Control", "private, no-store");
+  headers.set("X-Content-Type-Options", "nosniff");
+  if (range) { headers.set("Content-Range", `bytes ${range.offset}-${range.offset + range.length - 1}/${head.size}`); headers.set("Content-Length", String(range.length)); }
+  else headers.set("Content-Length", String(head.size));
+  if (c.req.method === "HEAD") return new Response(null, { status: range ? 206 : 200, headers });
+  const object = await c.env.DATA_BUCKET.get(job.archive_key, range ? { range } : undefined); if (!object) throw new HTTPException(404, { message: "Archive not found" });
+  return new Response(object.body, { status: range ? 206 : 200, headers });
 }
 
 export function readyBulkJobIsExpired(job: { status: string; expires_at: string }, now = Date.now()): boolean {
@@ -509,18 +583,88 @@ app.post("/api/public/shares/:publicId/bulk-download", async c => {
 app.get("/api/public/shares/:publicId/bulk-download/:jobId", async c => {
   const job = await getBulkJob(c, c.req.param("jobId")); if (!job) throw new HTTPException(404, { message: "Download job not found" });
   await expireReadyBulkJob(c, job);
+  const share = c.get("share") as ShareRow;
   const failure = job.error_code ? friendlyBulkFailure(job.error_code) : null;
   const progress = bulkJobProgress(job);
+  const encodedShare = encodeURIComponent(share.public_id!);
   const response: Record<string, unknown> = { jobId: job.id, status: job.status, fileCount: job.file_count, processedFiles: job.processed_files, totalBytes: job.total_bytes, processedBytes: job.processed_bytes, archiveSize: job.archive_size, expiresAt: job.expires_at, error: failure, downloadUrl: null, ...progress };
-  if (job.status === "ready") response.downloadUrl = (await archiveTicket(c, job)).url;
+  if (job.status === "ready") response.downloadUrl = `/api/public/shares/${encodedShare}/bulk-download/${job.id}/file`;
   return c.json(response);
 });
 
-app.get("/api/public/shares/:publicId/bulk-download/:jobId/file", async c => {
+app.on(["GET", "HEAD"], "/api/public/shares/:publicId/bulk-download/:jobId/file", async c => {
   const job = await getBulkJob(c, c.req.param("jobId")); if (!job) throw new HTTPException(404, { message: "Download is not ready" });
   await expireReadyBulkJob(c, job);
   if (job.status !== "ready") throw new HTTPException(job.status === "expired" ? 410 : 404, { message: job.status === "expired" ? "This prepared download has expired." : "Download is not ready" });
-  return c.redirect((await archiveTicket(c, job)).url, 302);
+  return streamArchive(c, job);
+});
+
+app.post("/api/public/shares/:publicId/cloud-transfers/oauth/:provider/start",async c=>{
+ requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow;const provider=cloudProvider(c.req.param("provider"));if(!cloudProviderEnabled(c.env,provider))throw new HTTPException(503,{message:"This cloud provider is not available yet"});
+ const body=await c.req.json().catch(()=>({})) as {selection?:unknown;destination?:unknown;conflictMode?:unknown;callbackNonce?:unknown};
+ const selection=validateBulkRequest(body.selection);const conflictMode=body.conflictMode==="skip"?"skip":"autorename";if(typeof body.callbackNonce!=="string"||!/^[A-Za-z0-9_-]{24,128}$/.test(body.callbackNonce))throw new HTTPException(400,{message:"Invalid callback nonce"});
+ const windowStart=Math.floor(Date.now()/3600000);const quota=await primaryDb(c.env).prepare(`INSERT INTO cloud_transfer_quota(share_id,window_start,created_count,total_bytes) VALUES(?,?,1,0)
+  ON CONFLICT(share_id,window_start) DO UPDATE SET created_count=created_count+1,updated_at=datetime('now') WHERE created_count<3`).bind(share.id,windowStart).run();
+ if(!quota.meta.changes){c.header("Retry-After",String(bulkQuotaRetryAfterSeconds()));throw new HTTPException(429,{message:"This delivery has reached its hourly cloud-copy limit."});}
+ const pkce=await createPkce(),state=createOAuthState(),stateHash=await sha256(state);const env=cloudEnv(c.env);const encrypted=await encryptCloudSecret({verifier:pkce.verifier,callbackNonce:body.callbackNonce},env.CLOUD_TRANSFER_TOKEN_SECRET,`oauth-state:${stateHash}:${provider}`);
+ const destination=provider==="google"?{folderId:typeof body.destination==="string"&&body.destination?body.destination:"root",callbackNonce:body.callbackNonce}:{path:typeof body.destination==="string"&&body.destination?body.destination:"/LTDS Delivery",callbackNonce:body.callbackNonce};
+ await primaryDb(c.env).prepare(`INSERT INTO cloud_oauth_states(state_hash,provider,share_id,share_version,selection_json,destination_json,conflict_mode,pkce_ciphertext,pkce_iv,key_id,expires_at)
+  VALUES(?,?,?,?,?,?,?,?,?,?,datetime('now','+10 minutes'))`).bind(stateHash,provider,share.id,share.share_version,JSON.stringify(selection),JSON.stringify(destination),conflictMode,encrypted.ciphertext,encrypted.iv,env.CLOUD_TRANSFER_KEY_ID||"v1").run();
+ const redirectUri=cloudRedirectUri(c.env,provider);const clientId=provider==="dropbox"?c.env.DROPBOX_CLIENT_ID!:c.env.GOOGLE_CLIENT_ID!;
+ const authorizationUrl=provider==="dropbox"?buildDropboxAuthorizationUrl({clientId,redirectUri,state,challenge:pkce.challenge}):buildGoogleAuthorizationUrl({clientId,redirectUri,state,challenge:pkce.challenge});
+ return c.json({authorizationUrl});
+});
+
+app.get("/api/public/cloud-transfers/oauth/:provider/callback",async c=>{
+ const provider=cloudProvider(c.req.param("provider")),state=c.req.query("state")||"",code=c.req.query("code")||"";if(!state||!code)throw new HTTPException(400,{message:"Cloud authorization was not completed"});
+ const stateHash=await sha256(state),nowIso=new Date().toISOString();const row=await primaryDb(c.env).prepare(`SELECT * FROM cloud_oauth_states WHERE state_hash=? AND provider=? AND consumed_at IS NULL AND datetime(expires_at)>datetime(?)`).bind(stateHash,provider,nowIso).first<any>();
+ if(!row)throw new HTTPException(400,{message:"Cloud authorization expired"});const consumed=await primaryDb(c.env).prepare("UPDATE cloud_oauth_states SET consumed_at=datetime('now') WHERE state_hash=? AND consumed_at IS NULL").bind(stateHash).run();if(!consumed.meta.changes)throw new HTTPException(400,{message:"Cloud authorization was already used"});
+ const env=cloudEnv(c.env);const secret=await decryptCloudSecret<{verifier:string;callbackNonce:string}>(row.pkce_ciphertext,row.pkce_iv,env.CLOUD_TRANSFER_TOKEN_SECRET,`oauth-state:${stateHash}:${provider}`);
+ const share=await primaryDb(c.env).prepare(activeShareSql("s.id=? AND s.share_version=?")).bind(row.share_id,row.share_version).first<ShareRow>();if(!share||!share.public_id)throw new HTTPException(404,{message:"This delivery is no longer available"});
+ const redirectUri=cloudRedirectUri(c.env,provider);const token=provider==="dropbox"?await exchangeDropboxCode({clientId:c.env.DROPBOX_CLIENT_ID!,clientSecret:c.env.DROPBOX_CLIENT_SECRET!,redirectUri,code,verifier:secret.verifier}):await exchangeGoogleCode({clientId:c.env.GOOGLE_CLIENT_ID!,clientSecret:c.env.GOOGLE_CLIENT_SECRET!,redirectUri,code,verifier:secret.verifier});
+ const authorizationId=randomSecret(16),jobId=randomSecret(16);const credential=await encryptCloudSecret(token,env.CLOUD_TRANSFER_TOKEN_SECRET,`authorization:${authorizationId}:${provider}`);const expiresAt=new Date(Date.now()+24*3600000).toISOString();
+ const pendingGoogle=provider==="google";const destination=pendingGoogle?JSON.stringify({pendingPicker:true}):row.destination_json;
+ await c.env.DELIVERY_DB.batch([
+  primaryDb(c.env).prepare(`INSERT INTO cloud_transfer_authorizations(id,share_id,share_version,provider,credential_ciphertext,credential_iv,key_id,scopes,token_expires_at,expires_at) VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(authorizationId,share.id,share.share_version,provider,credential.ciphertext,credential.iv,env.CLOUD_TRANSFER_KEY_ID||"v1",token.scope||"",token.expiresAt||null,expiresAt),
+  primaryDb(c.env).prepare(`INSERT INTO cloud_transfer_jobs(id,share_id,share_version,authorization_id,provider,selection_json,destination_json,conflict_mode,status,expires_at) VALUES(?,?,?,?,?,?,?,?, 'queued',?)`).bind(jobId,share.id,share.share_version,authorizationId,provider,row.selection_json,destination,row.conflict_mode,expiresAt),
+ ]);
+ if(!pendingGoogle){try{await c.env.CLOUD_TRANSFER_WORKFLOW.create({id:jobId,params:{jobId}});}catch(error){console.error(JSON.stringify({event:"cloud-transfer.workflow-create-failed",jobId,provider,error:error instanceof Error?error.message:String(error)}));await primaryDb(c.env).prepare("UPDATE cloud_transfer_jobs SET status='failed',error_code='transfer-failed',error_message=?,updated_at=datetime('now') WHERE id=?").bind(friendlyCloudFailure("transfer-failed").message,jobId).run();}}
+ const url=new URL(`/s/${encodeURIComponent(share.public_id)}`,c.env.PUBLIC_BASE_URL);url.searchParams.set("cloudTransferNonce",secret.callbackNonce);url.searchParams.set("cloudTransferProvider",providerPublicName(provider));
+ if(pendingGoogle)url.searchParams.set("cloudTransferAuthorization",authorizationId);else url.searchParams.set("cloudTransferJob",jobId);
+ return c.redirect(url.toString(),302);
+});
+
+app.post("/api/public/shares/:publicId/cloud-transfers/google/authorizations/:authorizationId/token",async c=>{
+ requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow,env=cloudEnv(c.env),authorizationId=c.req.param("authorizationId");
+ const row=await getGooglePickerAuthorization(env,authorizationId,share.id,share.share_version);
+ if(!row)throw new HTTPException(404,{message:"Google authorization not found"});const credential=await googlePickerCredential(env,authorizationId,row);if(!credential.accessToken)throw new HTTPException(401,{message:"Google authorization expired"});
+ c.header("Cache-Control","no-store");c.header("Pragma","no-cache");c.header("Referrer-Policy","no-referrer");return c.json({accessToken:credential.accessToken,expiresAt:credential.expiresAt||null});
+});
+
+app.post("/api/public/shares/:publicId/cloud-transfers",async c=>{
+ requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow,env=cloudEnv(c.env);const body=await c.req.json().catch(()=>({})) as {authorizationId?:unknown;folderId?:unknown};
+ if(typeof body.authorizationId!=="string"||!/^[A-Za-z0-9_-]{16,128}$/.test(body.authorizationId)||!validGoogleFolderId(body.folderId))throw new HTTPException(400,{message:"A valid Google Drive destination is required"});
+ const job=await activatePendingGoogleJob(env,{authorizationId:body.authorizationId,shareId:share.id,shareVersion:share.share_version,folderId:body.folderId});if(!job)throw new HTTPException(404,{message:"Google authorization not found or already used"});
+ try{await c.env.CLOUD_TRANSFER_WORKFLOW.create({id:job.id,params:{jobId:job.id}});}catch(error){console.error(JSON.stringify({event:"cloud-transfer.workflow-create-failed",jobId:job.id,provider:"google",error:error instanceof Error?error.message:String(error)}));await cloudDb(env).prepare("UPDATE cloud_transfer_jobs SET status='failed',error_code='transfer-failed',error_message=?,updated_at=datetime('now') WHERE id=?").bind(friendlyCloudFailure("transfer-failed").message,job.id).run();throw new HTTPException(503,{message:"The cloud transfer could not be queued"});}
+ return c.json({id:job.id,provider:"google-drive",status:"queued"},202);
+});
+
+app.get("/api/public/shares/:publicId/cloud-transfers/:jobId",async c=>{
+ const share=c.get("share") as ShareRow,job=await getAuthorizedCloudJob(cloudEnv(c.env),c.req.param("jobId"),share.id,share.share_version);if(!job)throw new HTTPException(404,{message:"Cloud transfer not found"});const items=await listCloudItems(cloudEnv(c.env),job.id);
+ return c.json({id:job.id,provider:providerPublicName(job.provider),status:cloudStatus(job.status),processedFiles:job.processed_files,totalFiles:job.file_count,processedBytes:job.processed_bytes,totalBytes:job.total_bytes,error:job.error_code?friendlyCloudFailure(job.error_code):null,items:items.map(item=>({id:item.id,name:item.relative_path,status:item.status==="completed"?"copied":item.status==="queued"?"waiting":item.status==="running"?"copying":item.status,processedBytes:item.uploaded_bytes,totalBytes:item.source_size,message:item.error_message||undefined}))});
+});
+
+app.post("/api/public/shares/:publicId/cloud-transfers/:jobId/cancel",async c=>{
+ requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow;const env=cloudEnv(c.env);if(!(await requestCloudCancellation(env,c.req.param("jobId"),share.id,share.share_version)))throw new HTTPException(409,{message:"This transfer can no longer be cancelled"});const job=await getAuthorizedCloudJob(env,c.req.param("jobId"),share.id,share.share_version);return c.json({id:job!.id,provider:providerPublicName(job!.provider),status:"cancelled"});
+});
+
+app.post("/api/public/shares/:publicId/cloud-transfers/:jobId/retry",async c=>{
+ requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow,env=cloudEnv(c.env),jobId=c.req.param("jobId");const count=await retryFailedCloudItems(env,jobId,share.id,share.share_version);if(!count)throw new HTTPException(409,{message:"There are no failed files to retry"});
+ await c.env.CLOUD_TRANSFER_WORKFLOW.create({id:`${jobId}-retry-${randomSecret(8)}`,params:{jobId}});const job=(await getAuthorizedCloudJob(env,jobId,share.id,share.share_version))!;return c.json({id:job.id,provider:providerPublicName(job.provider),status:"running"});
+});
+
+app.on(["GET","HEAD"],"/api/public/cloud-transfers/source/:grant",async c=>{
+ const object=await readGrantedSource(cloudEnv(c.env),c.req.param("grant"));const headers=new Headers();headers.set("Content-Type",object.httpMetadata?.contentType||"application/octet-stream");headers.set("Content-Length",String(object.size));headers.set("ETag",object.httpEtag);headers.set("Cache-Control","private, no-store");return new Response(c.req.method==="HEAD"?null:object.body,{headers});
 });
 
 export async function cleanupTemporaryZips(env: Env, now = Date.now()): Promise<void> {
@@ -561,4 +705,4 @@ app.onError((error, c) => {
   return c.json({ error: status >= 500 ? "An unexpected error occurred" : error.message,...(code?{code}:{}) }, status);
 });
 
-export default { fetch: app.fetch, scheduled: (_event, env, ctx) => ctx.waitUntil(cleanupTemporaryZips(env)) } satisfies ExportedHandler<Env>;
+export default { fetch: app.fetch, scheduled: (_event, env, ctx) => ctx.waitUntil(Promise.all([cleanupTemporaryZips(env),env.CLOUD_TRANSFER_TOKEN_SECRET?cleanupCloudTransfers(cloudEnv(env),{dropbox:createCloudProviderAdapter("dropbox",cloudEnv(env)),google:createCloudProviderAdapter("google",cloudEnv(env))}):Promise.resolve()]).then(()=>undefined)) } satisfies ExportedHandler<Env>;

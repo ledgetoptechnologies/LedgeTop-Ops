@@ -29,7 +29,13 @@
     "PREVIOUS_SESSION_KEY_ID": "",
     "STREAM_CUSTOMER_CODE": "",
     "R2_S3_ENDPOINT": "https://846c924bf17bf4f3dd15c97a4c5d1d51.r2.cloudflarestorage.com",
-    "R2_BUCKET_NAME": "client-data"
+    "R2_BUCKET_NAME": "client-data",
+    "CLOUD_TRANSFER_DROPBOX_ENABLED": "false",
+    "CLOUD_TRANSFER_GOOGLE_ENABLED": "false",
+    "DROPBOX_CLIENT_ID": "",
+    "GOOGLE_CLIENT_ID": "",
+    "GOOGLE_PICKER_API_KEY": "",
+    "GOOGLE_CLOUD_PROJECT_NUMBER": ""
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "ratelimits": [
@@ -92,6 +98,11 @@
       "name": "ltds-bulk-download",
       "binding": "BULK_DOWNLOAD_WORKFLOW",
       "class_name": "BulkDownloadWorkflow"
+    },
+    {
+      "name": "ltds-cloud-transfer",
+      "binding": "CLOUD_TRANSFER_WORKFLOW",
+      "class_name": "CloudTransferWorkflow"
     }
   ]
 }

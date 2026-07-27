@@ -216,7 +216,7 @@ describe("bulk-download 429 responses", () => {
     expect(retryAfter).toBeLessThanOrEqual(3600);
   });
 
-  it("transitions an elapsed ready job before creating another signed URL", async () => {
+  it("transitions an elapsed ready job to expired before serving the archive", async () => {
     const env = authenticatedEnv(true, 1, { status: "ready", expires_at: "2020-01-01T00:00:00.000Z" });
     const response = await deliveryWorker.fetch(new Request("https://delivery.example/api/public/shares/public/bulk-download/job-1", {
       headers: { Cookie: await sessionCookie(env) },
@@ -335,8 +335,8 @@ describe("bulk-download snapshot identities", () => {
     await expect(snapshot(tooMany.env, baseJob)).rejects.toThrow("file-limit");
 
     const tooLarge = snapshotEnv("", null, [
-      { key: "jobs/client/part-1.bin", size: 11 * 1024 * 1024 * 1024, etag: "etag-1", httpEtag: "\"etag-1\"" },
-      { key: "jobs/client/part-2.bin", size: 10 * 1024 * 1024 * 1024, etag: "etag-2", httpEtag: "\"etag-2\"" },
+      { key: "jobs/client/part-1.bin", size: 55 * 1024 * 1024 * 1024, etag: "etag-1", httpEtag: "\"etag-1\"" },
+      { key: "jobs/client/part-2.bin", size: 55 * 1024 * 1024 * 1024, etag: "etag-2", httpEtag: "\"etag-2\"" },
     ]);
     await expect(snapshot(tooLarge.env, baseJob)).rejects.toThrow("byte-limit");
   });

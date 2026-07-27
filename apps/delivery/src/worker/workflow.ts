@@ -6,7 +6,7 @@ import type { Env } from "./types";
 export { classifyWorkflowFailure } from "./bulk-download-errors";
 
 const MAX_FILES = 2_000;
-const MAX_BYTES = 20 * 1024 * 1024 * 1024;
+const MAX_BYTES = 100 * 1024 * 1024 * 1024;
 const CRC_CHUNK = 8 * 1024 * 1024;
 const CRC_PROGRESS_CHECKPOINT = 64 * 1024 * 1024;
 const CRC_FILE_CHECKPOINT = 25;

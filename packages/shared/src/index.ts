@@ -68,6 +68,13 @@ export interface DeliveryManifest {
   folder: { id: string; name: string; breadcrumbs: Array<{ id: string; name: string }> };
   items: DeliveryItem[];
   nextCursor: string | null;
+  capabilities?: {
+    cloudTransfer?: {
+      dropbox: boolean;
+      googleDrive: boolean;
+      googlePicker: boolean;
+    };
+  };
 }
 
 export const BRAND = {
