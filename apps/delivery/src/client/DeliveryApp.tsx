@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BRAND, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
 import { Brand, EmptyState, Loading } from "@ltds/ui";
 import { openDeliveryRoute, parseDeliveryRoute } from "./route";
@@ -295,6 +295,8 @@ function Preview({ item, items, publicId, onSelect, onClose }: { item: DeliveryI
   const previous = index > 0 ? items[index - 1] : undefined;
   const next = index >= 0 && index < items.length - 1 ? items[index + 1] : undefined;
   const filmstripItems = index < 0 ? [] : items.slice(Math.max(0, index - 4), Math.min(items.length, index + 5));
+  const activeFilmstripItem = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => { activeFilmstripItem.current?.scrollIntoView({ block: "nearest", inline: "center" }); }, [item.id]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (["INPUT", "TEXTAREA", "SELECT"].includes((event.target as HTMLElement)?.tagName)) return;
@@ -309,7 +311,7 @@ function Preview({ item, items, publicId, onSelect, onClose }: { item: DeliveryI
     <button className="preview-nav previous" disabled={!previous} aria-label="Previous file" onClick={() => previous && onSelect(previous)}>‹</button>
     <div className="preview-media">{item.kind === "image" ? <ImagePreview key={item.id} item={item} /> : item.kind === "pdf" ? <PdfPreview key={item.id} item={item} /> : item.kind === "video" ? <VideoPreview key={item.id} item={item} publicId={publicId} /> : item.kind === "audio" && (item.sourceUrl || item.previewUrl) ? <audio src={item.sourceUrl || item.previewUrl} controls /> : item.kind === "text" && (item.sourceUrl || item.previewUrl) ? <iframe src={item.sourceUrl || item.previewUrl} title={item.name} loading="lazy" /> : <PreparedPlaceholder item={item} />}</div>
     <button className="preview-nav next" disabled={!next} aria-label="Next file" onClick={() => next && onSelect(next)}>›</button>
-  </div>{items.length > 1 && <div className="preview-filmstrip" aria-label="Nearby files in this folder">{filmstripItems.map(candidate => <button key={candidate.id} className={candidate.id === item.id ? "active" : ""} aria-current={candidate.id === item.id ? "true" : undefined} title={candidate.name} onClick={() => onSelect(candidate)}>{candidate.thumbnailUrl ? <Thumbnail item={candidate} /> : <span className="file-kind">{iconFor(candidate)}</span>}</button>)}</div>}</section></div>;
+  </div>{filmstripItems.length > 0 && <div className="preview-filmstrip" aria-label="Nearby files in this folder">{filmstripItems.map(candidate => {const active=candidate.id===item.id;return <button key={candidate.id} ref={active?activeFilmstripItem:null} className={active?"active":""} aria-current={active?"true":undefined} title={candidate.name} onClick={() => onSelect(candidate)}>{candidate.thumbnailUrl ? <Thumbnail item={candidate} /> : <span className="file-kind">{iconFor(candidate)}</span>}</button>})}</div>}</section></div>;
 }
 
 function ImagePreview({ item }: { item: DeliveryItem }) {
@@ -328,7 +330,7 @@ function SkeletonViewer() { return <span className="skeleton-viewer" role="statu
 
 function DownloadOriginal({ item, compact = false }: { item: DeliveryItem; compact?: boolean }) {
   if (!item.downloadUrl) return null;
-  return <a className={compact ? "button button-orange button-small" : "viewer-download"} href={item.downloadUrl}>Download original</a>;
+  return <a className={compact ? "button button-orange button-small" : "viewer-download"} href={item.downloadUrl}>Download</a>;
 }
 
 function PreparedPlaceholder({ item }: { item: DeliveryItem }) {

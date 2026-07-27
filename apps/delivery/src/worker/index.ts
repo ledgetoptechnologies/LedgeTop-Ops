@@ -40,7 +40,10 @@ app.use("*", async (c, next) => {
   await next();
   c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   c.header("X-Robots-Tag", "noindex, nofollow");
-  if (c.req.path.startsWith("/api/")) c.header("Cache-Control", "no-store");
+  if (c.req.path.startsWith("/api/")) {
+    c.header("Cloudflare-CDN-Cache-Control", "no-store");
+    if (!c.res.headers.has("Cache-Control")) c.header("Cache-Control", "no-store");
+  }
 });
 
 function activeShareSql(extra: string): string {
@@ -166,6 +169,13 @@ function registeredDerivativeEtags(value: string): Record<string, unknown> {
   catch { return {}; }
 }
 
+function matchesEtag(value: string | undefined, current: string): boolean {
+  if (!value) return false;
+  const clean = (etag: string) => etag.trim().replace(/^W\//, "").replace(/^"|"$/g, "");
+  const expected = clean(current);
+  return value.split(",").some(candidate => candidate.trim() === "*" || clean(candidate) === expected);
+}
+
 async function requirePreparedImage(c: any, key: string, variant: "thumbnail" | "preview" | "poster"): Promise<Response> {
   const preparedVariant = variant === "thumbnail" ? "thumb" : variant;
   const prefix = (await preparedKey(key, "thumb")).replace(/thumb\.webp$/, "");
@@ -180,10 +190,16 @@ async function requirePreparedImage(c: any, key: string, variant: "thumbnail" | 
     cleanEtag(registered.manifest_etag) !== cleanEtag(manifest.httpEtag)) {
     throw new HTTPException(404, { message: "Prepared preview unavailable" });
   }
-  const object = await c.env.DATA_BUCKET.get(await preparedKey(key, preparedVariant), { onlyIf: { etagMatches: expectedEtag } });
+  const derivativeKey = await preparedKey(key, preparedVariant);
+  const derivative = await c.env.DATA_BUCKET.head(derivativeKey);
   const maxBytes = preparedVariant === "preview" ? 512_000 : 100 * 1024;
+  if (!derivative || derivative.size <= 0 || derivative.size > maxBytes || cleanEtag(derivative.httpEtag) !== cleanEtag(expectedEtag)) throw new HTTPException(404, { message: "Prepared preview unavailable" });
+  const responseEtag = derivative.httpEtag.startsWith("\"") ? derivative.httpEtag : `"${derivative.httpEtag.replace(/^"|"$/g, "")}"`;
+  const headers = new Headers({ "Content-Type": "image/webp", "Content-Disposition": "inline", "Cache-Control": "private, no-cache", "ETag": responseEtag, "X-Content-Type-Options": "nosniff" });
+  if (matchesEtag(c.req.header("If-None-Match"), responseEtag)) return new Response(null, { status: 304, headers });
+  const object = await c.env.DATA_BUCKET.get(derivativeKey, { onlyIf: { etagMatches: expectedEtag } });
   if (!object || !("body" in object) || object.size > maxBytes) throw new HTTPException(404, { message: "Prepared preview unavailable" });
-  const headers = new Headers(); headers.set("Content-Type", "image/webp"); headers.set("Content-Length", String(object.size)); headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("Content-Disposition", "inline"); headers.set("X-Content-Type-Options", "nosniff");
+  headers.set("Content-Length", String(object.size));
   return new Response(object.body, { headers });
 }
 
@@ -328,9 +344,11 @@ export async function streamItem(c: any, disposition: "inline" | "attachment", r
   if (!raw && disposition === "inline" && (kind === "image" || kind === "pdf")) return requirePreparedImage(c, key, "preview");
   if (!raw && disposition === "inline" && kind === "video") throw new HTTPException(409, { message: "Video preview is available through Stream" });
   let range: { offset: number; length: number } | undefined;
-  try { range = parseRange(c.req.header("Range"), head.size); } catch (error) { if (error instanceof HTTPException && error.status === 416) return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${head.size}`, "Accept-Ranges": "bytes" } }); throw error; }
-  const headers = new Headers(); head.writeHttpMetadata(headers); headers.set("Content-Type", mimeForKey(key)); headers.set("ETag", head.httpEtag); headers.set("Accept-Ranges", "bytes"); headers.set("Cache-Control", "private, no-store"); headers.set("X-Content-Type-Options", "nosniff"); headers.set("Content-Disposition", `${disposition}; filename="${safeFileName(key)}"`);
+  const rangeHeader = c.req.header("Range"), ifRange = c.req.header("If-Range");
+  try { range = parseRange(!ifRange || matchesEtag(ifRange, head.httpEtag) ? rangeHeader : undefined, head.size); } catch (error) { if (error instanceof HTTPException && error.status === 416) return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${head.size}`, "Accept-Ranges": "bytes" } }); throw error; }
+  const headers = new Headers(); head.writeHttpMetadata(headers); headers.set("Content-Type", mimeForKey(key)); headers.set("ETag", head.httpEtag); headers.set("Accept-Ranges", "bytes"); headers.set("Cache-Control", disposition === "inline" ? "private, no-cache" : "private, no-store"); headers.set("X-Content-Type-Options", "nosniff"); headers.set("Content-Disposition", `${disposition}; filename="${safeFileName(key)}"`);
   if (range) { headers.set("Content-Range", `bytes ${range.offset}-${range.offset + range.length - 1}/${head.size}`); headers.set("Content-Length", String(range.length)); } else headers.set("Content-Length", String(head.size));
+  if (!range && disposition === "inline" && matchesEtag(c.req.header("If-None-Match"), head.httpEtag)) { headers.delete("Content-Length"); return new Response(null, { status: 304, headers }); }
   if (c.req.method === "HEAD") return new Response(null, { status: range ? 206 : 200, headers });
   const object = await c.env.DATA_BUCKET.get(key, range ? { range } : undefined); if (!object) throw new HTTPException(404, { message: "File not found" });
   c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, disposition === "attachment" ? "download.started" : "preview.viewed", itemRef));

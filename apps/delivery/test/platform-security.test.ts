@@ -53,12 +53,13 @@ describe("single byte range parsing",()=>{
 
 describe("authenticated original object streaming",()=>{
   const share:ShareRow={id:"share-1",public_id:"public",project_id:"project-1",token_hash:"hash",label:null,password_hash:null,password_salt:null,password_iterations:null,password_algorithm:null,expires_at:null,revoked_at:null,revoked_reason:null,unavailable_since:null,share_version:2,client_name:"Client",project_name:"Delivery",r2_prefix:"jobs/client/"};
-  function context(method:"GET"|"HEAD",range?:string){
+  function context(method:"GET"|"HEAD",range?:string,ifNoneMatch?:string,ifRange?:string){
     const reads:Array<{key:string;options?:{range:{offset:number;length:number}}}>=[];
     const pending:Promise<unknown>[]=[];
     const statement={bind(){return statement;},async all(){return{results:[]};},async run(){return{meta:{changes:1}};}};
     const database={prepare(){return statement;},withSession(){return database;}};
-    const request=new Request("https://delivery.example/api/source",{method,headers:range?{Range:range}:undefined});
+    const headers=new Headers();if(range)headers.set("Range",range);if(ifNoneMatch)headers.set("If-None-Match",ifNoneMatch);if(ifRange)headers.set("If-Range",ifRange);
+    const request=new Request("https://delivery.example/api/source",{method,headers});
     const c:any={
       get:(name:string)=>name==="share"?share:undefined,
       req:{param:()=>encodeItemRef("edited/photo.jpg"),header:(name:string)=>request.headers.get(name)??undefined,method,raw:request},
@@ -80,7 +81,7 @@ describe("authenticated original object streaming",()=>{
     expect(response.status).toBe(206);
     expect(response.headers.get("Content-Range")).toBe("bytes 10-19/100");
     expect(response.headers.get("Content-Length")).toBe("10");
-    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(response.headers.get("Cache-Control")).toBe("private, no-cache");
     expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
     expect(value.reads).toEqual([{key:"jobs/client/edited/photo.jpg",options:{range:{offset:10,length:10}}}]);
     expect((await response.arrayBuffer()).byteLength).toBe(10);
@@ -97,6 +98,25 @@ describe("authenticated original object streaming",()=>{
     expect(invalidResponse.status).toBe(416);
     expect(invalidResponse.headers.get("Content-Range")).toBe("bytes */100");
     expect(invalid.reads).toHaveLength(0);
+  });
+  it("revalidates a privately cached original without reading R2 again",async()=>{
+    const value=context("GET",undefined,"W/\"etag\"");
+    const response=await streamItem(value.c,"inline",true);
+    expect(response.status).toBe(304);
+    expect(response.headers.get("ETag")).toBe("\"etag\"");
+    expect(response.headers.get("Cache-Control")).toBe("private, no-cache");
+    expect(response.headers.get("Content-Length")).toBeNull();
+    expect(value.reads).toHaveLength(0);
+  });
+  it("returns the complete current object when If-Range is stale",async()=>{
+    const value=context("GET","bytes=10-19",undefined,"\"old-etag\"");
+    const response=await streamItem(value.c,"inline",true);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Range")).toBeNull();
+    expect(response.headers.get("Content-Length")).toBe("100");
+    expect(value.reads).toEqual([{key:"jobs/client/edited/photo.jpg",options:undefined}]);
+    expect((await response.arrayBuffer()).byteLength).toBe(100);
+    await Promise.all(value.pending);
   });
 });
 
