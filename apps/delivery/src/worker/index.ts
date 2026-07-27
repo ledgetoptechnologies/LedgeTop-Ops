@@ -14,6 +14,13 @@ interface Tombstone { physical_key: string; tombstone_kind: "exact" | "prefix"; 
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 const COOKIE_NAME = "__Host-ltds_delivery";
 
+export function framePolicyForPath(path: string, method = "GET"): { frameAncestors: "'self'" | "'none'"; xFrameOptions: "SAMEORIGIN" | "DENY" } {
+  const inlinePdf = (method === "GET" || method === "HEAD") && /^\/api\/public\/shares\/[^/]+\/items\/[^/]+\/pdf$/.test(path);
+  return inlinePdf
+    ? { frameAncestors: "'self'", xFrameOptions: "SAMEORIGIN" }
+    : { frameAncestors: "'none'", xFrameOptions: "DENY" };
+}
+
 function sessionDb<T extends { prepare: (...args: any[]) => any }>(db: T): T {
   const candidate = db as T & { withSession?: (consistency: "first-primary") => T };
   return typeof candidate.withSession === "function" ? candidate.withSession("first-primary") : db;
@@ -23,7 +30,7 @@ function primaryDb(env: Pick<Env, "DELIVERY_DB">): D1Database {
   return sessionDb(env.DELIVERY_DB);
 }
 
-app.use("*", secureHeaders({
+const lockedSecurityHeaders = secureHeaders({
   contentSecurityPolicy: {
     defaultSrc: ["'self'"], imgSrc: ["'self'", "https://ledgetopdroneservices.com", "https://*.cloudflarestream.com", "data:"], styleSrc: ["'self'", "'unsafe-inline'"],
     scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com"], frameAncestors: ["'none'"],
@@ -33,7 +40,21 @@ app.use("*", secureHeaders({
   xContentTypeOptions: "nosniff",
   xFrameOptions: "DENY",
   xXssProtection: false,
-}));
+});
+const frameablePdfSecurityHeaders = secureHeaders({
+  contentSecurityPolicy: {
+    defaultSrc: ["'self'"], imgSrc: ["'self'", "https://ledgetopdroneservices.com", "https://*.cloudflarestream.com", "data:"], styleSrc: ["'self'", "'unsafe-inline'"],
+    scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com"], frameAncestors: ["'self'"],
+    baseUri: ["'none'"], objectSrc: ["'none'"], formAction: ["'self'"],
+  },
+  referrerPolicy: "no-referrer",
+  xContentTypeOptions: "nosniff",
+  xFrameOptions: "SAMEORIGIN",
+  xXssProtection: false,
+});
+app.use("*", (c, next) => framePolicyForPath(c.req.path, c.req.method).xFrameOptions === "SAMEORIGIN"
+  ? frameablePdfSecurityHeaders(c, next)
+  : lockedSecurityHeaders(c, next));
 
 app.use("*", async (c, next) => {
   if (c.env.ENVIRONMENT === "production" && new URL(c.req.url).host !== c.env.EXPECTED_HOST) return c.json({ error: "Not found" }, 404);
@@ -133,6 +154,11 @@ async function enforceRateLimit(c: any, limiter: RateLimit, scope: string): Prom
 
 function baseForItem(share: ShareRow, itemRef: string): string {
   return `/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${encodeURIComponent(itemRef)}`;
+}
+
+export function sourceUrlForItem(base: string, kind: DeliveryItem["kind"]): string | undefined {
+  if (!["image", "video", "audio", "pdf", "text"].includes(kind)) return undefined;
+  return `${base}/${kind === "pdf" ? "pdf" : "source"}`;
 }
 
 async function loadAliases(env: Env, keys: string[]): Promise<Map<string, string>> {
@@ -282,8 +308,8 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
     const relative = object.key.slice(root.length); const id = encodeItemRef(relative); const kind = kindForKey(object.key);
     const base = `/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${id}`;
     const item: DeliveryItem = { id, name: aliases.get(object.key) || relative.split("/").pop() || relative, kind, size: object.size, uploadedAt: object.uploaded.toISOString(), downloadUrl: `${base}/download`, previewStatus: kind === "video" ? "processing" : undefined };
-    if (["image", "audio", "pdf", "text"].includes(kind)) item.previewUrl = `${base}/preview`;
-    if (["image", "video", "audio", "pdf", "text"].includes(kind)) item.sourceUrl = `${base}/source`;
+    if (["image", "audio", "text"].includes(kind)) item.previewUrl = `${base}/preview`;
+    item.sourceUrl = sourceUrlForItem(base, kind);
     if (kind === "image" || kind === "video" || kind === "pdf") item.thumbnailUrl = `${base}/thumbnail`;
     if (kind === "video") item.previewUrl = undefined;
     if (kind === "video") videos.push({ index: items.length, key: object.key });
@@ -305,10 +331,12 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   return c.json(manifest);
 });
 
-export async function streamItem(c: any, disposition: "inline" | "attachment", raw = false): Promise<Response> {
+export async function streamItem(c: any, disposition: "inline" | "attachment", raw = false, requiredKind?: "pdf"): Promise<Response> {
   const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const relative = decodeItemRef(itemRef); const key = keyWithinRoot(share.r2_prefix, relative);
   await assertNotTrashed(c.env, key);
-  const kind = kindForKey(key); if (disposition === "inline" && !["image", "video", "audio", "pdf", "text"].includes(kind)) throw new HTTPException(415, { message: "Preview is not available for this file" });
+  const kind = kindForKey(key);
+  if (requiredKind && kind !== requiredKind) throw new HTTPException(415, { message: "PDF preview is not available for this file" });
+  if (disposition === "inline" && !["image", "video", "audio", "pdf", "text"].includes(kind)) throw new HTTPException(415, { message: "Preview is not available for this file" });
   const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" });
   if (!raw && disposition === "inline" && (kind === "image" || kind === "pdf")) return requirePreparedImage(c, key, "preview");
   if (!raw && disposition === "inline" && kind === "video") throw new HTTPException(409, { message: "Video preview is available through Stream" });
@@ -335,6 +363,7 @@ app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/preview", a
 });
 
 app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/source", c => streamItem(c, "inline", true));
+app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/pdf", c => streamItem(c, "inline", true, "pdf"));
 
 async function downloadTicket(c: any): Promise<{ url: string; expiresAt: string }> {
   const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));

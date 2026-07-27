@@ -4,11 +4,68 @@ import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, parseRange, p
 import { createSessionCookie, presignR2Get, verifyRotatingSessionCookie, verifySessionCookie } from "../src/worker/security";
 import { hashAccessCode } from "../../operations/src/worker/crypto";
 import { verifyAccessCode } from "../src/worker/security";
-import { ensurePublicId, markUnavailableFolder, serveAppShell, streamItem } from "../src/worker/index";
+import deliveryWorker, { ensurePublicId, framePolicyForPath, markUnavailableFolder, serveAppShell, sourceUrlForItem, streamItem } from "../src/worker/index";
 import type { ShareRow } from "../src/worker/types";
 
 describe("delivery app shell",()=>{
   it("preserves the public share path when requesting the SPA fallback",async()=>{let requestedPath="";const response=await serveAppShell(new Request("https://delivery.ledgetopdroneservices.com/s/public-id"),{fetch:async input=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("app shell",{status:200});}});expect(requestedPath).toBe("/s/public-id");expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();});
+});
+
+describe("inline PDF routing",()=>{
+  const base="/api/public/shares/public/items/item-ref";
+  it("uses the dedicated PDF route only for PDF source URLs",()=>{
+    expect(sourceUrlForItem(base,"pdf")).toBe(`${base}/pdf`);
+    expect(sourceUrlForItem(base,"image")).toBe(`${base}/source`);
+    expect(sourceUrlForItem(base,"folder")).toBeUndefined();
+  });
+  it("allows same-origin framing only for the dedicated PDF route",()=>{
+    expect(framePolicyForPath(`${base}/pdf`)).toEqual({frameAncestors:"'self'",xFrameOptions:"SAMEORIGIN"});
+    expect(framePolicyForPath(`${base}/pdf`,"HEAD")).toEqual({frameAncestors:"'self'",xFrameOptions:"SAMEORIGIN"});
+    expect(framePolicyForPath(`${base}/pdf`,"POST")).toEqual({frameAncestors:"'none'",xFrameOptions:"DENY"});
+    for(const path of [`${base}/source`,`${base}/preview`,"/health"])expect(framePolicyForPath(path)).toEqual({frameAncestors:"'none'",xFrameOptions:"DENY"});
+  });
+  async function routeContext(relative="edited/brochure.pdf",missing=false){
+    const share:ShareRow={id:"share-1",public_id:"public",project_id:"project-1",token_hash:"hash",label:null,password_hash:null,password_salt:null,password_iterations:null,password_algorithm:null,expires_at:null,revoked_at:null,revoked_reason:null,unavailable_since:null,share_version:2,client_name:"Client",project_name:"Delivery",r2_prefix:"jobs/client/"};
+    const pending:Promise<unknown>[]=[];
+    const statement={bind(){return statement;},async first<T>(){return share as T;},async all<T>(){return{results:[] as T[]};},async run(){return{meta:{changes:1}};}};
+    const database={prepare(){return statement;},withSession(){return database;}};
+    const limiter={async limit(){return{success:true};}};
+    const env:any={ENVIRONMENT:"development",EXPECTED_HOST:"delivery.example",DELIVERY_DB:database,DATA_BUCKET:{
+      async head(){return missing?null:{size:100,httpEtag:"\"pdf-etag\"",writeHttpMetadata(){}};},
+      async get(_key:string,options?:{range:{length:number}}){return{body:new Blob([new Uint8Array(options?.range.length??100)]).stream()};},
+    },PUBLIC_MEDIA_RATE_LIMITER:limiter,DELIVERY_SESSION_SECRET:"s".repeat(48),SESSION_KEY_ID:"v1",AUDIT_IP_SECRET:"a".repeat(48)};
+    const cookie=(await createSessionCookie(env.DELIVERY_SESSION_SECRET,env.SESSION_KEY_ID,share.id,share.share_version,Date.now()+60_000)).split(";")[0]!;
+    const url=`https://delivery.example/api/public/shares/public/items/${encodeURIComponent(encodeItemRef(relative))}/pdf`;
+    const executionCtx={waitUntil(promise:Promise<unknown>){pending.push(promise);},passThroughOnException(){}} as ExecutionContext;
+    return{env,cookie,url,pending,executionCtx};
+  }
+  it("serves authenticated PDF routes with inline framing headers",async()=>{
+    const value=await routeContext();
+    const response=await deliveryWorker.fetch(new Request(value.url,{headers:{Cookie:value.cookie}}),value.env,value.executionCtx);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Content-Type")).toBe("application/pdf");
+    expect(response.headers.get("Content-Disposition")).toBe('inline; filename="brochure.pdf"');
+    expect(response.headers.get("ETag")).toBe("\"pdf-etag\"");
+    expect(response.headers.get("X-Frame-Options")).toBe("SAMEORIGIN");
+    expect(response.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'self'");
+    await Promise.all(value.pending);
+  });
+  it("keeps ordinary responses unframeable and rejects unauthorized, missing, and non-PDF requests",async()=>{
+    const value=await routeContext();
+    const unauthorized=await deliveryWorker.fetch(new Request(value.url),value.env,value.executionCtx);
+    expect(unauthorized.status).toBe(401);
+    const missing=await routeContext("edited/missing.pdf",true);
+    expect((await deliveryWorker.fetch(new Request(missing.url,{headers:{Cookie:missing.cookie}}),missing.env,missing.executionCtx)).status).toBe(404);
+    const image=await routeContext("edited/photo.jpg");
+    expect((await deliveryWorker.fetch(new Request(image.url,{headers:{Cookie:image.cookie}}),image.env,image.executionCtx)).status).toBe(415);
+    const health=await deliveryWorker.fetch(new Request("https://delivery.example/health"),value.env,value.executionCtx);
+    expect(health.headers.get("X-Frame-Options")).toBe("DENY");
+    expect(health.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+    const wrongHost=await deliveryWorker.fetch(new Request("https://wrong.example/health"),{...value.env,ENVIRONMENT:"production"},value.executionCtx);
+    expect(wrongHost.status).toBe(404);
+    expect(wrongHost.headers.get("X-Frame-Options")).toBe("DENY");
+    expect(wrongHost.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+  });
 });
 
 describe("public item references",()=>{
@@ -53,7 +110,8 @@ describe("single byte range parsing",()=>{
 
 describe("authenticated original object streaming",()=>{
   const share:ShareRow={id:"share-1",public_id:"public",project_id:"project-1",token_hash:"hash",label:null,password_hash:null,password_salt:null,password_iterations:null,password_algorithm:null,expires_at:null,revoked_at:null,revoked_reason:null,unavailable_since:null,share_version:2,client_name:"Client",project_name:"Delivery",r2_prefix:"jobs/client/"};
-  function context(method:"GET"|"HEAD",range?:string,ifNoneMatch?:string,ifRange?:string){
+  function context(method:"GET"|"HEAD",range?:string,ifNoneMatch?:string,ifRange?:string,relative="edited/photo.jpg"){
+    const expectedKey=`jobs/client/${relative}`;
     const reads:Array<{key:string;options?:{range:{offset:number;length:number}}}>=[];
     const pending:Promise<unknown>[]=[];
     const statement={bind(){return statement;},async all(){return{results:[]};},async run(){return{meta:{changes:1}};}};
@@ -62,12 +120,12 @@ describe("authenticated original object streaming",()=>{
     const request=new Request("https://delivery.example/api/source",{method,headers});
     const c:any={
       get:(name:string)=>name==="share"?share:undefined,
-      req:{param:()=>encodeItemRef("edited/photo.jpg"),header:(name:string)=>request.headers.get(name)??undefined,method,raw:request},
+      req:{param:()=>encodeItemRef(relative),header:(name:string)=>request.headers.get(name)??undefined,method,raw:request},
       env:{
         AUDIT_IP_SECRET:"a".repeat(48),
         DELIVERY_DB:database,
         DATA_BUCKET:{
-          async head(key:string){expect(key).toBe("jobs/client/edited/photo.jpg");return{size:100,httpEtag:"\"etag\"",writeHttpMetadata(){}};},
+          async head(key:string){expect(key).toBe(expectedKey);return{size:100,httpEtag:"\"etag\"",writeHttpMetadata(){}};},
           async get(key:string,options?:{range:{offset:number;length:number}}){reads.push({key,options});const length=options?.range.length??100;return{body:new Blob([new Uint8Array(length)]).stream()};},
         },
       },
@@ -116,6 +174,18 @@ describe("authenticated original object streaming",()=>{
     expect(response.headers.get("Content-Length")).toBe("100");
     expect(value.reads).toEqual([{key:"jobs/client/edited/photo.jpg",options:undefined}]);
     expect((await response.arrayBuffer()).byteLength).toBe(100);
+    await Promise.all(value.pending);
+  });
+  it("streams the original PDF inline with ranges and rejects non-PDF identities",async()=>{
+    const value=context("GET","bytes=20-39",undefined,undefined,"edited/brochure.pdf");
+    const response=await streamItem(value.c,"inline",true,"pdf");
+    expect(response.status).toBe(206);
+    expect(response.headers.get("Content-Type")).toBe("application/pdf");
+    expect(response.headers.get("Content-Disposition")).toBe('inline; filename="brochure.pdf"');
+    expect(response.headers.get("ETag")).toBe("\"etag\"");
+    expect(response.headers.get("Content-Range")).toBe("bytes 20-39/100");
+    expect(value.reads).toEqual([{key:"jobs/client/edited/brochure.pdf",options:{range:{offset:20,length:20}}}]);
+    await expect(streamItem(context("GET").c,"inline",true,"pdf")).rejects.toMatchObject({status:415});
     await Promise.all(value.pending);
   });
 });

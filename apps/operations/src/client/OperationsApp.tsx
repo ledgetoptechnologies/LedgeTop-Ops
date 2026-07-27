@@ -359,10 +359,21 @@ function FilePreview({item,items:providedItems,select:providedSelect,close}:{ite
   </div>{filmstripItems.length>0&&<div className="preview-filmstrip" aria-label="Nearby files in this folder">{filmstripItems.map(candidate=>{const active=itemRef(candidate)===itemRef(item);return <button key={itemRef(candidate)} ref={active?activeFilmstripItem:null} className={active?"active":""} aria-current={active?"true":undefined} title={displayName(candidate)} onClick={()=>select(candidate)}><OperationsThumbnail item={candidate}/></button>})}</div>}</section></div>
 }
 function OperationsMedia({item,streamUrl,ticketLoading}:{item:DeliveryItem;streamUrl:string|null;ticketLoading:boolean}){
-  const[failed,setFailed]=useState(false),[preparedFailed,setPreparedFailed]=useState(false),[loading,setLoading]=useState(true);
+  const[failed,setFailed]=useState(false),[loading,setLoading]=useState(true),[pdfReady,setPdfReady]=useState<boolean|null>(null);
+  useEffect(()=>{
+    if(item.kind!=="pdf"||!item.sourceUrl){setPdfReady(null);return}
+    let cancelled=false;
+    setPdfReady(null);
+    fetch(item.sourceUrl,{method:"HEAD",credentials:"same-origin",cache:"no-store"}).then(response=>{if(!cancelled)setPdfReady(response.ok&&response.headers.get("Content-Type")?.startsWith("application/pdf")===true)}).catch(()=>{if(!cancelled)setPdfReady(false)});
+    return()=>{cancelled=true};
+  },[item.kind,item.sourceUrl]);
   if(failed)return <OperationsPreviewPlaceholder item={item}/>;
   if(item.kind==="image")return <>{loading&&<ViewerSkeleton/>}<img src={item.previewUrl} alt={displayName(item)} loading="lazy" decoding="async" onLoad={()=>setLoading(false)} onError={()=>setFailed(true)}/></>;
-  if(item.kind==="pdf")return item.sourceUrl?<>{loading&&<ViewerSkeleton/>}<iframe src={item.sourceUrl} title={displayName(item)} loading="lazy" onLoad={()=>setLoading(false)}/></>:preparedFailed?<OperationsPreviewPlaceholder item={item}/>:<>{loading&&<ViewerSkeleton/>}<img src={item.previewUrl} alt={`${displayName(item)} first page`} loading="lazy" decoding="async" onLoad={()=>setLoading(false)} onError={()=>setPreparedFailed(true)}/></>;
+  if(item.kind==="pdf"){
+    if(!item.sourceUrl||pdfReady===false)return <OperationsPreviewPlaceholder item={item}/>;
+    if(pdfReady===null)return <ViewerSkeleton/>;
+    return <>{loading&&<ViewerSkeleton/>}<iframe src={item.sourceUrl} title={displayName(item)} loading="lazy" onLoad={()=>setLoading(false)} onError={()=>setFailed(true)}/></>;
+  }
   if(item.kind==="video"){if(streamUrl)return <iframe src={streamUrl} title={displayName(item)} allow="accelerometer; autoplay; encrypted-media; picture-in-picture" allowFullScreen/>;if(ticketLoading)return <ViewerSkeleton/>;return item.sourceUrl?<video src={item.sourceUrl} controls playsInline preload="metadata" onError={()=>setFailed(true)}/>:<OperationsPreviewPlaceholder item={item}/>;}
   if(item.kind==="audio"&&(item.sourceUrl||item.previewUrl))return <audio src={item.sourceUrl||item.previewUrl} controls/>;
   if(item.kind==="text"&&(item.sourceUrl||item.previewUrl))return <iframe src={item.sourceUrl||item.previewUrl} title={displayName(item)} loading="lazy"/>;

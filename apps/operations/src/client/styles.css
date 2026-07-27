@@ -21,8 +21,8 @@
 .modal-backdrop{padding:clamp(.25rem,1vw,1rem);overflow:hidden;overscroll-behavior:contain}
 .preview{width:min(1600px,100%);height:min(96vh,1000px);height:min(96dvh,1000px);max-height:calc(100vh - .5rem);max-height:calc(100dvh - .5rem);display:grid;grid-template-rows:auto minmax(0,1fr) auto;overflow:hidden}
 .preview>.preview-stage-ops{height:auto;min-width:0;min-height:0;overflow:hidden}
-.preview-stage-ops .preview-media{min-width:0;min-height:0;overflow:hidden}
-.preview-stage-ops .preview-media>img,.preview-stage-ops .preview-media>video{display:block;width:100%;height:100%;max-width:none;max-height:none;object-fit:contain;object-position:center}
+.preview-stage-ops .preview-media{position:absolute;inset:0;width:auto;height:auto;min-width:0;min-height:0;overflow:hidden}
+.preview-stage-ops .preview-media>img,.preview-stage-ops .preview-media>video{position:absolute;inset:0;display:block;width:100%;height:100%;max-width:none;max-height:none;object-fit:contain;object-position:center}
 .preview>.preview-filmstrip{scrollbar-width:none;-ms-overflow-style:none;scrollbar-gutter:auto;overscroll-behavior-inline:contain}
 .preview>.preview-filmstrip::-webkit-scrollbar{display:none}
 @media(max-height:600px){.preview>header{padding:.4rem .65rem}.preview>.preview-filmstrip{height:66px;padding:.3rem max(.4rem,calc(50% - 34px))}.preview-filmstrip button{flex-basis:68px;height:52px}}

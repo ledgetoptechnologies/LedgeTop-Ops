@@ -336,10 +336,19 @@ function ImagePreview({ item }: { item: DeliveryItem }) {
 }
 
 function PdfPreview({ item }: { item: DeliveryItem }) {
-  const [preparedFailed, setPreparedFailed] = useState(!item.previewUrl); const [loaded, setLoaded] = useState(false);
-  if (item.sourceUrl) return <div className="pdf-preview" aria-busy={!loaded}>{!loaded && <SkeletonViewer />}<iframe src={item.sourceUrl} title={item.name} loading="lazy" onLoad={() => setLoaded(true)} /></div>;
-  if (preparedFailed) return <PreparedPlaceholder item={item} />;
-  return <div className="image-preview" aria-busy={!loaded}>{!loaded && <SkeletonViewer />}<img src={item.previewUrl} alt={`${item.name} first page`} loading="lazy" decoding="async" onLoad={() => setLoaded(true)} onError={() => setPreparedFailed(true)} /></div>;
+  const [status, setStatus] = useState<"checking" | "ready" | "failed">(item.sourceUrl ? "checking" : "failed"); const [loaded, setLoaded] = useState(false);
+  useEffect(() => {
+    if (!item.sourceUrl) { setStatus("failed"); return; }
+    const controller = new AbortController();
+    setStatus("checking"); setLoaded(false);
+    fetch(item.sourceUrl, { method: "HEAD", credentials: "same-origin", signal: controller.signal })
+      .then(response => setStatus(response.ok && response.headers.get("Content-Type")?.startsWith("application/pdf") ? "ready" : "failed"))
+      .catch(error => { if (error instanceof DOMException && error.name === "AbortError") return; setStatus("failed"); });
+    return () => controller.abort();
+  }, [item.sourceUrl]);
+  if (status === "failed" || !item.sourceUrl) return <PreparedPlaceholder item={item} />;
+  if (status === "checking") return <div className="pdf-preview" aria-busy="true"><SkeletonViewer /></div>;
+  return <div className="pdf-preview" aria-busy={!loaded}>{!loaded && <SkeletonViewer />}<iframe src={item.sourceUrl} title={item.name} loading="lazy" onLoad={() => setLoaded(true)} onError={() => setStatus("failed")} /></div>;
 }
 
 function SkeletonViewer() { return <span className="skeleton-viewer" role="status" aria-label="Loading preview" />; }
