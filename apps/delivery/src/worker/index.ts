@@ -4,7 +4,7 @@ import { secureHeaders } from "hono/secure-headers";
 import { type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
 import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName } from "./files";
 import { createSessionCookie, hmac, parseCookie, presignR2Get, randomSecret, sha256, verifyAccessCode, verifyRotatingSessionCookie } from "./security";
-import { preparedKey } from "./artifacts";
+import { matchesEtag, servePreparedImage } from "./prepared-images";
 import { recordFirstAccessNotification } from "./notifications";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
@@ -164,43 +164,12 @@ function aliasedPath(key: string, root: string, aliases: Map<string, string>): s
   return names.join("/");
 }
 
-function registeredDerivativeEtags(value: string): Record<string, unknown> {
-  try { const parsed = JSON.parse(value); return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; }
-  catch { return {}; }
-}
-
-function matchesEtag(value: string | undefined, current: string): boolean {
-  if (!value) return false;
-  const clean = (etag: string) => etag.trim().replace(/^W\//, "").replace(/^"|"$/g, "");
-  const expected = clean(current);
-  return value.split(",").some(candidate => candidate.trim() === "*" || clean(candidate) === expected);
-}
-
 async function requirePreparedImage(c: any, key: string, variant: "thumbnail" | "preview" | "poster"): Promise<Response> {
-  const preparedVariant = variant === "thumbnail" ? "thumb" : variant;
-  const prefix = (await preparedKey(key, "thumb")).replace(/thumb\.webp$/, "");
-  const source = await c.env.DATA_BUCKET.head(key);
-  const manifest = await c.env.DATA_BUCKET.head(`${prefix}manifest.json`);
-  const registered = await primaryDb(c.env).prepare("SELECT source_etag,manifest_etag,derivative_etags_json FROM preview_artifacts WHERE artifact_prefix=? AND source_key=? AND missing_since IS NULL").bind(prefix, key).first<{ source_etag: string; manifest_etag: string; derivative_etags_json: string }>();
-  const cleanEtag = (value: string) => value.replace(/^"|"$/g, "");
-  const derivativeEtags = registered ? registeredDerivativeEtags(registered.derivative_etags_json) : {};
-  const expectedEtag = derivativeEtags[preparedVariant];
-  if (!source || !manifest || !registered || typeof expectedEtag !== "string" ||
-    cleanEtag(registered.source_etag) !== cleanEtag(source.httpEtag) ||
-    cleanEtag(registered.manifest_etag) !== cleanEtag(manifest.httpEtag)) {
-    throw new HTTPException(404, { message: "Prepared preview unavailable" });
-  }
-  const derivativeKey = await preparedKey(key, preparedVariant);
-  const derivative = await c.env.DATA_BUCKET.head(derivativeKey);
-  const maxBytes = preparedVariant === "preview" ? 512_000 : 100 * 1024;
-  if (!derivative || derivative.size <= 0 || derivative.size > maxBytes || cleanEtag(derivative.httpEtag) !== cleanEtag(expectedEtag)) throw new HTTPException(404, { message: "Prepared preview unavailable" });
-  const responseEtag = derivative.httpEtag.startsWith("\"") ? derivative.httpEtag : `"${derivative.httpEtag.replace(/^"|"$/g, "")}"`;
-  const headers = new Headers({ "Content-Type": "image/webp", "Content-Disposition": "inline", "Cache-Control": "private, no-cache", "ETag": responseEtag, "X-Content-Type-Options": "nosniff" });
-  if (matchesEtag(c.req.header("If-None-Match"), responseEtag)) return new Response(null, { status: 304, headers });
-  const object = await c.env.DATA_BUCKET.get(derivativeKey, { onlyIf: { etagMatches: expectedEtag } });
-  if (!object || !("body" in object) || object.size > maxBytes) throw new HTTPException(404, { message: "Prepared preview unavailable" });
-  headers.set("Content-Length", String(object.size));
-  return new Response(object.body, { headers });
+  return servePreparedImage({
+    bucket: c.env.DATA_BUCKET,
+    database: primaryDb(c.env),
+    ifNoneMatch: c.req.header("If-None-Match"),
+  }, key, variant);
 }
 
 async function preparedOrOriginalImage(c: any, key: string, variant: "thumbnail" | "preview"): Promise<Response> {
