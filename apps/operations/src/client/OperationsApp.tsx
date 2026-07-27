@@ -334,6 +334,8 @@ function FilePreview({item,items:providedItems,select:providedSelect,close}:{ite
   const previous=index>0?items[index-1]:undefined,next=index>=0&&index<items.length-1?items[index+1]:undefined;
   const filmstripItems=index<0?[]:items.slice(Math.max(0,index-4),Math.min(items.length,index+5));
   const activeFilmstripItem=useRef<HTMLButtonElement|null>(null);
+  const dialog=useRef<HTMLElement|null>(null);
+  useEffect(()=>{const previousOverflow=document.body.style.overflow,previousFocus=document.activeElement instanceof HTMLElement?document.activeElement:null;document.body.style.overflow="hidden";dialog.current?.focus();return()=>{document.body.style.overflow=previousOverflow;previousFocus?.focus()}},[]);
   useEffect(()=>{activeFilmstripItem.current?.scrollIntoView({block:"nearest",inline:"center"})},[item.id]);
   useEffect(()=>{
     let cancelled=false;setStreamUrl(null);setTicketLoading(item.kind==="video"&&item.previewStatus==="ready");
@@ -350,7 +352,7 @@ function FilePreview({item,items:providedItems,select:providedSelect,close}:{ite
     document.addEventListener("keydown",onKeyDown);
     return()=>document.removeEventListener("keydown",onKeyDown);
   },[close,next,previous,select]);
-  return <div className="modal-backdrop" onMouseDown={event=>{if(event.currentTarget===event.target)close()}}><section className="preview" role="dialog" aria-modal="true" aria-label={`Preview ${displayName(item)}`}><header><strong>{displayName(item)}</strong>{index>=0&&<span className="preview-position" aria-live="polite">{index+1} of {items.length}</span>}<a className="button button-orange button-small" href={item.downloadUrl}>Download</a><button className="button-ghost button-small" onClick={close}>Close</button></header><div className="preview-stage-ops">
+  return <div className="modal-backdrop" onMouseDown={event=>{if(event.currentTarget===event.target)close()}}><section ref={dialog} tabIndex={-1} className="preview" role="dialog" aria-modal="true" aria-label={`Preview ${displayName(item)}`} onKeyDown={event=>{if(event.key!=="Tab")return;const focusable=Array.from(event.currentTarget.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),audio[controls],video[controls],[tabindex]:not([tabindex="-1"])'));if(!focusable.length){event.preventDefault();return}const first=focusable[0]!,last=focusable[focusable.length-1]!;if(event.shiftKey&&(document.activeElement===first||document.activeElement===event.currentTarget)){event.preventDefault();last.focus()}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}}}><header><strong>{displayName(item)}</strong>{index>=0&&<span className="preview-position" aria-live="polite">{index+1} of {items.length}</span>}<a className="button button-orange button-small" href={item.downloadUrl}>Download</a><button className="button-ghost button-small" onClick={close}>Close</button></header><div className="preview-stage-ops">
     <button className="preview-nav previous" disabled={!previous} aria-label="Previous file" onClick={()=>previous&&select(previous)}>‹</button>
     <div className="preview-media"><OperationsMedia key={itemRef(item)} item={item} streamUrl={streamUrl} ticketLoading={ticketLoading}/></div>
     <button className="preview-nav next" disabled={!next} aria-label="Next file" onClick={()=>next&&select(next)}>›</button>
