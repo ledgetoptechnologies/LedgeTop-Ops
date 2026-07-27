@@ -114,7 +114,7 @@ export function isCloudAuthorizationResult(value: unknown): value is CloudAuthor
 
 export function waitForCloudAuthorization(
   popup: Window,
-  expected: { origin: string; nonce: string },
+  expected: { origin: string; nonce: string; provider: CloudTransferProvider },
   options: {
     windowObject?: Window;
     timeoutMs?: number;
@@ -162,7 +162,15 @@ export function openCloudAuthorizationWindow(options: {
   return popup;
 }
 
-export function parseCloudTransferCallback(url: string): { jobId: string; nonce: string } | null {`n  const parsed = new URL(url);`n  const jobId = parsed.searchParams.get("cloudTransferJob") || "";`n  const nonce = parsed.searchParams.get("cloudTransferNonce") || "";`n  return jobId && nonce ? { jobId, nonce } : null;`n}
+export function parseCloudTransferCallback(url: string): { jobId: string; nonce: string; provider: CloudTransferProvider } | null {
+  const parsed = new URL(url);
+  const jobId = parsed.searchParams.get("cloudTransferJob") || "";
+  const nonce = parsed.searchParams.get("cloudTransferNonce") || "";
+  const provider = parsed.searchParams.get("cloudTransferProvider") as CloudTransferProvider | null;
+  if (!jobId || !nonce || !provider) return null;
+  if (provider !== "dropbox" && provider !== "google-drive") return null;
+  return { jobId, nonce, provider };
+}
 
 export function notifyCloudTransferOpener(url: string, options: { windowObject?: Window } = {}): boolean {
   const host = options.windowObject || window;
