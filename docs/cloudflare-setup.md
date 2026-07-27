@@ -64,6 +64,8 @@ npx.cmd wrangler secret put R2_ACCESS_KEY_ID
 npx.cmd wrangler secret put R2_SECRET_ACCESS_KEY
 ```
 
+These credentials sign direct browser download URLs only. Delivery's normal R2 reads use the `DATA_BUCKET` binding, and preview SHA identities do not use these secrets.
+
 Create a separate least-privilege R2 credential for the Operations Worker. It may authorize writes only to `client-data`; do not reuse the TrueNAS or Delivery credential:
 
 ```powershell
@@ -71,6 +73,8 @@ Set-Location apps/operations
 npx.cmd wrangler secret put R2_ACCESS_KEY_ID
 npx.cmd wrangler secret put R2_SECRET_ACCESS_KEY
 ```
+
+These credentials sign direct multipart browser uploads only. Operations CRUD, preview validation, and post-upload manifest finalization use the `DATA_BUCKET` binding.
 
 Set the account S3 endpoint and bucket name as non-secret Operations variables. Apply an R2 CORS policy that permits only the production Operations origin and the dedicated staging Operations origin, allows the headers signed by the upload flow, and exposes `ETag`. Never permit `*` origins with credentialed staff uploads. Presigned upload authorization must remain short-lived and object-specific.
 
@@ -136,7 +140,7 @@ Set-Location ../delivery
 npm.cmd run db:migrate:remote
 ```
 
-Confirm Delivery `0006`, `0007`, `0008`, `0090`, `0091`, and all Operations delivery-CRUD migrations appear in the remote migration list before deploying dependent Workers. Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding. Operations deployment creates/updates its file-operation Workflow binding. Each successful ZIP job sleeps for its 24-hour retention and then deletes its own archive, so Delivery does not require a Cron Trigger. Verify one completed job, one intentionally failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour exact quota, and one copy/move job with an injected retry before production rollout.
+Confirm Delivery `0006`, `0007`, `0008`, `0090`, `0091`, `0092`, and all Operations delivery-CRUD migrations appear in the remote migration list before deploying dependent Workers. Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding. Operations deployment creates/updates its file-operation Workflow binding. Each successful ZIP job sleeps for its 24-hour retention and then deletes its own archive, so Delivery does not require a Cron Trigger. Verify one completed job, one intentionally failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour exact quota, and one copy/move job with an injected retry before production rollout.
 
 The 20 GB ZIP limit and 10,000-object R2 CRUD limit require the Workers Paid Workflow step allowance. Do not enable those production limits on a Free-plan account; reduce the application limits or upgrade first.
 

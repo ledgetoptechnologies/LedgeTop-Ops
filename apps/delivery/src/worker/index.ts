@@ -161,24 +161,28 @@ function aliasedPath(key: string, root: string, aliases: Map<string, string>): s
   return names.join("/");
 }
 
+function registeredDerivativeEtags(value: string): Record<string, unknown> {
+  try { const parsed = JSON.parse(value); return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}; }
+  catch { return {}; }
+}
+
 async function requirePreparedImage(c: any, key: string, variant: "thumbnail" | "preview" | "poster"): Promise<Response> {
   const preparedVariant = variant === "thumbnail" ? "thumb" : variant;
-  const prefix = (await preparedKey(key, "thumb")).replace(/\/thumb\.webp$/, ""); const manifestObject = await c.env.DATA_BUCKET.get(`${prefix}/manifest.json`); if (!manifestObject) throw new HTTPException(404, { message: "Prepared preview unavailable" });
-  const manifest = await manifestObject.json().catch(() => null) as {
-    sourceKey?: unknown; sourceEtag?: unknown; sourceSize?: unknown; producerVersion?: unknown; createdAt?: unknown;
-  } | null;
+  const prefix = (await preparedKey(key, "thumb")).replace(/thumb\.webp$/, "");
   const source = await c.env.DATA_BUCKET.head(key);
+  const manifest = await c.env.DATA_BUCKET.head(`${prefix}manifest.json`);
+  const registered = await primaryDb(c.env).prepare("SELECT source_etag,manifest_etag,derivative_etags_json FROM preview_artifacts WHERE artifact_prefix=? AND source_key=? AND missing_since IS NULL").bind(prefix, key).first<{ source_etag: string; manifest_etag: string; derivative_etags_json: string }>();
   const cleanEtag = (value: string) => value.replace(/^"|"$/g, "");
-  if (!manifest || manifest.sourceKey !== key || !source ||
-    typeof manifest.sourceEtag !== "string" || cleanEtag(manifest.sourceEtag) !== cleanEtag(source.httpEtag) ||
-    typeof manifest.sourceSize !== "number" || manifest.sourceSize !== source.size ||
-    typeof manifest.producerVersion !== "string" || !manifest.producerVersion.trim() ||
-    typeof manifest.createdAt !== "string" || !Number.isFinite(Date.parse(manifest.createdAt))) {
+  const derivativeEtags = registered ? registeredDerivativeEtags(registered.derivative_etags_json) : {};
+  const expectedEtag = derivativeEtags[preparedVariant];
+  if (!source || !manifest || !registered || typeof expectedEtag !== "string" ||
+    cleanEtag(registered.source_etag) !== cleanEtag(source.httpEtag) ||
+    cleanEtag(registered.manifest_etag) !== cleanEtag(manifest.httpEtag)) {
     throw new HTTPException(404, { message: "Prepared preview unavailable" });
   }
-  const object = await c.env.DATA_BUCKET.get(await preparedKey(key, preparedVariant));
+  const object = await c.env.DATA_BUCKET.get(await preparedKey(key, preparedVariant), { onlyIf: { etagMatches: expectedEtag } });
   const maxBytes = preparedVariant === "preview" ? 512_000 : 100 * 1024;
-  if (!object || object.size > maxBytes) throw new HTTPException(404, { message: "Prepared preview unavailable" });
+  if (!object || !("body" in object) || object.size > maxBytes) throw new HTTPException(404, { message: "Prepared preview unavailable" });
   const headers = new Headers(); headers.set("Content-Type", "image/webp"); headers.set("Content-Length", String(object.size)); headers.set("Cache-Control", "private, max-age=86400, stale-while-revalidate=604800"); headers.set("Content-Disposition", "inline"); headers.set("X-Content-Type-Options", "nosniff");
   return new Response(object.body, { headers });
 }

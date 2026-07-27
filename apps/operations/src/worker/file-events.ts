@@ -13,6 +13,28 @@ export interface R2Notification {
 interface TusState { etag: string; stream_uid: string | null; stream_status: string | null; stream_upload_url: string | null; stream_upload_offset: number | null }
 const TUS_VERSION = "1.0.0";
 const TUS_CHUNK = 50 * 1024 * 1024;
+const PREVIEW_MANIFEST_MAX_BYTES = 64 * 1024;
+const PREVIEW_VARIANT_MAX_BYTES = { thumb: 100 * 1024, poster: 100 * 1024, preview: 512_000 } as const;
+
+interface PreviewDerivative {
+  key?: unknown;
+  mime?: unknown;
+  width?: unknown;
+  height?: unknown;
+  bytes?: unknown;
+}
+
+interface PreviewManifest {
+  sourceKey?: unknown;
+  sourceEtag?: unknown;
+  sourceSize?: unknown;
+  producerVersion?: unknown;
+  createdAt?: unknown;
+  derivatives?: unknown;
+  finalizationStatus?: unknown;
+  finalizedAt?: unknown;
+  [key: string]: unknown;
+}
 
 export function hidden(key: string): boolean {
   const parts = key.replace(/\\/g, "/").split("/").filter(Boolean);
@@ -29,26 +51,91 @@ export function previewManifest(key: string): boolean {
   return /(?:^|\/)\.previews\/[a-f0-9]{64}\/manifest\.json$/i.test(key);
 }
 
+export function previewDerivative(key: string): boolean {
+  return /(?:^|\/)\.previews\/[a-f0-9]{64}\/(?:thumb|preview|poster)\.webp$/i.test(key);
+}
+
 export function canonicalPreviewSource(key: string): boolean {
   return key.startsWith("Jobs/Clients/") && !hidden(key);
 }
 
-async function recordPreviewManifest(env: Env, key: string, etag: string): Promise<void> {
-  const object = await env.DATA_BUCKET.get(key, { range: { offset: 0, length: 64 * 1024 } });
-  if (!object) throw new Error("preview-manifest-unavailable-after-create-event");
-  const manifest = await object.json<{ sourceKey?: unknown; sourceEtag?: unknown; sourceSize?: unknown; producerVersion?: unknown; createdAt?: unknown }>().catch(() => null);
+function cleanEtag(value: string): string {
+  return value.replace(/^"|"$/g, "");
+}
+
+function expectedPreviewVariants(sourceKey: string): Array<keyof typeof PREVIEW_VARIANT_MAX_BYTES> {
+  const kind = mediaKind(sourceKey);
+  if (kind === "image" || kind === "pdf") return ["thumb", "preview"];
+  if (kind === "video") return ["poster"];
+  return [];
+}
+
+function validDerivative(value: unknown, expectedKey: string, maxBytes: number): value is PreviewDerivative {
+  if (!value || typeof value !== "object") return false;
+  const derivative = value as PreviewDerivative;
+  return derivative.key === expectedKey &&
+    derivative.mime === "image/webp" &&
+    typeof derivative.width === "number" && Number.isSafeInteger(derivative.width) && derivative.width > 0 && derivative.width <= 20_000 &&
+    typeof derivative.height === "number" && Number.isSafeInteger(derivative.height) && derivative.height > 0 && derivative.height <= 20_000 &&
+    typeof derivative.bytes === "number" && Number.isSafeInteger(derivative.bytes) && derivative.bytes > 0 && derivative.bytes <= maxBytes;
+}
+
+async function recordPreviewManifest(env: Env, prefix: string, sourceKey: string, sourceEtag: string, manifestEtag: string, derivativeEtags: Record<string, string>): Promise<void> {
+  await env.DELIVERY_DB.prepare(`INSERT INTO preview_artifacts(artifact_prefix,source_key,source_etag,manifest_etag,derivative_etags_json)
+    VALUES(?,?,?,?,?) ON CONFLICT(artifact_prefix) DO UPDATE SET source_key=excluded.source_key,
+    source_etag=excluded.source_etag,manifest_etag=excluded.manifest_etag,derivative_etags_json=excluded.derivative_etags_json,missing_since=NULL,
+    last_seen_at=datetime('now'),updated_at=datetime('now')`).bind(prefix, sourceKey, sourceEtag, manifestEtag, JSON.stringify(derivativeEtags)).run();
+}
+
+export type PreviewFinalizeResult = "ready" | "pending" | "invalid";
+
+export async function finalizePreviewManifest(env: Env, key: string): Promise<PreviewFinalizeResult> {
+  if (!previewManifest(key)) return "invalid";
+  const manifestHead = await env.DATA_BUCKET.head(key);
+  if (!manifestHead) return "pending";
+  if (manifestHead.size <= 0 || manifestHead.size > PREVIEW_MANIFEST_MAX_BYTES) return "invalid";
+  const object = await env.DATA_BUCKET.get(key);
+  if (!object) return "pending";
+  const manifest = await object.json<PreviewManifest>().catch(() => null);
   if (!manifest || typeof manifest.sourceKey !== "string" || !canonicalPreviewSource(manifest.sourceKey) ||
     typeof manifest.sourceEtag !== "string" || typeof manifest.sourceSize !== "number" ||
+    !Number.isSafeInteger(manifest.sourceSize) || manifest.sourceSize <= 0 ||
     typeof manifest.producerVersion !== "string" || !manifest.producerVersion.trim() ||
-    typeof manifest.createdAt !== "string" || !Number.isFinite(Date.parse(manifest.createdAt))) return;
+    typeof manifest.createdAt !== "string" || !Number.isFinite(Date.parse(manifest.createdAt)) ||
+    !manifest.derivatives || typeof manifest.derivatives !== "object") return "invalid";
+
   const prefix = key.slice(0, -"manifest.json".length);
-  if (prefix !== await artifactDirectory(manifest.sourceKey)) return;
-  await env.DELIVERY_DB.prepare(`INSERT INTO preview_artifacts(artifact_prefix,source_key,source_etag,manifest_etag)
-    VALUES(?,?,?,?) ON CONFLICT(artifact_prefix) DO UPDATE SET source_key=excluded.source_key,
-    source_etag=excluded.source_etag,manifest_etag=excluded.manifest_etag,missing_since=NULL,
-    last_seen_at=datetime('now'),updated_at=datetime('now')`).bind(
-    prefix, manifest.sourceKey, manifest.sourceEtag, etag,
-  ).run();
+  if (prefix !== await artifactDirectory(manifest.sourceKey)) return "invalid";
+  const variants = expectedPreviewVariants(manifest.sourceKey);
+  if (!variants.length) return "invalid";
+  const source = await env.DATA_BUCKET.head(manifest.sourceKey);
+  if (!source) return "pending";
+  if (manifest.sourceSize !== source.size) return "invalid";
+
+  const derivatives = manifest.derivatives as Record<string, unknown>;
+  const derivativeEtags: Record<string, string> = {};
+  for (const variant of variants) {
+    const derivativeKey = `${prefix}${variant}.webp`;
+    const derivative = derivatives[variant];
+    if (!validDerivative(derivative, derivativeKey, PREVIEW_VARIANT_MAX_BYTES[variant])) return "invalid";
+    const derivativeHead = await env.DATA_BUCKET.head(derivativeKey);
+    if (!derivativeHead) return "pending";
+    if (derivativeHead.size !== derivative.bytes || derivativeHead.size > PREVIEW_VARIANT_MAX_BYTES[variant]) return "invalid";
+    derivativeEtags[variant] = derivativeHead.httpEtag;
+  }
+
+  const suppliedEtag = cleanEtag(manifest.sourceEtag);
+  const actualEtag = cleanEtag(source.httpEtag);
+  if (suppliedEtag && suppliedEtag !== "pending" && suppliedEtag !== actualEtag) return "invalid";
+  const finalManifestHead = await env.DATA_BUCKET.head(key);
+  const finalSource = await env.DATA_BUCKET.head(manifest.sourceKey);
+  if (!finalManifestHead || !finalSource || finalManifestHead.httpEtag !== manifestHead.httpEtag || finalSource.httpEtag !== source.httpEtag) return "pending";
+  for (const [variant, etag] of Object.entries(derivativeEtags)) {
+    const current = await env.DATA_BUCKET.head(`${prefix}${variant}.webp`);
+    if (!current || current.httpEtag !== etag) return "pending";
+  }
+  await recordPreviewManifest(env, prefix, manifest.sourceKey, finalSource.httpEtag, finalManifestHead.httpEtag, derivativeEtags);
+  return "ready";
 }
 
 async function beginTusUpload(env: Env, key: string, size: number, etag: string): Promise<{ uid: string; url: string; offset: number }> {
@@ -110,7 +197,20 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       const event = message.body; const key = event.object?.key;
       if (!key) { message.ack(); continue; }
       if (previewManifest(key)) {
-        if (created(event.action)) { const head = await env.DATA_BUCKET.head(key); if (!head) throw new Error("preview-manifest-head-unavailable-after-create-event"); await recordPreviewManifest(env, key, head.httpEtag); }
+        if (created(event.action)) {
+          const result = await finalizePreviewManifest(env, key);
+          if (result === "invalid") console.warn(JSON.stringify({ event: "preview-manifest.invalid", key }));
+        }
+        message.ack(); continue;
+      }
+      if (previewDerivative(key)) {
+        if (created(event.action)) {
+          const manifestKey = key.replace(/(?:thumb|preview|poster)\.webp$/i, "manifest.json");
+          if (await env.DATA_BUCKET.head(manifestKey)) {
+            const result = await finalizePreviewManifest(env, manifestKey);
+            if (result === "invalid") console.warn(JSON.stringify({ event: "preview-manifest.invalid", key: manifestKey }));
+          }
+        }
         message.ack(); continue;
       }
       if (removed(event.action) || hidden(key)) { await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run(); message.ack(); continue; }
@@ -127,6 +227,13 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
         env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status,stream_error) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,stream_uid=excluded.stream_uid,stream_status=excluded.stream_status,stream_error=excluded.stream_error,updated_at=datetime('now')`).bind(key, head.httpEtag, head.size, head.uploaded.toISOString(), mime(key), kind, stream.uid, stream.status, stream.error),
         env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,last_success_at,status,details_json) VALUES ('truenas',datetime('now'),datetime('now'),'healthy',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=datetime('now'),status='healthy',details_json=excluded.details_json,updated_at=datetime('now')`).bind(JSON.stringify({ lastKey: key })),
       ]);
+      if (canonicalPreviewSource(key)) {
+        const manifestKey = `${await artifactDirectory(key)}manifest.json`;
+        if (await env.DATA_BUCKET.head(manifestKey)) {
+          const result = await finalizePreviewManifest(env, manifestKey);
+          if (result === "invalid") console.warn(JSON.stringify({ event: "preview-manifest.invalid", key: manifestKey }));
+        }
+      }
       message.ack();
     } catch (error) {
       console.error(JSON.stringify({ event: "file-index.error", message: error instanceof Error ? error.message : "unknown" }));

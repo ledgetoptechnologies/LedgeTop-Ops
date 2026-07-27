@@ -69,7 +69,7 @@ If deletion behavior is unexpected, stop the task, return to Copy, restore from 
 
 ## 5. Monitoring
 
-R2 create/delete notifications feed `ltds-file-events`. Queue processing updates the delivery file index and TrueNAS health timestamp. A daily live R2 reconciliation repairs missed events. Ops should show a stale sync warning when the last successful source activity/reconciliation is outside the agreed window.
+R2 create/delete notifications feed `ltds-file-events`. Queue processing updates the delivery file index and TrueNAS health timestamp. For `.previews` uploads, it also validates the bounded provisional manifest, verifies each deterministic WebP object, reads the exact source ETag and size through the R2 binding, and registers that identity in the shared `preview_artifacts` table. It does not rewrite the TrueNAS-owned manifest. The FFmpeg container does not need R2 credentials. A daily live R2 reconciliation repairs missed file-index events. Ops should show a stale sync warning when the last successful source activity/reconciliation is outside the agreed window.
 
 The file browser uses live R2 prefix/delimiter listing as the authority, so it updates even if the index temporarily lags. The index exists for search, media state, and thumbnails—not file existence.
 
@@ -94,7 +94,7 @@ Outputs are:
 
 Operations and Delivery never load originals for cards or filmstrips. When a user deliberately opens a file, the viewer prefers the prepared artifact and otherwise streams that one original regardless of size. Videos use Cloudflare Stream when ready and fall back to the range-enabled original with metadata-only preloading. Unsupported browser formats retain an explicit original-download action.
 
-The manifest must record the exact post-upload R2 ETag and size of the source, plus source key, derivative keys, dimensions, MIME type, producer version, and creation time. The exact R2 ETag/size—not a local pre-upload checksum—determines whether a derivative is current.
+The local producer writes `sourceEtag: "pending"` and the exact local source size, plus source key, deterministic derivative keys, dimensions, MIME type, producer version, and creation time. After upload, the Operations queue consumer records the exact R2 ETag in D1 only after the source size and all derivative objects validate. Preview routes compare that registered identity with the live source. The exact R2 ETag/size—not a local pre-upload checksum—determines whether a derivative is current.
 
 ## Resource and security boundary
 

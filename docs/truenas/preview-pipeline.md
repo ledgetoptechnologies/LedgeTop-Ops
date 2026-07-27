@@ -47,9 +47,9 @@ File size does not block an explicitly opened original. A 200 MiB photo or multi
 
 Large originals are never requested by the grid or filmstrip. In the viewer, images and PDFs stream only after the explicit open action. Videos prefer adaptive Cloudflare Stream playback and otherwise use the original R2 object with byte-range requests and `preload="metadata"` so the browser does not fetch a multi-gigabyte video before playback. Unsupported browser codecs retain a clear download-original fallback.
 
-The source object is authoritative. Derivatives are disposable read models. Publish the source to R2 first, obtain that exact R2 object's ETag and size, and only then publish the derivative manifest. A local checksum cannot substitute for the exact post-upload R2 ETag or size.
+The source object is authoritative. Derivatives are disposable read models. The TrueNAS producer writes a bounded provisional manifest with the local source size, `sourceEtag: "pending"`, `finalizationStatus: "pending-r2"`, and exact deterministic derivative keys. R2 create notifications then let the Operations Worker use its `DATA_BUCKET` binding to verify the source and derivative objects and register the exact post-upload R2 ETag in the shared `preview_artifacts` table. The adjacent manifest remains TrueNAS-owned and is not rewritten, avoiding a Cloud Sync overwrite loop. The FFmpeg container does not receive R2 credentials.
 
-The final manifest is written last, after every referenced derivative has been uploaded and verified. It must contain at least:
+The provisional manifest is written locally last, after every referenced derivative has been generated and verified. Cloud Sync uploads the source, WebPs, and manifest. Whichever of those objects arrives last triggers idempotent registration. A provisional manifest contains at least:
 
 ```json
 {
@@ -57,8 +57,9 @@ The final manifest is written last, after every referenced derivative has been u
   "sourceEtag": "\"the-exact-r2-object-etag\"",
   "sourceSize": 209715200,
   "sourceSha256": "optional-64-hex-audit-value",
-  "producerVersion": "ltds-preview/1.0.0",
+  "producerVersion": "ltds-preview/2.0.0",
   "createdAt": "2026-07-24T12:00:00.000Z",
+  "finalizationStatus": "pending-r2",
   "derivatives": {
     "thumb": { "key": ".../thumb.webp", "bytes": 98304 },
     "preview": { "key": ".../preview.webp", "bytes": 460800 }
@@ -66,7 +67,7 @@ The final manifest is written last, after every referenced derivative has been u
 }
 ```
 
-The manifest is valid only when each referenced object exists, has the expected WebP MIME type, dimensions, and byte size, and the manifest's `sourceKey`, exact R2 `sourceEtag`, and `sourceSize` still match the source. A changed source cannot reuse a stale derivative.
+The manifest is eligible for registration only when each referenced object exists at its deterministic sibling key, has the expected WebP MIME type, dimensions, and byte size, and the manifest's `sourceKey` and `sourceSize` match the R2 source. Manifests are limited to 64 KiB. The Worker rechecks object identities before committing and records the exact R2 source, manifest, and derivative ETags in D1. Preview routes require all relevant registered identities to match live R2 and use a conditional derivative read, so a changed source, manifest, or WebP cannot reuse a stale registration.
 
 ## Lifecycle
 
@@ -87,7 +88,9 @@ The producer must:
 4. Enforce CPU, memory, decoded-pixel, disk, duration, process-count, and concurrency limits.
 5. Validate dimensions, MIME, byte size, WebP decodability, and the thumbnail/preview size caps.
 6. Upload derivatives to temporary keys in the correct `.previews/<hash>/` directory.
-7. Upload `manifest.json` last.
+7. Write the provisional `manifest.json` locally last.
+8. Let Cloud Sync upload the source and `.previews` tree.
+9. Let the Operations queue consumer validate and register the exact R2 identity in D1.
 8. Remove superseded derivatives only after the replacement manifest is known-good.
 
 No preview process receives cloud credentials that can delete `Jobs/` source objects. No preview process publishes client-visible paths directly.

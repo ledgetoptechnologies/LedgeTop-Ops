@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { aliasParent, normalizeAliasKey, validateDisplayName } from "../src/worker/aliases";
-import { canonicalPreviewSource, hidden, previewManifest } from "../src/worker/file-events";
+import { canonicalPreviewSource, finalizePreviewManifest, hidden, previewDerivative, previewManifest } from "../src/worker/file-events";
 import { derivativePrefixes, validateDeleteConfirmation } from "../src/worker/source-delete";
 import { artifactDirectory, previewIdentity } from "../src/worker/artifacts";
 import { tombstoneMatches } from "../src/worker/trash";
@@ -14,6 +14,8 @@ describe("delivery reliability controls", () => {
   it("recognizes only canonical preview manifests and source roots", () => {
     const hash = "a".repeat(64);
     expect(previewManifest(`Jobs/Clients/Acme/Edited/.previews/${hash}/manifest.json`)).toBe(true);
+    expect(previewDerivative(`Jobs/Clients/Acme/Edited/.previews/${hash}/thumb.webp`)).toBe(true);
+    expect(previewDerivative(`Jobs/Clients/Acme/Edited/.previews/${hash}/source.jpg`)).toBe(false);
     expect(previewManifest(`Jobs/Clients/Acme/Edited/_ltds/previews/${hash}/manifest.json`)).toBe(false);
     expect(previewManifest(`Jobs/Clients/Acme/Edited/.previews/not-a-hash/manifest.json`)).toBe(false);
     expect(canonicalPreviewSource("Jobs/Clients/Acme/Edited/photo.jpg")).toBe(true);
@@ -43,6 +45,60 @@ describe("delivery reliability controls", () => {
   it("uses the NFC filename, not the client path, as preview identity", async () => {
     await expect(previewIdentity("Jobs/A/cafe\u0301.JPG")).resolves.toBe(await previewIdentity("Jobs/B/café.JPG"));
     await expect(artifactDirectory("Jobs/A/photo.jpg")).resolves.toMatch(/^Jobs\/A\/\.previews\/[a-f0-9]{64}\/$/);
+  });
+
+  it("finalizes a bounded provisional manifest with the exact R2 source identity", async () => {
+    const sourceKey = "Jobs/Clients/Acme/Edited/photo.jpg";
+    const prefix = await artifactDirectory(sourceKey);
+    const manifestKey = `${prefix}manifest.json`;
+    const manifest = {
+      sourceKey,
+      sourceEtag: "pending",
+      sourceSize: 200,
+      producerVersion: "ltds-preview/2.0.0",
+      createdAt: "2026-07-26T23:59:00Z",
+      finalizationStatus: "pending-r2",
+      derivatives: {
+        thumb: { key: `${prefix}thumb.webp`, mime: "image/webp", width: 520, height: 340, bytes: 80 },
+        preview: { key: `${prefix}preview.webp`, mime: "image/webp", width: 1600, height: 1200, bytes: 400 },
+      },
+    };
+    const stored = new Map<string, { size: number; etag: string; body?: unknown }>([
+      [sourceKey, { size: 200, etag: "\"source-etag\"" }],
+      [manifestKey, { size: JSON.stringify(manifest).length, etag: "\"manifest-old\"", body: manifest }],
+      [`${prefix}thumb.webp`, { size: 80, etag: "\"thumb\"" }],
+      [`${prefix}preview.webp`, { size: 400, etag: "\"preview\"" }],
+    ]);
+    let recorded: unknown[] = [];
+    const statement = { bind(...values: unknown[]) { recorded = values; return statement; }, async run() { return { meta: { changes: 1 } }; } };
+    const env: any = {
+      DATA_BUCKET: {
+        async head(key: string) { const value = stored.get(key); return value ? { size: value.size, httpEtag: value.etag } : null; },
+        async get(key: string) { const value = stored.get(key); return value?.body ? { async json() { return value.body; } } : null; },
+      },
+      DELIVERY_DB: { prepare() { return statement; } },
+    };
+    await expect(finalizePreviewManifest(env, manifestKey)).resolves.toBe("ready");
+    expect(recorded).toEqual([prefix, sourceKey, "\"source-etag\"", "\"manifest-old\"", JSON.stringify({ thumb: "\"thumb\"", preview: "\"preview\"" })]);
+  });
+
+  it("rejects stale or oversized provisional preview metadata", async () => {
+    const sourceKey = "Jobs/Clients/Acme/Edited/photo.jpg";
+    const prefix = await artifactDirectory(sourceKey);
+    const manifestKey = `${prefix}manifest.json`;
+    const badManifest = { sourceKey, sourceEtag: "pending", sourceSize: 199, producerVersion: "test", createdAt: "2026-07-26T23:59:00Z", derivatives: {} };
+    const env: any = {
+      DATA_BUCKET: {
+        async head(key: string) {
+          if (key === manifestKey) return { size: JSON.stringify(badManifest).length, httpEtag: "\"manifest\"" };
+          if (key === sourceKey) return { size: 200, httpEtag: "\"source\"" };
+          return null;
+        },
+        async get() { return { async json() { return badManifest; } }; },
+      },
+      DELIVERY_DB: { prepare() { throw new Error("invalid manifests must not write D1"); } },
+    };
+    await expect(finalizePreviewManifest(env, manifestKey)).resolves.toBe("invalid");
   });
 
   it("requires an exact typed-name delete confirmation", () => {
