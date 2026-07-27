@@ -6,8 +6,10 @@ import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, m
 import { createSessionCookie, hmac, parseCookie, presignR2Get, randomSecret, sha256, verifyAccessCode, verifyRotatingSessionCookie } from "./security";
 import { matchesEtag, servePreparedImage } from "./prepared-images";
 import { recordFirstAccessNotification } from "./notifications";
+import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
+export { friendlyBulkFailure } from "./bulk-download-errors";
 
 type Variables = { share: ShareRow };
 interface Tombstone { physical_key: string; tombstone_kind: "exact" | "prefix"; }
@@ -149,7 +151,38 @@ async function enforceRateLimit(c: any, limiter: RateLimit, scope: string): Prom
   const addressHash = await clientHash(c.env, c.req.raw);
   const share = c.get("share") as ShareRow | undefined;
   const result = await limiter.limit({ key: `${scope}:${share?.id || "session"}:${addressHash}` });
-  if (!result.success) throw new HTTPException(429, { message: "Too many requests. Please wait and try again." });
+  if (!result.success) {
+    c.header("Retry-After", "60");
+    throw new HTTPException(429, { message: "Too many requests. Please wait and try again." });
+  }
+}
+
+type PublicRateLimitBinding =
+  | "PUBLIC_MANIFEST_RATE_LIMITER"
+  | "PUBLIC_MEDIA_RATE_LIMITER"
+  | "PUBLIC_THUMBNAIL_RATE_LIMITER"
+  | "PUBLIC_DOWNLOAD_RATE_LIMITER"
+  | "PUBLIC_STREAM_RATE_LIMITER"
+  | "PUBLIC_BULK_RATE_LIMITER";
+
+export interface PublicRateLimitPolicy { binding: PublicRateLimitBinding; scope: string; }
+
+export function classifyPublicRateLimit(method: string, path: string): PublicRateLimitPolicy {
+  const bulkBase = "/api/public/shares/[^/]+/bulk-download";
+  if (method === "POST" && new RegExp(`^${bulkBase}$`).test(path)) {
+    return { binding: "PUBLIC_BULK_RATE_LIMITER", scope: "bulk-create" };
+  }
+  if (method === "GET" && new RegExp(`^${bulkBase}/[^/]+/file$`).test(path)) {
+    return { binding: "PUBLIC_DOWNLOAD_RATE_LIMITER", scope: "bulk-file" };
+  }
+  if (method === "GET" && new RegExp(`^${bulkBase}/[^/]+$`).test(path)) {
+    return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "bulk-status" };
+  }
+  if (path.endsWith("/manifest")) return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "manifest" };
+  if (path.endsWith("/thumbnail")) return { binding: "PUBLIC_THUMBNAIL_RATE_LIMITER", scope: "thumbnail" };
+  if (path.endsWith("/stream-ticket")) return { binding: "PUBLIC_STREAM_RATE_LIMITER", scope: "stream" };
+  if (path.endsWith("/download") || path.endsWith("/download-ticket")) return { binding: "PUBLIC_DOWNLOAD_RATE_LIMITER", scope: "download" };
+  return { binding: "PUBLIC_MEDIA_RATE_LIMITER", scope: "media" };
 }
 
 function baseForItem(share: ShareRow, itemRef: string): string {
@@ -277,14 +310,8 @@ app.use("/api/public/shares/:publicId/*", async (c, next) => {
   const share = await primaryDb(c.env).prepare(activeShareSql("s.id=? AND s.public_id=? AND s.share_version=?")).bind(session.shareId, c.req.param("publicId"),session.shareVersion).first<ShareRow>();
   if (!share){const unavailable=await primaryDb(c.env).prepare(unavailableShareSql("s.id=? AND s.public_id=?")).bind(session.shareId,c.req.param("publicId")).first<ShareRow>();if(unavailable)await markUnavailableFolder(c.env,unavailable);throw new HTTPException(404, { message: "This delivery link is invalid, expired, or revoked" });}
   c.set("share", share);
-  const path = c.req.path;
-  const [limiter,scope]:[RateLimit,string] = path.includes("/bulk-download") ? [c.env.PUBLIC_BULK_RATE_LIMITER,"bulk"]
-    : path.endsWith("/manifest") ? [c.env.PUBLIC_MANIFEST_RATE_LIMITER,"manifest"]
-    : path.endsWith("/thumbnail") ? [c.env.PUBLIC_THUMBNAIL_RATE_LIMITER,"thumbnail"]
-    : path.endsWith("/stream-ticket") ? [c.env.PUBLIC_STREAM_RATE_LIMITER,"stream"]
-    : path.endsWith("/download") || path.endsWith("/download-ticket") ? [c.env.PUBLIC_DOWNLOAD_RATE_LIMITER,"download"]
-    : [c.env.PUBLIC_MEDIA_RATE_LIMITER,"media"];
-  await enforceRateLimit(c, limiter, scope);
+  const policy = classifyPublicRateLimit(c.req.method, c.req.path);
+  await enforceRateLimit(c, c.env[policy.binding], policy.scope);
   await next();
 });
 
@@ -402,11 +429,20 @@ app.get("/api/public/shares/:publicId/items/:itemRef/thumbnail", async c => {
   throw new HTTPException(415, { message: "Thumbnail unavailable" });
 });
 
+export function bulkQuotaRetryAfterSeconds(now = Date.now()): number {
+  const hour = 60 * 60 * 1000;
+  return Math.max(1, Math.ceil((hour - (now % hour)) / 1000));
+}
+
 async function consumeBulkQuota(c: any, share: ShareRow): Promise<void> {
-  const windowStart = Math.floor(Date.now() / (60 * 60 * 1000));
+  const now = Date.now();
+  const windowStart = Math.floor(now / (60 * 60 * 1000));
   const result = await primaryDb(c.env).prepare(`INSERT INTO bulk_download_quota (share_id,window_start,created_count) VALUES (?,?,1)
     ON CONFLICT(share_id,window_start) DO UPDATE SET created_count=created_count+1,updated_at=datetime('now') WHERE created_count < 3`).bind(share.id, windowStart).run();
-  if (!result.meta.changes) throw new HTTPException(429, { message: "This delivery has reached its hourly bulk-download limit." });
+  if (!result.meta.changes) {
+    c.header("Retry-After", String(bulkQuotaRetryAfterSeconds(now)));
+    throw new HTTPException(429, { message: "This delivery has reached its hourly bulk-download limit." });
+  }
 }
 
 function validateBulkRequest(value: unknown): { all?: boolean; items?: string[] } {
@@ -422,7 +458,7 @@ function validateBulkRequest(value: unknown): { all?: boolean; items?: string[] 
 
 async function getBulkJob(c: any, jobId: string): Promise<any> {
   const share = c.get("share") as ShareRow;
-  return primaryDb(c.env).prepare("SELECT id,status,file_count,processed_files,total_bytes,processed_bytes,archive_size,error_code,error_message,expires_at,archive_key FROM bulk_download_jobs WHERE id=? AND share_id=? AND share_version=?").bind(jobId, share.id, share.share_version).first<any>();
+  return primaryDb(c.env).prepare("SELECT id,status,file_count,processed_files,total_bytes,processed_bytes,archive_size,error_code,error_message,expires_at,manifest_key,archive_key FROM bulk_download_jobs WHERE id=? AND share_id=? AND share_version=?").bind(jobId, share.id, share.share_version).first<any>();
 }
 
 async function archiveTicket(c: any, job: any): Promise<{ url: string; expiresAt: string }> {
@@ -431,32 +467,77 @@ async function archiveTicket(c: any, job: any): Promise<{ url: string; expiresAt
   return presignR2Get({ endpoint: c.env.R2_S3_ENDPOINT, bucket: c.env.R2_BUCKET_NAME, accessKeyId: c.env.R2_ACCESS_KEY_ID, secretAccessKey: c.env.R2_SECRET_ACCESS_KEY, expiresInSeconds: 120, downloadName: `${share.project_name || share.client_name || "delivery"}.zip` }, job.archive_key);
 }
 
+export function readyBulkJobIsExpired(job: { status: string; expires_at: string }, now = Date.now()): boolean {
+  const expiresAt = Date.parse(job.expires_at);
+  return job.status === "ready" && Number.isFinite(expiresAt) && expiresAt <= now;
+}
+
+async function expireReadyBulkJob(c: any, job: any): Promise<void> {
+  if (!readyBulkJobIsExpired(job)) return;
+  await primaryDb(c.env).prepare("UPDATE bulk_download_jobs SET status='expired',updated_at=datetime('now') WHERE id=? AND status='ready' AND datetime(expires_at)<=datetime('now')").bind(job.id).run();
+  job.status = "expired";
+  c.executionCtx.waitUntil(c.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key]));
+}
+
 app.post("/api/public/shares/:publicId/bulk-download", async c => {
   const share = c.get("share") as ShareRow; const request = validateBulkRequest(await c.req.json().catch(() => ({}))); await consumeBulkQuota(c, share);
   const jobId = randomSecret(16); const encodedShare = encodeURIComponent(share.public_id!); const manifestKey = `_ltds/tmp-downloads/${share.public_id}/${jobId}/manifest.json`; const archiveKey = `_ltds/tmp-downloads/${share.public_id}/${jobId}/archive.zip`; const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   await primaryDb(c.env).prepare("INSERT INTO bulk_download_jobs (id,share_id,share_version,request_json,status,manifest_key,archive_key,expires_at) VALUES (?,?,?,?,?,?,?,?)").bind(jobId, share.id, share.share_version, JSON.stringify(request), "queued", manifestKey, archiveKey, expiresAt).run();
   try { await c.env.BULK_DOWNLOAD_WORKFLOW.create({ id: jobId, params: { jobId } }); }
-  catch (error) { await primaryDb(c.env).prepare("UPDATE bulk_download_jobs SET status='failed',error_code='workflow-create-failed',error_message=?,updated_at=datetime('now') WHERE id=?").bind(error instanceof Error ? error.message.slice(0, 240) : "workflow-create-failed", jobId).run(); throw new HTTPException(503, { message: "The download could not be queued." }); }
+  catch (error) {
+    const failure = friendlyBulkFailure("workflow-create-failed");
+    console.error(JSON.stringify({ event: "bulk-download.workflow-create-failed", jobId, shareId: share.id, error: error instanceof Error ? error.message : String(error) }));
+    await primaryDb(c.env).prepare("UPDATE bulk_download_jobs SET status='failed',error_code=?,error_message=?,updated_at=datetime('now') WHERE id=?").bind(failure.code, failure.message, jobId).run();
+    throw new HTTPException(503, { message: failure.message });
+  }
   c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, "download.started", `bulk:${jobId}`));
   return c.json({ jobId, status: "queued", statusUrl: `/api/public/shares/${encodedShare}/bulk-download/${jobId}`, downloadUrl: null }, 202);
 });
 
 app.get("/api/public/shares/:publicId/bulk-download/:jobId", async c => {
   const job = await getBulkJob(c, c.req.param("jobId")); if (!job) throw new HTTPException(404, { message: "Download job not found" });
-  const response: Record<string, unknown> = { jobId: job.id, status: job.status, fileCount: job.file_count, processedFiles: job.processed_files, totalBytes: job.total_bytes, processedBytes: job.processed_bytes, archiveSize: job.archive_size, expiresAt: job.expires_at, error: job.error_code ? { code: job.error_code, message: job.error_message } : null, downloadUrl: null };
+  await expireReadyBulkJob(c, job);
+  const failure = job.error_code ? friendlyBulkFailure(job.error_code) : null;
+  const response: Record<string, unknown> = { jobId: job.id, status: job.status, fileCount: job.file_count, processedFiles: job.processed_files, totalBytes: job.total_bytes, processedBytes: job.processed_bytes, archiveSize: job.archive_size, expiresAt: job.expires_at, error: failure, downloadUrl: null };
   if (job.status === "ready") response.downloadUrl = (await archiveTicket(c, job)).url;
   return c.json(response);
 });
 
 app.get("/api/public/shares/:publicId/bulk-download/:jobId/file", async c => {
-  const job = await getBulkJob(c, c.req.param("jobId")); if (!job || job.status !== "ready") throw new HTTPException(404, { message: "Download is not ready" });
+  const job = await getBulkJob(c, c.req.param("jobId")); if (!job) throw new HTTPException(404, { message: "Download is not ready" });
+  await expireReadyBulkJob(c, job);
+  if (job.status !== "ready") throw new HTTPException(job.status === "expired" ? 410 : 404, { message: job.status === "expired" ? "This prepared download has expired." : "Download is not ready" });
   return c.redirect((await archiveTicket(c, job)).url, 302);
 });
 
-async function cleanupTemporaryZips(env: Env): Promise<void> {
-  const cutoff = Date.now() - 24 * 60 * 60 * 1000; let cursor: string | undefined;
-  do { const listed = await env.DATA_BUCKET.list({ prefix: "_ltds/tmp-downloads/", limit: 1000, cursor }); const expired = listed.objects.filter(object => object.uploaded.getTime() < cutoff).map(object => object.key); if (expired.length) await env.DATA_BUCKET.delete(expired); cursor = listed.truncated ? listed.cursor : undefined; } while (cursor);
-  await primaryDb(env).prepare("UPDATE bulk_download_jobs SET status='expired',updated_at=datetime('now') WHERE status IN ('queued','running','ready') AND datetime(expires_at)<=datetime('now')").run();
+export async function cleanupTemporaryZips(env: Env, now = Date.now()): Promise<void> {
+  const nowIso = new Date(now).toISOString();
+  await primaryDb(env).prepare("UPDATE bulk_download_jobs SET status='expired',updated_at=datetime(?) WHERE status IN ('queued','running','ready') AND datetime(expires_at)<=datetime(?)").bind(nowIso, nowIso).run();
+  const expiredJobs = await primaryDb(env).prepare("SELECT manifest_key,archive_key,multipart_upload_id FROM bulk_download_jobs WHERE status='expired' AND updated_at=datetime(?) AND datetime(expires_at)<=datetime(?)")
+    .bind(nowIso, nowIso).all<{ manifest_key: string; archive_key: string; multipart_upload_id: string | null }>();
+  for (const job of expiredJobs.results) {
+    if (!job.multipart_upload_id) continue;
+    try {
+      await env.DATA_BUCKET.resumeMultipartUpload(job.archive_key, job.multipart_upload_id).abort();
+    } catch (error) {
+      console.error(JSON.stringify({ event: "bulk-download.cleanup-abort-failed", archiveKey: job.archive_key, error: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+  const artifactKeys = [...new Set(expiredJobs.results.flatMap(job => [job.manifest_key, job.archive_key]).filter(Boolean))];
+  for (let offset = 0; offset < artifactKeys.length; offset += 1000) await env.DATA_BUCKET.delete(artifactKeys.slice(offset, offset + 1000));
+  const activeJobs = await primaryDb(env).prepare("SELECT manifest_key,archive_key FROM bulk_download_jobs WHERE status IN ('queued','running','ready') AND datetime(expires_at)>datetime(?)")
+    .bind(nowIso).all<{ manifest_key: string; archive_key: string }>();
+  const protectedKeys = new Set(activeJobs.results.flatMap(job => [job.manifest_key, job.archive_key]).filter(Boolean));
+  const cutoff = now - 24 * 60 * 60 * 1000;
+  let cursor: string | undefined;
+  do {
+    const listed = await env.DATA_BUCKET.list({ prefix: "_ltds/tmp-downloads/", limit: 1000, cursor });
+    const orphaned = listed.objects.filter(object => object.uploaded.getTime() < cutoff && !protectedKeys.has(object.key)).map(object => object.key);
+    if (orphaned.length) await env.DATA_BUCKET.delete(orphaned);
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
+  const currentWindow = Math.floor(now / (60 * 60 * 1000));
+  await primaryDb(env).prepare("DELETE FROM bulk_download_quota WHERE window_start<?").bind(currentWindow - 48).run();
 }
 
 app.notFound(c => c.json({ error: "Not found" }, 404));

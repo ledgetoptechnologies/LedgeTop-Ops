@@ -1,8 +1,9 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { decodeItemRef, isHiddenKey, keyWithinRoot, normalizeRoot } from "./files";
 import { buildZipLayout, crc32, readZipPart, type ZipManifestEntry } from "./zip";
-import { sha256Hex } from "./security";
+import { classifyWorkflowFailure } from "./bulk-download-errors";
 import type { Env } from "./types";
+export { classifyWorkflowFailure } from "./bulk-download-errors";
 
 const MAX_FILES = 2_000;
 const MAX_BYTES = 20 * 1024 * 1024 * 1024;
@@ -39,23 +40,39 @@ async function loadAliases(env: Env, keys: string[]): Promise<Map<string, string
   return aliases;
 }
 
-async function snapshot(env: Env, job: JobRow): Promise<Snapshot> {
+export async function readSourceRange(
+  bucket: R2Bucket,
+  source: { physicalKey: string; etag: string },
+  start: number,
+  length: number,
+): Promise<Uint8Array> {
+  const object = await bucket.get(source.physicalKey, {
+    range: { offset: start, length },
+    onlyIf: { etagMatches: source.etag },
+  });
+  if (!object || !("arrayBuffer" in object)) throw new Error("source-changed-or-disappeared");
+  const bytes = new Uint8Array(await object.arrayBuffer());
+  if (bytes.length !== length) throw new Error("source-short-read");
+  return bytes;
+}
+
+export async function snapshot(env: Env, job: JobRow): Promise<Snapshot> {
   const share = await db(env).prepare(`SELECT s.id,s.share_version,s.r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.share_version=? AND s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).bind(job.share_id, job.share_version).first<{ id: string; share_version: number; r2_prefix: string }>();
   if (!share) throw new Error("share-revoked");
   const tombstones = (await db(env).prepare("SELECT physical_key,tombstone_kind FROM delivery_tombstones WHERE restored_at IS NULL").all<Tombstone>()).results;
-  const request = JSON.parse(job.request_json) as Requested; const root = normalizeRoot(share.r2_prefix); const prefixes = new Set<string>(); const refs = request.items || [];
-  if (request.all === true) prefixes.add(root);
+  const request = JSON.parse(job.request_json) as Requested; const root = normalizeRoot(share.r2_prefix); const folderPrefixes = new Set<string>(); const refs = request.items || [];
+  const files = new Map<string, { size: number; etag: string }>();
+  if (request.all === true) folderPrefixes.add(root);
   for (const ref of refs) {
     const key = keyWithinRoot(root, decodeItemRef(ref)); if (isTrashed(tombstones, key)) continue; const head = await env.DATA_BUCKET.head(key);
-    if (head && !key.endsWith("/")) prefixes.add(key);
-    else prefixes.add(key.endsWith("/") ? key : `${key}/`);
+    if (head && !key.endsWith("/")) files.set(key, { size: head.size, etag: head.etag });
+    else folderPrefixes.add(key.endsWith("/") ? key : `${key}/`);
   }
-  const files = new Map<string, { size: number; etag: string }>();
-  for (const prefix of prefixes) {
+  for (const prefix of folderPrefixes) {
     let cursor: string | undefined;
     do {
       const listed = await env.DATA_BUCKET.list({ prefix, limit: 1000, cursor });
-      for (const object of listed.objects) if (!object.key.endsWith("/") && !isHiddenKey(object.key) && !isTrashed(tombstones, object.key)) files.set(object.key, { size: object.size, etag: object.httpEtag });
+      for (const object of listed.objects) if (!object.key.endsWith("/") && !isHiddenKey(object.key) && !isTrashed(tombstones, object.key)) files.set(object.key, { size: object.size, etag: object.etag });
       cursor = listed.truncated ? listed.cursor : undefined;
     } while (cursor);
   }
@@ -74,7 +91,7 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
     const jobId = event.payload.jobId; const job = await db(this.env).prepare("SELECT id,share_id,share_version,request_json,manifest_key,archive_key FROM bulk_download_jobs WHERE id=?").bind(jobId).first<JobRow>();
     if (!job) throw new Error("job-not-found");
     try {
-      const snapshotInfo = await step.do("snapshot-selection", { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } }, async () => { const value = await snapshot(this.env, job); await this.env.DATA_BUCKET.put(job.manifest_key, JSON.stringify(value)); const totalBytes = value.sources.reduce((total, source) => total + source.size, 0); await db(this.env).prepare("UPDATE bulk_download_jobs SET status='running',file_count=?,total_bytes=?,updated_at=datetime('now') WHERE id=?").bind(value.sources.length, totalBytes, job.id).run(); return { count: value.sources.length, totalBytes, root: value.root }; });
+      await step.do("snapshot-selection", { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } }, async () => { const value = await snapshot(this.env, job); await this.env.DATA_BUCKET.put(job.manifest_key, JSON.stringify(value)); const totalBytes = value.sources.reduce((total, source) => total + source.size, 0); await db(this.env).prepare("UPDATE bulk_download_jobs SET status='running',file_count=?,total_bytes=?,updated_at=datetime('now') WHERE id=?").bind(value.sources.length, totalBytes, job.id).run(); return { count: value.sources.length, totalBytes, root: value.root }; });
       const snap = await readJson<Snapshot>(this.env, job.manifest_key);
       const prepared: Source[] = [];
       for (let index = 0; index < snap.sources.length; index += 1) {
@@ -82,9 +99,7 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
         while (offset < source.size) {
           const start = offset; const length = Math.min(CRC_CHUNK, source.size - offset);
           const part = await step.do(`crc-${index}-${start}`, { retries: { limit: 3, delay: "5 seconds", backoff: "exponential" } }, async () => {
-            const object = await this.env.DATA_BUCKET.get(source.physicalKey, { range: { offset: start, length }, onlyIf: { etagMatches: source.etag } }); if (!object || !("arrayBuffer" in object)) throw new Error("source-changed-or-disappeared");
-            const bytes = new Uint8Array(await object.arrayBuffer());
-            if (bytes.length !== length) throw new Error("source-short-read");
+            const bytes = await readSourceRange(this.env.DATA_BUCKET, source, start, length);
             return { crc: crc32(bytes, crc), offset: start + bytes.length };
           });
           crc = part.crc; offset = part.offset;
@@ -104,7 +119,11 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
         parts.push(part);
       }
       await step.do("complete-multipart-upload", { retries: { limit: 3, delay: "10 seconds", backoff: "exponential" } }, async () => { const uploadRef = this.env.DATA_BUCKET.resumeMultipartUpload(job.archive_key, upload.uploadId); await uploadRef.complete(parts); return { archiveSize: layout.archiveSize }; });
-      await step.do("mark-ready", async () => { await db(this.env).prepare("UPDATE bulk_download_jobs SET status='ready',processed_files=file_count,processed_bytes=archive_size,updated_at=datetime('now') WHERE id=?").bind(job.id).run(); return { status: "ready" }; });
+      await step.do("mark-ready", async () => {
+        const result = await db(this.env).prepare("UPDATE bulk_download_jobs SET status='ready',processed_files=file_count,processed_bytes=archive_size,multipart_upload_id=NULL,expires_at=datetime('now','+24 hours'),updated_at=datetime('now') WHERE id=? AND status IN ('queued','running')").bind(job.id).run();
+        if (!result.meta.changes) throw new Error("job-no-longer-active");
+        return { status: "ready" };
+      });
       await step.sleep("temporary-download-retention", "24 hours");
       await step.do("expire-temporary-download", async () => {
         await this.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key]);
@@ -112,7 +131,14 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
         return { status: "expired" };
       });
     } catch (error) {
-      const code = error instanceof Error ? error.message.slice(0, 80) : "workflow-failed";
+      const rawError = error instanceof Error ? error.message : String(error);
+      const failure = classifyWorkflowFailure(rawError);
+      console.error(JSON.stringify({ event: "bulk-download.workflow-failed", jobId: job.id, shareId: job.share_id, code: failure.code, error: rawError }));
+      const failureState = await step.do("read-failure-state", async () => db(this.env).prepare("SELECT status FROM bulk_download_jobs WHERE id=?").bind(job.id).first<{ status: string }>());
+      if (failureState?.status === "ready") {
+        console.error(JSON.stringify({ event: "bulk-download.retention-failed", jobId: job.id, status: failureState.status, error: rawError }));
+        return;
+      }
       await step.do("cleanup-failed-artifacts", async () => {
         const current = await db(this.env).prepare("SELECT multipart_upload_id FROM bulk_download_jobs WHERE id=?").bind(job.id).first<{ multipart_upload_id: string | null }>();
         if (current?.multipart_upload_id) {
@@ -121,7 +147,7 @@ export class BulkDownloadWorkflow extends WorkflowEntrypoint<Env> {
         await this.env.DATA_BUCKET.delete([job.archive_key, job.manifest_key]);
         return { cleaned: true };
       });
-      await step.do("mark-failed", async () => { await db(this.env).prepare("UPDATE bulk_download_jobs SET status='failed',error_code=?,error_message=?,updated_at=datetime('now') WHERE id=? AND status<>'ready'").bind(code, code, job.id).run(); return { status: "failed" }; });
+      await step.do("mark-failed", async () => { await db(this.env).prepare("UPDATE bulk_download_jobs SET status='failed',error_code=?,error_message=?,updated_at=datetime('now') WHERE id=? AND status IN ('queued','running')").bind(failure.code, failure.message, job.id).run(); return { status: "failed" }; });
       throw error;
     }
   }

@@ -138,7 +138,7 @@ Set-Location ../delivery
 npm.cmd run db:migrate:remote
 ```
 
-Confirm Delivery `0006`, `0007`, `0008`, `0090`, `0091`, `0092`, and all Operations delivery-CRUD migrations appear in the remote migration list before deploying dependent Workers. Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding. Operations deployment creates/updates its file-operation Workflow binding. Each successful ZIP job sleeps for its 24-hour retention and then deletes its own archive, so Delivery does not require a Cron Trigger. Verify one completed job, one intentionally failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour exact quota, and one copy/move job with an injected retry before production rollout.
+Confirm Delivery `0006`, `0007`, `0008`, `0090`, `0091`, `0092`, and all Operations delivery-CRUD migrations appear in the remote migration list before deploying dependent Workers. Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding and its hourly cleanup Cron Trigger. Operations deployment creates/updates its file-operation Workflow binding. Each successful ZIP job sleeps for its 24-hour retention and deletes its own archive; the hourly Delivery cleanup is the recovery path for expired or interrupted jobs and also prunes old quota rows. Verify one completed job, one intentionally failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour exact quota, and one copy/move job with an injected retry before production rollout.
 
 The 20 GB ZIP limit and 10,000-object R2 CRUD limit require the Workers Paid Workflow step allowance. Do not enable those production limits on a Free-plan account; reduce the application limits or upgrade first.
 

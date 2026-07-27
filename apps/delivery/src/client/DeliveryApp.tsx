@@ -1,41 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BRAND, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
 import { Brand, EmptyState, Loading } from "@ltds/ui";
+import {
+  pollBulkDownload,
+  requestJson,
+  type BulkDownloadResponse,
+  type RequestError,
+} from "./bulk-download";
 import { openDeliveryRoute, parseDeliveryRoute } from "./route";
 
 type Gate = "landing" | "loading" | "code" | "ready" | "error";
 type ErrorView = "unavailable" | "invalid-link";
 
-interface RequestErrorBody {
-  error?: string;
-  code?: string;
-}
-
-type RequestError = Error & { status?: number; body?: RequestErrorBody };
-
-interface BulkDownloadResponse {
-  downloadUrl?: string;
-  ticket?: string;
-  downloadTicket?: string;
-  statusUrl?: string;
-  progressUrl?: string;
-  status?: "queued" | "processing" | "running" | "ready" | "failed" | "complete";
-  progress?: number;
-  percent?: number;
-  message?: string;
-  processedBytes?: number;
-  totalBytes?: number;
-  error?: { code?: string; message?: string } | null;
-}
-
 const invalidLinkDetail = "This folder has been moved, removed, or is no longer being shared. Contact your Ledge Top Drone Services representative for a current delivery link.";
-
-async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { credentials: "same-origin", ...init });
-  const body = await response.json().catch(() => ({})) as RequestErrorBody & T;
-  if (!response.ok) throw Object.assign(new Error(body.error || "Request failed"), { status: response.status, body });
-  return body;
-}
 
 function formatBytes(size: number | null): string {
   if (size === null) return "Folder";
@@ -69,6 +46,7 @@ export function DeliveryApp() {
   const [selectedItems, setSelectedItems] = useState<Set<string>>(() => new Set());
   const [selectionMode, setSelectionMode] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const bulkRequestActive = useRef(false);
   const [bulkError, setBulkError] = useState("");
   const [bulkProgress, setBulkProgress] = useState<{ status: string; percent: number | null; message?: string } | null>(null);
 
@@ -156,32 +134,22 @@ export function DeliveryApp() {
   }
 
   async function downloadBulk(all = false) {
-    if (!all && selectedItems.size === 0) return;
+    if (bulkRequestActive.current || (!all && selectedItems.size === 0)) return;
+    bulkRequestActive.current = true;
     setBulkBusy(true); setBulkError(""); setBulkProgress({ status: "Preparing download", percent: null });
     try {
-      const response = await fetch(`/api/public/shares/${encodeURIComponent(publicId)}/bulk-download`, {
+      let body = await requestJson<BulkDownloadResponse>(`/api/public/shares/${encodeURIComponent(publicId)}/bulk-download`, {
         method: "POST",
-        credentials: "same-origin",
         headers: { "Content-Type": "application/json", "Accept": "application/json" },
         body: JSON.stringify(all ? { all: true } : { items: [...selectedItems] }),
       });
-      if (!response.ok) {
-        const body = await response.json().catch(() => ({})) as RequestErrorBody;
-        throw new Error(body.error || "The download could not be prepared.");
-      }
-      let body = await response.json() as BulkDownloadResponse;
       const statusUrl = body.statusUrl || body.progressUrl;
       if (!body.downloadUrl && statusUrl) {
-        for (let attempt = 0; attempt < 1800; attempt += 1) {
-          await new Promise(resolve => window.setTimeout(resolve, 2000));
-          const status = await requestJson<BulkDownloadResponse>(statusUrl);
-          body = { ...body, ...status };
-          const calculated = body.totalBytes && typeof body.processedBytes === "number" ? Math.min(100, Math.round(body.processedBytes / body.totalBytes * 100)) : null;
-          const percent = typeof body.progress === "number" ? body.progress : typeof body.percent === "number" ? body.percent : calculated;
-          setBulkProgress({ status: body.status === "ready" || body.status === "complete" ? "Download ready" : "Building ZIP", percent, message: body.message });
-          if (body.status === "failed") throw new Error(body.error?.message || body.message || "The download could not be prepared.");
-          if (body.downloadUrl || body.ticket || body.downloadTicket || body.status === "ready" || body.status === "complete") break;
-        }
+        body = await pollBulkDownload(body, statusUrl, { onProgress: status => {
+          const calculated = status.totalBytes && typeof status.processedBytes === "number" ? Math.min(100, Math.round(status.processedBytes / status.totalBytes * 100)) : null;
+          const percent = typeof status.progress === "number" ? status.progress : typeof status.percent === "number" ? status.percent : calculated;
+          setBulkProgress({ status: status.status === "ready" || status.status === "complete" ? "Download ready" : "Building ZIP", percent, message: status.message });
+        } });
       }
       const ticket = body.ticket || body.downloadTicket;
       const downloadUrl = body.downloadUrl || (ticket ? `/api/public/shares/${encodeURIComponent(publicId)}/bulk-download/${encodeURIComponent(ticket)}` : "");
@@ -196,6 +164,7 @@ export function DeliveryApp() {
       setBulkError(caught instanceof Error ? caught.message : "The download could not be prepared.");
       setBulkProgress({ status: "Download failed", percent: null });
     } finally {
+      bulkRequestActive.current = false;
       setBulkBusy(false);
       window.setTimeout(() => setBulkProgress(null), 1800);
     }
