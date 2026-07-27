@@ -11,6 +11,9 @@ const EMPLOYEE_PERMISSIONS = new Set<Permission>([
   "projects.view",
   "tasks.view",
   "airspace.view",
+  "file_requests.view",
+  "file_requests.create",
+  "file_requests.manage",
 ]);
 
 export function employeePermissions(permissions: Permission[], administrator: boolean): Permission[] {

@@ -6,15 +6,21 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  "routes": [
+    { "pattern": "ops.ledgetopdroneservices.com", "custom_domain": true },
+    { "pattern": "incoming.ledgetopdroneservices.com", "custom_domain": true }
+  ],
   "assets": {
     "binding": "ASSETS",
     "directory": "./dist/client",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/health"]
+    "run_worker_first": ["/api/*", "/health", "/r/*"]
   },
   "vars": {
     "PUBLIC_BASE_URL": "https://ops.ledgetopdroneservices.com",
     "EXPECTED_HOST": "ops.ledgetopdroneservices.com",
+    "INCOMING_BASE_URL": "https://incoming.ledgetopdroneservices.com",
+    "INCOMING_EXPECTED_HOST": "incoming.ledgetopdroneservices.com",
     "ENVIRONMENT": "production",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "OPERATIONS_AUD": "d09e298c864b9c8f4491b4b42a4dbe2ecbf558b5868d18258443740e56032407",
@@ -28,6 +34,7 @@
     "STREAM_CUSTOMER_CODE": "",
     "R2_ACCOUNT_ID": "846c924bf17bf4f3dd15c97a4c5d1d51",
     "R2_BUCKET_NAME": "client-data",
+    "R2_INCOMING_BUCKET_NAME": "ltds-incoming",
     "ALERT_FROM": "",
     "ALERT_TO": "",
     "NOTIFICATION_FROM": "delivery@ledgetopdroneservices.com"
@@ -36,7 +43,8 @@
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "triggers": { "crons": ["*/15 * * * *"] },
   "r2_buckets": [
-    { "binding": "DATA_BUCKET", "bucket_name": "client-data" }
+    { "binding": "DATA_BUCKET", "bucket_name": "client-data" },
+    { "binding": "INCOMING_BUCKET", "bucket_name": "ltds-incoming" }
   ],
   "d1_databases": [
     {
@@ -62,6 +70,11 @@
       "name": "ltds-r2-crud",
       "binding": "R2_CRUD_WORKFLOW",
       "class_name": "R2CrudWorkflow"
+    },
+    {
+      "name": "ltds-incoming-upload-lifecycle",
+      "binding": "INCOMING_LIFECYCLE_WORKFLOW",
+      "class_name": "IncomingUploadLifecycleWorkflow"
     }
   ]
 }

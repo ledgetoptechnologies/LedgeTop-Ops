@@ -46,6 +46,13 @@ export async function runRetention(env: Env): Promise<number> {
     env.DELIVERY_DB.prepare("DELETE FROM bulk_download_quota WHERE datetime(updated_at)<=datetime('now','-7 days')"),
     env.DELIVERY_DB.prepare("DELETE FROM bulk_download_jobs WHERE status IN ('expired','failed','cancelled') AND datetime(updated_at)<=datetime('now','-90 days')"),
     env.DELIVERY_DB.prepare("DELETE FROM public_rate_limits WHERE datetime(expires_at)<=datetime('now')"),
+    env.DELIVERY_DB.prepare(`DELETE FROM file_request_contributors
+      WHERE datetime(created_at)<=datetime('now','-90 days')
+      AND NOT EXISTS (
+        SELECT 1 FROM file_request_uploads u
+        WHERE u.contributor_id=file_request_contributors.id
+        AND u.status NOT IN ('accepted','expired')
+      )`),
     env.DELIVERY_DB.prepare("UPDATE file_requests SET revoked_at=datetime('now'),revoked_reason='expired',updated_at=datetime('now') WHERE revoked_at IS NULL AND datetime(expires_at)<=datetime('now')"),
   ]);
   return archived;

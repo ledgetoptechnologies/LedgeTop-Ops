@@ -1,11 +1,52 @@
 import { HTTPException } from "hono/http-exception";
+import { hmac, timingSafeEqual } from "./crypto";
 
 const encoder = new TextEncoder();
 
-function base64Url(bytes: Uint8Array): string {
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+export function incomingConstantTimeEqual(left: string, right: string): boolean {
+  return timingSafeEqual(left, right);
+}
+
+export async function createIncomingSession(
+  secret: string,
+  requestId: string,
+  contributorId: string,
+  sessionVersion: number,
+  expiresAt: number,
+): Promise<string> {
+  const signature = await hmac(secret, `${requestId}:${contributorId}:${sessionVersion}:${expiresAt}`);
+  const value = `${requestId}.${contributorId}.${sessionVersion}.${expiresAt}.${signature}`;
+  return `__Host-ltds_incoming=${encodeURIComponent(value)}; Path=/; Max-Age=${Math.max(0, Math.floor((expiresAt - Date.now()) / 1000))}; HttpOnly; Secure; SameSite=Strict`;
+}
+
+export async function verifyIncomingSession(
+  secret: string,
+  cookie: string | undefined,
+  expectedRequestId: string,
+  expectedSessionVersion: number,
+): Promise<{ contributorId: string; expiresAt: number }> {
+  const raw = (cookie || "")
+    .split(";")
+    .map((part) => part.trim())
+    .find((part) => part.startsWith("__Host-ltds_incoming="))
+    ?.slice("__Host-ltds_incoming=".length);
+  if (!raw) throw new HTTPException(401, { message: "Upload session required" });
+  const [requestId, contributorId, versionRaw, expiresRaw, signature] = decodeURIComponent(raw).split(".");
+  const sessionVersion = Number(versionRaw);
+  const expiresAt = Number(expiresRaw);
+  if (
+    requestId !== expectedRequestId
+    || !contributorId
+    || !signature
+    || sessionVersion !== expectedSessionVersion
+    || !Number.isSafeInteger(expiresAt)
+    || expiresAt <= Date.now()
+  ) {
+    throw new HTTPException(401, { message: "Upload session expired" });
+  }
+  const expected = await hmac(secret, `${requestId}:${contributorId}:${sessionVersion}:${expiresAt}`);
+  if (!timingSafeEqual(expected, signature)) throw new HTTPException(401, { message: "Invalid upload session" });
+  return { contributorId, expiresAt };
 }
 
 function hex(bytes: ArrayBuffer): string {
@@ -23,45 +64,8 @@ async function hmacBytes(secret: string | Uint8Array, value: string): Promise<Ar
   return crypto.subtle.sign("HMAC", key, encoder.encode(value));
 }
 
-export async function hmac(secret: string, value: string): Promise<string> {
-  if (secret.length < 32) throw new Error("A required Worker secret is missing or too short");
-  return base64Url(new Uint8Array(await hmacBytes(secret, value)));
-}
-
-export function constantTimeEqual(left: string, right: string): boolean {
-  const a = encoder.encode(left);
-  const b = encoder.encode(right);
-  let difference = a.length ^ b.length;
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) difference |= (a[index] || 0) ^ (b[index] || 0);
-  return difference === 0;
-}
-
-export async function createUploadSession(secret: string, requestId: string, contributorId: string, expiresAt: number): Promise<string> {
-  const signature = await hmac(secret, `${requestId}:${contributorId}:${expiresAt}`);
-  const value = `${requestId}.${contributorId}.${expiresAt}.${signature}`;
-  return `__Host-ltds_incoming=${encodeURIComponent(value)}; Path=/; Max-Age=${Math.max(0, Math.floor((expiresAt - Date.now()) / 1000))}; HttpOnly; Secure; SameSite=Strict`;
-}
-
-export async function verifyUploadSession(secret: string, cookie: string | undefined, expectedRequestId: string): Promise<string> {
-  const raw = (cookie || "").split(";").map((part) => part.trim()).find((part) => part.startsWith("__Host-ltds_incoming="))?.slice("__Host-ltds_incoming=".length);
-  if (!raw) throw new HTTPException(401, { message: "Upload session required" });
-  const [requestId, contributorId, expiresRaw, signature] = decodeURIComponent(raw).split(".");
-  const expiresAt = Number(expiresRaw);
-  if (requestId !== expectedRequestId || !contributorId || !signature || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
-    throw new HTTPException(401, { message: "Upload session expired" });
-  }
-  const expected = await hmac(secret, `${requestId}:${contributorId}:${expiresAt}`);
-  if (!constantTimeEqual(expected, signature)) throw new HTTPException(401, { message: "Invalid upload session" });
-  return contributorId;
-}
-
 function awsEncode(value: string): string {
   return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
-}
-
-function amzDate(now: Date): { timestamp: string; date: string } {
-  const timestamp = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
-  return { timestamp, date: timestamp.slice(0, 8) };
 }
 
 async function signingKey(secret: string, date: string): Promise<Uint8Array> {
@@ -71,7 +75,7 @@ async function signingKey(secret: string, date: string): Promise<Uint8Array> {
   return new Uint8Array(await hmacBytes(serviceKey, "aws4_request"));
 }
 
-export async function presignR2Part(input: {
+export async function presignIncomingPart(input: {
   accountId: string;
   bucket: string;
   key: string;
@@ -83,12 +87,15 @@ export async function presignR2Part(input: {
   now?: Date;
 }): Promise<string> {
   if (!/^[a-f0-9]{32}$/i.test(input.accountId) || !input.bucket || !input.accessKeyId || !input.secretAccessKey) {
-    throw new Error("R2 upload signing is not configured");
+    throw new Error("R2 incoming upload signing is not configured");
   }
-  if (!Number.isInteger(input.partNumber) || input.partNumber < 1 || input.partNumber > 10_000) throw new Error("Invalid multipart part number");
+  if (!Number.isInteger(input.partNumber) || input.partNumber < 1 || input.partNumber > 10_000) {
+    throw new HTTPException(400, { message: "Invalid multipart part number" });
+  }
   const expires = Math.min(900, Math.max(30, input.expiresSeconds ?? 300));
   const now = input.now ?? new Date();
-  const { timestamp, date } = amzDate(now);
+  const timestamp = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
+  const date = timestamp.slice(0, 8);
   const host = `${input.accountId}.r2.cloudflarestorage.com`;
   const path = `/${awsEncode(input.bucket)}/${input.key.split("/").map(awsEncode).join("/")}`;
   const scope = `${date}/auto/s3/aws4_request`;
@@ -106,7 +113,8 @@ export async function presignR2Part(input: {
     .map(([key, value]) => [awsEncode(key), awsEncode(value)] as const)
     .sort(([leftKey, leftValue], [rightKey, rightValue]) =>
       leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0)
-    .map(([key, value]) => `${key}=${value}`).join("&");
+    .map(([key, value]) => `${key}=${value}`)
+    .join("&");
   const canonical = `PUT\n${path}\n${query}\nhost:${host}\n\nhost\nUNSIGNED-PAYLOAD`;
   const stringToSign = `AWS4-HMAC-SHA256\n${timestamp}\n${scope}\n${await digest(canonical)}`;
   const signature = hex(await hmacBytes(await signingKey(input.secretAccessKey, date), stringToSign));
@@ -129,7 +137,9 @@ export function validateIncomingFile(name: string, contentType: string, size: nu
   if (/^(text\/html|image\/svg\+xml|application\/(javascript|x-javascript|xml|x-msdownload|x-sh|x-powershell))$/.test(mime)) {
     throw new HTTPException(415, { message: "That file type is not accepted" });
   }
-  if (!Number.isSafeInteger(size) || size <= 0 || size > 2 * 1024 ** 4) throw new HTTPException(413, { message: "File size is outside the allowed range" });
+  if (!Number.isSafeInteger(size) || size <= 0 || size > 2 * 1024 ** 4) {
+    throw new HTTPException(413, { message: "File size is outside the allowed range" });
+  }
   return normalized;
 }
 
@@ -141,9 +151,13 @@ export function incomingMultipartPartSize(size: number): number {
   return Math.max(minimum, Math.ceil(required / fiveMiB) * fiveMiB);
 }
 
-export function hasBlockedMagic(bytes: Uint8Array): boolean {
+export function hasBlockedIncomingMagic(bytes: Uint8Array): boolean {
   if (bytes.length >= 2 && bytes[0] === 0x4d && bytes[1] === 0x5a) return true;
   const prefix = new TextDecoder().decode(bytes.slice(0, 256)).trimStart().toLowerCase();
-  return prefix.startsWith("<!doctype html") || prefix.startsWith("<html") || prefix.startsWith("<svg") || prefix.startsWith("#!") ||
-    prefix.startsWith("<script") || prefix.startsWith("<?xml");
+  return prefix.startsWith("<!doctype html")
+    || prefix.startsWith("<html")
+    || prefix.startsWith("<svg")
+    || prefix.startsWith("#!")
+    || prefix.startsWith("<script")
+    || prefix.startsWith("<?xml");
 }

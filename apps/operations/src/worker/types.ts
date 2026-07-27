@@ -13,6 +13,16 @@ export type Env = Cloudflare.Env & {
   R2_SECRET_ACCESS_KEY?: string;
   R2_ACCOUNT_ID: string;
   R2_BUCKET_NAME: string;
+  R2_INCOMING_BUCKET_NAME: string;
+  INCOMING_BASE_URL: string;
+  INCOMING_EXPECTED_HOST: string;
+  INCOMING_BUCKET: R2Bucket;
+  INCOMING_LIFECYCLE_WORKFLOW: Workflow;
+  TURNSTILE_SITE_KEY: string;
+  TURNSTILE_SECRET: string;
+  INCOMING_SESSION_SECRET: string;
+  INCOMING_ACCESS_CODE_PEPPER: string;
+  INCOMING_PICKUP_SECRET: string;
   R2_CRUD_WORKFLOW: Workflow;
   ALERT_EMAIL?: SendEmail;
   ALERT_FROM?: string;

@@ -2,15 +2,15 @@
 
 ## 1. Worker Builds
 
-Configure the Git repository `ledgetoptechnologies/LTDS-Ops` four times:
+Configure the Git repository `ledgetoptechnologies/LTDS-Ops` three times:
 
-| Setting | Operations | Delivery | Ops Sync | Incoming |
-|---|---|---|---|---|
-| Production branch | `main` | `main` | `main` | `main` |
-| Root directory | `/apps/operations` | `/apps/delivery` | `/apps/ops-sync` | `/apps/incoming` |
-| Build command | `npm run build` | `npm run build` | `npm run build` | `npm run build` |
-| Deploy command | `npx wrangler deploy` | `npx wrangler deploy` | `npm run deploy` | `npm run deploy` |
-| Version command | `npx wrangler versions upload` | `npx wrangler versions upload` | `npx wrangler versions upload` | `npx wrangler versions upload` |
+| Setting | Operations | Delivery | Ops Sync |
+|---|---|---|---|
+| Production branch | `main` | `main` | `main` |
+| Root directory | `/apps/operations` | `/apps/delivery` | `/apps/ops-sync` |
+| Build command | `npm run build` | `npm run build` | `npm run build` |
+| Deploy command | `npx wrangler deploy` | `npx wrangler deploy` | `npm run deploy` |
+| Version command | `npx wrangler versions upload` | `npx wrangler versions upload` | `npx wrangler versions upload` |
 
 Do not add runtime secrets to Build variables. The application secrets are Worker runtime secrets.
 
@@ -66,7 +66,7 @@ npx.cmd wrangler secret put R2_SECRET_ACCESS_KEY
 
 These credentials sign direct browser download URLs only. Delivery's normal R2 reads use the `DATA_BUCKET` binding, and preview SHA identities do not use these secrets.
 
-Create a separate least-privilege R2 credential for the Operations Worker. It may authorize writes only to `client-data`; do not reuse the TrueNAS or Delivery credential:
+Create a separate least-privilege R2 credential for the Operations Worker. Scope Object Read & Write to exactly `client-data` and `ltds-incoming`; do not reuse the TrueNAS or Delivery credential:
 
 ```powershell
 Set-Location apps/operations
@@ -74,7 +74,7 @@ npx.cmd wrangler secret put R2_ACCESS_KEY_ID
 npx.cmd wrangler secret put R2_SECRET_ACCESS_KEY
 ```
 
-These credentials sign direct multipart browser uploads only. Operations CRUD, preview validation, and post-upload manifest finalization use the `DATA_BUCKET` binding.
+These credentials sign direct multipart browser uploads for both staff Delivery uploads and public Incoming uploads. The relevant bucket and object key are always selected server-side. Normal Worker reads/writes use R2 bindings.
 
 Set the account S3 endpoint and bucket name as non-secret Operations variables. Apply an R2 CORS policy that permits only the production Operations origin and the dedicated staging Operations origin, allows the headers signed by the upload flow, and exposes `ETag`. Never permit `*` origins with credentialed staff uploads. Presigned upload authorization must remain short-lived and object-specific.
 
@@ -110,24 +110,22 @@ Use `PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY` only during rotation. Th
 
 ## 6. Staging before rollout
 
-Create separate staging Workers for all four services, D1 databases, R2 buckets, Workflow, queue, secrets, hostnames, and Access applications. Never bind staging to production D1/R2. Test Beau, Kollins, an Operator account, a public client flow, an inbound multipart upload, and successful/failed ZIP jobs before production builds from `main`.
+Create separate staging Workers for all three services, D1 databases, R2 buckets, Workflows, queue, secrets, hostnames, and Access applications. Never bind staging to production D1/R2. Test Beau, Kollins, an Operator account, a public client flow, an inbound multipart upload, and successful/failed ZIP jobs before production builds from `main`.
 
 ## 7. Incoming requests
 
-Create the private `ltds-incoming` bucket, attach `incoming.ledgetopdroneservices.com`, create a Turnstile widget restricted to that hostname, set `TURNSTILE_SITE_KEY`, and provision:
+Create the private `ltds-incoming` bucket. Route `incoming.ledgetopdroneservices.com` to `ltds-ops`, but keep Cloudflare Access limited to `ops.ledgetopdroneservices.com/*`. Create a Turnstile widget restricted to the Incoming hostname, set `TURNSTILE_SITE_KEY`, and provision on Operations:
 
 ```powershell
-Set-Location apps/incoming
+Set-Location apps/operations
 npx.cmd wrangler secret put TURNSTILE_SECRET
+npx.cmd wrangler secret put TURNSTILE_SITE_KEY
 npx.cmd wrangler secret put INCOMING_SESSION_SECRET
 npx.cmd wrangler secret put INCOMING_ACCESS_CODE_PEPPER
-npx.cmd wrangler secret put AUDIT_IP_SECRET
-npx.cmd wrangler secret put R2_INCOMING_ACCESS_KEY_ID
-npx.cmd wrangler secret put R2_INCOMING_SECRET_ACCESS_KEY
 npx.cmd wrangler secret put INCOMING_PICKUP_SECRET
 ```
 
-The R2 credential is scoped only to multipart writes in `ltds-incoming`. Apply the browser CORS policy from `docs/inbound-requests.md`, expose `ETag`, and configure a 14-day lifecycle backstop for quarantine objects and abandoned multipart uploads. Deployment creates the `ltds-incoming-upload-lifecycle` Workflow, which aborts incomplete uploads after 24 hours and expires unclaimed quarantine after 14 days without consuming an account Cron Trigger. TrueNAS calls the authenticated pickup-receipt endpoint only after ClamAV, checksum verification, durable local promotion, and removal of the quarantine object.
+Apply `apps/operations/r2-incoming-cors.json`, expose `ETag`, and configure a 14-day lifecycle backstop for quarantine objects and abandoned multipart uploads. Operations deployment creates the `ltds-incoming-upload-lifecycle` Workflow, which aborts incomplete uploads after 24 hours and expires unclaimed quarantine after 14 days. TrueNAS calls the authenticated pickup endpoint only after ClamAV, checksum verification, durable local copy, and removal of the quarantine object.
 
 ## 8. Migrations and Workflow rollout
 

@@ -2,6 +2,12 @@
 
 This is the production contract between TrueNAS, Hermes, the preview producer, and LTDS Delivery. Cards and viewers prefer prepared derivatives. Original media is never fetched by a folder grid or filmstrip, but the viewer streams the one original a user deliberately opens when a prepared preview is unavailable.
 
+The canonical executable implementation is
+[`preview-gen.sh`](preview-gen.sh). Validate a deployment candidate with
+`bash -n docs/truenas/preview-gen.sh` and
+`bash docs/truenas/tests/preview-gen-paths.sh`. The fixture covers valid source
+trees and the reserved-path boundary without invoking FFmpeg.
+
 ## Canonical source layout
 
 The synchronized source root is always:

@@ -29,6 +29,7 @@ describe("Operations R2 CRUD boundaries", () => {
     expect(requiresAdministratorForMutation("POST","/api/delivery/shares")).toBe(false);
     expect(requiresAdministratorForMutation("DELETE","/api/delivery/shares/share-1")).toBe(false);
     expect(requiresAdministratorForMutation("POST","/api/delivery/items/item-1/stream-ticket")).toBe(false);
+    expect(requiresAdministratorForMutation("POST","/api/delivery/incoming-link/rotate")).toBe(false);
     expect(requiresAdministratorForMutation("DELETE","/api/delivery/shares")).toBe(true);
     expect(requiresAdministratorForMutation("DELETE","/api/delivery/shares/share-1/extra")).toBe(true);
     expect(requiresAdministratorForMutation("DELETE","/api/delivery/shares/share%2F1")).toBe(true);

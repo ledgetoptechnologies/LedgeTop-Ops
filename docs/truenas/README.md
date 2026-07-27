@@ -75,6 +75,24 @@ The file browser uses live R2 prefix/delimiter listing as the authority, so it u
 
 ## Preview and derivative contract
 
+The canonical producer script is [`preview-gen.sh`](preview-gen.sh). Deploy
+that repository copy into the FFmpeg container rather than maintaining an
+independent pasted version. It preserves the `ltds-preview/2.0.0` provisional
+manifest contract described below.
+
+Before deployment, validate its syntax and path boundary behavior from a Linux
+or container shell:
+
+```bash
+bash -n docs/truenas/preview-gen.sh
+bash docs/truenas/tests/preview-gen-paths.sh
+```
+
+The path fixture explicitly confirms that normal files under `Clients`,
+`Demo`, `Edited Vs. Nonedited`, and `Extended` are accepted while reserved,
+hidden, and outside-root paths are rejected. A successful full generation run
+must finish with `errors=0` before the resulting `.previews` tree is synced.
+
 Source media remains under `Jobs/Clients/<client-or-organization>/...`. For a source leaf, the preview producer normalizes the leaf filename including its extension to Unicode NFC, hashes it with SHA-256, and writes derivatives beside the source in:
 
 ```text

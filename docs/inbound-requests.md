@@ -6,15 +6,15 @@ Use a separate private R2 bucket for inbound requests, not the client-delivery b
 
 ## Request model
 
-The `apps/incoming` Worker implements this boundary. Each request has an opaque public id, optional hashed access code, intake label, creator, expiry, file-count and byte quotas, contributors, and quarantined upload records. The public page is upload-only: it cannot browse, download, or enumerate other requests.
+The Operations Worker implements this boundary on the separate public hostname `incoming.ledgetopdroneservices.com`. Exact hostname dispatch happens before staff authentication: the Incoming hostname exposes only the upload page and public/pickup routes, while the Access-protected Operations hostname exposes only staff UI and APIs. The reusable request has an opaque public id, optional hashed access code, file-count and byte quotas, contributors, and quarantined upload records. The public page is upload-only: it cannot browse, download, or enumerate requests.
 
 Collect contributor name and email plus an optional note/reason for workflow context. Email is metadata, not authentication, and the platform does not send contributor notifications.
 
-Protect the request form with Turnstile, per-request and per-IP rate limits, an expiry, a maximum number of files, maximum total bytes, object-name rules, and a hidden honeypot. Do not place personal data in R2 object keys.
+Protect the request form with Turnstile, per-request and per-IP rate limits, maximum outstanding files and bytes, object-name rules, and a hidden honeypot. The reusable link remains open until staff revoke or replace it. Do not place personal data in R2 object keys.
 
 ## Large uploads
 
-Use direct multipart uploads to the private incoming bucket so the browser and R2 handle the large body without buffering it in a Worker. The Worker issues five-minute SigV4 part URLs only after validating the request, contributor session, Turnstile, and quota. Browser parts are 32 MiB. The Worker verifies the completed object size and rejects basic executable/active-content signatures; TrueNAS performs the authoritative checksum and ClamAV checks. Incomplete multipart uploads expire after 24 hours.
+Use direct multipart uploads to the private incoming bucket so the browser and R2 handle the large body without buffering it in a Worker. The Worker issues five-minute SigV4 part URLs only after validating the request, contributor session, Turnstile, and quota. Part size starts at 32 MiB and increases as needed to remain below R2's 10,000-part ceiling. D1 checkpoints and browser IndexedDB allow a contributor to reselect the same file after a reload and continue. The Worker verifies completed size and rejects basic executable/active-content signatures; TrueNAS performs authoritative checksum and ClamAV checks. Incomplete uploads expire after 24 hours.
 
 The bucket must allow CORS only from `https://incoming.ledgetopdroneservices.com`:
 
@@ -34,14 +34,14 @@ The bucket must allow CORS only from `https://incoming.ledgetopdroneservices.com
 }
 ```
 
-Provision `TURNSTILE_SECRET`, `INCOMING_SESSION_SECRET`, `INCOMING_ACCESS_CODE_PEPPER`, `AUDIT_IP_SECRET`, `R2_INCOMING_ACCESS_KEY_ID`, and `R2_INCOMING_SECRET_ACCESS_KEY` as Worker secrets. Register separate staging and production Turnstile widgets and set `TURNSTILE_SITE_KEY` in the matching environment.
+Provision `TURNSTILE_SECRET`, `INCOMING_SESSION_SECRET`, `INCOMING_ACCESS_CODE_PEPPER`, `AUDIT_IP_SECRET`, and `INCOMING_PICKUP_SECRET` on `ltds-ops`. The Operations `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` credential is scoped to object read/write on `client-data` and `ltds-incoming`; the signer hardcodes the Incoming bucket. Register separate staging and production Turnstile widgets and set `TURNSTILE_SITE_KEY` in the matching environment.
 
 ## Pickup and promotion
 
-TrueNAS/Hermes polls the request prefix on its normal interval. It downloads only completed, clean, checksum-verified objects into a local quarantine/staging area, then moves accepted files into the operator-selected `Jobs/Clients/<client-or-organization>/...` destination. The promotion should be idempotent and retain the request id/upload id in a sidecar manifest or local job log.
+TrueNAS/Hermes polls the quarantine prefix on its normal interval. It downloads completed objects into a central local Incoming area, verifies them, and leaves final sorting to Operations staff. Pickup should be idempotent and retain the request id/upload id in a sidecar manifest or local job log.
 
 Delete the inbound R2 object only after local verification and successful promotion. Object disappearance alone is never treated as acceptance. After ClamAV succeeds, the SHA-256 checksum is verified, the local copy is durable, and the quarantine object is removed, call `POST /api/internal/uploads/:uploadId/accepted` with `Authorization: Bearer <INCOMING_PICKUP_SECRET>` and JSON `{ "sha256": "<64 hex characters>" }`. The Worker rejects the receipt while the quarantine object still exists. If pickup fails, leave the object for retry and alert rather than deleting it. Configure an R2 lifecycle backstop for `quarantine/` after 14 days; the Worker also aborts day-old incomplete uploads and expires completed quarantine objects after 14 days.
 
 ## Implemented boundary
 
-The Worker owns request authorization, Turnstile verification, exact quotas, multipart coordination, basic type checks, and request status. TrueNAS/Hermes owns malware scanning, checksum verification, durable local staging, promotion into `Jobs/Clients/<client-or-organization>/...`, and confirmation of local integrity. No inbound request object is eligible for a client Delivery share until promotion is complete.
+The Operations Worker owns request authorization, Turnstile verification, exact quotas, multipart coordination, basic type checks, and request status. TrueNAS/Hermes owns malware scanning, checksum verification, durable local staging, and confirmation of local integrity. No inbound object is visible in Client Delivery.

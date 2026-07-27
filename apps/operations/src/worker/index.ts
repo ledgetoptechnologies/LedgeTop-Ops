@@ -21,6 +21,7 @@ import { listTrash, purgeTrash, restoreTombstone } from "./trash";
 import { processR2OperationJobs, purgeReplacementRecovery, registerR2CrudRoutes } from "./r2-crud";
 import { requiresAdministratorForMutation } from "./r2-crud-validation";
 import { enqueueExpiringNotifications, processDeliveryNotifications } from "./notifications";
+import { createIncomingStaffRouter, dispatchIncomingPublicRequest } from "./incoming";
 
 type Variables={principal:StaffPrincipal;administrator:boolean};
 const app=new Hono<{Bindings:Env;Variables:Variables}>();
@@ -80,6 +81,7 @@ app.on(["GET","HEAD"],"/api/delivery/items/:itemRef/preview",c=>opsFile(c,"inlin
 app.on(["GET","HEAD"],"/api/delivery/items/:itemRef/source",c=>opsFile(c,"inline",true));
 app.get("/api/delivery/items/:itemRef/thumbnail",async c=>{const key=await authorizeItem(c.env,c.get("principal"),c.req.param("itemRef"));const kind=mediaKind(key);if(kind==="image"||kind==="pdf")return preparedArtifact(c,key,"thumb");if(kind==="video")return preparedArtifact(c,key,"poster");throw new HTTPException(415,{message:"Thumbnail unavailable"});});
 registerR2CrudRoutes(app);
+app.route("/api/delivery/incoming-link",createIncomingStaffRouter());
 app.post("/api/delivery/items/:itemRef/stream-ticket",async c=>{const key=await authorizeItem(c.env,c.get("principal"),c.req.param("itemRef"));if(mediaKind(key)!=="video")throw new HTTPException(415,{message:"Stream preview unavailable"});const row=await c.env.DELIVERY_DB.withSession("first-primary").prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(key).first<{stream_uid:string|null;stream_status:string|null}>();if(row?.stream_status!=="ready"||!row.stream_uid||!c.env.STREAM_CUSTOMER_CODE)throw new HTTPException(404,{message:"Video preview unavailable"});const token=await c.env.STREAM.video(row.stream_uid).generateToken();return c.json({url:`https://customer-${c.env.STREAM_CUSTOMER_CODE}.cloudflarestream.com/${token}/iframe`,expiresIn:3600});});
 
 app.get("/api/admin/staff",async c=>{const principal=c.get("principal");await requirePermission(c.env,principal,"team.view");const scope=await sqlScope(c.env,principal,"team.view");let where="1=1",values:unknown[]=[];if(!scope.global){const divisions=scope.divisions.filter(id=>!scope.deniedDivisions.includes(id));if(!divisions.length)return c.json({staff:[]});where=`EXISTS (SELECT 1 FROM staff_divisions sd WHERE sd.staff_id=s.id AND sd.division_id IN (${placeholders(divisions)}))`;values=divisions;}const result=await c.env.OPS_DB.prepare(`SELECT s.id,s.email,s.display_name,s.status,s.last_seen_at,s.provisioning_source,s.sync_protected,GROUP_CONCAT(DISTINCT d.name) divisions,GROUP_CONCAT(DISTINCT r.name) roles,EXISTS(SELECT 1 FROM local_staff_role_assignments la WHERE la.staff_id=s.id AND la.role_id='role-delivery-coordinator' AND la.scope='global') local_delivery_access FROM staff_users s LEFT JOIN staff_divisions sd ON sd.staff_id=s.id LEFT JOIN divisions d ON d.id=sd.division_id LEFT JOIN staff_role_assignments a ON a.staff_id=s.id LEFT JOIN roles r ON r.id=a.role_id WHERE ${where} GROUP BY s.id ORDER BY s.display_name`).bind(...values).all();return c.json({staff:result.results});});
@@ -122,5 +124,11 @@ async function scheduled(event:ScheduledController,env:Env,ctx:ExecutionContext)
   ctx.waitUntil(purgeReplacementRecovery(env));
   ctx.waitUntil(enqueueExpiringNotifications(env).then(() => processDeliveryNotifications(env)));
 }
-export default{fetch:app.fetch,queue:consumeFileEvents,scheduled}satisfies ExportedHandler<Env,R2Notification>;
+async function fetch(request:Request,env:Env,ctx:ExecutionContext):Promise<Response>{
+  const incoming=dispatchIncomingPublicRequest(request,env,ctx);
+  if(incoming)return await incoming;
+  return app.fetch(request,env,ctx);
+}
+export default{fetch,queue:consumeFileEvents,scheduled}satisfies ExportedHandler<Env,R2Notification>;
 export { R2CrudWorkflow } from "./r2-crud";
+export { IncomingUploadLifecycleWorkflow } from "./incoming";
