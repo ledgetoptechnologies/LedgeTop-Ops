@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
+import deliveryWranglerConfig from "../wrangler.jsonc?raw";
 
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
 
 import deliveryWorker, {
   bulkQuotaRetryAfterSeconds,
+  bulkJobProgress,
   classifyPublicRateLimit,
   cleanupTemporaryZips,
   friendlyBulkFailure,
@@ -11,7 +13,15 @@ import deliveryWorker, {
 } from "../src/worker/index";
 import { encodeItemRef } from "../src/worker/files";
 import { createSessionCookie } from "../src/worker/security";
-import { classifyWorkflowFailure, readSourceRange, snapshot } from "../src/worker/workflow";
+import {
+  assemblyProgressBytes,
+  classifyWorkflowFailure,
+  crcProgressBytes,
+  readSourceRange,
+  shouldCheckpointCrcChunk,
+  shouldCheckpointCrcFile,
+  snapshot,
+} from "../src/worker/workflow";
 import type { Env, ShareRow } from "../src/worker/types";
 
 const share: ShareRow = {
@@ -51,6 +61,48 @@ describe("bulk-download rate-limit policy", () => {
   it("calculates the remaining hourly quota window", () => {
     expect(bulkQuotaRetryAfterSeconds(Date.UTC(2026, 6, 27, 12, 0, 0))).toBe(3600);
     expect(bulkQuotaRetryAfterSeconds(Date.UTC(2026, 6, 27, 12, 59, 59, 250))).toBe(1);
+  });
+});
+
+describe("bulk-download Worker limits and progress", () => {
+  it("configures the maximum supported Workflow CPU allowance", () => {
+    const config = JSON.parse(deliveryWranglerConfig) as {
+      limits?: { cpu_ms?: number; subrequests?: number };
+    };
+    expect(config.limits).toEqual({ cpu_ms: 300_000, subrequests: 25_000 });
+  });
+
+  it("reports monotonic two-phase progress without moving backwards", () => {
+    expect(crcProgressBytes(100, 0)).toBe(0);
+    expect(crcProgressBytes(100, 40)).toBe(20);
+    expect(crcProgressBytes(100, 100)).toBe(50);
+    expect(assemblyProgressBytes(100, 110, 0)).toBe(50);
+    expect(assemblyProgressBytes(100, 110, 55)).toBe(75);
+    expect(assemblyProgressBytes(100, 110, 110)).toBe(100);
+    expect(assemblyProgressBytes(100, 110, 220)).toBe(100);
+    expect(crcProgressBytes(0, 40)).toBe(0);
+  });
+
+  it("coalesces CRC progress writes to preserve the Workflow subrequest budget", () => {
+    const mib = 1024 * 1024;
+    expect(shouldCheckpointCrcChunk(0, 8 * mib)).toBe(false);
+    expect(shouldCheckpointCrcChunk(56 * mib, 64 * mib)).toBe(true);
+    expect(shouldCheckpointCrcChunk(64 * mib, 72 * mib)).toBe(false);
+    expect(shouldCheckpointCrcFile(24, 2_000)).toBe(false);
+    expect(shouldCheckpointCrcFile(25, 2_000)).toBe(true);
+    expect(shouldCheckpointCrcFile(1_999, 2_000)).toBe(false);
+    expect(shouldCheckpointCrcFile(2_000, 2_000)).toBe(true);
+  });
+
+  it("labels CRC and assembly phases for the polling client", () => {
+    expect(bulkJobProgress({ status: "queued", total_bytes: 100, processed_bytes: 0, archive_size: null }))
+      .toEqual({ progress: null, message: null });
+    expect(bulkJobProgress({ status: "running", total_bytes: 100, processed_bytes: 20, archive_size: null }))
+      .toEqual({ progress: 20, message: "Checking files" });
+    expect(bulkJobProgress({ status: "running", total_bytes: 100, processed_bytes: 75, archive_size: 110 }))
+      .toEqual({ progress: 75, message: "Building ZIP" });
+    expect(bulkJobProgress({ status: "ready", total_bytes: 100, processed_bytes: 100, archive_size: 110 }))
+      .toEqual({ progress: 100, message: "Download ready" });
   });
 });
 
@@ -321,6 +373,12 @@ describe("bulk-download failures and cleanup", () => {
 
   it("maps source mutations and unexpected errors to stable client-safe failures", () => {
     expect(classifyWorkflowFailure("Conditional ETag should not be wrapped in quotes")).toEqual(friendlyBulkFailure("source-changed"));
+    expect(classifyWorkflowFailure("Error: Worker exceeded CPU time limit.")).toEqual(friendlyBulkFailure("preparation-capacity"));
+    expect(classifyWorkflowFailure("exceededCpu")).toEqual(friendlyBulkFailure("preparation-capacity"));
+    expect(friendlyBulkFailure("preparation-capacity")).toEqual({
+      code: "preparation-capacity",
+      message: "This selection exceeded the archive preparation capacity. Choose a smaller selection and try again.",
+    });
     expect(classifyWorkflowFailure("secret internal stack detail")).toEqual(friendlyBulkFailure("workflow-failed"));
     expect(friendlyBulkFailure("secret internal stack detail")).toEqual(friendlyBulkFailure("workflow-failed"));
   });

@@ -7,6 +7,7 @@ const BULK_FAILURES: Record<string, BulkFailure> = {
   "byte-limit": { code: "byte-limit", message: "This download is larger than 20 GB. Choose a smaller selection." },
   "source-changed": { code: "source-changed", message: "One or more files changed while the archive was being built. Please create a new download." },
   "archive-too-large": { code: "archive-too-large", message: "This selection is too large to prepare as one download." },
+  "preparation-capacity": { code: "preparation-capacity", message: "This selection exceeded the archive preparation capacity. Choose a smaller selection and try again." },
   "workflow-create-failed": { code: "workflow-create-failed", message: "The download could not be queued. Please try again." },
   "workflow-failed": { code: "workflow-failed", message: "The download could not be prepared. Please try again." },
 };
@@ -18,6 +19,11 @@ export function friendlyBulkFailure(code: string | null | undefined): BulkFailur
 export function classifyWorkflowFailure(rawError: string): BulkFailure {
   if (["share-revoked", "empty-selection", "file-limit", "byte-limit"].includes(rawError)) return friendlyBulkFailure(rawError);
   if (rawError === "multipart-part-limit") return friendlyBulkFailure("archive-too-large");
+  if (
+    rawError.includes("exceeded CPU time limit")
+    || rawError.includes("exceededCpu")
+    || rawError.includes("CPU time limit exceeded")
+  ) return friendlyBulkFailure("preparation-capacity");
   if (
     rawError === "source-changed-or-disappeared"
     || rawError === "source-short-read"

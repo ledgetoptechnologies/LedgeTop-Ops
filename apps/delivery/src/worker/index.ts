@@ -472,6 +472,18 @@ export function readyBulkJobIsExpired(job: { status: string; expires_at: string 
   return job.status === "ready" && Number.isFinite(expiresAt) && expiresAt <= now;
 }
 
+export function bulkJobProgress(job: {
+  status: string;
+  total_bytes: number | null;
+  processed_bytes: number | null;
+  archive_size: number | null;
+}): { progress: number | null; message: string | null } {
+  if (job.status === "ready") return { progress: 100, message: "Download ready" };
+  if (job.status !== "running" || !job.total_bytes || job.total_bytes <= 0) return { progress: null, message: null };
+  const progress = Math.min(99, Math.max(0, Math.round(((job.processed_bytes || 0) / job.total_bytes) * 100)));
+  return { progress, message: job.archive_size == null ? "Checking files" : "Building ZIP" };
+}
+
 async function expireReadyBulkJob(c: any, job: any): Promise<void> {
   if (!readyBulkJobIsExpired(job)) return;
   await primaryDb(c.env).prepare("UPDATE bulk_download_jobs SET status='expired',updated_at=datetime('now') WHERE id=? AND status='ready' AND datetime(expires_at)<=datetime('now')").bind(job.id).run();
@@ -498,7 +510,8 @@ app.get("/api/public/shares/:publicId/bulk-download/:jobId", async c => {
   const job = await getBulkJob(c, c.req.param("jobId")); if (!job) throw new HTTPException(404, { message: "Download job not found" });
   await expireReadyBulkJob(c, job);
   const failure = job.error_code ? friendlyBulkFailure(job.error_code) : null;
-  const response: Record<string, unknown> = { jobId: job.id, status: job.status, fileCount: job.file_count, processedFiles: job.processed_files, totalBytes: job.total_bytes, processedBytes: job.processed_bytes, archiveSize: job.archive_size, expiresAt: job.expires_at, error: failure, downloadUrl: null };
+  const progress = bulkJobProgress(job);
+  const response: Record<string, unknown> = { jobId: job.id, status: job.status, fileCount: job.file_count, processedFiles: job.processed_files, totalBytes: job.total_bytes, processedBytes: job.processed_bytes, archiveSize: job.archive_size, expiresAt: job.expires_at, error: failure, downloadUrl: null, ...progress };
   if (job.status === "ready") response.downloadUrl = (await archiveTicket(c, job)).url;
   return c.json(response);
 });

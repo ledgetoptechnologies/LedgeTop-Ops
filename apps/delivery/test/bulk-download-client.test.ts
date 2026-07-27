@@ -52,6 +52,26 @@ describe("public bulk-download polling", () => {
     expect(harness.sleeps).toEqual([2_000, 2_000, 2_000, 2_000, 2_000]);
   });
 
+  it("delivers monotonic CRC and assembly progress to the UI", async () => {
+    const observed: Array<{ progress?: number; message?: string }> = [];
+    const harness = pollingHarness([
+      { status: "running", progress: 20, message: "Checking files" },
+      { status: "running", progress: 50, message: "Checking files" },
+      { status: "running", progress: 75, message: "Building ZIP" },
+      { status: "ready", progress: 100, message: "Download ready", downloadUrl: "/ready.zip" },
+    ]);
+    harness.options.onProgress = response => observed.push({ progress: response.progress, message: response.message });
+
+    await pollBulkDownload({ status: "queued" }, "/status", harness.options);
+
+    expect(observed).toEqual([
+      { progress: 20, message: "Checking files" },
+      { progress: 50, message: "Checking files" },
+      { progress: 75, message: "Building ZIP" },
+      { progress: 100, message: "Download ready" },
+    ]);
+  });
+
   it("honors Retry-After for a transient 429 and then resumes polling", async () => {
     const limited = Object.assign(new Error("Too many requests"), { status: 429, retryAfterMs: 7_000 });
     const harness = pollingHarness([limited, { status: "ready", ticket: "ticket" }]);

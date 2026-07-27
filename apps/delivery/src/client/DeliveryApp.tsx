@@ -148,7 +148,7 @@ export function DeliveryApp() {
         body = await pollBulkDownload(body, statusUrl, { onProgress: status => {
           const calculated = status.totalBytes && typeof status.processedBytes === "number" ? Math.min(100, Math.round(status.processedBytes / status.totalBytes * 100)) : null;
           const percent = typeof status.progress === "number" ? status.progress : typeof status.percent === "number" ? status.percent : calculated;
-          setBulkProgress({ status: status.status === "ready" || status.status === "complete" ? "Download ready" : "Building ZIP", percent, message: status.message });
+          setBulkProgress({ status: status.message || (status.status === "ready" || status.status === "complete" ? "Download ready" : "Building ZIP"), percent });
         } });
       }
       const ticket = body.ticket || body.downloadTicket;
