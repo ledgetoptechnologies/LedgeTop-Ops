@@ -337,7 +337,8 @@ function ImagePreview({ item }: { item: DeliveryItem }) {
 
 function PdfPreview({ item }: { item: DeliveryItem }) {
   const [preparedFailed, setPreparedFailed] = useState(!item.previewUrl); const [loaded, setLoaded] = useState(false);
-  if (preparedFailed) return item.sourceUrl ? <iframe src={item.sourceUrl} title={item.name} loading="lazy" /> : <PreparedPlaceholder item={item} />;
+  if (item.sourceUrl) return <div className="pdf-preview" aria-busy={!loaded}>{!loaded && <SkeletonViewer />}<iframe src={item.sourceUrl} title={item.name} loading="lazy" onLoad={() => setLoaded(true)} /></div>;
+  if (preparedFailed) return <PreparedPlaceholder item={item} />;
   return <div className="image-preview" aria-busy={!loaded}>{!loaded && <SkeletonViewer />}<img src={item.previewUrl} alt={`${item.name} first page`} loading="lazy" decoding="async" onLoad={() => setLoaded(true)} onError={() => setPreparedFailed(true)} /></div>;
 }
 
