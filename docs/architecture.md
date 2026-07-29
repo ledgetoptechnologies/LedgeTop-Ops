@@ -25,6 +25,8 @@ Operations state changes deny non-administrators by default and also require the
 
 Large staff uploads use short-lived, object-specific R2 authorization and browser-to-R2 transfer. The Worker validates the destination before issuing authorization and never accepts a caller-supplied unrestricted R2 key. Recursive copy, move, rename, replacement, and purge work is represented by durable operation records and processed in bounded, idempotent steps. Folder copy, move, and rename requests are rejected when the destination is the source itself or any descendant of the source, and the job processor repeats that validation before touching R2.
 
+Staff can also import files from Dropbox via a separate OAuth PKCE flow on the Operations Worker. The import Workflow enumerates the selected Dropbox folder, downloads files in 8 MiB chunks, and uploads to R2 via multipart upload. Import credentials are AES-GCM encrypted with per-authorization binding and support refresh-token rotation. The import is gated by the `delivery.files.upload` permission and does not require administrator access. See [cloud transfers](cloud-transfer.md) for configuration.
+
 ## Staff authentication and ACL
 
 Cloudflare Access authenticates people; it does not grant LTDS permissions. The Ops Worker verifies the Access JWT signature, issuer, expiry, exact Operations audience, `RS256`, `type=app`, nonempty human subject, and email. The email must match an active provisioned account. On first successful login, that account binds to the Access subject and rejects future subject mismatches.
