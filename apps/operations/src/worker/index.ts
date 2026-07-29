@@ -24,6 +24,8 @@ import { enqueueExpiringNotifications, processDeliveryNotifications } from "./no
 import { createIncomingStaffRouter, dispatchIncomingPublicRequest } from "./incoming";
 import { servePdfSourceFile, serveSourceFile } from "./source-file";
 import { isFrameableOperationsPdfRequest } from "./frame-policy";
+import { registerDropboxImportRoutes } from "./dropbox-import-routes";
+import { cleanupDropboxImports } from "./dropbox-import";
 
 type Variables={principal:StaffPrincipal;administrator:boolean};
 const app=new Hono<{Bindings:Env;Variables:Variables}>();
@@ -83,6 +85,7 @@ app.on(["GET","HEAD"],"/api/delivery/items/:itemRef/source",c=>opsFile(c,"inline
 app.on(["GET","HEAD"],"/api/delivery/items/:itemRef/pdf",async c=>servePdfSourceFile(c.env.DATA_BUCKET,await authorizeItem(c.env,c.get("principal"),c.req.param("itemRef")),c.req));
 app.get("/api/delivery/items/:itemRef/thumbnail",async c=>{const key=await authorizeItem(c.env,c.get("principal"),c.req.param("itemRef"));const kind=mediaKind(key);if(kind==="image"||kind==="pdf")return preparedArtifact(c,key,"thumb");if(kind==="video")return preparedArtifact(c,key,"poster");throw new HTTPException(415,{message:"Thumbnail unavailable"});});
 registerR2CrudRoutes(app);
+registerDropboxImportRoutes(app);
 app.route("/api/delivery/incoming-link",createIncomingStaffRouter());
 app.post("/api/delivery/items/:itemRef/stream-ticket",async c=>{const key=await authorizeItem(c.env,c.get("principal"),c.req.param("itemRef"));if(mediaKind(key)!=="video")throw new HTTPException(415,{message:"Stream preview unavailable"});const row=await c.env.DELIVERY_DB.withSession("first-primary").prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(key).first<{stream_uid:string|null;stream_status:string|null}>();if(row?.stream_status!=="ready"||!row.stream_uid||!c.env.STREAM_CUSTOMER_CODE)throw new HTTPException(404,{message:"Video preview unavailable"});const token=await c.env.STREAM.video(row.stream_uid).generateToken();return c.json({url:`https://customer-${c.env.STREAM_CUSTOMER_CODE}.cloudflarestream.com/${token}/iframe`,expiresIn:3600});});
 
@@ -125,6 +128,7 @@ async function scheduled(event:ScheduledController,env:Env,ctx:ExecutionContext)
   ctx.waitUntil(processR2OperationJobs(env));
   ctx.waitUntil(purgeReplacementRecovery(env));
   ctx.waitUntil(enqueueExpiringNotifications(env).then(() => processDeliveryNotifications(env)));
+  if(env.DROPBOX_IMPORT_TOKEN_SECRET)ctx.waitUntil(cleanupDropboxImports(env));
 }
 async function fetch(request:Request,env:Env,ctx:ExecutionContext):Promise<Response>{
   const incoming=dispatchIncomingPublicRequest(request,env,ctx);
@@ -134,3 +138,4 @@ async function fetch(request:Request,env:Env,ctx:ExecutionContext):Promise<Respo
 export default{fetch,queue:consumeFileEvents,scheduled}satisfies ExportedHandler<Env,R2Notification>;
 export { R2CrudWorkflow } from "./r2-crud";
 export { IncomingUploadLifecycleWorkflow } from "./incoming";
+export { DropboxImportWorkflow } from "./dropbox-import";

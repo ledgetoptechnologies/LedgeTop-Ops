@@ -17,6 +17,7 @@ function errorStatus(error: unknown): number {
   if (message === "event-id-conflict") return 409;
   if (message.startsWith("access-group-")) return 503;
   if (error instanceof ZodError || message.includes("mismatch")) return 422;
+  if (message.startsWith("projection-data-")) return 422;
   if (message.includes("required") || message.includes("invalid")) return 401;
   return 500;
 }

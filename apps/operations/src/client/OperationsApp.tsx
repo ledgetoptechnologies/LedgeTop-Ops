@@ -5,6 +5,7 @@ import { api, setCsrf } from "./api";
 import { generateSecureAccessCode } from "./access-code";
 import { DELIVERY_ROOT_PREFIX, deliveryPathFromPrefix, prefixFromDeliveryPath } from "./delivery-route";
 import { operationsSectionPath, pathOperationsSection, pathPage, type OperationsPage as Page, type OperationsSection } from "./operations-route";
+import { DropboxImportDialog } from "./DropboxImportDialog";
 
 type OperationsUser=SessionUser&{status:"Active";profileType:"Administrator"|"Employee";isAdministrator:boolean};
 interface Session{user:OperationsUser;csrfToken:string;timezone:string;mapStyleUrl:string|null}
@@ -81,6 +82,7 @@ function DeliveryWorkspaceV2({session}:{session:Session}){
   const[prefix,setPrefix]=useState(()=>prefixFromDeliveryPath(location.pathname)),[view,setView]=useState<"grid"|"list">("grid"),[preview,setPreview]=useState<any>(null);
   const[selected,setSelected]=useState<string[]>([]),[selectionMode,setSelectionMode]=useState(false),[operation,setOperation]=useState<DeliveryOperation|null>(null),[operationError,setOperationError]=useState("");
   const[uploading,setUploading]=useState(false),[fileInput,setFileInput]=useState<HTMLInputElement|null>(null),[folderInput,setFolderInput]=useState<HTMLInputElement|null>(null);
+  const[showDropboxImport,setShowDropboxImport]=useState(()=>{const params=new URLSearchParams(location.search);return Boolean(params.get("dropboxImportAuthorization"))});
   const{data,error,reload}=useLoad<any>(()=>api<any>(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`),[prefix]);
   const items:DeliveryItem[]=data?[...(data.folders||[]),...(data.files||[])]:[];
   const admin=session.user.isAdministrator;
@@ -147,6 +149,7 @@ function DeliveryWorkspaceV2({session}:{session:Session}){
     <button className="button-orange" disabled={!canCreate} onClick={()=>{const name=prompt("New folder name");if(name?.trim())void run(deliveryOperations.createFolder(prefix,name.trim()))}}>New folder</button>
     <button className="button-ghost" disabled={!canUpload||uploading} onClick={()=>fileInput?.click()}>{uploading?"Uploading…":"Upload files"}</button>
     <button className="button-ghost" disabled={!canUpload||uploading} onClick={()=>folderInput?.click()}>Upload folder</button>
+    <button className="button-ghost" disabled={!canUpload} onClick={()=>setShowDropboxImport(true)}>Import from Dropbox</button>
     <input ref={setFileInput} type="file" multiple hidden onChange={event=>{if(event.target.files)void upload(event.target.files);event.currentTarget.value=""}}/>
     <input ref={setFolderInput} type="file" multiple hidden {...({webkitdirectory:"",directory:""} as any)} onChange={event=>{if(event.target.files)void upload(event.target.files);event.currentTarget.value=""}}/>
     <button className={selectionMode?"active":"button-ghost"} onClick={()=>{setSelectionMode(value=>!value);setSelected([])}}>{selectionMode?"Done selecting":"Select"}</button>
@@ -157,7 +160,9 @@ function DeliveryWorkspaceV2({session}:{session:Session}){
   <ErrorLine error={error}/><div className="delivery-dropzone" onDragOver={event=>{if(canUpload)event.preventDefault()}} onDrop={event=>{if(!canUpload)return;event.preventDefault();void upload(event.dataTransfer.files)}}>
     <Card className="file-browser">{!data?<DeliverySkeleton/>:!items.length?<EmptyState title="This folder is empty" detail={canUpload?"Drop files here or use Upload to add delivery content.":"No delivery files are currently available."}/>:view==="grid"?<div className="file-grid">{items.map(item=><DeliveryGridItem key={itemRef(item)} item={item} selected={selected.includes(itemRef(item))} selectionMode={selectionMode} toggle={()=>toggle(item)} open={()=>item.prefix?openFolder(item.prefix):setPreview(item)} share={item.prefix&&canShare?()=>setPreview({shareFolder:item}):undefined}/>)}</div>:<div className="file-list">{items.map(item=><DeliveryListItem key={itemRef(item)} item={item} selected={selected.includes(itemRef(item))} selectionMode={selectionMode} toggle={()=>toggle(item)} open={()=>item.prefix?openFolder(item.prefix):setPreview(item)}/>)}</div>}</Card>
   </div>{preview?.shareFolder&&<ShareDialog folder={preview.shareFolder} canRevoke={allowed(session.user,"delivery.share.revoke")} close={()=>setPreview(null)} changed={()=>void reload()}/>} {preview&&!preview.shareFolder&&<FilePreview item={preview} items={previewItems} select={setPreview} close={()=>setPreview(null)}/>}
-  {admin&&canDelete&&<TrashPanel/>}<ShareHistory session={session} revision={0}/></>;
+  {admin&&canDelete&&<TrashPanel/>}<ShareHistory session={session} revision={0}/>
+  {showDropboxImport&&<DropboxImportDialog destinationPrefix={prefix} canUpload={canUpload} onClose={()=>setShowDropboxImport(false)} onStarted={()=>void reload()} />}
+  </>;
 }
 function DeliveryHub({session}:{session:Session}){
   const[tab,setTab]=useState<"delivery"|"incoming">("delivery");

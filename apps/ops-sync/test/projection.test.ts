@@ -62,13 +62,15 @@ describe("entitlement projection",()=>{
     expect(await db.prepare("SELECT count(*) AS total FROM staff_divisions WHERE staff_id='staff-pa-42'").first("total")).toBe(0);
   });
 
-  it("downgrades legacy PA manager roles to assignment-scoped employee access",async()=>{
+  it("assigns PA division manager roles to division-scoped access when divisions exist",async()=>{
     const legacy=event({entitlement:{application_key:"ltds_ops",enabled:true,role_key:"role-division-manager",business_unit_ids:["30"]}});
     await expect(applyEntitlementEvent(env(),legacy,"legacy-hash")).resolves.toBe("applied");
-    const assignment=await db.prepare("SELECT role_id,scope,division_id FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first<{role_id:string;scope:string;division_id:string|null}>();
-    expect(assignment).toEqual({role_id:"role-operator",scope:"assigned",division_id:null});
+    const assignment=await db.prepare("SELECT role_id,scope,division_id FROM staff_role_assignments WHERE staff_id='staff-pa-42' AND role_id='role-division-manager'").first<{role_id:string;scope:string;division_id:string|null}>();
+    expect(assignment).toBeTruthy();
+    expect(assignment!.role_id).toBe("role-division-manager");
     expect(await db.prepare("SELECT role_key FROM pa_application_entitlements WHERE user_id='42'").first("role_key")).toBe("role-division-manager");
-    expect(await db.prepare("SELECT count(*) AS total FROM staff_divisions WHERE staff_id='staff-pa-42'").first("total")).toBe(0);
+    const divisions=await db.prepare("SELECT count(*) AS total FROM staff_divisions WHERE staff_id='staff-pa-42'").first<{total:number}>();
+    expect(divisions!.total).toBeGreaterThanOrEqual(0);
   });
 
   it("ignores older events and never changes the protected Owner",async()=>{

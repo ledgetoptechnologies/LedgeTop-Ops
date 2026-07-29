@@ -24,7 +24,7 @@ export async function applyEntitlementEvent(env: Env, event: EntitlementEvent, p
   const syncMarker = `event:${event.event_id}`;
   await env.OPS_DB.batch([
     env.OPS_DB.prepare(`INSERT INTO pa_users (id,email,display_name,role,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,display_name=excluded.display_name,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`).bind(event.user.id,event.user.email,event.user.display_name,null,event.user.active?1:0,JSON.stringify(event.user),syncMarker),
-    env.OPS_DB.prepare(`INSERT INTO pa_application_entitlements (id,user_id,application_key,enabled,role_key,business_unit_ids_json,payload_json,last_event_at,last_sync_id,active) VALUES (?,?,?,?,?,?,?,?,?,1) ON CONFLICT(user_id) DO UPDATE SET application_key=excluded.application_key,enabled=excluded.enabled,role_key=excluded.role_key,business_unit_ids_json=excluded.business_unit_ids_json,payload_json=excluded.payload_json,last_event_at=excluded.last_event_at,last_sync_id=excluded.last_sync_id,active=1,updated_at=datetime('now')`).bind(`entitlement-${event.user.id}`,event.user.id,event.entitlement.application_key,enabled?1:0,event.entitlement.role_key,"[]",JSON.stringify(event.entitlement),event.occurred_at,syncMarker),
+    env.OPS_DB.prepare(`INSERT INTO pa_application_entitlements (id,user_id,application_key,enabled,role_key,business_unit_ids_json,payload_json,last_event_at,last_sync_id,active) VALUES (?,?,?,?,?,?,?,?,?,1) ON CONFLICT(user_id) DO UPDATE SET application_key=excluded.application_key,enabled=excluded.enabled,role_key=excluded.role_key,business_unit_ids_json=excluded.business_unit_ids_json,payload_json=excluded.payload_json,last_event_at=excluded.last_event_at,last_sync_id=excluded.last_sync_id,active=1,updated_at=datetime('now')`).bind(`entitlement-${event.user.id}`,event.user.id,event.entitlement.application_key,enabled?1:0,event.entitlement.role_key,JSON.stringify(event.entitlement.business_unit_ids),JSON.stringify(event.entitlement),event.occurred_at,syncMarker),
   ]);
 
   const protectedStaff = await env.OPS_DB.prepare("SELECT id FROM staff_users WHERE lower(email)=? AND sync_protected=1").bind(event.user.email).first<{ id: string }>();
@@ -36,12 +36,33 @@ export async function applyEntitlementEvent(env: Env, event: EntitlementEvent, p
       env.OPS_DB.prepare("DELETE FROM staff_role_assignments WHERE staff_id=? AND role_id<>'role-owner'").bind(id),
       env.OPS_DB.prepare("DELETE FROM staff_divisions WHERE staff_id=?").bind(id),
     ]);
-    if (enabled && event.entitlement.role_key === "role-admin") {
-      await env.OPS_DB.prepare("INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-admin','global',NULL,'global')")
-        .bind(`assignment-pa-${event.user.id}-global`,id).run();
-    } else if (enabled) {
-      await env.OPS_DB.prepare("INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-operator','assigned',NULL,'assigned')")
-        .bind(`assignment-pa-${event.user.id}-assigned`,id).run();
+    if (enabled) {
+      const roleKey = event.entitlement.role_key;
+      if (roleKey === "role-admin") {
+        await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-admin','global',NULL,'global') ON CONFLICT(id) DO NOTHING")
+          .bind(`assignment-pa-${event.user.id}-global`,id).run();
+      } else if (roleKey === "role-delivery-coordinator") {
+        await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-delivery-coordinator','global',NULL,'global') ON CONFLICT(id) DO NOTHING")
+          .bind(`assignment-pa-${event.user.id}-delivery-coordinator`,id).run();
+      } else if (roleKey === "role-division-manager") {
+        const businessUnitIds = event.entitlement.business_unit_ids;
+        if (businessUnitIds.length > 0) {
+          const divisionRows = await env.OPS_DB.prepare(`SELECT id FROM divisions WHERE project_alpha_business_unit_id IN (${businessUnitIds.map(() => "?").join(",")})`)
+            .bind(...businessUnitIds).all<{ id: string }>();
+          for (const div of divisionRows.results) {
+            await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-division-manager','division',?,?) ON CONFLICT(id) DO NOTHING")
+              .bind(`assignment-pa-${event.user.id}-div-mgr-${div.id}`,id,div.id,div.id).run();
+            await env.OPS_DB.prepare("INSERT INTO staff_divisions (staff_id,division_id) VALUES (?,?) ON CONFLICT(staff_id,division_id) DO NOTHING")
+              .bind(id,div.id).run();
+          }
+        } else {
+          await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-division-manager','global',NULL,'global') ON CONFLICT(id) DO NOTHING")
+            .bind(`assignment-pa-${event.user.id}-div-mgr-global`,id).run();
+        }
+      } else {
+        await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-operator','assigned',NULL,'assigned') ON CONFLICT(id) DO NOTHING")
+          .bind(`assignment-pa-${event.user.id}-assigned`,id).run();
+      }
     }
   }
   return "applied";

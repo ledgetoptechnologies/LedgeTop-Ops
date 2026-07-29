@@ -30,5 +30,6 @@ export function requiresAdministratorForMutation(method:string,path:string):bool
   const shareRevoke=normalizedMethod==="DELETE"&&parts.length===4&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="shares"&&delegatedRouteToken(parts[3]);
   const streamTicket=normalizedMethod==="POST"&&parts.length===5&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="items"&&delegatedRouteToken(parts[3])&&parts[4]==="stream-ticket";
   const incomingLink=parts.length>=3&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="incoming-link";
-  return !shareCreate&&!shareRevoke&&!streamTicket&&!incomingLink;
+  const dropboxImport=parts.length>=3&&parts[0]==="api"&&parts[1]==="dropbox-import";
+  return !shareCreate&&!shareRevoke&&!streamTicket&&!incomingLink&&!dropboxImport;
 }

@@ -34,6 +34,29 @@ required configuration exists. Missing configuration fails closed.
 Dropbox transfers use add/autorename semantics and never silently overwrite.
 Large-file fallback uses upload sessions.
 
+## Staff Dropbox import (Operations Worker)
+
+The Operations Worker also supports importing files **from** Dropbox into R2.
+This is a separate OAuth flow on `ops.ledgetopdroneservices.com` and uses its
+own secrets:
+
+1. Use the same Dropbox API application (or a separate one with Full Dropbox).
+2. Register an additional callback:
+   `https://ops.ledgetopdroneservices.com/api/dropbox-import/oauth/callback`
+3. Set `DROPBOX_CLIENT_ID` and `DROPBOX_IMPORT_ENABLED` in `apps/operations/wrangler.jsonc`.
+4. Store `DROPBOX_CLIENT_SECRET` and `DROPBOX_IMPORT_TOKEN_SECRET` (32 random
+   bytes, base64url) as Operations Worker secrets.
+5. Apply migration `0013_dropbox_import.sql` to the `ltds-ops` D1 database.
+
+The import Workflow enumerates the selected Dropbox folder, downloads files in
+8 MiB chunks, and uploads to R2 via multipart upload. Small files (<100 MiB)
+use a single download and R2 put. Large files use chunked download with R2
+multipart upload. Conflict modes are autorename, skip, replace, and fail.
+
+The import is gated by the `delivery.files.upload` permission and does not
+require administrator access. Imported files appear in the delivery browser
+after the R2 queue processes the object-create notifications.
+
 ## Google Cloud console
 
 1. Enable Google Drive API and Google Picker API in an LTDS-owned project.

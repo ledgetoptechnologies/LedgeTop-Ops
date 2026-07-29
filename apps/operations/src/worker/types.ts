@@ -31,6 +31,11 @@ export type Env = Cloudflare.Env & {
   NOTIFICATION_FROM?: string;
   SUA_GATEWAY_USER?: string;
   SUA_GATEWAY_PASSWORD?: string;
+  DROPBOX_IMPORT_ENABLED?: string;
+  DROPBOX_CLIENT_ID?: string;
+  DROPBOX_CLIENT_SECRET?: string;
+  DROPBOX_IMPORT_TOKEN_SECRET?: string;
+  DROPBOX_IMPORT_WORKFLOW?: Workflow;
 };
 
 export interface StaffPrincipal {

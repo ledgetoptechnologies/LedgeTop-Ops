@@ -127,6 +127,18 @@ npx.cmd wrangler secret put INCOMING_PICKUP_SECRET
 
 Apply `apps/operations/r2-incoming-cors.json`, expose `ETag`, and configure a 14-day lifecycle backstop for quarantine objects and abandoned multipart uploads. Operations deployment creates the `ltds-incoming-upload-lifecycle` Workflow, which aborts incomplete uploads after 24 hours and expires unclaimed quarantine after 14 days. TrueNAS calls the authenticated pickup endpoint only after ClamAV, checksum verification, durable local copy, and removal of the quarantine object.
 
+## 7b. Dropbox import (Operations Worker)
+
+To enable staff Dropbox import, provision these Operations Worker secrets and variables:
+
+```powershell
+Set-Location apps/operations
+npx.cmd wrangler secret put DROPBOX_CLIENT_SECRET
+npx.cmd wrangler secret put DROPBOX_IMPORT_TOKEN_SECRET
+```
+
+Set `DROPBOX_CLIENT_ID` and `DROPBOX_IMPORT_ENABLED` in `apps/operations/wrangler.jsonc`. Register the callback `https://ops.ledgetopdroneservices.com/api/dropbox-import/oauth/callback` in the Dropbox API application. Apply migration `0013_dropbox_import.sql` to the `ltds-ops` D1 database. The `ltds-dropbox-import` Workflow binding is created on deploy.
+
 ## 8. Migrations and Workflow rollout
 
 Export both production D1 databases before migration. Then apply Operations migrations to `ltds-ops` and Delivery migrations to `client-data`:
@@ -138,7 +150,7 @@ Set-Location ../delivery
 npm.cmd run db:migrate:remote
 ```
 
-Confirm Delivery `0006`, `0007`, `0008`, `0090`, `0091`, `0092`, and all Operations delivery-CRUD migrations appear in the remote migration list before deploying dependent Workers. Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding and its hourly cleanup Cron Trigger. Operations deployment creates/updates its file-operation Workflow binding. Each successful ZIP job sleeps for its 24-hour retention and deletes its own archive; the hourly Delivery cleanup is the recovery path for expired or interrupted jobs and also prunes old quota rows. Verify one completed job, one intentionally failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour exact quota, and one copy/move job with an injected retry before production rollout.
+Confirm Delivery `0006`, `0007`, `0008`, `0090`, `0091`, `0092`, `0093`, `0094`, and all Operations delivery-CRUD migrations, including `0013_dropbox_import`, appear in the remote migration list before deploying dependent Workers. Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding, the `ltds-cloud-transfer` Workflow binding, and the hourly cleanup Cron Trigger. Operations deployment creates/updates its file-operation Workflow binding, the `ltds-dropbox-import` Workflow binding, and the `ltds-incoming-upload-lifecycle` Workflow binding. Each successful ZIP job sleeps for its 24-hour retention and deletes its own archive; the hourly Delivery cleanup is the recovery path for expired or interrupted jobs and also prunes old quota rows. Verify one completed job, one intentionally failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour exact quota, one copy/move job with an injected retry, and one Dropbox import job before production rollout.
 
 The 20 GB ZIP limit and 10,000-object R2 CRUD limit require the Workers Paid Workflow step allowance. Do not enable those production limits on a Free-plan account; reduce the application limits or upgrade first.
 
@@ -154,5 +166,6 @@ Onboard the sending domain in Cloudflare Email Service, add an `EMAIL` send-emai
 - Incoming R2: `ltds-incoming` (private; production-origin CORS and quarantine lifecycle configured)
 - Queue: `ltds-file-events`
 - R2 notifications: object-create and object-delete to `ltds-file-events`
+- Workflows: `ltds-bulk-download`, `ltds-cloud-transfer` (delivery), `ltds-r2-crud`, `ltds-incoming-upload-lifecycle`, `ltds-dropbox-import` (operations)
 
 Do not infer migration or secret readiness from this file; verify the remote resources during each rollout.
