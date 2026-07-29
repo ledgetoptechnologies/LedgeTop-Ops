@@ -1,5 +1,5 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
-import { DropboxImportClient, DropboxImportError } from "./dropbox-import-client";
+import { DropboxImportClient, DropboxImportError, refreshDropboxToken } from "./dropbox-import-client";
 import { normalizeCrudKey } from "./r2-crud-validation";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -94,15 +94,28 @@ function opsDb(env: Env) {
 
 async function loadCredential(env: Env, authId: string, staffId: string): Promise<{ accessToken: string; refreshToken?: string; expiresAt?: string }> {
   const row = await opsDb(env).prepare(
-    "SELECT credential_ciphertext,credential_iv,key_id,token_expires_at,revoked_at FROM dropbox_import_authorizations WHERE id=? AND staff_id=? AND revoked_at IS NULL",
-  ).bind(authId, staffId).first<ImportAuthorization>();
+    "SELECT credential_ciphertext,credential_iv,key_id,token_expires_at,expires_at,revoked_at FROM dropbox_import_authorizations WHERE id=? AND staff_id=? AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')",
+  ).bind(authId, staffId).first<ImportAuthorization & { expires_at: string }>();
   if (!row || row.revoked_at) throw new Error("authorization-expired");
-  if (row.token_expires_at && Date.parse(row.token_expires_at) <= Date.now()) throw new Error("authorization-expired");
+  if (row.token_expires_at && Date.parse(row.token_expires_at) <= Date.now() + 120000) {
+    // Token is about to expire -- try refresh
+    if (!env.DROPBOX_CLIENT_ID || !env.DROPBOX_CLIENT_SECRET) throw new Error("authorization-expired");
+    const credential = await decryptImportSecret<{ accessToken: string; refreshToken?: string; expiresAt?: string }>(
+      row.credential_ciphertext, row.credential_iv, env.DROPBOX_IMPORT_TOKEN_SECRET!, `authorization:${authId}`,
+    );
+    if (!credential.refreshToken) throw new Error("authorization-expired");
+    const refreshed = await refreshDropboxToken(env.DROPBOX_CLIENT_ID, env.DROPBOX_CLIENT_SECRET, credential.refreshToken);
+    const updated = { ...credential, ...refreshed, refreshToken: refreshed.refreshToken || credential.refreshToken };
+    const encrypted = await encryptImportSecret(updated, env.DROPBOX_IMPORT_TOKEN_SECRET!, `authorization:${authId}`);
+    await opsDb(env).prepare(
+      "UPDATE dropbox_import_authorizations SET credential_ciphertext=?,credential_iv=?,token_expires_at=?,last_used_at=datetime('now') WHERE id=? AND revoked_at IS NULL",
+    ).bind(encrypted.ciphertext, encrypted.iv, updated.expiresAt || null, authId).run();
+    return updated;
+  }
   if (!env.DROPBOX_IMPORT_TOKEN_SECRET) throw new Error("not-configured");
-  const credential = await decryptImportSecret<{ accessToken: string; refreshToken?: string; expiresAt?: string }>(
+  return decryptImportSecret<{ accessToken: string; refreshToken?: string; expiresAt?: string }>(
     row.credential_ciphertext, row.credential_iv, env.DROPBOX_IMPORT_TOKEN_SECRET, `authorization:${authId}`,
   );
-  return credential;
 }
 
 async function jobCancelled(env: Env, jobId: string): Promise<boolean> {
@@ -168,35 +181,39 @@ async function importOneFile(
   const multipart = await env.DATA_BUCKET.createMultipartUpload(destKey, {
     httpMetadata: { contentType: "application/octet-stream" },
   });
-  const parts: Array<{ partNumber: number; etag: string }> = [];
-  let offset = 0;
-  let partNumber = 1;
+  try {
+    const parts: Array<{ partNumber: number; etag: string }> = [];
+    let offset = 0;
+    let partNumber = 1;
 
-  while (offset < totalSize) {
-    if (await jobCancelled(env, item.job_id)) {
-      try { await multipart.abort(); } catch { /* best effort */ }
-      throw new Error("cancelled");
+    while (offset < totalSize) {
+      if (await jobCancelled(env, item.job_id)) {
+        throw new Error("cancelled");
+      }
+      const length = Math.min(CHUNK_SIZE, totalSize - offset);
+      const response = await client.downloadFile(item.dropbox_path, { offset, length });
+      const chunk = new Uint8Array(await response.arrayBuffer());
+      if (chunk.byteLength !== length) throw new Error("dropbox-short-read");
+      const result = await multipart.uploadPart(partNumber, chunk);
+      parts.push({ partNumber: result.partNumber, etag: result.etag });
+      offset += chunk.byteLength;
+      partNumber += 1;
+
+      // Checkpoint progress
+      await opsDb(env).prepare(
+        "UPDATE dropbox_import_items SET downloaded_bytes=?,uploaded_bytes=?,updated_at=datetime('now') WHERE id=?",
+      ).bind(offset, offset, item.id).run();
+      await opsDb(env).prepare(
+        "UPDATE dropbox_import_jobs SET processed_bytes=processed_bytes+?,updated_at=datetime('now') WHERE id=? AND status='running'",
+      ).bind(length, item.job_id).run();
     }
-    const length = Math.min(CHUNK_SIZE, totalSize - offset);
-    const response = await client.downloadFile(item.dropbox_path, { offset, length });
-    const chunk = new Uint8Array(await response.arrayBuffer());
-    if (chunk.byteLength !== length) throw new Error("dropbox-short-read");
-    const result = await multipart.uploadPart(partNumber, chunk);
-    parts.push({ partNumber: result.partNumber, etag: result.etag });
-    offset += chunk.byteLength;
-    partNumber += 1;
 
-    // Checkpoint progress
-    await opsDb(env).prepare(
-      "UPDATE dropbox_import_items SET downloaded_bytes=?,uploaded_bytes=?,updated_at=datetime('now') WHERE id=?",
-    ).bind(offset, offset, item.id).run();
-    await opsDb(env).prepare(
-      "UPDATE dropbox_import_jobs SET processed_bytes=processed_bytes+?,updated_at=datetime('now') WHERE id=? AND status='running'",
-    ).bind(length, item.job_id).run();
+    const completed = await multipart.complete(parts);
+    return { r2Etag: completed.httpEtag, size: totalSize };
+  } catch (error) {
+    try { await multipart.abort(); } catch { /* best effort cleanup */ }
+    throw error;
   }
-
-  const completed = await multipart.complete(parts);
-  return { r2Etag: completed.httpEtag, size: totalSize };
 }
 
 async function markItemResult(env: Env, item: ImportItem, result: { r2Etag: string; size: number }): Promise<void> {

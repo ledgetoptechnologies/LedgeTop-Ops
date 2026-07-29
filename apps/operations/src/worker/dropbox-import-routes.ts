@@ -148,11 +148,11 @@ export function registerDropboxImportRoutes(app: App): void {
     );
     const client = new DropboxImportClient({ accessToken: credential.accessToken });
 
-    const path = body.path || "";
     if (body.cursor) {
       const result = await client.listFolderContinue(body.cursor);
       return c.json(result);
     }
+    const path = body.path || "";
     const result = await client.listFolder(path || "", false);
     return c.json(result);
   });

@@ -58,6 +58,8 @@ export function DropboxImportDialog({ destinationPrefix, canUpload, onClose, onS
   const [jobId, setJobId] = useState("");
   const [jobStatus, setJobStatus] = useState<ImportJobStatus | null>(null);
   const dialog = useRef<HTMLDivElement | null>(null);
+  const mountedRef = useRef(true);
+  useEffect(() => { mountedRef.current = true; return () => { mountedRef.current = false; }; }, []);
 
   useEffect(() => { dialog.current?.focus(); }, []);
   useEffect(() => {
@@ -122,14 +124,22 @@ export function DropboxImportDialog({ destinationPrefix, canUpload, onClose, onS
     }
   }
 
-  async function browse(path: string) {
+  const [browseCursor, setBrowseCursor] = useState<string | undefined>();
+
+  async function browse(path: string, cursor?: string) {
     setBusy(true); setError(""); setBrowsePath(path);
     try {
       const result = await api<BrowseResult>("/api/dropbox-import/browse", {
         method: "POST",
-        body: JSON.stringify({ authorizationId, path }),
+        body: JSON.stringify({ authorizationId, path, cursor }),
       });
-      setBrowseResult(result);
+      if (cursor && browseResult) {
+        // Append to existing results for pagination
+        setBrowseResult({ ...result, entries: [...browseResult.entries, ...result.entries] });
+      } else {
+        setBrowseResult(result);
+      }
+      setBrowseCursor(result.cursor);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "Could not browse Dropbox.");
     } finally { setBusy(false); }
@@ -161,8 +171,10 @@ export function DropboxImportDialog({ destinationPrefix, canUpload, onClose, onS
   async function pollStatus(id: string) {
     for (let attempt = 0; attempt < 1440; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 2000));
+      if (!mountedRef.current) return;
       try {
         const status = await api<ImportJobStatus>(`/api/dropbox-import/jobs/${encodeURIComponent(id)}`);
+        if (!mountedRef.current) return;
         setJobStatus(status);
         if (["completed", "failed", "cancelled", "partial", "expired"].includes(status.job.status)) {
           setPhase("done");
@@ -226,7 +238,7 @@ export function DropboxImportDialog({ destinationPrefix, canUpload, onClose, onS
               {entry.size && <small>{formatBytes(entry.size)}</small>}
             </label>
           ))}
-          {browseResult.hasMore && <button className="button-ghost button-small" disabled={busy} onClick={() => void browse(browsePath)}>Load more</button>}
+          {browseResult.hasMore && <button className="button-ghost button-small" disabled={busy} onClick={() => void browse(browsePath, browseCursor)}>Load more</button>}
         </div>}
         <label className="cloud-conflict-policy">If a file already exists
           <select value={conflictMode} onChange={e => setConflictMode(e.target.value as typeof conflictMode)}>

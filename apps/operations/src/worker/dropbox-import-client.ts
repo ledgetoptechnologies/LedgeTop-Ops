@@ -120,6 +120,23 @@ export class DropboxImportClient {
   }
 }
 
+export async function refreshDropboxToken(clientId: string, clientSecret: string, refreshToken: string): Promise<{ accessToken: string; refreshToken?: string; expiresAt?: string }> {
+  const response = await fetch("https://api.dropboxapi.com/oauth2/token", {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: refreshToken,
+      client_id: clientId,
+      client_secret: clientSecret,
+    }),
+  });
+  if (!response.ok) throw new Error("authorization-expired");
+  const token = await response.json() as { access_token: string; refresh_token?: string; expires_in?: number };
+  const expiresAt = token.expires_in ? new Date(Date.now() + token.expires_in * 1000).toISOString() : undefined;
+  return { accessToken: token.access_token, refreshToken: token.refresh_token || refreshToken, expiresAt };
+}
+
 export class DropboxImportError extends Error {
   readonly status: number;
   readonly retryable: boolean;
