@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "<OPS_SYNC_STAGING_WORKER>-staging",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "<OPS_SYNC_STAGING_HOST>", "custom_domain": true }],
+  "vars": {
+    "ENVIRONMENT": "staging",
+    "EXPECTED_HOST": "<OPS_SYNC_STAGING_HOST>",
+    "TEAM_DOMAIN": "https://<ACCESS_TEAM_DOMAIN>",
+    "CF_ACCESS_AUD": "<OPS_SYNC_STAGING_ACCESS_AUD>",
+    "CF_ACCOUNT_ID": "<STAGING_ACCOUNT_ID>",
+    "CF_ACCESS_GROUP_ID": "<STAGING_ACCESS_GROUP_ID>",
+    "CF_ACCESS_GROUP_NAME": "<STAGING_ACCESS_GROUP_NAME>",
+    "APPLICATION_KEY": "ltds_ops_staging",
+    "PROJECT_ALPHA_ALLOW_LEGACY_HMAC": "false"
+  },
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "d1_databases": [{ "binding": "OPS_DB", "database_name": "<OPERATIONS_STAGING_D1_NAME>", "database_id": "<OPERATIONS_STAGING_D1_ID>", "migrations_dir": "../operations/migrations" }]
+}

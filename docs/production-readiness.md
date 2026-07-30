@@ -13,12 +13,58 @@ capability must not render an operational button, and its API must return a
 stable, safe error code without exposing credentials or provider response
 bodies.
 
+Cloudflare Access is the perimeter identity check, not the LTDS authorization
+system. Every server route must additionally derive the LTDS principal and
+resource context server-side and enforce the applicable role, division, client,
+share/job, object key/prefix, and operation permission. A valid Access JWT,
+client-supplied division, or knowledge of an R2 key is never sufficient
+authority. Cross-division and cross-client object tests are release-blocking for
+read, range, preview, import, export, upload, delete, restore, and purge routes.
+The Operations ACL and scoped-query tests are evidence for part of this model;
+they are not evidence that every route has been audited.
+
+### Accepted deployment record (2026-07-30)
+
+The topic branch `agent/production-readiness` is at commit `fea54be` and draft
+PR 1. Pushing that branch caused the configured Cloudflare Git integration to
+publish Delivery version `93d188ff-9586-4755-9a3d-63b0f8f5d8fa` to production,
+replacing `7c218dd4-3fee-4b85-b9b7-1c9f54365807`. The operator has explicitly
+accepted leaving that Delivery version live and does not want a rollback.
+Recorded post-deployment evidence was a healthy Delivery health response, with
+Dropbox, Google, and permanent R2 purge flags disabled. Operations and Ops Sync
+were not redeployed, and no remote migrations or secrets were changed.
+
+The local verification associated with the change set passed TypeScript checks,
+Delivery's 105 tests, Operations' 118 tests, Ops Sync's 18 tests, all production
+builds, and `git diff --check`. These results establish source/build quality at
+that commit; they do not substitute for inspecting the deployed version's
+bindings, flags, migrations, routes, or logs.
+
+The unexpected topic-branch deployment is itself a failed release-control gate.
+No further production mutation is allowed until an operator records the current
+Git integration settings and configures one of these deliberate models:
+
+- production deploys accept only `main` after review and environment approval;
+- non-production branch builds deploy only to isolated preview Worker names and
+  hostnames that have no production routes or custom domains; or
+- automatic deployments are disabled and a reviewed, manually dispatched
+  release workflow deploys a pinned commit.
+
+Do not test this control by pushing another branch. Inspect the integration's
+production branch, branch include/exclude rules, Worker target/name, route and
+custom-domain attachment, build and deploy commands, token scope, and variable
+mappings. Preserve the settings as release evidence. A preview is not isolated
+if it shares a production Worker name, D1 database, R2 bucket, queue, Workflow,
+OAuth callback, Access audience/policy, route, or custom domain.
+
 Before a staging rollout:
 
 1. Export the Operations and Delivery D1 databases and record the deployed
    Worker version IDs.
-2. Apply migrations to isolated staging databases. Never bind staging Workers
-   to production D1 or R2.
+2. Create separately named staging Workers, D1 databases, R2 buckets, queues,
+   dead-letter queues, Workflows, Access applications/audiences, hostnames, and
+   OAuth applications/callbacks. Never bind staging Workers to production
+   data-plane resources.
 3. Validate generated Worker binding types and compare every required binding
    with the staging version configuration.
 4. Register the exact staging OAuth redirect URI. Wildcards and alternate hosts
@@ -28,6 +74,23 @@ Before a staging rollout:
 6. Deploy with provider flags disabled, verify baseline Delivery behavior, then
    enable one provider in staging.
 7. Preserve the prior Worker version and D1 exports until acceptance completes.
+
+Repository configuration must use explicit Wrangler staging environments or
+checked-in staging templates whose resource IDs are placeholders. Resource IDs,
+account IDs, routes, secrets, and OAuth credentials must be operator-supplied
+and must not be copied from production. A preflight must fail if staging is
+missing a binding, resolves to a production resource/name/hostname, enables a
+provider or `R2_PURGE_ENABLED`, or has a dirty/unpinned build input. Deployment
+and migration remain separate commands; migration requires a named database and
+an explicit backup checkpoint.
+
+A deliberate staging-to-production release is: merge only after review and
+local CI; deploy the pinned commit to isolated staging; apply staging migrations;
+run acceptance and fault-injection tests; record versions, bindings, flags, and
+evidence; obtain production approval; back up production D1; apply reviewed
+production migrations; deploy the same pinned commit with optional capabilities
+still disabled; run baseline smoke tests; and only then request separate
+approval for each capability rollout. A branch push alone is never a release.
 
 Rollback means disabling the affected capability, rolling the Worker back to
 the recorded version, allowing in-flight Workflows to reach a safe terminal
@@ -99,6 +162,19 @@ Deletion is a two-stage state transition:
    their source/job relationship. Hidden naming alone is never proof of
    ownership.
 
+Restore and retention are safety controls, not just UI states. Each tombstone
+must have an immutable created-at time, actor, ownership scope, retention
+deadline, and manifest identity. Restore must be ownership-authorized,
+idempotent, rejected after purge starts or retention expires, and auditable.
+Retention expiry makes an object eligible for an explicitly enabled purge; it
+must not itself delete data. Legal or operational holds override expiry. Backup
+and restore drills must prove D1 tombstones/manifests and R2 objects can be
+recovered together without reviving access that has since been revoked.
+
+This includes an outstanding code gate: restore currently blocks after
+`purging_at` is set, but does not enforce `purge_after`/retention expiry
+server-side. Expired restore requests must fail safely and have focused tests.
+
 This protects objects uploaded directly with R2/S3 tools: a visible object is
 manifested when the authorized delete begins, regardless of how it arrived.
 An object resynchronized or replaced after deletion has a different identity
@@ -115,9 +191,18 @@ injection across the final HEAD-to-DELETE interval. Enabling purge requires
 explicit production approval after audit alerts, restore procedures, and a
 rollback drill have been verified; deployment alone must not enable it.
 
-Reconciliation runs weekly as a conservative safety net. It may repair indexes,
-mark missing relationships, and create alerts. It must not automatically purge
-an unowned, ambiguous, newly discovered, or identity-changed object.
+Reconciliation is a repair-and-hold mechanism, never a deletion authority. It
+may restore missing index relationships, mark stale or missing records, and
+create alerts or operator-review holds. It must not delete R2 objects or derived
+artifacts, revoke shares, or purge ambiguous data merely because a scan
+disagrees with D1.
+
+This remains an outstanding code gate: `reconcileFileIndex` currently contains
+automatic share revocation after a missing-object grace period and automatic
+deletion of preview-artifact relationship records from D1 after a missing-source
+grace period; it does not delete the R2 preview objects in that branch. Those
+actions must become hold/alert-only or move behind a separately approved,
+ownership-protected lifecycle action with focused tests.
 
 Lifecycle acceptance:
 
@@ -137,6 +222,21 @@ Lifecycle acceptance:
 Implementation is intentionally deferred. The target architecture is R2
 object-create notifications to `ltds-file-events` as the primary trigger,
 with the existing isolated home-server producer as a fallback.
+
+Preview absence is not a delivery failure for non-previewable content. Preview
+generation and preview acceptance apply only when a source is explicitly
+classified as supported media within configured byte, pixel, page, and duration
+bounds. Unsupported media, ZIPs, raw/dump content, and opaque files retain
+download/copy delivery without a preview job. The UI must show an honest
+non-previewable state rather than retrying or showing a broken preview.
+
+Direct R2/S3 uploads are a later fallback requirement. Until object-create
+notifications and an idempotent consumer are separately implemented and
+enabled, directly uploaded objects may be indexed by conservative reconciliation
+and may rely on the home-server producer for supported previews. This fallback
+may repair visibility/index state and enqueue or alert for eligible missing
+previews; it must not infer ownership, generate recursively, or delete an
+object. Direct-upload preview automation is not currently production-ready.
 
 The queue consumer must:
 
@@ -213,3 +313,73 @@ notification filters, CORS origin/header policy, paid-plan limits where
 required, budget alerts, and operator access to logs and rollback controls.
 Their presence must be verified from the deployed version; source files and
 documentation are not evidence that production is configured.
+
+## Prioritized seven-day readiness plan
+
+Day 1: contain release risk and record reality
+
+- preserve the accepted Delivery deployment; make no production mutation;
+- capture live versions, routes/domains, bindings, migrations, compatibility
+  dates, flags, health results, and recent safe-error logs;
+- record Git integration settings and choose the deliberate deployment model.
+
+Day 2: provision isolated staging
+
+- create separately named staging Workers, hostnames, Access apps/audiences, D1
+  databases, R2 buckets, queues/DLQs, and Workflows;
+- populate a resource inventory with owner, account, retention, budget, backup,
+  and deletion-protection details; reuse no production resource IDs;
+- create separate provider test applications only when scheduled, keeping all
+  provider flags disabled.
+
+Day 3: codify release gates
+
+- add validated staging configuration and fail-closed preflight, migration,
+  smoke-test, and rollback commands;
+- make CI build/test without deploying and require reviewed pinned artifacts;
+- prevent topic branches from receiving production traffic before validating
+  the control with a no-op documentation branch.
+
+Day 4: authorization and lifecycle audit
+
+- enumerate every read/range/preview/import/export/upload/delete/restore/purge
+  route and verify server-side role, division, client/share/job, object-prefix,
+  and operation checks with cross-tenant negative tests;
+- change reconciliation to repair/hold-only and test missing, ambiguous,
+  identity-changed, and directly uploaded objects;
+- verify retention deadlines, holds, restore authorization/idempotency, backup
+  consistency, and permanent purge remaining disabled.
+
+Day 5: isolated staging deployment
+
+- back up staging D1, apply staging-only migrations, and deploy the pinned
+  commit with all providers and purge disabled;
+- record versions/bindings and run baseline Delivery, Operations, Ops Sync,
+  Access, R2 range/download, direct-upload indexing, and restore tests.
+
+Day 6: fault injection and observability
+
+- exercise interrupted transfers, retries/cancellation, test OAuth
+  denial/replay/revocation, changed ETags, deletion races, reconciliation
+  disagreement, rollback, and restore;
+- verify Worker, Workflow, Queue/DLQ, D1, R2 cost, OAuth, purge, and
+  reconciliation hold dashboards and alerts;
+- apply preview tests only to supported previewable media and verify unsupported
+  content remains downloadable.
+
+Day 7: decision packet
+
+- rerun checks/tests/builds from the pinned commit and publish staging evidence,
+  limitations, rollback record, resource inventory, and cost/budget owners;
+- hold production unless release controls, staging isolation, authorization,
+  repair-only reconciliation, restore safeguards, monitoring, and approvals pass;
+- request one explicit production decision for the pinned baseline. Provider
+  enablement and permanent purge remain separate decisions.
+
+Exact external decisions/resources needed are: acceptance of one Git deployment
+model; Cloudflare authority to inspect and later change build settings; unique
+staging Worker names and hostnames; unique Access applications/audiences and
+test identities; staging D1/R2/Queue/DLQ/Workflow resources; scoped staging
+deployment and observability credentials; backup storage and retention/hold
+policy owners; alert destinations and cost budgets; and, only for later provider
+testing, separate staging OAuth applications, callbacks, scopes, and secrets.

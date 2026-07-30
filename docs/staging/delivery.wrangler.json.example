@@ -1,0 +1,51 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "<DELIVERY_STAGING_WORKER>-staging",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-07-16",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "<DELIVERY_STAGING_HOST>", "custom_domain": true }],
+  "limits": { "cpu_ms": 300000, "subrequests": 25000 },
+  "triggers": { "crons": ["15 * * * *"] },
+  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*", "/s/*", "/health"] },
+  "vars": {
+    "PUBLIC_BASE_URL": "https://<DELIVERY_STAGING_HOST>",
+    "EXPECTED_HOST": "<DELIVERY_STAGING_HOST>",
+    "ENVIRONMENT": "staging",
+    "TEAM_DOMAIN": "https://<ACCESS_TEAM_DOMAIN>",
+    "POLICY_AUD": "<DELIVERY_STAGING_ACCESS_AUD>",
+    "SESSION_KEY_ID": "staging-v1",
+    "PREVIOUS_SESSION_KEY_ID": "",
+    "STREAM_CUSTOMER_CODE": "",
+    "R2_S3_ENDPOINT": "https://<STAGING_ACCOUNT_ID>.r2.cloudflarestorage.com",
+    "R2_BUCKET_NAME": "<DELIVERY_STAGING_R2_BUCKET>",
+    "CLOUD_TRANSFER_DROPBOX_ENABLED": "false",
+    "CLOUD_TRANSFER_GOOGLE_ENABLED": "false",
+    "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED": "false",
+    "DROPBOX_CLIENT_ID": "",
+    "GOOGLE_CLIENT_ID": "",
+    "GOOGLE_PICKER_API_KEY": "",
+    "GOOGLE_CLOUD_PROJECT_NUMBER": ""
+  },
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "ratelimits": [
+    { "name": "ACCESS_CODE_RATE_LIMITER", "namespace_id": "<STAGING_RATE_LIMIT_1>", "simple": { "limit": 10, "period": 60 } },
+    { "name": "PUBLIC_SESSION_RATE_LIMITER", "namespace_id": "<STAGING_RATE_LIMIT_2>", "simple": { "limit": 20, "period": 60 } },
+    { "name": "PUBLIC_MANIFEST_RATE_LIMITER", "namespace_id": "<STAGING_RATE_LIMIT_3>", "simple": { "limit": 120, "period": 60 } },
+    { "name": "PUBLIC_MEDIA_RATE_LIMITER", "namespace_id": "<STAGING_RATE_LIMIT_4>", "simple": { "limit": 180, "period": 60 } },
+    { "name": "PUBLIC_BULK_RATE_LIMITER", "namespace_id": "<STAGING_RATE_LIMIT_5>", "simple": { "limit": 3, "period": 60 } },
+    { "name": "PUBLIC_THUMBNAIL_RATE_LIMITER", "namespace_id": "<STAGING_RATE_LIMIT_6>", "simple": { "limit": 300, "period": 60 } },
+    { "name": "PUBLIC_DOWNLOAD_RATE_LIMITER", "namespace_id": "<STAGING_RATE_LIMIT_7>", "simple": { "limit": 30, "period": 60 } },
+    { "name": "PUBLIC_STREAM_RATE_LIMITER", "namespace_id": "<STAGING_RATE_LIMIT_8>", "simple": { "limit": 10, "period": 60 } }
+  ],
+  "r2_buckets": [{ "binding": "DATA_BUCKET", "bucket_name": "<DELIVERY_STAGING_R2_BUCKET>" }],
+  "d1_databases": [{ "binding": "DELIVERY_DB", "database_name": "<DELIVERY_STAGING_D1_NAME>", "database_id": "<DELIVERY_STAGING_D1_ID>", "migrations_dir": "migrations" }],
+  "images": { "binding": "IMAGES" },
+  "stream": { "binding": "STREAM" },
+  "workflows": [
+    { "name": "<BULK_DOWNLOAD_STAGING_WORKFLOW>", "binding": "BULK_DOWNLOAD_WORKFLOW", "class_name": "BulkDownloadWorkflow" },
+    { "name": "<CLOUD_TRANSFER_STAGING_WORKFLOW>", "binding": "CLOUD_TRANSFER_WORKFLOW", "class_name": "CloudTransferWorkflow" }
+  ]
+}

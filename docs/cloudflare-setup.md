@@ -12,6 +12,35 @@ Configure the Git repository `ledgetoptechnologies/LTDS-Ops` three times:
 | Deploy command | `npx wrangler deploy` | `npx wrangler deploy` | `npm run deploy` |
 | Version command | `npx wrangler versions upload` | `npx wrangler versions upload` | `npx wrangler versions upload` |
 
+### Branch-control release gate
+
+The production trigger for all three integrations must be `main` only, after
+review and required checks. Until isolated staging Workers and hostnames exist,
+disable non-production branch builds. If non-production builds are retained for
+artifact validation, their command must stop at `wrangler versions upload` to a
+separately named non-production Worker: never run `wrangler deploy` for a
+non-production branch, and never attach its version to a production route or
+custom domain.
+
+Changing Worker Builds settings is a Cloudflare dashboard mutation and requires
+explicit operator approval. Before changing anything, record the production
+branch, include/exclude rules, root/build/deploy commands, Worker target, routes,
+custom domains, variable mappings, and token scope. After an approved change,
+use a no-op documentation branch and verify both that the build has no
+production route and that production deployment history and traffic allocation
+did not change. A successful build alone is not evidence of isolation.
+
+Accepted evidence for commit `fea54be` on 2026-07-30:
+
+- Delivery version `93d188ff-9586-4755-9a3d-63b0f8f5d8fa` was promoted to 100%
+  production traffic and has been accepted; no rollback is requested.
+- Operations build `83eb8d31-a0fc-486d-884c-ac413b3d7dc5` was not promoted;
+  production remained on `a246a403-9030-4153-a7f4-3f271c64b331`.
+- Ops Sync build `1208a40c-ca8f-4687-8e5c-e5953c92a1c0` was not promoted;
+  production remained on `6492215d-e3b9-4c26-b02c-4a8da3e3099b`.
+
+No dashboard configuration change is authorized by this documentation.
+
 Do not add runtime secrets to Build variables. The application secrets are Worker runtime secrets.
 
 Delivery access codes use a shared HMAC pepper. Generate one cryptographically random value of at least 32 bytes and store the exact same value as the `DELIVERY_ACCESS_CODE_PEPPER` runtime secret on both `ltds-ops` and `ltds-delivery`. The value must never be committed, printed in logs, or placed in build variables. Ops hashes new codes and Delivery verifies them; neither Worker stores a plaintext code.
