@@ -91,16 +91,18 @@ describe("cloud transfer polling", () => {
     expect(test.sleeps).toEqual([2_000, 7_000, 4_000, 8_000]);
   });
 
-  it.each([
-    [{ id: "job", provider: "dropbox", status: "failed", error: { message: "Provider rejected the copy" } }, "Provider rejected"],
-    [{ id: "job", provider: "dropbox", status: "cancelled" }, "remaining files were cancelled"],
-  ] as const)("stops on terminal state", async (response, message) => {
-    const test = harness([response]);
+  it("surfaces failed terminal state", async () => {
+    const test = harness([{ id: "job", provider: "dropbox", status: "failed", error: { message: "Provider rejected the copy" } }]);
     await expect(pollCloudTransfer(
-      { id: "job", provider: "dropbox", status: "queued" },
-      "/status",
-      test.options,
-    )).rejects.toThrow(message);
+      { id: "job", provider: "dropbox", status: "queued" }, "/status", test.options,
+    )).rejects.toThrow("Provider rejected");
+  });
+
+  it("returns cancelled terminal state without presenting cancellation as a failure", async () => {
+    const test = harness([{ id: "job", provider: "dropbox", status: "cancelled" }]);
+    await expect(pollCloudTransfer(
+      { id: "job", provider: "dropbox", status: "cancelling" }, "/status", test.options,
+    )).resolves.toMatchObject({ status: "cancelled" });
   });
 });
 

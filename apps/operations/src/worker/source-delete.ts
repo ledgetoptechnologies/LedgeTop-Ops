@@ -1,5 +1,5 @@
 import { HTTPException } from "hono/http-exception";
-import { assertNotTrashed, createTombstone } from "./trash";
+import { assertNotTrashed, createTombstone, type TrashObjectIdentity } from "./trash";
 import { notificationStatement } from "./notifications";
 import { artifactDirectory } from "./artifacts";
 import { decodeRef, normalizePrefix } from "./delivery";
@@ -18,18 +18,18 @@ export async function derivativePrefixes(key: string, isFolder: boolean): Promis
   return [await artifactDirectory(key)];
 }
 
-async function listKeys(bucket: R2Bucket, prefix: string, exact = false): Promise<Array<{ key: string; size: number }>> {
-  if (exact) { const head = await bucket.head(prefix); return head ? [{ key: prefix, size: head.size }] : []; }
-  const output: Array<{ key: string; size: number }> = []; let cursor: string | undefined;
+async function listKeys(bucket: R2Bucket, prefix: string, exact = false): Promise<Array<{ key: string; size: number; etag: string }>> {
+  if (exact) { const head = await bucket.head(prefix); return head ? [{ key: prefix, size: head.size, etag: head.etag }] : []; }
+  const output: Array<{ key: string; size: number; etag: string }> = []; let cursor: string | undefined;
   do {
     const page = await bucket.list({ prefix, limit: BATCH, cursor });
-    output.push(...page.objects.filter(object => !object.key.endsWith("/")).map(object => ({ key: object.key, size: object.size })));
+    output.push(...page.objects.filter(object => !object.key.endsWith("/")).map(object => ({ key: object.key, size: object.size, etag: object.etag })));
     cursor = page.truncated ? page.cursor : undefined;
   } while (cursor);
   return output;
 }
 
-async function resolveTarget(env: Env, itemRef: string): Promise<{ key: string; isFolder: boolean; objects: Array<{ key: string; size: number }> }> {
+async function resolveTarget(env: Env, itemRef: string): Promise<{ key: string; isFolder: boolean; objects: Array<{ key: string; size: number; etag: string }> }> {
   const decoded = decodeRef(itemRef); const key = decoded.endsWith("/") ? normalizePrefix(decoded) : decoded;
   await assertNotTrashed(env, key);
   const exact = await listKeys(env.DATA_BUCKET, key, true);
@@ -53,13 +53,26 @@ export async function executeSourceDelete(env: Env, principal: StaffPrincipal, i
   const preview = await previewSourceDelete(env, itemRef);
   validateDeleteConfirmation(confirmation, preview.typedName);
   const prefix = preview.isFolder ? preview.key : `${preview.key}/`;
+  const target = await resolveTarget(env, itemRef);
+  if (target.key !== preview.key || target.isFolder !== preview.isFolder) throw new HTTPException(409, { message: "The source changed while deletion was being confirmed; review it and try again" });
   const affected = await env.DELIVERY_DB.prepare(`SELECT s.id,COALESCE(s.division_id,p.division_id) division_id,
     s.recipient_email,p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix
     FROM shares s JOIN projects p ON p.id=s.project_id
     WHERE s.revoked_at IS NULL AND p.active=1 AND
     (COALESCE(s.r2_prefix,p.r2_prefix)=? OR substr(COALESCE(s.r2_prefix,p.r2_prefix),1,length(?))=?)`)
     .bind(preview.key, prefix, prefix).all<{ id: string; division_id: string | null; recipient_email: string | null; client_name: string; project_name: string; r2_prefix: string }>();
-  const tombstone = await createTombstone(env, principal, preview.key, preview.isFolder);
+  const byKey = new Map<string, TrashObjectIdentity>(target.objects.map(object =>
+    [object.key, { key: object.key, etag: object.etag, size: object.size, relation: "source" }]));
+  const artifacts = await env.DELIVERY_DB.prepare(`SELECT artifact_prefix FROM preview_artifacts
+    WHERE source_key=? OR substr(source_key,1,length(?))=?`).bind(preview.key, prefix, prefix).all<{ artifact_prefix: string }>();
+  const artifactPrefixes = new Set(artifacts.results.map(row => row.artifact_prefix));
+  if (!preview.isFolder) artifactPrefixes.add(await artifactDirectory(preview.key));
+  for (const artifactPrefix of artifactPrefixes) {
+    for (const object of await listKeys(env.DATA_BUCKET, artifactPrefix)) {
+      byKey.set(object.key, { key: object.key, etag: object.etag, size: object.size, relation: "derived" });
+    }
+  }
+  const tombstone = await createTombstone(env, principal, preview.key, preview.isFolder, [...byKey.values()]);
   const statements: D1PreparedStatement[] = [];
   for (const share of affected.results) {
     statements.push(env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='staff_deleted_source',share_version=share_version+1 WHERE id=? AND revoked_at IS NULL").bind(share.id));

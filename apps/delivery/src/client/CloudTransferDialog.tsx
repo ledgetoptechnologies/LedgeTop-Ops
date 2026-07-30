@@ -42,6 +42,7 @@ export function CloudTransferDialog({ publicId, scope, enabledProviders, onClose
     if (job.status === "authorization_required") return "Authorization required";
     if (job.status === "queued") return "Waiting to start";
     if (job.status === "running") return "Copying files";
+    if (job.status === "cancelling") return "Cancelling remaining files";
     if (job.status === "completed") return "Copy complete";
     if (job.status === "cancelled") return "Remaining files cancelled";
     return "Copy failed";
@@ -88,7 +89,7 @@ export function CloudTransferDialog({ publicId, scope, enabledProviders, onClose
   async function cancel() {
     if (!job) return;
     setBusy(true); setError("");
-    try { setJob(await cancelCloudTransfer(publicId, job.id)); }
+    try { await follow(await cancelCloudTransfer(publicId, job.id)); }
     catch (caught) { setError(caught instanceof Error ? caught.message : "The copy could not be cancelled."); }
     finally { setBusy(false); }
   }

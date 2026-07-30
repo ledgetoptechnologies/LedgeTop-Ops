@@ -1,11 +1,11 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { snapshot } from "../workflow";
 import { classifyCloudFailure } from "./errors";
-import { decryptWithRotation, encryptCloudSecret } from "./grants";
+import { decryptCloudSecret, decryptWithRotation, encryptCloudSecret } from "./grants";
 import { cloudDb, cloudJobCancelled, finalizeCloudJob, getCloudJob, listCloudItems, markCloudItemFailure, markCloudItemResult, markCloudItemRunning, replaceCloudItems } from "./repository";
 import { createCloudProviderAdapter } from "./providers";
 import { refreshDropboxToken, refreshGoogleToken } from "./oauth";
-import type { CloudCredential, CloudTransferEnv, CloudTransferJob, TransferSource } from "./types";
+import type { CloudCredential, CloudTransferEnv, CloudTransferItem, CloudTransferJob, TransferSource } from "./types";
 
 async function loadCredential(env:CloudTransferEnv,job:CloudTransferJob):Promise<CloudCredential>{
  const row=await cloudDb(env).prepare("SELECT credential_ciphertext,credential_iv,key_id,expires_at,revoked_at FROM cloud_transfer_authorizations WHERE id=? AND share_id=? AND share_version=? AND provider=?").bind(job.authorization_id,job.share_id,job.share_version,job.provider).first<{credential_ciphertext:string;credential_iv:string;key_id:string;expires_at:string;revoked_at:string|null}>();
@@ -20,11 +20,15 @@ async function loadCredential(env:CloudTransferEnv,job:CloudTransferJob):Promise
  }
  return credential;
 }
+async function loadUploadState<T>(env:CloudTransferEnv,job:CloudTransferJob,item:CloudTransferItem):Promise<{state:T;uploadedBytes:number}|null>{
+ if(!item.upload_state_ciphertext||!item.upload_state_iv)return null;const purpose=`upload-state:${item.id}:${job.provider}`;
+ try{return{state:await decryptCloudSecret<T>(item.upload_state_ciphertext,item.upload_state_iv,env.CLOUD_TRANSFER_TOKEN_SECRET,purpose),uploadedBytes:item.uploaded_bytes};}
+ catch{if(!env.CLOUD_TRANSFER_PREVIOUS_TOKEN_SECRET)return null;try{return{state:await decryptCloudSecret<T>(item.upload_state_ciphertext,item.upload_state_iv,env.CLOUD_TRANSFER_PREVIOUS_TOKEN_SECRET,purpose),uploadedBytes:item.uploaded_bytes};}catch{return null;}}
+}
 async function shareActive(env:CloudTransferEnv,job:CloudTransferJob):Promise<boolean>{return Boolean(await cloudDb(env).prepare("SELECT s.id FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.share_version=? AND s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))").bind(job.share_id,job.share_version).first());}
 export async function snapshotCloudTransfer(env:CloudTransferEnv,job:CloudTransferJob):Promise<TransferSource[]>{
  const value=await snapshot(env,{id:job.id,share_id:job.share_id,share_version:job.share_version,request_json:job.selection_json,manifest_key:"",archive_key:""});
- const root=((JSON.parse(job.destination_json) as {path?:string}).path||"").replace(/^\/+|\/+$/g,"");
- return value.sources.map(source=>({physicalKey:source.physicalKey,relativePath:source.name,destinationPath:[root,source.name].filter(Boolean).join("/"),size:source.size,etag:source.etag}));
+ return value.sources.map(source=>({physicalKey:source.physicalKey,relativePath:source.name,destinationPath:source.name,size:source.size,etag:source.etag}));
 }
 export async function runCloudTransferJob(env:CloudTransferEnv,jobId:string,step:Pick<WorkflowStep,"do"|"sleep">):Promise<void>{
  const initial=await getCloudJob(env,jobId);if(!initial)throw new Error("job-not-found");
@@ -39,7 +43,7 @@ export async function runCloudTransferJob(env:CloudTransferEnv,jobId:string,step
    for(let attempt=current.attempts;attempt<4;attempt+=1){
     const outcome=await step.do(`transfer-${item.ordinal}-${attempt}`,async()=>{
      await markCloudItemRunning(env,item.id);current=(await cloudDb(env).prepare("SELECT * FROM cloud_transfer_items WHERE id=?").bind(item.id).first<typeof item>())!;
-     try{const credential=await loadCredential(env,job);const result=await adapter.transfer({env,job,item:current,credential,destination,conflictMode:job.conflict_mode,signalCancelled:()=>cloudJobCancelled(env,job.id),saveUploadState:async(state,bytes)=>{const encrypted=await encryptCloudSecret(state,env.CLOUD_TRANSFER_TOKEN_SECRET,`upload-state:${item.id}:${job.provider}`);await cloudDb(env).prepare("UPDATE cloud_transfer_items SET upload_state_ciphertext=?,upload_state_iv=?,uploaded_bytes=?,updated_at=datetime('now') WHERE id=?").bind(encrypted.ciphertext,encrypted.iv,bytes,item.id).run();}});await markCloudItemResult(env,current,result);return{terminal:true};}
+     try{const credential=await loadCredential(env,job);const result=await adapter.transfer({env,job,item:current,credential,destination,conflictMode:job.conflict_mode,signalCancelled:()=>cloudJobCancelled(env,job.id),loadUploadState:()=>loadUploadState<unknown>(env,job,current),saveUploadState:async(state,bytes)=>{const encrypted=await encryptCloudSecret(state,env.CLOUD_TRANSFER_TOKEN_SECRET,`upload-state:${item.id}:${job.provider}`);await cloudDb(env).prepare("UPDATE cloud_transfer_items SET upload_state_ciphertext=?,upload_state_iv=?,uploaded_bytes=?,updated_at=datetime('now') WHERE id=?").bind(encrypted.ciphertext,encrypted.iv,bytes,item.id).run();}});await markCloudItemResult(env,current,result);return{terminal:true};}
      catch(error){const failure=classifyCloudFailure(error);await markCloudItemFailure(env,current,failure);console.error(JSON.stringify({event:"cloud-transfer.item-failed",jobId,itemId:item.id,provider:job.provider,code:failure.code,error:error instanceof Error?error.message:String(error)}));return{terminal:!failure.retryable};}
     });
     if(outcome.terminal)break;

@@ -34,6 +34,7 @@
     "STREAM_CUSTOMER_CODE": "",
     "R2_ACCOUNT_ID": "846c924bf17bf4f3dd15c97a4c5d1d51",
     "R2_BUCKET_NAME": "client-data",
+    "R2_PURGE_ENABLED": "false",
     "R2_INCOMING_BUCKET_NAME": "ltds-incoming",
     "ALERT_FROM": "",
     "ALERT_TO": "",

@@ -29,7 +29,7 @@ function cloudEnv(env:Env):CloudTransferEnv{if(!env.CLOUD_TRANSFER_TOKEN_SECRET)
 function cloudProvider(value:string):CloudProvider{if(value==="dropbox")return"dropbox";if(value==="google"||value==="google-drive")return"google";throw new HTTPException(404,{message:"Cloud provider not found"});}
 function cloudProviderEnabled(env:Env,provider:CloudProvider):boolean{
  if(!env.CLOUD_TRANSFER_TOKEN_SECRET||!env.CLOUD_TRANSFER_WORKFLOW)return false;
- return provider==="dropbox"?env.CLOUD_TRANSFER_DROPBOX_ENABLED==="true"&&Boolean(env.DROPBOX_CLIENT_ID&&env.DROPBOX_CLIENT_SECRET):env.CLOUD_TRANSFER_GOOGLE_ENABLED==="true"&&Boolean(env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET);
+ return provider==="dropbox"?env.CLOUD_TRANSFER_DROPBOX_ENABLED==="true"&&Boolean(env.DROPBOX_CLIENT_ID&&env.DROPBOX_CLIENT_SECRET):env.CLOUD_TRANSFER_GOOGLE_ENABLED==="true"&&env.CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED==="true"&&Boolean(env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET&&env.GOOGLE_PICKER_API_KEY&&env.GOOGLE_CLOUD_PROJECT_NUMBER);
 }
 function requireSameOrigin(request:Request,env:Env):void{const origin=request.headers.get("Origin");if(!origin||origin!==new URL(env.PUBLIC_BASE_URL).origin)throw new HTTPException(403,{message:"This request is not allowed"});}
 function cloudRedirectUri(env:Env,provider:CloudProvider):string{return`${env.PUBLIC_BASE_URL}/api/public/cloud-transfers/oauth/${provider}/callback`;}
@@ -384,7 +384,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   let physicalBreadcrumb = root;
   for (const segment of relativeFolder.split("/").filter(Boolean)) { built = built ? `${built}/${segment}` : segment; physicalBreadcrumb += `${segment}/`; breadcrumbs.push({ id: encodeItemRef(built), name: aliases.get(physicalBreadcrumb) || segment }); }
   const currentPhysical = relativeFolder ? prefix : root;
-  const dropbox=cloudProviderEnabled(c.env,"dropbox"),google=cloudProviderEnabled(c.env,"google"); const manifest: DeliveryManifest = { share: { publicId: share.public_id!, label: share.label, clientName: share.client_name, projectName: aliases.get(root) || share.project_name, expiresAt: share.expires_at }, folder: { id: folderRef, name: aliases.get(currentPhysical) || relativeFolder.split("/").pop() || share.project_name, breadcrumbs }, items, nextCursor: listed.truncated ? listed.cursor : null, capabilities: { cloudTransfer: { dropbox, googleDrive: google, googlePicker: google && Boolean(c.env.GOOGLE_PICKER_API_KEY&&c.env.GOOGLE_CLOUD_PROJECT_NUMBER) } } };
+  const dropbox=cloudProviderEnabled(c.env,"dropbox"),google=cloudProviderEnabled(c.env,"google"); const manifest: DeliveryManifest = { share: { publicId: share.public_id!, label: share.label, clientName: share.client_name, projectName: aliases.get(root) || share.project_name, expiresAt: share.expires_at }, folder: { id: folderRef, name: aliases.get(currentPhysical) || relativeFolder.split("/").pop() || share.project_name, breadcrumbs }, items, nextCursor: listed.truncated ? listed.cursor : null, capabilities: { cloudTransfer: { dropbox, googleDrive: google, googlePicker: google } } };
   c.executionCtx.waitUntil(Promise.all([audit(c.env, c.req.raw, share.id, "manifest.viewed", folderRef), primaryDb(c.env).prepare("UPDATE shares SET access_count=access_count+1,last_accessed_at=datetime('now') WHERE id=?").bind(share.id).run()]));
   return c.json(manifest);
 });
@@ -655,7 +655,7 @@ app.get("/api/public/shares/:publicId/cloud-transfers/:jobId",async c=>{
 });
 
 app.post("/api/public/shares/:publicId/cloud-transfers/:jobId/cancel",async c=>{
- requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow;const env=cloudEnv(c.env);if(!(await requestCloudCancellation(env,c.req.param("jobId"),share.id,share.share_version)))throw new HTTPException(409,{message:"This transfer can no longer be cancelled"});const job=await getAuthorizedCloudJob(env,c.req.param("jobId"),share.id,share.share_version);return c.json({id:job!.id,provider:providerPublicName(job!.provider),status:"cancelled"});
+ requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow;const env=cloudEnv(c.env);if(!(await requestCloudCancellation(env,c.req.param("jobId"),share.id,share.share_version)))throw new HTTPException(409,{message:"This transfer can no longer be cancelled"});const job=await getAuthorizedCloudJob(env,c.req.param("jobId"),share.id,share.share_version);return c.json({id:job!.id,provider:providerPublicName(job!.provider),status:"cancelling"});
 });
 
 app.post("/api/public/shares/:publicId/cloud-transfers/:jobId/retry",async c=>{

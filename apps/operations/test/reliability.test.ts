@@ -3,7 +3,7 @@ import { aliasParent, normalizeAliasKey, validateDisplayName } from "../src/work
 import { canonicalPreviewSource, finalizePreviewManifest, hidden, previewDerivative, previewManifest } from "../src/worker/file-events";
 import { derivativePrefixes, validateDeleteConfirmation } from "../src/worker/source-delete";
 import { artifactDirectory, previewIdentity } from "../src/worker/artifacts";
-import { tombstoneMatches } from "../src/worker/trash";
+import { r2PurgeEnabled, tombstoneMatches, trashSnapshotBlockReason } from "../src/worker/trash";
 
 describe("delivery reliability controls", () => {
   it("rejects reserved segments everywhere in Operations paths", () => {
@@ -113,4 +113,34 @@ describe("delivery reliability controls", () => {
     expect(tombstoneMatches({ physical_key: "Jobs/client/", tombstone_kind: "prefix" }, "Jobs/client/edited/photo.jpg")).toBe(true);
     expect(tombstoneMatches({ physical_key: "Jobs/client/", tombstone_kind: "prefix" }, "Jobs/client-old/photo.jpg")).toBe(false);
   });
+  it("blocks legacy, changed, and newly discovered objects from purge", () => {
+    const manifest = [{ object_key: "Jobs/client/photo.jpg", object_etag: "v1", object_size: 100, relation: "source" as const, purged_at: null }];
+    expect(trashSnapshotBlockReason([], [])).toBe("legacy_or_empty_manifest");
+    expect(trashSnapshotBlockReason(manifest, [{ key: "Jobs/client/photo.jpg", etag: "v2", size: 100, relation: "source" }]))
+      .toBe("object_identity_changed:Jobs/client/photo.jpg");
+    expect(trashSnapshotBlockReason(manifest, [
+      { key: "Jobs/client/photo.jpg", etag: "v1", size: 100, relation: "source" },
+      { key: "Jobs/client/new.jpg", etag: "v1", size: 20, relation: "source" },
+    ])).toBe("unmanifested_object:Jobs/client/new.jpg");
+  });
+
+  it("allows unchanged identities and an idempotently missing object", () => {
+    const manifest = [
+      { object_key: "Jobs/client/photo.jpg", object_etag: "v1", object_size: 100, relation: "source" as const, purged_at: null },
+      { object_key: "Jobs/client/.previews/hash/thumb.webp", object_etag: "thumb-v1", object_size: 20, relation: "derived" as const, purged_at: null },
+    ];
+    expect(trashSnapshotBlockReason(manifest, [
+      { key: "Jobs/client/photo.jpg", etag: "v1", size: 100, relation: "source" },
+      { key: "Jobs/client/.previews/hash/thumb.webp", etag: "thumb-v1", size: 20, relation: "derived" },
+    ])).toBeNull();
+    expect(trashSnapshotBlockReason(manifest, [])).toBeNull();
+  });
+
+  it("keeps irreversible R2 purge fail-closed unless explicitly enabled", () => {
+    expect(r2PurgeEnabled({})).toBe(false);
+    expect(r2PurgeEnabled({ R2_PURGE_ENABLED: "false" })).toBe(false);
+    expect(r2PurgeEnabled({ R2_PURGE_ENABLED: "TRUE" })).toBe(false);
+    expect(r2PurgeEnabled({ R2_PURGE_ENABLED: "true" })).toBe(true);
+  });
+
 });

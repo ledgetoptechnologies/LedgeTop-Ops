@@ -4,7 +4,7 @@ import type {
   CloudTransferEnv,
   CloudTransferItem,
 } from "../types";
-import { DropboxClient } from "./dropbox";
+import { DropboxClient, isDropboxConflict, isDropboxSessionUnavailable } from "./dropbox";
 import { GoogleDriveClient } from "./google-drive";
 
 const CHUNK_SIZE = 8 * 1024 * 1024;
@@ -54,32 +54,56 @@ function dropboxAdapter(env: CloudTransferEnv): CloudProviderAdapter {
   return {
     async transfer(input) {
       const client = new DropboxClient({ accessToken: accessToken(input.credential) });
-      const sessionId = await client.uploadSessionStart();
-      let offset = 0;
-      await input.saveUploadState({ provider: "dropbox", sessionId }, offset);
+      const path = dropboxPath(input.item, input.destination);
+      if (input.conflictMode === "skip") {
+        const existing = await client.getMetadata(path);
+        if (existing) return { status: "skipped", providerFileId: existing.id, uploadedBytes: 0 };
+      }
+      const saved = await input.loadUploadState();
+      const savedState = saved?.state as { provider?: string; sessionId?: string } | undefined;
+      const canResume = savedState?.provider === "dropbox" && typeof savedState.sessionId === "string" && savedState.sessionId.length > 0
+        && Number.isSafeInteger(saved?.uploadedBytes) && saved!.uploadedBytes >= 0 && saved!.uploadedBytes <= input.item.source_size;
+      let sessionId = canResume ? savedState.sessionId! : await client.uploadSessionStart();
+      let offset = canResume ? saved!.uploadedBytes : 0;
+      if (!canResume) await input.saveUploadState({ provider: "dropbox", sessionId }, offset);
+      let restarted = false;
       while (offset < input.item.source_size) {
         if (await input.signalCancelled()) throw new Error("cancelled");
         const length = Math.min(CHUNK_SIZE, input.item.source_size - offset);
         const chunk = await sourceChunk(env, input.item, offset, length);
-        await client.uploadSessionAppend(sessionId, offset, chunk);
-        offset += chunk.byteLength;
+        try {
+          const nextOffset = await client.uploadSessionAppend(sessionId, offset, chunk);
+          if (nextOffset > input.item.source_size) throw new Error("source-changed");
+          offset = nextOffset;
+        } catch (error) {
+          if (!restarted && isDropboxSessionUnavailable(error)) {
+            sessionId = await client.uploadSessionStart();
+            offset = 0;
+            restarted = true;
+            await input.saveUploadState({ provider: "dropbox", sessionId }, offset);
+            continue;
+          }
+          throw error;
+        }
         await input.saveUploadState({ provider: "dropbox", sessionId }, offset);
       }
-      const result = await client.uploadSessionFinish(
-        sessionId,
-        offset,
-        dropboxPath(input.item, input.destination),
-        new Uint8Array(),
-        input.conflictMode === "autorename",
-      );
-      return { status: "completed", providerFileId: result.id, uploadedBytes: offset };
+      try {
+        const result = await client.uploadSessionFinish(
+          sessionId, offset, path, new Uint8Array(), input.conflictMode === "autorename",
+        );
+        return { status: "completed", providerFileId: result.id, uploadedBytes: offset };
+      } catch (error) {
+        if (input.conflictMode === "skip" && isDropboxConflict(error)) {
+          return { status: "skipped", uploadedBytes: 0 };
+        }
+        throw error;
+      }
     },
     async revoke(credential) {
       await new DropboxClient({ accessToken: accessToken(credential) }).revoke();
     },
   };
 }
-
 function googleAdapter(env: CloudTransferEnv): CloudProviderAdapter {
   return {
     async transfer(input) {
@@ -88,15 +112,27 @@ function googleAdapter(env: CloudTransferEnv): CloudProviderAdapter {
       if (existing) {
         return { status: "completed", providerFileId: existing.id, uploadedBytes: input.item.source_size };
       }
-      const sessionUrl = await client.startResumableUpload({
-        name: basename(input.item.destination_path),
-        parentId: googleParent(input.destination),
-        mimeType: "application/octet-stream",
-        size: input.item.source_size,
-        transferId: input.item.id,
-      });
+      const saved = await input.loadUploadState();
+      const savedState = saved?.state as { provider?: string; sessionUrl?: string } | undefined;
+      const canResume = savedState?.provider === "google" && typeof savedState.sessionUrl === "string"
+        && /^https:\/\/(?:www\.)?googleapis\.com\//.test(savedState.sessionUrl);
+      let sessionUrl = canResume
+        ? savedState.sessionUrl!
+        : await client.startResumableUpload({
+          name: basename(input.item.destination_path),
+          parentId: googleParent(input.destination),
+          mimeType: "application/octet-stream",
+          size: input.item.source_size,
+          transferId: input.item.id,
+        });
       let offset = 0;
-      await input.saveUploadState({ provider: "google", sessionUrl }, offset);
+      if (canResume) {
+        const status = await client.queryUploadStatus(sessionUrl, input.item.source_size);
+        if (status.complete) return { status: "completed", providerFileId: status.fileId, uploadedBytes: status.committedBytes };
+        offset = status.committedBytes;
+      } else {
+        await input.saveUploadState({ provider: "google", sessionUrl }, offset);
+      }
       while (offset < input.item.source_size) {
         if (await input.signalCancelled()) throw new Error("cancelled");
         const length = Math.min(CHUNK_SIZE, input.item.source_size - offset);
@@ -114,7 +150,6 @@ function googleAdapter(env: CloudTransferEnv): CloudProviderAdapter {
     },
   };
 }
-
 export function createCloudProviderAdapter(
   provider: CloudProvider,
   env: CloudTransferEnv,
