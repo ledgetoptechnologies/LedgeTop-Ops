@@ -1,0 +1,58 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "<OPERATIONS_STAGING_WORKER>-staging",
+  "main": "src/worker/index.ts",
+  "compatibility_date": "2026-07-22",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    { "pattern": "<OPERATIONS_STAGING_HOST>", "custom_domain": true },
+    { "pattern": "<INCOMING_STAGING_HOST>", "custom_domain": true }
+  ],
+  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*", "/health", "/r/*"] },
+  "vars": {
+    "PUBLIC_BASE_URL": "https://<OPERATIONS_STAGING_HOST>",
+    "EXPECTED_HOST": "<OPERATIONS_STAGING_HOST>",
+    "INCOMING_BASE_URL": "https://<INCOMING_STAGING_HOST>",
+    "INCOMING_EXPECTED_HOST": "<INCOMING_STAGING_HOST>",
+    "ENVIRONMENT": "staging",
+    "TEAM_DOMAIN": "https://<ACCESS_TEAM_DOMAIN>",
+    "OPERATIONS_AUD": "<OPERATIONS_STAGING_ACCESS_AUD>",
+    "DELIVERY_BASE_URL": "https://<DELIVERY_STAGING_HOST>",
+    "PROJECT_ALPHA_BASE_URL": "https://<PROJECT_ALPHA_STAGING_HOST>",
+    "APPLICATION_KEY": "ltds_ops_staging",
+    "TFR_REGION": "WI",
+    "DISPLAY_TIMEZONE": "America/Chicago",
+    "MAP_STYLE_URL": "",
+    "STREAM_ACCOUNT_ID": "",
+    "STREAM_CUSTOMER_CODE": "",
+    "R2_ACCOUNT_ID": "<STAGING_ACCOUNT_ID>",
+    "R2_BUCKET_NAME": "<DELIVERY_STAGING_R2_BUCKET>",
+    "R2_PURGE_ENABLED": "false",
+    "R2_INCOMING_BUCKET_NAME": "<INCOMING_STAGING_R2_BUCKET>",
+    "ALERT_FROM": "",
+    "ALERT_TO": "",
+    "NOTIFICATION_FROM": "",
+    "DROPBOX_IMPORT_ENABLED": "false",
+    "DROPBOX_CLIENT_ID": ""
+  },
+  "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "r2_buckets": [
+    { "binding": "DATA_BUCKET", "bucket_name": "<DELIVERY_STAGING_R2_BUCKET>" },
+    { "binding": "INCOMING_BUCKET", "bucket_name": "<INCOMING_STAGING_R2_BUCKET>" }
+  ],
+  "d1_databases": [
+    { "binding": "OPS_DB", "database_name": "<OPERATIONS_STAGING_D1_NAME>", "database_id": "<OPERATIONS_STAGING_D1_ID>", "migrations_dir": "migrations" },
+    { "binding": "DELIVERY_DB", "database_name": "<DELIVERY_STAGING_D1_NAME>", "database_id": "<DELIVERY_STAGING_D1_ID>", "migrations_dir": "../delivery/migrations" }
+  ],
+  "queues": { "consumers": [{ "queue": "<FILE_EVENTS_STAGING_QUEUE>", "max_batch_size": 25, "max_batch_timeout": 10, "max_retries": 5, "dead_letter_queue": "<FILE_EVENTS_STAGING_DLQ>" }] },
+  "images": { "binding": "IMAGES" },
+  "stream": { "binding": "STREAM" },
+  "workflows": [
+    { "name": "<R2_CRUD_STAGING_WORKFLOW>", "binding": "R2_CRUD_WORKFLOW", "class_name": "R2CrudWorkflow" },
+    { "name": "<INCOMING_LIFECYCLE_STAGING_WORKFLOW>", "binding": "INCOMING_LIFECYCLE_WORKFLOW", "class_name": "IncomingUploadLifecycleWorkflow" },
+    { "name": "<DROPBOX_IMPORT_STAGING_WORKFLOW>", "binding": "DROPBOX_IMPORT_WORKFLOW", "class_name": "DropboxImportWorkflow" }
+  ]
+}

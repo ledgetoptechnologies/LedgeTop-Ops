@@ -11,3 +11,6 @@ coverage/
 .DS_Store
 .backups/
 strix_runs/
+
+# Operator-created Cloudflare staging configs. Copy from docs/staging/*.example.
+apps/*/wrangler.staging.json
