@@ -8,7 +8,7 @@ import { operationsSectionPath, pathOperationsSection, pathPage, type Operations
 import { DropboxImportDialog } from "./DropboxImportDialog";
 
 type OperationsUser=SessionUser&{status:"Active";profileType:"Administrator"|"Employee";isAdministrator:boolean};
-interface Session{user:OperationsUser;csrfToken:string;timezone:string;mapStyleUrl:string|null;capabilities?:{dropboxImport?:{enabled:boolean;reason:"available"|"disabled"|"not-configured"}}}
+interface Session{user:OperationsUser;csrfToken:string;timezone:string;mapStyleUrl:string|null;capabilities?:{dropboxImport?:{enabled:boolean;reason:"available"|"disabled"|"not-configured"};incomingUploads?:{enabled:boolean;reason:"available"|"disabled"}}}
 interface ActiveDeliveryShare{id:string;shareUrl:string|null;passwordProtected:boolean;expiresAt:string|null;recoverable:boolean;recipientEmail?:string|null}
 interface DeliveryShareResult{id:string;shareUrl:string;accessCode:string|null;passwordProtected:boolean;expiresAt:string|null;lifecycle:"created"|"reused"|"updated"|"rotated";idempotentReplay:boolean}
 interface IncomingUploadSummary{id?:string;name?:string;fileName?:string;contributorName?:string;status?:string;size?:number;createdAt?:string;uploadedAt?:string}
@@ -166,7 +166,7 @@ function DeliveryWorkspaceV2({session}:{session:Session}){
 }
 function DeliveryHub({session}:{session:Session}){
   const[tab,setTab]=useState<"delivery"|"incoming">("delivery");
-  const canViewIncoming=allowed(session.user,"file_requests.view");
+  const canViewIncoming=allowed(session.user,"file_requests.view")&&session.capabilities?.incomingUploads?.enabled===true;
   return <><div className="delivery-subtabs" role="tablist" aria-label="Delivery tools">
     <button role="tab" aria-selected={tab==="delivery"} className={tab==="delivery"?"active":""} onClick={()=>setTab("delivery")}>Client delivery</button>
     {canViewIncoming&&<button role="tab" aria-selected={tab==="incoming"} className={tab==="incoming"?"active":""} onClick={()=>setTab("incoming")}>Incoming uploads</button>}

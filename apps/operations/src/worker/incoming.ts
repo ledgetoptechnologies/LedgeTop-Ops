@@ -15,10 +15,17 @@ import {
   verifyIncomingSession,
 } from "./incoming-security";
 import { incomingRequestPage } from "./incoming-page";
+import {
+  INCOMING_UPLOADS_DISABLED_CODE,
+  INCOMING_UPLOADS_DISABLED_MESSAGE,
+  incomingPublicRequestDecision,
+  incomingUploadsCapability,
+} from "./incoming-policy";
 import type { Env, StaffPrincipal } from "./types";
 
 export type IncomingEnv = Env & {
   INCOMING_BUCKET: R2Bucket;
+  INCOMING_UPLOADS_ENABLED?: string;
   INCOMING_BASE_URL: string;
   INCOMING_EXPECTED_HOST?: string;
   TURNSTILE_SITE_KEY?: string;
@@ -633,10 +640,37 @@ export function dispatchIncomingPublicRequest(
   context: ExecutionContext,
 ): Response | Promise<Response> | null {
   if (!isIncomingPublicRequest(request, env)) return null;
+  const decision = incomingPublicRequestDecision(env, request.method, new URL(request.url).pathname);
+  if (decision === "disabled") {
+    return Response.json(
+      { error: INCOMING_UPLOADS_DISABLED_CODE, message: INCOMING_UPLOADS_DISABLED_MESSAGE },
+      {
+        status: 503,
+        headers: {
+          "Cache-Control": "no-store",
+          "Cloudflare-CDN-Cache-Control": "no-store",
+          "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+          "Referrer-Policy": "no-referrer",
+          "X-Content-Type-Options": "nosniff",
+          "X-Robots-Tag": "noindex, nofollow",
+        },
+      },
+    );
+  }
   return publicApp.fetch(request, env, context);
 }
 
 const staffApp = new Hono<{ Bindings: IncomingEnv; Variables: StaffVariables }>();
+
+staffApp.use("*", async (c, next) => {
+  if (!incomingUploadsCapability(c.env).enabled) {
+    return c.json(
+      { error: INCOMING_UPLOADS_DISABLED_CODE, message: INCOMING_UPLOADS_DISABLED_MESSAGE },
+      503,
+    );
+  }
+  await next();
+});
 
 async function requireIncomingStaff(c: {
   env: IncomingEnv;

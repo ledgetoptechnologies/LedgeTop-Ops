@@ -19,6 +19,7 @@
   "vars": {
     "PUBLIC_BASE_URL": "https://ops.ledgetopdroneservices.com",
     "EXPECTED_HOST": "ops.ledgetopdroneservices.com",
+    "INCOMING_UPLOADS_ENABLED": "false",
     "INCOMING_BASE_URL": "https://incoming.ledgetopdroneservices.com",
     "INCOMING_EXPECTED_HOST": "incoming.ledgetopdroneservices.com",
     "ENVIRONMENT": "production",
