@@ -1,6 +1,6 @@
 import type { Permission, PermissionScope } from "@ltds/shared";
 
-export type Env = Cloudflare.Env & {
+export type Env = Omit<Cloudflare.Env, "INCOMING_UPLOADS_ENABLED" | "R2_PURGE_ENABLED"> & {
   PROJECT_ALPHA_API_KEY?: string;
   OPERATIONS_SESSION_SECRET: string;
   DELIVERY_TOKEN_SECRET: string;
@@ -15,6 +15,7 @@ export type Env = Cloudflare.Env & {
   R2_PURGE_ENABLED?: string;
   R2_BUCKET_NAME: string;
   R2_INCOMING_BUCKET_NAME: string;
+  INCOMING_UPLOADS_ENABLED?: string;
   INCOMING_BASE_URL: string;
   INCOMING_EXPECTED_HOST: string;
   INCOMING_BUCKET: R2Bucket;

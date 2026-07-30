@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
 const markers = /<[^>]+>|CHANGE[_-]?ME|REPLACE[_-]?ME|example\.invalid/i;
-const disabled = ["CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED", "DROPBOX_IMPORT_ENABLED", "R2_PURGE_ENABLED"];
+const disabled = ["CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED", "DROPBOX_IMPORT_ENABLED", "INCOMING_UPLOADS_ENABLED", "R2_PURGE_ENABLED"];
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const mapped = (entries = [], key) => new Map(entries.map((item) => [item.binding, item[key]]));
 const routeHosts = (config) => (config.routes ?? []).map((route) => typeof route === "string" ? route : route.pattern);
