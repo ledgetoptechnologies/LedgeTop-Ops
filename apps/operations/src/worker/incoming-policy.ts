@@ -10,7 +10,7 @@ export interface IncomingUploadsPolicyConfig {
   INCOMING_UPLOADS_ENABLED?: string;
 }
 
-export type IncomingPublicRequestDecision = "enabled" | "disabled" | "internal-completion";
+export type IncomingPublicRequestDecision = "enabled" | "disabled" | "health" | "internal-completion";
 
 export function incomingUploadsCapability(config: IncomingUploadsPolicyConfig): IncomingUploadsCapability {
   return config.INCOMING_UPLOADS_ENABLED === "true"
@@ -23,6 +23,9 @@ export function incomingPublicRequestDecision(
   method: string,
   pathname: string,
 ): IncomingPublicRequestDecision {
+  if (method.toUpperCase() === "GET" && pathname === "/health") {
+    return "health";
+  }
   if (
     method.toUpperCase() === "POST"
     && /^\/api\/internal\/uploads\/[^/]+\/accepted$/.test(pathname)
