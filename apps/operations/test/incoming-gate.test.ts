@@ -39,6 +39,22 @@ describe("incoming upload route gate", () => {
     expect(await response!.json()).toEqual({ message: "Invalid pickup credential" });
   });
 
+  it("keeps the incoming-host health check available while uploads are disabled", async () => {
+    const response = await dispatchIncomingPublicRequest(
+      new Request("https://incoming.test/health"),
+      disabledEnv as never,
+      {} as ExecutionContext,
+    );
+
+    expect(response).not.toBeNull();
+    expect(response!.status).toBe(200);
+    expect(await response!.json()).toEqual({
+      status: "ok",
+      service: "ltds-ops-incoming",
+      incomingUploads: { enabled: false, reason: "disabled" },
+    });
+  });
+
   it("returns the same disabled contract from the staff incoming router", async () => {
     const response = await createIncomingStaffRouter().request("/", {}, disabledEnv as never);
 

@@ -41,6 +41,12 @@ describe("incoming upload capability policy", () => {
     expect(incomingPublicRequestDecision({}, "POST", "/api/internal/uploads//accepted")).toBe("disabled");
   });
 
+  it("keeps only the exact read-only health endpoint available", () => {
+    expect(incomingPublicRequestDecision({}, "GET", "/health")).toBe("health");
+    expect(incomingPublicRequestDecision({}, "HEAD", "/health")).toBe("disabled");
+    expect(incomingPublicRequestDecision({}, "GET", "/health/extra")).toBe("disabled");
+  });
+
   it("publishes a stable, clear disabled response contract", () => {
     expect(INCOMING_UPLOADS_DISABLED_CODE).toBe("incoming_uploads_disabled");
     expect(INCOMING_UPLOADS_DISABLED_MESSAGE).toBe("Incoming uploads are currently disabled");

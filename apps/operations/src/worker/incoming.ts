@@ -641,6 +641,12 @@ export function dispatchIncomingPublicRequest(
 ): Response | Promise<Response> | null {
   if (!isIncomingPublicRequest(request, env)) return null;
   const decision = incomingPublicRequestDecision(env, request.method, new URL(request.url).pathname);
+  if (decision === "health") {
+    return Response.json(
+      { status: "ok", service: "ltds-ops-incoming", incomingUploads: incomingUploadsCapability(env) },
+      { headers: { "Cache-Control": "no-store" } },
+    );
+  }
   if (decision === "disabled") {
     return Response.json(
       { error: INCOMING_UPLOADS_DISABLED_CODE, message: INCOMING_UPLOADS_DISABLED_MESSAGE },
