@@ -113,7 +113,7 @@ export async function markCloudItemFailure(
 export async function retryFailedCloudItems(env: CloudTransferEnv, jobId: string, shareId: string, shareVersion: number): Promise<number> {
   const job = await getAuthorizedCloudJob(env, jobId, shareId, shareVersion);
   if (!job || !["partial", "failed"].includes(job.status)) return 0;
-  const result = await cloudDb(env).prepare(`UPDATE cloud_transfer_items SET status='retrying',retry_at=NULL,error_code=NULL,error_message=NULL,updated_at=datetime('now')
+  const result = await cloudDb(env).prepare(`UPDATE cloud_transfer_items SET status='retrying',attempts=0,retry_at=NULL,error_code=NULL,error_message=NULL,updated_at=datetime('now')
     WHERE job_id=? AND status='failed'`).bind(jobId).run();
   if (result.meta.changes) await cloudDb(env).prepare(`UPDATE cloud_transfer_jobs SET status='running',processed_files=succeeded_files,failed_files=0,error_code=NULL,error_message=NULL,
     completed_at=NULL,updated_at=datetime('now') WHERE id=?`).bind(jobId).run();
@@ -130,8 +130,8 @@ export async function finalizeCloudJob(env: CloudTransferEnv, jobId: string): Pr
       updated_at=datetime('now') WHERE job_id=? AND status IN ('queued','running','retrying')`).bind(jobId),
     cloudDb(env).prepare(`UPDATE cloud_transfer_jobs SET status=?,processed_files=(SELECT COUNT(*) FROM cloud_transfer_items WHERE job_id=? AND status IN ('completed','skipped','failed','cancelled')),
       completed_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND status IN ('queued','running','cancelling')`).bind(status, jobId, jobId),
-    cloudDb(env).prepare(`UPDATE cloud_transfer_authorizations SET credential_ciphertext='',credential_iv='',revoked_at=COALESCE(revoked_at,datetime('now'))
-      WHERE id=(SELECT authorization_id FROM cloud_transfer_jobs WHERE id=?)`).bind(jobId),
+    ...(status === "completed" || status === "cancelled" ? [cloudDb(env).prepare(`UPDATE cloud_transfer_authorizations SET credential_ciphertext='',credential_iv='',revoked_at=COALESCE(revoked_at,datetime('now'))
+      WHERE id=(SELECT authorization_id FROM cloud_transfer_jobs WHERE id=?)`).bind(jobId)] : []),
   ]);
   return getCloudJob(env, jobId);
 }

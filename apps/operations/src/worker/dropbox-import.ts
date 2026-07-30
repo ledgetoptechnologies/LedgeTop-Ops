@@ -3,7 +3,18 @@ import { DropboxImportClient, DropboxImportError, refreshDropboxToken } from "./
 import { normalizeCrudKey } from "./r2-crud-validation";
 import type { Env, StaffPrincipal } from "./types";
 
-const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MiB, matches delivery-side cloud transfer
+const MIN_PART_SIZE = 8 * 1024 * 1024;
+const MAX_PART_SIZE = 5 * 1024 * 1024 * 1024;
+const TARGET_MAX_PARTS = 9_999; // reserve one part below R2's 10,000-part limit
+const PART_SIZE_GRANULARITY = 1024 * 1024;
+
+export function dropboxImportPartSize(totalSize: number): number {
+  const required = Math.ceil(totalSize / TARGET_MAX_PARTS);
+  const rounded = Math.ceil(required / PART_SIZE_GRANULARITY) * PART_SIZE_GRANULARITY;
+  const partSize = Math.max(MIN_PART_SIZE, rounded);
+  if (partSize > MAX_PART_SIZE) throw new Error("file-too-large-for-multipart");
+  return partSize;
+}
 const MAX_FILES = 10_000;
 const MAX_BYTES = 500 * 1024 ** 3; // 500 GiB, matches staff upload limit
 
@@ -92,9 +103,15 @@ function opsDb(env: Env) {
   return env.OPS_DB.withSession("first-primary");
 }
 
-async function loadCredential(env: Env, authId: string, staffId: string): Promise<{ accessToken: string; refreshToken?: string; expiresAt?: string }> {
+export async function loadDropboxImportCredential(
+  env: Env,
+  authId: string,
+  staffId: string,
+  options: { allowExpired?: boolean } = {},
+): Promise<{ accessToken: string; refreshToken?: string; expiresAt?: string }> {
+  const expiryClause = options.allowExpired ? "" : " AND datetime(expires_at)>datetime('now')";
   const row = await opsDb(env).prepare(
-    "SELECT credential_ciphertext,credential_iv,key_id,token_expires_at,expires_at,revoked_at FROM dropbox_import_authorizations WHERE id=? AND staff_id=? AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')",
+    `SELECT credential_ciphertext,credential_iv,key_id,token_expires_at,expires_at,revoked_at FROM dropbox_import_authorizations WHERE id=? AND staff_id=? AND revoked_at IS NULL${expiryClause}`,
   ).bind(authId, staffId).first<ImportAuthorization & { expires_at: string }>();
   if (!row || row.revoked_at) throw new Error("authorization-expired");
   if (row.token_expires_at && Date.parse(row.token_expires_at) <= Date.now() + 120000) {
@@ -118,7 +135,16 @@ async function loadCredential(env: Env, authId: string, staffId: string): Promis
   );
 }
 
-async function jobCancelled(env: Env, jobId: string): Promise<boolean> {
+export async function revokeDropboxImportAuthorization(env: Env, authId: string, staffId: string): Promise<void> {
+  const credential = await loadDropboxImportCredential(env, authId, staffId, { allowExpired: true });
+  await new DropboxImportClient({ accessToken: credential.accessToken }).revoke();
+  await opsDb(env).prepare(
+    "UPDATE dropbox_import_authorizations SET credential_ciphertext='',credential_iv='',revoked_at=COALESCE(revoked_at,datetime('now')) WHERE id=? AND staff_id=? AND revoked_at IS NULL",
+  ).bind(authId, staffId).run();
+}
+
+
+export async function jobCancelled(env: Env, jobId: string): Promise<boolean> {
   const row = await opsDb(env).prepare("SELECT status,cancel_requested_at FROM dropbox_import_jobs WHERE id=?").bind(jobId)
     .first<{ status: string; cancel_requested_at: string | null }>();
   return !row || row.status === "cancelling" || row.status === "cancelled" || Boolean(row.cancel_requested_at);
@@ -146,7 +172,7 @@ function destination_prefix_trim(prefix: string): string {
   return prefix.replace(/^\/+|\/+$/g, "");
 }
 
-async function importOneFile(
+export async function importOneFile(
   env: Env,
   client: DropboxImportClient,
   item: ImportItem,
@@ -167,17 +193,9 @@ async function importOneFile(
     return { r2Etag: written.httpEtag, size: 0 };
   }
 
-  // For files under 100 MiB, download in one shot and put directly
-  if (totalSize <= 100 * 1024 * 1024) {
-    const response = await client.downloadFile(item.dropbox_path);
-    const written = await env.DATA_BUCKET.put(destKey, response.body!, {
-      httpMetadata: { contentType: response.headers.get("Content-Type") || "application/octet-stream" },
-    });
-    if (!written) throw new Error("r2-upload-failed");
-    return { r2Etag: written.httpEtag, size: totalSize };
-  }
-
-  // Large files: download in chunks, upload via R2 multipart
+  // Use bounded range downloads and multipart upload for every non-empty file.
+  // Each buffered part is bounded and the chosen size stays below R2's part-count ceiling.
+  const partSize = dropboxImportPartSize(totalSize);
   const multipart = await env.DATA_BUCKET.createMultipartUpload(destKey, {
     httpMetadata: { contentType: "application/octet-stream" },
   });
@@ -190,8 +208,9 @@ async function importOneFile(
       if (await jobCancelled(env, item.job_id)) {
         throw new Error("cancelled");
       }
-      const length = Math.min(CHUNK_SIZE, totalSize - offset);
-      const response = await client.downloadFile(item.dropbox_path, { offset, length });
+      const length = Math.min(partSize, totalSize - offset);
+      const sourceRef = item.dropbox_id || item.dropbox_path;
+      const response = await client.downloadFile(sourceRef, { offset, length });
       const chunk = new Uint8Array(await response.arrayBuffer());
       if (chunk.byteLength !== length) throw new Error("dropbox-short-read");
       const result = await multipart.uploadPart(partNumber, chunk);
@@ -204,8 +223,8 @@ async function importOneFile(
         "UPDATE dropbox_import_items SET downloaded_bytes=?,uploaded_bytes=?,updated_at=datetime('now') WHERE id=?",
       ).bind(offset, offset, item.id).run();
       await opsDb(env).prepare(
-        "UPDATE dropbox_import_jobs SET processed_bytes=processed_bytes+?,updated_at=datetime('now') WHERE id=? AND status='running'",
-      ).bind(length, item.job_id).run();
+        "UPDATE dropbox_import_jobs SET processed_bytes=(SELECT COALESCE(SUM(uploaded_bytes),0) FROM dropbox_import_items WHERE job_id=?),updated_at=datetime('now') WHERE id=? AND status='running'",
+      ).bind(item.job_id, item.job_id).run();
     }
 
     const completed = await multipart.complete(parts);
@@ -254,10 +273,16 @@ async function finalizeJob(env: Env, jobId: string): Promise<void> {
     opsDb(env).prepare(
       "UPDATE dropbox_import_jobs SET status=?,completed_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND status IN ('queued','running','cancelling')",
     ).bind(status, jobId),
-    opsDb(env).prepare(
-      "UPDATE dropbox_import_authorizations SET credential_ciphertext='',credential_iv='',revoked_at=COALESCE(revoked_at,datetime('now')) WHERE id=?",
-    ).bind(job.authorization_id),
   ]);
+  try {
+    await revokeDropboxImportAuthorization(env, job.authorization_id, job.staff_id);
+  } catch (error) {
+    console.warn(JSON.stringify({
+      event: "dropbox-import.authorization-revoke-deferred",
+      authorizationId: job.authorization_id,
+      error: error instanceof Error ? error.message : String(error),
+    }));
+  }
 }
 
 export async function runDropboxImportJob(env: Env, jobId: string, step: Pick<WorkflowStep, "do" | "sleep">): Promise<void> {
@@ -267,7 +292,7 @@ export async function runDropboxImportJob(env: Env, jobId: string, step: Pick<Wo
   try {
     if (job.status === "queued") {
       // Snapshot the Dropbox selection into items
-      const credential = await loadCredential(env, job.authorization_id, job.staff_id);
+      const credential = await loadDropboxImportCredential(env, job.authorization_id, job.staff_id);
       const client = new DropboxImportClient({ accessToken: credential.accessToken });
       const items = await step.do("snapshot-dropbox", async () => {
         return snapshotDropboxSelection(env, client, job);
@@ -281,7 +306,7 @@ export async function runDropboxImportJob(env: Env, jobId: string, step: Pick<Wo
     const current = await opsDb(env).prepare("SELECT * FROM dropbox_import_jobs WHERE id=?").bind(jobId).first<ImportJob>();
     if (!current || !["running", "cancelling"].includes(current.status)) return;
 
-    const credential = await loadCredential(env, current.authorization_id, current.staff_id);
+    const credential = await loadDropboxImportCredential(env, current.authorization_id, current.staff_id);
     const client = new DropboxImportClient({ accessToken: credential.accessToken });
 
     const items = await opsDb(env).prepare("SELECT * FROM dropbox_import_items WHERE job_id=? ORDER BY ordinal").bind(jobId).all<ImportItem>();
@@ -350,7 +375,8 @@ async function snapshotDropboxSelection(env: Env, client: DropboxImportClient, j
       if (entry[".tag"] === "file") {
         files.push({
           dropboxPath: entry.pathDisplay || entry.name,
-          dropboxId: entry.id || null,
+          // A rev reference is immutable; an id is only a rename-stable fallback.
+          dropboxId: entry.rev ? `rev:${entry.rev}` : entry.id || null,
           size: entry.size || 0,
         });
       }
@@ -405,12 +431,18 @@ export async function cleanupDropboxImports(env: Env, now = new Date()): Promise
 
   // Revoke expired authorizations
   const auths = await opsDb(env).prepare(
-    "SELECT id FROM dropbox_import_authorizations WHERE revoked_at IS NULL AND datetime(expires_at)<=datetime(?)",
-  ).bind(nowIso).all<{ id: string }>();
+    "SELECT id,staff_id FROM dropbox_import_authorizations WHERE revoked_at IS NULL AND datetime(expires_at)<=datetime(?)",
+  ).bind(nowIso).all<{ id: string; staff_id: string }>();
   for (const auth of auths.results) {
-    await opsDb(env).prepare(
-      "UPDATE dropbox_import_authorizations SET credential_ciphertext='',credential_iv='',revoked_at=COALESCE(revoked_at,datetime('now')) WHERE id=?",
-    ).bind(auth.id).run();
+    try {
+      await revokeDropboxImportAuthorization(env, auth.id, auth.staff_id);
+    } catch (error) {
+      console.warn(JSON.stringify({
+        event: "dropbox-import.authorization-revoke-retry",
+        authorizationId: auth.id,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+    }
   }
 
   // Clean old OAuth states

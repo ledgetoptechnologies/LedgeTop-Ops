@@ -14,6 +14,7 @@ export class ProviderHttpError extends Error {
   readonly retryAfterMs?: number;
   readonly retryable: boolean;
   readonly providerCode?: string;
+  readonly correctOffset?: number;
 
   constructor(input: {
     operation: string;
@@ -21,6 +22,7 @@ export class ProviderHttpError extends Error {
     retryAfterMs?: number;
     retryable: boolean;
     providerCode?: string;
+    correctOffset?: number;
   }) {
     super(`${input.operation} failed (${input.status})`);
     this.name = "ProviderHttpError";
@@ -28,6 +30,7 @@ export class ProviderHttpError extends Error {
     this.retryAfterMs = input.retryAfterMs;
     this.retryable = input.retryable;
     this.providerCode = input.providerCode;
+    this.correctOffset = input.correctOffset;
   }
 }
 
@@ -47,6 +50,17 @@ function providerCode(body: unknown): string | undefined {
   if (value && typeof value === "object") {
     const tag = (value as Record<string, unknown>)[".tag"];
     if (typeof tag === "string") return tag.slice(0, 120);
+  }
+  return undefined;
+}
+
+function providerCorrectOffset(body: unknown): number | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const record = body as Record<string, unknown>;
+  const error = record.error && typeof record.error === "object" ? record.error as Record<string, unknown> : undefined;
+  const reason = error?.reason && typeof error.reason === "object" ? error.reason as Record<string, unknown> : undefined;
+  for (const value of [record.correct_offset, error?.correct_offset, reason?.correct_offset]) {
+    if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return value;
   }
   return undefined;
 }
@@ -81,6 +95,7 @@ export async function providerFetch(
     retryAfterMs: parseRetryAfter(response.headers.get("Retry-After")),
     retryable: response.status === 408 || response.status === 409 || response.status === 429 || response.status >= 500,
     providerCode: providerCode(body),
+    correctOffset: providerCorrectOffset(body),
   });
 }
 

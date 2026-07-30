@@ -7,6 +7,7 @@ import {
   refreshGoogleToken,
 } from "../src/worker/cloud-transfer/oauth";
 import { DropboxClient } from "../src/worker/cloud-transfer/providers/dropbox";
+import { createCloudProviderAdapter } from "../src/worker/cloud-transfer/providers";
 import { GoogleDriveClient } from "../src/worker/cloud-transfer/providers/google-drive";
 import { ProviderHttpError, parseRetryAfter, providerFetch } from "../src/worker/cloud-transfer/providers/provider";
 
@@ -146,5 +147,93 @@ describe("Google Drive primitives", () => {
     await expect(client.queryUploadStatus("https://upload.example/session", 100)).resolves.toEqual(
       { complete: false, committedBytes: 64 },
     );
+  });
+});
+describe("Dropbox staged-beta transfer behavior", () => {
+  it("skips an existing destination without reading the R2 object", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toContain("files/get_metadata");
+      return Response.json({ id: "dbid:existing" });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const get = vi.fn();
+    const adapter = createCloudProviderAdapter("dropbox", { DATA_BUCKET: { get } } as never);
+    const result = await adapter.transfer({
+      env: {} as never,
+      job: {} as never,
+      item: { id: "item", source_key: "source", source_etag: "etag", source_size: 20, destination_path: "nested/file.bin" } as never,
+      credential: { accessToken: "token" },
+      destination: { path: "/LTDS Delivery/" },
+      conflictMode: "skip",
+      signalCancelled: async () => false,
+      loadUploadState: async () => null,
+      saveUploadState: async () => undefined,
+    });
+    expect(result).toEqual({ status: "skipped", providerFileId: "dbid:existing", uploadedBytes: 0 });
+    expect(get).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("resumes a saved Dropbox session and applies the destination root once", async () => {
+    const requests: Array<{ url: string; argument: Record<string, unknown> }> = [];
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push({ url: String(input), argument: JSON.parse(new Headers(init?.headers).get("Dropbox-API-Arg") || "{}") as Record<string, unknown> });
+      return String(input).endsWith("/finish") ? Response.json({ id: "dbid:done" }) : new Response(null, { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const get = vi.fn(async (_key: string, options: { range: { offset: number; length: number } }) => ({
+      body: new ReadableStream(),
+      arrayBuffer: async () => new Uint8Array(options.range.length).buffer,
+    }));
+    const adapter = createCloudProviderAdapter("dropbox", { DATA_BUCKET: { get } } as never);
+    const saved: Array<{ state: unknown; bytes: number }> = [];
+    const result = await adapter.transfer({
+      env: {} as never,
+      job: {} as never,
+      item: { id: "item", source_key: "source", source_etag: "etag", source_size: 6, destination_path: "nested/file.bin" } as never,
+      credential: { accessToken: "token" },
+      destination: { path: "/LTDS Delivery/" },
+      conflictMode: "autorename",
+      signalCancelled: async () => false,
+      loadUploadState: async () => ({ state: { provider: "dropbox", sessionId: "saved-session" }, uploadedBytes: 2 }),
+      saveUploadState: async (state, bytes) => { saved.push({ state, bytes }); },
+    });
+    expect(result).toMatchObject({ status: "completed", uploadedBytes: 6 });
+    expect(fetcher.mock.calls.some(call => String(call[0]).endsWith("/start"))).toBe(false);
+    expect(get).toHaveBeenCalledWith("source", expect.objectContaining({ range: { offset: 2, length: 4 } }));
+    const append = requests.find(request => request.url.endsWith("append_v2"));
+    expect(append?.argument).toMatchObject({ cursor: { session_id: "saved-session", offset: 2 } });
+    const finish = requests.find(request => request.url.endsWith("/finish"));
+    expect(finish?.argument).toMatchObject({ commit: { path: "/LTDS Delivery/nested/file.bin", mode: "add", autorename: true } });
+    expect(saved.at(-1)?.bytes).toBe(6);
+    vi.unstubAllGlobals();
+  });
+
+  it("reconciles Dropbox's committed offset after an ambiguous append", async () => {
+    const fetcher = vi.fn(async () => new Response(JSON.stringify({
+      error_summary: "lookup_failed/incorrect_offset/..",
+      error: { ".tag": "lookup_failed", reason: { ".tag": "incorrect_offset", correct_offset: 8 } },
+    }), { status: 409, headers: { "Content-Type": "application/json" } }));
+    const client = new DropboxClient({ accessToken: "token", fetch: fetcher });
+    await expect(client.uploadSessionAppend("session", 0, new Uint8Array(8))).resolves.toBe(8);
+  });
+
+  it("treats a finish-time conflict as skipped without overwrite", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith("get_metadata")) return new Response(JSON.stringify({ error_summary: "path/not_found/.." }), { status: 409, headers: { "Content-Type": "application/json" } });
+      if (String(input).endsWith("/start")) return Response.json({ session_id: "session" });
+      const argument = JSON.parse(new Headers(init?.headers).get("Dropbox-API-Arg") || "{}") as { commit?: Record<string, unknown> };
+      expect(argument.commit).toMatchObject({ autorename: false, strict_conflict: true });
+      return new Response(JSON.stringify({ error_summary: "path/conflict/file/.." }), { status: 409, headers: { "Content-Type": "application/json" } });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const adapter = createCloudProviderAdapter("dropbox", { DATA_BUCKET: {} } as never);
+    await expect(adapter.transfer({
+      env: {} as never, job: {} as never,
+      item: { id: "item", source_key: "source", source_etag: "etag", source_size: 0, destination_path: "file.bin" } as never,
+      credential: { accessToken: "token" }, destination: { path: "/Delivery" }, conflictMode: "skip",
+      signalCancelled: async () => false, loadUploadState: async () => null, saveUploadState: async () => undefined,
+    })).resolves.toEqual({ status: "skipped", uploadedBytes: 0 });
+    vi.unstubAllGlobals();
   });
 });

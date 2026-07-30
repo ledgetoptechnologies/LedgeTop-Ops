@@ -1,8 +1,15 @@
 import { cloudDb } from "./repository";
 import type { CloudProviderAdapter, CloudTransferEnv, CloudCredential } from "./types";
 import { decryptWithRotation } from "./grants";
+import { ProviderHttpError } from "./providers/provider";
 
 const HISTORY_DAYS = 90;
+
+function revocationDefinitivelyExpired(error: unknown): boolean {
+  return error instanceof ProviderHttpError
+    && (error.status === 400 || error.status === 401)
+    && /(?:invalid|expired).*(?:token|grant)|(?:token|grant).*(?:invalid|expired)/i.test(error.providerCode || "");
+}
 
 export async function eraseCloudAuthorization(env: CloudTransferEnv, authorizationId: string): Promise<void> {
   await cloudDb(env).prepare(`UPDATE cloud_transfer_authorizations SET credential_ciphertext='',credential_iv='',revoked_at=COALESCE(revoked_at,datetime('now'))
@@ -26,24 +33,33 @@ export async function cleanupCloudTransfers(
     .all<{ id: string; provider: "dropbox" | "google"; credential_ciphertext: string; credential_iv: string; key_id: string }>()).results;
   for (const authorization of authorizations) {
     const adapter = adapters[authorization.provider];
-    if (adapter?.revoke && authorization.credential_ciphertext) {
-      try {
-        const credential = await decryptWithRotation<CloudCredential>({
-          ciphertext: authorization.credential_ciphertext, iv: authorization.credential_iv, keyId: authorization.key_id,
-        }, env, `authorization:${authorization.id}:${authorization.provider}`);
-        await adapter.revoke(credential);
-      } catch (error) {
-        console.error(JSON.stringify({ event: "cloud-transfer.authorization-revoke-failed", authorizationId: authorization.id, provider: authorization.provider,
-          error: error instanceof Error ? error.message : String(error) }));
-      }
+    if (!authorization.credential_ciphertext) {
+      await eraseCloudAuthorization(env, authorization.id);
+      continue;
     }
-    await eraseCloudAuthorization(env, authorization.id);
+    if (!adapter?.revoke) {
+      console.error(JSON.stringify({ event: "cloud-transfer.authorization-revoke-deferred", authorizationId: authorization.id, provider: authorization.provider, code: "revoker-unavailable" }));
+      continue;
+    }
+    try {
+      const credential = await decryptWithRotation<CloudCredential>({
+        ciphertext: authorization.credential_ciphertext, iv: authorization.credential_iv, keyId: authorization.key_id,
+      }, env, `authorization:${authorization.id}:${authorization.provider}`);
+      await adapter.revoke(credential);
+      await eraseCloudAuthorization(env, authorization.id);
+    } catch (error) {
+      if (revocationDefinitivelyExpired(error)) {
+        await eraseCloudAuthorization(env, authorization.id);
+        continue;
+      }
+      console.error(JSON.stringify({ event: "cloud-transfer.authorization-revoke-deferred", authorizationId: authorization.id, provider: authorization.provider, code: "provider-revoke-failed" }));
+    }
   }
-
   await cloudDb(env).prepare("DELETE FROM cloud_oauth_states WHERE consumed_at IS NOT NULL OR datetime(expires_at)<=datetime(?)").bind(nowIso).run();
   await cloudDb(env).prepare(`UPDATE cloud_transfer_items SET upload_state_ciphertext=NULL,upload_state_iv=NULL,source_grant_hash=NULL,
     source_grant_ciphertext=NULL,source_grant_iv=NULL,source_grant_expires_at=NULL
-    WHERE job_id IN (SELECT id FROM cloud_transfer_jobs WHERE status IN ('completed','partial','failed','cancelled','expired'))`).run();
+    WHERE job_id IN (SELECT j.id FROM cloud_transfer_jobs j JOIN cloud_transfer_authorizations a ON a.id=j.authorization_id
+      WHERE j.status IN ('completed','cancelled','expired') OR a.revoked_at IS NOT NULL OR datetime(a.expires_at)<=datetime(?))`).bind(nowIso).run();
   const cutoff = new Date(now.getTime() - HISTORY_DAYS * 86_400_000).toISOString();
   await cloudDb(env).prepare(`DELETE FROM cloud_transfer_jobs WHERE status IN ('completed','partial','failed','cancelled','expired') AND datetime(updated_at)<=datetime(?)`).bind(cutoff).run();
   const currentWindow = Math.floor(now.getTime() / 3_600_000);

@@ -9,6 +9,7 @@ export type CloudTransferJobStatus =
   | "authorization_required"
   | "queued"
   | "running"
+  | "cancelling"
   | "ready"
   | "completed"
   | "failed"
@@ -186,7 +187,6 @@ function isTransientError(caught: unknown): caught is RequestError {
 
 function terminalError(job: CloudTransferJob): Error | null {
   if (job.status === "failed") return new Error(job.error?.message || job.message || "The files could not be copied.");
-  if (job.status === "cancelled") return new Error(job.message || "The remaining files were cancelled.");
   return null;
 }
 
@@ -222,7 +222,7 @@ export async function pollCloudTransfer(
     }
     const error = terminalError(result);
     if (error) throw error;
-    if (result.status === "completed") return result;
+    if (result.status === "completed" || result.status === "cancelled") return result;
     if (result.status === "authorization_required") return result;
   }
   throw new Error("The copy is still running. You can safely close this window and check again later.");

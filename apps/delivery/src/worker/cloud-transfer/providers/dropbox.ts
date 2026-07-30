@@ -1,4 +1,4 @@
-import { byteBody, providerFetch, responseJson, type Fetcher } from "./provider";
+import { byteBody, ProviderHttpError, providerFetch, responseJson, type Fetcher } from "./provider";
 
 const API = "https://api.dropboxapi.com/2";
 const CONTENT = "https://content.dropboxapi.com/2";
@@ -63,6 +63,18 @@ export class DropboxClient {
     return { id: result.metadata?.id, pathDisplay: result.metadata?.path_display };
   }
 
+  async getMetadata(path: string): Promise<{ id?: string } | null> {
+    try {
+      const result = await this.rpc<{ id?: string }>("files/get_metadata", {
+        path, include_deleted: false,
+      }, "dropbox-get-metadata");
+      return { id: result.id };
+    } catch (error) {
+      if (error instanceof ProviderHttpError && error.status === 409
+        && /(?:^|\/)not_found(?:\/|$)/.test(error.providerCode || "")) return null;
+      throw error;
+    }
+  }
   async saveUrl(path: string, url: string): Promise<DropboxSaveUrlResult> {
     const result = await this.rpc<Record<string, unknown>>("files/save_url", { path, url }, "dropbox-save-url");
     if (typeof result.async_job_id === "string") return { kind: "async", jobId: result.async_job_id };
@@ -94,17 +106,24 @@ export class DropboxClient {
     return result.session_id;
   }
 
-  async uploadSessionAppend(sessionId: string, offset: number, chunk: Uint8Array, close = false): Promise<void> {
-    const response = await providerFetch(this.fetcher, `${CONTENT}/files/upload_session/append_v2`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.accessToken}`,
-        "Content-Type": "application/octet-stream",
-        "Dropbox-API-Arg": JSON.stringify({ cursor: { session_id: sessionId, offset }, close }),
-      },
-      body: byteBody(chunk),
-    }, { operation: "dropbox-upload-append" });
-    await response.arrayBuffer();
+  async uploadSessionAppend(sessionId: string, offset: number, chunk: Uint8Array, close = false): Promise<number> {
+    try {
+      const response = await providerFetch(this.fetcher, `${CONTENT}/files/upload_session/append_v2`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.accessToken}`,
+          "Content-Type": "application/octet-stream",
+          "Dropbox-API-Arg": JSON.stringify({ cursor: { session_id: sessionId, offset }, close }),
+        },
+        body: byteBody(chunk),
+      }, { operation: "dropbox-upload-append" });
+      await response.arrayBuffer();
+      return offset + chunk.byteLength;
+    } catch (error) {
+      if (error instanceof ProviderHttpError && error.correctOffset !== undefined
+        && /incorrect_offset/.test(error.providerCode || "")) return error.correctOffset;
+      throw error;
+    }
   }
 
   async uploadSessionFinish(
@@ -118,7 +137,7 @@ export class DropboxClient {
       "files/upload_session/finish",
       {
         cursor: { session_id: sessionId, offset },
-        commit: { path, mode: "add", autorename, mute: false, strict_conflict: false },
+        commit: { path, mode: "add", autorename, mute: false, strict_conflict: !autorename },
       },
       byteBody(chunk),
       "dropbox-upload-finish",
@@ -132,4 +151,13 @@ export class DropboxClient {
     }, { operation: "dropbox-token-revoke" });
     await response.arrayBuffer();
   }
+}
+export function isDropboxConflict(error: unknown): boolean {
+  return error instanceof ProviderHttpError && error.status === 409
+    && /(?:^|\/)conflict(?:\/|$)/.test(error.providerCode || "");
+}
+
+export function isDropboxSessionUnavailable(error: unknown): boolean {
+  return error instanceof ProviderHttpError && error.status === 409
+    && /(?:not_found|closed|lookup_failed)/.test(error.providerCode || "");
 }

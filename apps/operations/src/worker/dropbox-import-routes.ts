@@ -5,6 +5,7 @@ import { DropboxImportClient } from "./dropbox-import-client";
 import {
   encryptImportSecret,
   decryptImportSecret,
+  loadDropboxImportCredential,
   cleanupDropboxImports,
 } from "./dropbox-import";
 import { normalizeCrudKey } from "./r2-crud-validation";
@@ -30,8 +31,27 @@ function importTokenSecret(env: Env): string {
   return env.DROPBOX_IMPORT_TOKEN_SECRET;
 }
 
-function dropboxImportEnabled(env: Env): boolean {
-  return env.DROPBOX_IMPORT_ENABLED === "true" && Boolean(env.DROPBOX_CLIENT_ID && env.DROPBOX_CLIENT_SECRET && env.DROPBOX_IMPORT_TOKEN_SECRET);
+export interface DropboxImportCapability {
+  enabled: boolean;
+  reason: "available" | "disabled" | "not-configured";
+}
+
+export function dropboxImportCapability(env: Env): DropboxImportCapability {
+  if (env.DROPBOX_IMPORT_ENABLED !== "true") return { enabled: false, reason: "disabled" };
+  if (!env.DROPBOX_CLIENT_ID || !env.DROPBOX_CLIENT_SECRET || !env.DROPBOX_IMPORT_TOKEN_SECRET || !env.DROPBOX_IMPORT_WORKFLOW) {
+    return { enabled: false, reason: "not-configured" };
+  }
+  return { enabled: true, reason: "available" };
+}
+
+function requireDropboxImportCapability(env: Env): void {
+  const capability = dropboxImportCapability(env);
+  if (capability.enabled) return;
+  throw new HTTPException(409, {
+    message: capability.reason === "disabled"
+      ? "Dropbox import is currently disabled"
+      : "Dropbox import is not configured",
+  });
 }
 
 function redirectUri(env: Env): string {
@@ -42,7 +62,7 @@ export function registerDropboxImportRoutes(app: App): void {
   // OAuth start: staff initiates Dropbox authorization
   app.post("/api/dropbox-import/oauth/start", async c => {
     const principal = c.get("principal");
-    if (!dropboxImportEnabled(c.env)) throw new HTTPException(503, { message: "Dropbox import is not available" });
+    requireDropboxImportCapability(c.env);
     await requirePermission(c.env, principal, "delivery.files.upload", {}, true);
 
     const secret = importTokenSecret(c.env);
@@ -73,6 +93,7 @@ export function registerDropboxImportRoutes(app: App): void {
 
   // OAuth callback: Dropbox redirects back here
   app.get("/api/dropbox-import/oauth/callback", async c => {
+    requireDropboxImportCapability(c.env);
     const state = c.req.query("state") || "";
     const code = c.req.query("code") || "";
     if (!state || !code) throw new HTTPException(400, { message: "Dropbox authorization was not completed" });
@@ -107,7 +128,10 @@ export function registerDropboxImportRoutes(app: App): void {
         redirect_uri: redirectUri(c.env),
       }),
     });
-    if (!tokenResponse.ok) throw new HTTPException(400, { message: "Dropbox authorization failed" });
+    if (!tokenResponse.ok) {
+      console.warn(JSON.stringify({ event: "dropbox-import.oauth-token-exchange-failed", status: tokenResponse.status }));
+      throw new HTTPException(400, { message: "Dropbox authorization failed; reconnect Dropbox and try again" });
+    }
     const token = await tokenResponse.json() as { access_token: string; refresh_token?: string; expires_in?: number; account_id?: string; scope?: string };
 
     const authId = randomSecret(16);
@@ -131,21 +155,24 @@ export function registerDropboxImportRoutes(app: App): void {
   // Browse Dropbox folders
   app.post("/api/dropbox-import/browse", async c => {
     const principal = c.get("principal");
-    if (!dropboxImportEnabled(c.env)) throw new HTTPException(503, { message: "Dropbox import is not available" });
+    requireDropboxImportCapability(c.env);
     await requirePermission(c.env, principal, "delivery.files.upload", {}, true);
 
     const body = await c.req.json().catch(() => ({})) as { authorizationId?: string; path?: string; cursor?: string };
     if (!body.authorizationId) throw new HTTPException(400, { message: "Authorization ID is required" });
 
-    const secret = importTokenSecret(c.env);
-    const auth = await c.env.OPS_DB.prepare(
-      "SELECT credential_ciphertext,credential_iv,key_id,token_expires_at,revoked_at FROM dropbox_import_authorizations WHERE id=? AND staff_id=? AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')",
-    ).bind(body.authorizationId, principal.id).first<{ credential_ciphertext: string; credential_iv: string; key_id: string; token_expires_at: string | null; revoked_at: string | null }>();
-    if (!auth || auth.revoked_at) throw new HTTPException(404, { message: "Dropbox authorization not found or expired" });
-
-    const credential = await decryptImportSecret<{ accessToken: string; refreshToken?: string }>(
-      auth.credential_ciphertext, auth.credential_iv, secret, `authorization:${body.authorizationId}`,
-    );
+    let credential: { accessToken: string };
+    try {
+      credential = await loadDropboxImportCredential(c.env, body.authorizationId, principal.id);
+    } catch (error) {
+      console.warn(JSON.stringify({
+        event: "dropbox-import.browse-authorization-failed",
+        authorizationId: body.authorizationId,
+        staffId: principal.id,
+        error: error instanceof Error ? error.message : String(error),
+      }));
+      throw new HTTPException(401, { message: "Dropbox authorization expired; reconnect Dropbox and try again" });
+    }
     const client = new DropboxImportClient({ accessToken: credential.accessToken });
 
     if (body.cursor) {
@@ -160,7 +187,7 @@ export function registerDropboxImportRoutes(app: App): void {
   // Start an import job
   app.post("/api/dropbox-import/jobs", async c => {
     const principal = c.get("principal");
-    if (!dropboxImportEnabled(c.env)) throw new HTTPException(503, { message: "Dropbox import is not available" });
+    requireDropboxImportCapability(c.env);
     await requirePermission(c.env, principal, "delivery.files.upload", {}, true);
 
     const body = await c.req.json().catch(() => ({})) as {
@@ -223,7 +250,7 @@ export function registerDropboxImportRoutes(app: App): void {
       "UPDATE dropbox_import_jobs SET status='cancelling',cancel_requested_at=COALESCE(cancel_requested_at,datetime('now')),updated_at=datetime('now') WHERE id=? AND staff_id=? AND status IN ('queued','running','cancelling')",
     ).bind(c.req.param("id"), principal.id).run();
     if (!result.meta.changes) throw new HTTPException(409, { message: "This import can no longer be cancelled" });
-    return c.json({ success: true, status: "cancelled" });
+    return c.json({ success: true, status: "cancelling" });
   });
 
   // List recent jobs

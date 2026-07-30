@@ -17,14 +17,14 @@ import { deleteAlias, resolveAliasKey, upsertAlias } from "./aliases";
 import { executeSourceDelete, previewSourceDelete } from "./source-delete";
 import { servePreparedArtifact, type PreparedArtifactVariant } from "./prepared-artifact";
 import { runRetention } from "./retention";
-import { listTrash, purgeTrash, restoreTombstone } from "./trash";
+import { listTrash, purgeTrash, r2PurgeEnabled, restoreTombstone } from "./trash";
 import { processR2OperationJobs, purgeReplacementRecovery, registerR2CrudRoutes } from "./r2-crud";
 import { requiresAdministratorForMutation } from "./r2-crud-validation";
 import { enqueueExpiringNotifications, processDeliveryNotifications } from "./notifications";
 import { createIncomingStaffRouter, dispatchIncomingPublicRequest } from "./incoming";
 import { servePdfSourceFile, serveSourceFile } from "./source-file";
 import { isFrameableOperationsPdfRequest } from "./frame-policy";
-import { registerDropboxImportRoutes } from "./dropbox-import-routes";
+import { dropboxImportCapability, registerDropboxImportRoutes } from "./dropbox-import-routes";
 import { cleanupDropboxImports } from "./dropbox-import";
 
 type Variables={principal:StaffPrincipal;administrator:boolean};
@@ -42,7 +42,7 @@ async function requireGlobal(env:Env,principal:StaffPrincipal,permission:Permiss
 function placeholders(values:unknown[]):string{return values.map(()=>"?").join(",");}
 
 app.get("/health",c=>c.json({status:"ok",service:"ltds-ops"}));
-app.get("/api/session",async c=>{const principal=c.get("principal"),administrator=c.get("administrator");const [permissions,globalScope]=await Promise.all([permissionKeys(c.env,principal),sqlScope(c.env,principal,"dashboard.view")]);const divisions=administrator&&globalScope.global?await c.env.OPS_DB.prepare("SELECT id,name,code FROM divisions WHERE active=1 ORDER BY name").all():await c.env.OPS_DB.prepare("SELECT d.id,d.name,d.code FROM divisions d JOIN staff_divisions sd ON sd.division_id=d.id WHERE sd.staff_id=? AND d.active=1 ORDER BY sd.is_primary DESC,d.name").bind(principal.id).all();return c.json({user:{id:principal.id,email:principal.email,displayName:principal.displayName,status:"Active",profileType:administrator?"Administrator":"Employee",isAdministrator:administrator,permissions:employeePermissions(permissions,administrator),divisions:divisions.results},csrfToken:await csrfToken(c.env,principal),timezone:c.env.DISPLAY_TIMEZONE,mapStyleUrl:c.env.MAP_STYLE_URL||null});});
+app.get("/api/session",async c=>{const principal=c.get("principal"),administrator=c.get("administrator");const [permissions,globalScope]=await Promise.all([permissionKeys(c.env,principal),sqlScope(c.env,principal,"dashboard.view")]);const divisions=administrator&&globalScope.global?await c.env.OPS_DB.prepare("SELECT id,name,code FROM divisions WHERE active=1 ORDER BY name").all():await c.env.OPS_DB.prepare("SELECT d.id,d.name,d.code FROM divisions d JOIN staff_divisions sd ON sd.division_id=d.id WHERE sd.staff_id=? AND d.active=1 ORDER BY sd.is_primary DESC,d.name").bind(principal.id).all();return c.json({user:{id:principal.id,email:principal.email,displayName:principal.displayName,status:"Active",profileType:administrator?"Administrator":"Employee",isAdministrator:administrator,permissions:employeePermissions(permissions,administrator),divisions:divisions.results},csrfToken:await csrfToken(c.env,principal),timezone:c.env.DISPLAY_TIMEZONE,mapStyleUrl:c.env.MAP_STYLE_URL||null,capabilities:{dropboxImport:dropboxImportCapability(c.env)}});});
 
 async function visibilityScope(env:Env,principal:StaffPrincipal,administrator:boolean,permission:Permission){const scope=await sqlScope(env,principal,permission);return administrator?scope:{...scope,global:false,divisions:[]};}
 async function paScopeWhere(env:Env,principal:StaffPrincipal,administrator:boolean,permission:Permission,alias:string,kind:"operation"|"task"){return paResourceFilter(await visibilityScope(env,principal,administrator,permission),principal,administrator,alias,kind);}
@@ -124,7 +124,7 @@ async function scheduled(event:ScheduledController,env:Env,ctx:ExecutionContext)
   })());
   if(hour===8&&minute===30)ctx.waitUntil(reconcileFileIndex(env));
   if(hour===8&&minute===45)ctx.waitUntil(runRetention(env));
-  ctx.waitUntil(purgeTrash(env));
+  if(r2PurgeEnabled(env))ctx.waitUntil(purgeTrash(env));
   ctx.waitUntil(processR2OperationJobs(env));
   ctx.waitUntil(purgeReplacementRecovery(env));
   ctx.waitUntil(enqueueExpiringNotifications(env).then(() => processDeliveryNotifications(env)));

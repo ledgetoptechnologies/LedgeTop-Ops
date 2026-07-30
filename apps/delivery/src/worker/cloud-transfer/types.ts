@@ -93,6 +93,7 @@ export interface CloudProviderAdapter {
     destination: unknown;
     conflictMode: ConflictMode;
     signalCancelled: () => Promise<boolean>;
+    loadUploadState: () => Promise<{ state: unknown; uploadedBytes: number } | null>;
     saveUploadState: (state: unknown, uploadedBytes: number) => Promise<void>;
   }): Promise<CloudProviderTransferResult>;
   revoke?(credential: CloudCredential): Promise<void>;

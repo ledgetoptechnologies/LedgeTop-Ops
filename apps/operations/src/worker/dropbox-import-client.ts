@@ -18,6 +18,7 @@ export interface DropboxMetadata {
   ".tag": "file" | "folder" | "deleted";
   size?: number;
   contentHash?: string;
+  rev?: string;
 }
 
 export interface DropboxListResult {
@@ -91,7 +92,21 @@ export class DropboxImportClient {
       method: "POST",
       headers,
     });
-    if (!response.ok && response.status !== 206) {
+    if (range) {
+      const expectedEnd = range.offset + range.length - 1;
+      const contentRange = response.headers.get("Content-Range");
+      const contentLength = response.headers.get("Content-Length");
+      const match = contentRange?.match(/^bytes (\d+)-(\d+)\/(\d+)$/);
+      const validRange = response.status === 206
+        && match?.[1] === String(range.offset)
+        && match?.[2] === String(expectedEnd)
+        && Number(match?.[3]) > expectedEnd
+        && contentLength === String(range.length);
+      if (!validRange) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new DropboxImportError("dropbox-download-range", response.status, "invalid range response");
+      }
+    } else if (!response.ok) {
       const text = await response.text().catch(() => "");
       throw new DropboxImportError("dropbox-download", response.status, text);
     }
@@ -113,10 +128,14 @@ export class DropboxImportClient {
   }
 
   async revoke(): Promise<void> {
-    await this.fetcher(`${API}/auth/token/revoke`, {
+    const response = await this.fetcher(`${API}/auth/token/revoke`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.accessToken}` },
     });
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      throw new DropboxImportError("dropbox-token-revoke", response.status, "");
+    }
   }
 }
 

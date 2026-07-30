@@ -12,6 +12,7 @@ export type Env = Cloudflare.Env & {
   R2_ACCESS_KEY_ID?: string;
   R2_SECRET_ACCESS_KEY?: string;
   R2_ACCOUNT_ID: string;
+  R2_PURGE_ENABLED?: string;
   R2_BUCKET_NAME: string;
   R2_INCOMING_BUCKET_NAME: string;
   INCOMING_BASE_URL: string;
