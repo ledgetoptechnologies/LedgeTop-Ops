@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultEvidence = path.join(root, ".backups", "staging-release-evidence.json");
@@ -134,7 +134,7 @@ export function validateEvidenceFile(base = root, evidenceFile = defaultEvidence
     const configs = {};
     const configHashes = {};
     for (const app of apps) {
-      const file = path.join(base, "apps", app, "wrangler.staging.json");
+      const file = path.join(base, "apps", APP_SOURCE_DIRS[app], "wrangler.staging.json");
       configs[app] = JSON.parse(fs.readFileSync(file, "utf8"));
       configHashes[app] = sha256(file);
     }

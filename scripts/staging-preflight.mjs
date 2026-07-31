@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
@@ -128,11 +128,12 @@ export function validateFiles(base = root) {
   const configs = {};
   const errors = [];
   for (const app of apps) {
-    const stagingFile = path.join(base, "apps", app, "wrangler.staging.json");
+    const sourceDir = APP_SOURCE_DIRS[app];
+    const stagingFile = path.join(base, "apps", sourceDir, "wrangler.staging.json");
     if (!fs.existsSync(stagingFile)) { errors.push(`${path.relative(base, stagingFile)} is missing`); continue; }
     try {
       configs[app] = readJson(stagingFile);
-      errors.push(...validateApp(app, configs[app], readJson(path.join(base, "apps", app, "wrangler.jsonc"))));
+      errors.push(...validateApp(app, configs[app], readJson(path.join(base, "apps", sourceDir, "wrangler.jsonc"))));
     } catch (error) { errors.push(`${path.relative(base, stagingFile)} is invalid JSON: ${error.message}`); }
   }
   if (apps.every((app) => configs[app])) errors.push(...validateCrossApp(configs));

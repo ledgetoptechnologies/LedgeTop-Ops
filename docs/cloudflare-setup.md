@@ -7,10 +7,23 @@ Configure the Git repository `ledgetoptechnologies/LTDS-Ops` three times:
 | Setting | Operations | Delivery | Ops Sync |
 |---|---|---|---|
 | Production branch | `main` | `main` | `main` |
-| Root directory | `/apps/operations` | `/apps/delivery` | `/apps/ops-sync` |
+| Root directory | `/apps/operations` | `/apps/client` | `/apps/ops-sync` |
 | Build command | `npm run build` | `npm run build` | `npm run build` |
 | Deploy command | `npx wrangler deploy` | `npx wrangler deploy` | `npm run deploy` |
 | Version command | `npx wrangler versions upload` | `npx wrangler versions upload` | `npx wrangler versions upload` |
+
+### Source-layout transition guard
+
+The Delivery Worker Builds root must change from `/apps/delivery` to
+`/apps/client` before the first build from a commit containing the source move.
+That separately approved dashboard change is the only Cloudflare configuration
+required by the source-layout refactor. It must not rename `ltds-delivery` or
+change its routes, custom domains, Access applications, variables, secrets, D1,
+R2, Queue, Workflow, Images, Stream, or rate-limit bindings.
+
+Do not attach `client.ledgetopdroneservices.com` or remove `delivery.` as part
+of the source-layout change. The later client-host-aware release uses the
+ordered clean cutover and rollback in [future planning](future-plans.md#ordered-hostname-cutover).
 
 ### Branch-control release gate
 
@@ -88,7 +101,7 @@ Set `STREAM_ACCOUNT_ID` and `STREAM_CUSTOMER_CODE` as non-secret runtime variabl
 Create a dedicated R2 API credential with read-only access to `client-data` for short-lived original-file and ZIP tickets. Do not reuse the TrueNAS write credential:
 
 ```powershell
-Set-Location apps/delivery
+Set-Location apps/client
 npx.cmd wrangler secret put R2_ACCESS_KEY_ID
 npx.cmd wrangler secret put R2_SECRET_ACCESS_KEY
 ```
@@ -175,7 +188,7 @@ Export both production D1 databases before migration. Then apply Operations migr
 ```powershell
 Set-Location apps/operations
 npm.cmd run db:migrate:remote
-Set-Location ../delivery
+Set-Location ../client
 npm.cmd run db:migrate:remote
 ```
 

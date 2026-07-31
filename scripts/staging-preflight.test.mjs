@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { validateApp, validateCrossApp } from "./staging-preflight.mjs";
-import { REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { validateApp, validateCrossApp, validateFiles } from "./staging-preflight.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -76,4 +79,17 @@ test("requires shared staging resources to agree", () => {
   const configs = { delivery: stagingConfig("delivery"), operations: stagingConfig("operations"), "ops-sync": stagingConfig("ops-sync") };
   configs.operations.d1_databases[1].database_id = "wrong";
   assert(validateCrossApp(configs).some((error) => error.includes("DELIVERY_DB")));
+});
+test("resolves logical delivery staging files from apps/client", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-layout-"));
+  for (const app of ["delivery", "operations", "ops-sync"]) {
+    const directory = path.join(base, "apps", APP_SOURCE_DIRS[app]);
+    fs.mkdirSync(directory, { recursive: true });
+    const staging = stagingConfig(app);
+    fs.writeFileSync(path.join(directory, "wrangler.staging.json"), JSON.stringify(staging));
+    fs.writeFileSync(path.join(directory, "wrangler.jsonc"), JSON.stringify(productionFrom(staging)));
+  }
+  assert.deepEqual(validateFiles(base), []);
+  fs.renameSync(path.join(base, "apps", "client"), path.join(base, "apps", "delivery"));
+  assert(validateFiles(base).some((error) => error.includes(path.join("apps", "client", "wrangler.staging.json"))));
 });

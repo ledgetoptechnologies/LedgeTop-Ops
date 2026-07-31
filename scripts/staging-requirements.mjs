@@ -1,5 +1,14 @@
 export const STAGING_ACCOUNT_ID = "846c924bf17bf4f3dd15c97a4c5d1d51";
 
+// Logical service identities remain stable even when their source directories
+// change. "delivery" still names the deployed Worker and staging evidence;
+// only its repository directory is apps/client.
+export const APP_SOURCE_DIRS = Object.freeze({
+  delivery: "client",
+  operations: "operations",
+  "ops-sync": "ops-sync",
+});
+
 export const REQUIRED_STAGING_SECRETS = Object.freeze({
   delivery: Object.freeze(["DELIVERY_SESSION_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]),
   operations: Object.freeze(["OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "PROJECT_ALPHA_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "TURNSTILE_SITE_KEY", "TURNSTILE_SECRET", "INCOMING_SESSION_SECRET", "INCOMING_ACCESS_CODE_PEPPER", "INCOMING_PICKUP_SECRET"]),
@@ -67,7 +76,7 @@ export const STAGING_INVENTORY = Object.freeze({
     routes: [{ pattern: STAGING_HOSTS.operations, custom_domain: true }],
     d1_databases: [
       { binding: "OPS_DB", database_name: "ltds-ops-staging", database_id: "78b34173-b168-4e3d-9832-bb9d245cc6b8", migrations_dir: "migrations" },
-      { binding: "DELIVERY_DB", database_name: "client-data-staging", database_id: "b6f653ab-9acd-4421-9ad0-207754b59aeb", migrations_dir: "../delivery/migrations" },
+      { binding: "DELIVERY_DB", database_name: "client-data-staging", database_id: "b6f653ab-9acd-4421-9ad0-207754b59aeb", migrations_dir: "../client/migrations" },
     ],
     r2_buckets: [
       { binding: "DATA_BUCKET", bucket_name: "client-data-staging" },
