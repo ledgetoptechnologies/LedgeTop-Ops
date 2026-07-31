@@ -8,6 +8,8 @@
     "build": "npm --prefix apps/delivery run build && npm --prefix apps/operations run build && npm --prefix apps/ops-sync run build",
     "staging:check": "node scripts/staging-preflight.mjs",
     "staging:check:test": "node --test scripts/staging-preflight.test.mjs",
+    "staging:evidence:check": "node scripts/staging-evidence.mjs",
+    "staging:evidence:check:test": "node --test scripts/staging-evidence.test.mjs",
     "staging:release:prepare": "node scripts/staging-release.mjs"
   }
 }

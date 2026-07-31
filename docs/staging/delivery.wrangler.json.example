@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "<DELIVERY_STAGING_WORKER>-staging",
+  "account_id": "846c924bf17bf4f3dd15c97a4c5d1d51",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-07-16",
   "compatibility_flags": ["nodejs_compat"],
@@ -28,6 +29,9 @@
     "GOOGLE_CLIENT_ID": "",
     "GOOGLE_PICKER_API_KEY": "",
     "GOOGLE_CLOUD_PROJECT_NUMBER": ""
+  },
+  "secrets": {
+    "required": ["DELIVERY_SESSION_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "ratelimits": [
