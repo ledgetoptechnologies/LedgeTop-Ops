@@ -1,0 +1,148 @@
+{
+  "releaseCommit": "<REVIEWED_40_CHARACTER_GIT_SHA>",
+  "configSha256": {
+    "delivery": "<SHA256>",
+    "operations": "<SHA256>",
+    "ops-sync": "<SHA256>"
+  },
+  "credential": {
+    "valid": false,
+    "accountId": "846c924bf17bf4f3dd15c97a4c5d1d51",
+    "verifiedAt": "<ISO_8601_TIMESTAMP>",
+    "confirmedPermissions": [
+      "workers:write",
+      "d1:write",
+      "zone:read"
+    ]
+  },
+  "branchBuilds": {
+    "delivery": {
+      "productionBranch": "main",
+      "nonProductionBuildsEnabled": true,
+      "verifiedAt": "<ISO_8601_TIMESTAMP>",
+      "evidenceRef": "<DASHBOARD_OR_API_RECORD>"
+    },
+    "operations": {
+      "productionBranch": "main",
+      "nonProductionBuildsEnabled": true,
+      "verifiedAt": "<ISO_8601_TIMESTAMP>",
+      "evidenceRef": "<DASHBOARD_OR_API_RECORD>"
+    },
+    "ops-sync": {
+      "productionBranch": "main",
+      "nonProductionBuildsEnabled": true,
+      "verifiedAt": "<ISO_8601_TIMESTAMP>",
+      "evidenceRef": "<DASHBOARD_OR_API_RECORD>"
+    }
+  },
+  "projectAlpha": {
+    "baseUrl": "https://<PROJECT_ALPHA_STAGING_HOST>",
+    "approvalRef": "<APPROVAL_REFERENCE>",
+    "operationsReadCredentialReady": false,
+    "opsSyncServiceAuthReady": false,
+    "opsSyncAccessGroupReady": false,
+    "ed25519Ready": false
+  },
+  "hosts": {
+    "delivery": {
+      "hostname": "delivery-staging.ledgetopdroneservices.com",
+      "dnsReady": false,
+      "accessReady": true
+    },
+    "operations": {
+      "hostname": "ops-staging.ledgetopdroneservices.com",
+      "dnsReady": false,
+      "accessReady": true
+    },
+    "incoming": {
+      "hostname": "incoming-staging.ledgetopdroneservices.com",
+      "published": false
+    },
+    "ops-sync": {
+      "hostname": "ops-sync-staging.ledgetopdroneservices.com",
+      "dnsReady": false,
+      "accessReady": false
+    }
+  },
+  "access": {
+    "audiences": {
+      "delivery": "f6942c97e306d81d206c94746dc731413d5e59461b35d9b213f13fdf96b62835",
+      "operations": "e5e2026896677c6fbaa0c7eb9b795e326516c15a3191dfba3c2ad43da4728671",
+      "ops-sync": "7b578ad388abb5c5eb550e86ddf3263af0b2a5694e8bf4810c67affa5721ec37"
+    },
+    "groupId": "<STAGING_ACCESS_GROUP_ID>",
+    "groupName": "<STAGING_ACCESS_GROUP_NAME>",
+    "testerEmail": "<VERIFIED_TEST_EMAIL>",
+    "testerActiveOperationsUser": false,
+    "approvalRef": "<APPROVAL_REFERENCE>"
+  },
+  "secrets": {
+    "delivery": {
+      "names": [
+        "DELIVERY_SESSION_SECRET",
+        "DELIVERY_ACCESS_CODE_PEPPER",
+        "AUDIT_IP_SECRET",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY"
+      ],
+      "verifiedAt": "<ISO_8601_TIMESTAMP>",
+      "source": "<wrangler-secret-list|reviewed-secrets-file>",
+      "workerIsNew": true,
+      "remoteNames": [],
+      "evidenceRef": "<EVIDENCE_REFERENCE>"
+    },
+    "operations": {
+      "names": [
+        "OPERATIONS_SESSION_SECRET",
+        "DELIVERY_TOKEN_SECRET",
+        "DELIVERY_ACCESS_CODE_PEPPER",
+        "AUDIT_IP_SECRET",
+        "PROJECT_ALPHA_API_KEY",
+        "R2_ACCESS_KEY_ID",
+        "R2_SECRET_ACCESS_KEY"
+      ],
+      "verifiedAt": "<ISO_8601_TIMESTAMP>",
+      "source": "<wrangler-secret-list|reviewed-secrets-file>",
+      "evidenceRef": "<EVIDENCE_REFERENCE>",
+      "workerIsNew": true,
+      "remoteNames": []
+    },
+    "ops-sync": {
+      "names": [
+        "CF_ACCESS_GROUP_API_TOKEN",
+        "PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY"
+      ],
+      "verifiedAt": "<ISO_8601_TIMESTAMP>",
+      "source": "<wrangler-secret-list|reviewed-secrets-file>",
+      "evidenceRef": "<EVIDENCE_REFERENCE>",
+      "workerIsNew": true,
+      "remoteNames": []
+    }
+  },
+  "backups": {
+    "delivery": {
+      "path": ".backups/<DELIVERY_EXPORT>.sql",
+      "databaseName": "client-data-staging",
+      "databaseId": "b6f653ab-9acd-4421-9ad0-207754b59aeb",
+      "generatedAt": "<ISO_8601_TIMESTAMP>",
+      "bytes": 0,
+      "sha256": "<SHA256>",
+      "confirmedIntentionallyEmpty": false
+    },
+    "operations": {
+      "path": ".backups/<OPERATIONS_EXPORT>.sql",
+      "databaseName": "ltds-ops-staging",
+      "databaseId": "78b34173-b168-4e3d-9832-bb9d245cc6b8",
+      "generatedAt": "<ISO_8601_TIMESTAMP>",
+      "bytes": 0,
+      "sha256": "<SHA256>",
+      "confirmedIntentionallyEmpty": false
+    }
+  },
+  "approvals": {
+    "stagingDnsAndRoutes": false,
+    "stagingMigrations": false,
+    "stagingDeployment": false,
+    "productionChanges": false
+  }
+}

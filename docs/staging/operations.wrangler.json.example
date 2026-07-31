@@ -1,15 +1,13 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "<OPERATIONS_STAGING_WORKER>-staging",
+  "account_id": "846c924bf17bf4f3dd15c97a4c5d1d51",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-07-22",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
-  "routes": [
-    { "pattern": "<OPERATIONS_STAGING_HOST>", "custom_domain": true },
-    { "pattern": "<INCOMING_STAGING_HOST>", "custom_domain": true }
-  ],
+  "routes": [{ "pattern": "<OPERATIONS_STAGING_HOST>", "custom_domain": true }],
   "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*", "/health", "/r/*"] },
   "vars": {
     "PUBLIC_BASE_URL": "https://<OPERATIONS_STAGING_HOST>",
@@ -37,6 +35,9 @@
     "NOTIFICATION_FROM": "",
     "DROPBOX_IMPORT_ENABLED": "false",
     "DROPBOX_CLIENT_ID": ""
+  },
+  "secrets": {
+    "required": ["OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "PROJECT_ALPHA_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "triggers": { "crons": ["*/15 * * * *"] },

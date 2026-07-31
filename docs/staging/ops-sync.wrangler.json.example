@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "<OPS_SYNC_STAGING_WORKER>-staging",
+  "account_id": "846c924bf17bf4f3dd15c97a4c5d1d51",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-22",
   "compatibility_flags": ["nodejs_compat"],
@@ -17,6 +18,9 @@
     "CF_ACCESS_GROUP_NAME": "<STAGING_ACCESS_GROUP_NAME>",
     "APPLICATION_KEY": "ltds_ops_staging",
     "PROJECT_ALPHA_ALLOW_LEGACY_HMAC": "false"
+  },
+  "secrets": {
+    "required": ["CF_ACCESS_GROUP_API_TOKEN", "PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY"]
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "triggers": { "crons": ["*/5 * * * *"] },
