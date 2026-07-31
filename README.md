@@ -64,4 +64,6 @@ Complete [Cloudflare setup](docs/cloudflare-setup.md), including the Operations 
 
 For production operations, use the [operations runbook](docs/operations/README.md), the [media-preview contract](docs/truenas/preview-pipeline.md), and the [inbound request design](docs/inbound-requests.md). These documents distinguish repository behavior from operator-owned Cloudflare, TrueNAS, Hermes, and alerting configuration.
 
+Exploratory concepts that are not committed roadmap or active scope are kept in [future planning proposals](docs/future-plans.md).
+
 The Worker code is production-packaged, but a production deploy should not be performed with `OPERATIONS_AUD` still set to its placeholder or before the Access application protects the Operations hostname.
