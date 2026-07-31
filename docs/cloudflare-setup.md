@@ -25,6 +25,32 @@ Do not attach `client.ledgetopdroneservices.com` or remove `delivery.` as part
 of the source-layout change. The later client-host-aware release uses the
 ordered clean cutover and rollback in [future planning](future-plans.md#ordered-hostname-cutover).
 
+### Client portal authentication hold
+
+The client portal has a default-off Cloudflare Access adapter. It accepts only
+a signed `Cf-Access-Jwt-Assertion` from a **separate Client Portal** Access
+application, validating its HTTPS issuer, exact client audience, `RS256`
+signature, `type=app`, expiry, verified email, and nonempty subject. The Worker
+then independently resolves the issuer/subject against a local active
+membership and grant; an Access login alone never grants a client account,
+project, delivery, or billing access.
+
+Set `CLIENT_ACCESS_TEAM_DOMAIN` and `CLIENT_ACCESS_AUD` only for that dedicated
+app. Do not reuse the Operations, Ops Sync, or historic Delivery audience. The
+future internal Access-group reconciler consumes the client membership outbox;
+its `CLIENT_ACCESS_GROUP_API_TOKEN` secret belongs on that internal worker only,
+never on the public client/delivery Worker. It uses a separate client group and
+must not mix staff ACL provisioning with client invitations.
+
+Do not enable the portal, attach `client.ledgetopdroneservices.com`, create a
+client Access application, or add identity secrets merely because the UI and
+repository foundation exist. Those are later, separately reviewed changes with
+staging authentication and authorization evidence. Public share paths remain
+outside Access and continue to use their own revocable-link controls. The service-request API
+uses the existing `PUBLIC_BULK_RATE_LIMITER` with a scope-separated,
+server-derived account key; this foundation adds no rate-limit binding or
+Cloudflare resource.
+
 ### Branch-control release gate
 
 The production trigger for all three integrations must be `main` only, after

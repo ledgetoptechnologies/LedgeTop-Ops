@@ -18,6 +18,7 @@ import { buildDropboxAuthorizationUrl, buildGoogleAuthorizationUrl, createOAuthS
 import type { CloudCredential } from "./cloud-transfer/types";
 import { createCloudProviderAdapter } from "./cloud-transfer/providers";
 import type { CloudProvider, CloudTransferEnv } from "./cloud-transfer/types";
+import { createClientPortalRouter } from "./client-portal/routes";
 export { friendlyBulkFailure } from "./bulk-download-errors";
 
 type Variables = { share: ShareRow };
@@ -696,6 +697,8 @@ export async function cleanupTemporaryZips(env: Env, now = Date.now()): Promise<
   const currentWindow = Math.floor(now / (60 * 60 * 1000));
   await primaryDb(env).prepare("DELETE FROM bulk_download_quota WHERE window_start<?").bind(currentWindow - 48).run();
 }
+
+app.route("/api/client", createClientPortalRouter());
 
 app.notFound(c => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {

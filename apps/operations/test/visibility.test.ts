@@ -10,7 +10,7 @@ const scope: SqlScope = { global: false, divisions: ["division-30"], assigned: f
 describe("operations visibility", () => {
   it("limits the employee session to read-only operational permissions", () => {
     const permissions: Permission[] = ["dashboard.view", "operations.view", "tasks.create", "delivery.browse", "team.view"];
-    expect(employeePermissions(permissions, false)).toEqual(["dashboard.view", "operations.view"]);
+    expect(employeePermissions(permissions, false)).toEqual(["dashboard.view", "operations.view", "delivery.browse", "team.view"]);
     expect(employeePermissions(permissions, true)).toEqual(permissions);
   });
 
@@ -53,5 +53,13 @@ describe("operations visibility", () => {
   it("gives administrators global active-record visibility", () => {
     expect(paResourceFilter(scope, employee, true, "o", "operation")).toEqual({ sql: "o.active=1", values: [] });
     expect(paProjectFilter(scope, employee, true)).toEqual({ sql: "p.active=1", values: [] });
+  });
+
+  it("requires an LTDS-local explicit all-operations grant before a synced employee can see all records", () => {
+    const globalScope: SqlScope = { ...scope, global: true };
+    expect(paResourceFilter(globalScope, employee, false, "o", "operation")).not.toEqual({ sql: "o.active=1", values: [] });
+    expect(paResourceFilter(globalScope, employee, false, "o", "operation", true)).toEqual({ sql: "o.active=1", values: [] });
+    expect(paProjectFilter(globalScope, employee, false, true)).toEqual({ sql: "p.active=1", values: [] });
+    expect(paCalendarFilter(globalScope, employee, false, "e", true)).toEqual({ sql: "e.active=1", values: [] });
   });
 });

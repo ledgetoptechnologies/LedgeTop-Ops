@@ -39,6 +39,25 @@ remain disabled. Incoming browser uploads stay confined to the private
 quarantine boundary, pass through TrueNAS verification, and require an
 authorized publication step before becoming client-browsable.
 
+### Current implementation boundary
+
+The client portal foundation is intentionally default-off. It provides a
+provider-neutral verified-principal interface, account/project/delivery grant
+repositories, a session-first responsive shell, and rate-limited service-request
+APIs. The production principal resolver still returns no identity, so setting a
+feature flag alone cannot authenticate a client. No client identity provider,
+password database, enrollment flow, recovery flow, or MFA system has been
+selected or implemented.
+
+Actual client login is a blocking dependency for the MVP and requires a
+user-approved identity provider or Cloudflare Access pattern, its exact token
+verification contract, and staging evidence. That decision must happen before
+enabling the portal or attaching `client.ledgetopdroneservices.com`. It must not
+replace the local account, project, delivery, and service-request authorization
+checks. The current request mutation limiter reuses the existing public bulk
+rate-limit binding with a distinct server-derived account key; no Cloudflare
+resource or binding change is introduced by this slice.
+
 ### Ordered hostname cutover
 
 This source-layout PR performs none of these external actions. Execute them only
@@ -94,6 +113,8 @@ back or deletes D1/R2 data or bound services:
 
 - Invitation-only authenticated portal with explicit client memberships and
   delivery grants.
+- A user-approved identity provider or Access pattern, with verified server-side
+  identity context and staging login/logout/denial evidence.
 - Flight/service request submission and status visibility.
 - Existing delivery browsing, preview, and download behavior.
 - Existing password-protected public share links.
