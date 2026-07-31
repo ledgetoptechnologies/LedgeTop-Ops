@@ -6,7 +6,7 @@ import { REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAG
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
 const markers = /<[^>]+>|CHANGE[_-]?ME|REPLACE[_-]?ME|example\.invalid/i;
-const disabled = ["CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED", "DROPBOX_IMPORT_ENABLED", "INCOMING_UPLOADS_ENABLED", "R2_PURGE_ENABLED"];
+const disabled = ["CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED", "DROPBOX_IMPORT_ENABLED", "DIRECT_DELIVERY_UPLOADS_ENABLED", "R2_PURGE_ENABLED"];
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const mapped = (entries = [], key) => new Map(entries.map((item) => [item.binding, item[key]]));
 const routeHosts = (config) => (config.routes ?? []).map((route) => typeof route === "string" ? route : route.pattern);
@@ -86,9 +86,6 @@ export function validateApp(app, staging, production) {
   for (const route of staging.routes ?? []) {
     if (typeof route !== "object" || route.custom_domain !== true) errors.push(`${app} routes must use explicit custom_domain=true objects`);
     if (typeof route === "object" && !/(?:^|[.-])staging(?:[.-]|$)/i.test(route.pattern ?? "")) errors.push(`${app} route must be a staging hostname`);
-  }
-  if (app === "operations" && vars.INCOMING_UPLOADS_ENABLED !== "true" && stageRoutes.includes(vars.INCOMING_EXPECTED_HOST)) {
-    errors.push("operations must not publish the incoming staging hostname while incoming uploads are disabled");
   }
 
   compareResources(app, "D1", staging.d1_databases, production.d1_databases, "database_id", errors);

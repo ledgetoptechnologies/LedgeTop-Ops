@@ -84,8 +84,9 @@ npm.cmd run staging:release:prepare
 & '.\apps\ops-sync\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/ops-sync/wrangler.staging.json --outdir C:\tmp\ltds-ops-sync-staging-dry-run
 ```
 
-The incoming staging hostname must remain absent from Operations routes while
-`INCOMING_UPLOADS_ENABLED=false`.
+The isolated incoming staging hostname is required for quarantine intake testing.
+Keep direct browser uploads into client delivery storage disabled with
+`DIRECT_DELIVERY_UPLOADS_ENABLED=false`.
 
 ## Read-only backup and migration preflight
 
