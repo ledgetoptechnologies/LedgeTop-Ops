@@ -8,7 +8,7 @@ import { operationsSectionPath, pathOperationsSection, pathPage, type Operations
 import { DropboxImportDialog } from "./DropboxImportDialog";
 
 type OperationsUser=SessionUser&{status:"Active";profileType:"Administrator"|"Employee";isAdministrator:boolean};
-interface Session{user:OperationsUser;csrfToken:string;timezone:string;mapStyleUrl:string|null;capabilities?:{dropboxImport?:{enabled:boolean;reason:"available"|"disabled"|"not-configured"};incomingUploads?:{enabled:boolean;reason:"available"|"disabled"}}}
+interface Session{user:OperationsUser;csrfToken:string;timezone:string;mapStyleUrl:string|null;capabilities?:{dropboxImport?:{enabled:boolean;reason:"available"|"disabled"|"not-configured"};incomingUploads?:{enabled:boolean;reason:"available"|"disabled"};directDeliveryUploads?:{enabled:boolean;reason:"available"|"disabled"}}}
 interface ActiveDeliveryShare{id:string;shareUrl:string|null;passwordProtected:boolean;expiresAt:string|null;recoverable:boolean;recipientEmail?:string|null}
 interface DeliveryShareResult{id:string;shareUrl:string;accessCode:string|null;passwordProtected:boolean;expiresAt:string|null;lifecycle:"created"|"reused"|"updated"|"rotated";idempotentReplay:boolean}
 interface IncomingUploadSummary{id?:string;name?:string;fileName?:string;contributorName?:string;status?:string;size?:number;createdAt?:string;uploadedAt?:string}
@@ -86,7 +86,7 @@ function DeliveryWorkspaceV2({session}:{session:Session}){
   const{data,error,reload}=useLoad<any>(()=>api<any>(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`),[prefix]);
   const items:DeliveryItem[]=data?[...(data.folders||[]),...(data.files||[])]:[];
   const admin=session.user.isAdministrator;
-  const canCreate=admin&&allowed(session.user,"delivery.files.create"),canUpload=allowed(session.user,"delivery.files.upload");
+  const canCreate=admin&&allowed(session.user,"delivery.files.create"),canUpload=allowed(session.user,"delivery.files.upload")&&session.capabilities?.directDeliveryUploads?.enabled===true;
   const canCopy=admin&&allowed(session.user,"delivery.files.copy"),canMove=admin&&allowed(session.user,"delivery.files.move");
   const canDelete=admin&&allowed(session.user,"delivery.delete"),canShare=allowed(session.user,"delivery.share.create");
   const openFolder=useCallback((nextPrefix:string)=>{
@@ -147,6 +147,7 @@ function DeliveryWorkspaceV2({session}:{session:Session}){
   const previewItems=items.filter(item=>!item.prefix);
   return <><div className="delivery-toolbar"><div className="delivery-toolbar-actions">
     <button className="button-orange" disabled={!canCreate} onClick={()=>{const name=prompt("New folder name");if(name?.trim())void run(deliveryOperations.createFolder(prefix,name.trim()))}}>New folder</button>
+    {!canUpload&&allowed(session.user,"delivery.files.upload")&&<span className="managed-badge">Direct browser uploads are disabled. Use an Incoming request link.</span>}
     <button className="button-ghost" disabled={!canUpload||uploading} onClick={()=>fileInput?.click()}>{uploading?"Uploading…":"Upload files"}</button>
     <button className="button-ghost" disabled={!canUpload||uploading} onClick={()=>folderInput?.click()}>Upload folder</button>
     {session.capabilities?.dropboxImport?.enabled&&<button className="button-ghost" disabled={!canUpload} onClick={()=>setShowDropboxImport(true)}>Import from Dropbox</button>}

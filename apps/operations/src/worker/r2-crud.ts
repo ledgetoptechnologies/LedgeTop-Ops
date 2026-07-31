@@ -11,6 +11,11 @@ import { presignOperationsR2Part } from "./r2-signing";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { assertSafeCrudDestination, normalizeCrudKey, operationsMultipartPartSize } from "./r2-crud-validation";
 import { artifactDirectory } from "./artifacts";
+import {
+  DIRECT_DELIVERY_UPLOADS_DISABLED_CODE,
+  DIRECT_DELIVERY_UPLOADS_DISABLED_MESSAGE,
+  directDeliveryUploadsCapability,
+} from "./direct-upload-policy";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
 type ConflictPolicy = "fail" | "skip" | "replace" | "rename";
@@ -189,6 +194,17 @@ async function startJob(c:any,jobId:string,instanceId=jobId):Promise<void>{try{a
 export async function purgeReplacementRecovery(env:Env):Promise<number>{const rows=await env.OPS_DB.prepare("SELECT id,recovery_key FROM r2_replacement_recovery WHERE datetime(purge_after)<=datetime('now') ORDER BY purge_after LIMIT 25").all<{id:string;recovery_key:string}>();for(const row of rows.results){await env.DATA_BUCKET.delete(row.recovery_key);await env.OPS_DB.prepare("DELETE FROM r2_replacement_recovery WHERE id=?").bind(row.id).run();}await env.OPS_DB.prepare("DELETE FROM r2_event_suppressions WHERE datetime(expires_at)<=datetime('now')").run();return rows.results.length;}
 
 export function registerR2CrudRoutes(app: App): void {
+  const requireDirectDeliveryUploads = async (c: any, next: () => Promise<void>) => {
+    if (!directDeliveryUploadsCapability(c.env).enabled) {
+      return c.json({
+        error: DIRECT_DELIVERY_UPLOADS_DISABLED_CODE,
+        message: DIRECT_DELIVERY_UPLOADS_DISABLED_MESSAGE,
+      }, 503);
+    }
+    await next();
+  };
+  app.use("/api/delivery/uploads", requireDirectDeliveryUploads);
+  app.use("/api/delivery/uploads/*", requireDirectDeliveryUploads);
   const guardUploadSession = async (c: any, next: () => Promise<void>) => {
     if (c.req.method === "GET") return next();
     const session = await c.env.OPS_DB.prepare("SELECT object_key,created_by,status,expires_at FROM r2_upload_sessions WHERE id=?").bind(c.req.param("id")).first() as { object_key: string; created_by: string; status: string; expires_at: string } | null;

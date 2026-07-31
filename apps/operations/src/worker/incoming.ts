@@ -15,9 +15,8 @@ import {
   verifyIncomingSession,
 } from "./incoming-security";
 import { incomingRequestPage } from "./incoming-page";
+import { canonicalMultipartEtag } from "./multipart-etag";
 import {
-  INCOMING_UPLOADS_DISABLED_CODE,
-  INCOMING_UPLOADS_DISABLED_MESSAGE,
   incomingPublicRequestDecision,
   incomingUploadsCapability,
 } from "./incoming-policy";
@@ -25,7 +24,6 @@ import type { Env, StaffPrincipal } from "./types";
 
 export type IncomingEnv = Env & {
   INCOMING_BUCKET: R2Bucket;
-  INCOMING_UPLOADS_ENABLED?: string;
   INCOMING_BASE_URL: string;
   INCOMING_EXPECTED_HOST?: string;
   TURNSTILE_SITE_KEY?: string;
@@ -187,7 +185,11 @@ async function checkpoints(env: IncomingEnv, uploadId: string): Promise<PartChec
     `SELECT part_number partNumber,etag,size
      FROM file_request_upload_parts WHERE upload_id=? ORDER BY part_number`,
   ).bind(uploadId).all<PartCheckpoint>();
-  return rows.results;
+  return rows.results.map((part) => {
+    const etag = canonicalMultipartEtag(part.etag);
+    if (!etag) throw new Error("Stored incoming multipart ETag is invalid");
+    return { ...part, etag };
+  });
 }
 
 async function deterministicFileId(
@@ -482,6 +484,8 @@ publicApp.put("/api/public/requests/:publicId/files/:fileId/parts/:partNumber", 
     etag: z.string().trim().min(1).max(256),
     size: z.number().int().positive(),
   }));
+  const etag = canonicalMultipartEtag(input.etag);
+  if (!etag) throw new HTTPException(400, { message: "Invalid upload part ETag" });
   const partSize = incomingMultipartPartSize(upload.declared_size);
   const partCount = Math.ceil(upload.declared_size / partSize);
   const expectedSize = partNumber === partCount
@@ -495,8 +499,8 @@ publicApp.put("/api/public/requests/:publicId/files/:fileId/parts/:partNumber", 
      VALUES (?,?,?,?)
      ON CONFLICT(upload_id,part_number) DO UPDATE SET
        etag=excluded.etag,size=excluded.size,updated_at=datetime('now')`,
-  ).bind(upload.id, partNumber, input.etag, input.size).run();
-  return c.json({ ok: true, partNumber });
+  ).bind(upload.id, partNumber, etag, input.size).run();
+  return c.json({ ok: true, partNumber, etag });
 });
 
 publicApp.get("/api/public/requests/:publicId/files/:fileId/resume", async (c) => {
@@ -528,11 +532,16 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
       etag: z.string().min(1).max(256),
     })).min(1).max(10_000),
   }));
+  const requestedParts = input.parts.map((part) => {
+    const etag = canonicalMultipartEtag(part.etag);
+    if (!etag) throw new HTTPException(400, { message: "Invalid upload part ETag" });
+    return { partNumber: part.partNumber, etag };
+  });
   const saved = await checkpoints(c.env, upload.id);
   if (
-    saved.length !== input.parts.length
+    saved.length !== requestedParts.length
     || saved.some((part, index) =>
-      part.partNumber !== input.parts[index]?.partNumber || part.etag !== input.parts[index]?.etag)
+      part.partNumber !== requestedParts[index]?.partNumber || part.etag !== requestedParts[index]?.etag)
   ) {
     throw new HTTPException(409, { message: "Upload checkpoints do not match the completion request" });
   }
@@ -545,7 +554,7 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
   try {
     object = await c.env.INCOMING_BUCKET
       .resumeMultipartUpload(upload.object_key, upload.upload_id)
-      .complete(input.parts);
+      .complete(requestedParts);
   } catch (error) {
     const completed=await c.env.INCOMING_BUCKET.head(upload.object_key);
     if(completed&&completed.size===upload.declared_size)object=completed;
@@ -625,8 +634,15 @@ publicApp.post("/api/internal/uploads/:uploadId/accepted", async (c) => {
 
 publicApp.onError((error, c) => {
   if (error instanceof HTTPException) return c.json({ message: error.message }, error.status);
-  console.error("incoming_request_failed", error);
-  return c.json({ message: "Unexpected server error" }, 500);
+  const reference = crypto.randomUUID();
+  console.error(JSON.stringify({
+    event: "incoming_request_failed",
+    reference,
+    method: c.req.method,
+    path: c.req.path,
+    message: error instanceof Error ? error.message : "unknown",
+  }));
+  return c.json({ error: "incoming_server_error", message: "The upload could not be completed. Please retry the file.", reference }, 500);
 });
 
 export function isIncomingPublicRequest(request: Request, env: IncomingEnv): boolean {
@@ -647,36 +663,10 @@ export function dispatchIncomingPublicRequest(
       { headers: { "Cache-Control": "no-store" } },
     );
   }
-  if (decision === "disabled") {
-    return Response.json(
-      { error: INCOMING_UPLOADS_DISABLED_CODE, message: INCOMING_UPLOADS_DISABLED_MESSAGE },
-      {
-        status: 503,
-        headers: {
-          "Cache-Control": "no-store",
-          "Cloudflare-CDN-Cache-Control": "no-store",
-          "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
-          "Referrer-Policy": "no-referrer",
-          "X-Content-Type-Options": "nosniff",
-          "X-Robots-Tag": "noindex, nofollow",
-        },
-      },
-    );
-  }
   return publicApp.fetch(request, env, context);
 }
 
 const staffApp = new Hono<{ Bindings: IncomingEnv; Variables: StaffVariables }>();
-
-staffApp.use("*", async (c, next) => {
-  if (!incomingUploadsCapability(c.env).enabled) {
-    return c.json(
-      { error: INCOMING_UPLOADS_DISABLED_CODE, message: INCOMING_UPLOADS_DISABLED_MESSAGE },
-      503,
-    );
-  }
-  await next();
-});
 
 async function requireIncomingStaff(c: {
   env: IncomingEnv;

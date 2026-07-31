@@ -24,7 +24,7 @@ function stagingConfig(app) {
       CLOUD_TRANSFER_GOOGLE_ENABLED: "false",
       CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED: "false",
       DROPBOX_IMPORT_ENABLED: "false",
-      INCOMING_UPLOADS_ENABLED: "false",
+      DIRECT_DELIVERY_UPLOADS_ENABLED: "false",
       R2_PURGE_ENABLED: "false",
       ...(app === "operations" ? { PROJECT_ALPHA_BASE_URL: "https://project-alpha-staging.test", INCOMING_EXPECTED_HOST: "incoming-staging.ledgetopdroneservices.com", INCOMING_BASE_URL: "https://incoming-staging.ledgetopdroneservices.com" } : {}),
       ...(app === "ops-sync" ? { CF_ACCESS_GROUP_ID: "staging-group", CF_ACCESS_GROUP_NAME: "Staging Testers" } : {}),

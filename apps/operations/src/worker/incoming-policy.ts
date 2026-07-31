@@ -1,25 +1,19 @@
-export const INCOMING_UPLOADS_DISABLED_CODE = "incoming_uploads_disabled";
-export const INCOMING_UPLOADS_DISABLED_MESSAGE = "Incoming uploads are currently disabled";
 
 export interface IncomingUploadsCapability {
   enabled: boolean;
   reason: "available" | "disabled";
 }
 
-export interface IncomingUploadsPolicyConfig {
-  INCOMING_UPLOADS_ENABLED?: string;
-}
+export type IncomingUploadsPolicyConfig = object;
 
-export type IncomingPublicRequestDecision = "enabled" | "disabled" | "health" | "internal-completion";
+export type IncomingPublicRequestDecision = "enabled" | "health" | "internal-completion";
 
-export function incomingUploadsCapability(config: IncomingUploadsPolicyConfig): IncomingUploadsCapability {
-  return config.INCOMING_UPLOADS_ENABLED === "true"
-    ? { enabled: true, reason: "available" }
-    : { enabled: false, reason: "disabled" };
+export function incomingUploadsCapability(_config: IncomingUploadsPolicyConfig): IncomingUploadsCapability {
+  return { enabled: true, reason: "available" };
 }
 
 export function incomingPublicRequestDecision(
-  config: IncomingUploadsPolicyConfig,
+  _config: IncomingUploadsPolicyConfig,
   method: string,
   pathname: string,
 ): IncomingPublicRequestDecision {
@@ -32,5 +26,5 @@ export function incomingPublicRequestDecision(
   ) {
     return "internal-completion";
   }
-  return incomingUploadsCapability(config).enabled ? "enabled" : "disabled";
+  return "enabled";
 }
