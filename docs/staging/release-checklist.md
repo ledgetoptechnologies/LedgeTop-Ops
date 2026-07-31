@@ -5,7 +5,7 @@ Dropbox, Google, permanent purge, and incoming uploads disabled.
 
 ## Current credential boundary
 
-Use `& '.\apps\delivery\node_modules\.bin\wrangler.cmd' whoami` immediately before a release. Record only the
+Use `& '.\apps\client\node_modules\.bin\wrangler.cmd' whoami` immediately before a release. Record only the
 account, authentication method, permission names, and timestamp. Never copy an
 OAuth token or API token into the evidence file.
 
@@ -70,16 +70,16 @@ secret values in Git, Wrangler `vars`, shell arguments, or release evidence.
 Run from repository root:
 
 ```powershell
-& '.\apps\delivery\node_modules\.bin\wrangler.cmd' whoami
+& '.\apps\client\node_modules\.bin\wrangler.cmd' whoami
 npm.cmd run staging:check
 npm.cmd run staging:check:test
-Get-FileHash -Algorithm SHA256 apps/delivery/wrangler.staging.json
+Get-FileHash -Algorithm SHA256 apps/client/wrangler.staging.json
 Get-FileHash -Algorithm SHA256 apps/operations/wrangler.staging.json
 Get-FileHash -Algorithm SHA256 apps/ops-sync/wrangler.staging.json
 node scripts/staging-evidence.mjs .backups/staging-release-evidence.json
 npm.cmd run staging:release:prepare
 
-& '.\apps\delivery\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/delivery/wrangler.staging.json --outdir C:\tmp\ltds-delivery-staging-dry-run
+& '.\apps\client\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/client/wrangler.staging.json --outdir C:\tmp\ltds-delivery-staging-dry-run
 & '.\apps\operations\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/operations/wrangler.staging.json --outdir C:\tmp\ltds-ops-staging-dry-run
 & '.\apps\ops-sync\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/ops-sync/wrangler.staging.json --outdir C:\tmp\ltds-ops-sync-staging-dry-run
 ```
@@ -97,7 +97,7 @@ A very small export is not useful recovery evidence unless the database is
 reviewed and explicitly confirmed intentionally empty:
 
 ```powershell
-& '.\apps\delivery\node_modules\.bin\wrangler.cmd' d1 export client-data-staging --remote --config apps/delivery/wrangler.staging.json --output .backups/client-data-staging-pre-release.sql --skip-confirmation
+& '.\apps\client\node_modules\.bin\wrangler.cmd' d1 export client-data-staging --remote --config apps/client/wrangler.staging.json --output .backups/client-data-staging-pre-release.sql --skip-confirmation
 & '.\apps\operations\node_modules\.bin\wrangler.cmd' d1 export ltds-ops-staging --remote --config apps/operations/wrangler.staging.json --output .backups/ltds-ops-staging-pre-release.sql --skip-confirmation
 Get-Item .backups/client-data-staging-pre-release.sql
 Get-Item .backups/ltds-ops-staging-pre-release.sql
@@ -110,14 +110,14 @@ all evidence gates and separate migration approval pass, rerun identity and
 evidence checks immediately before applying migrations:
 
 ```powershell
-& '.\apps\delivery\node_modules\.bin\wrangler.cmd' whoami
+& '.\apps\client\node_modules\.bin\wrangler.cmd' whoami
 npm.cmd run staging:evidence:check
 ```
 
 ```powershell
-& '.\apps\delivery\node_modules\.bin\wrangler.cmd' d1 migrations list client-data-staging --remote --config apps/delivery/wrangler.staging.json
+& '.\apps\client\node_modules\.bin\wrangler.cmd' d1 migrations list client-data-staging --remote --config apps/client/wrangler.staging.json
 & '.\apps\operations\node_modules\.bin\wrangler.cmd' d1 migrations list ltds-ops-staging --remote --config apps/operations/wrangler.staging.json
-& '.\apps\delivery\node_modules\.bin\wrangler.cmd' d1 migrations apply client-data-staging --remote --config apps/delivery/wrangler.staging.json
+& '.\apps\client\node_modules\.bin\wrangler.cmd' d1 migrations apply client-data-staging --remote --config apps/client/wrangler.staging.json
 & '.\apps\operations\node_modules\.bin\wrangler.cmd' d1 migrations apply ltds-ops-staging --remote --config apps/operations/wrangler.staging.json
 ```
 
@@ -132,12 +132,12 @@ to create reviewable staging versions without routing traffic. Immediately
 before this mutation phase, rerun identity and evidence checks:
 
 ```powershell
-& '.\apps\delivery\node_modules\.bin\wrangler.cmd' whoami
+& '.\apps\client\node_modules\.bin\wrangler.cmd' whoami
 npm.cmd run staging:evidence:check
 ```
 
 ```powershell
-& '.\apps\delivery\node_modules\.bin\wrangler.cmd' versions upload --strict --config apps/delivery/wrangler.staging.json --secrets-file '.backups\delivery-staging.secrets.json'
+& '.\apps\client\node_modules\.bin\wrangler.cmd' versions upload --strict --config apps/client/wrangler.staging.json --secrets-file '.backups\delivery-staging.secrets.json'
 & '.\apps\operations\node_modules\.bin\wrangler.cmd' versions upload --strict --config apps/operations/wrangler.staging.json --secrets-file '.backups\operations-staging.secrets.json'
 & '.\apps\ops-sync\node_modules\.bin\wrangler.cmd' versions upload --strict --config apps/ops-sync/wrangler.staging.json --secrets-file '.backups\ops-sync-staging.secrets.json'
 ```

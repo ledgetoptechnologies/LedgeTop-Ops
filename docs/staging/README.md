@@ -21,7 +21,7 @@ Never reuse a production worker name, host, Access audience, D1 ID, R2 bucket, q
 Copy each example to the corresponding ignored path and replace every placeholder:
 
 ```text
-docs/staging/delivery.wrangler.json.example    -> apps/delivery/wrangler.staging.json
+docs/staging/delivery.wrangler.json.example    -> apps/client/wrangler.staging.json
 docs/staging/operations.wrangler.json.example  -> apps/operations/wrangler.staging.json
 docs/staging/ops-sync.wrangler.json.example    -> apps/ops-sync/wrangler.staging.json
 ```

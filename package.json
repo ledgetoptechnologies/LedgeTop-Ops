@@ -3,9 +3,9 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
-    "check": "npm --prefix apps/delivery run check && npm --prefix apps/operations run check && npm --prefix apps/ops-sync run check",
-    "test": "npm --prefix apps/delivery test && npm --prefix apps/operations test && npm --prefix apps/ops-sync test",
-    "build": "npm --prefix apps/delivery run build && npm --prefix apps/operations run build && npm --prefix apps/ops-sync run build",
+    "check": "npm --prefix apps/client run check && npm --prefix apps/operations run check && npm --prefix apps/ops-sync run check",
+    "test": "node --test scripts/source-layout-invariants.test.mjs && npm --prefix apps/client test && npm --prefix apps/operations test && npm --prefix apps/ops-sync test",
+    "build": "npm --prefix apps/client run build && npm --prefix apps/operations run build && npm --prefix apps/ops-sync run build",
     "staging:check": "node scripts/staging-preflight.mjs",
     "staging:check:test": "node --test scripts/staging-preflight.test.mjs",
     "staging:evidence:check": "node scripts/staging-evidence.mjs",

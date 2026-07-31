@@ -14,7 +14,7 @@ Project Alpha is authoritative for explicitly selected users, Project Managers a
 ```text
 apps/
   operations/  React/Vite staff UI + Hono Worker API
-  delivery/    React/Vite client UI + Hono Worker API
+  client/      React/Vite client UI + Hono Worker API
   ops-sync/    Project Alpha webhook + Cloudflare Access reconciliation Worker
 packages/
   shared/      permission and API contracts
@@ -29,13 +29,13 @@ Each app intentionally has its own `package.json`, lockfile, `wrangler.jsonc`, m
 | Worker | Build root | Deploy command |
 |---|---|---|
 | `ltds-ops` | `/apps/operations` | `npm run deploy` |
-| `ltds-delivery` | `/apps/delivery` | `npm run deploy` |
+| `ltds-delivery` | `/apps/client` | `npm run deploy` |
 | `ltds-ops-sync` | `/apps/ops-sync` | `npm run deploy` |
 
 ## Local verification
 
 ```powershell
-npm.cmd --prefix apps/delivery install
+npm.cmd --prefix apps/client install
 npm.cmd --prefix apps/operations install
 npm.cmd --prefix apps/ops-sync install
 npm.cmd run check
