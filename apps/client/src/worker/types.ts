@@ -20,6 +20,14 @@ export interface Env {
   PUBLIC_BULK_RATE_LIMITER: RateLimit;
   PUBLIC_BASE_URL: string;
   EXPECTED_HOST: string;
+  CLIENT_PORTAL_ENABLED?: string;
+  CLIENT_PORTAL_ORIGIN?: string;
+  /**
+   * Dedicated Client Portal Access application values. These deliberately do
+   * not reuse the staff Operations or Ops Sync audience.
+   */
+  CLIENT_ACCESS_TEAM_DOMAIN?: string;
+  CLIENT_ACCESS_AUD?: string;
   ENVIRONMENT: string;
   SESSION_KEY_ID: string;
   PREVIOUS_SESSION_KEY_ID?: string;

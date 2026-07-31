@@ -42,6 +42,17 @@ export async function hasPermission(env: Env, principal: StaffPrincipal, permiss
   return evaluatePermission(await loadGrants(env, principal.id), principal, permission, context);
 }
 
+/**
+ * Project Alpha roles establish that a person may enter Operations.  A broad
+ * Operations view is deliberately an LTDS-local, explicit grant: synced roles
+ * must never turn an assigned-work view into an all-work view by accident.
+ */
+export async function hasLocalGlobalAllow(env: Env, principal: StaffPrincipal, permission: Permission): Promise<boolean> {
+  return Boolean(await env.OPS_DB.withSession("first-primary").prepare(
+    "SELECT 1 ok FROM staff_permission_overrides WHERE staff_id=? AND permission_key=? AND effect='allow' AND scope='global' LIMIT 1",
+  ).bind(principal.id, permission).first());
+}
+
 export async function permissionKeys(env: Env, principal: StaffPrincipal): Promise<Permission[]> {
   const grants = await loadGrants(env, principal.id);
   return PERMISSIONS.filter(permission => {
