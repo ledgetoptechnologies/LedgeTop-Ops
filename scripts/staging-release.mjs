@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateEvidenceFile } from "./staging-evidence.mjs";
 import { validateFiles } from "./staging-preflight.mjs";
+import { APP_SOURCE_DIRS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -27,10 +28,11 @@ for (const script of ["staging:check:test", "staging:evidence:check:test", "chec
   }
 }
 for (const app of ["delivery", "operations", "ops-sync"]) {
-  const executable = path.join(root, "apps", app, "node_modules", ".bin", process.platform === "win32" ? "wrangler.cmd" : "wrangler");
+  const sourceDir = APP_SOURCE_DIRS[app];
+  const executable = path.join(root, "apps", sourceDir, "node_modules", ".bin", process.platform === "win32" ? "wrangler.cmd" : "wrangler");
   const result = spawnSync(executable, [
     "deploy", "--dry-run",
-    "--config", path.join(root, "apps", app, "wrangler.staging.json"),
+    "--config", path.join(root, "apps", sourceDir, "wrangler.staging.json"),
     "--outdir", path.join(root, ".backups", "dry-run", app),
   ], { cwd: root, stdio: "inherit" });
   if (result.status !== 0) {

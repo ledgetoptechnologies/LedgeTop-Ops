@@ -92,7 +92,7 @@ credentials and must never be returned to the browser or logged.
 Apply the Delivery D1 migration before enabling a provider:
 
 ```powershell
-cd apps/delivery
+cd apps/client
 npx wrangler d1 migrations apply client-data --remote
 ```
 

@@ -1,15 +1,112 @@
 # Future planning proposals
 
-> **Status: exploratory only.** Nothing in this document is a committed
-> roadmap, approved architecture, production capability, or active
-> implementation scope. Each proposal requires product validation, security
-> review, cost analysis, staging evidence, and a separate implementation
-> decision.
+> **Status:** The client-portal transition section records an approved planning
+> direction, but it does not authorize production domains, routes, Access
+> applications, secrets, bindings, migrations, or deployment. All other
+> proposals remain exploratory and require product validation, security review,
+> cost analysis, staging evidence, and a separate implementation decision.
 
 Todd's application is read-only reference material. It must not be modified or
 treated as an upstream dependency. Any useful interaction patterns observed
 there must be independently specified and implemented within the owning LTDS
-system only after validation.
+system only after validation. It is not a requirements source, code or schema
+source, integration target, dependency, or authorization model.
+
+## Client portal transition (target: August 21, 2026)
+
+**Approved planning direction:** Move the public source layout from
+`apps/delivery` to `apps/client` while initially retaining the deployed
+`ltds-delivery` Worker, its resource bindings, and its runtime contracts. The
+source-layout change does not authorize any Cloudflare or production change.
+
+The intended public boundary is:
+
+- `ops.ledgetopdroneservices.com` remains Cloudflare Access-protected and
+  staff-only.
+- `ops-sync.ledgetopdroneservices.com` remains internal/service-authenticated
+  and exposes no client journey.
+- `client.ledgetopdroneservices.com` becomes the sole client-facing origin for
+  the authenticated portal, flight/service requests, quarantine-first incoming
+  uploads, password-protected public shares, and delivery browsing.
+- `delivery.ledgetopdroneservices.com` has no client traffic and is testing-only.
+  It is removed in the client-host cutover instead of becoming a redirect or a
+  compatibility origin.
+
+The domain migration must keep the existing Worker identity and bindings stable,
+and the cutover must be independently reversible without deleting or recreating
+the Worker or any bound resource. Browser writes to client-visible `client-data`
+remain disabled. Incoming browser uploads stay confined to the private
+quarantine boundary, pass through TrueNAS verification, and require an
+authorized publication step before becoming client-browsable.
+
+### Ordered hostname cutover
+
+This source-layout PR performs none of these external actions. Execute them only
+after separate review and approval of client-host-aware runtime code:
+
+1. Merge and deploy a pinned client-host-aware version to the existing
+   `ltds-delivery` Worker. Do not rename the Worker or change its D1, R2, Queue,
+   Workflow, Images, Stream, rate-limit, variable, or secret bindings.
+2. Record the deployed and rollback version IDs; export the current
+   `delivery.` DNS/custom-domain and delivery-scoped Access administration
+   application and policy configuration. Confirm that the rollback version can
+   still serve `delivery.` without data or schema rollback.
+3. Pass staging and pre-cutover checks for portal authentication and
+   authorization, public shares, delivery browsing, request submission, and
+   quarantine upload boundaries. Keep `client.` unattached until these checks
+   pass.
+4. Attach `client.ledgetopdroneservices.com` to the existing Worker and create
+   or enable only the client-scoped Access application/policies required by the
+   authenticated portal. Do not detach `delivery.` yet.
+5. Test the real `client.` origin end to end: expected-host rejection,
+   unauthenticated denial, client isolation, staff/client authorization,
+   password-protected public shares, preview/download browsing, request flow,
+   quarantine-only uploads, and `/health`. This brief overlap is a cutover
+   validation window, not a redirect or compatibility period.
+6. If every client-origin gate passes, remove the `delivery.` custom domain/DNS
+   record and its delivery-scoped Access administration application. Do not
+   redirect `delivery.` and do not delete the Worker, versions, bindings,
+   secrets, D1 databases, R2 buckets, Queue, Workflows, Images, Stream, or
+   rate-limit resources.
+7. Re-run `client.` health/authentication/authorization and public-share smoke
+   tests after removal, then record the final domain, Access policy, Worker
+   version, and resource inventory as cutover evidence.
+
+### Ordered rollback
+
+Rollback changes hostname and Worker-version selection only; it never rolls
+back or deletes D1/R2 data or bound services:
+
+1. Stop further cutover changes and preserve logs/evidence. Leave all stateful
+   resources and secrets untouched.
+2. If `delivery.` has already been removed, restore its exported DNS/custom
+   domain and delivery-scoped Access administration application/policies on the
+   same `ltds-delivery` Worker.
+3. Restore the recorded pre-cutover Worker version or host configuration needed
+   to serve `delivery.` while retaining the same bindings and resource IDs.
+4. Verify `delivery.` health, expected-host behavior, Access administration,
+   public-share authorization, browsing, previews, and downloads.
+5. Only after `delivery.` is healthy, detach `client.` and disable its new
+   Access application/policies. Record the rollback version and hostname/policy
+   inventory. Do not delete `client.` records until the restored path is proven.
+
+### Minimum usable scope
+
+- Invitation-only authenticated portal with explicit client memberships and
+  delivery grants.
+- Flight/service request submission and status visibility.
+- Existing delivery browsing, preview, and download behavior.
+- Existing password-protected public share links.
+- Resumable quarantine uploads reachable from the client origin.
+- Staff provisioning, request triage, and publication authorization on Ops.
+
+### Deferred beyond the minimum
+
+Self-registration, a custom password/reset/MFA stack, automatic Project Alpha
+write-back, automated quarantine publication, electronic proposal acceptance,
+and redirect/dual-host compatibility behavior are outside the minimum August 21
+scope. The authorized clean hostname cutover is an operational release step,
+not an MVP runtime feature.
 
 ## Architectural boundary
 
