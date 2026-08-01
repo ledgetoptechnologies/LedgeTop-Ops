@@ -1,6 +1,7 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "@ltds/ui/styles.css";
+import "mapbox-gl/dist/mapbox-gl.css";
 import "./styles.css";
 import { ClientPortalApp } from "./ClientPortalApp";
 import { DeliveryApp } from "./DeliveryApp";

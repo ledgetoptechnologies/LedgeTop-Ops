@@ -65,6 +65,7 @@ export interface ClientServiceRequestInput {
   desiredCompletionAt?: string | null;
   latitude?: number | null;
   longitude?: number | null;
+  areaGeoJson?: { type: "Polygon"; coordinates: [number, number][][] } | null;
 }
 
 export interface ClientServiceRequest {
@@ -83,6 +84,7 @@ export interface ClientServiceRequest {
   desiredCompletionAt: string | null;
   latitude: number | null;
   longitude: number | null;
+  areaGeoJson?: { type: "Polygon"; coordinates: [number, number][][] } | null;
   status: "submitted" | "under_review" | "accepted" | "declined" | "cancelled" | "completed";
   createdAt: string;
   updatedAt: string;

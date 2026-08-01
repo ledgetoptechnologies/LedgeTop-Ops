@@ -70,11 +70,11 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Worker, resources, hosts, and asset routing remain unchanged", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "caf189f0ed59cb5d9bff1c5f16dba97b5b0a861230538de3f487d488f5bb0f95");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "9bca0fc0b6ff67909035f0ac9388e12f9f3e17cf4a1087986b56d28ab2d2096e");
   const config = readJson("apps/client/wrangler.jsonc");
-  assert.equal(config.name, "ltds-delivery");
+  assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
-  assert.equal(Object.hasOwn(config, "routes"), false);
+  assert.deepEqual(config.routes, [{ pattern: "client.ledgetopdroneservices.com", custom_domain: true }]);
   assert.equal(config.workers_dev, false);
   assert.equal(config.preview_urls, false);
   assert.deepEqual(config.triggers, { crons: ["15 * * * *"] });
@@ -84,8 +84,8 @@ test("the deployed Worker, resources, hosts, and asset routing remain unchanged"
     not_found_handling: "single-page-application",
     run_worker_first: ["/api/*", "/s/*", "/health"],
   });
-  assert.equal(config.vars.PUBLIC_BASE_URL, "https://delivery.ledgetopdroneservices.com");
-  assert.equal(config.vars.EXPECTED_HOST, "delivery.ledgetopdroneservices.com");
+  assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://client.ledgetopdroneservices.com");
+  assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
   assert.equal(config.vars.R2_BUCKET_NAME, "client-data");
   assert.deepEqual(config.r2_buckets, [{ binding: "DATA_BUCKET", bucket_name: "client-data" }]);
   assert.deepEqual(config.d1_databases, [{

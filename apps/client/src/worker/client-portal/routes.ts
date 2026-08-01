@@ -5,6 +5,7 @@ import type { Env } from "../types";
 import { d1ClientPortalRepository } from "./repository";
 import type { ClientPortalRepository, ClientPortalSession, ResolveClientPrincipal } from "./types";
 import { ClientAccessConfigurationError, clientAccessConfiguration, resolveCloudflareClientPrincipal } from "./access-identity";
+import { validateRequestArea } from "./request-area";
 
 interface ClientPortalDependencies {
   resolvePrincipal?: ResolveClientPrincipal;
@@ -32,9 +33,15 @@ const serviceRequestBody = z.object({
   desiredCompletionAt: z.iso.datetime({ offset: true }).nullable().optional(),
   latitude: z.number().finite().min(-90).max(90).nullable().optional(),
   longitude: z.number().finite().min(-180).max(180).nullable().optional(),
+  areaGeoJson: z.unknown().nullable().optional(),
 }).strict().superRefine((value, context) => {
   if ((value.latitude === null || value.latitude === undefined) !== (value.longitude === null || value.longitude === undefined)) {
     context.addIssue({ code: "custom", message: "Latitude and longitude must be provided together" });
+  }
+  try {
+    validateRequestArea(value.areaGeoJson);
+  } catch {
+    context.addIssue({ code: "custom", message: "The selected map area is invalid" });
   }
 });
 const invitationBody = z.object({
@@ -131,6 +138,7 @@ export function createClientPortalRouter(dependencies: ClientPortalDependencies 
       viewBilling: session.canViewBilling,
     } });
   });
+  router.get("/map-config", c => c.json({ mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null }));
 
   router.get("/projects", async c => c.json({ projects: await repository.listProjects(c.env, c.get("clientSession")) }));
 
@@ -240,6 +248,7 @@ export function createClientPortalRouter(dependencies: ClientPortalDependencies 
       desiredCompletionAt: parsed.data.desiredCompletionAt ?? null,
       latitude: parsed.data.latitude ?? null,
       longitude: parsed.data.longitude ?? null,
+      areaGeoJson: validateRequestArea(parsed.data.areaGeoJson),
     });
     if (!result) throw new HTTPException(404, { message: "Project not found or service requests are not permitted" });
     if (result.kind === "conflict") throw new HTTPException(409, { message: "This Idempotency-Key was already used for a different request" });

@@ -12,6 +12,7 @@ import {
   type PortalServiceRequestStatus,
 } from "./portal-api";
 import { clientPortalPath, parseClientPortalRoute, type ClientPortalPage } from "./portal-route";
+import { MapAreaSelector, type PortalAreaGeoJson } from "./MapAreaSelector";
 
 type ReadyPage = Exclude<ClientPortalPage, "not-found">;
 type PortalGate =
@@ -98,9 +99,11 @@ function RequestList({ requests, projects, limit }: { requests: PortalServiceReq
 function ServiceRequestForm({
   projects,
   onCreated,
+  mapboxPublicToken,
 }: {
   projects: PortalProject[];
   onCreated: (request: PortalServiceRequest) => void;
+  mapboxPublicToken: string | null;
 }) {
   const eligibleProjects = projects.filter(project => project.canRequestService);
   const [projectId, setProjectId] = useState(eligibleProjects[0]?.id || "");
@@ -115,8 +118,8 @@ function ServiceRequestForm({
   const [siteContactEmail, setSiteContactEmail] = useState("");
   const [siteContactPhone, setSiteContactPhone] = useState("");
   const [desiredCompletionAt, setDesiredCompletionAt] = useState("");
-  const [latitude, setLatitude] = useState("");
-  const [longitude, setLongitude] = useState("");
+  const [point, setPoint] = useState<[number, number] | null>(null);
+  const [areaGeoJson, setAreaGeoJson] = useState<PortalAreaGeoJson | null>(null);
   const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
@@ -144,8 +147,9 @@ function ServiceRequestForm({
         siteContactEmail: siteContactEmail.trim() || null,
         siteContactPhone: siteContactPhone.trim() || null,
         desiredCompletionAt: desiredCompletionAt ? new Date(desiredCompletionAt).toISOString() : null,
-        latitude: latitude === "" ? null : Number(latitude),
-        longitude: longitude === "" ? null : Number(longitude),
+        latitude: point?.[1] ?? null,
+        longitude: point?.[0] ?? null,
+        areaGeoJson,
       }, idempotencyKey);
       onCreated(request);
       setTitle("");
@@ -158,8 +162,8 @@ function ServiceRequestForm({
       setSiteContactEmail("");
       setSiteContactPhone("");
       setDesiredCompletionAt("");
-      setLatitude("");
-      setLongitude("");
+      setPoint(null);
+      setAreaGeoJson(null);
       setIdempotencyKey(crypto.randomUUID());
       setMessage({ tone: "success", text: "Request submitted. LTDS will review it shortly." });
     } catch (caught) {
@@ -197,8 +201,7 @@ function ServiceRequestForm({
         <label>Site contact name <span>(optional)</span><input value={siteContactName} onChange={event => setSiteContactName(event.target.value)} maxLength={160} /></label>
         <label>Site contact email <span>(optional)</span><input type="email" value={siteContactEmail} onChange={event => setSiteContactEmail(event.target.value)} maxLength={320} /></label>
         <label>Site contact phone <span>(optional)</span><input type="tel" value={siteContactPhone} onChange={event => setSiteContactPhone(event.target.value)} maxLength={64} /></label>
-        <label>Latitude <span>(optional, pair with longitude)</span><input type="number" min="-90" max="90" step="any" value={latitude} onChange={event => setLatitude(event.target.value)} /></label>
-        <label>Longitude <span>(optional, pair with latitude)</span><input type="number" min="-180" max="180" step="any" value={longitude} onChange={event => setLongitude(event.target.value)} /></label>
+        <div className="portal-form-wide"><MapAreaSelector value={areaGeoJson} onChange={setAreaGeoJson} token={mapboxPublicToken} point={point} onPoint={setPoint} /></div>
       </div>
       <div className="portal-form-actions">
         <p className={message?.tone === "error" ? "portal-message error" : "portal-message"} aria-live="polite">{message?.text}</p>
@@ -305,7 +308,7 @@ export function ClientPortalApp({ initialPage }: { initialPage: ClientPortalPage
     </>;
   } else if (page === "requests") {
     content = <><section className="portal-page-heading"><span className="eyebrow">Flight & service</span><h1>Requests</h1><p>Submit a request against a project where your account has permission.</p></section>
-      <Card title="New request"><ServiceRequestForm projects={projects} onCreated={onCreated} /></Card>
+      <Card title="New request"><ServiceRequestForm projects={projects} onCreated={onCreated} mapboxPublicToken={gate.data.mapboxPublicToken} /></Card>
       <Card title="Request history"><RequestList requests={requests} projects={projects} /></Card>
     </>;
   } else {

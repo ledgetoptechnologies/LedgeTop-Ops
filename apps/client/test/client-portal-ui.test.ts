@@ -45,6 +45,7 @@ describe("client portal browser API boundary", () => {
       calls.push(url);
       if (url === "/api/client/session") return pendingSession as Promise<T>;
       if (url === "/api/client/projects") return { projects: [] } as T;
+      if (url === "/api/client/map-config") return { mapboxPublicToken: null } as T;
       return { requests: [] } as T;
     }) as PortalRequest;
 
@@ -56,8 +57,9 @@ describe("client portal browser API boundary", () => {
       account: { id: "account-a", displayName: "Acme" },
       projects: [],
       requests: [],
+      mapboxPublicToken: null,
     });
-    expect(calls).toEqual(["/api/client/session", "/api/client/projects", "/api/client/service-requests"]);
+    expect(calls).toEqual(["/api/client/session", "/api/client/projects", "/api/client/service-requests", "/api/client/map-config"]);
   });
 
   it("stops at the session boundary when the browser is unauthenticated", async () => {

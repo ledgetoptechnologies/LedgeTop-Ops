@@ -28,6 +28,7 @@ export interface Env {
    */
   CLIENT_ACCESS_TEAM_DOMAIN?: string;
   CLIENT_ACCESS_AUD?: string;
+  MAPBOX_PUBLIC_TOKEN?: string;
   ENVIRONMENT: string;
   SESSION_KEY_ID: string;
   PREVIOUS_SESSION_KEY_ID?: string;

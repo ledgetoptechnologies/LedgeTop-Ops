@@ -43,6 +43,7 @@ export interface PortalServiceRequest {
   desiredCompletionAt?: string | null;
   latitude?: number | null;
   longitude?: number | null;
+  areaGeoJson?: { type: "Polygon"; coordinates: [number, number][][] } | null;
   status: PortalServiceRequestStatus;
   createdAt: string;
   updatedAt: string;
@@ -52,6 +53,7 @@ export interface PortalBootstrap {
   account: PortalAccount;
   projects: PortalProject[];
   requests: PortalServiceRequest[];
+  mapboxPublicToken: string | null;
 }
 
 export interface CreatePortalServiceRequestInput {
@@ -69,17 +71,19 @@ export interface CreatePortalServiceRequestInput {
   desiredCompletionAt?: string | null;
   latitude?: number | null;
   longitude?: number | null;
+  areaGeoJson?: { type: "Polygon"; coordinates: [number, number][][] } | null;
 }
 
 export type PortalRequest = typeof requestJson;
 
 export async function loadPortalBootstrap(request: PortalRequest = requestJson): Promise<PortalBootstrap> {
   const session = await request<{ account: PortalAccount }>("/api/client/session");
-  const [projects, requests] = await Promise.all([
+  const [projects, requests, mapConfig] = await Promise.all([
     request<{ projects: PortalProject[] }>("/api/client/projects"),
     request<{ requests: PortalServiceRequest[] }>("/api/client/service-requests"),
+    request<{ mapboxPublicToken: string | null }>("/api/client/map-config"),
   ]);
-  return { account: session.account, projects: projects.projects, requests: requests.requests };
+  return { account: session.account, projects: projects.projects, requests: requests.requests, mapboxPublicToken: mapConfig.mapboxPublicToken };
 }
 
 export async function loadPortalDeliveries(projectId: string, request: PortalRequest = requestJson): Promise<PortalDelivery[]> {

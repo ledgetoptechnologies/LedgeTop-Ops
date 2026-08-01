@@ -19,6 +19,7 @@
     "@ltds/ui": "file:../../packages/ui",
     "hono": "^4.9.9",
     "jose": "^6.2.3",
+    "mapbox-gl": "^3.14.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "zod": "^4.1.11"

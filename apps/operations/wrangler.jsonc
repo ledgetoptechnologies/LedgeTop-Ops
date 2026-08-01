@@ -40,12 +40,13 @@
     "ALERT_FROM": "",
     "ALERT_TO": "",
     "NOTIFICATION_FROM": "delivery@ledgetopdroneservices.com",
+    "CLIENT_REQUEST_TRIAGE_TO": "",
     "DROPBOX_IMPORT_ENABLED": "false",
     "DROPBOX_CLIENT_ID": ""
   },
   "send_email": [{ "name": "NOTIFICATION_EMAIL", "allowed_sender_addresses": ["delivery@ledgetopdroneservices.com"] }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "triggers": { "crons": ["*/15 * * * *"] },
+  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *"] },
   "r2_buckets": [
     { "binding": "DATA_BUCKET", "bucket_name": "client-data" },
     { "binding": "INCOMING_BUCKET", "bucket_name": "ltds-incoming" }

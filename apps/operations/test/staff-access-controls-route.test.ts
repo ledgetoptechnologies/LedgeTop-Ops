@@ -29,7 +29,7 @@ const principal = { id: "staff-admin", email: "admin@example.com", displayName: 
 const executionCtx = { waitUntil() {}, passThroughOnException() {} } as unknown as ExecutionContext;
 
 function environment(
-  target: { id: string; sync_protected: number } = { id: "staff-target", sync_protected: 0 },
+  target: { id: string; sync_protected: number; status?: string } = { id: "staff-target", sync_protected: 0 },
   staffRows: Record<string, unknown>[] = [],
 ) {
   const prepared: Array<{ sql: string; values: unknown[] }> = [];
@@ -42,7 +42,7 @@ function environment(
         bind(...values: unknown[]) { this.values = values; prepared.push(this); return this; },
         async first() {
           if (sql.includes("SELECT id,email,status,sync_protected FROM staff_users")) {
-            return { ...target, email: "target@example.com", status: "active" };
+            return { ...target, email: "target@example.com", status: target.status || "active" };
           }
           return null;
         },
@@ -119,6 +119,15 @@ describe("staff access-control route", () => {
     }), protectedOwner.env as any, executionCtx);
     expect(protectedResponse.status).toBe(409);
     expect(protectedOwner.batchCount()).toBe(0);
+  });
+
+  it("allows an administrator to prepare controls for an inactive synced staff member without activating them", async () => {
+    const state = environment({ id: "staff-pending", sync_protected: 0, status: "inactive" });
+    const response = await worker.fetch(new Request("https://ops.example/api/admin/staff/staff-pending/access-controls", {
+      method: "PUT", headers: { "Content-Type": "application/json", Origin: "https://ops.example" }, body: JSON.stringify(controls),
+    }), state.env as any, executionCtx);
+    expect(response.status).toBe(200);
+    expect(state.batchCount()).toBe(1);
   });
 
   it("excludes staff in explicitly denied divisions even with a global team allow", async () => {
