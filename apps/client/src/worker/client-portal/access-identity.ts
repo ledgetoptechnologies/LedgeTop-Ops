@@ -81,7 +81,10 @@ export async function resolveCloudflareClientPrincipal(
   const configuration = clientAccessConfiguration(env);
   const assertion = request.headers.get("Cf-Access-Jwt-Assertion")
     ?? accessAuthorizationCookie(request.headers.get("Cookie"));
-  if (!assertion) return null;
+  if (!assertion) {
+    console.warn("client-portal-access: assertion missing");
+    return null;
+  }
   try {
     const verified = await jwtVerify(
       assertion,
@@ -90,6 +93,7 @@ export async function resolveCloudflareClientPrincipal(
     );
     return verifiedClientPrincipalFromAccessPayload(verified.payload, configuration);
   } catch {
+    console.warn("client-portal-access: assertion rejected");
     return null;
   }
 }
