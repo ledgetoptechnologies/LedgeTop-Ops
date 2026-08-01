@@ -120,7 +120,10 @@ const CONSOLIDATED_CRON="*/15 * * * *";
 const CLIENT_REQUEST_NOTIFICATION_CRON="*/5 * * * *";
 
 async function scheduled(event:ScheduledController,env:Env,ctx:ExecutionContext){
-  if(event.cron===CLIENT_REQUEST_NOTIFICATION_CRON){ctx.waitUntil(processClientPortalRequestNotifications(env));return;}
+  if(event.cron===CLIENT_REQUEST_NOTIFICATION_CRON){
+    try{await processClientPortalRequestNotifications(env);}catch(error){console.error(JSON.stringify({event:"client_request_notifications.error",message:error instanceof Error?error.message:"unknown"}));}
+    return;
+  }
   if(event.cron!==CONSOLIDATED_CRON)return;
 
   ctx.waitUntil(refreshStreamStatuses(env));
