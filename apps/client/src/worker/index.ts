@@ -104,7 +104,7 @@ app.use("*", (c, next) => framePolicyForPath(c.req.path, c.req.method).xFrameOpt
 app.use("*", async (c, next) => {
   if (!requestHostAllowed(c.req.url,c.env)) return c.json({ error: "Not found" }, 404);
   await next();
-  c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+  c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=(self)");
   c.header("X-Robots-Tag", "noindex, nofollow");
   if (c.req.path.startsWith("/api/")) {
     c.header("Cloudflare-CDN-Cache-Control", "no-store");
