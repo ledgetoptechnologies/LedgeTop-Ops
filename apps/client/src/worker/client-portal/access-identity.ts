@@ -92,8 +92,11 @@ export async function resolveCloudflareClientPrincipal(
       { issuer: configuration.issuer, audience: configuration.audience, algorithms: ["RS256"], requiredClaims: ["iss", "aud", "sub", "exp"] },
     );
     return verifiedClientPrincipalFromAccessPayload(verified.payload, configuration);
-  } catch {
-    console.warn("client-portal-access: assertion rejected");
+  } catch (error) {
+    // Deliberately expose only the verifier category: assertion contents and
+    // identity claims must never reach Worker logs.
+    const category = error instanceof Error ? error.name : "unknown";
+    console.warn(`client-portal-access: assertion rejected (${category})`);
     return null;
   }
 }
