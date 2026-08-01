@@ -67,6 +67,9 @@ describe("Client Portal Cloudflare Access identity boundary", () => {
     expect(verifiedClientPrincipalFromAccessPayload({
       iss: configuration.issuer, aud: configuration.audience, type: "app", sub: "access-subject", email: "Client@Example.com", exp: 2_000_000_000,
     }, configuration)).toEqual({ issuer: configuration.issuer, subject: "access-subject", email: "client@example.com" });
+    expect(verifiedClientPrincipalFromAccessPayload({
+      iss: configuration.issuer, aud: ["another-access-application", configuration.audience], type: "app", sub: "access-subject", email: "Client@Example.com", exp: 2_000_000_000,
+    }, configuration)).toEqual({ issuer: configuration.issuer, subject: "access-subject", email: "client@example.com" });
 
     for (const payload of [
       { iss: configuration.issuer, aud: configuration.audience, type: "org", sub: "access-subject", email: "client@example.com", exp: 2_000_000_000 },

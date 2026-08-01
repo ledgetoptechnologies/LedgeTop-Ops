@@ -20,6 +20,10 @@ function validEmail(value: unknown): value is string {
   return nonEmptyString(value, 320) && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 }
 
+function includesExpectedAudience(audience: JWTPayload["aud"], expected: string): boolean {
+  return audience === expected || (Array.isArray(audience) && audience.includes(expected));
+}
+
 /**
  * Access normally injects the assertion header before invoking a Worker.
  * Browsers also receive the same signed application token in the
@@ -64,7 +68,7 @@ export function clientAccessConfiguration(env: Pick<Env, "CLIENT_ACCESS_TEAM_DOM
  * Authorization remains the issuer+subject local grant.
  */
 export function verifiedClientPrincipalFromAccessPayload(payload: JWTPayload, configuration: ClientAccessConfiguration): VerifiedClientPrincipal | null {
-  if (payload.iss !== configuration.issuer || payload.aud !== configuration.audience) return null;
+  if (payload.iss !== configuration.issuer || !includesExpectedAudience(payload.aud, configuration.audience)) return null;
   if (payload.type !== "app" || !nonEmptyString(payload.sub) || !validEmail(payload.email)) return null;
   // jwtVerify validates a supplied exp, but the portal never accepts a token
   // without one. This prevents a provider/configuration mistake from creating
@@ -76,7 +80,7 @@ export function verifiedClientPrincipalFromAccessPayload(payload: JWTPayload, co
 /** Safe diagnostic category only; no value from a token is logged. */
 function principalMappingRejection(payload: JWTPayload, configuration: ClientAccessConfiguration): string | null {
   if (payload.iss !== configuration.issuer) return "issuer";
-  if (payload.aud !== configuration.audience) return "audience";
+  if (!includesExpectedAudience(payload.aud, configuration.audience)) return "audience";
   if (payload.type !== "app") return "type";
   if (!nonEmptyString(payload.sub)) return "subject";
   if (!validEmail(payload.email)) return "email";
