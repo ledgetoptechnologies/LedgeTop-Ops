@@ -1,5 +1,18 @@
 # LTDS Ops
 
+## Current pilot status
+
+The client pilot is available at `client.ledgetopdroneservices.com` behind a
+dedicated Cloudflare Access application. It is invitation/grant controlled:
+Access email authentication is only the front door, while LTDS still enforces
+local client, project, delivery, and request permissions. The pilot includes
+service-request submission, Operations triage, and durable notifications.
+
+The Operations Worker is the sole notification sender. The current pilot uses
+TLS-only Gmail SMTP; the Client Worker never receives SMTP credentials. See
+[notification operations](docs/notifications.md) for required variable names,
+safe testing, and fallback behavior.
+
 LTDS Ops is the operating and client-delivery platform for Ledge Top Drone Services. It contains three independently deployed Cloudflare Workers in one repository:
 
 - `ltds-ops` at `ops.ledgetopdroneservices.com` — private staff operations, projects, tasks, airspace awareness, ACL, delivery administration, and Dropbox import.
@@ -64,6 +77,6 @@ Complete [Cloudflare setup](docs/cloudflare-setup.md), including the Operations 
 
 For production operations, use the [operations runbook](docs/operations/README.md), the [media-preview contract](docs/truenas/preview-pipeline.md), and the [inbound request design](docs/inbound-requests.md). These documents distinguish repository behavior from operator-owned Cloudflare, TrueNAS, Hermes, and alerting configuration.
 
-Exploratory concepts that are not committed roadmap or active scope are kept in [future planning proposals](docs/future-plans.md).
+See [Cloudflare setup](docs/cloudflare-setup.md), [notification operations](docs/notifications.md), and [future planning proposals](docs/future-plans.md) for the current pilot boundary, mail transport, and deferred work.
 
 The Worker code is production-packaged, but a production deploy should not be performed with `OPERATIONS_AUD` still set to its placeholder or before the Access application protects the Operations hostname.

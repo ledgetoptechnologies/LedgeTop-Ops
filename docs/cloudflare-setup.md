@@ -25,7 +25,7 @@ Do not attach `client.ledgetopdroneservices.com` or remove `delivery.` as part
 of the source-layout change. The later client-host-aware release uses the
 ordered clean cutover and rollback in [future planning](future-plans.md#ordered-hostname-cutover).
 
-### Client portal authentication hold
+### Client portal authentication and pilot boundary
 
 The client portal has a default-off Cloudflare Access adapter. It accepts only
 a signed `Cf-Access-Jwt-Assertion` from a **separate Client Portal** Access
@@ -45,14 +45,18 @@ its `CLIENT_ACCESS_GROUP_API_TOKEN` secret belongs on that internal worker only,
 never on the public client/delivery Worker. It uses a separate client group and
 must not mix staff ACL provisioning with client invitations.
 
-Do not enable the portal, attach `client.ledgetopdroneservices.com`, create a
-client Access application, or add identity secrets merely because the UI and
-repository foundation exist. Those are later, separately reviewed changes with
-staging authentication and authorization evidence. Public share paths remain
-outside Access and continue to use their own revocable-link controls. The service-request API
-uses the existing `PUBLIC_BULK_RATE_LIMITER` with a scope-separated,
-server-derived account key; this foundation adds no rate-limit binding or
-Cloudflare resource.
+The approved pilot is attached at `client.ledgetopdroneservices.com`. It uses a
+dedicated Client Portal Access application and current-policy API, with an
+email one-time-passcode login and a short-lived pilot allow group. It is not a
+host-wide Allow policy and it does not turn every Project Alpha contact into a
+portal user. A successful Access login still requires a local active
+membership and grant in LTDS.
+
+Public share paths remain outside Access and continue to use their own
+revocable-link controls. The service-request API uses the existing
+`PUBLIC_BULK_RATE_LIMITER` with a scope-separated, server-derived account key.
+Keep the client Access audience, group, and provisioning automation separate
+from Operations staff ACL provisioning.
 
 For the separately authorized rollout, the production Client Portal Access app
 must target only `client.ledgetopdroneservices.com/portal`, `/portal/*`,
@@ -67,11 +71,10 @@ Never use a host-wide client Allow policy, and verify no
 path matching and specificity in
 [Application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/).
 
-Create Access applications/policies and export their rollback configuration
-before attaching DNS/custom domains. Deploy the existing Worker with
-`CLIENT_PORTAL_ENABLED=false`, record the rollback version, and prove public
-share behavior first. A temporary staging activation and the production
-activation each require separate approval. Full details are in
+The pilot must retain an exported rollback configuration. Before expanding
+beyond the pilot, prove authenticated portal access, unprovisioned denial,
+cross-account denial, public-share isolation, request submission, Operations
+triage, and notification delivery. Full isolated-staging guidance remains in
 [the staging rollout packet](staging/client-portal-rollout.md).
 
 ### Branch-control release gate

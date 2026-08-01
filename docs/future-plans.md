@@ -1,10 +1,10 @@
 # Future planning proposals
 
-> **Status:** The client-portal transition section records an approved planning
-> direction, but it does not authorize production domains, routes, Access
-> applications, secrets, bindings, migrations, or deployment. All other
-> proposals remain exploratory and require product validation, security review,
-> cost analysis, staging evidence, and a separate implementation decision.
+> **Status:** A limited client-portal pilot is now deployed at `client.` with
+> Cloudflare Access, explicit LTDS memberships/grants, controlled test data,
+> and request notifications. It is not a general client launch. All expansion
+> items below remain subject to product validation, security review, cost
+> analysis, staging evidence, and a separate implementation decision.
 
 Todd's application is read-only reference material. It must not be modified or
 treated as an upstream dependency. Any useful interaction patterns observed
@@ -41,22 +41,16 @@ authorized publication step before becoming client-browsable.
 
 ### Current implementation boundary
 
-The client portal foundation is intentionally default-off. It provides a
-provider-neutral verified-principal interface, account/project/delivery grant
-repositories, a session-first responsive shell, and rate-limited service-request
-APIs. The production principal resolver still returns no identity, so setting a
-feature flag alone cannot authenticate a client. No client identity provider,
-password database, enrollment flow, recovery flow, or MFA system has been
-selected or implemented.
+The deployed pilot has a Cloudflare Access verified-principal adapter,
+account/project/delivery grant repositories, responsive portal shell, and
+rate-limited service-request APIs. Cloudflare verifies the human email, but
+LTDS independently resolves that identity to an active local membership and
+grant. Access login alone is never sufficient.
 
-Actual client login is a blocking dependency for the MVP and requires a
-user-approved identity provider or Cloudflare Access pattern, its exact token
-verification contract, and staging evidence. That decision must happen before
-enabling the portal or attaching `client.ledgetopdroneservices.com`. It must not
-replace the local account, project, delivery, and service-request authorization
-checks. The current request mutation limiter reuses the existing public bulk
-rate-limit binding with a distinct server-derived account key; no Cloudflare
-resource or binding change is introduced by this slice.
+The pilot does not include self-registration, password recovery, a custom MFA
+database, bulk client enrollment, Project Alpha write-back, or broad billing
+visibility. The request limiter reuses the existing public bulk rate-limit
+binding with a distinct server-derived account key.
 
 ### Ordered hostname cutover
 
