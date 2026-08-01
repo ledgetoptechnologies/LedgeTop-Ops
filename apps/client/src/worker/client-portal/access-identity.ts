@@ -73,6 +73,17 @@ export function verifiedClientPrincipalFromAccessPayload(payload: JWTPayload, co
   return { issuer: configuration.issuer, subject: payload.sub, email: payload.email.toLowerCase() };
 }
 
+/** Safe diagnostic category only; no value from a token is logged. */
+function principalMappingRejection(payload: JWTPayload, configuration: ClientAccessConfiguration): string | null {
+  if (payload.iss !== configuration.issuer) return "issuer";
+  if (payload.aud !== configuration.audience) return "audience";
+  if (payload.type !== "app") return "type";
+  if (!nonEmptyString(payload.sub)) return "subject";
+  if (!validEmail(payload.email)) return "email";
+  if (typeof payload.exp !== "number" || !Number.isFinite(payload.exp)) return "expiry";
+  return null;
+}
+
 export async function resolveCloudflareClientPrincipal(
   request: Request,
   env: Env,
@@ -91,7 +102,10 @@ export async function resolveCloudflareClientPrincipal(
       getKey ?? createRemoteJWKSet(new URL(`${configuration.issuer}/cdn-cgi/access/certs`)),
       { issuer: configuration.issuer, audience: configuration.audience, algorithms: ["RS256"], requiredClaims: ["iss", "aud", "sub", "exp"] },
     );
-    return verifiedClientPrincipalFromAccessPayload(verified.payload, configuration);
+    const principal = verifiedClientPrincipalFromAccessPayload(verified.payload, configuration);
+    const rejection = principalMappingRejection(verified.payload, configuration);
+    if (rejection) console.warn(`client-portal-access: verified assertion did not map (${rejection})`);
+    return principal;
   } catch (error) {
     // Deliberately expose only the verifier category: assertion contents and
     // identity claims must never reach Worker logs.
