@@ -1,6 +1,7 @@
 export const PERMISSIONS = [
   "dashboard.view",
   "operations.view",
+  "operations.view_all",
   "operations.manage",
   "projects.view",
   "tasks.view",

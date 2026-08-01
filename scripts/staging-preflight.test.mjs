@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { validateApp, validateCrossApp, validateFiles } from "./staging-preflight.mjs";
-import { APP_SOURCE_DIRS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -22,7 +22,13 @@ function stagingConfig(app) {
       POLICY_AUD: STAGING_ACCESS_AUDS.delivery,
       OPERATIONS_AUD: STAGING_ACCESS_AUDS.operations,
       CF_ACCESS_AUD: STAGING_ACCESS_AUDS["ops-sync"],
-      PUBLIC_BASE_URL: `https://${inventory.routes[0].pattern}`,
+      PUBLIC_BASE_URL: app === "delivery" ? `https://${STAGING_HOSTS.client}` : `https://${inventory.routes[0].pattern}`,
+      ...(app === "delivery" ? {
+        CLIENT_PORTAL_ENABLED: "false",
+        CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
+        CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN,
+        CLIENT_ACCESS_AUD: "a".repeat(64),
+      } : {}),
       CLOUD_TRANSFER_DROPBOX_ENABLED: "false",
       CLOUD_TRANSFER_GOOGLE_ENABLED: "false",
       CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED: "false",
@@ -92,4 +98,15 @@ test("resolves logical delivery staging files from apps/client", () => {
   assert.deepEqual(validateFiles(base), []);
   fs.renameSync(path.join(base, "apps", "client"), path.join(base, "apps", "delivery"));
   assert(validateFiles(base).some((error) => error.includes(path.join("apps", "client", "wrangler.staging.json"))));
+});
+test("fails closed on client portal activation, origin, and audience reuse", () => {
+  const staging = stagingConfig("delivery");
+  const production = productionFrom(staging);
+  staging.vars.CLIENT_PORTAL_ENABLED = "true";
+  staging.vars.CLIENT_PORTAL_ORIGIN = "https://other-staging.example";
+  staging.vars.CLIENT_ACCESS_AUD = STAGING_ACCESS_AUDS.operations;
+  const errors = validateApp("delivery", staging, production);
+  for (const expected of ["CLIENT_PORTAL_ENABLED", "client portal and public origins", "must not reuse"]) {
+    assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
+  }
 });

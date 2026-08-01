@@ -109,7 +109,8 @@ test("public route, host-guard, health, and cookie contracts remain unchanged", 
   assert.deepEqual(publicRoutes(worker), expectedPublicRoutes);
   assert(worker.includes('const COOKIE_NAME = "__Host-ltds_delivery";'));
   assert(worker.includes('service: "ltds-delivery"'));
-  assert(worker.includes('new URL(c.req.url).host !== c.env.EXPECTED_HOST'));
+  assert(worker.includes("requestHostAllowed(c.req.url,c.env)"));
+  assert(worker.includes('requestHost===env.EXPECTED_HOST'));
   assert.equal(worker.match(/12 \* 60 \* 60 \* 1000/g)?.length, 2);
   assert(security.includes('`__Host-ltds_delivery=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`'));
   assert(!security.includes("Domain="));

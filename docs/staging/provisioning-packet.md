@@ -27,7 +27,8 @@ feature.
 | Delivery Worker | `ltds-delivery-staging` |
 | Operations Worker | `ltds-ops-staging` |
 | Ops Sync Worker | `ltds-ops-sync-staging` |
-| Delivery host | `delivery-staging.ledgetopdroneservices.com` |
+| Delivery rollback/admin host | `delivery-staging.ledgetopdroneservices.com` |
+| Client portal/public-share host | `client-staging.ledgetopdroneservices.com` |
 | Operations host | `ops-staging.ledgetopdroneservices.com` |
 | Incoming host | `incoming-staging.ledgetopdroneservices.com` |
 | Ops Sync host | `ops-sync-staging.ledgetopdroneservices.com` |
@@ -62,9 +63,14 @@ unlocked. Both queues have zero producers and zero consumers. No migration,
 event subscription, route, Access policy, Workflow, or Worker version was
 created by this provisioning step.
 
-The three staging Access applications and their policy state are recorded in
+The three existing staging Access applications and their policy state are recorded in
 `docs/staging/access-created-inventory.md`. Their audiences are distinct from
 production; Access creation did not create DNS records or Worker routes.
+
+The client host, dedicated client portal Access app/audience/group, and public
+Bypass app/policy are not provisioned. Their exact fail-closed contract and
+ordered plan are in `docs/staging/client-portal-rollout.md`; none may reuse the
+existing Delivery Access audience or tester policy.
 
 ## Reproducible commands
 
@@ -91,6 +97,9 @@ Before ignored `apps/*/wrangler.staging.json` files can pass preflight:
 
 - copy the recorded staging Access audiences into `POLICY_AUD`,
   `OPERATIONS_AUD`, and `CF_ACCESS_AUD`;
+- create and record the distinct client portal audience and group, set
+  `CLIENT_ACCESS_AUD`, `CLIENT_ACCESS_TEAM_DOMAIN`, and
+  `CLIENT_PORTAL_ORIGIN`, and keep `CLIENT_PORTAL_ENABLED=false`;
 - the staging Access group ID/name and approved test identities;
 - a staging-only Project Alpha origin and service-token policy;
 - interactive staging secrets, never committed or placed in shell commands;
@@ -106,7 +115,7 @@ Do not create the three Workers or five Workflows merely to reserve their names.
 Deployment would create or update Workflows and activate hourly, 15-minute, and
 5-minute cron schedules plus the Operations queue consumer.
 
-Also defer custom-domain routes, DNS, additional Access applications or
+Also defer the `client-staging` custom-domain route and DNS, additional Access applications or
 policies, D1 migrations, R2 event notifications, Queue/DLQ consumer
 attachment, secrets, provider applications, and all feature activation.
 

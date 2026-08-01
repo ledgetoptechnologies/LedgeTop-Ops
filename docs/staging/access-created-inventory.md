@@ -10,6 +10,11 @@ Cloudflare authentication error `10000`.
 
 ## Applications
 
+This is the pre-client-portal inventory. No `LTDS Client Portal Staging` app,
+`LTDS Client Public Staging` Bypass app, or dedicated client staging group was
+created in this step. The historic Delivery staging audience must not be used
+as `CLIENT_ACCESS_AUD`.
+
 | Application | ID | Audience | Domain | Session | Launcher |
 | --- | --- | --- | --- | --- | --- |
 | LTDS Delivery Staging | `2ef49026-12ac-4e5a-a354-4843b8b01249` | `f6942c97e306d81d206c94746dc731413d5e59461b35d9b213f13fdf96b62835` | `delivery-staging.ledgetopdroneservices.com` | 1 hour | hidden |

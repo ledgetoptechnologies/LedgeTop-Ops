@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultEvidence = path.join(root, ".backups", "staging-release-evidence.json");
@@ -70,6 +70,8 @@ export function validateEvidence(evidence, options = {}) {
   if (projectAlpha.baseUrl !== configs.operations?.vars?.PROJECT_ALPHA_BASE_URL) errors.push("Project Alpha baseUrl must match Operations staging config");
   if (!populated(projectAlpha.approvalRef)) errors.push("Project Alpha needs an approval reference");
   for (const gate of ["operationsReadCredentialReady", "opsSyncServiceAuthReady", "opsSyncAccessGroupReady", "ed25519Ready"]) if (projectAlpha[gate] !== true) errors.push(`Project Alpha ${gate} must be confirmed true`);
+  if (projectAlpha.paymentBillingContractReady !== true) errors.push("Project Alpha paymentBillingContractReady must be confirmed true");
+  if (projectAlpha.authorizationBypassUsed !== false) errors.push("Project Alpha must not bypass LTDS authorization");
 
   for (const [name, hostname] of Object.entries(STAGING_HOSTS)) {
     const host = evidence.hosts?.[name] ?? {};
@@ -91,6 +93,39 @@ export function validateEvidence(evidence, options = {}) {
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(access.testerEmail ?? "")) errors.push("Access testerEmail must be explicit");
   if (access.testerActiveOperationsUser !== true) errors.push("Access tester must be confirmed as an active Operations user");
   if (!populated(access.approvalRef)) errors.push("Access setup needs an approval reference");
+
+  const portal = evidence.clientPortal ?? {};
+  const deliveryVars = configs.delivery?.vars ?? {};
+  if (portal.hostname !== STAGING_CLIENT_PORTAL.hostname) errors.push("client portal hostname must match the approved staging topology");
+  if (portal.origin !== `https://${STAGING_CLIENT_PORTAL.hostname}` || portal.origin !== deliveryVars.CLIENT_PORTAL_ORIGIN || portal.origin !== deliveryVars.PUBLIC_BASE_URL) errors.push("client portal origin must match the Delivery staging config and public origin");
+  if (portal.enabled !== false || deliveryVars.CLIENT_PORTAL_ENABLED !== "false") errors.push("client portal must remain default-off in release preparation evidence");
+  if (portal.teamDomain !== STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN || portal.teamDomain !== deliveryVars.CLIENT_ACCESS_TEAM_DOMAIN) errors.push("client portal Access team domain must match Delivery staging config");
+  if (portal.applicationName !== STAGING_CLIENT_PORTAL.applicationName || !populated(portal.applicationId)) errors.push("client portal needs the dedicated Access application identity");
+  if (!/^[a-f0-9]{64}$/i.test(portal.audience ?? "") || portal.audience !== deliveryVars.CLIENT_ACCESS_AUD) errors.push("client portal audience must match the dedicated Access app and Delivery staging config");
+  if (Object.values(STAGING_ACCESS_AUDS).includes(portal.audience)) errors.push("client portal audience must not reuse Delivery, Operations, or Ops Sync Access");
+  if (!populated(portal.groupId) || portal.groupName !== STAGING_CLIENT_PORTAL.groupName) errors.push("client portal needs the dedicated staging client group");
+  if (portal.groupId === access.groupId || portal.groupName === access.groupName) errors.push("client portal group must not reuse the staff or Ops Sync group");
+  if (!sameSet(portal.protectedPaths, STAGING_CLIENT_PORTAL.protectedPaths)) errors.push("client portal protected paths must exactly match the portal Access contract");
+  const publicAccess = portal.publicAccess ?? {};
+  if (publicAccess.applicationName !== STAGING_CLIENT_PORTAL.publicApplicationName || !populated(publicAccess.applicationId) || !populated(publicAccess.policyId)) errors.push("client public paths need a separately identified Access Bypass application and policy");
+  if (publicAccess.decision !== "bypass" || publicAccess.include !== "everyone") errors.push("client public path policy must be Bypass Everyone");
+  if (publicAccess.destination !== STAGING_CLIENT_PORTAL.hostname) errors.push("client public Bypass destination must be the client staging host root");
+  if (!sameSet(publicAccess.workerPublicPaths, STAGING_CLIENT_PORTAL.publicPaths)) errors.push("client public paths must exactly match the reviewed Worker contract");
+  if (!populated(portal.approvalRef)) errors.push("client portal Access setup needs an approval reference");
+
+  const portalTests = portal.tests ?? {};
+  for (const gate of ["portalDisabled404", "invalidAudienceDenied", "unprovisionedIdentityDenied", "crossAccountDenied", "staffAclDenied", "publicShareAnonymousReachable", "publicSharePasswordRechecked", "accessHeaderAbsentOnPublicShare"]) {
+    if (portalTests[gate] !== true) errors.push(`client portal test ${gate} must be confirmed true`);
+  }
+  if (!recentDate(portalTests.observedAt, now) || !populated(portalTests.evidenceRef)) errors.push("client portal end-to-end evidence must be current and referenced");
+
+  const migrations = evidence.migrations ?? {};
+  for (const app of ["delivery", "operations"]) {
+    const migration = migrations[app] ?? {};
+    if (!sameSet(migration.expected, REQUIRED_STAGING_MIGRATIONS[app])) errors.push(`${app} portal/ACL migration set must exactly match the release contract`);
+    if (migration.appliedToStaging !== true || !populated(migration.listEvidenceRef) || !populated(migration.applyEvidenceRef)) errors.push(`${app} staging migrations must be applied and evidenced`);
+  }
+  if (migrations.productionUnchanged !== true) errors.push("production migrations must be confirmed unchanged");
 
   for (const app of apps) {
     const secretEvidence = evidence.secrets?.[app] ?? {};

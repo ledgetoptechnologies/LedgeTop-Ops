@@ -45,3 +45,11 @@ Delete the inbound R2 object only after local verification and successful promot
 ## Implemented boundary
 
 The Operations Worker owns request authorization, Turnstile verification, exact quotas, multipart coordination, basic type checks, and request status. TrueNAS/Hermes owns malware scanning, checksum verification, durable local staging, and confirmation of local integrity. No inbound object is visible in Client Delivery.
+
+An authenticated client portal flight/service request is workflow metadata, not
+an upload authorization and not a payment/billing authorization. It cannot
+write to R2, select an arbitrary incoming request, or bypass Turnstile,
+quarantine, staff publication, project grants, or Operations staff ACLs. Any
+future link from a portal request to reusable intake must be explicit,
+account/project scoped, separately rate-limited, and tested in staging; it is
+not part of the default-off portal foundation.

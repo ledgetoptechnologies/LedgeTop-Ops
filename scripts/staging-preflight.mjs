@@ -6,7 +6,7 @@ import { APP_SOURCE_DIRS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
 const markers = /<[^>]+>|CHANGE[_-]?ME|REPLACE[_-]?ME|example\.invalid/i;
-const disabled = ["CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED", "DROPBOX_IMPORT_ENABLED", "DIRECT_DELIVERY_UPLOADS_ENABLED", "R2_PURGE_ENABLED"];
+const disabled = ["CLIENT_PORTAL_ENABLED", "CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED", "DROPBOX_IMPORT_ENABLED", "DIRECT_DELIVERY_UPLOADS_ENABLED", "R2_PURGE_ENABLED"];
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const mapped = (entries = [], key) => new Map(entries.map((item) => [item.binding, item[key]]));
 const routeHosts = (config) => (config.routes ?? []).map((route) => typeof route === "string" ? route : route.pattern);
@@ -47,7 +47,14 @@ export function validateApp(app, staging, production) {
   const audienceKey = { delivery: "POLICY_AUD", operations: "OPERATIONS_AUD", "ops-sync": "CF_ACCESS_AUD" }[app];
   if (vars.EXPECTED_HOST !== STAGING_HOSTS[app]) errors.push(`${app} EXPECTED_HOST must match the approved staging host`);
   if (vars[audienceKey] !== STAGING_ACCESS_AUDS[app]) errors.push(`${app} Access audience must match the approved staging app`);
-  if (app !== "ops-sync" && vars.PUBLIC_BASE_URL !== `https://${STAGING_HOSTS[app]}`) errors.push(`${app} PUBLIC_BASE_URL must match the approved staging host`);
+  if (app === "operations" && vars.PUBLIC_BASE_URL !== `https://${STAGING_HOSTS.operations}`) errors.push("operations PUBLIC_BASE_URL must match the approved staging host");
+  if (app === "delivery") {
+    if (vars.CLIENT_PORTAL_ENABLED !== "false") errors.push("delivery CLIENT_PORTAL_ENABLED must remain false for release preparation");
+    if (vars.CLIENT_PORTAL_ORIGIN !== `https://${STAGING_HOSTS.client}` || vars.PUBLIC_BASE_URL !== vars.CLIENT_PORTAL_ORIGIN) errors.push("delivery client portal and public origins must match the approved client staging host");
+    if (vars.CLIENT_ACCESS_TEAM_DOMAIN !== STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN) errors.push("delivery CLIENT_ACCESS_TEAM_DOMAIN must match the approved Access team");
+    if (!/^[a-f0-9]{64}$/i.test(vars.CLIENT_ACCESS_AUD ?? "")) errors.push("delivery CLIENT_ACCESS_AUD must be the dedicated client portal Access audience");
+    if (Object.values(STAGING_ACCESS_AUDS).includes(vars.CLIENT_ACCESS_AUD)) errors.push("delivery CLIENT_ACCESS_AUD must not reuse another staging Access audience");
+  }
   if (app === "operations" && (vars.INCOMING_EXPECTED_HOST !== STAGING_HOSTS.incoming || vars.INCOMING_BASE_URL !== `https://${STAGING_HOSTS.incoming}`)) errors.push("operations incoming host variables must match the reserved staging hostname");
   const declaredSecrets = staging.secrets?.required ?? [];
   if (!Array.isArray(declaredSecrets)) errors.push(`${app} secrets.required must be an array`);
