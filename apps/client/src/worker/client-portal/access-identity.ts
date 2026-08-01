@@ -21,6 +21,25 @@ function validEmail(value: unknown): value is string {
 }
 
 /**
+ * Access normally injects the assertion header before invoking a Worker.
+ * Browsers also receive the same signed application token in the
+ * CF_Authorization cookie. Use the cookie only when the injected header is
+ * absent, then subject it to the identical issuer, audience, expiry, and
+ * signature checks below.
+ */
+function accessAuthorizationCookie(cookieHeader: string | null): string | null {
+  if (!cookieHeader) return null;
+  for (const part of cookieHeader.split(";")) {
+    const separator = part.indexOf("=");
+    if (separator < 1) continue;
+    if (part.slice(0, separator).trim() !== "CF_Authorization") continue;
+    const value = part.slice(separator + 1).trim();
+    return value || null;
+  }
+  return null;
+}
+
+/**
  * Validates configuration before a request reaches an identity or grant
  * lookup. The client application gets a distinct audience and issuer so an
  * Operations or service assertion can never be replayed at this boundary.
@@ -60,7 +79,8 @@ export async function resolveCloudflareClientPrincipal(
   getKey?: JWTVerifyGetKey,
 ): Promise<VerifiedClientPrincipal | null> {
   const configuration = clientAccessConfiguration(env);
-  const assertion = request.headers.get("Cf-Access-Jwt-Assertion");
+  const assertion = request.headers.get("Cf-Access-Jwt-Assertion")
+    ?? accessAuthorizationCookie(request.headers.get("Cookie"));
   if (!assertion) return null;
   try {
     const verified = await jwtVerify(

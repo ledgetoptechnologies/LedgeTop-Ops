@@ -50,6 +50,12 @@ function accessRequest(assertion: string): Request {
   });
 }
 
+function cookieAccessRequest(assertion: string): Request {
+  return new Request("https://client.example/api/client/session", {
+    headers: { Cookie: `other=value; CF_Authorization=${assertion}; another=value` },
+  });
+}
+
 describe("Client Portal Cloudflare Access identity boundary", () => {
   it("requires a dedicated HTTPS issuer and audience", () => {
     expect(clientAccessConfiguration({ CLIENT_ACCESS_TEAM_DOMAIN: configuration.issuer, CLIENT_ACCESS_AUD: configuration.audience } as Env)).toEqual(configuration);
@@ -73,6 +79,18 @@ describe("Client Portal Cloudflare Access identity boundary", () => {
   it("accepts a real RS256 Access application token without an email_verified claim", async () => {
     const principal = await resolveCloudflareClientPrincipal(accessRequest(await signAccessToken()), accessEnv, localJwks);
     expect(principal).toEqual({ issuer: configuration.issuer, subject: "access-subject", email: "client@example.com" });
+  });
+
+  it("uses the signed Access authorization cookie only when the injected header is absent", async () => {
+    const principal = await resolveCloudflareClientPrincipal(cookieAccessRequest(await signAccessToken()), accessEnv, localJwks);
+    expect(principal).toEqual({ issuer: configuration.issuer, subject: "access-subject", email: "client@example.com" });
+
+    const trustedCookie = await signAccessToken();
+    const invalidHeader = "not-a-jwt";
+    const request = new Request("https://client.example/api/client/session", {
+      headers: { "Cf-Access-Jwt-Assertion": invalidHeader, Cookie: `CF_Authorization=${trustedCookie}` },
+    });
+    expect(await resolveCloudflareClientPrincipal(request, accessEnv, localJwks)).toBeNull();
   });
 
   it.each([
