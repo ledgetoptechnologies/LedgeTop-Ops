@@ -143,11 +143,12 @@ async function sendWithSmtp(settings: SmtpSettings, mail: OutboundMail): Promise
     await response([250]);
     await command("QUIT", [221]);
   } finally {
-    try { await writer.close(); } catch { /* Socket is already closed after a failed SMTP exchange. */ }
-    writer.releaseLock();
-    try { await reader.cancel(); } catch { /* Socket is already closed after a failed SMTP exchange. */ }
-    reader.releaseLock();
+    // `socket.close()` tears down both streams. Awaiting stream closure here can
+    // linger after SMTP has already accepted DATA, which would delay the durable
+    // outbox acknowledgement and risk a duplicate retry.
     socket.close();
+    writer.releaseLock();
+    reader.releaseLock();
   }
 }
 
