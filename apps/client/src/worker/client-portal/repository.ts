@@ -39,6 +39,14 @@ interface ServiceRequestRow {
   details: string;
   location_text: string | null;
   preferred_start_at: string | null;
+  service_category: string | null;
+  deliverables_text: string | null;
+  site_contact_name: string | null;
+  site_contact_email: string | null;
+  site_contact_phone: string | null;
+  desired_completion_at: string | null;
+  latitude: number | null;
+  longitude: number | null;
   status: ClientServiceRequest["status"];
   created_at: string;
   updated_at: string;
@@ -96,6 +104,14 @@ function mapServiceRequest(row: ServiceRequestRow): ClientServiceRequest {
     details: row.details,
     location: row.location_text,
     preferredStartAt: row.preferred_start_at,
+    serviceCategory: row.service_category,
+    deliverables: row.deliverables_text,
+    siteContactName: row.site_contact_name,
+    siteContactEmail: row.site_contact_email,
+    siteContactPhone: row.site_contact_phone,
+    desiredCompletionAt: row.desired_completion_at,
+    latitude: row.latitude,
+    longitude: row.longitude,
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
@@ -128,17 +144,22 @@ const memberProjectConstraint = `
   ))`;
 
 const serviceRequestColumns =
-  "r.id,r.project_id,r.request_type,r.title,r.details,r.location_text,r.preferred_start_at,r.status,r.created_at,r.updated_at";
+  "r.id,r.project_id,r.request_type,r.title,r.details,r.location_text,r.preferred_start_at,r.service_category,r.deliverables_text,r.site_contact_name,r.site_contact_email,r.site_contact_phone,r.desired_completion_at,r.latitude,r.longitude,r.status,r.created_at,r.updated_at";
 
 async function serviceRequestFingerprint(input: ClientServiceRequestInput): Promise<string> {
-  return sha256(JSON.stringify([
+  const legacyFields = [
     input.projectId,
     input.requestType,
     input.title,
     input.details,
     input.location,
     input.preferredStartAt,
-  ]));
+  ];
+  // Keep an exact retry of a pre-0101 request replayable. New scope details
+  // become part of the identity only when the caller actually supplies one.
+  const scope = [input.serviceCategory, input.deliverables, input.siteContactName, input.siteContactEmail, input.siteContactPhone, input.desiredCompletionAt, input.latitude, input.longitude]
+    .map(value => value ?? null);
+  return sha256(JSON.stringify(scope.every(value => value === null) ? legacyFields : [...legacyFields, ...scope]));
 }
 
 async function enqueueRequestNotification(
@@ -279,8 +300,9 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     const fingerprint = await serviceRequestFingerprint(input);
     const inserted = await portalDb(env).prepare(`
       INSERT INTO client_service_requests
-        (id,account_id,project_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,idempotency_key,request_fingerprint)
-      SELECT ?,a.id,g.project_id,i.id,?,?,?,?,?,?,?
+        (id,account_id,project_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,desired_completion_at,latitude,longitude,idempotency_key,request_fingerprint)
+      SELECT ?,a.id,g.project_id,i.id,
+        ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
       FROM client_accounts a
       JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
       JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
@@ -295,6 +317,14 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
         input.details,
         input.location,
         input.preferredStartAt,
+        input.serviceCategory ?? null,
+        input.deliverables ?? null,
+        input.siteContactName ?? null,
+        input.siteContactEmail ?? null,
+        input.siteContactPhone ?? null,
+        input.desiredCompletionAt ?? null,
+        input.latitude ?? null,
+        input.longitude ?? null,
         input.idempotencyKey,
         fingerprint,
         session.identityId,

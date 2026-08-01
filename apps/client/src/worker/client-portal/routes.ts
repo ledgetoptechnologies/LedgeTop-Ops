@@ -24,7 +24,19 @@ const serviceRequestBody = z.object({
   details: z.string().trim().min(1).max(5000),
   location: z.string().trim().min(1).max(240).nullable().optional(),
   preferredStartAt: z.iso.datetime({ offset: true }).nullable().optional(),
-}).strict();
+  serviceCategory: z.string().trim().min(1).max(100).nullable().optional(),
+  deliverables: z.string().trim().min(1).max(2000).nullable().optional(),
+  siteContactName: z.string().trim().min(1).max(160).nullable().optional(),
+  siteContactEmail: z.string().trim().email().max(320).nullable().optional(),
+  siteContactPhone: z.string().trim().min(3).max(64).nullable().optional(),
+  desiredCompletionAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  latitude: z.number().finite().min(-90).max(90).nullable().optional(),
+  longitude: z.number().finite().min(-180).max(180).nullable().optional(),
+}).strict().superRefine((value, context) => {
+  if ((value.latitude === null || value.latitude === undefined) !== (value.longitude === null || value.longitude === undefined)) {
+    context.addIssue({ code: "custom", message: "Latitude and longitude must be provided together" });
+  }
+});
 const invitationBody = z.object({
   email: z.string().trim().email().max(320),
   projectIds: z.array(opaqueId).max(100).default([]),
@@ -220,6 +232,14 @@ export function createClientPortalRouter(dependencies: ClientPortalDependencies 
       idempotencyKey: parsedIdempotencyKey.data,
       location: parsed.data.location ?? null,
       preferredStartAt: parsed.data.preferredStartAt ?? null,
+      serviceCategory: parsed.data.serviceCategory ?? null,
+      deliverables: parsed.data.deliverables ?? null,
+      siteContactName: parsed.data.siteContactName ?? null,
+      siteContactEmail: parsed.data.siteContactEmail ?? null,
+      siteContactPhone: parsed.data.siteContactPhone ?? null,
+      desiredCompletionAt: parsed.data.desiredCompletionAt ?? null,
+      latitude: parsed.data.latitude ?? null,
+      longitude: parsed.data.longitude ?? null,
     });
     if (!result) throw new HTTPException(404, { message: "Project not found or service requests are not permitted" });
     if (result.kind === "conflict") throw new HTTPException(409, { message: "This Idempotency-Key was already used for a different request" });

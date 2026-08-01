@@ -109,6 +109,14 @@ function ServiceRequestForm({
   const [details, setDetails] = useState("");
   const [location, setLocation] = useState("");
   const [preferredStartAt, setPreferredStartAt] = useState("");
+  const [serviceCategory, setServiceCategory] = useState("");
+  const [deliverables, setDeliverables] = useState("");
+  const [siteContactName, setSiteContactName] = useState("");
+  const [siteContactEmail, setSiteContactEmail] = useState("");
+  const [siteContactPhone, setSiteContactPhone] = useState("");
+  const [desiredCompletionAt, setDesiredCompletionAt] = useState("");
+  const [latitude, setLatitude] = useState("");
+  const [longitude, setLongitude] = useState("");
   const [idempotencyKey, setIdempotencyKey] = useState(() => crypto.randomUUID());
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState<{ tone: "success" | "error"; text: string } | null>(null);
@@ -130,12 +138,28 @@ function ServiceRequestForm({
         details,
         location: location.trim() || null,
         preferredStartAt: preferredStartAt ? new Date(preferredStartAt).toISOString() : null,
+        serviceCategory: serviceCategory.trim() || null,
+        deliverables: deliverables.trim() || null,
+        siteContactName: siteContactName.trim() || null,
+        siteContactEmail: siteContactEmail.trim() || null,
+        siteContactPhone: siteContactPhone.trim() || null,
+        desiredCompletionAt: desiredCompletionAt ? new Date(desiredCompletionAt).toISOString() : null,
+        latitude: latitude === "" ? null : Number(latitude),
+        longitude: longitude === "" ? null : Number(longitude),
       }, idempotencyKey);
       onCreated(request);
       setTitle("");
       setDetails("");
       setLocation("");
       setPreferredStartAt("");
+      setServiceCategory("");
+      setDeliverables("");
+      setSiteContactName("");
+      setSiteContactEmail("");
+      setSiteContactPhone("");
+      setDesiredCompletionAt("");
+      setLatitude("");
+      setLongitude("");
       setIdempotencyKey(crypto.randomUUID());
       setMessage({ tone: "success", text: "Request submitted. LTDS will review it shortly." });
     } catch (caught) {
@@ -167,6 +191,14 @@ function ServiceRequestForm({
         <label className="portal-form-wide">Details<textarea value={details} onChange={event => setDetails(event.target.value)} maxLength={5000} rows={5} required /></label>
         <label>Location <span>(optional)</span><input value={location} onChange={event => setLocation(event.target.value)} maxLength={240} /></label>
         <label>Preferred start <span>(optional)</span><input type="datetime-local" value={preferredStartAt} onChange={event => setPreferredStartAt(event.target.value)} /></label>
+        <label>Service category <span>(optional)</span><input value={serviceCategory} onChange={event => setServiceCategory(event.target.value)} maxLength={100} placeholder="e.g. aerial imaging" /></label>
+        <label>Desired completion <span>(optional)</span><input type="datetime-local" value={desiredCompletionAt} onChange={event => setDesiredCompletionAt(event.target.value)} /></label>
+        <label className="portal-form-wide">Requested deliverables <span>(optional)</span><textarea value={deliverables} onChange={event => setDeliverables(event.target.value)} maxLength={2000} rows={3} placeholder="Photos, video, orthomosaic, inspection notes…" /></label>
+        <label>Site contact name <span>(optional)</span><input value={siteContactName} onChange={event => setSiteContactName(event.target.value)} maxLength={160} /></label>
+        <label>Site contact email <span>(optional)</span><input type="email" value={siteContactEmail} onChange={event => setSiteContactEmail(event.target.value)} maxLength={320} /></label>
+        <label>Site contact phone <span>(optional)</span><input type="tel" value={siteContactPhone} onChange={event => setSiteContactPhone(event.target.value)} maxLength={64} /></label>
+        <label>Latitude <span>(optional, pair with longitude)</span><input type="number" min="-90" max="90" step="any" value={latitude} onChange={event => setLatitude(event.target.value)} /></label>
+        <label>Longitude <span>(optional, pair with latitude)</span><input type="number" min="-180" max="180" step="any" value={longitude} onChange={event => setLongitude(event.target.value)} /></label>
       </div>
       <div className="portal-form-actions">
         <p className={message?.tone === "error" ? "portal-message error" : "portal-message"} aria-live="polite">{message?.text}</p>

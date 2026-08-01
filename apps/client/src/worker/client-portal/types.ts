@@ -57,6 +57,14 @@ export interface ClientServiceRequestInput {
   details: string;
   location: string | null;
   preferredStartAt: string | null;
+  serviceCategory?: string | null;
+  deliverables?: string | null;
+  siteContactName?: string | null;
+  siteContactEmail?: string | null;
+  siteContactPhone?: string | null;
+  desiredCompletionAt?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
 }
 
 export interface ClientServiceRequest {
@@ -67,6 +75,14 @@ export interface ClientServiceRequest {
   details: string;
   location: string | null;
   preferredStartAt: string | null;
+  serviceCategory: string | null;
+  deliverables: string | null;
+  siteContactName: string | null;
+  siteContactEmail: string | null;
+  siteContactPhone: string | null;
+  desiredCompletionAt: string | null;
+  latitude: number | null;
+  longitude: number | null;
   status: "submitted" | "under_review" | "accepted" | "declined" | "cancelled" | "completed";
   createdAt: string;
   updatedAt: string;

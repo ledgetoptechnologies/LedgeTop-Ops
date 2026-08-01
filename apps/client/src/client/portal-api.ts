@@ -35,6 +35,14 @@ export interface PortalServiceRequest {
   details: string;
   location: string | null;
   preferredStartAt: string | null;
+  serviceCategory?: string | null;
+  deliverables?: string | null;
+  siteContactName?: string | null;
+  siteContactEmail?: string | null;
+  siteContactPhone?: string | null;
+  desiredCompletionAt?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
   status: PortalServiceRequestStatus;
   createdAt: string;
   updatedAt: string;
@@ -53,6 +61,14 @@ export interface CreatePortalServiceRequestInput {
   details: string;
   location: string | null;
   preferredStartAt: string | null;
+  serviceCategory?: string | null;
+  deliverables?: string | null;
+  siteContactName?: string | null;
+  siteContactEmail?: string | null;
+  siteContactPhone?: string | null;
+  desiredCompletionAt?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
 }
 
 export type PortalRequest = typeof requestJson;
