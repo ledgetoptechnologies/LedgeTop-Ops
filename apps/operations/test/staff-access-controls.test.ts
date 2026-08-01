@@ -7,6 +7,7 @@ import type { GrantRow, StaffPrincipal } from "../src/worker/types";
 
 const source = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
 const client = readFileSync(new URL("../src/client/OperationsApp.tsx", import.meta.url), "utf8");
+const styles = readFileSync(new URL("../src/client/styles.css", import.meta.url), "utf8");
 const migration = readFileSync(new URL("../migrations/0015_staff_acl_explicit_controls.sql", import.meta.url), "utf8");
 const principal = { id: "staff-target" } as StaffPrincipal;
 
@@ -57,6 +58,12 @@ describe("staff access controls", () => {
     expect(client).toContain('session.user.isAdministrator&&person.id!==session.user.id&&!person.sync_protected&&person.id!=="staff-beau-koltz"');
     expect(client).toContain("View all operations, projects, and tasks");
     expect(client).toContain("Create client links");
+  });
+
+  it("keeps each team access control inside a responsive card row", () => {
+    expect(styles).toContain(".local-access-toggle{display:grid;grid-template-columns:minmax(0,1fr);gap:.55rem;width:100%;min-width:0");
+    expect(styles).toContain(".local-access-toggle label{display:grid;grid-template-columns:1.15rem minmax(0,1fr)");
+    expect(styles).toContain(".local-access-toggle label+label{padding-top:.55rem;border-top:1px solid var(--line)}");
   });
 
   it("migrates the one legacy delivery grant mechanism before deleting it", () => {
