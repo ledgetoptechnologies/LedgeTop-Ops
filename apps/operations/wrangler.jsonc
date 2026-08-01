@@ -40,6 +40,10 @@
     "ALERT_FROM": "",
     "ALERT_TO": "",
     "NOTIFICATION_FROM": "delivery@ledgetopdroneservices.com",
+    "SMTP_NOTIFICATIONS_ENABLED": "true",
+    "SMTP_HOST": "smtp.gmail.com",
+    "SMTP_FROM": "no-reply@ledgetoptechnologies.com",
+    "SMTP_USERNAME": "no-reply@ledgetoptechnologies.com",
     "CLIENT_REQUEST_TRIAGE_TO": "beaukoltz@ledgetopdroneservices.com",
     "DROPBOX_IMPORT_ENABLED": "false",
     "DROPBOX_CLIENT_ID": ""

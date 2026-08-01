@@ -31,6 +31,11 @@ export type Env = Omit<Cloudflare.Env, "DIRECT_DELIVERY_UPLOADS_ENABLED" | "R2_P
   ALERT_TO?: string;
   NOTIFICATION_EMAIL?: SendEmail;
   NOTIFICATION_FROM?: string;
+  SMTP_NOTIFICATIONS_ENABLED?: string;
+  SMTP_HOST?: string;
+  SMTP_FROM?: string;
+  SMTP_USERNAME?: string;
+  SMTP_PASSWORD?: string;
   /** Address that receives new client service-request triage notices. */
   CLIENT_REQUEST_TRIAGE_TO?: string;
   SUA_GATEWAY_USER?: string;

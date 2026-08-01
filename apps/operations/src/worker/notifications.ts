@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import { sendAdminAlert } from "./alerts";
+import { sendNotificationMail } from "./mailer";
 
 export type NotificationKind = "share_created" | "share_updated" | "share_revoked" | "first_access" | "expiring_72h";
 export interface NotificationPayload { publicId?: string | null; shareUrl?: string; clientName?: string; projectName?: string; r2Prefix?: string; expiresAt?: string | null; }
@@ -79,7 +80,6 @@ export async function enqueueExpiringNotifications(env: Env): Promise<number> {
 }
 
 export async function processDeliveryNotifications(env: Env): Promise<number> {
-  if (!env.NOTIFICATION_EMAIL || !env.NOTIFICATION_FROM) return 0;
   let processed = 0;
   for (; processed < 25; processed += 1) {
     const row = await env.DELIVERY_DB.prepare(`SELECT id,share_id,kind,recipient_email,payload_json,attempts FROM delivery_notifications
@@ -93,7 +93,7 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
     const attempt = row.attempts + 1;
     try {
       const rendered = renderNotification(row.kind, JSON.parse(row.payload_json) as NotificationPayload);
-      await env.NOTIFICATION_EMAIL.send({ to: row.recipient_email, from: { email: env.NOTIFICATION_FROM, name: "LTDS Client Delivery" }, subject: rendered.subject, text: rendered.text, html: rendered.html });
+      await sendNotificationMail(env, { to: row.recipient_email, fromName: "LTDS Client Delivery", subject: rendered.subject, text: rendered.text, html: rendered.html });
       await env.DELIVERY_DB.prepare("UPDATE delivery_notifications SET status='sent',sent_at=datetime('now'),lease_until=NULL,updated_at=datetime('now') WHERE id=? AND status='sending'").bind(row.id).run();
       await auditNotification(env, "notification.sent", row, { attempt });
     } catch (error) {
@@ -130,7 +130,6 @@ async function auditClientRequestNotification(env: Env, action: string, row: Cli
 
 /** Delivers the durable client-request intent ledger. A missing recipient is deliberately suppressed, never retried forever. */
 export async function processClientPortalRequestNotifications(env: Env): Promise<number> {
-  if (!env.NOTIFICATION_EMAIL || !env.NOTIFICATION_FROM) return 0;
   let processed = 0;
   for (; processed < 25; processed += 1) {
     const row = await env.DELIVERY_DB.prepare(`SELECT n.id,n.request_id,n.event_type,n.status_value,n.recipient_kind,n.payload_json,n.attempt_count,
@@ -157,7 +156,7 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
     }
     try {
       const rendered = clientRequestNotification(row);
-      await env.NOTIFICATION_EMAIL.send({ to: recipient, from: { email: env.NOTIFICATION_FROM, name: "LTDS Client Portal" }, subject: rendered.subject, text: rendered.text, html: rendered.html });
+      await sendNotificationMail(env, { to: recipient, fromName: "LTDS Client Portal", subject: rendered.subject, text: rendered.text, html: rendered.html });
       await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing'").bind(row.id).run();
       await auditClientRequestNotification(env, "client_request_notification.sent", row, { attempt });
     } catch (error) {
