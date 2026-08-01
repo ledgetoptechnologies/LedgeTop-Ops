@@ -15,6 +15,7 @@ function errorStatus(error: unknown): number {
   const message = error instanceof Error ? error.message : "internal-error";
   if (error instanceof SyntaxError) return 400;
   if (message === "event-id-conflict") return 409;
+  if (message === "projection-entity-busy") return 503;
   if (message.startsWith("access-group-")) return 503;
   if (error instanceof ZodError || message.includes("mismatch")) return 422;
   if (message.startsWith("projection-data-")) return 422;

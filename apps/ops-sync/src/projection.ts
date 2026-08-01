@@ -75,15 +75,83 @@ function requiredValue(data: Record<string,unknown>, key: string): string {
   return current;
 }
 
+async function applyPortalProjection(env: Env, event: ProjectionEvent, active: number): Promise<void> {
+  if (event.projection.entity_type !== "client" && event.projection.entity_type !== "organization" && event.projection.entity_type !== "project") return;
+  const db = env.DELIVERY_DB;
+  if (!db) throw new Error("delivery-db-binding-required");
+  const data = event.projection.data;
+  const id = event.projection.entity_id;
+  if (event.projection.entity_type === "client") {
+    const name = value(data, "name") ?? `Client ${id}`;
+    await db.batch([
+      db.prepare(`UPDATE client_accounts SET display_name=?,status=CASE WHEN ?=0 THEN 'suspended' ELSE 'active' END,updated_at=datetime('now') WHERE project_alpha_client_id=?`).bind(name,active,id),
+      db.prepare(`UPDATE projects SET client_name=?,updated_at=datetime('now') WHERE id IN (SELECT g.project_id FROM client_project_grants g JOIN client_accounts a ON a.id=g.account_id WHERE a.project_alpha_client_id=? AND g.revoked_at IS NULL)`).bind(name,id),
+    ]);
+  } else if (event.projection.entity_type === "organization") {
+    const name = value(data, "name") ?? `Organization ${id}`;
+    await db.batch([
+      db.prepare(`UPDATE client_accounts SET display_name=?,status=CASE WHEN ?=0 THEN 'suspended' ELSE 'active' END,updated_at=datetime('now') WHERE project_alpha_organization_id=? AND project_alpha_client_id IS NULL`).bind(name,active,id),
+      db.prepare(`UPDATE projects SET client_name=?,updated_at=datetime('now') WHERE id IN (SELECT g.project_id FROM client_project_grants g JOIN client_accounts a ON a.id=g.account_id WHERE a.project_alpha_organization_id=? AND a.project_alpha_client_id IS NULL AND g.revoked_at IS NULL)`).bind(name,id),
+    ]);
+  } else if (event.projection.entity_type === "project") {
+    await db.prepare(`UPDATE projects SET project_name=?,status=?,summary=?,source_updated_at=?,active=?,updated_at=datetime('now') WHERE project_alpha_project_id=?`)
+      .bind(value(data,"name")??`Project ${id}`,value(data,"status"),value(data,"description"),event.projection.source_updated_at,active,id).run();
+  }
+}
+
+const PROJECTION_LEASE_DURATION = "+10 minutes";
+
+async function claimProjectionEntity(env: Env, event: ProjectionEvent): Promise<void> {
+  const claimed = await env.OPS_DB.prepare(`INSERT INTO pa_projection_entity_leases (entity_type,entity_id,owner_event_id,lease_until)
+    VALUES (?,?,?,datetime('now',?))
+    ON CONFLICT(entity_type,entity_id) DO UPDATE SET
+      owner_event_id=excluded.owner_event_id,
+      lease_until=excluded.lease_until,
+      updated_at=datetime('now')
+    WHERE datetime(pa_projection_entity_leases.lease_until)<=datetime('now')
+    RETURNING owner_event_id`)
+    .bind(event.projection.entity_type,event.projection.entity_id,event.event_id,PROJECTION_LEASE_DURATION)
+    .first<{owner_event_id:string}>();
+  if(claimed?.owner_event_id!==event.event_id)throw new Error("projection-entity-busy");
+}
+
+async function refreshProjectionEntityLease(env: Env, event: ProjectionEvent): Promise<void> {
+  const refreshed = await env.OPS_DB.prepare(`UPDATE pa_projection_entity_leases
+    SET lease_until=datetime('now',?),updated_at=datetime('now')
+    WHERE entity_type=? AND entity_id=? AND owner_event_id=?
+    RETURNING owner_event_id`)
+    .bind(PROJECTION_LEASE_DURATION,event.projection.entity_type,event.projection.entity_id,event.event_id)
+    .first<{owner_event_id:string}>();
+  if(refreshed?.owner_event_id!==event.event_id)throw new Error("projection-entity-lease-lost");
+}
+
+async function releaseProjectionEntity(env: Env, event: ProjectionEvent): Promise<void> {
+  await env.OPS_DB.prepare("DELETE FROM pa_projection_entity_leases WHERE entity_type=? AND entity_id=? AND owner_event_id=?")
+    .bind(event.projection.entity_type,event.projection.entity_id,event.event_id).run();
+}
+
 export async function applyProjectionEvent(env: Env, event: ProjectionEvent, payloadHash: string): Promise<ProjectionResult> {
   const receipt=await env.OPS_DB.prepare("SELECT payload_hash,status FROM integration_event_receipts WHERE event_id=?").bind(event.event_id).first<{payload_hash:string;status:string}>();
   if(receipt){if(receipt.payload_hash!==payloadHash)throw new Error("event-id-conflict");if(receipt.status==="completed"||receipt.status==="ignored")return "duplicate";}
   else await env.OPS_DB.prepare("INSERT INTO integration_event_receipts (event_id,integration,event_type,user_id,occurred_at,payload_hash,status) VALUES (?,'project-alpha',?,?,?,?, 'pending')").bind(event.event_id,event.event_type,value(event.projection.data,"user_id")??event.projection.entity_id,event.occurred_at,payloadHash).run();
-  const latest=await env.OPS_DB.prepare("SELECT source_updated_at FROM pa_projection_entity_versions WHERE entity_type=? AND entity_id=?").bind(event.projection.entity_type,event.projection.entity_id).first<{source_updated_at:string}>();
-  if(latest&&Date.parse(event.projection.source_updated_at)<=Date.parse(latest.source_updated_at)){await env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='ignored',processed_at=datetime('now') WHERE event_id=?").bind(event.event_id).run();return "ignored";}
-  const data=event.projection.data,active=event.projection.action==="upsert"?1:0,marker=`event:${event.event_id}`;
-  const statements:D1PreparedStatement[]=[];
-  if(event.projection.entity_type==="business_unit") {
+  await claimProjectionEntity(env,event);
+  let processingError:unknown;
+  try {
+    const latest=await env.OPS_DB.prepare("SELECT source_updated_at,event_id FROM pa_projection_entity_versions WHERE entity_type=? AND entity_id=?").bind(event.projection.entity_type,event.projection.entity_id).first<{source_updated_at:string;event_id:string}>();
+    if(latest&&Date.parse(event.projection.source_updated_at)<=Date.parse(latest.source_updated_at)){
+      // A prior attempt can finish both projections and advance the entity marker
+      // before its receipt/reconciliation acknowledgement. Let the handler finish
+      // that same pending event instead of permanently misclassifying it as stale.
+      if(receipt?.status==="pending"&&latest.event_id===event.event_id)return "applied";
+      await env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='ignored',processed_at=datetime('now') WHERE event_id=?").bind(event.event_id).run();return "ignored";
+    }
+    const data=event.projection.data,active=event.projection.action==="upsert"?1:0,marker=`event:${event.event_id}`;
+    const statements:D1PreparedStatement[]=[];
+    if(event.projection.entity_type==="client") {
+    statements.push(env.OPS_DB.prepare(`INSERT INTO pa_clients (id,name,organization_id,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,organization_id=excluded.organization_id,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`).bind(event.projection.entity_id,value(data,"name")??`Client ${event.projection.entity_id}`,value(data,"organization_id"),active,JSON.stringify(data),marker));
+  } else if(event.projection.entity_type==="organization") {
+    statements.push(env.OPS_DB.prepare(`INSERT INTO pa_organizations (id,name,active,payload_json,last_sync_id) VALUES (?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`).bind(event.projection.entity_id,value(data,"name")??`Organization ${event.projection.entity_id}`,active,JSON.stringify(data),marker));
+  } else if(event.projection.entity_type==="business_unit") {
     const name=value(data,"name")??`Business unit ${event.projection.entity_id}`,code=value(data,"code")??`pa-${event.projection.entity_id}`;
     statements.push(
       env.OPS_DB.prepare(`INSERT INTO pa_business_units (id,name,code,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET name=excluded.name,code=excluded.code,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`).bind(event.projection.entity_id,name,code,active,JSON.stringify(data),marker),
@@ -113,10 +181,22 @@ export async function applyProjectionEvent(env: Env, event: ProjectionEvent, pay
     else statements.push(env.OPS_DB.prepare("UPDATE pa_calendar_events SET active=0,updated_at=datetime('now') WHERE id=?").bind(`task:${event.projection.entity_id}`));
   } else if(event.projection.entity_type==="task_assignment") {
     statements.push(env.OPS_DB.prepare(`INSERT INTO pa_task_assignments (task_id,user_id,assigned_by_user_id,assigned_at,payload_json,last_sync_id,active) VALUES (?,?,?,?,?,?,?) ON CONFLICT(task_id,user_id) DO UPDATE SET assigned_by_user_id=excluded.assigned_by_user_id,assigned_at=excluded.assigned_at,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,active=excluded.active`).bind(requiredValue(data,"task_id"),requiredValue(data,"user_id"),value(data,"assigned_by"),value(data,"assigned_at"),JSON.stringify(data),marker,active));
+    }
+    await refreshProjectionEntityLease(env,event);
+    if(statements.length)await env.OPS_DB.batch(statements);
+    // Keep a failed portal write retryable: the source version is advanced only
+    // after DELIVERY_DB has accepted its idempotent projection.
+    await refreshProjectionEntityLease(env,event);
+    await applyPortalProjection(env,event,active);
+    await refreshProjectionEntityLease(env,event);
+    await env.OPS_DB.prepare(`INSERT INTO pa_projection_entity_versions (entity_type,entity_id,source_updated_at,event_id) VALUES (?,?,?,?) ON CONFLICT(entity_type,entity_id) DO UPDATE SET source_updated_at=excluded.source_updated_at,event_id=excluded.event_id,updated_at=datetime('now')`).bind(event.projection.entity_type,event.projection.entity_id,event.projection.source_updated_at,event.event_id).run();
+    return "applied";
+  } catch(error) {
+    processingError=error;
+    throw error;
+  } finally {
+    try{await releaseProjectionEntity(env,event);}catch(releaseError){if(!processingError)throw releaseError;}
   }
-  if(statements.length)await env.OPS_DB.batch(statements);
-  await env.OPS_DB.prepare(`INSERT INTO pa_projection_entity_versions (entity_type,entity_id,source_updated_at,event_id) VALUES (?,?,?,?) ON CONFLICT(entity_type,entity_id) DO UPDATE SET source_updated_at=excluded.source_updated_at,event_id=excluded.event_id,updated_at=datetime('now')`).bind(event.projection.entity_type,event.projection.entity_id,event.projection.source_updated_at,event.event_id).run();
-  return "applied";
 }
 
 export async function completeEvent(env: Env, event: IntegrationEvent): Promise<void> {

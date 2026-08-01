@@ -1,5 +1,15 @@
 # Project Alpha integration
 
+## Client request pilot boundary
+
+Project Alpha is read-only from LTDS for the client-request pilot. Staff
+manually create PA projects, on-demand quotes, contracts, and invoices. LTDS
+may verify and link an existing quote reference with an authenticated `GET`,
+but it does not create or mutate those records and does not own financial
+communications. The LTDS operational estimate is expressly non-binding; client
+confirmation, final LTDS approval, and verified PA quote linkage are separate
+events. See [the client request pilot contract](client-portal.md).
+
 Project Alpha is authoritative for Business Units, Projects, Project Team memberships, Operations, Tasks, assignments, and external access entitlements. This repository stores a last-known-good, read-only D1 projection.
 
 ## Deployment configuration
@@ -32,7 +42,7 @@ Only explicitly enabled Project Alpha entitlements provision an Operations accou
 
 Projects may include `manager_user_id`. A Project Manager receives Project context in the same way as a Project Team member; Project Alpha remains responsible for making the manager a Team member and for choosing the Project's Business Unit.
 
-Project Alpha posts signed incremental changes to `/v1/project-alpha/events`. The receiver validates Cloudflare Access, the configured application key, schema version, event ID, timestamp, and Ed25519 signature. An invalid Ed25519 signature never downgrades to HMAC. Event receipts make delivery idempotent; per-entity source timestamps prevent older events from overwriting newer data.
+Project Alpha posts signed incremental changes to `/v1/project-alpha/events`. The receiver validates Cloudflare Access, the configured application key, schema version, event ID, timestamp, and Ed25519 signature. An invalid Ed25519 signature never downgrades to HMAC. Event receipts make delivery idempotent; per-entity source timestamps prevent older events from overwriting newer data. An owner-checked, expiring D1 lease serializes same-entity events across the Operations and client/organization portal projections and the final source marker. A contending delivery receives a retryable response; it does not mutate Project Alpha or silently acknowledge an uncommitted projection.
 
 The receiver acknowledges a valid event after its D1 projection is committed. Cloudflare Access-group membership is reconciled immediately and independently every five minutes, so a temporary Cloudflare control-plane failure cannot block Project Alpha's outbox. Configure both `CF_ACCESS_GROUP_ID` and the exact deployment-specific `CF_ACCESS_GROUP_NAME`; the name provides a safe recovery path if Cloudflare rotates or replaces the group identifier.
 

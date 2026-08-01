@@ -36,11 +36,17 @@ function repository(overrides: Partial<ClientPortalRepository> = {}): ClientPort
   return {
     resolveSession: vi.fn(async () => session),
     listProjects: vi.fn(async () => []),
+    getProject: vi.fn(async () => null),
+    listProjectFiles: vi.fn(async () => null),
+    listPastDeliveries: vi.fn(async () => ({ files: [], prefix: "", cursor: null })),
+    getAuthorizedFile: vi.fn(async () => null),
     listDeliveries: vi.fn(async () => []),
     getDeliveryHandoff: vi.fn(async () => null),
     listServiceRequests: vi.fn(async () => []),
     getServiceRequest: vi.fn(async () => null),
     createServiceRequest: vi.fn(async () => ({ kind: "created" as const, request: serviceRequest })),
+    updateServiceRequest: vi.fn(async () => null),
+    createChangeRequest: vi.fn(async () => null),
     listMembers: vi.fn(async () => []),
     listInvitations: vi.fn(async () => []),
     createInvitation: vi.fn(async () => null),
@@ -293,7 +299,7 @@ describe("client portal team management", () => {
     const listMembers = vi.fn(async () => [{ identityId: "member-a", email: "member@example.com", role: "member" as const, canViewBilling: false }]);
     const listInvitations = vi.fn(async () => [{ id: "invite-a", email: "new@example.com", projectIds: ["project-a"], expiresAt: "2026-08-07T00:00:00.000Z" }]);
     const response = await createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ listMembers, listInvitations }) })
-      .request("/team", {}, env("true"));
+      .request("/team", {}, { ...env("true"), CLIENT_PORTAL_TEAM_ENABLED: "true" });
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ members: [{ identityId: "member-a" }], invitations: [{ id: "invite-a" }] });
     expect(listMembers).toHaveBeenCalledWith(expect.anything(), session);
@@ -307,7 +313,7 @@ describe("client portal team management", () => {
       method: "POST",
       headers: { Origin: "https://client.example", "Content-Type": "application/json" },
       body: JSON.stringify({ email: "new@example.com", projectIds: ["project-a"] }),
-    }, env("true", "https://client.example", { limit } as RateLimit));
+    }, { ...env("true", "https://client.example", { limit } as RateLimit), CLIENT_PORTAL_TEAM_ENABLED: "true" });
     expect(response.status).toBe(201);
     expect(limit).toHaveBeenCalledWith({ key: "client-team:invite:account-a" });
     expect(createInvitation).toHaveBeenCalledWith(expect.anything(), session, { email: "new@example.com", projectIds: ["project-a"] });
@@ -322,10 +328,10 @@ describe("client portal team management", () => {
       revokeMember: vi.fn(async () => false),
     });
     const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repo });
-    expect((await app.request("https://client.example/team", {}, env("true", "https://client.example"))).status).toBe(403);
+    expect((await app.request("https://client.example/team", {}, { ...env("true", "https://client.example"), CLIENT_PORTAL_TEAM_ENABLED: "true" })).status).toBe(403);
     expect((await app.request("https://client.example/team/members/identity-a", {
       method: "DELETE", headers: { Origin: "https://client.example" },
-    }, env("true", "https://client.example"))).status).toBe(404);
+    }, { ...env("true", "https://client.example"), CLIENT_PORTAL_TEAM_ENABLED: "true" })).status).toBe(404);
   });
 });
 

@@ -139,7 +139,7 @@ every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
 `0100_client_portal_release_hardening.sql` and Operations
 `0014_staff_acl_controls.sql` through
-`0015_staff_acl_explicit_controls.sql`. Migration `0100` removes
+`0016_projection_entity_leases.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any

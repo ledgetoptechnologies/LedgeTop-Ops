@@ -37,7 +37,7 @@ const projectionEventSchema = z.object({
   event_id: z.string().uuid(), event_type: z.literal("projection.changed"), occurred_at: z.string().datetime({ offset: true }), schema_version: z.literal(1),
   application_key: z.string().trim().min(2).max(64).regex(/^[a-z0-9][a-z0-9_-]+$/),
   projection: z.object({
-    entity_type: z.enum(["project","project_assignment","business_unit","operation","operation_assignment","task","task_assignment"]),
+    entity_type: z.enum(["client","organization","project","project_assignment","business_unit","operation","operation_assignment","task","task_assignment"]),
     entity_id: identifier, action: z.enum(["upsert","revoke"]), source_updated_at: z.string().datetime({ offset: true }), data: z.record(z.string(),z.unknown()),
   }).strict(),
 }).strict();

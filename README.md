@@ -13,6 +13,10 @@ TLS-only Gmail SMTP; the Client Worker never receives SMTP credentials. See
 [notification operations](docs/notifications.md) for required variable names,
 safe testing, and fallback behavior.
 
+The complete request/revision/estimate/Project Alpha boundary, local evidence,
+known limitations, Todd's App UX decision record, and engineering handoff are
+in [the client request pilot contract](docs/client-portal.md).
+
 LTDS Ops is the operating and client-delivery platform for Ledge Top Drone Services. It contains three independently deployed Cloudflare Workers in one repository:
 
 - `ltds-ops` at `ops.ledgetopdroneservices.com` — private staff operations, projects, tasks, airspace awareness, ACL, delivery administration, and Dropbox import.

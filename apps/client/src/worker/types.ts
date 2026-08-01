@@ -22,6 +22,7 @@ export interface Env {
   EXPECTED_HOST: string;
   CLIENT_PORTAL_ENABLED?: string;
   CLIENT_PORTAL_ORIGIN?: string;
+  CLIENT_PORTAL_TEAM_ENABLED?: string;
   /**
    * Dedicated Client Portal Access application values. These deliberately do
    * not reuse the staff Operations or Ops Sync audience.

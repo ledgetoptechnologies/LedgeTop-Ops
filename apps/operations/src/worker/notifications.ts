@@ -1,3 +1,9 @@
+import {
+  buildServiceRequestNotificationSnapshot,
+  parseServiceRequestNotificationSnapshot,
+  type ServiceRequestNotificationLifecycle,
+  type ServiceRequestNotificationSnapshot,
+} from "@ltds/shared";
 import type { Env } from "./types";
 import { sendAdminAlert } from "./alerts";
 import { sendNotificationMail } from "./mailer";
@@ -7,7 +13,7 @@ export interface NotificationPayload { publicId?: string | null; shareUrl?: stri
 interface NotificationRow { id: string; share_id: string; kind: NotificationKind; recipient_email: string; payload_json: string; attempts: number; }
 const MAX_ATTEMPTS = 3;
 
-type ClientPortalRequestEvent = "request_submitted" | "request_status_changed";
+type ClientPortalRequestEvent = "request_submitted" | "request_status_changed" | "request_confirmation_requested" | "request_client_response";
 type ClientPortalRequestRecipient = "staff_triage" | "client_requester";
 interface ClientPortalRequestNotificationRow {
   id: string;
@@ -18,12 +24,12 @@ interface ClientPortalRequestNotificationRow {
   payload_json: string;
   attempt_count: number;
   title: string;
-  request_type: string;
-  details: string;
+  project_id: string | null;
+  service_category: string | null;
   location_text: string | null;
-  desired_completion_at: string | null;
-  project_name: string;
-  client_name: string;
+  latitude: number | null;
+  longitude: number | null;
+  project_name: string | null;
   requester_email: string | null;
 }
 
@@ -93,7 +99,7 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
     const attempt = row.attempts + 1;
     try {
       const rendered = renderNotification(row.kind, JSON.parse(row.payload_json) as NotificationPayload);
-      await sendNotificationMail(env, { to: row.recipient_email, fromName: "LTDS Client Delivery", subject: rendered.subject, text: rendered.text, html: rendered.html });
+      await sendNotificationMail(env, { to: row.recipient_email, fromName: "LTDS Client Delivery", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
       await env.DELIVERY_DB.prepare("UPDATE delivery_notifications SET status='sent',sent_at=datetime('now'),lease_until=NULL,updated_at=datetime('now') WHERE id=? AND status='sending'").bind(row.id).run();
       await auditNotification(env, "notification.sent", row, { attempt });
     } catch (error) {
@@ -108,19 +114,114 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
   return processed;
 }
 
-function clientRequestNotification(row: ClientPortalRequestNotificationRow): { subject: string; text: string; html: string } {
-  const project = row.project_name || row.client_name || "client portal";
-  const status = row.status_value || "submitted";
-  if (row.recipient_kind === "client_requester") {
-    const subject = `Request ${status.replace(/_/g, " ")}: ${row.title}`;
-    const text = `Your ${row.request_type} request for ${project} is now ${status.replace(/_/g, " ")}.`;
-    return { subject, text, html: `<p>${escapeHtml(text)}</p>` };
+const lifecyclePresentation: Record<
+  ServiceRequestNotificationLifecycle,
+  { subject: string; status: string; introduction: string }
+> = {
+  submitted: {
+    subject: "Service request submitted",
+    status: "Submitted",
+    introduction: "A service request was submitted.",
+  },
+  under_review: {
+    subject: "Service request under review",
+    status: "Under review",
+    introduction: "LTDS is reviewing your service request.",
+  },
+  accepted_pending_pa_linkage: {
+    subject: "Service request accepted",
+    status: "Accepted — next steps being prepared",
+    introduction: "LTDS accepted your service request and is preparing the next steps.",
+  },
+  accepted_linked: {
+    subject: "Service request accepted",
+    status: "Accepted",
+    introduction: "Your service request is accepted.",
+  },
+  declined: {
+    subject: "Service request declined",
+    status: "Declined",
+    introduction: "LTDS cannot proceed with this service request.",
+  },
+  cancelled: {
+    subject: "Service request cancelled",
+    status: "Cancelled",
+    introduction: "This service request was cancelled.",
+  },
+  completed: {
+    subject: "Service request completed",
+    status: "Completed",
+    introduction: "This service request is complete.",
+  },
+  estimate_ready: {
+    subject: "Operational estimate ready",
+    status: "Estimate ready",
+    introduction: "A non-binding operational estimate is ready for your review.",
+  },
+  client_response_received: {
+    subject: "Client response received",
+    status: "Client response received",
+    introduction: "A client responded to the operational estimate.",
+  },
+};
+
+export function renderClientRequestNotification(
+  snapshot: ServiceRequestNotificationSnapshot,
+  actionUrl: string,
+): { subject: string; text: string; html: string } {
+  const presentation = lifecyclePresentation[snapshot.lifecycle];
+  const context =
+    snapshot.projectContext.kind === "existing_project"
+      ? `Existing project — ${snapshot.projectContext.label}`
+      : snapshot.projectContext.label;
+  const actionLabel =
+    snapshot.action === "review_in_operations"
+      ? "Review in LTDS Operations"
+      : "Open the client portal";
+  const subjectPrefix =
+    snapshot.lifecycle === "submitted" && snapshot.action === "review_in_operations"
+      ? "New service request"
+      : presentation.subject;
+  const text = `${presentation.introduction}\n\nTitle: ${snapshot.title}\nContext: ${context}\nScope: ${snapshot.scopeLabel}\nLocation: ${snapshot.locationLabel}\nStatus: ${presentation.status}\n\n${actionLabel}: ${actionUrl}`;
+  const html = `<p>${escapeHtml(presentation.introduction)}</p><p><strong>Title:</strong> ${escapeHtml(snapshot.title)}<br><strong>Context:</strong> ${escapeHtml(context)}<br><strong>Scope:</strong> ${escapeHtml(snapshot.scopeLabel)}<br><strong>Location:</strong> ${escapeHtml(snapshot.locationLabel)}<br><strong>Status:</strong> ${escapeHtml(presentation.status)}</p><p><a href="${escapeHtml(actionUrl)}">${escapeHtml(actionLabel)}</a></p>`;
+  return { subject: `${subjectPrefix}: ${snapshot.title}`, text, html };
+}
+
+function notificationSnapshot(row: ClientPortalRequestNotificationRow): ServiceRequestNotificationSnapshot {
+  try {
+    const stored = parseServiceRequestNotificationSnapshot(JSON.parse(row.payload_json));
+    if (stored) return stored;
+  } catch {
+    // Legacy payloads are rebuilt from the same request-scoped, nonfinancial fields below.
   }
-  const due = row.desired_completion_at ? `\nRequested completion: ${row.desired_completion_at}` : "";
-  const location = row.location_text ? `\nLocation: ${row.location_text}` : "";
-  const text = `A client submitted a ${row.request_type} request for ${project}.\n\nTitle: ${row.title}${location}${due}\n\nDetails:\n${row.details}`;
-  const html = `<p>A client submitted a <strong>${escapeHtml(row.request_type)}</strong> request for <strong>${escapeHtml(project)}</strong>.</p><p><strong>Title:</strong> ${escapeHtml(row.title)}${row.location_text ? `<br><strong>Location:</strong> ${escapeHtml(row.location_text)}` : ""}${row.desired_completion_at ? `<br><strong>Requested completion:</strong> ${escapeHtml(row.desired_completion_at)}` : ""}</p><p><strong>Details</strong><br>${escapeHtml(row.details).replace(/\n/g, "<br>")}</p>`;
-  return { subject: `New client request: ${row.title}`, text, html };
+  const lifecycle: ServiceRequestNotificationLifecycle =
+    row.event_type === "request_confirmation_requested"
+      ? "estimate_ready"
+      : row.event_type === "request_client_response"
+        ? "client_response_received"
+        : (row.status_value as ServiceRequestNotificationLifecycle) || "submitted";
+  return buildServiceRequestNotificationSnapshot({
+    title: row.title,
+    projectId: row.project_id,
+    projectName: row.project_name,
+    serviceCategory: row.service_category,
+    locationLabel: row.location_text,
+    latitude: row.latitude,
+    longitude: row.longitude,
+    lifecycle,
+    action:
+      row.recipient_kind === "staff_triage"
+        ? "review_in_operations"
+        : "open_client_portal",
+  });
+}
+
+function actionUrl(env: Env, row: ClientPortalRequestNotificationRow, snapshot: ServiceRequestNotificationSnapshot): string {
+  const base = snapshot.action === "review_in_operations" ? env.PUBLIC_BASE_URL : env.DELIVERY_BASE_URL;
+  const path = snapshot.action === "review_in_operations"
+    ? `/operations/client-requests/${encodeURIComponent(row.request_id)}`
+    : "/portal/requests";
+  return new URL(path, base).toString();
 }
 
 async function auditClientRequestNotification(env: Env, action: string, row: ClientPortalRequestNotificationRow, detail: Record<string, unknown>): Promise<void> {
@@ -133,11 +234,11 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
   let processed = 0;
   for (; processed < 25; processed += 1) {
     const row = await env.DELIVERY_DB.prepare(`SELECT n.id,n.request_id,n.event_type,n.status_value,n.recipient_kind,n.payload_json,n.attempt_count,
-      r.title,r.request_type,r.details,r.location_text,r.desired_completion_at,p.project_name,p.client_name,
+      r.title,r.project_id,r.service_category,r.location_text,r.latitude,r.longitude,p.project_name,
       CASE WHEN n.recipient_kind='client_requester' THEN i.email ELSE NULL END requester_email
       FROM client_portal_notification_outbox n
       JOIN client_service_requests r ON r.id=n.request_id
-      JOIN projects p ON p.id=r.project_id
+      LEFT JOIN projects p ON p.id=r.project_id
       LEFT JOIN client_identity_links i ON i.id=r.created_by_identity_id AND i.revoked_at IS NULL
       WHERE ((n.status='pending' AND datetime(n.next_attempt_at)<=datetime('now')) OR (n.status='processing' AND datetime(n.lease_expires_at)<=datetime('now')))
         AND n.attempt_count < ? ORDER BY n.created_at LIMIT 1`).bind(MAX_ATTEMPTS).first<ClientPortalRequestNotificationRow>();
@@ -149,14 +250,18 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
     const attempt = row.attempt_count + 1;
     const recipient = row.recipient_kind === "staff_triage" ? normalizeRecipientEmail(env.CLIENT_REQUEST_TRIAGE_TO) : normalizeRecipientEmail(row.requester_email);
     if (!recipient) {
-      await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing'")
-        .bind(row.recipient_kind === "staff_triage" ? "staff-triage-recipient-not-configured" : "requester-email-unavailable", row.id).run();
-      await auditClientRequestNotification(env, "client_request_notification.suppressed", row, { attempt });
+      const staffRecipientMissing = row.recipient_kind === "staff_triage";
+      await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status=?,lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing'")
+        .bind(staffRecipientMissing ? "failed" : "suppressed", staffRecipientMissing ? "staff-triage-recipient-not-configured" : "requester-email-unavailable", row.id).run();
+      await auditClientRequestNotification(env, staffRecipientMissing ? "client_request_notification.failed" : "client_request_notification.suppressed", row, { attempt });
+      if (staffRecipientMissing)
+        await sendAdminAlert(env, "Client request triage is not configured", `Notification ${row.id} for request ${row.request_id} could not be routed to staff.`);
       continue;
     }
     try {
-      const rendered = clientRequestNotification(row);
-      await sendNotificationMail(env, { to: recipient, fromName: "LTDS Client Portal", subject: rendered.subject, text: rendered.text, html: rendered.html });
+      const snapshot = notificationSnapshot(row);
+      const rendered = renderClientRequestNotification(snapshot, actionUrl(env, row, snapshot));
+      await sendNotificationMail(env, { to: recipient, fromName: "LTDS Client Portal", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
       await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing'").bind(row.id).run();
       await auditClientRequestNotification(env, "client_request_notification.sent", row, { attempt });
     } catch (error) {

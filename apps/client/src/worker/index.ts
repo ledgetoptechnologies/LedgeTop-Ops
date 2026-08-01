@@ -77,8 +77,8 @@ function primaryDb(env: Pick<Env, "DELIVERY_DB">): D1Database {
 
 const lockedSecurityHeaders = secureHeaders({
   contentSecurityPolicy: {
-    defaultSrc: ["'self'"], imgSrc: ["'self'", "https://ledgetopdroneservices.com", "https://*.cloudflarestream.com", "data:"], styleSrc: ["'self'", "'unsafe-inline'"],
-    scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com"], frameAncestors: ["'none'"],
+    defaultSrc: ["'self'"], imgSrc: ["'self'", "https://ledgetopdroneservices.com", "https://*.cloudflarestream.com", "data:", "blob:"], styleSrc: ["'self'", "'unsafe-inline'"],
+    scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com", "https://api.mapbox.com", "https://events.mapbox.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com"], workerSrc: ["blob:"], frameAncestors: ["'none'"],
     baseUri: ["'none'"], objectSrc: ["'none'"], formAction: ["'self'"],
   },
   referrerPolicy: "no-referrer",
@@ -88,8 +88,8 @@ const lockedSecurityHeaders = secureHeaders({
 });
 const frameablePdfSecurityHeaders = secureHeaders({
   contentSecurityPolicy: {
-    defaultSrc: ["'self'"], imgSrc: ["'self'", "https://ledgetopdroneservices.com", "https://*.cloudflarestream.com", "data:"], styleSrc: ["'self'", "'unsafe-inline'"],
-    scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com"], frameAncestors: ["'self'"],
+    defaultSrc: ["'self'"], imgSrc: ["'self'", "https://ledgetopdroneservices.com", "https://*.cloudflarestream.com", "data:", "blob:"], styleSrc: ["'self'", "'unsafe-inline'"],
+    scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com", "https://api.mapbox.com", "https://events.mapbox.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com"], workerSrc: ["blob:"], frameAncestors: ["'self'"],
     baseUri: ["'none'"], objectSrc: ["'none'"], formAction: ["'self'"],
   },
   referrerPolicy: "no-referrer",
@@ -710,6 +710,7 @@ export async function cleanupTemporaryZips(env: Env, now = Date.now()): Promise<
 }
 
 app.route("/api/client", createClientPortalRouter());
+app.get("/", c => c.redirect("/portal", 302));
 
 app.notFound(c => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {

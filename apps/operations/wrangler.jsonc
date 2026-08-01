@@ -25,7 +25,7 @@
     "ENVIRONMENT": "production",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "OPERATIONS_AUD": "d09e298c864b9c8f4491b4b42a4dbe2ecbf558b5868d18258443740e56032407",
-    "DELIVERY_BASE_URL": "https://delivery.ledgetopdroneservices.com",
+    "DELIVERY_BASE_URL": "https://client.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "https://project-alpha.ledgetopdroneservices.com",
     "APPLICATION_KEY": "ltds_ops",
     "TFR_REGION": "WI",

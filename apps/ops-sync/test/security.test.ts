@@ -38,6 +38,7 @@ describe("Project Alpha webhook validation", () => {
     expect(parseIntegrationEvent(projection,"community_operations").event_type).toBe("projection.changed");
     expect(()=>parseIntegrationEvent(projection,"another_application")).toThrow("application-key-mismatch");
     expect(()=>parseIntegrationEvent({...projection,projection:{...projection.projection,entity_type:"password"}},"community_operations")).toThrow();
+    expect(parseIntegrationEvent({...projection,projection:{...projection.projection,entity_type:"client",entity_id:"70"}},"community_operations").event_type).toBe("projection.changed");
   });
 
   it("verifies the timestamp and raw body HMAC", async () => {

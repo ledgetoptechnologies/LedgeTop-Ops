@@ -7,6 +7,8 @@ import type { GrantRow, StaffPrincipal } from "../src/worker/types";
 
 const source = readFileSync(new URL("../src/worker/index.ts", import.meta.url), "utf8");
 const client = readFileSync(new URL("../src/client/OperationsApp.tsx", import.meta.url), "utf8");
+const compactSource = source.replace(/\s+/g, "");
+const compactClient = client.replace(/\s+/g, "");
 const styles = readFileSync(new URL("../src/client/styles.css", import.meta.url), "utf8");
 const migration = readFileSync(new URL("../migrations/0015_staff_acl_explicit_controls.sql", import.meta.url), "utf8");
 const principal = { id: "staff-target" } as StaffPrincipal;
@@ -42,7 +44,7 @@ describe("staff access controls", () => {
 
   it("exposes a system-admin-only, strict allowlisted update endpoint with audit logging", () => {
     expect(source).toContain('app.put("/api/admin/staff/:id/access-controls"');
-    expect(source).toContain("await requireGlobal(c.env,principal,\"roles.manage\")");
+    expect(compactSource).toContain("awaitrequireGlobal(c.env,principal,\"roles.manage\")");
     expect(source).toContain("staffAccessSchema");
     expect(source).toContain("staff.access_controls.updated");
     expect(source).toContain("Administrators cannot change their own access controls");
@@ -54,8 +56,8 @@ describe("staff access controls", () => {
 
   it("connects each visible admin toggle to the CSRF-protected API, while ordinary team viewers cannot mutate it", () => {
     expect(client).toContain("/access-controls");
-    expect(client).toContain('api<{staff:any[]}>("/api/team/staff")');
-    expect(client).toContain('session.user.isAdministrator&&person.id!==session.user.id&&!person.sync_protected&&person.id!=="staff-beau-koltz"');
+    expect(compactClient).toContain('api<{staff:any[]}>("/api/team/staff")');
+    expect(compactClient).toContain('session.user.isAdministrator&&person.id!==session.user.id&&!person.sync_protected&&person.id!=="staff-beau-koltz"');
     expect(client).toContain("View all operations, projects, and tasks");
     expect(client).toContain("Create client links");
   });

@@ -39,7 +39,7 @@ export interface EntitlementEvent {
   };
 }
 
-export type ProjectionEntityType = "project" | "project_assignment" | "business_unit" | "operation" | "operation_assignment" | "task" | "task_assignment";
+export type ProjectionEntityType = "client" | "organization" | "project" | "project_assignment" | "business_unit" | "operation" | "operation_assignment" | "task" | "task_assignment";
 export interface ProjectionEvent {
   event_id: string;
   event_type: "projection.changed";

@@ -43,6 +43,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
     "0015_staff_acl_explicit_controls.sql",
+    "0016_projection_entity_leases.sql",
   ]),
 });
 
@@ -124,7 +125,10 @@ export const STAGING_INVENTORY = Object.freeze({
   "ops-sync": {
     name: "ltds-ops-sync-staging",
     routes: [{ pattern: STAGING_HOSTS["ops-sync"], custom_domain: true }],
-    d1_databases: [{ binding: "OPS_DB", database_name: "ltds-ops-staging", database_id: "78b34173-b168-4e3d-9832-bb9d245cc6b8", migrations_dir: "../operations/migrations" }],
+    d1_databases: [
+      { binding: "OPS_DB", database_name: "ltds-ops-staging", database_id: "78b34173-b168-4e3d-9832-bb9d245cc6b8", migrations_dir: "../operations/migrations" },
+      { binding: "DELIVERY_DB", database_name: "client-data-staging", database_id: "b6f653ab-9acd-4421-9ad0-207754b59aeb", migrations_dir: "../client/migrations" },
+    ],
     r2_buckets: [],
     workflows: [],
     queues: [],

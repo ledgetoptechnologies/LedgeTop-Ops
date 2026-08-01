@@ -268,6 +268,36 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
   return statements;
 }
 
+function clientPortalProjectionStatements(env: Env, data: SnapshotCollections, changed: ReadonlySet<CollectionName>): D1PreparedStatement[] {
+  if (!env.DELIVERY_DB) return [];
+  const db = env.DELIVERY_DB;
+  const statements: D1PreparedStatement[] = [];
+  if (changed.has("clients")) for (const row of data.clients) {
+    const id = text(row.id), name = text(row.name);
+    if (id && name) statements.push(db.prepare("UPDATE client_accounts SET display_name=?,updated_at=datetime('now') WHERE project_alpha_client_id=?").bind(name, id));
+  }
+  if (changed.has("organizations")) for (const row of data.organizations) {
+    const id = text(row.id), name = text(row.name);
+    if (id && name) statements.push(db.prepare("UPDATE client_accounts SET display_name=?,updated_at=datetime('now') WHERE project_alpha_organization_id=? AND project_alpha_client_id IS NULL").bind(name, id));
+  }
+  if (changed.has("projects")) {
+    const clients = new Map(data.clients.map(row => [text(row.id), text(row.name)]));
+    const organizations = new Map(data.organizations.map(row => [text(row.id), text(row.name)]));
+    for (const row of data.projects) {
+      const id = text(row.id), projectName = text(row.name);
+      if (!id || !projectName) continue;
+      const clientName = clients.get(text(row.client_id)) || organizations.get(text(row.organization_id)) || "Client";
+      statements.push(db.prepare(`UPDATE projects SET client_name=?,project_name=?,status=?,summary=?,site_address=?,service_address=?,
+        project_contact_name=?,project_contact_email=?,project_contact_phone=?,next_milestone=?,source_updated_at=?,updated_at=datetime('now')
+        WHERE project_alpha_project_id=?`)
+        .bind(clientName, projectName, text(row.status), text(row.summary) || text(row.description), text(row.site_address),
+          text(row.service_address), text(row.project_contact_name), normalizedEmail(row.project_contact_email),
+          text(row.project_contact_phone), text(row.next_milestone), text(row.updated_at), id));
+    }
+  }
+  return statements;
+}
+
 function reconciliationStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, applicationKey: string): D1PreparedStatement[] {
   const tables: Record<CollectionName, string> = {
     users: "pa_users", business_units: "pa_business_units", worker_business_units: "pa_worker_business_units",
@@ -351,6 +381,10 @@ export async function syncProjectAlpha(env: Env): Promise<ProjectAlphaSyncResult
     const changed = await changedCollections(env.OPS_DB, fingerprints);
     await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed, applicationKey));
     await runBatches(env.OPS_DB, reconciliationStatements(env.OPS_DB, data, syncId, changed, applicationKey));
+    await runBatches(env.DELIVERY_DB, clientPortalProjectionStatements(env, data, changed));
+    // Commit source fingerprints only after the idempotent portal projection.
+    // If DELIVERY_DB is unavailable, the next run must retry the same changed
+    // collections instead of falsely reporting a healthy but stale portal.
     await runBatches(env.OPS_DB, fingerprintStatements(env.OPS_DB, fingerprints, changed, syncId));
     await env.OPS_DB.batch([
       env.OPS_DB.prepare("UPDATE sync_runs SET status='success',completed_at=datetime('now'),records_seen=? WHERE id=?").bind(records, runId),

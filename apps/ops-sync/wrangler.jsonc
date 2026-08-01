@@ -30,6 +30,12 @@
       "database_name": "ltds-ops",
       "database_id": "6ebf7514-d306-4615-ae56-ad869c874dbd",
       "migrations_dir": "../operations/migrations"
+    },
+    {
+      "binding": "DELIVERY_DB",
+      "database_name": "client-data",
+      "database_id": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
+      "migrations_dir": "../client/migrations"
     }
   ]
 }

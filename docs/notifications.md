@@ -9,7 +9,8 @@ Operations claims pending records with a short lease and retries sends at most t
 Created and updated messages may contain the delivery link. Access codes are never included. Contributor uploads do not enqueue notifications.
 
 Client portal request and team events use the Delivery D1 outbox introduced by
-migrations `0098` and `0099`. Enqueueing is not delivery: consumers must claim
+migrations `0098` and `0099` and rebuilt with required request-scoped dedupe
+keys and confirmation/response events by `0104`. Enqueueing is not delivery: consumers must claim
 idempotently, bound retries, avoid logging client content, and retain the local
 account/request authorization context. No notification recipient, Access group
 membership, or Project Alpha billing contact grants portal access. Staging must
@@ -35,7 +36,48 @@ does not silently send the same message through another provider.
 The existing Cloudflare Email Service binding remains an intentional fallback
 only when `SMTP_NOTIFICATIONS_ENABLED=false`. This preserves one mail owner and
 avoids a second application password. The Operations cron queues 72-hour
-expiration notices and processes the outbox every fifteen minutes.
+expiration notices every fifteen minutes and processes the outbox every five
+minutes. Request mail uses a stable outbox-derived `Message-ID`; delivery is
+still at-least-once because the provider and D1 cannot share a transaction.
+
+Every new service request must create one `staff_triage` outbox record with a
+non-null dedupe key. A blank `CLIENT_REQUEST_TRIAGE_TO` is a configuration
+failure that is audited and alerted, not a successful suppression. Client
+confirmation mail is separately deduped by immutable estimate version.
+
+## Service-request presentation contract
+
+Each service-request outbox row stores a versioned, nonfinancial presentation
+snapshot in its existing `payload_json`; this contract requires no database
+migration. Version 1 contains only the human-readable request title,
+existing-project or `New or one-off service` context, service scope/category,
+stable location label, lifecycle presentation value, and portal action. New
+events render from that immutable snapshot so retries, later request edits, or
+project-name changes cannot alter the message. The consumer rebuilds only these
+same bounded fields from the request-scoped database join when processing a
+legacy pre-versioned row.
+
+Location labels follow the client request record: an explicitly selected
+geocoder address/place is preferred; otherwise the stored reverse-geocoded
+nearby road/place is used; otherwise bounded coordinates render as
+`Near <latitude>, <longitude>`; a request with neither uses `Location not
+specified`. The notification consumer does not perform geocoding or invent an
+exact address.
+
+Client-facing subjects use `Service request` and human lifecycle labels. They
+never expose the internal request type or database status tokens. Existing
+projects are named plainly; account-level work is always described as `New or
+one-off service`. Staff submission and client-response mail links to the
+request's LTDS Operations review route. Client status and estimate-ready mail
+links to the authenticated client request overview.
+
+The presentation snapshot and renderer intentionally exclude request details,
+site contacts, notification-recipient metadata, billing contacts, estimate
+amounts, currency, Project Alpha identifiers, quote/document numbers,
+contracts, and invoices. Financial artifacts remain under Project Alpha's
+authority. In particular, linking a verified Project Alpha quote can update the
+service-request lifecycle, but no quote field is copied into the notification
+payload or message.
 
 ## Pilot verification
 

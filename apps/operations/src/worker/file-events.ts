@@ -145,7 +145,7 @@ async function beginTusUpload(env: Env, key: string, size: number, etag: string)
       Authorization: `Bearer ${env.STREAM_API_TOKEN}`,
       "Tus-Resumable": TUS_VERSION,
       "Upload-Length": String(size),
-      "Upload-Metadata": `name ${metadata(key.split("/").pop() || "video")},requiresignedurls ${metadata("true")},allowedorigins ${metadata(JSON.stringify(["delivery.ledgetopdroneservices.com"]))}`,
+      "Upload-Metadata": `name ${metadata(key.split("/").pop() || "video")},requiresignedurls ${metadata("true")},allowedorigins ${metadata(JSON.stringify(["client.ledgetopdroneservices.com"]))}`,
     },
   });
   const location = response.headers.get("Location"); const uid = response.headers.get("stream-media-id");

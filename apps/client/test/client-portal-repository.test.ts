@@ -37,6 +37,9 @@ function recordingEnv(options: {
       };
       return statement;
     },
+    async batch(statements: Array<{ run(): Promise<{ meta: { changes: number } }> }>) {
+      return Promise.all(statements.map(statement => statement.run()));
+    },
     withSession(consistency: string) {
       expect(consistency).toBe("first-primary");
       return database;
@@ -121,9 +124,9 @@ describe("client portal grant enforcement", () => {
     const call = value.calls[0]!;
     expect(call.binds).toEqual(["account-a", "identity-a", "request-b"]);
     expect(call.sql).toContain("r.id=? AND r.account_id=a.id");
-    expect(call.sql).toContain("g.account_id=a.id");
-    expect(call.sql).toContain("g.revoked_at IS NULL");
-    expect(call.sql).toContain("p.active=1");
+    expect(call.sql).toContain("request_grant.account_id=a.id");
+    expect(call.sql).toContain("request_grant.revoked_at IS NULL");
+    expect(call.sql).toContain("request_project.active=1");
   });
 });
 
@@ -141,22 +144,23 @@ describe("client service request writes", () => {
   it("performs no insert unless one SQL statement revalidates every server-side grant", async () => {
     const value = recordingEnv({ changes: () => 0 });
     await expect(d1ClientPortalRepository.createServiceRequest(value.env, session, input)).resolves.toBeNull();
-    expect(value.calls).toHaveLength(2);
-    const call = value.calls[0]!;
+    expect(value.calls).toHaveLength(6);
+    const call = value.calls.find(entry => entry.sql.includes("INSERT INTO client_service_requests"))!;
     expect(call.sql).toContain("INSERT INTO client_service_requests");
-    expect(call.sql).toContain("SELECT ?,a.id,g.project_id,i.id");
+    expect(call.sql).toContain("SELECT ?,a.id,g.project_id,?,i.id");
     expect(call.sql).toContain("g.can_request_service=1");
     expect(call.sql).toContain("a.status='active'");
     expect(call.sql).toContain("p.active=1");
-    expect(call.sql).toContain("ON CONFLICT(account_id,idempotency_key) DO NOTHING");
     expect(call.binds).toContain("request-test-0001");
-    expect(call.binds.slice(-3)).toEqual(["identity-a", "project-a", "account-a"]);
+    expect(call.binds.slice(-5)).toEqual(["identity-a", "project-a", "account-a", null, null]);
   });
 
   it("returns the created request through the same account-scoped read path", async () => {
     const value = recordingEnv({
       changes: call => call.sql.includes("INSERT INTO") ? 1 : 0,
-      first: call => call.sql.includes("FROM client_service_requests") ? {
+      first: call => call.sql.includes("SELECT p.project_name")
+        ? { project_name: "North Distribution Center" }
+        : call.sql.includes("r.id=?") ? {
         id: "request-a",
         project_id: "project-a",
         request_type: "service",
@@ -171,9 +175,21 @@ describe("client service request writes", () => {
     });
     const created = await d1ClientPortalRepository.createServiceRequest(value.env, session, input);
     expect(created).toMatchObject({ kind: "created", request: { id: "request-a", projectId: "project-a", status: "submitted" } });
-    expect(value.calls).toHaveLength(4);
-    expect(value.calls[1]?.binds.slice(0, 2)).toEqual(["account-a", "identity-a"]);
-    expect(value.calls.some(call => call.sql.includes("client_portal_notification_outbox"))).toBe(true);
+    expect(value.calls).toHaveLength(7);
+    expect(value.calls.at(-1)?.binds.slice(0, 2)).toEqual(["account-a", "identity-a"]);
+    const outbox = value.calls.find(call => call.sql.includes("client_portal_notification_outbox"));
+    expect(outbox).toBeDefined();
+    const notification = JSON.parse(String(outbox?.binds.at(-1)));
+    expect(notification).toEqual({
+      presentationVersion: 1,
+      title: "Model refresh",
+      projectContext: { kind: "existing_project", label: "North Distribution Center" },
+      scopeLabel: "General service",
+      locationLabel: "Location not specified",
+      lifecycle: "submitted",
+      action: "review_in_operations",
+    });
+    expect(JSON.stringify(notification)).not.toMatch(/flight|amount|currency|quote|contact|billing/i);
   });
 });
 
@@ -225,6 +241,10 @@ describe("client service request listing", () => {
       latitude: null,
       longitude: null,
       areaGeoJson: null,
+      parentRequestId: undefined,
+      poiPoints: [],
+      acceptedQuote: null,
+      operationalEstimate: null,
       status: "under_review",
       createdAt: "2026-07-31 12:00:00",
       updatedAt: "2026-07-31 13:00:00",
@@ -232,9 +252,9 @@ describe("client service request listing", () => {
     const call = value.calls[0]!;
     expect(call.binds).toEqual(["account-a", "identity-a"]);
     expect(call.sql).toContain("r.account_id=a.id");
-    expect(call.sql).toContain("g.account_id=a.id");
-    expect(call.sql).toContain("g.revoked_at IS NULL");
-    expect(call.sql).toContain("p.active=1");
+    expect(call.sql).toContain("request_grant.account_id=a.id");
+    expect(call.sql).toContain("request_grant.revoked_at IS NULL");
+    expect(call.sql).toContain("request_project.active=1");
     expect(call.sql).toContain("ORDER BY r.created_at DESC,r.id DESC");
     expect(call.sql).toContain("LIMIT 100");
   });
@@ -286,9 +306,9 @@ describe("client service request idempotency", () => {
     });
     const result = await d1ClientPortalRepository.createServiceRequest(value.env, session, input);
     expect(result).toMatchObject({ kind: "replayed", request: { id: "request-existing" } });
-    expect(value.calls).toHaveLength(2);
-    expect(value.calls[1]?.binds).toEqual(["account-a", "identity-a", "request-test-0001"]);
-    expect(value.calls[1]?.sql).toContain("r.account_id=a.id");
+    expect(value.calls).toHaveLength(1);
+    expect(value.calls[0]?.binds).toEqual(["account-a", "identity-a", "request-test-0001"]);
+    expect(value.calls[0]?.sql).toContain("r.account_id=a.id");
   });
 
   it("rejects reuse of the key for a different payload", async () => {

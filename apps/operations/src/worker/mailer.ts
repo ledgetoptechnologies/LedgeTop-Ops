@@ -6,6 +6,8 @@ export interface OutboundMail {
   subject: string;
   text: string;
   html: string;
+  /** Stable durable-outbox identifier used as SMTP Message-ID on retries. */
+  messageIdKey?: string;
 }
 
 interface SmtpSettings {
@@ -63,7 +65,10 @@ export function buildSmtpMessage(mail: OutboundMail, from: string): string {
   const to = requireEmail(mail.to, "notification recipient");
   const sender = requireEmail(from, "SMTP_FROM");
   const boundary = `=_ltds_${crypto.randomUUID().replaceAll("-", "")}`;
-  const messageId = `<${crypto.randomUUID()}@${sender.split("@")[1]}>`;
+  const messageIdKey = cleanHeader(mail.messageIdKey || crypto.randomUUID())
+    .replace(/[^a-zA-Z0-9._-]/g, "-")
+    .slice(0, 160);
+  const messageId = `<${messageIdKey}@${sender.split("@")[1]}>`;
   return [
     `From: ${encodedHeader(mail.fromName)} <${sender}>`,
     `To: <${to}>`,

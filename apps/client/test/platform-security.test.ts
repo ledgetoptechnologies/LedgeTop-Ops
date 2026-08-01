@@ -73,6 +73,10 @@ describe("inline PDF routing",()=>{
     const health=await deliveryWorker.fetch(new Request("https://delivery.example/health"),value.env,value.executionCtx);
     expect(health.headers.get("X-Frame-Options")).toBe("DENY");
     expect(health.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
+    expect(health.headers.get("Content-Security-Policy")).toContain("worker-src blob:");
+    expect(health.headers.get("Content-Security-Policy")).toContain("https://api.mapbox.com");
+    expect(health.headers.get("Content-Security-Policy")).toContain("https://events.mapbox.com");
+    expect(health.headers.get("Content-Security-Policy")).toContain("img-src 'self' https://ledgetopdroneservices.com https://*.cloudflarestream.com data: blob:");
     const wrongHost=await deliveryWorker.fetch(new Request("https://wrong.example/health"),{...value.env,ENVIRONMENT:"production"},value.executionCtx);
     expect(wrongHost.status).toBe(404);
     expect(wrongHost.headers.get("X-Frame-Options")).toBe("DENY");

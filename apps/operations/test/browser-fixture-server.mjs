@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
 
 const root = resolve("dist/client");
-const port = 4173;
+const port = 4174;
 const contentTypes = new Map([
   [".css", "text/css; charset=utf-8"],
   [".html", "text/html; charset=utf-8"],
@@ -20,7 +20,6 @@ const server = createServer(async (request, response) => {
     response.writeHead(204).end();
     return;
   }
-
   const requested = resolve(root, `.${decodeURIComponent(url.pathname)}`);
   let file = requested.startsWith(`${root}${sep}`) ? requested : resolve(root, "index.html");
   try {
@@ -32,7 +31,7 @@ const server = createServer(async (request, response) => {
   response.writeHead(200, {
     "Cache-Control": "no-store",
     "Content-Type": contentTypes.get(extname(file)) ?? "application/octet-stream",
-    "Content-Security-Policy": "default-src 'self'; img-src 'self' https://ledgetopdroneservices.com data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.mapbox.com https://events.mapbox.com; worker-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' https://ledgetopdroneservices.com https://*.mapbox.com data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.mapbox.com https://events.mapbox.com; worker-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   });
   createReadStream(file).pipe(response);
 });
@@ -45,6 +44,4 @@ function shutdown() {
   server.closeIdleConnections?.();
   server.closeAllConnections?.();
 }
-for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, shutdown);
-}
+for (const signal of ["SIGINT", "SIGTERM"]) process.on(signal, shutdown);

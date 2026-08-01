@@ -34,6 +34,32 @@ export interface ClientProject {
   clientName: string;
   projectName: string;
   canRequestService: boolean;
+  status?: string | null;
+  summary?: string | null;
+  siteAddress?: string | null;
+  serviceAddress?: string | null;
+  projectContactName?: string | null;
+  projectContactEmail?: string | null;
+  projectContactPhone?: string | null;
+  nextMilestone?: string | null;
+  lastUpdateAt?: string | null;
+}
+
+export interface ClientPortalFile {
+  id: string;
+  key: string;
+  name: string;
+  size: number;
+  uploadedAt: string;
+  contentType: string | null;
+  previewPath: string | null;
+  downloadPath: string;
+}
+
+export interface ClientFilePage {
+  files: ClientPortalFile[];
+  prefix: string;
+  cursor: string | null;
 }
 
 export interface ClientDelivery {
@@ -51,7 +77,9 @@ export type ClientServiceRequestType = "flight" | "service";
 
 export interface ClientServiceRequestInput {
   idempotencyKey: string;
-  projectId: string;
+  expectedUpdatedAt?: string;
+  projectId: string | null;
+  parentRequestId?: string | null;
   requestType: ClientServiceRequestType;
   title: string;
   details: string;
@@ -66,11 +94,33 @@ export interface ClientServiceRequestInput {
   latitude?: number | null;
   longitude?: number | null;
   areaGeoJson?: { type: "Polygon"; coordinates: [number, number][][] } | null;
+  poiPoints?: Array<{ longitude: number; latitude: number; label?: string | null }>;
+}
+
+export interface ClientAcceptedQuote {
+  documentNumber: string | null;
+  status: string;
+  total: number | null;
+  currency: string | null;
+  verifiedAt: string;
+}
+
+export interface ClientOperationalEstimate {
+  id: string;
+  version: number;
+  scope: string;
+  amount: number | null;
+  currency: string | null;
+  status: "draft" | "ready" | "accepted" | "change_requested";
+  proposedFields: Record<string, unknown> | null;
+  clientResponseNote: string | null;
+  updatedAt: string;
 }
 
 export interface ClientServiceRequest {
   id: string;
-  projectId: string;
+  projectId: string | null;
+  parentRequestId?: string | null;
   requestType: ClientServiceRequestType;
   title: string;
   details: string;
@@ -85,7 +135,10 @@ export interface ClientServiceRequest {
   latitude: number | null;
   longitude: number | null;
   areaGeoJson?: { type: "Polygon"; coordinates: [number, number][][] } | null;
-  status: "submitted" | "under_review" | "accepted" | "declined" | "cancelled" | "completed";
+  poiPoints?: Array<{ longitude: number; latitude: number; label: string | null }>;
+  status: "submitted" | "under_review" | "accepted_pending_pa_linkage" | "accepted_linked" | "declined" | "cancelled" | "completed";
+  acceptedQuote?: ClientAcceptedQuote | null;
+  operationalEstimate?: ClientOperationalEstimate | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -99,11 +152,18 @@ export type ResolveClientPrincipal = (request: Request, env: Env) => Promise<Ver
 export interface ClientPortalRepository {
   resolveSession(env: Env, principal: VerifiedClientPrincipal): Promise<ClientPortalSession | null>;
   listProjects(env: Env, session: ClientPortalSession): Promise<ClientProject[]>;
+  getProject(env: Env, session: ClientPortalSession, projectId: string): Promise<ClientProject | null>;
+  listProjectFiles(env: Env, session: ClientPortalSession, projectId: string, cursor?: string | null): Promise<ClientFilePage | null>;
+  listPastDeliveries(env: Env, session: ClientPortalSession, cursor?: string | null): Promise<ClientFilePage>;
+  getAuthorizedFile(env: Env, session: ClientPortalSession, fileId: string, projectId?: string | null): Promise<ClientPortalFile | null>;
   listDeliveries(env: Env, session: ClientPortalSession, projectId: string): Promise<ClientDelivery[]>;
   getDeliveryHandoff(env: Env, session: ClientPortalSession, projectId: string, shareId: string): Promise<{ publicId: string } | null>;
   listServiceRequests(env: Env, session: ClientPortalSession): Promise<ClientServiceRequest[]>;
   getServiceRequest(env: Env, session: ClientPortalSession, requestId: string): Promise<ClientServiceRequest | null>;
   createServiceRequest(env: Env, session: ClientPortalSession, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;
+  updateServiceRequest(env: Env, session: ClientPortalSession, requestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequest | null>;
+  createChangeRequest(env: Env, session: ClientPortalSession, parentRequestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;
+  respondToOperationalEstimate?(env: Env, session: ClientPortalSession, requestId: string, estimateId: string, response: "accept" | "request_change", note: string | null, mutationKey: string): Promise<ClientServiceRequest | null>;
   listMembers(env: Env, session: ClientPortalSession): Promise<ClientPortalMember[] | null>;
   listInvitations(env: Env, session: ClientPortalSession): Promise<ClientPortalInvitation[] | null>;
   createInvitation(env: Env, session: ClientPortalSession, input: { email: string; projectIds: string[] }): Promise<ClientPortalInvitation | null>;

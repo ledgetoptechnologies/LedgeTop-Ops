@@ -138,7 +138,8 @@
     "operations": {
       "expected": [
         "0014_staff_acl_controls.sql",
-        "0015_staff_acl_explicit_controls.sql"
+        "0015_staff_acl_explicit_controls.sql",
+        "0016_projection_entity_leases.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",

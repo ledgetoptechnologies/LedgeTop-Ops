@@ -20,13 +20,24 @@ function event(overrides: Partial<EntitlementEvent> = {}): EntitlementEvent {
   };
 }
 
-function env(): Env { return {OPS_DB:db} as Env; }
+function env(deliveryDb?: D1Database): Env { return {OPS_DB:db,DELIVERY_DB:deliveryDb} as Env; }
+
+function portalDatabase(state:{failNext:boolean;writes:Array<{sql:string;values:unknown[]}>;beforeWrite?:()=>Promise<void>}):D1Database {
+  const database={
+    prepare(sql:string){
+      const statement={sql,values:[] as unknown[],bind(...values:unknown[]){this.values=values;return this;},async run(){const beforeWrite=state.beforeWrite;state.beforeWrite=undefined;await beforeWrite?.();if(state.failNext){state.failNext=false;throw new Error("delivery-unavailable");}state.writes.push({sql:this.sql,values:this.values});return{meta:{changes:1}};}};
+      return statement;
+    },
+    async batch(statements:Array<{sql:string;values:unknown[]}>){const beforeWrite=state.beforeWrite;state.beforeWrite=undefined;await beforeWrite?.();if(state.failNext){state.failNext=false;throw new Error("delivery-unavailable");}state.writes.push(...statements.map(statement=>({sql:statement.sql,values:statement.values})));return statements.map(()=>({meta:{changes:1}}));},
+  };
+  return database as unknown as D1Database;
+}
 
 describe("entitlement projection",()=>{
   beforeEach(async()=>{
     miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await miniflare.getD1Database("OPS_DB") as D1Database;
-    for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql","0007_pa_projection_fingerprints.sql","0008_project_units_task_assignments.sql","0009_project_managers.sql"]){
+    for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql","0007_pa_projection_fingerprints.sql","0008_project_units_task_assignments.sql","0009_project_managers.sql","0016_projection_entity_leases.sql"]){
       const sql=await readFile(resolve(import.meta.dirname,"../../operations/migrations",migration),"utf8");
       for(const statement of sql.replace(/\r\n/g,"\n").split(";").map((part)=>part.trim()).filter((part)=>part && !part.startsWith("PRAGMA foreign_keys"))){
         await db.prepare(statement).run();
@@ -116,12 +127,74 @@ describe("entitlement projection",()=>{
     expect(await db.prepare("SELECT active FROM pa_calendar_events WHERE id='task:110'").first("active")).toBe(0);
   });
 
+  it("accepts client and organization projections and retries portal propagation before advancing the source version",async()=>{
+    const state={failNext:true,writes:[] as Array<{sql:string;values:unknown[]}>};
+    const delivery=portalDatabase(state);
+    const client:ProjectionEvent={event_id:"0ab5f730-ce6a-4b0e-b0fe-e6ba9930936c",event_type:"projection.changed",occurred_at:"2026-08-01T14:00:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"client",entity_id:"70",action:"upsert",source_updated_at:"2026-08-01T13:59:00.000000Z",data:{id:70,name:"Portal Client",organization_id:80}}};
+    await expect(applyProjectionEvent(env(delivery),client,"client-hash")).rejects.toThrow("delivery-unavailable");
+    expect(await db.prepare("SELECT source_updated_at FROM pa_projection_entity_versions WHERE entity_type='client' AND entity_id='70'").first()).toBeNull();
+    await expect(applyProjectionEvent(env(delivery),client,"client-hash")).resolves.toBe("applied");
+    expect(await db.prepare("SELECT name FROM pa_clients WHERE id='70'").first("name")).toBe("Portal Client");
+    expect(await db.prepare("SELECT source_updated_at FROM pa_projection_entity_versions WHERE entity_type='client' AND entity_id='70'").first("source_updated_at")).toBe(client.projection.source_updated_at);
+    expect(state.writes.some(write=>write.sql.includes("client_accounts")&&write.values.includes("70"))).toBe(true);
+    expect(state.writes.some(write=>write.sql.includes("ELSE 'active'"))).toBe(true);
+    const portalWriteCount=state.writes.length;
+    await expect(applyProjectionEvent(env(delivery),client,"client-hash")).resolves.toBe("applied");
+    expect(state.writes).toHaveLength(portalWriteCount);
+    await completeEvent(env(),client);
+    await expect(applyProjectionEvent(env(delivery),client,"client-hash")).resolves.toBe("duplicate");
+
+    const organization:ProjectionEvent={event_id:"3cd9380b-1b91-4622-873e-0e440dd97a6b",event_type:"projection.changed",occurred_at:"2026-08-01T14:01:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"organization",entity_id:"80",action:"revoke",source_updated_at:"2026-08-01T14:01:00.000000Z",data:{id:80,name:"Portal Organization"}}};
+    await expect(applyProjectionEvent(env(delivery),organization,"organization-hash")).resolves.toBe("applied");
+    expect(await db.prepare("SELECT active FROM pa_organizations WHERE id='80'").first("active")).toBe(0);
+  });
+
+  it("fails closed when a portal projection is missing DELIVERY_DB",async()=>{
+    const client:ProjectionEvent={event_id:"4f19dfc1-4f73-46de-b364-da1b7c10fdc2",event_type:"projection.changed",occurred_at:"2026-08-01T14:02:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"client",entity_id:"72",action:"revoke",source_updated_at:"2026-08-01T14:02:00.000000Z",data:{id:72,name:"Revoked Client"}}};
+    await expect(applyProjectionEvent(env(),client,"missing-delivery-hash")).rejects.toThrow("delivery-db-binding-required");
+    expect(await db.prepare("SELECT source_updated_at FROM pa_projection_entity_versions WHERE entity_type='client' AND entity_id='72'").first()).toBeNull();
+    expect(await db.prepare("SELECT status FROM integration_event_receipts WHERE event_id=?").bind(client.event_id).first("status")).toBe("pending");
+    expect(await db.prepare("SELECT owner_event_id FROM pa_projection_entity_leases WHERE entity_type='client' AND entity_id='72'").first()).toBeNull();
+
+    const state={failNext:false,writes:[] as Array<{sql:string;values:unknown[]}>};
+    await expect(applyProjectionEvent(env(portalDatabase(state)),client,"missing-delivery-hash")).resolves.toBe("applied");
+    expect(await db.prepare("SELECT source_updated_at FROM pa_projection_entity_versions WHERE entity_type='client' AND entity_id='72'").first("source_updated_at")).toBe(client.projection.source_updated_at);
+    expect(state.writes.some(write=>write.sql.includes("client_accounts")&&write.values.includes(0)&&write.values.includes("72"))).toBe(true);
+  });
+
   it("ignores an out-of-order incremental projection for the same entity",async()=>{
+    const delivery=portalDatabase({failNext:false,writes:[]});
     const newer:ProjectionEvent={event_id:"2fab1100-9992-4fd1-b013-26b330a9db34",event_type:"projection.changed",occurred_at:"2026-07-22T05:03:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"project",entity_id:"40",action:"upsert",source_updated_at:"2026-07-22T05:03:00.000000Z",data:{id:40,name:"New name",business_unit_id:30,manager_user_id:42}}};
     const older:ProjectionEvent={...newer,event_id:"dcf7d00b-f313-45a7-815e-3cb97fe60fd0",occurred_at:"2026-07-22T05:02:00.000000Z",projection:{...newer.projection,source_updated_at:"2026-07-22T05:02:00.000000Z",data:{id:40,name:"Old name",business_unit_id:30}}};
-    await expect(applyProjectionEvent(env(),newer,"newer-project-hash")).resolves.toBe("applied");
-    await expect(applyProjectionEvent(env(),older,"older-project-hash")).resolves.toBe("ignored");
+    await expect(applyProjectionEvent(env(delivery),newer,"newer-project-hash")).resolves.toBe("applied");
+    await expect(applyProjectionEvent(env(delivery),older,"older-project-hash")).resolves.toBe("ignored");
     expect(await db.prepare("SELECT name FROM pa_projects WHERE id='40'").first("name")).toBe("New name");
     expect(await db.prepare("SELECT manager_user_id FROM pa_projects WHERE id='40'").first("manager_user_id")).toBe("42");
+  });
+
+  it("serializes concurrent projection versions for one entity",async()=>{
+    let signalPortalWrite!:()=>void;
+    let releasePortalWrite!:()=>void;
+    const portalWriteStarted=new Promise<void>(resolve=>{signalPortalWrite=resolve;});
+    const portalWriteRelease=new Promise<void>(resolve=>{releasePortalWrite=resolve;});
+    const state={
+      failNext:false,
+      writes:[] as Array<{sql:string;values:unknown[]}>,
+      beforeWrite:async()=>{signalPortalWrite();await portalWriteRelease;},
+    };
+    const delivery=portalDatabase(state);
+    const older:ProjectionEvent={event_id:"7e248a60-b2e1-44c2-995e-b2d3a2043503",event_type:"projection.changed",occurred_at:"2026-08-01T15:00:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"client",entity_id:"71",action:"upsert",source_updated_at:"2026-08-01T15:00:00.000000Z",data:{id:71,name:"Older Client"}}};
+    const newer:ProjectionEvent={...older,event_id:"c3b37b91-717d-408d-a04a-53f6567cff7c",occurred_at:"2026-08-01T15:01:00.000000Z",projection:{...older.projection,source_updated_at:"2026-08-01T15:01:00.000000Z",data:{id:71,name:"Newer Client"}}};
+    const olderRun=applyProjectionEvent(env(delivery),older,"older-client-hash");
+    await portalWriteStarted;
+    try {
+      await expect(applyProjectionEvent(env(delivery),newer,"newer-client-hash")).rejects.toThrow("projection-entity-busy");
+    } finally {
+      releasePortalWrite();
+      await olderRun;
+    }
+    await expect(applyProjectionEvent(env(delivery),newer,"newer-client-hash")).resolves.toBe("applied");
+    expect(await db.prepare("SELECT name FROM pa_clients WHERE id='71'").first("name")).toBe("Newer Client");
+    expect(await db.prepare("SELECT event_id FROM pa_projection_entity_versions WHERE entity_type='client' AND entity_id='71'").first("event_id")).toBe(newer.event_id);
   });
 });

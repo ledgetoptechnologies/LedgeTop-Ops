@@ -36,6 +36,121 @@ export type PermissionScope = "global" | "division" | "assigned" | "own";
 export type OperationStatus = "draft" | "scheduled" | "ready" | "blocked" | "in_progress" | "completed" | "cancelled";
 export type TaskStatus = "todo" | "in_progress" | "blocked" | "done";
 
+export type ServiceRequestNotificationLifecycle =
+  | "submitted"
+  | "under_review"
+  | "accepted_pending_pa_linkage"
+  | "accepted_linked"
+  | "declined"
+  | "cancelled"
+  | "completed"
+  | "estimate_ready"
+  | "client_response_received";
+
+export interface ServiceRequestNotificationSnapshot {
+  presentationVersion: 1;
+  title: string;
+  projectContext: {
+    kind: "existing_project" | "new_or_one_off";
+    label: string;
+  };
+  scopeLabel: string;
+  locationLabel: string;
+  lifecycle: ServiceRequestNotificationLifecycle;
+  action: "review_in_operations" | "open_client_portal";
+}
+
+function boundedPresentationText(value: unknown, fallback: string, maxLength: number): string {
+  if (typeof value !== "string") return fallback;
+  const text = value.trim();
+  return text ? text.slice(0, maxLength) : fallback;
+}
+
+export function serviceRequestLocationLabel(
+  label: string | null | undefined,
+  latitude: number | null | undefined,
+  longitude: number | null | undefined,
+): string {
+  const selected = boundedPresentationText(label, "", 240);
+  if (selected) return selected;
+  if (Number.isFinite(latitude) && Number.isFinite(longitude))
+    return `Near ${Number(latitude).toFixed(4)}, ${Number(longitude).toFixed(4)}`;
+  return "Location not specified";
+}
+
+export function buildServiceRequestNotificationSnapshot(input: {
+  title: string;
+  projectId?: string | null;
+  projectName?: string | null;
+  serviceCategory?: string | null;
+  locationLabel?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  lifecycle: ServiceRequestNotificationLifecycle;
+  action: ServiceRequestNotificationSnapshot["action"];
+}): ServiceRequestNotificationSnapshot {
+  const existingProject = Boolean(input.projectId);
+  return {
+    presentationVersion: 1,
+    title: boundedPresentationText(input.title, "Service request", 160),
+    projectContext: existingProject
+      ? {
+          kind: "existing_project",
+          label: boundedPresentationText(input.projectName, "Existing project", 240),
+        }
+      : { kind: "new_or_one_off", label: "New or one-off service" },
+    scopeLabel: boundedPresentationText(input.serviceCategory, "General service", 100),
+    locationLabel: serviceRequestLocationLabel(
+      input.locationLabel,
+      input.latitude,
+      input.longitude,
+    ),
+    lifecycle: input.lifecycle,
+    action: input.action,
+  };
+}
+
+const serviceRequestNotificationLifecycles = new Set<ServiceRequestNotificationLifecycle>([
+  "submitted",
+  "under_review",
+  "accepted_pending_pa_linkage",
+  "accepted_linked",
+  "declined",
+  "cancelled",
+  "completed",
+  "estimate_ready",
+  "client_response_received",
+]);
+
+export function parseServiceRequestNotificationSnapshot(
+  value: unknown,
+): ServiceRequestNotificationSnapshot | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<ServiceRequestNotificationSnapshot>;
+  if (
+    candidate.presentationVersion !== 1 ||
+    typeof candidate.title !== "string" ||
+    !candidate.projectContext ||
+    typeof candidate.projectContext !== "object" ||
+    !["existing_project", "new_or_one_off"].includes(candidate.projectContext.kind) ||
+    typeof candidate.projectContext.label !== "string" ||
+    typeof candidate.scopeLabel !== "string" ||
+    typeof candidate.locationLabel !== "string" ||
+    !serviceRequestNotificationLifecycles.has(candidate.lifecycle as ServiceRequestNotificationLifecycle) ||
+    !["review_in_operations", "open_client_portal"].includes(candidate.action as string)
+  )
+    return null;
+  return buildServiceRequestNotificationSnapshot({
+    title: candidate.title,
+    projectId: candidate.projectContext.kind === "existing_project" ? "snapshot-project" : null,
+    projectName: candidate.projectContext.label,
+    serviceCategory: candidate.scopeLabel,
+    locationLabel: candidate.locationLabel,
+    lifecycle: candidate.lifecycle as ServiceRequestNotificationLifecycle,
+    action: candidate.action as ServiceRequestNotificationSnapshot["action"],
+  });
+}
+
 export interface SessionUser {
   id: string;
   email: string;

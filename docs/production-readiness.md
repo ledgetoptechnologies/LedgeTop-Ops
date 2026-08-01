@@ -101,7 +101,7 @@ still disabled; run baseline smoke tests; and only then request separate
 approval for each capability rollout. A branch push alone is never a release.
 
 The portal schema gate requires Delivery migrations `0096`–`0100` and
-Operations `0014`–`0015`, with fresh staging exports and exact list/apply
+Operations `0014`–`0016`, with fresh staging exports and exact list/apply
 evidence. Client `0100` preserves independent share rotation/revocation by
 removing `share_version` from the delivery-grant foreign-key parent while
 retaining the recorded version as a fail-closed authorization check. These
