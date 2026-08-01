@@ -390,7 +390,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
           SELECT 1 FROM client_account_invitations pending
           WHERE pending.account_id=a.id AND pending.email=? AND pending.revoked_at IS NULL AND pending.accepted_at IS NULL
         )`)
-      .bind(invitation.id, email, JSON.stringify(projectIds), invitation.expiresAt, session.accountId, session.identityId, session.accountId, email)
+      .bind(invitation.id, email, JSON.stringify(projectIds), invitation.expiresAt, session.identityId, session.accountId, email)
       .run();
     if (created.meta.changes !== 1) return null;
 
@@ -443,8 +443,14 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       .bind(invitationId, session.accountId, session.accountId, session.identityId)
       .run();
     if (revoked.meta.changes !== 1) return false;
-    await db.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('client_manager',?,'client.invitation.revoked','client_account_invitation',?,?)")
-      .bind(session.identityId, invitationId, JSON.stringify({ accountId: session.accountId })).run();
+    await db.batch([
+      db.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('client_manager',?,'client.invitation.revoked','client_account_invitation',?,?)")
+        .bind(session.identityId, invitationId, JSON.stringify({ accountId: session.accountId })),
+      db.prepare(`INSERT INTO client_access_sync_outbox (id,account_id,email,action,source_type,source_id)
+        SELECT ?,account_id,lower(email),'revoke','invite',id
+        FROM client_account_invitations WHERE id=? AND account_id=? AND revoked_at IS NOT NULL`)
+        .bind(crypto.randomUUID(), invitationId, session.accountId),
+    ]);
     return true;
   },
 };

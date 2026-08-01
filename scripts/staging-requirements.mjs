@@ -17,9 +17,33 @@ export const REQUIRED_STAGING_SECRETS = Object.freeze({
 
 export const STAGING_HOSTS = Object.freeze({
   delivery: "delivery-staging.ledgetopdroneservices.com",
+  client: "client-staging.ledgetopdroneservices.com",
   operations: "ops-staging.ledgetopdroneservices.com",
   incoming: "incoming-staging.ledgetopdroneservices.com",
   "ops-sync": "ops-sync-staging.ledgetopdroneservices.com",
+});
+
+export const STAGING_CLIENT_PORTAL = Object.freeze({
+  applicationName: "LTDS Client Portal Staging",
+  publicApplicationName: "LTDS Client Public Staging",
+  hostname: STAGING_HOSTS.client,
+  protectedPaths: Object.freeze(["/portal", "/portal/*", "/api/client", "/api/client/*"]),
+  publicPaths: Object.freeze(["/", "/s/*", "/api/public/*", "/health", "/assets/*"]),
+  groupName: "LTDS Client Portal Staging Testers",
+});
+
+export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
+  delivery: Object.freeze([
+    "0096_client_portal_foundation.sql",
+    "0097_client_portal_team_acl.sql",
+    "0098_client_access_sync_processing.sql",
+    "0099_client_portal_request_notifications.sql",
+    "0100_client_portal_release_hardening.sql",
+  ]),
+  operations: Object.freeze([
+    "0014_staff_acl_controls.sql",
+    "0015_staff_acl_explicit_controls.sql",
+  ]),
 });
 
 export const STAGING_ACCESS_AUDS = Object.freeze({
@@ -31,6 +55,10 @@ export const STAGING_ACCESS_AUDS = Object.freeze({
 export const STAGING_STATIC_VARS = Object.freeze({
   delivery: Object.freeze({
     TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
+    PUBLIC_BASE_URL: `https://${STAGING_HOSTS.client}`,
+    CLIENT_PORTAL_ENABLED: "false",
+    CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
+    CLIENT_ACCESS_TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
     R2_S3_ENDPOINT: "https://846c924bf17bf4f3dd15c97a4c5d1d51.r2.cloudflarestorage.com",
     R2_BUCKET_NAME: "client-data-staging",
   }),
@@ -52,7 +80,10 @@ export const STAGING_STATIC_VARS = Object.freeze({
 export const STAGING_INVENTORY = Object.freeze({
   delivery: {
     name: "ltds-delivery-staging",
-    routes: [{ pattern: STAGING_HOSTS.delivery, custom_domain: true }],
+    routes: [
+      { pattern: STAGING_HOSTS.delivery, custom_domain: true },
+      { pattern: STAGING_HOSTS.client, custom_domain: true },
+    ],
     d1_databases: [{ binding: "DELIVERY_DB", database_name: "client-data-staging", database_id: "b6f653ab-9acd-4421-9ad0-207754b59aeb", migrations_dir: "migrations" }],
     r2_buckets: [{ binding: "DATA_BUCKET", bucket_name: "client-data-staging" }],
     workflows: [

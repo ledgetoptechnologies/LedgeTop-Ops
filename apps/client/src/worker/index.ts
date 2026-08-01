@@ -37,6 +37,17 @@ function cloudRedirectUri(env:Env,provider:CloudProvider):string{return`${env.PU
 function cloudStatus(value:string):string{return value==="partial"?"failed":value;}
 function providerPublicName(provider:CloudProvider):"dropbox"|"google-drive"{return provider==="google"?"google-drive":"dropbox";}
 
+export function requestHostAllowed(requestUrl:string,env:Pick<Env,"ENVIRONMENT"|"EXPECTED_HOST"|"CLIENT_PORTAL_ORIGIN">):boolean{
+ if(env.ENVIRONMENT!=="production")return true;
+ const requestHost=new URL(requestUrl).host;
+ if(requestHost===env.EXPECTED_HOST)return true;
+ if(!env.CLIENT_PORTAL_ORIGIN)return false;
+ try{
+  const portal=new URL(env.CLIENT_PORTAL_ORIGIN);
+  return portal.protocol==="https:"&&portal.origin===env.CLIENT_PORTAL_ORIGIN&&portal.pathname==="/"&&requestHost===portal.host;
+ }catch{return false;}
+}
+
 async function googlePickerCredential(env:CloudTransferEnv,authorizationId:string,row:{credential_ciphertext:string;credential_iv:string;key_id:string}):Promise<CloudCredential>{
  let credential=await decryptWithRotation<CloudCredential>({ciphertext:row.credential_ciphertext,iv:row.credential_iv,keyId:row.key_id},env,`authorization:${authorizationId}:google`);
  if(credential.expiresAt&&Date.parse(credential.expiresAt)<=Date.now()+120000){
@@ -91,7 +102,7 @@ app.use("*", (c, next) => framePolicyForPath(c.req.path, c.req.method).xFrameOpt
   : lockedSecurityHeaders(c, next));
 
 app.use("*", async (c, next) => {
-  if (c.env.ENVIRONMENT === "production" && new URL(c.req.url).host !== c.env.EXPECTED_HOST) return c.json({ error: "Not found" }, 404);
+  if (!requestHostAllowed(c.req.url,c.env)) return c.json({ error: "Not found" }, 404);
   await next();
   c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   c.header("X-Robots-Tag", "noindex, nofollow");

@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
+import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import type { Env } from "../types";
 import type { VerifiedClientPrincipal } from "./types";
 
@@ -39,12 +39,14 @@ export function clientAccessConfiguration(env: Pick<Env, "CLIENT_ACCESS_TEAM_DOM
 
 /**
  * Turns a cryptographically verified Cloudflare Access app assertion into the
- * minimal local identity key. Email is checked here because OTP eligibility is
- * email based, but authorization remains the issuer+subject local grant.
+ * minimal local identity key. Cloudflare Access and its configured IdP verify
+ * the human email before issuing an application token; the token supplies the
+ * email claim but does not promise a separate email_verified claim.
+ * Authorization remains the issuer+subject local grant.
  */
 export function verifiedClientPrincipalFromAccessPayload(payload: JWTPayload, configuration: ClientAccessConfiguration): VerifiedClientPrincipal | null {
   if (payload.iss !== configuration.issuer || payload.aud !== configuration.audience) return null;
-  if (payload.type !== "app" || !nonEmptyString(payload.sub) || !validEmail(payload.email) || payload.email_verified !== true) return null;
+  if (payload.type !== "app" || !nonEmptyString(payload.sub) || !validEmail(payload.email)) return null;
   // jwtVerify validates a supplied exp, but the portal never accepts a token
   // without one. This prevents a provider/configuration mistake from creating
   // a long-lived bearer assertion.
@@ -52,14 +54,18 @@ export function verifiedClientPrincipalFromAccessPayload(payload: JWTPayload, co
   return { issuer: configuration.issuer, subject: payload.sub, email: payload.email.toLowerCase() };
 }
 
-export async function resolveCloudflareClientPrincipal(request: Request, env: Env): Promise<VerifiedClientPrincipal | null> {
+export async function resolveCloudflareClientPrincipal(
+  request: Request,
+  env: Env,
+  getKey?: JWTVerifyGetKey,
+): Promise<VerifiedClientPrincipal | null> {
   const configuration = clientAccessConfiguration(env);
   const assertion = request.headers.get("Cf-Access-Jwt-Assertion");
   if (!assertion) return null;
   try {
     const verified = await jwtVerify(
       assertion,
-      createRemoteJWKSet(new URL(`${configuration.issuer}/cdn-cgi/access/certs`)),
+      getKey ?? createRemoteJWKSet(new URL(`${configuration.issuer}/cdn-cgi/access/certs`)),
       { issuer: configuration.issuer, audience: configuration.audience, algorithms: ["RS256"], requiredClaims: ["iss", "aud", "sub", "exp"] },
     );
     return verifiedClientPrincipalFromAccessPayload(verified.payload, configuration);

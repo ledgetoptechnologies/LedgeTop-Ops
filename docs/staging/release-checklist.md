@@ -1,7 +1,9 @@
 # Staging release gate and command packet
 
-This packet prepares commands; it does not authorize running them. Keep
-Dropbox, Google, permanent purge, and incoming uploads disabled.
+This packet prepares commands; it does not authorize running them. Keep the
+client portal, Dropbox, Google, permanent purge, and incoming uploads disabled.
+The client-specific sequence is in
+[client-portal-rollout.md](client-portal-rollout.md).
 
 ## Current credential boundary
 
@@ -27,8 +29,15 @@ not become active deployments.
 - staging Access group ID and exact group name;
 - Ops Sync staging service-auth policy and Project Alpha service-token owner;
 - Delivery, Operations, and Ops Sync staging DNS readiness;
+- `client-staging.ledgetopdroneservices.com`, its dedicated portal Access
+  app/audience/group, and its separately reviewed public Bypass app/policy;
 - reviewed commit SHA and current build-control evidence;
 - D1 export paths and SHA-256 checksums.
+
+`CLIENT_PORTAL_ENABLED` must be `false`; `CLIENT_PORTAL_ORIGIN` and
+`PUBLIC_BASE_URL` must both be the client staging origin. `CLIENT_ACCESS_AUD`
+must be the new portal app audience, never `POLICY_AUD`, `OPERATIONS_AUD`, or
+`CF_ACCESS_AUD`.
 
 Copy `docs/staging/release-evidence.json.example` to the ignored path
 `.backups/staging-release-evidence.json`. Record only booleans, identifiers,
@@ -88,6 +97,10 @@ The isolated incoming staging hostname is required for quarantine intake testing
 Keep direct browser uploads into client delivery storage disabled with
 `DIRECT_DELIVERY_UPLOADS_ENABLED=false`.
 
+The example evidence intentionally fails until the client Access/public-path
+contract, migrations, end-to-end tests, and final default-off state are
+recorded. Do not mark future or inferred results true.
+
 ## Read-only backup and migration preflight
 
 After identity, exact config/resource inventory, and branch-control checks pass,
@@ -122,7 +135,15 @@ npm.cmd run staging:evidence:check
 ```
 
 Apply Delivery first because Operations binds the Delivery database. Record
-every migration result. Worker rollback does not undo either database.
+every migration result. For this milestone, explicitly confirm Delivery
+`0096_client_portal_foundation.sql` through
+`0100_client_portal_release_hardening.sql` and Operations
+`0014_staff_acl_controls.sql` through
+`0015_staff_acl_explicit_controls.sql`. Migration `0100` removes
+`share_version` from the delivery-grant parent key so existing share
+rotation/revocation updates cannot be blocked by a portal grant; the grant
+still records the approved version for authorization checks. Reject any
+unexpected pending migration. Worker rollback does not undo either database.
 
 ## Separately approved version and deployment sequence
 
@@ -151,3 +172,9 @@ After deployment, verify Access rejection, host rejection, health, role and
 object authorization, fault handling, recycle/restore, audit logs, queue/DLQ,
 and rollback. Ops Sync stays undeployed and default-deny until Project Alpha
 service auth, Access group authority, and Ed25519 verification are ready.
+
+For the portal, first prove the false flag returns `404`. Temporary activation
+requires its own approval and version; after the full client/team/request/share
+matrix passes, deploy a reviewed false version again. Evidence passes only
+after the false state is restored. The Project Alpha payment/billing contract
+must be ready, but it never substitutes for LTDS authorization checks.

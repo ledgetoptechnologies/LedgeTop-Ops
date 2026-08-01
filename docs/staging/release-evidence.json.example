@@ -41,13 +41,20 @@
     "operationsReadCredentialReady": false,
     "opsSyncServiceAuthReady": false,
     "opsSyncAccessGroupReady": false,
-    "ed25519Ready": false
+    "ed25519Ready": false,
+    "paymentBillingContractReady": false,
+    "authorizationBypassUsed": false
   },
   "hosts": {
     "delivery": {
       "hostname": "delivery-staging.ledgetopdroneservices.com",
       "dnsReady": false,
       "accessReady": true
+    },
+    "client": {
+      "hostname": "client-staging.ledgetopdroneservices.com",
+      "dnsReady": false,
+      "accessReady": false
     },
     "operations": {
       "hostname": "ops-staging.ledgetopdroneservices.com",
@@ -76,6 +83,69 @@
     "testerActiveOperationsUser": false,
     "approvalRef": "<APPROVAL_REFERENCE>"
   },
+  "clientPortal": {
+    "hostname": "client-staging.ledgetopdroneservices.com",
+    "origin": "https://client-staging.ledgetopdroneservices.com",
+    "enabled": false,
+    "teamDomain": "https://ledgetoptechnologies.cloudflareaccess.com",
+    "applicationName": "LTDS Client Portal Staging",
+    "applicationId": "<CLIENT_PORTAL_ACCESS_APPLICATION_ID>",
+    "audience": "<DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD>",
+    "groupId": "<DEDICATED_CLIENT_PORTAL_STAGING_GROUP_ID>",
+    "groupName": "LTDS Client Portal Staging Testers",
+    "protectedPaths": [
+      "/portal",
+      "/portal/*",
+      "/api/client",
+      "/api/client/*"
+    ],
+    "publicAccess": {
+      "applicationName": "LTDS Client Public Staging",
+      "applicationId": "<CLIENT_PUBLIC_BYPASS_APPLICATION_ID>",
+      "policyId": "<CLIENT_PUBLIC_BYPASS_POLICY_ID>",
+      "decision": "bypass",
+      "include": "everyone",
+      "destination": "client-staging.ledgetopdroneservices.com",
+      "workerPublicPaths": ["/", "/s/*", "/api/public/*", "/health", "/assets/*"]
+    },
+    "approvalRef": "<APPROVAL_REFERENCE>",
+    "tests": {
+      "portalDisabled404": false,
+      "invalidAudienceDenied": false,
+      "unprovisionedIdentityDenied": false,
+      "crossAccountDenied": false,
+      "staffAclDenied": false,
+      "publicShareAnonymousReachable": false,
+      "publicSharePasswordRechecked": false,
+      "accessHeaderAbsentOnPublicShare": false,
+      "observedAt": "<ISO_8601_TIMESTAMP>",
+      "evidenceRef": "<EVIDENCE_REFERENCE>"
+    }
+  },
+  "migrations": {
+    "delivery": {
+      "expected": [
+        "0096_client_portal_foundation.sql",
+        "0097_client_portal_team_acl.sql",
+        "0098_client_access_sync_processing.sql",
+        "0099_client_portal_request_notifications.sql",
+        "0100_client_portal_release_hardening.sql"
+      ],
+      "appliedToStaging": false,
+      "listEvidenceRef": "<EVIDENCE_REFERENCE>",
+      "applyEvidenceRef": "<EVIDENCE_REFERENCE>"
+    },
+    "operations": {
+      "expected": [
+        "0014_staff_acl_controls.sql",
+        "0015_staff_acl_explicit_controls.sql"
+      ],
+      "appliedToStaging": false,
+      "listEvidenceRef": "<EVIDENCE_REFERENCE>",
+      "applyEvidenceRef": "<EVIDENCE_REFERENCE>"
+    },
+    "productionUnchanged": false
+  },
   "secrets": {
     "delivery": {
       "names": [
@@ -99,7 +169,12 @@
         "AUDIT_IP_SECRET",
         "PROJECT_ALPHA_API_KEY",
         "R2_ACCESS_KEY_ID",
-        "R2_SECRET_ACCESS_KEY"
+        "R2_SECRET_ACCESS_KEY",
+        "TURNSTILE_SITE_KEY",
+        "TURNSTILE_SECRET",
+        "INCOMING_SESSION_SECRET",
+        "INCOMING_ACCESS_CODE_PEPPER",
+        "INCOMING_PICKUP_SECRET"
       ],
       "verifiedAt": "<ISO_8601_TIMESTAMP>",
       "source": "<wrangler-secret-list|reviewed-secrets-file>",

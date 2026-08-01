@@ -75,6 +75,14 @@ Before a staging rollout:
    enable one provider in staging.
 7. Preserve the prior Worker version and D1 exports until acceptance completes.
 
+For the client portal milestone, also reserve a distinct client staging host
+on the existing staging Delivery Worker. Create a dedicated path-scoped client
+Access app/audience/group and a separate public-share Bypass app/policy; do not
+reuse Delivery, Operations, Ops Sync, staff, or production client authority.
+Keep `CLIENT_PORTAL_ENABLED=false`, bind `CLIENT_PORTAL_ORIGIN` and
+`PUBLIC_BASE_URL` to the client staging origin, and prove the exact public path
+and password/session contract before any temporary activation.
+
 Repository configuration must use explicit Wrangler staging environments or
 checked-in staging templates whose resource IDs are placeholders. Resource IDs,
 account IDs, routes, secrets, and OAuth credentials must be operator-supplied
@@ -91,6 +99,18 @@ evidence; obtain production approval; back up production D1; apply reviewed
 production migrations; deploy the same pinned commit with optional capabilities
 still disabled; run baseline smoke tests; and only then request separate
 approval for each capability rollout. A branch push alone is never a release.
+
+The portal schema gate requires Delivery migrations `0096`–`0100` and
+Operations `0014`–`0015`, with fresh staging exports and exact list/apply
+evidence. Client `0100` preserves independent share rotation/revocation by
+removing `share_version` from the delivery-grant foreign-key parent while
+retaining the recorded version as a fail-closed authorization check. These
+migrations are not rolled back with Worker code. The Project
+Alpha payment/billing contract is a blocking dependency, never an exception to
+local staff, client-team, account, project, delivery, request, or billing ACLs.
+After separately approved staging activation tests, restore the false flag and
+record that state before production review. Follow
+[the client portal staging packet](staging/client-portal-rollout.md).
 
 Rollback means disabling the affected capability, rolling the Worker back to
 the recorded version, allowing in-flight Workflows to reach a safe terminal

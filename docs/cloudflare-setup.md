@@ -30,7 +30,10 @@ ordered clean cutover and rollback in [future planning](future-plans.md#ordered-
 The client portal has a default-off Cloudflare Access adapter. It accepts only
 a signed `Cf-Access-Jwt-Assertion` from a **separate Client Portal** Access
 application, validating its HTTPS issuer, exact client audience, `RS256`
-signature, `type=app`, expiry, verified email, and nonempty subject. The Worker
+signature, `type=app`, expiry, a syntactically valid email claim, and nonempty
+subject. Cloudflare Access and its configured identity provider verify the
+human email before issuing the application token; the token contract does not
+require a separate `email_verified` claim. The Worker
 then independently resolves the issuer/subject against a local active
 membership and grant; an Access login alone never grants a client account,
 project, delivery, or billing access.
@@ -50,6 +53,26 @@ outside Access and continue to use their own revocable-link controls. The servic
 uses the existing `PUBLIC_BULK_RATE_LIMITER` with a scope-separated,
 server-derived account key; this foundation adds no rate-limit binding or
 Cloudflare resource.
+
+For the separately authorized rollout, the production Client Portal Access app
+must target only `client.ledgetopdroneservices.com/portal`, `/portal/*`,
+`/api/client`, and `/api/client/*`. Use a dedicated client group and audience.
+Define a separate root client-host application with a narrowly reviewed Bypass
+Everyone policy so public shares do not require Access. The more-specific
+portal paths retain the portal Allow policy. Release-critical public path
+families include `/`, `/s/*`, `/api/public/*`, `/health`, and `/assets/*`; they
+remain under the Worker's own routing and authorization controls.
+Never use a host-wide client Allow policy, and verify no
+`Cf-Access-Jwt-Assertion` reaches a public share request. Cloudflare documents
+path matching and specificity in
+[Application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/).
+
+Create Access applications/policies and export their rollback configuration
+before attaching DNS/custom domains. Deploy the existing Worker with
+`CLIENT_PORTAL_ENABLED=false`, record the rollback version, and prove public
+share behavior first. A temporary staging activation and the production
+activation each require separate approval. Full details are in
+[the staging rollout packet](staging/client-portal-rollout.md).
 
 ### Branch-control release gate
 
@@ -178,7 +201,7 @@ Use `PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY` only during rotation. Th
 
 ## 6. Staging before rollout
 
-Create separate staging Workers for all three services, D1 databases, R2 buckets, Workflows, queue, secrets, hostnames, and Access applications. Never bind staging to production D1/R2. Test Beau, Kollins, an Operator account, a public client flow, an inbound multipart upload, and successful/failed ZIP jobs before production builds from `main`.
+Create separate staging Workers for all three services, D1 databases, R2 buckets, Workflows, queue, secrets, hostnames, and Access applications. Never bind staging to production D1/R2. The client portal uses a distinct staging hostname, app/audience/group, and public Bypass policy while remaining default-off. Test Beau, Kollins, an Operator account, provisioned and unprovisioned client identities, cross-account denial, a public share with and without a password, an inbound multipart upload, and successful/failed ZIP jobs before production builds from `main`.
 
 ## 7. Incoming requests
 

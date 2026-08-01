@@ -4,8 +4,20 @@ import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, parseRange, p
 import { createSessionCookie, presignR2Get, verifyRotatingSessionCookie, verifySessionCookie } from "../src/worker/security";
 import { hashAccessCode } from "../../operations/src/worker/crypto";
 import { verifyAccessCode } from "../src/worker/security";
-import deliveryWorker, { ensurePublicId, framePolicyForPath, markUnavailableFolder, serveAppShell, sourceUrlForItem, streamItem } from "../src/worker/index";
+import deliveryWorker, { ensurePublicId, framePolicyForPath, markUnavailableFolder, requestHostAllowed, serveAppShell, sourceUrlForItem, streamItem } from "../src/worker/index";
 import type { ShareRow } from "../src/worker/types";
+
+describe("production host admission",()=>{
+  it("admits only the legacy delivery host and an exact configured portal origin",()=>{
+    const base={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example"} as const;
+    expect(requestHostAllowed("https://delivery.example/health",base)).toBe(true);
+    expect(requestHostAllowed("https://wrong.example/health",base)).toBe(false);
+    expect(requestHostAllowed("https://client.example/portal",{...base,CLIENT_PORTAL_ORIGIN:"https://client.example"})).toBe(true);
+    expect(requestHostAllowed("https://client.example.evil.test/portal",{...base,CLIENT_PORTAL_ORIGIN:"https://client.example"})).toBe(false);
+    expect(requestHostAllowed("https://client.example/portal",{...base,CLIENT_PORTAL_ORIGIN:"http://client.example"})).toBe(false);
+    expect(requestHostAllowed("https://client.example/portal",{...base,CLIENT_PORTAL_ORIGIN:"https://client.example/path"})).toBe(false);
+  });
+});
 
 describe("delivery app shell",()=>{
   it("preserves the public share path when requesting the SPA fallback",async()=>{let requestedPath="";const response=await serveAppShell(new Request("https://delivery.ledgetopdroneservices.com/s/public-id"),{fetch:async input=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("app shell",{status:200});}});expect(requestedPath).toBe("/s/public-id");expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();});

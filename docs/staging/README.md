@@ -6,7 +6,9 @@ Staging is separate infrastructure, not a branch version of a production Worker.
 
 Provision through the approved Cloudflare account process and record non-secret identifiers outside Git:
 
-- three staging Workers and staging-only custom hosts protected by distinct Cloudflare Access applications/audiences;
+- three staging Workers and five staging-only custom hosts, including a distinct
+  client portal host with a dedicated path-scoped Access app/audience/group and
+  a reviewed public-share Bypass contract;
 - staging delivery and operations D1 databases;
 - staging delivery and incoming R2 buckets with retention/versioning safeguards suitable for test data;
 - a staging file-event queue, staging-only consumer, and DLQ;
@@ -15,6 +17,10 @@ Provision through the approved Cloudflare account process and record non-secret 
 - staging secrets entered interactively or through the approved secret store.
 
 Never reuse a production worker name, host, Access audience, D1 ID, R2 bucket, queue, Workflow name, or rate-limit namespace. Never put secrets in a Wrangler config or shell command.
+
+The client portal release program is specified in
+[client-portal-rollout.md](client-portal-rollout.md). Its config is default-off;
+the existing Delivery staging Access app is not the client identity app.
 
 ## Prepare local configuration
 
@@ -46,7 +52,7 @@ Only after the unexpected production branch deployment has been resolved and a s
 4. List pending migrations with the explicit `--config apps/<app>/wrangler.staging.json` path and confirm the resolved IDs are staging IDs.
 5. Apply staging migrations one database at a time with that explicit config.
 6. Deploy with `wrangler deploy --config apps/<app>/wrangler.staging.json`. Never use an unqualified package `deploy` script for staging.
-7. Verify Access rejection, host rejection, `/health`, object authorization, upload/download, recycle/restore, and audit/log behavior. Provider integrations and permanent purge stay disabled.
+7. Verify Access rejection, host rejection, `/health`, object authorization, upload/download, recycle/restore, and audit/log behavior. Follow the separate client-portal activation/restore sequence; provider integrations and permanent purge stay disabled.
 
 These are operator instructions, not commands run by repository automation. Record version IDs, migration output, health evidence, and rollback targets in the release ticket.
 

@@ -31,6 +31,20 @@ Staff can also import files from Dropbox via a separate OAuth PKCE flow on the O
 
 Cloudflare Access authenticates people; it does not grant LTDS permissions. The Ops Worker verifies the Access JWT signature, issuer, expiry, exact Operations audience, `RS256`, `type=app`, nonempty human subject, and email. The email must match an active provisioned account. On first successful login, that account binds to the Access subject and rejects future subject mismatches.
 
+The default-off client portal has a separate Access trust domain: a dedicated
+client application audience and client-managed group authenticate `/portal*`
+and `/api/client*`, after which D1 account, project, delivery, team, request,
+and billing grants authorize each operation. Staff ACLs and client-team ACLs
+are independent. A staff identity, a historic Delivery token, an Access group
+membership, or a Project Alpha payment/billing record alone grants no client
+permission.
+
+Public shares remain a separate capability boundary on the same future client
+origin. `/s/*` and `/api/public/*` bypass Access and enforce their existing
+opaque link, revocation, expiry, password, session, share-version, and object
+checks. Portal delivery handoff rechecks a local grant and redirects into that
+flow; it does not mint or substitute a public-share session.
+
 ACL order:
 
 1. Missing, inactive, unprovisioned, or subject-mismatched staff are denied.
