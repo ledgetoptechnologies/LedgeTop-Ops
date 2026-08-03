@@ -544,15 +544,19 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
         `
       SELECT DISTINCT f.r2_key,f.size,f.uploaded_at,f.content_type,f.media_kind,association.r2_prefix association_prefix
       FROM client_folder_associations association
+      ${sessionJoin}
+      JOIN client_project_grants g ON g.account_id=a.id AND g.project_id=association.project_id AND g.revoked_at IS NULL
+      JOIN projects p ON p.id=g.project_id AND p.active=1
       JOIN file_index f ON substr(f.r2_key,1,length(association.r2_prefix))=association.r2_prefix
-      WHERE association.account_id=? AND association.scope_type='project' AND association.project_id=?
+      WHERE association.account_id=a.id AND association.scope_type='project' AND association.project_id=?
         AND association.revoked_at IS NULL AND f.r2_key>?
+        ${memberProjectConstraint}
         AND f.r2_key NOT LIKE '_ltds/%' AND f.r2_key NOT LIKE '%/_ltds/%'
         AND f.r2_key NOT LIKE '.previews/%' AND f.r2_key NOT LIKE '%/.previews/%'
         AND f.r2_key NOT LIKE 'dump/%' AND f.r2_key NOT LIKE '%/dump/%'
       ORDER BY f.r2_key LIMIT 101`,
       )
-      .bind(session.accountId, projectId, cursor || "")
+      .bind(session.accountId, session.identityId, projectId, cursor || "")
       .all<FileRow>();
     const rows = result.results;
     const page = rows.slice(0, 100);
@@ -601,10 +605,6 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
   ): Promise<ClientPortalFile | null> {
     const key = decodeFileId(fileId);
     if (!key) return null;
-    if (projectId) {
-      const project = await this.getProject(env, session, projectId);
-      if (!project) return null;
-    }
     const scope = projectId ? "project" : "client";
     const row = await portalDb(env)
       .prepare(
@@ -612,15 +612,19 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       SELECT f.r2_key,f.size,f.uploaded_at,f.content_type,f.media_kind,association.r2_prefix association_prefix
       FROM client_folder_associations association
       JOIN file_index f ON f.r2_key=? AND substr(f.r2_key,1,length(association.r2_prefix))=association.r2_prefix
-      WHERE association.account_id=? AND association.scope_type=?
+      ${sessionJoin}
+      ${projectId ? `JOIN client_project_grants g ON g.account_id=a.id AND g.project_id=association.project_id AND g.revoked_at IS NULL
+      JOIN projects p ON p.id=g.project_id AND p.active=1` : ""}
+      WHERE association.account_id=a.id AND association.scope_type=?
         AND ${projectId ? "association.project_id=?" : "association.project_id IS NULL"}
         AND association.revoked_at IS NULL
+        ${projectId ? memberProjectConstraint : ""}
       ORDER BY length(association.r2_prefix) DESC LIMIT 1`,
       )
       .bind(
         ...(projectId
-          ? [key, session.accountId, scope, projectId]
-          : [key, session.accountId, scope]),
+          ? [key, session.accountId, session.identityId, scope, projectId]
+          : [key, session.accountId, session.identityId, scope]),
       )
       .first<FileRow>();
     return row ? mapFile(row, projectId || null) : null;

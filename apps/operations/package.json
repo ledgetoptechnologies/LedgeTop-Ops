@@ -32,6 +32,7 @@
     "@types/react": "^19.1.16",
     "@types/react-dom": "^19.1.9",
     "@vitejs/plugin-react": "^5.0.4",
+    "miniflare": "^4.20260730.0",
     "typescript": "^5.9.3",
     "vite": "^7.1.7",
     "vitest": "^4.1.0",

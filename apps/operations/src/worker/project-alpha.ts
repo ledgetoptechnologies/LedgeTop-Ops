@@ -202,15 +202,15 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
   }
   if (changed.has("organizations")) for (const row of data.organizations) {
     const id = text(row.id); if (!id) continue;
-    statements.push(db.prepare(`INSERT INTO pa_organizations (id,name,active,payload_json,last_sync_id) VALUES (?,?,1,?,?)
-      ON CONFLICT(id) DO UPDATE SET name=excluded.name,active=1,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`)
-      .bind(id, text(row.name) || `Organization ${id}`, JSON.stringify(row), syncId));
+    statements.push(db.prepare(`INSERT INTO pa_organizations (id,name,active,payload_json,last_sync_id) VALUES (?,?,?,?,?)
+      ON CONFLICT(id) DO UPDATE SET name=excluded.name,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`)
+      .bind(id, text(row.name) || `Organization ${id}`, sourceActive(row), JSON.stringify(row), syncId));
   }
   if (changed.has("projects")) for (const row of data.projects) {
     const id = text(row.id); if (!id) continue;
     statements.push(db.prepare(`INSERT INTO pa_projects (id,client_id,organization_id,business_unit_id,manager_user_id,name,status,start_date,end_date,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
-      ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id,organization_id=excluded.organization_id,business_unit_id=excluded.business_unit_id,manager_user_id=excluded.manager_user_id,name=excluded.name,status=excluded.status,start_date=excluded.start_date,end_date=excluded.end_date,active=1,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`)
-      .bind(id, text(row.client_id), text(row.organization_id), text(row.business_unit_id), text(row.manager_user_id), text(row.name) || `Project ${id}`, text(row.status), text(row.start_date) || text(row.estimated_start), text(row.end_date) || text(row.estimated_end), 1, JSON.stringify(row), syncId));
+      ON CONFLICT(id) DO UPDATE SET client_id=excluded.client_id,organization_id=excluded.organization_id,business_unit_id=excluded.business_unit_id,manager_user_id=excluded.manager_user_id,name=excluded.name,status=excluded.status,start_date=excluded.start_date,end_date=excluded.end_date,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')`)
+      .bind(id, text(row.client_id), text(row.organization_id), text(row.business_unit_id), text(row.manager_user_id), text(row.name) || `Project ${id}`, text(row.status), text(row.start_date) || text(row.estimated_start), text(row.end_date) || text(row.estimated_end), sourceActive(row), JSON.stringify(row), syncId));
   }
   if (changed.has("project_assignments")) for (const row of data.project_assignments) {
     const id = text(row.id), projectId = text(row.project_id), userId = text(row.user_id); if (!id || !projectId || !userId) continue;
@@ -269,16 +269,17 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
 }
 
 function clientPortalProjectionStatements(env: Env, data: SnapshotCollections, changed: ReadonlySet<CollectionName>): D1PreparedStatement[] {
-  if (!env.DELIVERY_DB) return [];
   const db = env.DELIVERY_DB;
   const statements: D1PreparedStatement[] = [];
   if (changed.has("clients")) for (const row of data.clients) {
     const id = text(row.id), name = text(row.name);
-    if (id && name) statements.push(db.prepare("UPDATE client_accounts SET display_name=?,updated_at=datetime('now') WHERE project_alpha_client_id=?").bind(name, id));
+    if (id && name) statements.push(db.prepare("UPDATE client_accounts SET display_name=?,project_alpha_organization_id=?,status=?,updated_at=datetime('now') WHERE project_alpha_client_id=?")
+      .bind(name, text(row.organization_id), sourceActive(row) ? "active" : "suspended", id));
   }
   if (changed.has("organizations")) for (const row of data.organizations) {
     const id = text(row.id), name = text(row.name);
-    if (id && name) statements.push(db.prepare("UPDATE client_accounts SET display_name=?,updated_at=datetime('now') WHERE project_alpha_organization_id=? AND project_alpha_client_id IS NULL").bind(name, id));
+    if (id && name) statements.push(db.prepare("UPDATE client_accounts SET display_name=?,status=?,updated_at=datetime('now') WHERE project_alpha_organization_id=? AND project_alpha_client_id IS NULL")
+      .bind(name, sourceActive(row) ? "active" : "suspended", id));
   }
   if (changed.has("projects")) {
     const clients = new Map(data.clients.map(row => [text(row.id), text(row.name)]));
@@ -288,12 +289,62 @@ function clientPortalProjectionStatements(env: Env, data: SnapshotCollections, c
       if (!id || !projectName) continue;
       const clientName = clients.get(text(row.client_id)) || organizations.get(text(row.organization_id)) || "Client";
       statements.push(db.prepare(`UPDATE projects SET client_name=?,project_name=?,status=?,summary=?,site_address=?,service_address=?,
-        project_contact_name=?,project_contact_email=?,project_contact_phone=?,next_milestone=?,source_updated_at=?,updated_at=datetime('now')
-        WHERE project_alpha_project_id=?`)
+        project_contact_name=?,project_contact_email=?,project_contact_phone=?,next_milestone=?,source_updated_at=?,
+        updated_at=datetime('now'),active=? WHERE project_alpha_project_id=?`)
         .bind(clientName, projectName, text(row.status), text(row.summary) || text(row.description), text(row.site_address),
           text(row.service_address), text(row.project_contact_name), normalizedEmail(row.project_contact_email),
-          text(row.project_contact_phone), text(row.next_milestone), text(row.updated_at), id));
+          text(row.project_contact_phone), text(row.next_milestone), text(row.updated_at), sourceActive(row), id));
     }
+  }
+  if (changed.has("clients")) {
+    const activeClientIds = data.clients.filter(sourceActive).map(row => text(row.id)).filter((id): id is string => Boolean(id));
+    statements.push(activeClientIds.length
+      ? db.prepare(`UPDATE client_accounts SET status='suspended',updated_at=datetime('now') WHERE project_alpha_client_id IS NOT NULL AND project_alpha_client_id NOT IN (${activeClientIds.map(() => "?").join(",")})`).bind(...activeClientIds)
+      : db.prepare("UPDATE client_accounts SET status='suspended',updated_at=datetime('now') WHERE project_alpha_client_id IS NOT NULL"));
+  }
+  if (changed.has("organizations")) {
+    const activeOrganizationIds = data.organizations.filter(sourceActive).map(row => text(row.id)).filter((id): id is string => Boolean(id));
+    statements.push(activeOrganizationIds.length
+      ? db.prepare(`UPDATE client_accounts SET status='suspended',updated_at=datetime('now') WHERE project_alpha_client_id IS NULL AND project_alpha_organization_id IS NOT NULL AND project_alpha_organization_id NOT IN (${activeOrganizationIds.map(() => "?").join(",")})`).bind(...activeOrganizationIds)
+      : db.prepare("UPDATE client_accounts SET status='suspended',updated_at=datetime('now') WHERE project_alpha_client_id IS NULL AND project_alpha_organization_id IS NOT NULL"));
+  }
+  if (changed.has("projects")) {
+    const activeProjectIds = data.projects.filter(sourceActive).map(row => text(row.id)).filter((id): id is string => Boolean(id));
+    statements.push(activeProjectIds.length
+      ? db.prepare(`UPDATE projects SET active=0,updated_at=datetime('now') WHERE project_alpha_project_id IS NOT NULL AND project_alpha_project_id NOT IN (${activeProjectIds.map(() => "?").join(",")})`).bind(...activeProjectIds)
+      : db.prepare("UPDATE projects SET active=0,updated_at=datetime('now') WHERE project_alpha_project_id IS NOT NULL"));
+  }
+
+  if (changed.has("clients") || changed.has("organizations") || changed.has("projects")) {
+    const activeClients = new Set(data.clients.filter(sourceActive).map(row => text(row.id)).filter(Boolean));
+    const activeOrganizations = new Set(data.organizations.filter(sourceActive).map(row => text(row.id)).filter(Boolean));
+    for (const row of data.projects) {
+      const projectId = text(row.id); if (!projectId) continue;
+      const clientId = activeClients.has(text(row.client_id)) ? text(row.client_id) : null;
+      const organizationId = activeOrganizations.has(text(row.organization_id)) ? text(row.organization_id) : null;
+      const active = sourceActive(row);
+      const invalidAccounts = `SELECT g.account_id FROM client_project_grants g
+        JOIN client_accounts a ON a.id=g.account_id
+        JOIN projects p ON p.id=g.project_id
+        WHERE p.project_alpha_project_id=? AND g.revoked_at IS NULL AND NOT
+          (?=1 AND a.status='active' AND ((? IS NOT NULL AND a.project_alpha_client_id IS ?)
+            OR (g.can_request_service=0 AND ? IS NOT NULL AND a.project_alpha_organization_id IS ?)))`;
+      const invalidValues = [projectId, active, clientId, clientId, organizationId, organizationId];
+      for (const table of ["client_folder_associations", "client_delivery_grants", "client_member_project_grants"] as const) {
+        statements.push(db.prepare(`UPDATE ${table} SET revoked_at=COALESCE(revoked_at,datetime('now'))
+          WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_project_id=?) AND revoked_at IS NULL
+            AND account_id IN (${invalidAccounts})`).bind(projectId, ...invalidValues));
+      }
+      statements.push(db.prepare(`UPDATE client_project_grants SET revoked_at=COALESCE(revoked_at,datetime('now'))
+        WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_project_id=?) AND revoked_at IS NULL
+          AND account_id IN (${invalidAccounts})`).bind(projectId, ...invalidValues));
+    }
+    for (const table of ["client_folder_associations", "client_delivery_grants", "client_member_project_grants", "client_project_grants"] as const) {
+      statements.push(db.prepare(`UPDATE ${table} SET revoked_at=COALESCE(revoked_at,datetime('now'))
+        WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_project_id IS NOT NULL AND active=0) AND revoked_at IS NULL`));
+    }
+    statements.push(db.prepare(`UPDATE client_folder_associations SET revoked_at=COALESCE(revoked_at,datetime('now'))
+      WHERE scope_type='client' AND revoked_at IS NULL AND account_id IN (SELECT id FROM client_accounts WHERE status<>'active')`));
   }
   return statements;
 }
@@ -373,6 +424,7 @@ export async function syncProjectAlpha(env: Env): Promise<ProjectAlphaSyncResult
     env.OPS_DB.prepare("UPDATE integration_health SET last_attempt_at=datetime('now'),updated_at=datetime('now') WHERE integration='project-alpha'"),
   ]);
   try {
+    if (!env.DELIVERY_DB) throw new Error("delivery-db-binding-required");
     // Fetch and validate every page before touching projection data. A failed or partial
     // snapshot therefore leaves the last known good projection entirely intact.
     const data = await fetchCompleteSnapshot(env);

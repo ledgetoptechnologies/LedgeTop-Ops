@@ -168,6 +168,30 @@ no-store`; another provisioned client received 404, an unauthenticated principal
 received 401, removing the project scope received 404, and all denied attempts
 performed zero bucket reads.
 
+### Direct authenticated client folder grants
+
+Migration `0105_internal_folder_grants.sql` adds the backend contract for
+sharing an Operations folder directly with an existing client workspace. This
+is a `scope_type='client'` prefix grant under `Jobs/Clients/`; it does not create
+or rotate a row in `shares`, return a `public_id`, issue a public URL, or send a
+public-link message. Permissioned staff use
+`POST /api/client-portal/accounts/:accountId/folder-grants` with a required
+`Idempotency-Key`; replacement versions are immutable and the matching `DELETE`
+route revokes the current version. The portal resolves the grant through the
+current active account, Access-backed identity, and membership on every list or
+file request.
+
+The internal notification outbox waits at least five minutes. Its consumer
+re-reads the exact association ID, logical grant/version, active PA-backed
+account, recipient identity and membership, current email, and indexed content
+newly exposed relative to the recipient's prior client-folder coverage. A
+revoked, narrowed, superseded, unauthorized, redundant, or empty grant is
+suppressed. Valid mail links only to the authenticated `/portal/deliveries`
+page. Stable mutation fingerprints, outbox uniqueness, and `Message-ID` values
+make retries idempotent. Controlled D1 tests verify share-then-revoke produces
+no access and no mail, while a valid due grant sends once; no real message was
+sent during this validation.
+
 The requested final post-fix diff rescan workspace
 `039e35dd-7458-4707-98d8-9af6f3a67225` remained at setup awaiting **Start
 scan**, so it produced no scan ID or report. On 2026-08-01 the user explicitly
@@ -269,7 +293,9 @@ remain read-only.
   500 kB. This is a performance concern, not a failed build.
 - Operations-to-Delivery folder association spans two D1 databases and cannot
   be atomic. It needs a durable reconciliation/idempotency design before that
-  path is relied on as a single transaction.
+  legacy PA-project association path is relied on as a single transaction. The
+  direct client-workspace folder-grant path is Delivery-D1-only and does not
+  have this cross-database write.
 - A provider can accept SMTP before the D1 sent marker commits; the stable
   `Message-ID` mitigates but cannot mathematically eliminate a duplicate.
 - Staging still lacks a configured Mapbox token and staff-triage recipient and

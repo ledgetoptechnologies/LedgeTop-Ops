@@ -28,8 +28,10 @@ export function requiresAdministratorForMutation(method:string,path:string):bool
   const parts=pathParts(path);
   const shareCreate=normalizedMethod==="POST"&&parts.length===3&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="shares";
   const shareRevoke=normalizedMethod==="DELETE"&&parts.length===4&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="shares"&&delegatedRouteToken(parts[3]);
+  const internalFolderGrantCreate=normalizedMethod==="POST"&&parts.length===5&&parts[0]==="api"&&parts[1]==="client-portal"&&parts[2]==="accounts"&&delegatedRouteToken(parts[3])&&parts[4]==="folder-grants";
+  const internalFolderGrantRevoke=normalizedMethod==="DELETE"&&parts.length===6&&parts[0]==="api"&&parts[1]==="client-portal"&&parts[2]==="accounts"&&delegatedRouteToken(parts[3])&&parts[4]==="folder-grants"&&delegatedRouteToken(parts[5]);
   const streamTicket=normalizedMethod==="POST"&&parts.length===5&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="items"&&delegatedRouteToken(parts[3])&&parts[4]==="stream-ticket";
   const incomingLink=parts.length>=3&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="incoming-link";
   const dropboxImport=parts.length>=3&&parts[0]==="api"&&parts[1]==="dropbox-import";
-  return !shareCreate&&!shareRevoke&&!streamTicket&&!incomingLink&&!dropboxImport;
+  return !shareCreate&&!shareRevoke&&!internalFolderGrantCreate&&!internalFolderGrantRevoke&&!streamTicket&&!incomingLink&&!dropboxImport;
 }

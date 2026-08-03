@@ -30,8 +30,8 @@ function page(overrides: Record<string, unknown> = {}): Record<string, unknown> 
   return { generated_at: "2026-07-17T12:00:00Z", ...Object.fromEntries(collectionNames.map((name) => [name, []])), has_more: false, next_page: null, ...overrides };
 }
 
-function environment(db: Database): Env {
-  return { OPS_DB: db as unknown as D1Database, PROJECT_ALPHA_BASE_URL: "https://pa.example.test", PROJECT_ALPHA_API_KEY: "secret", APPLICATION_KEY: "external_operations" } as unknown as Env;
+function environment(db: Database, deliveryDb: Database = new Database()): Env {
+  return { OPS_DB: db as unknown as D1Database, DELIVERY_DB: deliveryDb as unknown as D1Database, PROJECT_ALPHA_BASE_URL: "https://pa.example.test", PROJECT_ALPHA_API_KEY: "secret", APPLICATION_KEY: "external_operations" } as unknown as Env;
 }
 
 afterEach(() => vi.unstubAllGlobals());
@@ -45,6 +45,18 @@ describe("Project Alpha snapshot synchronization", () => {
 
     await expect(syncProjectAlpha(environment(db))).rejects.toThrow("project-alpha-http-503");
     expect(db.allSql()).not.toContain("INSERT INTO pa_users");
+    expect(db.allSql()).toContain("status='failed'");
+  });
+
+  it("fails closed before fetching or committing fingerprints when DELIVERY_DB is missing", async () => {
+    const db = new Database();
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const missingDelivery = { ...environment(db), DELIVERY_DB: undefined } as unknown as Env;
+
+    await expect(syncProjectAlpha(missingDelivery)).rejects.toThrow("delivery-db-binding-required");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(db.allSql()).not.toContain("INSERT INTO pa_projection_fingerprints");
     expect(db.allSql()).toContain("status='failed'");
   });
 
@@ -185,5 +197,34 @@ describe("Project Alpha snapshot synchronization", () => {
     expect(sql).toContain("UPDATE pa_operations SET active=0");
     expect(sql).not.toContain("UPDATE pa_users SET active=0");
     expect(sql).not.toContain("INSERT INTO pa_users");
+  });
+
+  it("reconciles portal account, project, and folder access against current PA ownership", async () => {
+    const db = new Database(), deliveryDb = new Database();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(new Response(JSON.stringify(page({
+      clients: [
+        { id: 70, name: "Prior client", organization_id: 80, active: false },
+        { id: 71, name: "Current client", organization_id: 81, active: true },
+      ],
+      organizations: [
+        { id: 80, name: "Prior organization", active: false },
+        { id: 81, name: "Current organization", active: true },
+      ],
+      projects: [
+        { id: 50, name: "Remapped project", client_id: 71, organization_id: 81, active: true },
+        { id: 51, name: "Inactive project", client_id: 70, organization_id: 80, active: false },
+      ],
+    })))));
+
+    await syncProjectAlpha(environment(db, deliveryDb));
+    const sql = deliveryDb.allSql();
+    expect(sql).toContain("project_alpha_organization_id=?,status=?");
+    expect(sql).toContain("project_alpha_project_id NOT IN");
+    expect(sql).toContain("UPDATE client_folder_associations SET revoked_at");
+    expect(sql).toContain("UPDATE client_project_grants SET revoked_at");
+    const remap = deliveryDb.batches.flat().find(statement => statement.sql.includes("UPDATE client_project_grants SET revoked_at") && statement.values.includes("50"));
+    expect(remap?.values).toEqual(expect.arrayContaining(["50", 1, "71", "81"]));
+    const inactive = deliveryDb.batches.flat().find(statement => statement.sql.includes("UPDATE client_project_grants SET revoked_at") && statement.values.includes("51"));
+    expect(inactive?.values).toEqual(expect.arrayContaining(["51", 0]));
   });
 });

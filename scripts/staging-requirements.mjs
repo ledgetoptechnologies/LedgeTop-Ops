@@ -39,6 +39,11 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0098_client_access_sync_processing.sql",
     "0099_client_portal_request_notifications.sql",
     "0100_client_portal_release_hardening.sql",
+    "0101_client_service_request_scoping.sql",
+    "0102_client_service_request_area.sql",
+    "0103_client_portal_workspace.sql",
+    "0104_service_request_thread.sql",
+    "0105_internal_folder_grants.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",

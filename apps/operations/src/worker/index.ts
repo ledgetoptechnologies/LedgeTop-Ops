@@ -97,6 +97,11 @@ import {
   staffAccessControlEffect,
   type StaffAccessControl,
 } from "./staff-access-controls";
+import {
+  createClientFolderGrant,
+  processClientFolderGrantNotifications,
+  revokeClientFolderGrant,
+} from "./client-folder-grants";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -310,6 +315,14 @@ const folderAssociationSchema = z
     divisionId: z.string().min(1),
     r2Prefix: z.string().min(1).max(1000),
     accountId: z.string().min(1).max(128).optional(),
+  })
+  .strict();
+const clientFolderGrantSchema = z
+  .object({
+    divisionId: z.string().trim().min(1).max(128),
+    r2Prefix: z.string().trim().min(1).max(1000),
+    grantId: z.string().trim().min(1).max(128).optional(),
+    recipientIdentityId: z.string().trim().min(1).max(128).nullable().optional(),
   })
   .strict();
 const paQuoteLinkSchema = z
@@ -746,6 +759,21 @@ app.post("/api/client-portal/accounts", async (c) => {
   }
   await db.batch(statements);
   return c.json({ id: accountId, status: "active" }, 201);
+});
+app.post("/api/client-portal/accounts/:accountId/folder-grants", async (c) => {
+  const value = await body(c, clientFolderGrantSchema);
+  const grant = await createClientFolderGrant(
+    c.env,
+    c.req.raw,
+    c.get("principal"),
+    { ...value, accountId: c.req.param("accountId") },
+    c.req.header("Idempotency-Key") || "",
+  );
+  return c.json({ grant }, grant.idempotentReplay || grant.unchanged ? 200 : 201);
+});
+app.delete("/api/client-portal/accounts/:accountId/folder-grants/:grantId", async (c) => {
+  await revokeClientFolderGrant(c.env, c.req.raw, c.get("principal"), c.req.param("accountId"), c.req.param("grantId"));
+  return c.json({ success: true });
 });
 app.post("/api/client-portal/projects", async (c) => {
   const principal = c.get("principal");
@@ -2102,7 +2130,10 @@ async function scheduled(
 ) {
   if (event.cron === CLIENT_REQUEST_NOTIFICATION_CRON) {
     try {
-      await processClientPortalRequestNotifications(env);
+      await Promise.all([
+        processClientPortalRequestNotifications(env),
+        processClientFolderGrantNotifications(env),
+      ]);
     } catch (error) {
       console.error(
         JSON.stringify({

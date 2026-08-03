@@ -197,4 +197,69 @@ describe("entitlement projection",()=>{
     expect(await db.prepare("SELECT name FROM pa_clients WHERE id='71'").first("name")).toBe("Newer Client");
     expect(await db.prepare("SELECT event_id FROM pa_projection_entity_versions WHERE entity_type='client' AND entity_id='71'").first("event_id")).toBe(newer.event_id);
   });
+
+  it("revokes stale portal project and folder grants after PA remap or deactivation",async()=>{
+    await db.batch([
+      db.prepare("INSERT INTO pa_clients(id,name,active,payload_json,last_sync_id) VALUES ('70','Prior client',1,'{}','seed'),('71','Current client',1,'{}','seed')"),
+      db.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,last_sync_id) VALUES ('80','Prior organization',1,'{}','seed'),('81','Current organization',1,'{}','seed')"),
+    ]);
+    const state={failNext:false,writes:[] as Array<{sql:string;values:unknown[]}>};
+    const delivery=portalDatabase(state);
+    const remap:ProjectionEvent={event_id:"6d929e7a-1cc5-478c-8f83-0defe0db52e8",event_type:"projection.changed",occurred_at:"2026-08-01T16:00:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"project",entity_id:"50",action:"upsert",source_updated_at:"2026-08-01T16:00:00.000000Z",data:{id:50,name:"Remapped project",client_id:71,organization_id:81}}};
+    await expect(applyProjectionEvent(env(delivery),remap,"remap-hash")).resolves.toBe("applied");
+    const folderRevoke=state.writes.find(write=>write.sql.includes("UPDATE client_folder_associations SET revoked_at")&&write.values.includes("50"));
+    const projectRevoke=state.writes.find(write=>write.sql.includes("UPDATE client_project_grants SET revoked_at")&&write.values.includes("50"));
+    expect(folderRevoke?.values).toEqual(expect.arrayContaining(["50",1,"71","81"]));
+    expect(projectRevoke?.values).toEqual(expect.arrayContaining(["50",1,"71","81"]));
+
+    const revoke:ProjectionEvent={...remap,event_id:"2dd75fa6-7e84-4b6d-82b0-5f5ef2b28b63",occurred_at:"2026-08-01T16:01:00.000000Z",projection:{...remap.projection,action:"revoke",source_updated_at:"2026-08-01T16:01:00.000000Z"}};
+    await expect(applyProjectionEvent(env(delivery),revoke,"revoke-hash")).resolves.toBe("applied");
+    const inactiveRevoke=state.writes.filter(write=>write.sql.includes("UPDATE client_project_grants SET revoked_at")&&write.values.includes("50")).at(-1);
+    expect(inactiveRevoke?.values).toEqual(expect.arrayContaining(["50",0]));
+    expect(state.writes.some(write=>write.sql.includes("UPDATE projects SET project_name")&&write.values.includes(0)&&write.values.includes("50"))).toBe(true);
+  });
+
+  it("removes cross-client access in a real Delivery D1 after a PA project remap",async()=>{
+    const deliveryMiniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["DELIVERY_DB"]});
+    try{
+      const delivery=await deliveryMiniflare.getD1Database("DELIVERY_DB") as D1Database;
+      for(const statement of [
+        "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,project_alpha_client_id TEXT,project_alpha_organization_id TEXT)",
+        "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,project_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT)",
+        "CREATE TABLE client_project_grants(account_id TEXT,project_id TEXT,can_request_service INTEGER NOT NULL,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
+        "CREATE TABLE client_folder_associations(id TEXT PRIMARY KEY,scope_type TEXT,account_id TEXT,project_id TEXT,revoked_at TEXT)",
+        "CREATE TABLE client_delivery_grants(account_id TEXT,project_id TEXT,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
+        "CREATE TABLE client_member_project_grants(account_id TEXT,project_id TEXT,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
+      ])await delivery.prepare(statement).run();
+      await db.batch([
+        db.prepare("INSERT INTO pa_clients(id,name,active,payload_json,last_sync_id) VALUES ('70','Prior client',1,'{}','seed'),('71','Current client',1,'{}','seed')"),
+        db.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,last_sync_id) VALUES ('80','Prior organization',1,'{}','seed'),('81','Current organization',1,'{}','seed')"),
+      ]);
+      await delivery.batch([
+        delivery.prepare("INSERT INTO client_accounts VALUES ('account-old','active','70','80')"),
+        delivery.prepare("INSERT INTO projects VALUES ('portal-pa-50','50','Project','active',NULL,NULL,1,NULL)"),
+        delivery.prepare("INSERT INTO client_project_grants VALUES ('account-old','portal-pa-50',1,NULL)"),
+        delivery.prepare("INSERT INTO client_folder_associations VALUES ('folder-old','project','account-old','portal-pa-50',NULL)"),
+      ]);
+      const remap:ProjectionEvent={event_id:"05bdf255-32ce-45d7-b7f1-ebfd6c465120",event_type:"projection.changed",occurred_at:"2026-08-01T16:30:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"project",entity_id:"50",action:"upsert",source_updated_at:"2026-08-01T16:30:00.000000Z",data:{id:50,name:"Remapped project",client_id:71,organization_id:81}}};
+
+      await expect(applyProjectionEvent(env(delivery),remap,"real-d1-remap-hash")).resolves.toBe("applied");
+      expect(await delivery.prepare("SELECT revoked_at FROM client_project_grants WHERE account_id='account-old'").first("revoked_at")).toBeTruthy();
+      expect(await delivery.prepare("SELECT revoked_at FROM client_folder_associations WHERE id='folder-old'").first("revoked_at")).toBeTruthy();
+    }finally{await deliveryMiniflare.dispose();}
+  });
+
+  it("suspends a revoked client but preserves concrete-client account status on organization revoke",async()=>{
+    const state={failNext:false,writes:[] as Array<{sql:string;values:unknown[]}>};
+    const delivery=portalDatabase(state);
+    const client:ProjectionEvent={event_id:"295036cb-3fe6-4527-991f-ec97dc38f30d",event_type:"projection.changed",occurred_at:"2026-08-01T17:00:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"client",entity_id:"70",action:"revoke",source_updated_at:"2026-08-01T17:00:00.000000Z",data:{id:70,name:"Revoked client",organization_id:80}}};
+    await applyProjectionEvent(env(delivery),client,"client-revoke-hash");
+    expect(state.writes.some(write=>write.sql.includes("project_alpha_organization_id")&&write.values.includes(0)&&write.values.includes("70"))).toBe(true);
+    expect(state.writes.some(write=>write.sql.includes("scope_type='client'")&&write.sql.includes("status<>'active'"))).toBe(true);
+
+    const organization:ProjectionEvent={event_id:"6da2e532-86b7-4d14-8c14-f741958021d7",event_type:"projection.changed",occurred_at:"2026-08-01T17:01:00.000000Z",schema_version:1,application_key:"ltds_ops",projection:{entity_type:"organization",entity_id:"80",action:"revoke",source_updated_at:"2026-08-01T17:01:00.000000Z",data:{id:80,name:"Revoked organization"}}};
+    await applyProjectionEvent(env(delivery),organization,"organization-revoke-hash");
+    const organizationStatus=state.writes.find(write=>write.sql.includes("project_alpha_organization_id=? AND project_alpha_client_id IS NULL")&&write.values.includes("80"));
+    expect(organizationStatus?.values).toEqual(expect.arrayContaining([0,"80"]));
+  });
 });

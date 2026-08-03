@@ -134,11 +134,13 @@ describe("client portal migrated-D1 end-to-end contract", () => {
   }
 
   it("applies the complete migration chain without granting implicit access", async () => {
-    const migrationTables = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('client_accounts','client_account_members','client_access_sync_outbox','client_portal_notification_outbox') ORDER BY name").all<{ name: string }>();
+    const migrationTables = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('client_accounts','client_account_members','client_access_sync_outbox','client_portal_notification_outbox','client_folder_grant_mutations','client_folder_grant_notifications') ORDER BY name").all<{ name: string }>();
     expect(migrationTables.results.map(row => row.name)).toEqual([
       "client_access_sync_outbox",
       "client_account_members",
       "client_accounts",
+      "client_folder_grant_mutations",
+      "client_folder_grant_notifications",
       "client_portal_notification_outbox",
     ]);
     expect(await d1ClientPortalRepository.resolveSession(env, { ...principal, subject: "not-provisioned" })).toBeNull();
@@ -184,7 +186,8 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     ]);
 
     const archive = await portal().request(`${portalOrigin}/past-deliveries`, {}, env);
-    expect((await archive.json() as { files: Array<{ key: string }> }).files.map(file => file.key)).toEqual(["clients/acme/archive/old.txt"]);
+    const archiveBody = await archive.json() as { files: Array<{ key: string; downloadPath: string }> };
+    expect(archiveBody.files.map(file => file.key)).toEqual(["clients/acme/archive/old.txt"]);
 
     const reportFile = projectBody.files.find(file => file.key === "clients/acme/north/report.pdf")!;
     const issuedUrl = new URL(reportFile.downloadPath, portalOrigin);
@@ -215,6 +218,25 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const withoutProjectGrant = await portal().request(`${portalOrigin}${routePath.replace("?projectId=project-a", "")}`, {}, env);
     expect(withoutProjectGrant.status).toBe(404);
     expect(bucketGetKeys).toEqual([]);
+
+    const archiveRoutePath = archiveBody.files[0]!.downloadPath.replace(/^\/api\/client/, "");
+    await db.prepare("UPDATE client_folder_associations SET revoked_at=datetime('now') WHERE id='folder-client-a'").run();
+    const revokedClientFolderDownload = await portal().request(`${portalOrigin}${archiveRoutePath}`, {}, env);
+    expect(revokedClientFolderDownload.status).toBe(404);
+    expect(bucketGetKeys).toEqual([]);
+    await db.prepare("UPDATE client_folder_associations SET revoked_at=NULL WHERE id='folder-client-a'").run();
+
+    await db.prepare("UPDATE client_folder_associations SET revoked_at=datetime('now') WHERE id='folder-project-a'").run();
+    const revokedFolderDownload = await portal().request(`${portalOrigin}${routePath}`, {}, env);
+    expect(revokedFolderDownload.status).toBe(404);
+    expect(bucketGetKeys).toEqual([]);
+    await db.prepare("UPDATE client_folder_associations SET revoked_at=NULL WHERE id='folder-project-a'").run();
+
+    await db.prepare("UPDATE client_project_grants SET revoked_at=datetime('now') WHERE account_id='account-a' AND project_id='project-a'").run();
+    const revokedProjectDownload = await portal().request(`${portalOrigin}${routePath}`, {}, env);
+    expect(revokedProjectDownload.status).toBe(404);
+    expect(bucketGetKeys).toEqual([]);
+    await db.prepare("UPDATE client_project_grants SET revoked_at=NULL WHERE account_id='account-a' AND project_id='project-a'").run();
   });
 
   it("creates an idempotent request and durable staff-notification/audit records", async () => {

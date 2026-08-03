@@ -84,7 +84,7 @@ async function applyPortalProjection(env: Env, event: ProjectionEvent, active: n
   if (event.projection.entity_type === "client") {
     const name = value(data, "name") ?? `Client ${id}`;
     await db.batch([
-      db.prepare(`UPDATE client_accounts SET display_name=?,status=CASE WHEN ?=0 THEN 'suspended' ELSE 'active' END,updated_at=datetime('now') WHERE project_alpha_client_id=?`).bind(name,active,id),
+      db.prepare(`UPDATE client_accounts SET display_name=?,project_alpha_organization_id=?,status=CASE WHEN ?=0 THEN 'suspended' ELSE 'active' END,updated_at=datetime('now') WHERE project_alpha_client_id=?`).bind(name,value(data,"organization_id"),active,id),
       db.prepare(`UPDATE projects SET client_name=?,updated_at=datetime('now') WHERE id IN (SELECT g.project_id FROM client_project_grants g JOIN client_accounts a ON a.id=g.account_id WHERE a.project_alpha_client_id=? AND g.revoked_at IS NULL)`).bind(name,id),
     ]);
   } else if (event.projection.entity_type === "organization") {
@@ -97,6 +97,41 @@ async function applyPortalProjection(env: Env, event: ProjectionEvent, active: n
     await db.prepare(`UPDATE projects SET project_name=?,status=?,summary=?,source_updated_at=?,active=?,updated_at=datetime('now') WHERE project_alpha_project_id=?`)
       .bind(value(data,"name")??`Project ${id}`,value(data,"status"),value(data,"description"),event.projection.source_updated_at,active,id).run();
   }
+}
+
+async function reconcilePortalProjectionAccess(env: Env): Promise<void> {
+  const db = env.DELIVERY_DB;
+  if (!db) throw new Error("delivery-db-binding-required");
+  const [projects, clients, organizations] = await Promise.all([
+    env.OPS_DB.prepare("SELECT id,client_id,organization_id,active FROM pa_projects").all<{id:string;client_id:string|null;organization_id:string|null;active:number}>(),
+    env.OPS_DB.prepare("SELECT id FROM pa_clients WHERE active=1").all<{id:string}>(),
+    env.OPS_DB.prepare("SELECT id FROM pa_organizations WHERE active=1").all<{id:string}>(),
+  ]);
+  const activeClients=new Set(clients.results.map(row=>row.id));
+  const activeOrganizations=new Set(organizations.results.map(row=>row.id));
+  const statements:D1PreparedStatement[]=[];
+  for(const project of projects.results){
+    const clientId=project.client_id&&activeClients.has(project.client_id)?project.client_id:null;
+    const organizationId=project.organization_id&&activeOrganizations.has(project.organization_id)?project.organization_id:null;
+    const invalidAccounts=`SELECT g.account_id FROM client_project_grants g
+      JOIN client_accounts a ON a.id=g.account_id
+      JOIN projects p ON p.id=g.project_id
+      WHERE p.project_alpha_project_id=? AND g.revoked_at IS NULL AND NOT
+        (?=1 AND a.status='active' AND ((? IS NOT NULL AND a.project_alpha_client_id IS ?)
+          OR (g.can_request_service=0 AND ? IS NOT NULL AND a.project_alpha_organization_id IS ?)))`;
+    const invalidValues=[project.id,project.active,clientId,clientId,organizationId,organizationId];
+    for(const table of ["client_folder_associations","client_delivery_grants","client_member_project_grants"] as const){
+      statements.push(db.prepare(`UPDATE ${table} SET revoked_at=COALESCE(revoked_at,datetime('now'))
+        WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_project_id=?) AND revoked_at IS NULL
+          AND account_id IN (${invalidAccounts})`).bind(project.id,...invalidValues));
+    }
+    statements.push(db.prepare(`UPDATE client_project_grants SET revoked_at=COALESCE(revoked_at,datetime('now'))
+      WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_project_id=?) AND revoked_at IS NULL
+        AND account_id IN (${invalidAccounts})`).bind(project.id,...invalidValues));
+  }
+  statements.push(db.prepare(`UPDATE client_folder_associations SET revoked_at=COALESCE(revoked_at,datetime('now'))
+    WHERE scope_type='client' AND revoked_at IS NULL AND account_id IN (SELECT id FROM client_accounts WHERE status<>'active')`));
+  for(let index=0;index<statements.length;index+=75)await db.batch(statements.slice(index,index+75));
 }
 
 const PROJECTION_LEASE_DURATION = "+10 minutes";
@@ -188,6 +223,7 @@ export async function applyProjectionEvent(env: Env, event: ProjectionEvent, pay
     // after DELIVERY_DB has accepted its idempotent projection.
     await refreshProjectionEntityLease(env,event);
     await applyPortalProjection(env,event,active);
+    if(event.projection.entity_type==="client"||event.projection.entity_type==="organization"||event.projection.entity_type==="project")await reconcilePortalProjectionAccess(env);
     await refreshProjectionEntityLease(env,event);
     await env.OPS_DB.prepare(`INSERT INTO pa_projection_entity_versions (entity_type,entity_id,source_updated_at,event_id) VALUES (?,?,?,?) ON CONFLICT(entity_type,entity_id) DO UPDATE SET source_updated_at=excluded.source_updated_at,event_id=excluded.event_id,updated_at=datetime('now')`).bind(event.projection.entity_type,event.projection.entity_id,event.projection.source_updated_at,event.event_id).run();
     return "applied";

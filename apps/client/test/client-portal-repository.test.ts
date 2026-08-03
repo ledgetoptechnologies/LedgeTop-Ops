@@ -77,6 +77,27 @@ describe("client portal identity resolution", () => {
 });
 
 describe("client portal grant enforcement", () => {
+  it("resolves a project file only while every current session, project, member, and folder grant holds in the same query", async () => {
+    const value = recordingEnv();
+    const fileId = Buffer.from("clients/acme/north/report.pdf").toString("base64url");
+    await expect(d1ClientPortalRepository.getAuthorizedFile(value.env, session, fileId, "project-a")).resolves.toBeNull();
+    expect(value.calls).toHaveLength(1);
+    const call = value.calls[0]!;
+    expect(call.binds).toEqual(["clients/acme/north/report.pdf", "account-a", "identity-a", "project", "project-a"]);
+    for (const condition of [
+      "a.status='active'",
+      "i.revoked_at IS NULL",
+      "m.revoked_at IS NULL",
+      "g.account_id=a.id",
+      "g.revoked_at IS NULL",
+      "p.active=1",
+      "association.account_id=a.id",
+      "association.project_id=?",
+      "association.revoked_at IS NULL",
+      "member_grant.revoked_at IS NULL",
+    ]) expect(call.sql).toContain(condition);
+  });
+
   it("lists a delivery only through active account, identity, project, delivery, share, and version joins", async () => {
     const value = recordingEnv({
       all: () => [{

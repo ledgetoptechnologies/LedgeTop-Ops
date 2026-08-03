@@ -8,6 +8,18 @@ Operations claims pending records with a short lease and retries sends at most t
 
 Created and updated messages may contain the delivery link. Access codes are never included. Contributor uploads do not enqueue notifications.
 
+Internal client-workspace folder grants use a separate outbox added by migration
+`0105`; they never reuse the public-share notification contract. An optional
+recipient is an exact portal identity, not an email-based authorization grant.
+The row becomes eligible after five minutes, and the consumer then re-resolves
+the current email only after confirming the exact immutable grant version,
+active PA-backed client account, nonrevoked identity and membership, and at
+least one newly visible indexed object not covered before the grant. Revocation,
+narrowing, supersession, recipient deauthorization, redundant coverage, or an
+empty/stale file index suppresses the row without calling the mail transport.
+The action is the authenticated `/portal/deliveries` route and contains no
+public share ID, token, signature, or expiry parameter.
+
 Client portal request and team events use the Delivery D1 outbox introduced by
 migrations `0098` and `0099` and rebuilt with required request-scoped dedupe
 keys and confirmation/response events by `0104`. Enqueueing is not delivery: consumers must claim
@@ -39,6 +51,11 @@ avoids a second application password. The Operations cron queues 72-hour
 expiration notices every fifteen minutes and processes the outbox every five
 minutes. Request mail uses a stable outbox-derived `Message-ID`; delivery is
 still at-least-once because the provider and D1 cannot share a transaction.
+The same provider boundary applies to internal folder-grant mail: revocation in
+the five-minute grace window is deterministically suppressed, but a revocation
+that races after the final authorization check and after SMTP has accepted the
+message cannot be recalled. The exact grant is still revoked immediately, so
+the authenticated portal link exposes no stale access.
 
 Every new service request must create one `staff_triage` outbox record with a
 non-null dedupe key. A blank `CLIENT_REQUEST_TRIAGE_TO` is a configuration
@@ -86,3 +103,10 @@ visible in the Operations triage queue, its outbox record reaches `sent`, and
 the approved recipient receives the notification. Do not use a real client
 request as the first transport test, and do not treat email delivery as a grant
 of portal access.
+
+For an internal folder grant, use a synthetic client workspace and indexed test
+object. Verify a revoke inside the grace window leaves the outbox `suppressed`,
+the portal returns no file, and the mail mock records zero sends. For the valid
+case, advance only the controlled outbox clock, verify exactly one call with a
+stable message ID and `/portal/deliveries`, then repeat the consumer to prove it
+does not send again. Never use an actual client address for this test.
