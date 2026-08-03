@@ -159,13 +159,49 @@ export interface SessionUser {
   divisions: Array<{ id: string; name: string; code: string }>;
 }
 
+export const THUMBNAIL_STATES = ["ready", "pending", "failed", "not_applicable"] as const;
+export type ThumbnailState = (typeof THUMBNAIL_STATES)[number];
+
+export const THUMBNAIL_FALLBACK_KINDS = [
+  "image",
+  "video",
+  "audio",
+  "pdf",
+  "archive",
+  "document",
+  "spreadsheet",
+  "unknown",
+] as const;
+export type ThumbnailFallbackKind = (typeof THUMBNAIL_FALLBACK_KINDS)[number];
+
+/**
+ * Returns a coarse, non-sensitive icon category. The result never includes the
+ * file name and is safe to map to a client-bundled SVG after the caller has
+ * received an authorized manifest.
+ */
+export function thumbnailFallbackKindForFile(
+  fileName: string,
+  mediaKind: "image" | "video" | "audio" | "pdf" | "text" | "other",
+): ThumbnailFallbackKind {
+  if (mediaKind === "image" || mediaKind === "video" || mediaKind === "audio" || mediaKind === "pdf") return mediaKind;
+  const leaf = fileName.replace(/\\/g, "/").split("/").pop() || "";
+  const extension = leaf.includes(".") ? leaf.slice(leaf.lastIndexOf(".") + 1).toLowerCase() : "";
+  if (["zip", "7z", "rar", "tar", "gz", "tgz", "bz2", "xz"].includes(extension)) return "archive";
+  if (["csv", "xls", "xlsx", "ods"].includes(extension)) return "spreadsheet";
+  if (["doc", "docx", "odt", "rtf", "txt", "md", "json"].includes(extension) || mediaKind === "text") return "document";
+  return "unknown";
+}
+
 export interface DeliveryItem {
   id: string;
   name: string;
   kind: "folder" | "image" | "video" | "audio" | "pdf" | "text" | "other";
   size: number | null;
   uploadedAt: string | null;
+  /** Present only for a ready real thumbnail; never aliases an original. */
   thumbnailUrl?: string;
+  thumbnailState?: ThumbnailState;
+  thumbnailFallbackKind?: ThumbnailFallbackKind;
   previewUrl?: string;
   sourceUrl?: string;
   downloadUrl?: string;

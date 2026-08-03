@@ -12,6 +12,13 @@
 
 set -euo pipefail
 
+retired_message="LTDS server-side preview generation is retired. Originals sync to private R2; Cloudflare Queues and the Operations Worker create the single supported thumbnail."
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  echo "$retired_message" >&2
+  exit 2
+fi
+return 0
+
 DRY_RUN=false
 SINGLE_FILE=""
 if [[ "${1:-}" == "--dry-run" ]]; then

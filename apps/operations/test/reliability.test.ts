@@ -1,11 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { aliasParent, normalizeAliasKey, validateDisplayName } from "../src/worker/aliases";
-import { canonicalPreviewSource, finalizePreviewManifest, hidden, previewDerivative, previewManifest } from "../src/worker/file-events";
+import { canonicalPreviewSource, finalizePreviewManifest, hidden, previewDerivative, previewManifest, thumbnailJobForCreatedObject } from "../src/worker/file-events";
 import { derivativePrefixes, validateDeleteConfirmation } from "../src/worker/source-delete";
 import { artifactDirectory, previewIdentity } from "../src/worker/artifacts";
 import { r2PurgeEnabled, tombstoneMatches, trashSnapshotBlockReason } from "../src/worker/trash";
 
 describe("delivery reliability controls", () => {
+  it("maps a successful multipart image upload to a thumbnail queue payload", () => {
+    expect(thumbnailJobForCreatedObject("CompleteMultipartUpload", "Jobs/Clients/Synthetic/photo.jpg", "image", { httpEtag: '"source-etag"', size: 4096 })).toEqual({ sourceKey: "Jobs/Clients/Synthetic/photo.jpg", sourceEtag: '"source-etag"', sourceSize: 4096 });
+    expect(thumbnailJobForCreatedObject("CompleteMultipartUpload", "Jobs/Clients/Synthetic/archive.zip", "other", { httpEtag: '"archive"', size: 10 })).toBeNull();
+  });
   it("rejects reserved segments everywhere in Operations paths", () => {
     for (const key of ["_ltds/a.jpg", "jobs/_ltds/a.jpg", "jobs/client/.previews/hash/thumb.webp", "jobs/client/dump/a.jpg", "jobs/dump/client/a.jpg"]) expect(hidden(key)).toBe(true);
     expect(hidden("jobs/client/unedited/a.jpg")).toBe(false);

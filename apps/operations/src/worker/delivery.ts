@@ -1,5 +1,5 @@
 import { HTTPException } from "hono/http-exception";
-import type { DeliveryItem } from "@ltds/shared";
+import { thumbnailFallbackKindForFile, type DeliveryItem } from "@ltds/shared";
 import { accessCodeMatches, decryptDeliveryToken, encryptDeliveryToken, hashAccessCode, randomToken, sha256 } from "./crypto";
 import { requirePermission, sqlScope } from "./acl";
 import { auditStatement } from "./request-security";
@@ -7,6 +7,7 @@ import type { Env, StaffPrincipal } from "./types";
 import { aliasMap } from "./aliases";
 import { activeTombstones, assertNotTrashed, tombstoneMatches } from "./trash";
 import { normalizeRecipientEmail, notificationDedupeKey, notificationStatement } from "./notifications";
+import { thumbnailStateForObject, type ThumbnailJobRow } from "./image-thumbnails";
 
 const encoder = new TextEncoder(); const decoder = new TextDecoder("utf-8", { fatal: true });
 const MIME: Record<string,string> = { avif:"image/avif",bmp:"image/bmp",gif:"image/gif",jpeg:"image/jpeg",jpg:"image/jpeg",png:"image/png",tif:"image/tiff",tiff:"image/tiff",webp:"image/webp",mp4:"video/mp4",m4v:"video/x-m4v",webm:"video/webm",mov:"video/quicktime",mp3:"audio/mpeg",m4a:"audio/mp4",wav:"audio/wav",ogg:"audio/ogg",pdf:"application/pdf",txt:"text/plain; charset=utf-8",csv:"text/csv; charset=utf-8",json:"application/json; charset=utf-8" };
@@ -20,7 +21,8 @@ export function normalizePrefix(value:string):string{const prefix=value.trim().r
 function hidden(key:string):boolean{const parts=key.replace(/\\/g,"/").split("/").filter(Boolean);return parts.some(reserved);}
 function ext(key:string):string{const name=key.split("/").pop()||"";return name.includes(".")?(name.split(".").pop()||"").toLowerCase():"";}
 export function mime(key:string):string{return MIME[ext(key)]||"application/octet-stream";}
-export function mediaKind(key:string):DeliveryItem["kind"]{const value=mime(key);if(value.startsWith("image/"))return"image";if(value.startsWith("video/"))return"video";if(value.startsWith("audio/"))return"audio";if(value==="application/pdf")return"pdf";if(value.startsWith("text/")||value.startsWith("application/json"))return"text";return"other";}
+export type MediaKind = Exclude<DeliveryItem["kind"], "folder">;
+export function mediaKind(key:string):MediaKind{const value=mime(key);if(value.startsWith("image/"))return"image";if(value.startsWith("video/"))return"video";if(value.startsWith("audio/"))return"audio";if(value==="application/pdf")return"pdf";if(value.startsWith("text/")||value.startsWith("application/json"))return"text";return"other";}
 export function deliverySourceUrl(kind:DeliveryItem["kind"],id:string):string|undefined{return["image","video","audio","pdf","text"].includes(kind)?`/api/delivery/items/${id}/${kind==="pdf"?"pdf":"source"}`:undefined;}
 
 interface FolderAssociation { division_id: string; r2_prefix: string }
@@ -45,7 +47,12 @@ export async function listDeliveryFolder(env:Env,principal:StaffPrincipal,prefix
   const shared=(key:string)=>activeShares.results.some(share=>{try{return key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});
   const folders=listed.delimitedPrefixes.filter(value=>!hidden(value)&&!trashed(value));
   const files=listed.objects.filter(object=>object.key!==prefix&&!object.key.endsWith("/")&&!hidden(object.key)&&!trashed(object.key));
-  const aliases=await aliasMap(env,[...folders,...files.map(object=>object.key)]); const items=files.map(object=>{const id=encodeRef(object.key);const kind=mediaKind(object.key);const name=aliases.get(object.key)||object.key.slice(prefix.length);return{id,name,displayName:name,physicalKey:object.key,kind,size:object.size,uploadedAt:object.uploaded.toISOString(),isShared:shared(object.key),previewUrl:["image","audio","text"].includes(kind)?`/api/delivery/items/${id}/preview`:undefined,sourceUrl:deliverySourceUrl(kind,id),thumbnailUrl:["image","video","pdf"].includes(kind)?`/api/delivery/items/${id}/thumbnail`:undefined,downloadUrl:`/api/delivery/items/${id}/download`,previewStatus:kind==="video"?"processing":undefined,actions:{rename:`/api/delivery/items/${id}/display-name`,delete:`/api/delivery/items/${id}/source`}};});
+  const aliases=await aliasMap(env,[...folders,...files.map(object=>object.key)]); const items=files.map(object=>{const id=encodeRef(object.key);const kind=mediaKind(object.key);const name=aliases.get(object.key)||object.key.slice(prefix.length);const sourceUrl=deliverySourceUrl(kind,id);return{id,name,displayName:name,physicalKey:object.key,kind,size:object.size,uploadedAt:object.uploaded.toISOString(),isShared:shared(object.key),previewUrl:kind==="image"?sourceUrl:["audio","text"].includes(kind)?`/api/delivery/items/${id}/preview`:undefined,sourceUrl,thumbnailUrl:undefined as string|undefined,thumbnailState:(kind==="image"?"pending":"not_applicable") as DeliveryItem["thumbnailState"],thumbnailFallbackKind:thumbnailFallbackKindForFile(object.key,kind),downloadUrl:`/api/delivery/items/${id}/download`,previewStatus:kind==="video"?"processing":undefined,actions:{rename:`/api/delivery/items/${id}/display-name`,delete:`/api/delivery/items/${id}/source`}};});
+  const images=files.map((object,index)=>({object,index})).filter(value=>mediaKind(value.object.key)==="image");
+  if(images.length){
+    const rows=await env.DELIVERY_DB.batch(images.map(image=>env.DELIVERY_DB.prepare("SELECT source_etag,thumbnail_key,status,error_code FROM image_thumbnail_jobs WHERE source_key=?").bind(image.object.key)));
+    rows.forEach((result,index)=>{const image=images[index]!,row=result.results[0] as ThumbnailJobRow|undefined,state=thumbnailStateForObject(image.object.httpEtag,row),item=items[image.index]!;item.thumbnailState=state.state;if(state.state==="ready")item.thumbnailUrl=`/api/delivery/items/${item.id}/thumbnail`;});
+  }
   const videos=files.map((object,index)=>({object,index})).filter(value=>mediaKind(value.object.key)==="video");
   if(videos.length){
     const rows=await env.DELIVERY_DB.batch(videos.map(video=>env.DELIVERY_DB.prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(video.object.key)));

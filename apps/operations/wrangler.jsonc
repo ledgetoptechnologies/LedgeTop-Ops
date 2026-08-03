@@ -70,7 +70,24 @@
     }
   ],
   "queues": {
-    "consumers": [{ "queue": "ltds-file-events", "max_batch_size": 25, "max_batch_timeout": 10, "max_retries": 5 }]
+    "producers": [
+      { "binding": "THUMBNAIL_QUEUE", "queue": "ltds-thumbnail-jobs" }
+    ],
+    "consumers": [
+      { "queue": "ltds-file-events", "max_batch_size": 25, "max_batch_timeout": 10, "max_retries": 5 },
+      {
+        "queue": "ltds-thumbnail-jobs",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "ltds-thumbnail-jobs-dlq"
+      },
+      {
+        "queue": "ltds-thumbnail-jobs-dlq",
+        "max_batch_size": 10,
+        "max_batch_timeout": 5
+      }
+    ]
   },
   "images": { "binding": "IMAGES" },
   "stream": { "binding": "STREAM" }

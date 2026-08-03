@@ -1,7 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 import type { Hono } from "hono";
 import { requirePermission } from "./acl";
-import { decodeRef, encodeRef } from "./delivery";
+import { decodeRef, encodeRef, mediaKind } from "./delivery";
 import { auditStatement, requireMutationSecurity } from "./request-security";
 import { executeSourceDelete } from "./source-delete";
 import { restoreTombstone } from "./trash";
@@ -16,6 +16,7 @@ import {
   DIRECT_DELIVERY_UPLOADS_DISABLED_MESSAGE,
   directDeliveryUploadsCapability,
 } from "./direct-upload-policy";
+import { enqueueThumbnailJob } from "./image-thumbnails";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
 type ConflictPolicy = "fail" | "skip" | "replace" | "rename";
@@ -96,7 +97,7 @@ async function copyObject(env: Env, source: string, target: string, conflict: Co
   const resolved = await targetName(env, target, conflict); if (!resolved) return { target: null, skipped: true };
   if(conflict==="replace"){const existing=await env.DATA_BUCKET.get(resolved);if(existing){const id=crypto.randomUUID(),recoveryKey=`Jobs/Clients/_ltds/replacements/${id}/${leaf(resolved)}`;await env.DATA_BUCKET.put(recoveryKey,existing.body,{httpMetadata:existing.httpMetadata,customMetadata:existing.customMetadata});await env.OPS_DB.prepare("INSERT INTO r2_replacement_recovery(id,original_key,recovery_key,purge_after) VALUES(?,?,?,datetime('now','+7 days'))").bind(id,resolved,recoveryKey).run();}}
   const indexed=await env.DELIVERY_DB.prepare("SELECT content_type,media_kind,stream_uid,stream_status,stream_error FROM file_index WHERE r2_key=?").bind(source).first<{content_type:string|null;media_kind:string;stream_uid:string|null;stream_status:string|null;stream_error:string|null}>();
-  if(indexed)await env.OPS_DB.prepare("INSERT INTO r2_event_suppressions(object_key,event_kind,expires_at) VALUES(?,'create',datetime('now','+1 hour')) ON CONFLICT(object_key) DO UPDATE SET expires_at=excluded.expires_at").bind(resolved).run();
+  if(indexed&&indexed.media_kind!=="image")await env.OPS_DB.prepare("INSERT INTO r2_event_suppressions(object_key,event_kind,expires_at) VALUES(?,'create',datetime('now','+1 hour')) ON CONFLICT(object_key) DO UPDATE SET expires_at=excluded.expires_at").bind(resolved).run();
   const sourceObject = await env.DATA_BUCKET.get(source); if (!sourceObject) throw new Error("source-disappeared");
   let written:R2Object;
   if(roots&&source.endsWith("/manifest.json")&&source.includes("/.previews/")){const bytes=await sourceObject.arrayBuffer(),manifest=(()=>{try{return JSON.parse(new TextDecoder().decode(bytes))}catch{return null}})();if(manifest&&typeof manifest.sourceKey==="string"&&manifest.sourceKey.startsWith(roots.source)){manifest.sourceKey=`${roots.target}${manifest.sourceKey.slice(roots.source.length)}`;written=await env.DATA_BUCKET.put(resolved,JSON.stringify(manifest),{httpMetadata:{...sourceObject.httpMetadata,contentType:"application/json"},customMetadata:sourceObject.customMetadata});}else written=await env.DATA_BUCKET.put(resolved,bytes,{httpMetadata:sourceObject.httpMetadata,customMetadata:sourceObject.customMetadata});}
@@ -104,6 +105,10 @@ async function copyObject(env: Env, source: string, target: string, conflict: Co
   if(indexed)await env.DELIVERY_DB.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status,stream_error)
     VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,stream_uid=excluded.stream_uid,stream_status=excluded.stream_status,stream_error=excluded.stream_error,updated_at=datetime('now')`)
     .bind(resolved,written.httpEtag,written.size,written.uploaded.toISOString(),indexed.content_type,indexed.media_kind,indexed.stream_uid,indexed.stream_status,indexed.stream_error).run();
+  if(indexed?.media_kind==="image"&&mediaKind(resolved)==="image"){
+    try{await enqueueThumbnailJob(env,{sourceKey:resolved,sourceEtag:written.httpEtag,sourceSize:written.size});}
+    catch(error){console.error(JSON.stringify({event:"thumbnail.copy-enqueue-failed",key:resolved,error:error instanceof Error?error.message:"unknown"}));}
+  }
   return { target: resolved, skipped: false };
 }
 

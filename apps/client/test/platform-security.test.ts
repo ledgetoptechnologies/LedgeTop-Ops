@@ -155,7 +155,7 @@ describe("authenticated original object streaming",()=>{
     expect(response.status).toBe(206);
     expect(response.headers.get("Content-Range")).toBe("bytes 10-19/100");
     expect(response.headers.get("Content-Length")).toBe("10");
-    expect(response.headers.get("Cache-Control")).toBe("private, no-cache");
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(response.headers.get("X-Content-Type-Options")).toBe("nosniff");
     expect(value.reads).toEqual([{key:"jobs/client/edited/photo.jpg",options:{range:{offset:10,length:10}}}]);
     expect((await response.arrayBuffer()).byteLength).toBe(10);
@@ -178,7 +178,7 @@ describe("authenticated original object streaming",()=>{
     const response=await streamItem(value.c,"inline",true);
     expect(response.status).toBe(304);
     expect(response.headers.get("ETag")).toBe("\"etag\"");
-    expect(response.headers.get("Cache-Control")).toBe("private, no-cache");
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(response.headers.get("Content-Length")).toBeNull();
     expect(value.reads).toHaveLength(0);
   });

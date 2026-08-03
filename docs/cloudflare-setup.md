@@ -244,7 +244,7 @@ Set-Location ../client
 npm.cmd run db:migrate:remote
 ```
 
-Confirm Delivery `0006`, `0007`, `0008`, `0090`, `0091`, `0092`, `0093`, `0094`, and all Operations delivery-CRUD migrations, including `0013_dropbox_import`, appear in the remote migration list before deploying dependent Workers. Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding, the `ltds-cloud-transfer` Workflow binding, and the hourly cleanup Cron Trigger. Operations deployment creates/updates its file-operation Workflow binding, the `ltds-dropbox-import` Workflow binding, and the `ltds-incoming-upload-lifecycle` Workflow binding. Each successful ZIP job sleeps for its 24-hour retention and deletes its own archive; the hourly Delivery cleanup is the recovery path for expired or interrupted jobs and also prunes old quota rows. Verify one completed job, one intentionally failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour exact quota, one copy/move job with an injected retry, and one Dropbox import job before production rollout.
+Confirm Delivery migrations through `0106_image_thumbnail_jobs.sql` and all Operations delivery-CRUD migrations, including `0013_dropbox_import`, appear in the remote migration list before deploying dependent Workers. Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding, the `ltds-cloud-transfer` Workflow binding, and the hourly cleanup Cron Trigger. Operations deployment creates/updates its file-operation Workflow binding, the `ltds-dropbox-import` Workflow binding, the `ltds-incoming-upload-lifecycle` Workflow binding, and the thumbnail Queue producer/consumers. Follow the separate [thumbnail deployment sequence](media-thumbnail-pipeline.md) before enabling that producer. Each successful ZIP job sleeps for its 24-hour retention and deletes its own archive; the hourly Delivery cleanup is the recovery path for expired or interrupted jobs and also prunes old quota rows. Verify one completed job, one intentionally failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour exact quota, one copy/move job with an injected retry, and one Dropbox import job before production rollout.
 
 The 20 GB ZIP limit and 10,000-object R2 CRUD limit require the Workers Paid Workflow step allowance. Do not enable those production limits on a Free-plan account; reduce the application limits or upgrade first.
 
@@ -259,6 +259,7 @@ Onboard the sending domain in Cloudflare Email Service, add an `EMAIL` send-emai
 - R2: `client-data`
 - Incoming R2: `ltds-incoming` (private; production-origin CORS and quarantine lifecycle configured)
 - Queue: `ltds-file-events`
+- Thumbnail Queue/DLQ (required by the new config; create during rollout): `ltds-thumbnail-jobs`, `ltds-thumbnail-jobs-dlq`
 - R2 notifications: object-create and object-delete to `ltds-file-events`
 - Workflows: `ltds-bulk-download`, `ltds-cloud-transfer` (delivery), `ltds-r2-crud`, `ltds-incoming-upload-lifecycle`, `ltds-dropbox-import` (operations)
 

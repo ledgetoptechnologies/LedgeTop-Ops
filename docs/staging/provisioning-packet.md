@@ -59,7 +59,7 @@ required. Do not infer a recovery time from an untested source-sync schedule.
 | DLQ | `ltds-file-events-staging-dlq` / `b6f9faccbab64c8db7bfd29c483b3708` | Failed staging file events |
 
 Both D1 databases are empty. Both R2 buckets are Standard, empty, private, and
-unlocked. Both queues have zero producers and zero consumers. No migration,
+unlocked. The listed queues initially have zero producers and zero consumers. No migration,
 event subscription, route, Access policy, Workflow, or Worker version was
 created by this provisioning step.
 
@@ -89,6 +89,8 @@ npx.cmd wrangler r2 bucket create client-data-staging --location wnam
 npx.cmd wrangler r2 bucket create ltds-incoming-staging --location enam
 npx.cmd wrangler queues create ltds-file-events-staging
 npx.cmd wrangler queues create ltds-file-events-staging-dlq
+npx.cmd wrangler queues create ltds-thumbnail-jobs-staging
+npx.cmd wrangler queues create ltds-thumbnail-jobs-staging-dlq
 ```
 
 ## Minimal unresolved configuration

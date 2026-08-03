@@ -4,7 +4,8 @@ import { secureHeaders } from "hono/secure-headers";
 import { type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
 import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName } from "./files";
 import { createSessionCookie, hmac, parseCookie, randomSecret, sha256, verifyAccessCode, verifyRotatingSessionCookie } from "./security";
-import { matchesEtag, servePreparedImage } from "./prepared-images";
+import { matchesEtag } from "./prepared-images";
+import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import { recordFirstAccessNotification } from "./notifications";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
@@ -266,23 +267,6 @@ function aliasedPath(key: string, root: string, aliases: Map<string, string>): s
   return names.join("/");
 }
 
-async function requirePreparedImage(c: any, key: string, variant: "thumbnail" | "preview" | "poster"): Promise<Response> {
-  return servePreparedImage({
-    bucket: c.env.DATA_BUCKET,
-    database: primaryDb(c.env),
-    ifNoneMatch: c.req.header("If-None-Match"),
-  }, key, variant);
-}
-
-async function preparedOrOriginalImage(c: any, key: string, variant: "thumbnail" | "preview"): Promise<Response> {
-  try {
-    return await requirePreparedImage(c, key, variant);
-  } catch (error) {
-    if (!(error instanceof HTTPException) || error.status !== 404) throw error;
-  }
-  return streamItem(c, "inline", true);
-}
-
 app.get("/health", c => c.json({ status: "ok", service: "ltds-delivery" }));
 
 export async function serveAppShell(request: Request, assets: Pick<Fetcher, "fetch">): Promise<Response> {
@@ -373,17 +357,26 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
     items.push({ id: encodeItemRef(relative), name: aliases.get(folderPrefix) || relative.split("/").pop() || relative, kind: "folder", size: null, uploadedAt: null });
   }
   const videos: Array<{ index: number; key: string }> = [];
+  const images: Array<{ index: number; key: string; etag: string; base: string }> = [];
   for (const object of listed.objects) {
     if (object.key === prefix || object.key.endsWith("/") || isHiddenKey(object.key) || isTrashed(tombstones, object.key)) continue;
     const relative = object.key.slice(root.length); const id = encodeItemRef(relative); const kind = kindForKey(object.key);
     const base = `/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${id}`;
-    const item: DeliveryItem = { id, name: aliases.get(object.key) || relative.split("/").pop() || relative, kind, size: object.size, uploadedAt: object.uploaded.toISOString(), downloadUrl: `${base}/download`, previewStatus: kind === "video" ? "processing" : undefined };
-    if (["image", "audio", "text"].includes(kind)) item.previewUrl = `${base}/preview`;
+    const item: DeliveryItem = { id, name: aliases.get(object.key) || relative.split("/").pop() || relative, kind, size: object.size, uploadedAt: object.uploaded.toISOString(), downloadUrl: `${base}/download`, previewStatus: kind === "video" ? "processing" : undefined, ...thumbnailFieldsForObject(object.key, kind, base, object.httpEtag, null) };
     item.sourceUrl = sourceUrlForItem(base, kind);
-    if (kind === "image" || kind === "video" || kind === "pdf") item.thumbnailUrl = `${base}/thumbnail`;
+    if (kind === "image") { item.previewUrl = item.sourceUrl; images.push({ index: items.length, key: object.key, etag: object.httpEtag, base }); }
+    else if (kind === "audio" || kind === "text") item.previewUrl = `${base}/preview`;
     if (kind === "video") item.previewUrl = undefined;
     if (kind === "video") videos.push({ index: items.length, key: object.key });
     items.push(item);
+  }
+  if (images.length) {
+    const db = primaryDb(c.env); const records = await db.batch(images.map(image => db.prepare("SELECT source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status FROM image_thumbnail_jobs WHERE source_key=?").bind(image.key)));
+    records.forEach((result, index) => {
+      const row = result.results[0] as ThumbnailJobRow | undefined; const image = images[index]!; const item = items[image.index];
+      if (!item) return;
+      Object.assign(item, thumbnailFieldsForObject(image.key, "image", image.base, image.etag, row));
+    });
   }
   if (videos.length) {
     const db = primaryDb(c.env); const records = await db.batch(videos.map(video => db.prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(video.key)));
@@ -408,12 +401,12 @@ export async function streamItem(c: any, disposition: "inline" | "attachment", r
   if (requiredKind && kind !== requiredKind) throw new HTTPException(415, { message: "PDF preview is not available for this file" });
   if (disposition === "inline" && !["image", "video", "audio", "pdf", "text"].includes(kind)) throw new HTTPException(415, { message: "Preview is not available for this file" });
   const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" });
-  if (!raw && disposition === "inline" && (kind === "image" || kind === "pdf")) return requirePreparedImage(c, key, "preview");
+  if (!raw && disposition === "inline" && kind === "pdf") return streamItem(c, "inline", true, "pdf");
   if (!raw && disposition === "inline" && kind === "video") throw new HTTPException(409, { message: "Video preview is available through Stream" });
   let range: { offset: number; length: number } | undefined;
   const rangeHeader = c.req.header("Range"), ifRange = c.req.header("If-Range");
   try { range = parseRange(!ifRange || matchesEtag(ifRange, head.httpEtag) ? rangeHeader : undefined, head.size); } catch (error) { if (error instanceof HTTPException && error.status === 416) return new Response(null, { status: 416, headers: { "Content-Range": `bytes */${head.size}`, "Accept-Ranges": "bytes" } }); throw error; }
-  const headers = new Headers(); head.writeHttpMetadata(headers); headers.set("Content-Type", mimeForKey(key)); headers.set("ETag", head.httpEtag); headers.set("Accept-Ranges", "bytes"); headers.set("Cache-Control", disposition === "inline" ? "private, no-cache" : "private, no-store"); headers.set("X-Content-Type-Options", "nosniff"); headers.set("Content-Disposition", `${disposition}; filename="${safeFileName(key)}"`);
+  const headers = new Headers(); head.writeHttpMetadata(headers); headers.set("Content-Type", mimeForKey(key)); headers.set("ETag", head.httpEtag); headers.set("Accept-Ranges", "bytes"); headers.set("Cache-Control", "private, no-store"); headers.set("X-Content-Type-Options", "nosniff"); headers.set("Content-Disposition", `${disposition}; filename="${safeFileName(key)}"`);
   if (range) { headers.set("Content-Range", `bytes ${range.offset}-${range.offset + range.length - 1}/${head.size}`); headers.set("Content-Length", String(range.length)); } else headers.set("Content-Length", String(head.size));
   if (!range && disposition === "inline" && matchesEtag(c.req.header("If-None-Match"), head.httpEtag)) { headers.delete("Content-Length"); return new Response(null, { status: 304, headers }); }
   if (c.req.method === "HEAD") return new Response(null, { status: range ? 206 : 200, headers });
@@ -426,8 +419,8 @@ app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/preview", a
   const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
   await assertNotTrashed(c.env, key);
   const kind = kindForKey(key);
-  if (kind === "image") return preparedOrOriginalImage(c, key, "preview");
-  if (kind === "pdf") return requirePreparedImage(c, key, "preview");
+  if (kind === "image") return streamItem(c, "inline", true);
+  if (kind === "pdf") return streamItem(c, "inline", true, "pdf");
   if (kind === "audio" || kind === "text") return streamItem(c, "inline", true);
   throw new HTTPException(415, { message: "Preview unavailable" });
 });
@@ -488,14 +481,11 @@ async function createStreamTicket(c: any): Promise<{ url: string; expiresAt: str
 
 app.post("/api/public/shares/:publicId/items/:itemRef/stream-ticket", async c => c.json(await createStreamTicket(c)));
 
-app.get("/api/public/shares/:publicId/items/:itemRef/thumbnail", async c => {
+app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/thumbnail", async c => {
   const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
   await assertNotTrashed(c.env, key);
-  if (!(await c.env.DATA_BUCKET.head(key))) throw new HTTPException(404, { message: "File not found" });
-  if (kindForKey(key) === "image") return requirePreparedImage(c, key, "thumbnail");
-  if (kindForKey(key) === "pdf") return requirePreparedImage(c, key, "thumbnail");
-  if (kindForKey(key) === "video") return requirePreparedImage(c, key, "poster");
-  throw new HTTPException(415, { message: "Thumbnail unavailable" });
+  if (kindForKey(key) !== "image") throw new HTTPException(409, { message: "Thumbnail is not available for this file type", cause: { code: "THUMBNAIL_NOT_APPLICABLE" } });
+  return serveAuthorizedThumbnail(c.env, key, { method: c.req.method, ifNoneMatch: c.req.header("If-None-Match") });
 });
 
 export function bulkQuotaRetryAfterSeconds(now = Date.now()): number {

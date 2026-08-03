@@ -1,4 +1,8 @@
-# Prompt for Hermes: LTDS TrueNAS preview generator
+# RETIRED — do not use: LTDS TrueNAS preview generator
+
+This prompt is retained only as rollback history. The product now uses the
+[Cloudflare thumbnail-only pipeline](../media-thumbnail-pipeline.md). Do not
+generate or upload any of the derivatives described below.
 
 I need you to create, test, and harden the production TrueNAS Scale preview-generation script used by the LTDS Cloudflare Operations and Delivery Workers.
 

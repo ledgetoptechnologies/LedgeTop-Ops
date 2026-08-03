@@ -29,6 +29,7 @@ import {
   refreshStreamStatuses,
   type R2Notification,
 } from "./file-events";
+import { consumeThumbnailDeadLetters, consumeThumbnailJobs, getThumbnailForAuthorizedSource, type ThumbnailJobMessage } from "./image-thumbnails";
 import {
   authorizeItem,
   createDeliveryShare,
@@ -56,10 +57,6 @@ import {
 } from "./visibility";
 import { deleteAlias, resolveAliasKey, upsertAlias } from "./aliases";
 import { executeSourceDelete, previewSourceDelete } from "./source-delete";
-import {
-  servePreparedArtifact,
-  type PreparedArtifactVariant,
-} from "./prepared-artifact";
 import { runRetention } from "./retention";
 import {
   listTrash,
@@ -1794,18 +1791,6 @@ app.delete("/api/delivery/items/:itemRef/source", async (c) => {
   });
 });
 
-async function preparedArtifact(
-  c: any,
-  key: string,
-  variant: PreparedArtifactVariant,
-) {
-  return servePreparedArtifact(
-    c.env,
-    key,
-    variant,
-    c.req.header("If-None-Match"),
-  );
-}
 async function opsFile(
   c: any,
   disposition: "inline" | "attachment",
@@ -1822,27 +1807,13 @@ async function opsFile(
     !["image", "video", "audio", "pdf", "text"].includes(kind)
   )
     throw new HTTPException(415, { message: "Preview unavailable" });
-  if (!raw && disposition === "inline" && kind === "image")
-    return preparedOrOriginal(c, key, "preview");
   if (!raw && disposition === "inline" && kind === "pdf")
-    return preparedArtifact(c, key, "preview");
+    return servePdfSourceFile(c.env.DATA_BUCKET, key, c.req);
   if (!raw && disposition === "inline" && kind === "video")
     throw new HTTPException(409, {
       message: "Video preview uses Stream or the original source",
     });
   return serveSourceFile(c.env.DATA_BUCKET, key, c.req, disposition);
-}
-async function preparedOrOriginal(
-  c: any,
-  key: string,
-  variant: "thumb" | "preview",
-): Promise<Response> {
-  try {
-    return await preparedArtifact(c, key, variant);
-  } catch (error) {
-    if (!(error instanceof HTTPException) || error.status !== 404) throw error;
-  }
-  return opsFile(c, "inline", true);
 }
 app.on(["GET", "HEAD"], "/api/delivery/items/:itemRef/preview", (c) =>
   opsFile(c, "inline"),
@@ -1860,17 +1831,25 @@ app.on(["GET", "HEAD"], "/api/delivery/items/:itemRef/pdf", async (c) =>
     c.req,
   ),
 );
-app.get("/api/delivery/items/:itemRef/thumbnail", async (c) => {
+app.on(["GET", "HEAD"], "/api/delivery/items/:itemRef/thumbnail", async (c) => {
   const key = await authorizeItem(
     c.env,
     c.get("principal"),
     c.req.param("itemRef"),
   );
   const kind = mediaKind(key);
-  if (kind === "image" || kind === "pdf")
-    return preparedArtifact(c, key, "thumb");
-  if (kind === "video") return preparedArtifact(c, key, "poster");
-  throw new HTTPException(415, { message: "Thumbnail unavailable" });
+  if (kind !== "image") return c.json({ state: "not_applicable" }, 409);
+  const thumbnail = await getThumbnailForAuthorizedSource(c.env, key);
+  if (thumbnail.state !== "ready") return c.json({ state: thumbnail.state, errorCode: thumbnail.errorCode }, 409);
+  const headers = new Headers({
+    "Content-Type": "image/webp",
+    "Content-Disposition": "inline",
+    "Content-Length": String(thumbnail.object.size),
+    "Cache-Control": "private, no-store",
+    "ETag": thumbnail.object.httpEtag,
+    "X-Content-Type-Options": "nosniff",
+  });
+  return new Response(c.req.method === "HEAD" ? null : thumbnail.object.body, { headers });
 });
 registerR2CrudRoutes(app);
 registerDropboxImportRoutes(app);
@@ -2201,11 +2180,16 @@ async function fetch(
   if (incoming) return await incoming;
   return app.fetch(request, env, ctx);
 }
+async function queue(batch: MessageBatch<R2Notification | ThumbnailJobMessage>, env: Env): Promise<void> {
+  if (batch.queue.endsWith("thumbnail-jobs-dlq") || batch.queue.endsWith("thumbnail-jobs-staging-dlq")) return consumeThumbnailDeadLetters(batch, env);
+  if (batch.messages.some(message => (message.body as { kind?: unknown } | null)?.kind === "image-thumbnail.v1")) return consumeThumbnailJobs(batch, env);
+  return consumeFileEvents(batch as MessageBatch<R2Notification>, env);
+}
 export default {
   fetch,
-  queue: consumeFileEvents,
+  queue,
   scheduled,
-} satisfies ExportedHandler<Env, R2Notification>;
+} satisfies ExportedHandler<Env, R2Notification | ThumbnailJobMessage>;
 export { R2CrudWorkflow } from "./r2-crud";
 export { IncomingUploadLifecycleWorkflow } from "./incoming";
 export { DropboxImportWorkflow } from "./dropbox-import";

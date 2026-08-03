@@ -26,6 +26,11 @@ export type Env = Omit<Cloudflare.Env, "DIRECT_DELIVERY_UPLOADS_ENABLED" | "R2_P
   INCOMING_ACCESS_CODE_PEPPER: string;
   INCOMING_PICKUP_SECRET: string;
   R2_CRUD_WORKFLOW: Workflow;
+  THUMBNAIL_QUEUE: Queue<{
+    kind: "image-thumbnail.v1";
+    sourceKey: string;
+    sourceEtag: string;
+  }>;
   ALERT_EMAIL?: SendEmail;
   ALERT_FROM?: string;
   ALERT_TO?: string;

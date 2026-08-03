@@ -104,7 +104,7 @@ export function validateApp(app, staging, production) {
   if ((production.queues?.consumers?.length ?? 0) && !stageQueues.length) errors.push(`${app} is missing its staging queue consumer`);
   for (const consumer of stageQueues) {
     complete(consumer.queue, `${app} queue`, errors);
-    complete(consumer.dead_letter_queue, `${app} queue DLQ`, errors);
+    if (!consumer.queue?.endsWith("-dlq")) complete(consumer.dead_letter_queue, `${app} queue DLQ`, errors);
     if (prodQueues.has(consumer.queue)) errors.push(`${app} queue ${consumer.queue} reuses production`);
   }
 

@@ -3,6 +3,7 @@ import type { Env } from "./types";
 import { artifactDirectory } from "./artifacts";
 import { sendAdminAlert } from "./alerts";
 import { notificationStatement } from "./notifications";
+import { enqueueThumbnailJob } from "./image-thumbnails";
 
 export interface R2Notification {
   action: string;
@@ -46,6 +47,17 @@ export function hidden(key: string): boolean {
 function created(action: string): boolean { return ["PutObject", "CopyObject", "CompleteMultipartUpload"].some(value => action.includes(value)); }
 function removed(action: string): boolean { return action.includes("Delete") || action.includes("Lifecycle"); }
 function metadata(value: string): string { let binary = ""; for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte); return btoa(binary); }
+
+export function thumbnailJobForCreatedObject(
+  action: string,
+  key: string,
+  kind: string,
+  head: Pick<R2Object, "httpEtag" | "size">,
+): { sourceKey: string; sourceEtag: string; sourceSize: number } | null {
+  return created(action) && kind === "image" && !hidden(key)
+    ? { sourceKey: key, sourceEtag: head.httpEtag, sourceSize: head.size }
+    : null;
+}
 
 export function previewManifest(key: string): boolean {
   return /(?:^|\/)\.previews\/[a-f0-9]{64}\/manifest\.json$/i.test(key);
@@ -213,7 +225,14 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
         }
         message.ack(); continue;
       }
-      if (removed(event.action) || hidden(key)) { await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run(); message.ack(); continue; }
+      if (removed(event.action) || hidden(key)) {
+        if (removed(event.action) && !hidden(key)) {
+          const thumbnail = await env.DELIVERY_DB.prepare("SELECT thumbnail_key FROM image_thumbnail_jobs WHERE source_key=?").bind(key).first<{ thumbnail_key: string }>();
+          if (thumbnail?.thumbnail_key) await env.DATA_BUCKET.delete(thumbnail.thumbnail_key);
+          await env.DELIVERY_DB.prepare("DELETE FROM image_thumbnail_jobs WHERE source_key=?").bind(key).run();
+        }
+        await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run(); message.ack(); continue;
+      }
       if (!created(event.action)) { message.ack(); continue; }
       const suppressed=await env.OPS_DB.prepare("DELETE FROM r2_event_suppressions WHERE object_key=? AND event_kind='create' AND datetime(expires_at)>datetime('now') RETURNING object_key").bind(key).first();
       if(suppressed){message.ack();continue;}
@@ -227,6 +246,8 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
         env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status,stream_error) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,stream_uid=excluded.stream_uid,stream_status=excluded.stream_status,stream_error=excluded.stream_error,updated_at=datetime('now')`).bind(key, head.httpEtag, head.size, head.uploaded.toISOString(), mime(key), kind, stream.uid, stream.status, stream.error),
         env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,last_success_at,status,details_json) VALUES ('truenas',datetime('now'),datetime('now'),'healthy',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=datetime('now'),status='healthy',details_json=excluded.details_json,updated_at=datetime('now')`).bind(JSON.stringify({ lastKey: key })),
       ]);
+      const thumbnailJob = thumbnailJobForCreatedObject(event.action, key, kind, head);
+      if (thumbnailJob) await enqueueThumbnailJob(env, thumbnailJob);
       if (canonicalPreviewSource(key)) {
         const manifestKey = `${await artifactDirectory(key)}manifest.json`;
         if (await env.DATA_BUCKET.head(manifestKey)) {

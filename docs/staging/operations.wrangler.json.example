@@ -49,7 +49,14 @@
     { "binding": "OPS_DB", "database_name": "<OPERATIONS_STAGING_D1_NAME>", "database_id": "<OPERATIONS_STAGING_D1_ID>", "migrations_dir": "migrations" },
     { "binding": "DELIVERY_DB", "database_name": "<DELIVERY_STAGING_D1_NAME>", "database_id": "<DELIVERY_STAGING_D1_ID>", "migrations_dir": "../client/migrations" }
   ],
-  "queues": { "consumers": [{ "queue": "<FILE_EVENTS_STAGING_QUEUE>", "max_batch_size": 25, "max_batch_timeout": 10, "max_retries": 5, "dead_letter_queue": "<FILE_EVENTS_STAGING_DLQ>" }] },
+  "queues": {
+    "producers": [{ "binding": "THUMBNAIL_QUEUE", "queue": "<THUMBNAIL_STAGING_QUEUE>" }],
+    "consumers": [
+      { "queue": "<FILE_EVENTS_STAGING_QUEUE>", "max_batch_size": 25, "max_batch_timeout": 10, "max_retries": 5, "dead_letter_queue": "<FILE_EVENTS_STAGING_DLQ>" },
+      { "queue": "<THUMBNAIL_STAGING_QUEUE>", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "<THUMBNAIL_STAGING_DLQ>" },
+      { "queue": "<THUMBNAIL_STAGING_DLQ>", "max_batch_size": 10, "max_batch_timeout": 5 }
+    ]
+  },
   "images": { "binding": "IMAGES" },
   "stream": { "binding": "STREAM" },
   "workflows": [

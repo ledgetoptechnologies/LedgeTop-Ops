@@ -65,7 +65,7 @@ export async function serveSourceFile(
   headers.set("Content-Disposition",`${disposition}; filename="${(key.split("/").pop()||"file").replace(/[\0-\x1f\x7f"\\]/g,"_")}"`);
   headers.set("ETag",head.httpEtag);
   headers.set("Accept-Ranges","bytes");
-  headers.set("Cache-Control",disposition==="inline"?"private, no-cache":"private, no-store");
+  headers.set("Cache-Control","private, no-store");
   headers.set("X-Content-Type-Options","nosniff");
   headers.set("Content-Length",String(requested?.length||head.size));
   if(requested)headers.set("Content-Range",`bytes ${requested.offset}-${requested.offset+requested.length-1}/${head.size}`);

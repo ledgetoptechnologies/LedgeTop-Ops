@@ -124,7 +124,11 @@ export const STAGING_INVENTORY = Object.freeze({
       { name: "ltds-incoming-upload-lifecycle-staging", binding: "INCOMING_LIFECYCLE_WORKFLOW", class_name: "IncomingUploadLifecycleWorkflow" },
       { name: "ltds-dropbox-import-staging", binding: "DROPBOX_IMPORT_WORKFLOW", class_name: "DropboxImportWorkflow" },
     ],
-    queues: [{ queue: "ltds-file-events-staging", max_batch_size: 25, max_batch_timeout: 10, max_retries: 5, dead_letter_queue: "ltds-file-events-staging-dlq" }],
+    queues: [
+      { queue: "ltds-file-events-staging", max_batch_size: 25, max_batch_timeout: 10, max_retries: 5, dead_letter_queue: "ltds-file-events-staging-dlq" },
+      { queue: "ltds-thumbnail-jobs-staging", max_batch_size: 10, max_batch_timeout: 5, max_retries: 5, dead_letter_queue: "ltds-thumbnail-jobs-staging-dlq" },
+      { queue: "ltds-thumbnail-jobs-staging-dlq", max_batch_size: 10, max_batch_timeout: 5 },
+    ],
     ratelimits: [],
   },
   "ops-sync": {

@@ -71,7 +71,7 @@ Optional access codes are PBKDF2-derived with a random salt, application pepper,
 
 R2 paths use opaque base64url item references. Validation rejects traversal, backslashes, controls, absolute paths, exact case-insensitive `dump` components, nested `.previews` artifacts, and the reserved `_ltds` root. Unsafe formats such as HTML, XML, JavaScript, and SVG are downloads rather than inline content.
 
-Prepared `.previews` artifacts are preferred for photo and PDF cards and viewers. Folder grids and viewer filmstrips never request originals. When a user deliberately opens an item and its prepared artifact is absent or invalid, the authenticated viewer streams only that original regardless of size. Videos prefer Cloudflare Stream and otherwise use the original R2 object with byte-range support and metadata-only preloading. Unsupported browser formats retain an explicit original-download action.
+Folder grids use one Cloudflare Queue-generated still-image thumbnail and never request originals. Clicking an image streams that authorized full-resolution original with range support; no medium or large preview derivative is created. PDF, video, archive, office-document, and unknown items expose a coarse fallback-icon enum for client-bundled SVGs. Videos continue to prefer Cloudflare Stream and otherwise use the authorized original with metadata-only preloading. See [Cloudflare thumbnail-only media delivery](media-thumbnail-pipeline.md).
 
 ## Airspace safety model
 

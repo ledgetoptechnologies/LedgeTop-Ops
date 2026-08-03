@@ -26,6 +26,7 @@ describe("Operations source file serving",()=>{
     expect(response.headers.get("Content-Disposition")).toBe('inline; filename="document.pdf"');
     expect(response.headers.get("ETag")).toBe('"source-etag"');
     expect(response.headers.get("Accept-Ranges")).toBe("bytes");
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
     expect(await response.text()).toBe("pdf body");
     expect(storage.get).toHaveBeenCalledWith("Jobs/Clients/example/document.pdf",undefined);
   });

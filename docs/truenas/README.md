@@ -34,7 +34,7 @@ Create a scheduled Cloud Sync **Push** task:
 
 Configure an exact-segment, case-insensitive `Dump` exclusion and validate it with nested samples. Do not exclude `unedited`.
 
-The portal also denies `Dump` and `.previews` independently, so a filter mistake cannot expose reserved or generated content to clients. Hermes must never recurse into `.previews` during source discovery, but the R2 upload task must include the generated `.previews` objects.
+The portal also denies `Dump` and `.previews` independently, so legacy content cannot be exposed to clients. Hermes must never recurse into or upload `.previews`; new thumbnail objects are Worker-owned under `_ltds`.
 
 ## 3. Dry run and verification
 
@@ -69,11 +69,16 @@ If deletion behavior is unexpected, stop the task, return to Copy, restore from 
 
 ## 5. Monitoring
 
-R2 create/delete notifications feed `ltds-file-events`. Queue processing updates the delivery file index and TrueNAS health timestamp. For `.previews` uploads, it also validates the bounded provisional manifest, verifies each deterministic WebP object, reads the exact source ETag and size through the R2 binding, and registers that identity in the shared `preview_artifacts` table. It does not rewrite the TrueNAS-owned manifest. The FFmpeg container does not need R2 credentials. A daily live R2 reconciliation repairs missed file-index events. Ops should show a stale sync warning when the last successful source activity/reconciliation is outside the agreed window.
+R2 create/delete notifications feed `ltds-file-events`. Queue processing updates the delivery file index and TrueNAS health timestamp. For supported still images, it records a durable D1 job and sends a second queue message so the Operations Worker can create one fixed WebP thumbnail through its Cloudflare Images binding. TrueNAS does not generate or upload preview derivatives and needs no R2 credentials beyond its existing sync path. A daily live R2 reconciliation repairs missed file-index events. See [the thumbnail-only pipeline](../media-thumbnail-pipeline.md).
 
 The file browser uses live R2 prefix/delimiter listing as the authority, so it updates even if the index temporarily lags. The index exists for search, media state, and thumbnails—not file existence.
 
-## Preview and derivative contract
+## Retired preview and derivative contract
+
+The material below is retained only as rollback history. Do not deploy or run
+the former producer. `preview-gen.sh` now exits non-zero when executed. New
+uploads sync untouched originals only; Cloudflare creates one small still-image
+thumbnail as documented in [the current pipeline](../media-thumbnail-pipeline.md).
 
 The canonical producer script is [`preview-gen.sh`](preview-gen.sh). Deploy
 that repository copy into the FFmpeg container rather than maintaining an
@@ -110,7 +115,7 @@ Outputs are:
 
 `thumb.webp` must be at most 100 KiB. `preview.webp` has a hard cap of 500 KiB (`512000` bytes) and a preferred target of 450 KiB. Reduce WebP quality iteratively first; if the target is not met, reduce dimensions and repeat quality reduction. Reject any preview that remains above the hard cap.
 
-Operations and Delivery never load originals for cards or filmstrips. When a user deliberately opens a file, the viewer prefers the prepared artifact and otherwise streams that one original regardless of size. Videos use Cloudflare Stream when ready and fall back to the range-enabled original with metadata-only preloading. Unsupported browser formats retain an explicit original-download action.
+Operations and Delivery never load originals for cards or filmstrips. Cards use a real Cloudflare-generated thumbnail when ready or a local generic file-kind icon. When a user deliberately opens an image, the authorized route streams the full-resolution original. No medium or large preview is generated. Videos use Cloudflare Stream when ready and fall back to the range-enabled original with metadata-only preloading.
 
 The local producer writes `sourceEtag: "pending"` and the exact local source size, plus source key, deterministic derivative keys, dimensions, MIME type, producer version, and creation time. After upload, the Operations queue consumer records the exact R2 ETag in D1 only after the source size and all derivative objects validate. Preview routes compare that registered identity with the live source. The exact R2 ETag/size—not a local pre-upload checksum—determines whether a derivative is current.
 
@@ -122,7 +127,7 @@ Inbound files are quarantined and scanned with ClamAV before Hermes or the previ
 
 ## Sync and pruning contract
 
-Use rclone with the R2 S3 endpoint, `COPY` mode, checksums where supported, bounded retries, and no overlapping jobs. Exclude every exact path segment named `Dump` case-insensitively. Hermes source discovery must skip `.previews`, while the upload phase must explicitly include generated `**/.previews/**` artifacts and publish each `manifest.json` only after its WebPs. Keep top-level Worker-owned `_ltds/tmp-downloads/**`, `_ltds/audit-archive/**`, and future reserved paths out of the TrueNAS push. A separate read-only backup pull may retrieve only `_ltds/audit-archive/**`. Validate the final rclone filter order in a dry run.
+Use rclone with the R2 S3 endpoint, `COPY` mode, checksums where supported, bounded retries, and no overlapping jobs. Exclude every exact path segment named `Dump` case-insensitively and exclude all `.previews` trees. Keep top-level Worker-owned `_ltds/**` paths out of the TrueNAS push. A separate read-only backup pull may retrieve only `_ltds/audit-archive/**`. Validate the final rclone filter order in a dry run.
 
 Do not interpret an empty source mount, an unavailable NAS, a failed listing, or a partial scan as a deletion instruction. The first cutover requires file-count, byte-count, checksum samples, and ZFS snapshot verification.
 
