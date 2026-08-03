@@ -29,7 +29,7 @@ import {
   refreshStreamStatuses,
   type R2Notification,
 } from "./file-events";
-import { consumeThumbnailDeadLetters, consumeThumbnailJobs, getThumbnailForAuthorizedSource, type ThumbnailJobMessage } from "./image-thumbnails";
+import { classifyThumbnailQueueBatch, consumeThumbnailDeadLetters, consumeThumbnailJobs, getThumbnailForAuthorizedSource, type ThumbnailJobMessage } from "./image-thumbnails";
 import {
   authorizeItem,
   createDeliveryShare,
@@ -2183,8 +2183,10 @@ async function fetch(
   return app.fetch(request, env, ctx);
 }
 async function queue(batch: MessageBatch<R2Notification | ThumbnailJobMessage>, env: Env): Promise<void> {
-  if (batch.queue.endsWith("thumbnail-jobs-dlq") || batch.queue.endsWith("thumbnail-jobs-staging-dlq")) return consumeThumbnailDeadLetters(batch, env);
-  if (batch.messages.some(message => (message.body as { kind?: unknown } | null)?.kind === "image-thumbnail.v1")) return consumeThumbnailJobs(batch, env);
+  const thumbnailBatch = classifyThumbnailQueueBatch(batch);
+  if (thumbnailBatch === "dead_letters") return consumeThumbnailDeadLetters(batch, env);
+  if (thumbnailBatch === "jobs") return consumeThumbnailJobs(batch, env);
+  if (thumbnailBatch === "mixed") throw new Error("Mixed thumbnail and file-event queue batch");
   return consumeFileEvents(batch as MessageBatch<R2Notification>, env);
 }
 export default {

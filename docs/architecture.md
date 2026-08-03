@@ -8,20 +8,30 @@ Cloudflare Access
       v
 ops.ledgetopdroneservices.com
       |-- OPS_DB: staff, ACL, projects, operations, tasks, FAA, audit
-      |-- DELIVERY_DB: share administration and file index
-      |-- private R2: staff browsing
-      `-- Queue/Stream management
+      |-- DELIVERY_DB: grants, notification/thumbnail jobs, file index
+      |-- private R2: staff browsing, originals, private brief attachments
+      `-- file-event/thumbnail Queues, Images transforms, Stream management
 
 delivery.ledgetopdroneservices.com
       |-- DELIVERY_DB only
-      |-- private R2, prefix-confined per share
-      |-- Images thumbnails
+      |-- private R2, authorization-confined original/thumbnail serving
+      |-- public-share and authenticated client-workspace sessions
       `-- Stream signed playback only
 ```
 
 Delivery never receives an `OPS_DB` binding. R2 has no public bucket domain. Both Workers stream object bodies and HTTP byte ranges rather than buffering media.
 
-Operations state changes deny non-administrators by default and also require the matching D1 permission. The only delegated mutation exceptions are delivery-link creation/revocation; authenticated Delivery Coordinators may also request short-lived Stream preview tickets. Project Alpha controls which identities may sign in; local D1 roles control what those identities may do after authentication. Delivery Coordinators can browse and manage links without receiving R2 mutation permissions.
+Operations state changes deny non-administrators by default and also require the
+matching D1 permission. A path-exact allowlist permits only narrow delegated
+routes, including delivery-link and internal-folder grant creation/revocation,
+Stream tickets, incoming-link administration, Dropbox import, and operational
+job-brief save/attachment actions, to bypass the global administrator gate.
+Those routes still require the existing human session, same-origin/CSRF checks,
+and their route-specific scoped permission; the allowlist is not an R2 or ACL
+bypass. Project Alpha controls which identities may sign in; local D1 roles
+control what those identities may do after authentication. Delivery
+Coordinators can browse and manage links without receiving R2 mutation
+permissions.
 
 Large staff uploads use short-lived, object-specific R2 authorization and browser-to-R2 transfer. The Worker validates the destination before issuing authorization and never accepts a caller-supplied unrestricted R2 key. Recursive copy, move, rename, replacement, and purge work is represented by durable operation records and processed in bounded, idempotent steps. Folder copy, move, and rename requests are rejected when the destination is the source itself or any descendant of the source, and the job processor repeats that validation before touching R2.
 
@@ -57,6 +67,30 @@ ACL order:
 
 The Owner role is represented by immutable seeded grants; code has no role-name bypass. The API prevents deactivation of the final active global Owner.
 
+## Project Alpha and LTDS ownership
+
+Project Alpha remains generic and strictly read-only from LTDS. It owns client,
+organization, project, operation, status, schedule, assignment, and entitlement
+identity. LTDS stores a last-known-good projection and never creates or edits
+Project Alpha records or financial artifacts. Signed incremental events and
+complete snapshots update only LTDS-local projection and authorization state.
+
+LTDS owns direct client-workspace folder grants, their revocation-safe
+notification outbox, operational execution briefs, private brief attachments,
+and audit history. An internal folder grant is accepted only when Operations
+derives one unambiguous active Project Alpha client/organization owner and
+division from the longest matching project-folder association; the caller
+cannot select that authority context. A job brief may reference only an active
+projected operation, and pilot visibility follows the operation's current
+projected assignment.
+
+Client-workspace list and content routes return opaque same-origin file
+identifiers. Before the first R2 read, the Client Worker rechecks the Access
+session, active identity/account/membership, current folder or project grant,
+and exact indexed key. Brief attachment routes likewise reauthorize the
+operation and attachment before R2. Neither path returns an R2 key, presigned
+bearer URL, or credential to the browser.
+
 ## Client link security
 
 New URLs have the form:
@@ -71,7 +105,16 @@ Optional access codes are PBKDF2-derived with a random salt, application pepper,
 
 R2 paths use opaque base64url item references. Validation rejects traversal, backslashes, controls, absolute paths, exact case-insensitive `dump` components, nested `.previews` artifacts, and the reserved `_ltds` root. Unsafe formats such as HTML, XML, JavaScript, and SVG are downloads rather than inline content.
 
-Folder grids use one Cloudflare Queue-generated still-image thumbnail and never request originals. Clicking an image streams that authorized full-resolution original with range support; no medium or large preview derivative is created. PDF, video, archive, office-document, and unknown items expose a coarse fallback-icon enum for client-bundled SVGs. Videos continue to prefer Cloudflare Stream and otherwise use the authorized original with metadata-only preloading. See [Cloudflare thumbnail-only media delivery](media-thumbnail-pipeline.md).
+Folder grids use one current Cloudflare Queue-generated still-image thumbnail
+and never request originals as thumbnail fallbacks. Clicking an image streams
+that authorized full-resolution original with range support; no medium or large
+preview derivative is created. PDF, video, archive, office-document, and unknown
+items expose a coarse fallback-kind enum. The current Hermes UI uses its local
+file-kind/brand placeholders; mapping the enum to client-bundled SVGs remains a
+future UI refinement. Videos continue to prefer the pre-existing Cloudflare
+Stream path and otherwise use the authorized original with metadata-only
+preloading; this thumbnail work adds no video processing. See [Cloudflare
+thumbnail-only media delivery](media-thumbnail-pipeline.md).
 
 ## Airspace safety model
 

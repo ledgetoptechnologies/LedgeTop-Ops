@@ -59,6 +59,22 @@ export function thumbnailJobForCreatedObject(
     : null;
 }
 
+/**
+ * A delete event may arrive after a replacement at the same key. Live objects
+ * make that event stale. On a real removal, retain the source-identity-scoped
+ * thumbnail row and opaque object so an out-of-order event cannot delete a
+ * newer replacement; reconciliation or separately approved cleanup can prune
+ * orphans without racing object-create processing.
+ */
+export async function handleRemovedSource(
+  env: Pick<Env, "DATA_BUCKET" | "DELIVERY_DB">,
+  key: string,
+): Promise<"stale" | "removed"> {
+  if (await env.DATA_BUCKET.head(key)) return "stale";
+  await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run();
+  return "removed";
+}
+
 export function previewManifest(key: string): boolean {
   return /(?:^|\/)\.previews\/[a-f0-9]{64}\/manifest\.json$/i.test(key);
 }
@@ -225,12 +241,12 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
         }
         message.ack(); continue;
       }
-      if (removed(event.action) || hidden(key)) {
-        if (removed(event.action) && !hidden(key)) {
-          const thumbnail = await env.DELIVERY_DB.prepare("SELECT thumbnail_key FROM image_thumbnail_jobs WHERE source_key=?").bind(key).first<{ thumbnail_key: string }>();
-          if (thumbnail?.thumbnail_key) await env.DATA_BUCKET.delete(thumbnail.thumbnail_key);
-          await env.DELIVERY_DB.prepare("DELETE FROM image_thumbnail_jobs WHERE source_key=?").bind(key).run();
-        }
+      if (removed(event.action)) {
+        if (!hidden(key)) await handleRemovedSource(env, key);
+        else await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run();
+        message.ack(); continue;
+      }
+      if (hidden(key)) {
         await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run(); message.ack(); continue;
       }
       if (!created(event.action)) { message.ack(); continue; }

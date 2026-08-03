@@ -15,6 +15,7 @@ describe("thumbnail deployment contract", () => {
   });
 
   it("persists source identity, lease, attempts, errors, and dead-letter visibility", () => {
+    expect(migration).toContain("CHECK (source_size >= 0)");
     for (const column of ["source_key", "source_etag", "thumbnail_key", "thumbnail_etag", "status", "attempt_count", "error_code", "error_message", "lease_until", "dead_lettered_at"]) {
       expect(migration).toContain(column);
     }

@@ -179,7 +179,16 @@ public-link message. Permissioned staff use
 `Idempotency-Key`; replacement versions are immutable and the matching `DELETE`
 route revokes the current version. The portal resolves the grant through the
 current active account, Access-backed identity, and membership on every list or
-file request.
+file request. Operations derives the grant division and PA client or organization
+owner from the longest matching active `project_folders` association. A missing,
+ambiguous, mismatched-division, or wrong-client association fails closed; the
+request body cannot choose the authorization scope recorded in either audit log.
+The portal returns only an opaque same-origin file identifier. Before its first
+`DATA_BUCKET` read, the content route rechecks the Access-backed session, active
+identity/account/membership, current folder association, and exact `file_index`
+key. It creates neither a public share nor a presigned R2 credential. This
+release exposes the staff grant contract through the Operations API; a dedicated
+staff grant-management UI is not yet included.
 
 The internal notification outbox waits at least five minutes. Its consumer
 re-reads the exact association ID, logical grant/version, active PA-backed

@@ -44,11 +44,13 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0103_client_portal_workspace.sql",
     "0104_service_request_thread.sql",
     "0105_internal_folder_grants.sql",
+    "0106_image_thumbnail_jobs.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
     "0015_staff_acl_explicit_controls.sql",
     "0016_projection_entity_leases.sql",
+    "0017_operational_job_briefs.sql",
   ]),
 });
 
@@ -70,7 +72,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
   }),
   operations: Object.freeze({
     TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
-    DELIVERY_BASE_URL: "https://delivery-staging.ledgetopdroneservices.com",
+    DELIVERY_BASE_URL: `https://${STAGING_HOSTS.client}`,
     R2_ACCOUNT_ID: STAGING_ACCOUNT_ID,
     R2_BUCKET_NAME: "client-data-staging",
     R2_INCOMING_BUCKET_NAME: "ltds-incoming-staging",
@@ -97,6 +99,8 @@ export const STAGING_INVENTORY = Object.freeze({
       { name: "ltds-cloud-transfer-staging", binding: "CLOUD_TRANSFER_WORKFLOW", class_name: "CloudTransferWorkflow" },
     ],
     queues: [],
+    images: { binding: "IMAGES" },
+    crons: ["15 * * * *"],
     ratelimits: [
       { name: "ACCESS_CODE_RATE_LIMITER", namespace_id: "730202601", simple: { limit: 10, period: 60 } },
       { name: "PUBLIC_SESSION_RATE_LIMITER", namespace_id: "730202602", simple: { limit: 20, period: 60 } },
@@ -129,6 +133,11 @@ export const STAGING_INVENTORY = Object.freeze({
       { queue: "ltds-thumbnail-jobs-staging", max_batch_size: 10, max_batch_timeout: 5, max_retries: 5, dead_letter_queue: "ltds-thumbnail-jobs-staging-dlq" },
       { queue: "ltds-thumbnail-jobs-staging-dlq", max_batch_size: 10, max_batch_timeout: 5 },
     ],
+    queueProducers: [
+      { binding: "THUMBNAIL_QUEUE", queue: "ltds-thumbnail-jobs-staging" },
+    ],
+    images: { binding: "IMAGES" },
+    crons: ["*/15 * * * *", "*/5 * * * *"],
     ratelimits: [],
   },
   "ops-sync": {
@@ -141,6 +150,7 @@ export const STAGING_INVENTORY = Object.freeze({
     r2_buckets: [],
     workflows: [],
     queues: [],
+    crons: ["*/5 * * * *"],
     ratelimits: [],
   },
 });

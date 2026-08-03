@@ -27,7 +27,10 @@ The same-origin contract is:
 
 D1 batches execute the guarded current-version mutation, immutable revision, attachment row when applicable, and general audit event transactionally. If the expected version is stale, the first mutation changes zero rows and the API returns `409` with `currentVersion`; it never silently overwrites. Staff uploads use a random private key below the reserved `Jobs/Operations/_ltds/JobBriefs/` subtree. The generic delivery browser rejects `_ltds` paths even for global delivery browsers, so only the operation-authorized brief route can resolve those bytes. If the D1 write conflicts or fails before committing after R2 accepts the new upload, only that newly generated object is cleaned up; a response-assembly failure after commit never deletes an attachment referenced by D1.
 
-The Operations UI refreshes an open brief every eight seconds and again on window focus/visibility. A dirty editor is not replaced automatically; it warns that a newer version is available. Successful changes are therefore promptly visible to an assigned pilot without real notifications.
+The Operations UI attempts to refresh an open brief every eight seconds and
+again on window focus/visibility. Browser timer throttling, a suspended tab, or
+network failure can delay that best-effort polling. A dirty editor is not
+replaced automatically; it warns that a newer version is available.
 
 ## Access policy
 
@@ -43,6 +46,13 @@ The Operations UI refreshes an open brief every eight seconds and again on windo
 ## External navigation
 
 Authorized request/job viewers receive clearly labelled HTTPS actions for Google Maps and Apple Maps. HTTPS lets each provider open its native app when supported and fall back to its web experience otherwise. Links contain only a destination coordinate and optional human-readable label—never a Mapbox token, private geometry URL, attachment URL, or R2 credential.
+
+Request review derives its destination from the submitted polygon or POIs and
+then falls back to the stored request point. The current job-brief route does
+not store separate job geometry: it uses the first active projected Project
+Alpha service location with valid coordinates, ordered by service-location ID.
+If that operation's project has no such location, the job brief exposes no map
+action.
 
 The representative coordinate is deterministic:
 
@@ -61,12 +71,22 @@ Geometry and navigation targets are returned only inside the already authorized 
 2. Apply Operations migration `0017` before deploying code that registers the job-brief routes.
 3. Deploy the Worker and client bundle together so the UI does not call routes missing their schema.
 4. Smoke-test an administrator create/edit, an assigned-pilot read/download, an unrelated-user denial, a deliberate stale-version conflict, a staff KML upload, and an authorized project-file reference.
-5. Monitor structured Worker errors and audit/revision counts. No real notifications or client-file mutations are part of this release.
+5. Monitor structured Worker errors and audit/revision counts. The job-brief
+   feature itself emits no email, push notification, or external message and
+   does not mutate client files. Direct folder-grant notification behavior in
+   the combined release is a separate contract documented in
+   [notifications](../notifications.md).
 
 ## Current limitations and future extension
 
 - The first release attaches briefs only to verified Project Alpha operations. Standalone LTDS work is not yet exposed; supporting it should add a separate local-operation reference rather than fabricate a Project Alpha identifier.
 - Attachments are append-only in this release. There is no remove/replace UI; history and bytes remain auditable.
+- Append-only attachment bytes consume private R2 storage until a separately
+  reviewed retention or cleanup policy exists.
 - Staff uploads are capped at 25 MiB. Large orthomosaics and raw imagery belong in the existing delivery workflow, not a job brief.
 - No preset or reusable-item UI exists. A future preset system can populate stable item IDs plus `presetRef` and still save immutable resolved text in each brief revision.
-- No emails, push notifications, or external messages are sent. Poll/focus refresh is the current prompt-update mechanism.
+- Job-brief changes emit no emails, push notifications, or external messages.
+  Poll/focus refresh is the current prompt-update mechanism.
+- Drafts exist only in browser memory. Switching or closing the open brief uses
+  a confirmation, but top-level navigation, browser close, or a crash can still
+  lose unsaved text.

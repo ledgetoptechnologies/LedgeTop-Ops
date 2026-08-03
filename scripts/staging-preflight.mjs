@@ -28,12 +28,16 @@ export function validateApp(app, staging, production) {
   const errors = [];
   const inventory = STAGING_INVENTORY[app];
   if (staging.account_id !== STAGING_ACCOUNT_ID) errors.push(`${app} account_id must equal the approved LTDS staging account`);
-  for (const key of ["name", "routes", "d1_databases", "r2_buckets", "workflows", "ratelimits"]) {
+  for (const key of ["name", "routes", "d1_databases", "r2_buckets", "workflows", "ratelimits", "images"]) {
     const actual = staging[key] ?? (Array.isArray(inventory[key]) ? [] : undefined);
     if (JSON.stringify(actual) !== JSON.stringify(inventory[key])) errors.push(`${app} ${key} does not match the approved staging inventory`);
   }
   const consumers = staging.queues?.consumers ?? [];
   if (JSON.stringify(consumers) !== JSON.stringify(inventory.queues)) errors.push(`${app} queues do not match the approved staging inventory`);
+  const producers = staging.queues?.producers ?? [];
+  if (JSON.stringify(producers) !== JSON.stringify(inventory.queueProducers ?? [])) errors.push(`${app} queue producers do not match the approved staging inventory`);
+  const crons = staging.triggers?.crons ?? [];
+  if (JSON.stringify(crons) !== JSON.stringify(inventory.crons ?? [])) errors.push(`${app} cron triggers do not match the approved staging inventory`);
   complete(staging.name, `${app} worker name`, errors);
   if (staging.name === production.name) errors.push(`${app} reuses the production worker name`);
   if (!staging.name?.endsWith("-staging")) errors.push(`${app} worker name must end in -staging`);
@@ -100,12 +104,18 @@ export function validateApp(app, staging, production) {
   compareResources(app, "workflow", staging.workflows, production.workflows, "name", errors);
 
   const prodQueues = new Set((production.queues?.consumers ?? []).map((item) => item.queue));
+  const prodProducerQueues = new Set((production.queues?.producers ?? []).map((item) => item.queue));
   const stageQueues = staging.queues?.consumers ?? [];
   if ((production.queues?.consumers?.length ?? 0) && !stageQueues.length) errors.push(`${app} is missing its staging queue consumer`);
   for (const consumer of stageQueues) {
     complete(consumer.queue, `${app} queue`, errors);
     if (!consumer.queue?.endsWith("-dlq")) complete(consumer.dead_letter_queue, `${app} queue DLQ`, errors);
     if (prodQueues.has(consumer.queue)) errors.push(`${app} queue ${consumer.queue} reuses production`);
+  }
+  for (const producer of staging.queues?.producers ?? []) {
+    complete(producer.binding, `${app} queue producer binding`, errors);
+    complete(producer.queue, `${app} queue producer`, errors);
+    if (prodProducerQueues.has(producer.queue)) errors.push(`${app} queue producer ${producer.queue} reuses production`);
   }
 
   const prodLimits = mapped(production.ratelimits, "namespace_id");

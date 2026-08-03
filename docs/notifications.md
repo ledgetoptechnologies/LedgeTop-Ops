@@ -19,6 +19,9 @@ narrowing, supersession, recipient deauthorization, redundant coverage, or an
 empty/stale file index suppresses the row without calling the mail transport.
 The action is the authenticated `/portal/deliveries` route and contains no
 public share ID, token, signature, or expiry parameter.
+`DELIVERY_BASE_URL` on Operations must be the authenticated client portal
+origin (production `client.ledgetopdroneservices.com`, or its isolated staging
+equivalent), not the delivery rollback/admin host.
 
 Client portal request and team events use the Delivery D1 outbox introduced by
 migrations `0098` and `0099` and rebuilt with required request-scoped dedupe
@@ -51,6 +54,10 @@ avoids a second application password. The Operations cron queues 72-hour
 expiration notices every fifteen minutes and processes the outbox every five
 minutes. Request mail uses a stable outbox-derived `Message-ID`; delivery is
 still at-least-once because the provider and D1 cannot share a transaction.
+For an internal folder grant, eligibility begins five minutes after creation;
+the five-minute cron normally observes it roughly five to ten minutes after
+creation, before provider and retry delay. This is a safety grace period, not a
+five-minute delivery SLA.
 The same provider boundary applies to internal folder-grant mail: revocation in
 the five-minute grace window is deterministically suppressed, but a revocation
 that races after the final authorization check and after SMTP has accepted the

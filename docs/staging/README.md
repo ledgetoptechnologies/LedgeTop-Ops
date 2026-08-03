@@ -62,6 +62,9 @@ These are operator instructions, not commands run by repository automation. Reco
 - `npm run staging:release:prepare` passes and reports no production resource reuse.
 - Cloudflare Access authenticates users; Workers separately enforce role, division, client, job, and object ownership.
 - Reconciliation repairs known manifest state and never purges ambiguous objects.
-- Preview tests apply only to explicitly previewable delivery media.
-- Direct-to-R2 uploads remain outside automated preview guarantees until the documented object-event fallback exists.
+- Thumbnail tests apply only to supported still images at or below the
+  implementation's 20 MiB input cap; all other kinds use local fallbacks.
+- Every supported R2 create path must reach the staging file-event queue before
+  thumbnail generation is considered verified. No original may be used as a
+  list/grid fallback.
 - Production routes, secrets, migrations, provider flags, and purge flags are unchanged.

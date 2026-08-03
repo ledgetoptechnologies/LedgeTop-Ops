@@ -1,10 +1,13 @@
 # LTDS staging provisioning packet
 
-Status: standalone storage and queue resources plus three staging Access
-applications are provisioned. Delivery and Operations have one narrow human
-test policy each; Ops Sync remains default-deny. Worker deployment, Workflow
-creation, migrations, routes, additional Access changes, event subscriptions,
-secrets, and feature activation remain deferred.
+Status: the standalone storage resources, file-event queue/DLQ, and three
+staging Access applications listed under **Created standalone resources** were
+provisioned. The thumbnail queue/DLQ and Images entitlement have not been
+verified by this repository audit and must be treated as pending until a fresh
+Cloudflare inventory records their IDs/status. Delivery and Operations have one
+narrow human test policy each; Ops Sync remains default-deny. Worker deployment,
+Workflow creation, migrations, routes, additional Access changes, event
+subscriptions, secrets, and feature activation remain deferred.
 
 ## Deliberate same-account exception
 
@@ -38,6 +41,8 @@ feature.
 | Incoming R2 | `ltds-incoming-staging`, ENAM, Standard |
 | File-events queue | `ltds-file-events-staging` |
 | Dead-letter queue | `ltds-file-events-staging-dlq` |
+| Thumbnail queue | `ltds-thumbnail-jobs-staging` (required; existence unverified) |
+| Thumbnail DLQ | `ltds-thumbnail-jobs-staging-dlq` (required; existence unverified) |
 | R2 retention | Disposable test data; no bucket lock or automatic expiry |
 | Provider flags | Dropbox, Google, and Google Picker `false` |
 | Direct R2 upload | `false` |
@@ -89,6 +94,14 @@ npx.cmd wrangler r2 bucket create client-data-staging --location wnam
 npx.cmd wrangler r2 bucket create ltds-incoming-staging --location enam
 npx.cmd wrangler queues create ltds-file-events-staging
 npx.cmd wrangler queues create ltds-file-events-staging-dlq
+```
+
+The following are required by the new configuration but are not recorded as
+created resources above. List queues first; create only a missing exact name
+during a separately approved provisioning step:
+
+```powershell
+npx.cmd wrangler queues list
 npx.cmd wrangler queues create ltds-thumbnail-jobs-staging
 npx.cmd wrangler queues create ltds-thumbnail-jobs-staging-dlq
 ```
@@ -105,6 +118,8 @@ Before ignored `apps/*/wrangler.staging.json` files can pass preflight:
 - the staging Access group ID/name and approved test identities;
 - a staging-only Project Alpha origin and service-token policy;
 - interactive staging secrets, never committed or placed in shell commands;
+- verified Images transformations entitlement plus the thumbnail queue/DLQ
+  identities;
 - eight unused positive-integer rate-limit namespace values;
 - the reviewed commit and build artifact checksum.
 
@@ -115,7 +130,8 @@ controls and the direct-upload capability gate are separately approved.
 
 Do not create the three Workers or five Workflows merely to reserve their names.
 Deployment would create or update Workflows and activate hourly, 15-minute, and
-5-minute cron schedules plus the Operations queue consumer.
+5-minute cron schedules plus the Operations queue consumers and thumbnail
+producer binding. Queue resources themselves must already exist.
 
 Also defer the `client-staging` custom-domain route and DNS, additional Access applications or
 policies, D1 migrations, R2 event notifications, Queue/DLQ consumer
@@ -143,4 +159,9 @@ is not a substitute for a tested restore drill.
 Empty D1 databases scale to zero. Empty R2 buckets incur charges only when
 objects or operations are added. Queues are billed by message operations, so
 unattached empty queues have no message operations. Worker and Workflow usage
-does not begin until deployment and invocation.
+does not begin until deployment and invocation. Once enabled, thumbnails add
+Images transformations, Queue retries, D1 reads/writes, R2 source reads,
+derivative writes/serves, and up to 128 KiB of R2 storage per current ready
+derivative; retained obsolete ETag derivatives add storage until reviewed
+cleanup. Current pricing and account entitlement must be checked in Cloudflare
+during rollout.

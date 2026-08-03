@@ -6,7 +6,8 @@ PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS image_thumbnail_jobs (
   source_key TEXT PRIMARY KEY,
   source_etag TEXT NOT NULL,
-  source_size INTEGER NOT NULL CHECK (source_size > 0),
+  -- Zero-byte image objects are terminal failed jobs, not retryable queue work.
+  source_size INTEGER NOT NULL CHECK (source_size >= 0),
   thumbnail_key TEXT NOT NULL UNIQUE,
   thumbnail_etag TEXT,
   thumbnail_size INTEGER,

@@ -235,16 +235,40 @@ Set `DROPBOX_CLIENT_ID` and `DROPBOX_IMPORT_ENABLED` in `apps/operations/wrangle
 
 ## 8. Migrations and Workflow rollout
 
-Export both production D1 databases before migration. Then apply Operations migrations to `ltds-ops` and Delivery migrations to `client-data`:
+Export both production D1 databases before migration. Apply Delivery migrations
+to `client-data` first because the new Operations Worker depends on Delivery
+tables `0105` and `0106`; then apply Operations migrations to `ltds-ops`:
 
 ```powershell
-Set-Location apps/operations
+Set-Location apps/client
 npm.cmd run db:migrate:remote
-Set-Location ../client
+Set-Location ../operations
 npm.cmd run db:migrate:remote
 ```
 
-Confirm Delivery migrations through `0106_image_thumbnail_jobs.sql` and all Operations delivery-CRUD migrations, including `0013_dropbox_import`, appear in the remote migration list before deploying dependent Workers. Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding, the `ltds-cloud-transfer` Workflow binding, and the hourly cleanup Cron Trigger. Operations deployment creates/updates its file-operation Workflow binding, the `ltds-dropbox-import` Workflow binding, the `ltds-incoming-upload-lifecycle` Workflow binding, and the thumbnail Queue producer/consumers. Follow the separate [thumbnail deployment sequence](media-thumbnail-pipeline.md) before enabling that producer. Each successful ZIP job sleeps for its 24-hour retention and deletes its own archive; the hourly Delivery cleanup is the recovery path for expired or interrupted jobs and also prunes old quota rows. Verify one completed job, one intentionally failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour exact quota, one copy/move job with an injected retry, and one Dropbox import job before production rollout.
+Confirm Delivery migrations through `0106_image_thumbnail_jobs.sql` and
+Operations migrations through `0017_operational_job_briefs.sql` appear in the
+remote migration lists before deploying dependent Workers. Before the
+Operations deployment, separately verify that Images transformations are
+enabled, the thumbnail queue and DLQ exist, the producer/main-consumer/DLQ
+consumer bindings resolve to those exact queues, the existing R2 object-create
+notification still feeds `ltds-file-events`, and both the 15-minute and
+5-minute crons are present. Repository configuration does not prove those
+remote resources exist.
+
+Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding,
+the `ltds-cloud-transfer` Workflow binding, and the hourly cleanup Cron Trigger.
+Operations deployment creates/updates its file-operation Workflow binding, the
+`ltds-dropbox-import` Workflow binding, the
+`ltds-incoming-upload-lifecycle` Workflow binding, and the thumbnail Queue
+producer/consumers. Follow the separate [thumbnail deployment
+sequence](media-thumbnail-pipeline.md) before enabling that producer. Each
+successful ZIP job sleeps for its 24-hour retention and deletes its own archive;
+the hourly Delivery cleanup is the recovery path for expired or interrupted
+jobs and also prunes old quota rows. Verify one completed job, one intentionally
+failed job, multipart cleanup, the 24-hour archive expiry, the three-per-hour
+exact quota, one copy/move job with an injected retry, and one Dropbox import
+job before production rollout.
 
 The 20 GB ZIP limit and 10,000-object R2 CRUD limit require the Workers Paid Workflow step allowance. Do not enable those production limits on a Free-plan account; reduce the application limits or upgrade first.
 

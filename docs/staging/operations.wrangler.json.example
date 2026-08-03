@@ -18,7 +18,7 @@
     "ENVIRONMENT": "staging",
     "TEAM_DOMAIN": "https://<ACCESS_TEAM_DOMAIN>",
     "OPERATIONS_AUD": "<OPERATIONS_STAGING_ACCESS_AUD>",
-    "DELIVERY_BASE_URL": "https://<DELIVERY_STAGING_HOST>",
+    "DELIVERY_BASE_URL": "https://<CLIENT_STAGING_HOST>",
     "PROJECT_ALPHA_BASE_URL": "https://<PROJECT_ALPHA_STAGING_HOST>",
     "APPLICATION_KEY": "ltds_ops_staging",
     "TFR_REGION": "WI",
@@ -40,7 +40,7 @@
     "required": ["OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "PROJECT_ALPHA_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "TURNSTILE_SITE_KEY", "TURNSTILE_SECRET", "INCOMING_SESSION_SECRET", "INCOMING_ACCESS_CODE_PEPPER", "INCOMING_PICKUP_SECRET"]
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
-  "triggers": { "crons": ["*/15 * * * *"] },
+  "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *"] },
   "r2_buckets": [
     { "binding": "DATA_BUCKET", "bucket_name": "<DELIVERY_STAGING_R2_BUCKET>" },
     { "binding": "INCOMING_BUCKET", "bucket_name": "<INCOMING_STAGING_R2_BUCKET>" }

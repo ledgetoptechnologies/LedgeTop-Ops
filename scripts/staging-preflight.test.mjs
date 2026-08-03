@@ -43,7 +43,12 @@ function stagingConfig(app) {
     r2_buckets: inventory.r2_buckets,
     workflows: inventory.workflows,
     ratelimits: inventory.ratelimits,
-    ...(inventory.queues.length ? { queues: { consumers: inventory.queues } } : {}),
+    ...(inventory.queues.length || inventory.queueProducers?.length ? { queues: {
+      consumers: inventory.queues,
+      producers: inventory.queueProducers ?? [],
+    } } : {}),
+    ...(inventory.images ? { images: inventory.images } : {}),
+    ...(inventory.crons ? { triggers: { crons: inventory.crons } } : {}),
   };
 }
 function productionFrom(staging) {
@@ -55,7 +60,10 @@ function productionFrom(staging) {
   production.r2_buckets = production.r2_buckets.map((item) => ({ ...item, bucket_name: `prod-${item.bucket_name}` }));
   production.workflows = production.workflows.map((item) => ({ ...item, name: `prod-${item.name}` }));
   production.ratelimits = production.ratelimits.map((item) => ({ ...item, namespace_id: `prod-${item.namespace_id}` }));
-  if (production.queues) production.queues.consumers = production.queues.consumers.map((item) => ({ ...item, queue: `prod-${item.queue}` }));
+  if (production.queues) {
+    production.queues.consumers = production.queues.consumers.map((item) => ({ ...item, queue: `prod-${item.queue}` }));
+    production.queues.producers = production.queues.producers.map((item) => ({ ...item, queue: `prod-${item.queue}` }));
+  }
   return production;
 }
 
@@ -80,6 +88,23 @@ test("rejects unresolved Ops Sync authority", () => {
   const staging = stagingConfig("ops-sync");
   staging.vars.CF_ACCESS_GROUP_ID = "<STAGING_ACCESS_GROUP_ID>";
   assert(validateApp("ops-sync", staging, productionFrom(staging)).some((error) => error.includes("placeholder")));
+});
+test("requires the thumbnail producer, Images binding, and five-minute notification cron", () => {
+  const staging = stagingConfig("operations");
+  const production = productionFrom(staging);
+  staging.queues.producers = [];
+  staging.images = undefined;
+  staging.triggers.crons = ["*/15 * * * *"];
+  const errors = validateApp("operations", staging, production);
+  for (const expected of ["queue producers", "images", "cron triggers"]) {
+    assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
+  }
+});
+test("requires the authenticated client portal origin for Operations mail", () => {
+  const staging = stagingConfig("operations");
+  staging.vars.DELIVERY_BASE_URL = `https://${STAGING_HOSTS.delivery}`;
+  const errors = validateApp("operations", staging, productionFrom(staging));
+  assert(errors.some((error) => error.includes("DELIVERY_BASE_URL")), errors.join(" | "));
 });
 test("requires shared staging resources to agree", () => {
   const configs = { delivery: stagingConfig("delivery"), operations: stagingConfig("operations"), "ops-sync": stagingConfig("ops-sync") };

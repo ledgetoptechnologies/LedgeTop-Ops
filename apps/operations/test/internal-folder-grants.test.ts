@@ -35,6 +35,12 @@ describe("direct authenticated client folder grants", () => {
   let miniflare: Miniflare;
   let db: D1Database;
   let env: any;
+  let folderAssociations: Array<{
+    division_id: string;
+    r2_prefix: string;
+    project_alpha_client_id: string | null;
+    project_alpha_organization_id: string | null;
+  }>;
 
   beforeAll(async () => {
     miniflare = new Miniflare({
@@ -56,8 +62,8 @@ describe("direct authenticated client folder grants", () => {
     }
     await db.prepare("PRAGMA foreign_keys = ON").run();
     await db.batch([
-      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id) VALUES('account-a','Acme','active','pa-client-a')"),
-      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id) VALUES('account-b','Other','active','pa-client-b')"),
+      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES('account-a','Acme','active','pa-client-a','pa-org-a')"),
+      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES('account-b','Other','active','pa-client-b','pa-org-b')"),
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('identity-a','account-a','https://issuer.test','subject-a','client-a@example.test')"),
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('identity-b','account-b','https://issuer.test','subject-b','client-b@example.test')"),
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('account-a','identity-a','manager')"),
@@ -65,14 +71,26 @@ describe("direct authenticated client folder grants", () => {
       db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES('Jobs/Clients/Acme/Delivery/photo.jpg','etag-a',12,'2026-08-02T12:00:00Z','image/jpeg','image')"),
       db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES('Jobs/Clients/Acme/Second/report.pdf','etag-b',20,'2026-08-02T12:00:00Z','application/pdf','pdf')"),
     ]);
+    const opsDb = {
+      withSession() { return this; },
+      prepare(sql: string) {
+        if (!sql.includes("FROM project_folders")) throw new Error(`unexpected-ops-query:${sql}`);
+        return { async all() { return { results: folderAssociations }; } };
+      },
+      async batch() { return []; },
+    };
     env = {
       DELIVERY_DB: db,
       DELIVERY_BASE_URL: "https://client.example.test",
-      OPS_DB: { async batch() { return []; } },
+      OPS_DB: opsDb,
     };
   });
 
   beforeEach(() => {
+    folderAssociations = [
+      { division_id: "division-a", r2_prefix: "Jobs/Clients/Acme/", project_alpha_client_id: "pa-client-a", project_alpha_organization_id: "pa-org-a" },
+      { division_id: "division-a", r2_prefix: "Jobs/Clients/Acme/Delivery/", project_alpha_client_id: "pa-client-a", project_alpha_organization_id: "pa-org-a" },
+    ];
     mocks.requirePermission.mockReset().mockResolvedValue(undefined);
     mocks.auditStatement.mockReset().mockResolvedValue({});
     mocks.sendNotificationMail.mockReset().mockResolvedValue(undefined);
@@ -91,6 +109,7 @@ describe("direct authenticated client folder grants", () => {
     expect(created).toMatchObject({ accountId: "account-a", r2Prefix: "Jobs/Clients/Acme/Delivery/", version: 1, idempotentReplay: false });
     expect(mocks.requirePermission.mock.calls[0]?.slice(1)).toEqual([principal, "delivery.share.create", { divisionId: "division-a" }, true]);
     expect(await db.prepare("SELECT scope_type FROM client_folder_associations WHERE id=?").bind(created.id).first("scope_type")).toBe("client");
+    expect(await db.prepare("SELECT division_id FROM client_folder_associations WHERE id=?").bind(created.id).first("division_id")).toBe("division-a");
     expect(await db.prepare("SELECT COUNT(*) count FROM shares").first("count")).toBe(0);
     expect(await db.prepare("SELECT status FROM client_folder_grant_notifications WHERE association_id=?").bind(created.id).first("status")).toBe("pending");
     const session = { accountId: "account-a", displayName: "Acme", identityId: "identity-a", role: "manager" as const, canViewBilling: false };
@@ -152,6 +171,49 @@ describe("direct authenticated client folder grants", () => {
       accountId: "account-a", divisionId: "division-a", r2Prefix: "Jobs/Clients/Acme/Missing/",
     }, "folder-grant-missing-db")).rejects.toThrow("delivery-db-binding-required");
     await expect(processClientFolderGrantNotifications({} as any)).rejects.toThrow("delivery-db-binding-required");
+  });
+
+  it("derives the longest-prefix division and rejects forged, missing, ambiguous, or wrong-client associations", async () => {
+    folderAssociations = [
+      { division_id: "division-a", r2_prefix: "Jobs/Clients/Acme/", project_alpha_client_id: "pa-client-a", project_alpha_organization_id: "pa-org-a" },
+      { division_id: "division-b", r2_prefix: "Jobs/Clients/Acme/Delivery/", project_alpha_client_id: "pa-client-a", project_alpha_organization_id: "pa-org-a" },
+    ];
+    const scopedInput = {
+      accountId: "account-a",
+      divisionId: "division-a",
+      r2Prefix: "Jobs/Clients/Acme/Delivery/Scoped/",
+    };
+    await expect(createClientFolderGrant(env, request, principal, scopedInput, "folder-grant-forged-0001"))
+      .rejects.toMatchObject({ status: 409 });
+    expect(mocks.requirePermission).not.toHaveBeenCalled();
+
+    const created = await createClientFolderGrant(env, request, principal, { ...scopedInput, divisionId: "division-b" }, "folder-grant-derived-0001");
+    expect(mocks.requirePermission).toHaveBeenLastCalledWith(env, principal, "delivery.share.create", { divisionId: "division-b" }, true);
+    expect(mocks.auditStatement).toHaveBeenLastCalledWith(env, request, principal, "client.folder.granted", "client_folder_grant", created.grantId, "division-b", expect.any(Object));
+    expect(await db.prepare("SELECT division_id FROM client_folder_associations WHERE id=?").bind(created.id).first("division_id")).toBe("division-b");
+    await db.prepare("UPDATE client_folder_associations SET division_id='forged-division' WHERE id=?").bind(created.id).run();
+    await revokeClientFolderGrant(env, request, principal, "account-a", created.grantId);
+    expect(mocks.requirePermission).toHaveBeenLastCalledWith(env, principal, "delivery.share.revoke", { divisionId: "division-b" }, true);
+    expect(mocks.auditStatement).toHaveBeenLastCalledWith(env, request, principal, "client.folder.revoked", "client_folder_grant", created.grantId, "division-b", expect.objectContaining({ storedDivisionId: "forged-division" }));
+
+    await expect(createClientFolderGrant(env, request, principal, {
+      ...scopedInput,
+      accountId: "account-b",
+      divisionId: "division-b",
+    }, "folder-grant-wrong-client-0001")).rejects.toMatchObject({ status: 404 });
+    await expect(createClientFolderGrant(env, request, principal, {
+      ...scopedInput,
+      r2Prefix: "Jobs/Clients/Unmapped/",
+    }, "folder-grant-unmapped-0001")).rejects.toMatchObject({ status: 404 });
+
+    folderAssociations = [
+      { division_id: "division-a", r2_prefix: "Jobs/Clients/Acme", project_alpha_client_id: "pa-client-a", project_alpha_organization_id: "pa-org-a" },
+      { division_id: "division-b", r2_prefix: "Jobs/Clients/Acme/", project_alpha_client_id: "pa-client-a", project_alpha_organization_id: "pa-org-a" },
+    ];
+    await expect(createClientFolderGrant(env, request, principal, {
+      ...scopedInput,
+      r2Prefix: "Jobs/Clients/Acme/Ambiguous/",
+    }, "folder-grant-ambiguous-0001")).rejects.toMatchObject({ status: 409 });
   });
 
   it("suppresses when no indexed content is newly visible or the recipient membership is revoked", async () => {

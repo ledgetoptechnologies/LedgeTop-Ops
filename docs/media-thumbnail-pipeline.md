@@ -6,9 +6,12 @@ Private R2 originals remain authoritative and are never modified. A successful
 R2 object-create event is indexed by the Operations Worker, which records a
 durable D1 thumbnail job and sends an `image-thumbnail.v1` message to
 `ltds-thumbnail-jobs`. The queue consumer streams the original through the
-Cloudflare Images binding and stores exactly one fixed `320x240` WebP under
-`_ltds/thumbnails/v1/`. It does not create `preview`, `medium`, `large`, PDF, or
-video-poster derivatives.
+Cloudflare Images binding and stores one current referenced fixed `320x240`
+WebP for the source key's current ETag under `_ltds/thumbnails/v1/`. It does not
+create `preview`, `medium`, `large`, PDF, or video-poster derivatives. A deleted
+source can leave its stable-key thumbnail object unreferenced until a separately
+reviewed cleanup; ETag checks prevent that object from being served for a later
+replacement.
 
 The public and staff APIs continue to return opaque same-origin routes. They do
 not return R2 URLs, presigned bearer URLs, or credentials. Every original and
@@ -20,12 +23,12 @@ range, HEAD, and ETag semantics. The legacy image `previewUrl` field is retained
 as a compatibility alias to that same authorized original route; it no longer
 means a generated preview.
 
-The list/grid rendering rule is strict: use `thumbnailUrl` only when
-`thumbnailState === "ready"`. In every other state, render an LTDS-branded
-fallback or a client-bundled accessible SVG selected by
-`thumbnailFallbackKind`. List/grid code must not use `sourceUrl`, `previewUrl`,
-or `downloadUrl` as an image source. Those routes are activation actions, not
-thumbnail fallbacks.
+The list/grid rendering rule is strict: `thumbnailUrl` is present only when
+`thumbnailState === "ready"`. In every other state, the current Hermes UI uses
+its existing local file-kind or branded placeholder. It does not yet use
+`thumbnailFallbackKind` to select a bundled SVG. List/grid code must not use
+`sourceUrl`, `previewUrl`, or `downloadUrl` as an image source. Those routes are
+activation actions, not thumbnail fallbacks.
 
 Authorized list items expose:
 
@@ -37,14 +40,14 @@ Authorized list items expose:
 - `sourceUrl`: the authorized full-resolution original route for supported
   inline media.
 
-The fallback enum is coarse and contains no filename or path. Hermes can map it
-to local accessible SVG assets (for example, `archive -> archive.svg`,
-`spreadsheet -> spreadsheet.svg`, and `unknown -> file.svg`). No remote icon
-endpoint is needed. If a thumbnail is pending or failed, the thumbnail route
-returns a harmless status error and never substitutes the original image.
+The fallback enum is coarse and contains no filename or path. A later Hermes UI
+change can map it to local accessible SVG assets without a remote icon endpoint.
+If a thumbnail is pending or failed, the thumbnail route returns a harmless
+status error and never substitutes the original image.
 
-On activation, images use `sourceUrl` to load the untouched full-resolution
-original for zoom/pan. Other supported inline types use their existing
+On activation, the current image viewer loads `previewUrl`, which is a
+compatibility alias to the same authorized full-resolution `sourceUrl` route;
+it is not a derivative. Other supported inline types use their existing
 authorized `sourceUrl` representation, and all file kinds retain their
 authorized `downloadUrl`. Authorization is rechecked before any R2 read.
 
@@ -57,15 +60,20 @@ authorized `downloadUrl`. Authorization is rechecked before any R2 read.
   `CompleteMultipartUpload` must feed `ltds-file-events`.
 - Create `ltds-thumbnail-jobs` and `ltds-thumbnail-jobs-dlq` before deploying
   the binding configuration.
-- Cloudflare Images binding input is limited to 20 MB. Larger originals remain
-  downloadable and zoomable, but their thumbnail job is visibly failed until a
-  future large-input transform path is approved.
+- This implementation caps thumbnail input at 20 MiB through
+  `THUMBNAIL_MAX_INPUT_BYTES`. Larger originals remain downloadable and
+  zoomable, but their thumbnail job is visibly failed until a future
+  large-input transform path is approved.
 - Queue delivery is at-least-once. D1 source-ETag state and a lease make
   generation idempotent. Six total delivery attempts are aligned with
   `max_retries: 5`; exhausted messages move to the DLQ and its consumer records
   `dead_lettered_at` before acknowledging them.
-- Account for Images transformations, Queue operations (including retries), R2
-  reads/writes, Worker CPU, and D1 operations. Check current pricing and limits:
+- Each current ready derivative is capped at 128 KiB. Account for one source
+  read and Images transformation, the derivative write and authorized serves,
+  Queue operations including retries, Worker CPU, and D1 operations. Retained
+  unreferenced objects for deleted sources add R2 storage until reviewed cleanup. Check current
+  pricing and limits during rollout; this repository does not verify the
+  account's current entitlement or bill:
   <https://developers.cloudflare.com/images/pricing/>,
   <https://developers.cloudflare.com/queues/platform/pricing/>, and
   <https://developers.cloudflare.com/r2/pricing/>.
@@ -81,7 +89,7 @@ authorized `downloadUrl`. Authorization is rechecked before any R2 read.
    event queue. Do not add overlapping R2 notification rules.
 5. Deploy Operations, then Client, to staging. Upload a synthetic image and
    verify `pending -> ready`, one thumbnail object, and authorized original
-   streaming. Also test a synthetic invalid image and an input over 20 MB.
+   streaming. Also test a synthetic invalid image and an input over 20 MiB.
 6. Review Workers structured logs and D1 failed/dead-letter rows before a
    production rollout. Production resource creation and deployment are outside
    this repository change.
@@ -90,8 +98,16 @@ authorized `downloadUrl`. Authorization is rechecked before any R2 read.
 
 `error_code`, a bounded `error_message`, `attempt_count`, `failed_at`, and
 `dead_lettered_at` provide failure visibility without client content in logs.
-Invalid images, unsupported formats, and oversized inputs fail permanently.
+Empty images are recorded as `empty_source` failures without publishing queue
+work. Invalid images, unsupported formats, and oversized inputs fail permanently.
 Transient Images/R2/D1 errors retry with bounded exponential delay.
+
+Source-delete notifications do not eagerly delete the thumbnail state row or
+its stable-key opaque R2 object. R2 notifications can arrive after a replacement at the
+same key, so eager deletion could remove the replacement's state or thumbnail.
+The live source ETag prevents a retained stale row from being served; orphaned
+rows and objects are reclaimed only by a separately reviewed reconciliation or
+cleanup procedure.
 
 After fixing a transient root cause, an operator may set the exact current job
 back to `pending` and replay its `image-thumbnail.v1` message through an
@@ -111,7 +127,7 @@ recoverable cleanup plan.
 
 ## Known limitations
 
-- Only supported still-image inputs at or below the Images binding input limit
+- Only supported still-image inputs at or below the implementation's 20 MiB cap
   receive real thumbnails. PDF, video, archives, office documents, and unknown
   files use local generic icons.
 - Video thumbnails, poster extraction, transcoding, and adaptive streaming are
@@ -122,5 +138,7 @@ recoverable cleanup plan.
 - Queue and Images unit tests use synthetic mocks; a non-production Cloudflare
   staging smoke test is still required to validate account entitlement and real
   decoder behavior.
+- The current Hermes UI receives `thumbnailFallbackKind` but still renders its
+  existing local file-kind/brand placeholder rather than a kind-specific SVG.
 - Legacy prepared-artifact tables and readers are retained for rollback and
   cleanup compatibility, but new manifests and image routes do not use them.

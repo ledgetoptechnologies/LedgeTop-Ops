@@ -129,7 +129,13 @@
         "0097_client_portal_team_acl.sql",
         "0098_client_access_sync_processing.sql",
         "0099_client_portal_request_notifications.sql",
-        "0100_client_portal_release_hardening.sql"
+        "0100_client_portal_release_hardening.sql",
+        "0101_client_service_request_scoping.sql",
+        "0102_client_service_request_area.sql",
+        "0103_client_portal_workspace.sql",
+        "0104_service_request_thread.sql",
+        "0105_internal_folder_grants.sql",
+        "0106_image_thumbnail_jobs.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -139,7 +145,8 @@
       "expected": [
         "0014_staff_acl_controls.sql",
         "0015_staff_acl_explicit_controls.sql",
-        "0016_projection_entity_leases.sql"
+        "0016_projection_entity_leases.sql",
+        "0017_operational_job_briefs.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",

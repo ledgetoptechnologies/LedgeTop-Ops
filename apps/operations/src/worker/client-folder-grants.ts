@@ -1,6 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 import { requirePermission } from "./acl";
 import { sendAdminAlert } from "./alerts";
+import { normalizePrefix, resolveDivisionAssociation } from "./delivery";
 import { sendNotificationMail } from "./mailer";
 import { auditStatement } from "./request-security";
 import { normalizeCrudKey } from "./r2-crud-validation";
@@ -27,6 +28,19 @@ interface GrantRow {
 
 interface MutationRow extends GrantRow {
   mutation_fingerprint: string;
+}
+
+interface ClientAccountMapping {
+  id: string;
+  project_alpha_client_id: string;
+  project_alpha_organization_id: string | null;
+}
+
+interface AuthoritativeFolderAssociation {
+  division_id: string;
+  r2_prefix: string;
+  project_alpha_client_id: string | null;
+  project_alpha_organization_id: string | null;
 }
 
 interface NotificationRow {
@@ -93,20 +107,52 @@ async function mutationReplay(env: Env, accountId: string, mutationKey: string, 
   return row;
 }
 
+async function authoritativeFolderGrantDivision(env: Env, prefix: string, account: ClientAccountMapping): Promise<string> {
+  const associations = await env.OPS_DB.withSession("first-primary").prepare(`SELECT pf.division_id,pf.r2_prefix,
+      p.client_id project_alpha_client_id,p.organization_id project_alpha_organization_id
+    FROM project_folders pf JOIN pa_projects p ON p.id=pf.project_id
+    WHERE p.active=1 ORDER BY length(pf.r2_prefix) DESC`).all<AuthoritativeFolderAssociation>();
+  const matches = associations.results
+    .map(row => ({ row, prefix: normalizePrefix(row.r2_prefix) }))
+    .filter(candidate => prefix.startsWith(candidate.prefix));
+  if (!matches.length) throw new HTTPException(404, { message: "Folder not found" });
+
+  const longestLength = Math.max(...matches.map(candidate => candidate.prefix.length));
+  const authoritative = matches.filter(candidate => candidate.prefix.length === longestLength);
+  const divisionId = resolveDivisionAssociation(prefix, authoritative.map(candidate => candidate.row));
+  if (!divisionId) throw new HTTPException(404, { message: "Folder not found" });
+
+  const owners = new Set(authoritative.map(({ row }) => row.project_alpha_client_id
+    ? `client:${row.project_alpha_client_id}`
+    : row.project_alpha_organization_id
+      ? `organization:${row.project_alpha_organization_id}`
+      : "unmapped"));
+  if (owners.size !== 1 || owners.has("unmapped"))
+    throw new HTTPException(409, { message: "Folder is associated with multiple clients and requires review" });
+  const [owner] = owners;
+  const accountOwner = owner === `client:${account.project_alpha_client_id}`
+    || Boolean(account.project_alpha_organization_id && owner === `organization:${account.project_alpha_organization_id}`);
+  if (!accountOwner) throw new HTTPException(404, { message: "Folder not found" });
+  return divisionId;
+}
+
 export async function createClientFolderGrant(env: Env, request: Request, principal: StaffPrincipal, input: ClientFolderGrantInput, mutationKey: string) {
   if (!env.DELIVERY_DB) throw new Error("delivery-db-binding-required");
   if (mutationKey.length < 16 || mutationKey.length > 128)
     throw new HTTPException(400, { message: "Idempotency-Key must contain 16-128 characters" });
   const prefix = normalizeCrudKey(input.r2Prefix, true);
-  await requirePermission(env, principal, "delivery.share.create", { divisionId: input.divisionId }, true);
-  const mutationFingerprint = await fingerprint(stableInput(input, prefix));
+  const account = await env.DELIVERY_DB.withSession("first-primary").prepare(
+    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND status='active' AND project_alpha_client_id IS NOT NULL",
+  ).bind(input.accountId).first<ClientAccountMapping>();
+  if (!account) throw new HTTPException(404, { message: "Active client workspace not found" });
+  const divisionId = await authoritativeFolderGrantDivision(env, prefix, account);
+  if (input.divisionId !== divisionId)
+    throw new HTTPException(409, { message: "Folder division does not match the authoritative association" });
+  await requirePermission(env, principal, "delivery.share.create", { divisionId }, true);
+  const mutationFingerprint = await fingerprint(stableInput({ ...input, divisionId }, prefix));
   const replay = await mutationReplay(env, input.accountId, mutationKey, mutationFingerprint);
   if (replay) return { ...mapGrant(replay), idempotentReplay: true, unchanged: false };
 
-  const account = await env.DELIVERY_DB.withSession("first-primary").prepare(
-    "SELECT id FROM client_accounts WHERE id=? AND status='active' AND project_alpha_client_id IS NOT NULL",
-  ).bind(input.accountId).first<{ id: string }>();
-  if (!account) throw new HTTPException(404, { message: "Active client workspace not found" });
   if (input.recipientIdentityId && !(await activeRecipient(env, input.accountId, input.recipientIdentityId)))
     throw new HTTPException(409, { message: "Notification recipient is not an active member of this client workspace" });
 
@@ -122,9 +168,9 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
   if (!previous) {
     const covered = await db.prepare(`SELECT id,logical_grant_id,grant_version,account_id,r2_prefix,division_id
       FROM client_folder_associations WHERE account_id=? AND scope_type='client' AND project_id IS NULL
-        AND revoked_at IS NULL AND logical_grant_id IS NOT NULL
+        AND revoked_at IS NULL AND logical_grant_id IS NOT NULL AND division_id=?
         AND substr(?,1,length(r2_prefix))=r2_prefix
-      ORDER BY length(r2_prefix) LIMIT 1`).bind(input.accountId, prefix).first<GrantRow>();
+      ORDER BY length(r2_prefix) LIMIT 1`).bind(input.accountId, divisionId, prefix).first<GrantRow>();
     if (covered) {
       await db.batch([
         mutationStatement(env, { accountId: input.accountId, mutationKey, fingerprint: mutationFingerprint, grantId: covered.logical_grant_id, version: covered.grant_version, associationId: covered.id }),
@@ -133,7 +179,7 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
     }
   }
 
-  if (previous?.r2_prefix === prefix && previous.division_id === input.divisionId) {
+  if (previous?.r2_prefix === prefix && previous.division_id === divisionId) {
     await db.batch([
       mutationStatement(env, { accountId: input.accountId, mutationKey, fingerprint: mutationFingerprint, grantId: previous.logical_grant_id, version: previous.grant_version, associationId: previous.id }),
     ]);
@@ -161,7 +207,7 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
   statements.push(
     db.prepare(`INSERT INTO client_folder_associations
       (id,scope_type,project_id,account_id,r2_prefix,created_by,logical_grant_id,grant_version,division_id)
-      VALUES (?,'client',NULL,?,?,?,?,?,?)`).bind(associationId, input.accountId, prefix, principal.id, grantId, version, input.divisionId),
+      VALUES (?,'client',NULL,?,?,?,?,?,?)`).bind(associationId, input.accountId, prefix, principal.id, grantId, version, divisionId),
     mutationStatement(env, { accountId: input.accountId, mutationKey, fingerprint: mutationFingerprint, grantId, version, associationId }),
     db.prepare("INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES('staff',?,'client.folder.granted','client_folder_grant',?,?)")
       .bind(principal.id, grantId, JSON.stringify({ accountId: input.accountId, associationId, version, r2Prefix: prefix, previousAssociationId: previous?.id || null })),
@@ -176,7 +222,7 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
     if (racedReplay) return { ...mapGrant(racedReplay), idempotentReplay: true, unchanged: false };
     throw error;
   }
-  await env.OPS_DB.batch([await auditStatement(env, request, principal, "client.folder.granted", "client_folder_grant", grantId, input.divisionId, { accountId: input.accountId, associationId, version, r2Prefix: prefix })]);
+  await env.OPS_DB.batch([await auditStatement(env, request, principal, "client.folder.granted", "client_folder_grant", grantId, divisionId, { accountId: input.accountId, associationId, version, r2Prefix: prefix })]);
   return { id: associationId, grantId, version, accountId: input.accountId, r2Prefix: prefix, idempotentReplay: false, unchanged: false };
 }
 
@@ -189,14 +235,19 @@ export async function revokeClientFolderGrant(env: Env, request: Request, princi
   const row = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,logical_grant_id,grant_version,account_id,r2_prefix,division_id
     FROM client_folder_associations WHERE logical_grant_id=? AND account_id=? AND scope_type='client' AND project_id IS NULL AND revoked_at IS NULL`).bind(grantId, accountId).first<GrantRow>();
   if (!row) throw new HTTPException(404, { message: "Active client folder grant not found" });
-  await requirePermission(env, principal, "delivery.share.revoke", { divisionId: row.division_id }, true);
+  const account = await env.DELIVERY_DB.withSession("first-primary").prepare(
+    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND project_alpha_client_id IS NOT NULL",
+  ).bind(accountId).first<ClientAccountMapping>();
+  if (!account) throw new HTTPException(404, { message: "Active client folder grant not found" });
+  const divisionId = await authoritativeFolderGrantDivision(env, row.r2_prefix, account);
+  await requirePermission(env, principal, "delivery.share.revoke", { divisionId }, true);
   const result = await env.DELIVERY_DB.batch([
     env.DELIVERY_DB.prepare("UPDATE client_folder_associations SET revoked_at=datetime('now') WHERE id=? AND revoked_at IS NULL").bind(row.id),
     env.DELIVERY_DB.prepare("INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES('staff',?,'client.folder.revoked','client_folder_grant',?,?)")
       .bind(principal.id, grantId, JSON.stringify({ accountId: row.account_id, associationId: row.id, version: row.grant_version, r2Prefix: row.r2_prefix })),
   ]);
   if (!result[0]?.meta.changes) throw new HTTPException(404, { message: "Active client folder grant not found" });
-  await env.OPS_DB.batch([await auditStatement(env, request, principal, "client.folder.revoked", "client_folder_grant", grantId, row.division_id, { accountId: row.account_id, associationId: row.id, version: row.grant_version, r2Prefix: row.r2_prefix })]);
+  await env.OPS_DB.batch([await auditStatement(env, request, principal, "client.folder.revoked", "client_folder_grant", grantId, divisionId, { accountId: row.account_id, associationId: row.id, version: row.grant_version, r2Prefix: row.r2_prefix, storedDivisionId: row.division_id })]);
 }
 
 function renderClientFolderGrant(accountName: string, actionUrl: string) {

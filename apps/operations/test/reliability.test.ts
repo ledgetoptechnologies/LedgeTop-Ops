@@ -1,6 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { aliasParent, normalizeAliasKey, validateDisplayName } from "../src/worker/aliases";
-import { canonicalPreviewSource, finalizePreviewManifest, hidden, previewDerivative, previewManifest, thumbnailJobForCreatedObject } from "../src/worker/file-events";
+import { canonicalPreviewSource, finalizePreviewManifest, handleRemovedSource, hidden, previewDerivative, previewManifest, thumbnailJobForCreatedObject } from "../src/worker/file-events";
 import { derivativePrefixes, validateDeleteConfirmation } from "../src/worker/source-delete";
 import { artifactDirectory, previewIdentity } from "../src/worker/artifacts";
 import { r2PurgeEnabled, tombstoneMatches, trashSnapshotBlockReason } from "../src/worker/trash";
@@ -9,6 +9,27 @@ describe("delivery reliability controls", () => {
   it("maps a successful multipart image upload to a thumbnail queue payload", () => {
     expect(thumbnailJobForCreatedObject("CompleteMultipartUpload", "Jobs/Clients/Synthetic/photo.jpg", "image", { httpEtag: '"source-etag"', size: 4096 })).toEqual({ sourceKey: "Jobs/Clients/Synthetic/photo.jpg", sourceEtag: '"source-etag"', sourceSize: 4096 });
     expect(thumbnailJobForCreatedObject("CompleteMultipartUpload", "Jobs/Clients/Synthetic/archive.zip", "other", { httpEtag: '"archive"', size: 10 })).toBeNull();
+  });
+  it("retains thumbnail state and objects when handling current or stale source deletes", async () => {
+    const run = vi.fn(async () => ({ meta: { changes: 1 } }));
+    const bind = vi.fn(() => ({ run }));
+    const prepare = vi.fn((_sql: string) => ({ bind }));
+    const deleteObject = vi.fn();
+    const liveHead = vi.fn(async (): Promise<{ httpEtag: string } | null> => ({ httpEtag: '"replacement"' }));
+    const env = {
+      DATA_BUCKET: { head: liveHead, delete: deleteObject },
+      DELIVERY_DB: { prepare },
+    } as any;
+
+    await expect(handleRemovedSource(env, "Jobs/Clients/Synthetic/photo.jpg")).resolves.toBe("stale");
+    expect(prepare).not.toHaveBeenCalled();
+    expect(deleteObject).not.toHaveBeenCalled();
+
+    liveHead.mockResolvedValueOnce(null);
+    await expect(handleRemovedSource(env, "Jobs/Clients/Synthetic/photo.jpg")).resolves.toBe("removed");
+    expect(prepare).toHaveBeenCalledOnce();
+    expect(prepare.mock.calls[0]?.[0]).toBe("DELETE FROM file_index WHERE r2_key=?");
+    expect(deleteObject).not.toHaveBeenCalled();
   });
   it("rejects reserved segments everywhere in Operations paths", () => {
     for (const key of ["_ltds/a.jpg", "jobs/_ltds/a.jpg", "jobs/client/.previews/hash/thumb.webp", "jobs/client/dump/a.jpg", "jobs/dump/client/a.jpg"]) expect(hidden(key)).toBe(true);

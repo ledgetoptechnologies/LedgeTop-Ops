@@ -137,16 +137,27 @@ npm.cmd run staging:evidence:check
 Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
-`0105_internal_folder_grants.sql` and Operations
+`0106_image_thumbnail_jobs.sql` and Operations
 `0014_staff_acl_controls.sql` through
-`0016_projection_entity_leases.sql`. Migration `0100` removes
+`0017_operational_job_briefs.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any
 unexpected pending migration. Migration `0105` must be present before the
 Operations version that exposes direct authenticated folder grants or runs its
-five-minute notification consumer. Worker rollback does not undo either
-database.
+five-minute notification consumer; `0106` must be present before thumbnail jobs
+are indexed or served; `0017` must be present before job-brief routes are
+registered. Worker rollback does not undo either database.
+
+Before version upload, verify rather than infer the remaining operator-owned
+media prerequisites: the staging thumbnail queue and DLQ exist, Operations has
+the exact `THUMBNAIL_QUEUE` producer, main consumer, DLQ consumer, and `IMAGES`
+binding, and the 15-minute and 5-minute crons are both present. Confirm the
+existing R2 object-create notification still feeds only the staging file-event
+queue; do not add an overlapping notification rule. Disable the retired TrueNAS
+preview cron/container before activating thumbnail processing. The repository
+examples and passing preflight prove configuration shape only, not Cloudflare
+resource existence or Images entitlement.
 
 ## Separately approved version and deployment sequence
 

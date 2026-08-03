@@ -51,6 +51,18 @@ export interface ThumbnailJobRow {
   error_code: string | null;
 }
 
+export type ThumbnailQueueBatchKind = "jobs" | "dead_letters" | "other" | "mixed";
+
+/** Cloudflare preserves the original body when moving a message to a DLQ. */
+export function classifyThumbnailQueueBatch(
+  batch: Pick<MessageBatch<unknown>, "queue" | "messages">,
+): ThumbnailQueueBatchKind {
+  const thumbnailMessages = batch.messages.filter((message) => isThumbnailJobMessage(message.body)).length;
+  if (thumbnailMessages === 0) return "other";
+  if (thumbnailMessages !== batch.messages.length) return "mixed";
+  return /(?:^|[-_.])(?:dlq|dead[-_.]?letters?)(?:$|[-_.])/i.test(batch.queue) ? "dead_letters" : "jobs";
+}
+
 export function thumbnailStateForObject(sourceEtag: string, job: ThumbnailJobRow | null | undefined): ThumbnailStateRecord {
   if (!job || cleanEtag(job.source_etag) !== cleanEtag(sourceEtag)) return { state: "pending" };
   if (job.status === "ready") return { state: "ready", thumbnailKey: job.thumbnail_key };
@@ -154,12 +166,23 @@ export async function enqueueThumbnailJob(
   input: { sourceKey: string; sourceEtag: string; sourceSize: number },
 ): Promise<{ enqueued: boolean; state: ThumbnailState }> {
   const sourceEtag = cleanEtag(input.sourceEtag);
-  if (!input.sourceKey || !sourceEtag || !Number.isSafeInteger(input.sourceSize) || input.sourceSize <= 0) {
+  if (!input.sourceKey || !sourceEtag || !Number.isSafeInteger(input.sourceSize) || input.sourceSize < 0) {
     throw new Error("Invalid thumbnail enqueue input");
   }
   const thumbnailKey = await thumbnailObjectKey(input.sourceKey);
   await registerJob(env, input.sourceKey, sourceEtag, input.sourceSize, thumbnailKey);
   await resetQueuePublishFailure(env, input.sourceKey, sourceEtag);
+  if (input.sourceSize === 0) {
+    await env.DELIVERY_DB.prepare(`/* thumbnail.empty-source */
+      UPDATE image_thumbnail_jobs
+      SET status='failed',thumbnail_etag=NULL,thumbnail_size=NULL,
+        error_code='empty_source',error_message='The original image is empty',
+        lease_until=NULL,failed_at=datetime('now'),updated_at=datetime('now')
+      WHERE source_key=? AND source_etag=?`)
+      .bind(input.sourceKey, sourceEtag)
+      .run();
+    return { enqueued: false, state: "failed" };
+  }
   const current = await getThumbnailState(env, input.sourceKey, sourceEtag);
   if (current.state === "ready" || current.state === "failed") return { enqueued: false, state: current.state };
   try {

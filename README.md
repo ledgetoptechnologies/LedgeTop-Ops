@@ -68,16 +68,25 @@ Run each app locally with `npm.cmd --prefix apps/<app> run dev`. Copy its `.dev.
 - D1 `ltds-ops` (`6ebf7514-d306-4615-ae56-ad869c874dbd`)
 - private R2 bucket `client-data`
 - queue `ltds-file-events`, with R2 create and delete notifications
-- Images binding for R2 thumbnails
+- configured thumbnail queue/DLQ names `ltds-thumbnail-jobs` and
+  `ltds-thumbnail-jobs-dlq`; their remote existence must be verified before a
+  dependent deployment
+- Operations Images and `THUMBNAIL_QUEUE` bindings for one current still-image
+  thumbnail per source ETag
 - Stream binding for private, signed video playback
 - delivery access-code rate limiter
-- cron schedules for FAA, Project Alpha, Stream status, cleanup, and reconciliation
+- cron schedules for FAA, Project Alpha, Stream status, cleanup,
+  reconciliation, and the five-minute notification consumer
 
 Both production configurations disable `workers.dev` and version preview URLs and reject unexpected hosts in Worker middleware.
 
 ## Before the first production code deployment
 
 Complete [Cloudflare setup](docs/cloudflare-setup.md), including the Operations Access audience and account activation for Images/Stream. Then create a scoped Project Alpha key as described in [Project Alpha integration](docs/project-alpha.md). Follow the [TrueNAS runbook](docs/truenas/README.md) only after a staging delivery has passed.
+
+Wrangler configuration declares bindings; it is not evidence that queues,
+Images entitlement, event subscriptions, migrations, or cron triggers exist in
+the remote account. Verify those operator-owned resources during rollout.
 
 For production operations, use the [operations runbook](docs/operations/README.md), the [media-preview contract](docs/truenas/preview-pipeline.md), and the [inbound request design](docs/inbound-requests.md). These documents distinguish repository behavior from operator-owned Cloudflare, TrueNAS, Hermes, and alerting configuration.
 

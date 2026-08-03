@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  classifyThumbnailQueueBatch,
   consumeThumbnailDeadLetters,
   consumeThumbnailJobs,
   enqueueThumbnailJob,
@@ -102,6 +103,18 @@ class FakeThumbnailDb {
             db.job.status = "failed";
             db.job.error_code = "queue_publish_failed";
             db.job.error_message = message;
+            return result(1);
+          }
+          return result(0);
+        }
+        if (sql.includes("thumbnail.empty-source")) {
+          const [sourceKey, sourceEtag] = values as [string, string];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag) {
+            db.job.status = "failed";
+            db.job.thumbnail_etag = null;
+            db.job.thumbnail_size = null;
+            db.job.error_code = "empty_source";
+            db.job.error_message = "The original image is empty";
             return result(1);
           }
           return result(0);
@@ -261,6 +274,29 @@ describe("Cloudflare image thumbnail pipeline", () => {
       sourceSize: 4096,
     })).rejects.toThrow("queue unavailable");
     expect(value.db.job).toMatchObject({ status: "failed", error_code: "queue_publish_failed" });
+  });
+
+  it("records an empty image as a terminal fallback without publishing or retrying", async () => {
+    const value = fixture({ size: 0 });
+    const queued = await enqueueThumbnailJob(value.env, {
+      sourceKey: value.message.sourceKey,
+      sourceEtag: value.message.sourceEtag,
+      sourceSize: 0,
+    });
+    expect(queued).toEqual({ enqueued: false, state: "failed" });
+    expect(value.send).not.toHaveBeenCalled();
+    expect(value.db.job).toMatchObject({ source_size: 0, status: "failed", error_code: "empty_source" });
+  });
+
+  it("classifies renamed thumbnail queues by body and a generic DLQ token", () => {
+    const value = fixture();
+    const batch = queueBatch(value.message).batch;
+    expect(classifyThumbnailQueueBatch({ ...batch, queue: "tenant-media-work" })).toBe("jobs");
+    expect(classifyThumbnailQueueBatch({ ...batch, queue: "tenant-media-dlq-v2" })).toBe("dead_letters");
+    expect(classifyThumbnailQueueBatch({ ...batch, queue: "tenant-media-dead-letter-v2" })).toBe("dead_letters");
+    const fileEvent = { ...batch.messages[0]!, body: { action: "PutObject" } };
+    expect(classifyThumbnailQueueBatch({ ...batch, messages: [fileEvent] })).toBe("other");
+    expect(classifyThumbnailQueueBatch({ ...batch, messages: [...batch.messages, fileEvent] })).toBe("mixed");
   });
 
   it("does not regenerate a ready job when the same event is delivered twice", async () => {
