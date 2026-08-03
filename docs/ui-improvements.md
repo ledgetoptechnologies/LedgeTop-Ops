@@ -1,5 +1,58 @@
 # UI/UX Improvements
 
+## 2026-08-02 — Zebra Striping and Airspace Spacing
+
+A second CSS pass focused on list readability and airspace page spacing.
+No logic changes, CSS-only.
+
+### Zebra Striping (alternating row backgrounds)
+
+Every list pattern across both apps now has subtle alternating row backgrounds
+(`#f7f9fa` on even rows) and a slightly darker hover state (`#f0f5f8`). All
+striped rows also got `border-radius: 6px` for a slightly rounded appearance
+and horizontal padding (`.5rem`) where they previously had none.
+
+**Operations app** (`apps/operations/src/client/styles.css`):
+- `.simple-rows > div` and `.health-row` - dashboard lists (upcoming
+  operations, work queue, delivery activity, integration health)
+- `.airspace-row` - TFR list, operations requiring review, MOA/SUA entries
+- `.file-list > button` - file browser list view
+- `.delivery-list-item` - delivery folder/file list with selection mode
+- `.incoming-upload-list > div` - incoming upload history
+
+**Client app** (`apps/client/src/client/styles.css`):
+- `.portal-file-row` - client portal file list
+- `.portal-request-row` - client portal service request list
+- `.portal-delivery-list article` - client portal past deliveries list
+- `.item-row` - delivery browser list view (public share page)
+
+**Shared design system** (`packages/ui/src/styles.css`):
+- `tbody tr` - base table rows now have zebra striping and hover
+
+### Airspace Page Spacing
+
+**Operations app** (`apps/operations/src/client/styles.css`):
+- `.airspace-counts`: Gap increased from `.8rem` to `1rem`, card padding
+  increased from `.75rem` to `.85rem .9rem`, margin-bottom increased from
+  `1rem` to `1.5rem` for better separation from source strip below
+- `.airspace-counts p`: Description paragraph now has a left border
+  separator (`border-left: 2px solid var(--line)`) with `.5rem` padding
+  and `line-height: 1.5` so it reads as a sidebar note, not crammed text
+- `.airspace-row`: Horizontal padding added (`.65rem` left/right) so rows
+  aren't flush to card edges. Added `border-radius: 6px` and hover state
+- Mobile: airspace-counts `p` gets top border instead of left border when
+  stacked
+
+### Verification
+
+All gates pass:
+- TypeScript: `tsc --noEmit` clean for both apps
+- Tests: 346 total, all pass
+- Builds: Both apps build successfully
+- Source layout invariants: pass
+
+---
+
 ## 2026-08-02 — CSS/UI Polish
 
 A comprehensive CSS and UI/UX improvement pass across the shared design system

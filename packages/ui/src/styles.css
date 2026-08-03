@@ -210,7 +210,8 @@ th{
   white-space:nowrap;
 }
 tbody tr{transition:background .12s ease}
-tbody tr:hover{background:#f7f9fa}
+tbody tr:nth-child(even){background:#f7f9fa}
+tbody tr:hover{background:#f0f5f8}
 td small{display:block;color:var(--muted);margin-top:.15rem}
 
 /* --- Reduced motion ------------------------------------------------------ */
