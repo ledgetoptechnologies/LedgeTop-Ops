@@ -32,6 +32,13 @@ describe("Operations R2 CRUD boundaries", () => {
     expect(requiresAdministratorForMutation("DELETE","/api/client-portal/accounts/account-1/folder-grants/grant-1")).toBe(false);
     expect(requiresAdministratorForMutation("POST","/api/delivery/items/item-1/stream-ticket")).toBe(false);
     expect(requiresAdministratorForMutation("POST","/api/delivery/incoming-link/rotate")).toBe(false);
+    expect(requiresAdministratorForMutation("PUT","/api/operations/operation-1/job-brief")).toBe(false);
+    expect(requiresAdministratorForMutation("POST","/api/operations/operation-1/job-brief/attachments/upload")).toBe(false);
+    expect(requiresAdministratorForMutation("POST","/api/operations/operation-1/job-brief/attachments/reference")).toBe(false);
+    expect(requiresAdministratorForMutation("POST","/api/operations/operation%2F1/job-brief/attachments/upload")).toBe(true);
+    expect(requiresAdministratorForMutation("DELETE","/api/operations/operation-1/job-brief/attachments/file-1")).toBe(true);
+    expect(requiresAdministratorForMutation("DELETE","/api/operations/operation-1/job-brief")).toBe(true);
+    expect(requiresAdministratorForMutation("POST","/api/operations/operation-1/job-brief")).toBe(true);
     expect(requiresAdministratorForMutation("DELETE","/api/delivery/shares")).toBe(true);
     expect(requiresAdministratorForMutation("DELETE","/api/delivery/shares/share-1/extra")).toBe(true);
     expect(requiresAdministratorForMutation("DELETE","/api/delivery/shares/share%2F1")).toBe(true);

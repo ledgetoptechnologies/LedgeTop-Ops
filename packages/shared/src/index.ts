@@ -36,6 +36,114 @@ export type PermissionScope = "global" | "division" | "assigned" | "own";
 export type OperationStatus = "draft" | "scheduled" | "ready" | "blocked" | "in_progress" | "completed" | "cancelled";
 export type TaskStatus = "todo" | "in_progress" | "blocked" | "done";
 
+export interface NavigationDestination {
+  latitude: number;
+  longitude: number;
+  label: string;
+  coordinateSource:
+    | "point"
+    | "multipoint_representative"
+    | "area_representative"
+    | "fallback_point";
+  googleMapsUrl: string;
+  appleMapsUrl: string;
+}
+
+type NavigationGeometry = {
+  type: "Point" | "MultiPoint" | "Polygon" | "MultiPolygon";
+  coordinates: unknown;
+};
+
+function navigationCoordinate(value: unknown): [number, number] | null {
+  if (!Array.isArray(value) || value.length < 2) return null;
+  const longitude = Number(value[0]), latitude = Number(value[1]);
+  return Number.isFinite(longitude) && Number.isFinite(latitude) &&
+    longitude >= -180 && longitude <= 180 && latitude >= -90 && latitude <= 90
+    ? [longitude, latitude]
+    : null;
+}
+
+function navigationCoordinates(value: unknown, output: [number, number][]): void {
+  const point = navigationCoordinate(value);
+  if (point) {
+    output.push(point);
+    return;
+  }
+  if (Array.isArray(value))
+    for (const child of value) navigationCoordinates(child, output);
+}
+
+function representativeNavigationPoint(points: [number, number][]): [number, number] | null {
+  const unique = [...new Map(points.map(point => [`${point[0]}:${point[1]}`, point])).values()];
+  if (!unique.length) return null;
+  const latitude = unique.reduce((sum, point) => sum + point[1], 0) / unique.length;
+  const longitudeVector = unique.reduce(
+    (sum, point) => {
+      const radians = point[0] * Math.PI / 180;
+      return { x: sum.x + Math.cos(radians), y: sum.y + Math.sin(radians) };
+    },
+    { x: 0, y: 0 },
+  );
+  const longitude = Math.abs(longitudeVector.x) < 1e-12 && Math.abs(longitudeVector.y) < 1e-12
+    ? unique[0]![0]
+    : Math.atan2(longitudeVector.y, longitudeVector.x) * 180 / Math.PI;
+  return unique.reduce((closest, candidate) => {
+    const longitudeDelta = Math.abs(candidate[0] - longitude);
+    const wrappedLongitudeDelta = Math.min(longitudeDelta, 360 - longitudeDelta);
+    const distance = wrappedLongitudeDelta ** 2 + (candidate[1] - latitude) ** 2;
+    const closestLongitudeDelta = Math.abs(closest[0] - longitude);
+    const closestDistance = Math.min(closestLongitudeDelta, 360 - closestLongitudeDelta) ** 2 +
+      (closest[1] - latitude) ** 2;
+    return distance < closestDistance ? candidate : closest;
+  }, unique[0]!);
+}
+
+/**
+ * Returns a deterministic navigation hint. It is intentionally not a route,
+ * road snap, survey centroid, or guarantee that the destination is drivable.
+ */
+export function buildNavigationDestination(input: {
+  geometry?: NavigationGeometry | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  label?: string | null;
+}): NavigationDestination | null {
+  let point: [number, number] | null = null;
+  let coordinateSource: NavigationDestination["coordinateSource"] = "fallback_point";
+  const geometry = input.geometry;
+  if (geometry?.type === "Point") {
+    point = navigationCoordinate(geometry.coordinates);
+    coordinateSource = "point";
+  } else if (geometry?.type === "MultiPoint") {
+    const points: [number, number][] = [];
+    navigationCoordinates(geometry.coordinates, points);
+    point = representativeNavigationPoint(points);
+    coordinateSource = "multipoint_representative";
+  } else if (geometry?.type === "Polygon" || geometry?.type === "MultiPolygon") {
+    const points: [number, number][] = [];
+    navigationCoordinates(geometry.coordinates, points);
+    point = representativeNavigationPoint(points);
+    coordinateSource = "area_representative";
+  }
+  if (!point) {
+    point = navigationCoordinate([input.longitude, input.latitude]);
+    coordinateSource = "fallback_point";
+  }
+  if (!point) return null;
+
+  const [longitude, latitude] = point;
+  const coordinate = `${latitude.toFixed(6)},${longitude.toFixed(6)}`;
+  const label = input.label?.trim().slice(0, 160) || "Job area";
+  return {
+    latitude,
+    longitude,
+    label,
+    coordinateSource,
+    googleMapsUrl: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(coordinate)}`,
+    appleMapsUrl: `https://maps.apple.com/?ll=${encodeURIComponent(coordinate)}&q=${encodeURIComponent(label)}`,
+  };
+}
+
 export type ServiceRequestNotificationLifecycle =
   | "submitted"
   | "under_review"

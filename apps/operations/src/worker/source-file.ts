@@ -48,9 +48,11 @@ export async function serveSourceFile(
   key:string,
   request:SourceFileRequest,
   disposition:"inline"|"attachment",
+  expectedEtag?:string,
 ):Promise<Response>{
   const head=await bucket.head(key);
   if(!head)throw new HTTPException(404,{message:"File not found"});
+  if(expectedEtag&&head.httpEtag!==expectedEtag)throw new HTTPException(409,{message:"File content no longer matches its audited version"});
 
   let requested:ByteRange|undefined;
   const rangeHeader=request.header("Range"),ifRange=request.header("If-Range");

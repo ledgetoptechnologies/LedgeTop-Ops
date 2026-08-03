@@ -99,6 +99,7 @@ import {
   processClientFolderGrantNotifications,
   revokeClientFolderGrant,
 } from "./client-folder-grants";
+import { registerJobBriefRoutes } from "./job-brief";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -969,6 +970,7 @@ app.get("/api/operations", async (c) => {
 });
 app.post("/api/operations", () => managedInProjectAlpha());
 app.patch("/api/operations/:id", () => managedInProjectAlpha());
+registerJobBriefRoutes(app);
 
 app.get("/api/tasks", async (c) => {
   const principal = c.get("principal");

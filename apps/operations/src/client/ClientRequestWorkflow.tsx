@@ -407,6 +407,7 @@ function ClientRequestDetail({
             poiJson={request.poi_points_json}
             latitude={request.latitude}
             longitude={request.longitude}
+            locationLabel={request.location_text}
           />
         </Card>
       </div>

@@ -1,12 +1,14 @@
 import { defineConfig, devices } from "@playwright/test";
 
+const fixturePort = Number(process.env.PLAYWRIGHT_PORT || 4174);
+
 export default defineConfig({
   testDir: "./test/browser",
   fullyParallel: true,
   retries: 0,
   reporter: "line",
   use: {
-    baseURL: "http://127.0.0.1:4174",
+    baseURL: `http://127.0.0.1:${fixturePort}`,
     channel: "msedge",
     headless: true,
     screenshot: "only-on-failure",
@@ -21,7 +23,7 @@ export default defineConfig({
       ? undefined
       : {
           command: "node test/browser-fixture-server.mjs",
-          url: "http://127.0.0.1:4174/health",
+          url: `http://127.0.0.1:${fixturePort}/health`,
           reuseExistingServer: false,
           timeout: 30_000,
         },

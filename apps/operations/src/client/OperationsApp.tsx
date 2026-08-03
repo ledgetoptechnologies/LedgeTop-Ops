@@ -17,6 +17,7 @@ import {
 } from "./operations-route";
 import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
+import { JobBriefPanel } from "./JobBriefPanel";
 
 type OperationsUser = SessionUser & {
   status: "Active";
@@ -552,7 +553,7 @@ function OperationsHub({ session }: { session: Session }) {
         ))}
       </nav>
       {section === "operations" && allowed(session.user, "operations.view") && (
-        <Operations />
+        <Operations session={session} />
       )}
       {section === "projects" && allowed(session.user, "projects.view") && (
         <Projects session={session} />
@@ -771,14 +772,21 @@ function ClientRequestQueue() {
   );
 }
 
-function Operations() {
+function Operations({ session }: { session: Session }) {
   const { data, error } = useLoad(
     () => api<{ operations: any[] }>("/api/operations"),
     [],
   );
+  const [selectedOperationId, setSelectedOperationId] = useState<string | null>(null);
+  const [briefDirty, setBriefDirty] = useState(false);
+  const selectBrief = useCallback((operationId: string | null) => {
+    if (briefDirty && !window.confirm("Discard the unsaved job brief draft?")) return;
+    setBriefDirty(false);
+    setSelectedOperationId(operationId);
+  }, [briefDirty]);
   return (
     <>
-      <ManagedNotice />
+      <ManagedNotice detail="Project Alpha manages operation identity, schedule, and assignment. LTDS Operations owns the versioned execution brief shown to assigned pilots." />
       <ErrorLine error={error} />
       <Card className="table-card">
         {data?.operations.length ? (
@@ -789,6 +797,7 @@ function Operations() {
                 <th>Business unit</th>
                 <th>Schedule</th>
                 <th>Status</th>
+                <th>Brief</th>
               </tr>
             </thead>
             <tbody>
@@ -818,6 +827,15 @@ function Operations() {
                       {item.status.replaceAll("_", " ")}
                     </StatusPill>
                   </td>
+                  <td>
+                    <button
+                      className="button-ghost button-small"
+                      aria-expanded={selectedOperationId === item.id}
+                      onClick={() => selectBrief(selectedOperationId === item.id ? null : item.id)}
+                    >
+                      {selectedOperationId === item.id ? "Close brief" : "View brief"}
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -829,6 +847,15 @@ function Operations() {
           />
         )}
       </Card>
+      {selectedOperationId && (
+        <JobBriefPanel
+          key={selectedOperationId}
+          operationId={selectedOperationId}
+          canReferenceProjectFiles={allowed(session.user, "delivery.browse")}
+          onDirtyChange={setBriefDirty}
+          close={() => selectBrief(null)}
+        />
+      )}
     </>
   );
 }

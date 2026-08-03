@@ -66,6 +66,9 @@ test("staff deep-link review shows all request evidence and sends an idempotent 
   await expect(page.getByText("Orthomosaic and progress photos")).toBeVisible();
   await expect(page.getByText("Alex Client · alex@example.com · 555-0100")).toBeVisible();
   await expect(page.locator(".mapboxgl-canvas")).toBeVisible();
+  await expect(page.getByRole("link", { name: "Google Maps" })).toHaveAttribute("href", /^https:\/\/www\.google\.com\/maps\/search/);
+  await expect(page.getByRole("link", { name: "Apple Maps" })).toHaveAttribute("href", /^https:\/\/maps\.apple\.com\//);
+  await expect(page.getByText(/not a guaranteed road or safe launch location/i)).toBeVisible();
   await expect(page.getByText("Revision 1 · submitted")).toBeVisible();
   await expect(page.getByText("review opened")).toBeVisible();
   await expect(page.getByRole("button", { name: "Add east parcel" })).toBeVisible();

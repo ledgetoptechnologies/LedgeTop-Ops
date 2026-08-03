@@ -1,6 +1,8 @@
 import { useEffect, useRef } from "react";
 import mapboxgl from "mapbox-gl";
 import type { Feature } from "geojson";
+import { buildNavigationDestination } from "@ltds/shared";
+import { NavigationActions } from "./NavigationActions";
 
 type Area = { type: "Polygon"; coordinates: [number, number][][] };
 type Poi = { longitude: number; latitude: number; label?: string | null };
@@ -20,12 +22,14 @@ export function RequestMapViewer({
   poiJson,
   latitude,
   longitude,
+  locationLabel,
 }: {
   token: string | null;
   areaJson?: string | null;
   poiJson?: string | null;
   latitude?: number | null;
   longitude?: number | null;
+  locationLabel?: string | null;
 }) {
   const element = useRef<HTMLDivElement | null>(null);
   const area = parse<Area | null>(areaJson, null);
@@ -35,6 +39,17 @@ export function RequestMapViewer({
     : latitude != null && longitude != null
       ? [{ latitude, longitude, label: "Requested location" }]
       : [];
+  const destinationGeometry = area || (allPois.length > 1
+    ? { type: "MultiPoint" as const, coordinates: allPois.map(poi => [poi.longitude, poi.latitude]) }
+    : allPois.length === 1
+      ? { type: "Point" as const, coordinates: [allPois[0]!.longitude, allPois[0]!.latitude] }
+      : null);
+  const destination = buildNavigationDestination({
+    geometry: destinationGeometry,
+    latitude,
+    longitude,
+    label: locationLabel,
+  });
   useEffect(() => {
     if (!token || !element.current) return;
     mapboxgl.accessToken = token;
@@ -132,6 +147,7 @@ export function RequestMapViewer({
           </ol>
         </section>
       )}
+      <NavigationActions destination={destination} />
     </div>
   );
 }

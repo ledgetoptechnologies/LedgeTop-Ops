@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { extname, resolve, sep } from "node:path";
 
 const root = resolve("dist/client");
-const port = 4174;
+const port = Number(process.env.PLAYWRIGHT_PORT || 4174);
 const contentTypes = new Map([
   [".css", "text/css; charset=utf-8"],
   [".html", "text/html; charset=utf-8"],

@@ -1,5 +1,7 @@
 # Production operations runbook
 
+See [Operational job briefs](job-briefs.md) for the versioned pilot-instruction data model, private KML/reference policy, assignment-scoped access, external navigation coordinate choice, and release sequence.
+
 This runbook records operator-owned controls that are not safely expressible in the application repository.
 
 ## Staging
