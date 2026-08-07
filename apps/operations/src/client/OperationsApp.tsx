@@ -2250,14 +2250,19 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     data: DeliveryLocationCollection | null;
     error: string;
   }>({ prefix: "", data: null, error: "" });
+  const locationRequestId = useRef(0);
   const reloadLocations = useCallback(async () => {
     const requestedPrefix = prefix;
+    const requestId = ++locationRequestId.current;
+    setLocationState({ prefix: requestedPrefix, data: null, error: "" });
     try {
       const value = await api<DeliveryLocationCollection>(
         `/api/delivery/folders/locations?prefix=${encodeURIComponent(requestedPrefix)}`,
       );
+      if (requestId !== locationRequestId.current) return;
       setLocationState({ prefix: requestedPrefix, data: value, error: "" });
     } catch (caught) {
+      if (requestId !== locationRequestId.current) return;
       setLocationState({
         prefix: requestedPrefix,
         data: null,
@@ -2776,12 +2781,14 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
       )}
       <ErrorLine error={error} />
       <ErrorLine error={locationError} />
-      <ImageLocationMap
-        key={prefix}
-        token={session.mapboxPublicToken}
-        locations={locations}
-        scopeLabel="this folder"
-      />
+      {locations && locations.points.length > 0 && (
+        <ImageLocationMap
+          key={prefix}
+          token={session.mapboxPublicToken}
+          locations={locations}
+          scopeLabel="this folder"
+        />
+      )}
       <div
         className="delivery-dropzone"
         onDragOver={(event) => {

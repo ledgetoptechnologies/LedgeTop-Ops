@@ -12,7 +12,15 @@ async function mockMapbox(page: Page) {
   await page.route("https://events.mapbox.com/**", route => route.fulfill({ status: 204, body: "" }));
 }
 
-async function mockDelivery(page: Page) {
+async function mockDelivery(page: Page, locationResponse: {
+  points: Array<{ latitude: number; longitude: number; imageCount: number }>;
+  imageCount: number;
+  truncated: boolean;
+} = {
+  points: [{ latitude: 44.501, longitude: -88.071, imageCount: 2 }],
+  imageCount: 2,
+  truncated: false,
+}) {
   await page.route("**/api/**", async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -36,11 +44,7 @@ async function mockDelivery(page: Page) {
       } });
     } else if (url.pathname === "/api/delivery/folders/locations") {
       expect(url.searchParams.get("prefix")).toBe("Jobs/Clients/Acme/Current/");
-      await route.fulfill({ json: {
-        points: [{ latitude: 44.501, longitude: -88.071, imageCount: 2 }],
-        imageCount: 2,
-        truncated: false,
-      } });
+      await route.fulfill({ json: locationResponse });
     } else if (url.pathname === "/api/delivery/folders") {
       await route.fulfill({ json: { prefix: "Jobs/Clients/Acme/Current/", folders: [], files: [], nextCursor: null } });
     } else if (url.pathname === "/api/delivery/trash") {
@@ -80,4 +84,14 @@ test("assigned Operations viewer gets a compact and fullscreen photo map without
     expect(box!.x).toBeGreaterThanOrEqual(0);
     expect(box!.x + box!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
   }
+});
+
+test("hides the entire photo map when the folder has no mapped photos", async ({ page }) => {
+  await mockDelivery(page, { points: [], imageCount: 0, truncated: false });
+  await page.goto("/delivery/Acme/Current");
+
+  await expect(page.locator(".file-browser")).toBeVisible();
+  await expect(page.locator(".image-location-map")).toHaveCount(0);
+  await expect(page.getByText("No image locations are available for this folder.")).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Image locations from available photo metadata" })).toHaveCount(0);
 });
