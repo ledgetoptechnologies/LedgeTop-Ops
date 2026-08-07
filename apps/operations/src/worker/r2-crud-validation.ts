@@ -11,7 +11,8 @@ export function normalizeCrudKey(value:unknown,folder=false):string{
   if(typeof value!=="string"||value.length>MAX_KEY_LENGTH||/[\0-\x1f\x7f]/.test(value))throw new HTTPException(400,{message:"A valid R2 path is required"});
   const normalized=value.trim().replace(/\\/g,"/").replace(/^\/+/,"").replace(/\/{2,}/g,"/"),clean=normalized.replace(/\/+$/,""),parts=clean.split("/");
   if(!clean||parts.some(part=>!part||part==="."||part===".."||reservedSegment(part)))throw new HTTPException(400,{message:"The R2 path is reserved or invalid"});
-  if(!clean.startsWith("Jobs/Clients/")||clean==="Jobs/Clients")throw new HTTPException(400,{message:"R2 paths must be under Jobs/Clients"});
+  const deliveryRoot=clean==="Jobs/Clients";
+  if((deliveryRoot&&!folder)||(!deliveryRoot&&!clean.startsWith("Jobs/Clients/")))throw new HTTPException(400,{message:"R2 paths must be under Jobs/Clients"});
   const result=folder?`${clean}/`:clean;
   if(new TextEncoder().encode(result).byteLength>MAX_R2_KEY_BYTES)throw new HTTPException(400,{message:"The R2 path exceeds the 1,024-byte storage limit"});
   return result;

@@ -1,11 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { assertSafeCrudDestination, normalizeCrudKey, operationsMultipartPartSize, requiresAdministratorForMutation } from "../src/worker/r2-crud-validation";
+import { assertSafeCrudDestination, browserUploadObjectKey, normalizeCrudKey, operationsMultipartPartSize, requiresAdministratorForMutation } from "../src/worker/r2-crud-validation";
 import { presignOperationsR2Part } from "../src/worker/r2-signing";
 
 describe("Operations R2 CRUD boundaries", () => {
   it("accepts only canonical Jobs/Clients paths", () => {
     expect(normalizeCrudKey("Jobs/Clients/Acme/photo.jpg")).toBe("Jobs/Clients/Acme/photo.jpg");
     expect(normalizeCrudKey("Jobs/Clients/Acme/Edited", true)).toBe("Jobs/Clients/Acme/Edited/");
+    expect(normalizeCrudKey("Jobs/Clients", true)).toBe("Jobs/Clients/");
+    expect(() => normalizeCrudKey("Jobs/Clients")).toThrow();
+    expect(browserUploadObjectKey("Jobs/Clients", "root-photo.jpg")).toEqual({
+      root: "Jobs/Clients/", relative: "root-photo.jpg", key: "Jobs/Clients/root-photo.jpg",
+    });
     expect(() => normalizeCrudKey("Jobs/Demo/photo.jpg")).toThrow();
     expect(() => normalizeCrudKey("Jobs/Clients/Acme/.previews/x.webp")).toThrow();
     expect(() => normalizeCrudKey("Jobs/Clients/Acme/DUMP/raw.jpg")).toThrow();
