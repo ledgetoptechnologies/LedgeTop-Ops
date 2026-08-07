@@ -33,7 +33,15 @@ control what those identities may do after authentication. Delivery
 Coordinators can browse and manage links without receiving R2 mutation
 permissions.
 
-Large staff uploads use short-lived, object-specific R2 authorization and browser-to-R2 transfer. The Worker validates the destination before issuing authorization and never accepts a caller-supplied unrestricted R2 key. Recursive copy, move, rename, replacement, and purge work is represented by durable operation records and processed in bounded, idempotent steps. Folder copy, move, and rename requests are rejected when the destination is the source itself or any descendant of the source, and the job processor repeats that validation before touching R2.
+Large authenticated staff uploads use same-origin, Worker-mediated multipart
+transfer into private R2 staging. The Worker validates the complete upload
+intent and every destination, checkpoints parts in D1, and never accepts a
+caller-supplied unrestricted R2 key or returns a public/presigned R2 URL.
+Recursive copy, move, rename, replacement, and purge work is represented by
+durable operation records and processed in bounded, idempotent steps. Folder
+copy, move, and rename requests are rejected when the destination is the source
+itself or any descendant of the source, and the job processor repeats that
+validation before touching R2.
 
 Staff can also import files from Dropbox via a separate OAuth PKCE flow on the Operations Worker. The import Workflow enumerates the selected Dropbox folder, downloads files in 8 MiB chunks, and uploads to R2 via multipart upload. Import credentials are AES-GCM encrypted with per-authorization binding and support refresh-token rotation. The import is gated by the `delivery.files.upload` permission and does not require administrator access. See [cloud transfers](cloud-transfer.md) for configuration.
 

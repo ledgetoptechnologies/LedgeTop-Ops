@@ -1,16 +1,24 @@
 import { HTTPException } from "hono/http-exception";
 import type { Hono } from "hono";
 import { requirePermission } from "./acl";
-import { decodeRef, encodeRef, mediaKind } from "./delivery";
+import { decodeRef, encodeRef, mediaKind, mime } from "./delivery";
 import { auditStatement, requireMutationSecurity } from "./request-security";
 import { executeSourceDelete } from "./source-delete";
 import { restoreTombstone } from "./trash";
 import type { Env, StaffPrincipal } from "./types";
 import type { Permission } from "@ltds/shared";
-import { presignOperationsR2Part } from "./r2-signing";
-import { canonicalThumbnailSourceKey, enqueueThumbnailJob, removeThumbnailStateForPath } from "./image-thumbnails";
+import { canonicalThumbnailSourceKey, enqueueThumbnailJob, removeThumbnailStateForPath, supportedThumbnailSource } from "./image-thumbnails";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
-import { assertSafeCrudDestination, normalizeCrudKey, operationsMultipartPartSize } from "./r2-crud-validation";
+import {
+  MAX_BROWSER_UPLOAD_BYTES,
+  MAX_BROWSER_UPLOAD_FILE_BYTES,
+  MAX_BROWSER_UPLOAD_FILES,
+  assertSafeCrudDestination,
+  browserUploadContentType,
+  browserUploadObjectKey,
+  normalizeCrudKey,
+  operationsMultipartPartSize,
+} from "./r2-crud-validation";
 import { artifactDirectory } from "./artifacts";
 import {
   DIRECT_DELIVERY_UPLOADS_DISABLED_CODE,
@@ -30,8 +38,9 @@ const BATCH = permission("delivery.files.batch");
 const RESTORE = permission("delivery.files.restore");
 const MAX_BATCH_OPERATIONS = 25;
 const MAX_JOB_OBJECTS_PER_TURN = 1;
-const MAX_UPLOAD_SIZE = 500 * 1024 ** 3;
 const DEFAULT_UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
+const MAX_ACTIVE_UPLOAD_SESSIONS = 10;
+const MAX_UPLOAD_CLEANUP_ATTEMPTS = 8;
 
 function jsonBody(c: any): Promise<any> {
   return c.req.json().catch(() => { throw new HTTPException(400, { message: "Request body must be JSON" }); });
@@ -91,16 +100,50 @@ async function targetFolderName(env:Env,target:string,conflict:ConflictPolicy):P
   throw new HTTPException(409,{message:"Could not find an available destination folder name"});
 }
 
-async function copyObject(env: Env, source: string, target: string, conflict: ConflictPolicy,roots?:{source:string;target:string}): Promise<{ target: string | null; skipped: boolean }> {
+async function copyObject(env: Env, source: string, target: string, conflict: ConflictPolicy,roots?:{source:string;target:string},allowRecovery=true): Promise<{ target: string | null; skipped: boolean }> {
   const sourceHead = await env.DATA_BUCKET.head(source); if (!sourceHead) throw new Error("source-disappeared");
   const resolved = await targetName(env, target, conflict); if (!resolved) return { target: null, skipped: true };
-  if(conflict==="replace"){const existing=await env.DATA_BUCKET.get(resolved);if(existing){const id=crypto.randomUUID(),recoveryKey=`Jobs/Clients/_ltds/replacements/${id}/${leaf(resolved)}`;await env.DATA_BUCKET.put(recoveryKey,existing.body,{httpMetadata:existing.httpMetadata,customMetadata:existing.customMetadata});await env.OPS_DB.prepare("INSERT INTO r2_replacement_recovery(id,original_key,recovery_key,purge_after) VALUES(?,?,?,datetime('now','+7 days'))").bind(id,resolved,recoveryKey).run();}}
   const indexed=await env.DELIVERY_DB.prepare("SELECT content_type,media_kind,stream_uid,stream_status,stream_error FROM file_index WHERE r2_key=?").bind(source).first<{content_type:string|null;media_kind:string;stream_uid:string|null;stream_status:string|null;stream_error:string|null}>();
   if(indexed&&indexed.media_kind!=="image")await env.OPS_DB.prepare("INSERT INTO r2_event_suppressions(object_key,event_kind,expires_at) VALUES(?,'create',datetime('now','+1 hour')) ON CONFLICT(object_key) DO UPDATE SET expires_at=excluded.expires_at").bind(resolved).run();
   const sourceObject = await env.DATA_BUCKET.get(source); if (!sourceObject) throw new Error("source-disappeared");
-  let written:R2Object;
-  if(roots&&source.endsWith("/manifest.json")&&source.includes("/.previews/")){const bytes=await sourceObject.arrayBuffer(),manifest=(()=>{try{return JSON.parse(new TextDecoder().decode(bytes))}catch{return null}})();if(manifest&&typeof manifest.sourceKey==="string"&&manifest.sourceKey.startsWith(roots.source)){manifest.sourceKey=`${roots.target}${manifest.sourceKey.slice(roots.source.length)}`;written=await env.DATA_BUCKET.put(resolved,JSON.stringify(manifest),{httpMetadata:{...sourceObject.httpMetadata,contentType:"application/json"},customMetadata:sourceObject.customMetadata});}else written=await env.DATA_BUCKET.put(resolved,bytes,{httpMetadata:sourceObject.httpMetadata,customMetadata:sourceObject.customMetadata});}
-  else written=await env.DATA_BUCKET.put(resolved, sourceObject.body, { httpMetadata: sourceObject.httpMetadata, customMetadata: sourceObject.customMetadata });
+  let recovery: { id: string; key: string } | null = null;
+  let replacementBaseline: string | null = null;
+  if (conflict === "replace") {
+    const existing = await env.DATA_BUCKET.get(resolved);
+    replacementBaseline = existing?.httpEtag || null;
+    if (existing && allowRecovery) {
+      const id = crypto.randomUUID();
+      const recoveryKey = `Jobs/Clients/_ltds/replacements/${id}/${leaf(resolved)}`;
+      await env.DATA_BUCKET.put(recoveryKey, existing.body, { httpMetadata: existing.httpMetadata, customMetadata: existing.customMetadata });
+      try {
+        await env.OPS_DB.prepare("INSERT INTO r2_replacement_recovery(id,original_key,recovery_key,purge_after) VALUES(?,?,?,datetime('now','+7 days'))")
+          .bind(id, resolved, recoveryKey).run();
+        recovery = { id, key: recoveryKey };
+      } catch (error) {
+        await env.DATA_BUCKET.delete(recoveryKey);
+        throw error;
+      }
+    }
+  }
+  const destinationMetadata = { ...(sourceObject.customMetadata || {}), ...(recovery ? { replacementRecoveryId: recovery.id } : {}) };
+  const replacementCondition = conflict === "replace"
+    ? new Headers(replacementBaseline ? { "If-Match": replacementBaseline } : { "If-None-Match": "*" })
+    : undefined;
+  let written:R2Object|null = null;
+  try {
+    if(roots&&source.endsWith("/manifest.json")&&source.includes("/.previews/")){const bytes=await sourceObject.arrayBuffer(),manifest=(()=>{try{return JSON.parse(new TextDecoder().decode(bytes))}catch{return null}})();if(manifest&&typeof manifest.sourceKey==="string"&&manifest.sourceKey.startsWith(roots.source)){manifest.sourceKey=`${roots.target}${manifest.sourceKey.slice(roots.source.length)}`;written=await env.DATA_BUCKET.put(resolved,JSON.stringify(manifest),{onlyIf:replacementCondition,httpMetadata:{...sourceObject.httpMetadata,contentType:"application/json"},customMetadata:destinationMetadata});}else written=await env.DATA_BUCKET.put(resolved,bytes,{onlyIf:replacementCondition,httpMetadata:sourceObject.httpMetadata,customMetadata:destinationMetadata});}
+    else written=await env.DATA_BUCKET.put(resolved, sourceObject.body, { onlyIf: replacementCondition, httpMetadata: sourceObject.httpMetadata, customMetadata: destinationMetadata });
+    if (!written) throw new HTTPException(409, { message: "The replacement destination changed before publication" });
+    if (recovery) await env.OPS_DB.prepare("UPDATE r2_replacement_recovery SET replacement_result_etag=? WHERE id=?")
+      .bind(written.httpEtag, recovery.id).run();
+  } catch (error) {
+    if (recovery && !written) {
+      await env.DATA_BUCKET.delete(recovery.key);
+      await env.OPS_DB.prepare("DELETE FROM r2_replacement_recovery WHERE id=?").bind(recovery.id).run();
+    }
+    throw error;
+  }
+  if (!written) throw new Error("replacement-write-missing");
   if(indexed)await env.DELIVERY_DB.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status,stream_error)
     VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,stream_uid=excluded.stream_uid,stream_status=excluded.stream_status,stream_error=excluded.stream_error,updated_at=datetime('now')`)
     .bind(resolved,written.httpEtag,written.size,written.uploaded.toISOString(),indexed.content_type,indexed.media_kind,indexed.stream_uid,indexed.stream_status,indexed.stream_error).run();
@@ -111,7 +154,7 @@ async function copyObject(env: Env, source: string, target: string, conflict: Co
   return { target: resolved, skipped: false };
 }
 
-async function copyPreparedArtifacts(env:Env,source:string,target:string,move:boolean):Promise<void>{const sourcePrefix=await artifactDirectory(source),targetPrefix=await artifactDirectory(target);let cursor:string|undefined;do{const page=await env.DATA_BUCKET.list({prefix:sourcePrefix,limit:100,cursor});for(const object of page.objects){const destination=`${targetPrefix}${object.key.slice(sourcePrefix.length)}`;await copyObject(env,object.key,destination,"replace",{source,target});if(move)await env.DATA_BUCKET.delete(object.key);}cursor=page.truncated?page.cursor:undefined;}while(cursor);}
+async function copyPreparedArtifacts(env:Env,source:string,target:string,move:boolean):Promise<void>{const sourcePrefix=await artifactDirectory(source),targetPrefix=await artifactDirectory(target);let cursor:string|undefined;do{const page=await env.DATA_BUCKET.list({prefix:sourcePrefix,limit:100,cursor});for(const object of page.objects){const destination=`${targetPrefix}${object.key.slice(sourcePrefix.length)}`;await copyObject(env,object.key,destination,"replace",{source,target},false);if(move)await env.DATA_BUCKET.delete(object.key);}cursor=page.truncated?page.cursor:undefined;}while(cursor);}
 
 async function revokeImpactedShares(env: Env, actorId: string, key: string): Promise<number> {
   const prefix = prefixFor(key);
@@ -197,6 +240,210 @@ async function startJob(c:any,jobId:string,instanceId=jobId):Promise<void>{try{a
 
 export async function purgeReplacementRecovery(env:Env):Promise<number>{const rows=await env.OPS_DB.prepare("SELECT id,recovery_key FROM r2_replacement_recovery WHERE datetime(purge_after)<=datetime('now') ORDER BY purge_after LIMIT 25").all<{id:string;recovery_key:string}>();for(const row of rows.results){await env.DATA_BUCKET.delete(row.recovery_key);await env.OPS_DB.prepare("DELETE FROM r2_replacement_recovery WHERE id=?").bind(row.id).run();}await env.OPS_DB.prepare("DELETE FROM r2_event_suppressions WHERE datetime(expires_at)<=datetime('now')").run();return rows.results.length;}
 
+type BrowserUploadCollisionPolicy = "fail" | "rename" | "replace";
+interface BrowserUploadIntentFile {
+  ordinal: number;
+  relativePath: string;
+  key: string;
+  size: number;
+  contentType: string;
+}
+interface BrowserUploadSessionRow {
+  id: string;
+  upload_id: string;
+  object_key: string;
+  staging_key: string;
+  expected_size: number;
+  content_type: string;
+  part_size: number;
+  status: "active" | "completing" | "completed" | "aborted" | "expired";
+  created_by: string;
+  expires_at: string;
+  intent_id: string;
+  intent_ordinal: number;
+  conflict_policy: BrowserUploadCollisionPolicy;
+  result_key: string | null;
+  result_etag: string | null;
+  completion_claimed_at: string | null;
+  destination_baseline: string;
+  replacement_recovery_id: string | null;
+  cleanup_status: "not_due" | "pending" | "complete" | "failed";
+  cleanup_attempts: number;
+  cleanup_error: string | null;
+}
+
+function browserCollisionPolicy(value: unknown): BrowserUploadCollisionPolicy {
+  if (value === undefined || value === "fail") return "fail";
+  if (value === "rename" || value === "replace") return value;
+  throw new HTTPException(400, { message: "Upload collision policy is invalid" });
+}
+
+async function browserUploadFingerprint(value: unknown): Promise<string> {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify(value)));
+  return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function browserIdempotencyKey(request: Request): string {
+  const value = request.headers.get("Idempotency-Key") || "";
+  if (!/^[A-Za-z0-9_-]{16,128}$/.test(value)) throw new HTTPException(400, { message: "A valid Idempotency-Key is required" });
+  return value;
+}
+
+function sessionResponse(session: BrowserUploadSessionRow, parts: Array<{part_number:number;etag:string;size:number}> = []) {
+  return {
+    sessionId: session.id,
+    key: session.result_key || session.object_key,
+    partSize: session.part_size,
+    expiresAt: session.expires_at,
+    status: session.status,
+    etag: session.result_etag,
+    cleanupStatus: session.cleanup_status,
+    cleanupAttempts: session.cleanup_attempts,
+    cleanupError: session.cleanup_error,
+    parts: parts.map((part) => ({ partNumber: part.part_number, etag: part.etag, size: part.size })),
+  };
+}
+
+async function uploadSession(env: Env, sessionId: string, principalId: string): Promise<BrowserUploadSessionRow | null> {
+  return env.OPS_DB.prepare(`SELECT id,upload_id,object_key,staging_key,expected_size,content_type,part_size,status,
+    created_by,expires_at,intent_id,intent_ordinal,conflict_policy,result_key,result_etag,completion_claimed_at,
+    destination_baseline,replacement_recovery_id,cleanup_status,cleanup_attempts,cleanup_error
+    FROM r2_upload_sessions WHERE id=? AND created_by=?`).bind(sessionId, principalId).first<BrowserUploadSessionRow>();
+}
+
+async function refreshFileIndexAndThumbnail(env: Env, object: R2Object, contentType: string): Promise<void> {
+  await env.DELIVERY_DB.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind)
+    VALUES(?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,
+    uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,
+    stream_uid=NULL,stream_status=CASE WHEN excluded.media_kind='video' THEN 'disabled' ELSE NULL END,
+    stream_upload_url=NULL,stream_upload_offset=0,stream_error=NULL,updated_at=datetime('now')`)
+    .bind(object.key, object.httpEtag, object.size, object.uploaded.toISOString(), contentType, mediaKind(object.key)).run();
+  if (canonicalThumbnailSourceKey(object.key) && supportedThumbnailSource(object.key, contentType)) {
+    await enqueueThumbnailJob(env, {
+      sourceKey: object.key,
+      sourceEtag: object.httpEtag,
+      sourceSize: object.size,
+      eventTime: object.uploaded.toISOString(),
+    });
+  } else if (canonicalThumbnailSourceKey(object.key)) {
+    await removeThumbnailStateForPath(env, object.key);
+  }
+}
+
+async function finalizeBrowserUpload(
+  env: Env,
+  session: BrowserUploadSessionRow,
+  object: R2Object,
+): Promise<void> {
+  await refreshFileIndexAndThumbnail(env, object, session.content_type);
+  const completed = await env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET status='completed',result_key=?,result_etag=?,
+    completed_at=COALESCE(completed_at,datetime('now')),completion_claimed_at=NULL,
+    cleanup_status='pending',cleanup_next_attempt_at=datetime('now'),cleanup_claimed_at=NULL,cleanup_error=NULL
+    WHERE id=? AND status='completing'`)
+    .bind(object.key, object.httpEtag, session.id).run();
+  if (completed.meta.changes !== 1) throw new HTTPException(409, { message: "Upload completion no longer owns the session" });
+  await env.OPS_DB.batch([
+    env.OPS_DB.prepare(`UPDATE browser_upload_intent_files SET status='completed',result_key=?,result_etag=?,
+      error_code=NULL,updated_at=datetime('now') WHERE intent_id=? AND ordinal=?`)
+      .bind(object.key, object.httpEtag, session.intent_id, session.intent_ordinal),
+  ]);
+  await env.OPS_DB.prepare(`UPDATE browser_upload_intents SET status='completed',completed_at=datetime('now'),updated_at=datetime('now')
+    WHERE id=? AND status='active' AND NOT EXISTS (
+      SELECT 1 FROM browser_upload_intent_files WHERE intent_id=? AND status<>'completed'
+    )`).bind(session.intent_id, session.intent_id).run();
+}
+
+interface BrowserUploadCleanupRow {
+  id: string;
+  upload_id: string;
+  staging_key: string | null;
+  cleanup_attempts: number;
+}
+
+function knownTerminalMultipartError(error: unknown): boolean {
+  const code = error && typeof error === "object" && "code" in error ? String((error as {code:unknown}).code) : "";
+  const message = error instanceof Error ? error.message : String(error);
+  return code === "NoSuchUpload" || /no such upload|unknown multipart upload|already (?:completed|aborted)|not found/i.test(message);
+}
+
+function cleanupErrorMessage(error: unknown): string {
+  return (error instanceof Error ? error.message : "Unknown upload cleanup error").replace(/[\r\n\t]+/g, " ").slice(0, 240);
+}
+
+export async function cleanupBrowserUploadSessions(env: Env, limit = 25, onlySessionId?: string): Promise<number> {
+  const boundedLimit = Math.max(1, Math.min(100, limit));
+  const rows = onlySessionId
+    ? await env.OPS_DB.prepare(`SELECT id FROM r2_upload_sessions WHERE id=? AND status IN ('completed','aborted','expired')
+        AND cleanup_status='pending' AND cleanup_attempts<? AND datetime(COALESCE(cleanup_next_attempt_at,'1970-01-01'))<=datetime('now')
+        AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at)<=datetime('now','-5 minutes')) LIMIT 1`)
+      .bind(onlySessionId, MAX_UPLOAD_CLEANUP_ATTEMPTS).all<{id:string}>()
+    : await env.OPS_DB.prepare(`SELECT id FROM r2_upload_sessions WHERE status IN ('completed','aborted','expired')
+        AND cleanup_status='pending' AND cleanup_attempts<? AND datetime(COALESCE(cleanup_next_attempt_at,'1970-01-01'))<=datetime('now')
+        AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at)<=datetime('now','-5 minutes'))
+        ORDER BY cleanup_next_attempt_at,id LIMIT ?`)
+      .bind(MAX_UPLOAD_CLEANUP_ATTEMPTS, boundedLimit).all<{id:string}>();
+  let cleaned = 0;
+  for (const candidate of rows.results) {
+    const claimed = await env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET cleanup_claimed_at=datetime('now'),
+      cleanup_attempts=cleanup_attempts+1 WHERE id=? AND status IN ('completed','aborted','expired')
+      AND cleanup_status='pending' AND cleanup_attempts<?
+      AND datetime(COALESCE(cleanup_next_attempt_at,'1970-01-01'))<=datetime('now')
+      AND (cleanup_claimed_at IS NULL OR datetime(cleanup_claimed_at)<=datetime('now','-5 minutes'))`)
+      .bind(candidate.id, MAX_UPLOAD_CLEANUP_ATTEMPTS).run();
+    if (claimed.meta.changes !== 1) continue;
+    const row = await env.OPS_DB.prepare("SELECT id,upload_id,staging_key,cleanup_attempts FROM r2_upload_sessions WHERE id=?")
+      .bind(candidate.id).first<BrowserUploadCleanupRow>();
+    if (!row) continue;
+    try {
+      if (row.staging_key) {
+        try {
+          await env.DATA_BUCKET.resumeMultipartUpload(row.staging_key, row.upload_id).abort();
+        } catch (error) {
+          if (!knownTerminalMultipartError(error)) throw error;
+        }
+        await env.DATA_BUCKET.delete(row.staging_key);
+        if (await env.DATA_BUCKET.head(row.staging_key)) throw new Error("Upload staging object remained after cleanup");
+      }
+      await env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET cleanup_status='complete',cleanup_next_attempt_at=NULL,
+        cleanup_claimed_at=NULL,cleanup_error=NULL WHERE id=?`).bind(row.id).run();
+      cleaned += 1;
+    } catch (error) {
+      const terminal = row.cleanup_attempts >= MAX_UPLOAD_CLEANUP_ATTEMPTS;
+      const delayMinutes = Math.min(60, Math.max(1, row.cleanup_attempts * 5));
+      await env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET cleanup_status=?,
+        cleanup_next_attempt_at=CASE WHEN ? THEN NULL ELSE datetime('now','+' || ? || ' minutes') END,
+        cleanup_claimed_at=NULL,cleanup_error=? WHERE id=?`)
+        .bind(terminal ? "failed" : "pending", terminal ? 1 : 0, delayMinutes, cleanupErrorMessage(error), row.id).run();
+    }
+  }
+  return cleaned;
+}
+
+export async function expireBrowserUploadSessions(env: Env, limit = 25): Promise<number> {
+  const rows = await env.OPS_DB.prepare(`SELECT id,upload_id,object_key,staging_key,intent_id,intent_ordinal FROM r2_upload_sessions
+    WHERE datetime(expires_at)<=datetime('now') AND (
+      status='active' OR (status='completing' AND datetime(completion_claimed_at)<=datetime('now','-5 minutes'))
+    ) ORDER BY expires_at LIMIT ?`)
+    .bind(Math.max(1, Math.min(100, limit))).all<{id:string;upload_id:string;object_key:string;staging_key:string|null;intent_id:string|null;intent_ordinal:number|null}>();
+  let expired = 0;
+  for (const row of rows.results) {
+    const changed = await env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET status='expired',completion_claimed_at=NULL,
+      cleanup_status='pending',cleanup_next_attempt_at=datetime('now'),cleanup_claimed_at=NULL,cleanup_error=NULL WHERE id=?
+      AND datetime(expires_at)<=datetime('now') AND (
+        status='active' OR (status='completing' AND datetime(completion_claimed_at)<=datetime('now','-5 minutes'))
+      )`).bind(row.id).run();
+    if (!changed.meta.changes) continue;
+    if (row.intent_id !== null && row.intent_ordinal !== null) {
+      await env.OPS_DB.prepare("UPDATE browser_upload_intent_files SET status='aborted',error_code='expired',updated_at=datetime('now') WHERE intent_id=? AND ordinal=? AND status<>'completed'")
+        .bind(row.intent_id, row.intent_ordinal).run();
+    }
+    await cleanupBrowserUploadSessions(env, 1, row.id);
+    expired += 1;
+  }
+  await env.OPS_DB.prepare("UPDATE browser_upload_intents SET status='expired',updated_at=datetime('now') WHERE status='active' AND datetime(expires_at)<=datetime('now')").run();
+  return expired;
+}
+
 export function registerR2CrudRoutes(app: App): void {
   const requireDirectDeliveryUploads = async (c: any, next: () => Promise<void>) => {
     if (!directDeliveryUploadsCapability(c.env).enabled) {
@@ -209,16 +456,6 @@ export function registerR2CrudRoutes(app: App): void {
   };
   app.use("/api/delivery/uploads", requireDirectDeliveryUploads);
   app.use("/api/delivery/uploads/*", requireDirectDeliveryUploads);
-  const guardUploadSession = async (c: any, next: () => Promise<void>) => {
-    if (c.req.method === "GET") return next();
-    const session = await c.env.OPS_DB.prepare("SELECT object_key,created_by,status,expires_at FROM r2_upload_sessions WHERE id=?").bind(c.req.param("id")).first() as { object_key: string; created_by: string; status: string; expires_at: string } | null;
-    const principal = c.get("principal");
-    if (!session || session.created_by !== principal.id || session.status !== "active" || Date.parse(session.expires_at) <= Date.now()) throw new HTTPException(404, { message: "Upload session not found or expired" });
-    await requireCrudPermission(c.env, principal, UPLOAD, session.object_key);
-    await next();
-  };
-  app.use("/api/delivery/uploads/:id", guardUploadSession);
-  app.use("/api/delivery/uploads/:id/*", guardUploadSession);
   app.use("/api/delivery/fs/trash/:id/restore", async (c, next) => {
     const tombstone = await c.env.DELIVERY_DB.prepare("SELECT physical_key FROM delivery_tombstones WHERE id=? AND restored_at IS NULL").bind(c.req.param("id")).first<{ physical_key: string }>();
     if (!tombstone) throw new HTTPException(404, { message: "Trash item not found or already restored" });
@@ -247,20 +484,401 @@ export function registerR2CrudRoutes(app: App): void {
   app.get("/api/delivery/fs/jobs/:id", async c => { const principal = c.get("principal"); await requirePermission(c.env, principal, permission("delivery.browse")); const job = await c.env.OPS_DB.prepare("SELECT id,kind,status,source_key,target_key,conflict_policy,total_items,processed_items,error_code,error_message,created_at,updated_at,completed_at FROM r2_operation_jobs WHERE id=? AND requested_by=?").bind(c.req.param("id"), principal.id).first(); if (!job) throw new HTTPException(404, { message: "Operation job not found" }); return c.json({ job }); });
   app.post("/api/delivery/fs/jobs/:id/cancel",async c=>{const principal=c.get("principal");await requirePermission(c.env,principal,BATCH);const result=await c.env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='cancelled',updated_at=datetime('now'),lease_until=NULL WHERE id=? AND requested_by=? AND status IN ('queued','running')").bind(c.req.param("id"),principal.id).run();if(result.meta.changes!==1)throw new HTTPException(409,{message:"Operation cannot be cancelled"});return c.json({success:true});});
   app.post("/api/delivery/fs/jobs/:id/retry",async c=>{const principal=c.get("principal");await requirePermission(c.env,principal,BATCH);const result=await c.env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='queued',error_code=NULL,error_message=NULL,updated_at=datetime('now'),lease_until=NULL WHERE id=? AND requested_by=? AND status='failed'").bind(c.req.param("id"),principal.id).run();if(result.meta.changes!==1)throw new HTTPException(409,{message:"Only failed operations can be retried"});await startJob(c,c.req.param("id"),`${c.req.param("id")}-${crypto.randomUUID()}`);return c.json({success:true,status:"queued"});});
-  app.get("/api/delivery/fs/replacements",async c=>{const principal=c.get("principal");await requirePermission(c.env,principal,permission("delivery.delete"));const rows=await c.env.OPS_DB.prepare("SELECT id,original_key,created_at,purge_after FROM r2_replacement_recovery ORDER BY created_at DESC LIMIT 100").all();return c.json({items:rows.results});});
-  app.post("/api/delivery/fs/replacements/:id/restore",async c=>{const principal=c.get("principal");await requirePermission(c.env,principal,permission("delivery.delete"));const row=await c.env.OPS_DB.prepare("SELECT id,original_key,recovery_key FROM r2_replacement_recovery WHERE id=?").bind(c.req.param("id")).first<{id:string;original_key:string;recovery_key:string}>();if(!row)throw new HTTPException(404,{message:"Replacement recovery item not found"});const object=await c.env.DATA_BUCKET.get(row.recovery_key);if(!object)throw new HTTPException(410,{message:"Replacement recovery object is unavailable"});const restored=await c.env.DATA_BUCKET.put(row.original_key,object.body,{httpMetadata:object.httpMetadata,customMetadata:object.customMetadata});if(canonicalThumbnailSourceKey(row.original_key)&&mediaKind(row.original_key)==="image")await enqueueThumbnailJob(c.env,{sourceKey:row.original_key,sourceEtag:restored.httpEtag,sourceSize:restored.size,eventTime:restored.uploaded.toISOString()});await c.env.DATA_BUCKET.delete(row.recovery_key);await c.env.OPS_DB.prepare("DELETE FROM r2_replacement_recovery WHERE id=?").bind(row.id).run();await audit(c.env,c.req.raw,principal,"delivery.replacement.restored",row.original_key,{recoveryId:row.id});return c.json({success:true});});
+  app.get("/api/delivery/fs/replacements", async c => {
+    const principal = c.get("principal");
+    if (c.get("administrator")) await requirePermission(c.env, principal, permission("delivery.delete"));
+    const rows = await c.env.OPS_DB.prepare(`SELECT id,original_key,created_at,purge_after
+      FROM r2_replacement_recovery ORDER BY created_at DESC LIMIT 500`)
+      .all<{id:string;original_key:string;created_at:string;purge_after:string}>();
+    if (c.get("administrator")) return c.json({ items: rows.results.slice(0, 100) });
+    const visible: typeof rows.results = [];
+    for (const row of rows.results) {
+      try {
+        await requireCrudPermission(c.env, principal, permission("delivery.delete"), row.original_key);
+        visible.push(row);
+        if (visible.length >= 100) break;
+      } catch (error) {
+        if (!(error instanceof HTTPException) || (error.status !== 403 && error.status !== 404)) throw error;
+      }
+    }
+    return c.json({ items: visible });
+  });
+  app.post("/api/delivery/fs/replacements/:id/restore", async c => {
+    const principal = c.get("principal");
+    const row = await c.env.OPS_DB.prepare(`SELECT id,original_key,recovery_key,replacement_result_etag
+      FROM r2_replacement_recovery WHERE id=?`).bind(c.req.param("id"))
+      .first<{id:string;original_key:string;recovery_key:string;replacement_result_etag:string|null}>();
+    if (!row) throw new HTTPException(404, { message: "Replacement recovery item not found" });
+    await requireCrudPermission(c.env, principal, RESTORE, row.original_key);
+    let current = await c.env.DATA_BUCKET.head(row.original_key);
+    const alreadyRestored = current?.customMetadata?.replacementRecoveryRestore === row.id;
+    if (!row.replacement_result_etag && current?.customMetadata?.replacementRecoveryId === row.id) {
+      row.replacement_result_etag = current.httpEtag;
+      await c.env.OPS_DB.prepare("UPDATE r2_replacement_recovery SET replacement_result_etag=? WHERE id=? AND replacement_result_etag IS NULL")
+        .bind(current.httpEtag, row.id).run();
+    }
+    let restored: R2Object;
+    if (alreadyRestored && current) {
+      restored = current;
+    } else {
+      if (!row.replacement_result_etag || !current || current.httpEtag !== row.replacement_result_etag) {
+        throw new HTTPException(409, { message: "The replacement destination changed; recovery was preserved" });
+      }
+      const object = await c.env.DATA_BUCKET.get(row.recovery_key);
+      if (!object) throw new HTTPException(410, { message: "Replacement recovery object is unavailable" });
+      const condition = new Headers({ "If-Match": row.replacement_result_etag });
+      const published = await c.env.DATA_BUCKET.put(row.original_key, object.body, {
+        onlyIf: condition,
+        httpMetadata: object.httpMetadata,
+        customMetadata: { ...(object.customMetadata || {}), replacementRecoveryRestore: row.id },
+      });
+      if (!published) throw new HTTPException(409, { message: "The replacement destination changed; recovery was preserved" });
+      restored = published;
+      current = published;
+    }
+    const contentType = restored.httpMetadata?.contentType || mime(row.original_key);
+    await refreshFileIndexAndThumbnail(c.env, restored, contentType);
+    await c.env.DATA_BUCKET.delete(row.recovery_key);
+    await c.env.OPS_DB.prepare("DELETE FROM r2_replacement_recovery WHERE id=?").bind(row.id).run();
+    await audit(c.env, c.req.raw, principal, "delivery.replacement.restored", row.original_key, { recoveryId: row.id });
+    return c.json({ success: true, etag: current.httpEtag });
+  });
 
-  app.post("/api/delivery/uploads", async c => { const principal = c.get("principal"); const body = await jsonBody(c); const key = normalizeCrudKey(body.key, false); await requireCrudPermission(c.env, principal, UPLOAD, key); const size = Number(body.size); if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_UPLOAD_SIZE) throw new HTTPException(400, { message: "Upload size must be between 1 byte and 500 GiB" }); const contentType = typeof body.contentType === "string" && body.contentType.length <= 200 ? body.contentType : "application/octet-stream"; const upload = await c.env.DATA_BUCKET.createMultipartUpload(key, { httpMetadata: { contentType } }); const id = crypto.randomUUID(); const expires = new Date(Date.now() + DEFAULT_UPLOAD_TTL_MS).toISOString(); await c.env.OPS_DB.prepare("INSERT INTO r2_upload_sessions(id,upload_id,object_key,expected_size,content_type,created_by,expires_at) VALUES(?,?,?,?,?,?,?)").bind(id, upload.uploadId, key, size, contentType, principal.id, expires).run(); await audit(c.env, c.req.raw, principal, "delivery.upload.created", key, { sessionId: id }); return c.json({ sessionId: id, key, uploadId: upload.uploadId, partSize: operationsMultipartPartSize(size), expiresAt: expires }, 201); });
+  app.post("/api/delivery/uploads/intents", async c => {
+    const principal = c.get("principal");
+    const idempotencyKey = browserIdempotencyKey(c.req.raw);
+    const body = await jsonBody(c);
+    const collisionPolicy = browserCollisionPolicy(body.collisionPolicy);
+    if (!Array.isArray(body.files) || body.files.length < 1 || body.files.length > MAX_BROWSER_UPLOAD_FILES) {
+      throw new HTTPException(400, { message: `Upload intents require 1-${MAX_BROWSER_UPLOAD_FILES} files` });
+    }
+    const normalized: BrowserUploadIntentFile[] = body.files.map((file: any, ordinal: number) => {
+      const path = browserUploadObjectKey(body.rootPrefix, file?.relativePath);
+      const size = Number(file?.size);
+      if (!Number.isSafeInteger(size) || size <= 0 || size > MAX_BROWSER_UPLOAD_FILE_BYTES) {
+        throw new HTTPException(400, { message: "Upload file size is invalid" });
+      }
+      return { ordinal, relativePath: path.relative, key: path.key, size, contentType: browserUploadContentType(file?.contentType) };
+    });
+    if (new Set(normalized.map((file) => file.relativePath)).size !== normalized.length) {
+      throw new HTTPException(400, { message: "Upload relative paths must be unique" });
+    }
+    const totalBytes = normalized.reduce((sum, file) => sum + file.size, 0);
+    if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_BROWSER_UPLOAD_BYTES) {
+      throw new HTTPException(400, { message: "Upload batch size is too large" });
+    }
+    const root = browserUploadObjectKey(body.rootPrefix, normalized[0]!.relativePath).root;
+    await requireCrudPermission(c.env, principal, UPLOAD, root);
+    for (const file of normalized) await requireCrudPermission(c.env, principal, UPLOAD, file.key);
+    const fingerprint = await browserUploadFingerprint({ root, collisionPolicy, files: normalized.map(({ relativePath, size, contentType }) => ({ relativePath, size, contentType })) });
+    const existing = await c.env.OPS_DB.prepare("SELECT id,request_fingerprint,status,expires_at FROM browser_upload_intents WHERE created_by=? AND idempotency_key=?")
+      .bind(principal.id, idempotencyKey).first<{id:string;request_fingerprint:string;status:string;expires_at:string}>();
+    if (existing) {
+      if (existing.request_fingerprint !== fingerprint) throw new HTTPException(409, { message: "Idempotency-Key was already used for a different upload" });
+      return c.json({ intentId: existing.id, status: existing.status, expiresAt: existing.expires_at, fileCount: normalized.length, totalBytes });
+    }
+    const id = crypto.randomUUID();
+    const expires = new Date(Date.now() + DEFAULT_UPLOAD_TTL_MS).toISOString();
+    try {
+      await c.env.OPS_DB.batch([
+        c.env.OPS_DB.prepare(`INSERT INTO browser_upload_intents
+          (id,created_by,idempotency_key,request_fingerprint,root_prefix,collision_policy,file_count,total_bytes,expires_at)
+          VALUES(?,?,?,?,?,?,?,?,?)`).bind(id, principal.id, idempotencyKey, fingerprint, root, collisionPolicy, normalized.length, totalBytes, expires),
+        ...normalized.map((file) => c.env.OPS_DB.prepare(`INSERT INTO browser_upload_intent_files
+          (intent_id,ordinal,relative_path,object_key,expected_size,content_type) VALUES(?,?,?,?,?,?)`)
+          .bind(id, file.ordinal, file.relativePath, file.key, file.size, file.contentType)),
+      ]);
+    } catch (error) {
+      const replay = await c.env.OPS_DB.prepare("SELECT id,request_fingerprint,status,expires_at FROM browser_upload_intents WHERE created_by=? AND idempotency_key=?")
+        .bind(principal.id, idempotencyKey).first<{id:string;request_fingerprint:string;status:string;expires_at:string}>();
+      if (!replay) throw error;
+      if (replay.request_fingerprint !== fingerprint) throw new HTTPException(409, { message: "Idempotency-Key was already used for a different upload" });
+      return c.json({ intentId: replay.id, status: replay.status, expiresAt: replay.expires_at, fileCount: normalized.length, totalBytes });
+    }
+    await audit(c.env, c.req.raw, principal, "delivery.upload.intent.created", id, { fileCount: normalized.length, totalBytes, collisionPolicy });
+    return c.json({ intentId: id, status: "active", expiresAt: expires, fileCount: normalized.length, totalBytes }, 201);
+  });
 
-  app.post("/api/delivery/uploads/:id/parts/:partNumber/ticket", async c => {const principal=c.get("principal");await requirePermission(c.env,principal,UPLOAD);const partNumber=Number(c.req.param("partNumber"));if(!Number.isSafeInteger(partNumber)||partNumber<1||partNumber>10_000)throw new HTTPException(400,{message:"A valid upload part is required"});const session=await c.env.OPS_DB.prepare("SELECT upload_id,object_key FROM r2_upload_sessions WHERE id=? AND created_by=? AND status='active' AND datetime(expires_at)>datetime('now')").bind(c.req.param("id"),principal.id).first<{upload_id:string;object_key:string}>();if(!session)throw new HTTPException(404,{message:"Upload session not found or expired"});if(!c.env.R2_ACCESS_KEY_ID||!c.env.R2_SECRET_ACCESS_KEY)throw new HTTPException(503,{message:"Direct R2 uploads are not configured"});const url=await presignOperationsR2Part({accountId:c.env.R2_ACCOUNT_ID,bucket:c.env.R2_BUCKET_NAME,key:session.object_key,uploadId:session.upload_id,partNumber,accessKeyId:c.env.R2_ACCESS_KEY_ID,secretAccessKey:c.env.R2_SECRET_ACCESS_KEY,expiresSeconds:300});return c.json({url,expiresIn:300});});
+  app.post("/api/delivery/uploads", async c => {
+    const principal = c.get("principal");
+    const body = await jsonBody(c);
+    const ordinal = Number(body.ordinal);
+    if (typeof body.intentId !== "string" || !Number.isSafeInteger(ordinal) || ordinal < 0 || ordinal >= MAX_BROWSER_UPLOAD_FILES) {
+      throw new HTTPException(400, { message: "A valid upload intent item is required" });
+    }
+    const file = await c.env.OPS_DB.prepare(`SELECT i.id intent_id,i.collision_policy,i.expires_at,i.status intent_status,
+      f.ordinal,f.object_key,f.expected_size,f.content_type,f.session_id
+      FROM browser_upload_intents i JOIN browser_upload_intent_files f ON f.intent_id=i.id
+      WHERE i.id=? AND i.created_by=? AND f.ordinal=?`).bind(body.intentId, principal.id, ordinal)
+      .first<{intent_id:string;collision_policy:BrowserUploadCollisionPolicy;expires_at:string;intent_status:string;ordinal:number;object_key:string;expected_size:number;content_type:string;session_id:string|null}>();
+    if (!file || file.intent_status !== "active" || Date.parse(file.expires_at) <= Date.now()) throw new HTTPException(404, { message: "Upload intent not found or expired" });
+    await requireCrudPermission(c.env, principal, UPLOAD, file.object_key);
+    if (file.session_id) {
+      const existing = await uploadSession(c.env, file.session_id, principal.id);
+      if (existing) return c.json(sessionResponse(existing));
+    }
+    let target = file.object_key;
+    if (file.collision_policy === "fail" && await c.env.DATA_BUCKET.head(target)) throw new HTTPException(409, { message: "The upload destination already exists" });
+    if (file.collision_policy === "rename") target = (await targetName(c.env, target, "rename"))!;
+    const destinationAtOpen = file.collision_policy === "replace" ? await c.env.DATA_BUCKET.head(target) : null;
+    const destinationBaseline = file.collision_policy === "replace"
+      ? destinationAtOpen ? `etag:${destinationAtOpen.httpEtag}` : "absent"
+      : "unknown";
+    const id = crypto.randomUUID();
+    const stagingKey = `_ltds/browser-uploads/${file.intent_id}/${id}`;
+    const partSize = operationsMultipartPartSize(file.expected_size);
+    const upload = await c.env.DATA_BUCKET.createMultipartUpload(stagingKey, {
+      httpMetadata: { contentType: file.content_type },
+      customMetadata: { browserUploadSession: id },
+    });
+    try {
+      const created = await c.env.OPS_DB.batch([
+        c.env.OPS_DB.prepare(`INSERT INTO r2_upload_sessions
+          (id,upload_id,object_key,expected_size,content_type,created_by,expires_at,intent_id,intent_ordinal,staging_key,part_size,conflict_policy,destination_baseline)
+          SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?
+          WHERE (SELECT COUNT(*) FROM r2_upload_sessions
+            WHERE created_by=? AND status IN ('active','completing') AND datetime(expires_at)>datetime('now')) < ?`)
+          .bind(id, upload.uploadId, target, file.expected_size, file.content_type,
+            principal.id, file.expires_at, file.intent_id, file.ordinal, stagingKey, partSize, file.collision_policy,
+            destinationBaseline, principal.id, MAX_ACTIVE_UPLOAD_SESSIONS),
+        c.env.OPS_DB.prepare(`UPDATE browser_upload_intent_files SET status='uploading',session_id=?,updated_at=datetime('now')
+          WHERE intent_id=? AND ordinal=? AND session_id IS NULL
+            AND EXISTS (SELECT 1 FROM r2_upload_sessions WHERE id=? AND created_by=? AND status='active')`)
+          .bind(id, file.intent_id, file.ordinal, id, principal.id),
+      ]);
+      if (created[0]?.meta.changes !== 1) {
+        await upload.abort();
+        throw new HTTPException(429, { message: "Too many active upload sessions" });
+      }
+      if (created[1]?.meta.changes !== 1) {
+        await c.env.OPS_DB.prepare("DELETE FROM r2_upload_sessions WHERE id=? AND status='active'").bind(id).run();
+        await upload.abort();
+        const replay = await c.env.OPS_DB.prepare("SELECT session_id FROM browser_upload_intent_files WHERE intent_id=? AND ordinal=?")
+          .bind(file.intent_id, file.ordinal).first<{session_id:string|null}>();
+        if (replay?.session_id) {
+          const existing = await uploadSession(c.env, replay.session_id, principal.id);
+          if (existing) return c.json(sessionResponse(existing));
+        }
+        throw new HTTPException(409, { message: "Upload intent item is already associated with another session" });
+      }
+    } catch (error) {
+      if (!(error instanceof HTTPException && error.status === 429)) await upload.abort();
+      const replay = await c.env.OPS_DB.prepare("SELECT session_id FROM browser_upload_intent_files WHERE intent_id=? AND ordinal=?")
+        .bind(file.intent_id, file.ordinal).first<{session_id:string|null}>();
+      if (replay?.session_id) {
+        const existing = await uploadSession(c.env, replay.session_id, principal.id);
+        if (existing) return c.json(sessionResponse(existing));
+      }
+      throw error;
+    }
+    const session = await uploadSession(c.env, id, principal.id);
+    await audit(c.env, c.req.raw, principal, "delivery.upload.created", target, { sessionId: id, intentId: file.intent_id, ordinal });
+    return c.json(sessionResponse(session!), 201);
+  });
 
-  app.put("/api/delivery/uploads/:id/parts/:partNumber", async c => { const principal = c.get("principal"); await requirePermission(c.env, principal, UPLOAD); const partNumber = Number(c.req.param("partNumber")); if (!Number.isSafeInteger(partNumber) || partNumber < 1 || partNumber > 10000 || !c.req.raw.body) throw new HTTPException(400, { message: "A valid upload part is required" }); const session = await c.env.OPS_DB.prepare("SELECT id,upload_id,object_key,status,expires_at FROM r2_upload_sessions WHERE id=? AND created_by=?").bind(c.req.param("id"), principal.id).first<any>(); if (!session || session.status !== "active" || Date.parse(session.expires_at) <= Date.now()) throw new HTTPException(404, { message: "Upload session not found or expired" }); const multipart = c.env.DATA_BUCKET.resumeMultipartUpload(session.object_key, session.upload_id); const result = await multipart.uploadPart(partNumber, c.req.raw.body); const length = Number(c.req.header("Content-Length") || 0); await c.env.OPS_DB.prepare("INSERT INTO r2_upload_parts(session_id,part_number,etag,size) VALUES(?,?,?,?) ON CONFLICT(session_id,part_number) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=datetime('now')").bind(session.id, partNumber, result.etag, length).run(); return c.json({ partNumber: result.partNumber, etag: result.etag, size: length }); });
+  app.put("/api/delivery/uploads/:id/parts/:partNumber", async c => {
+    const principal = c.get("principal");
+    const session = await uploadSession(c.env, c.req.param("id"), principal.id);
+    const partNumber = Number(c.req.param("partNumber"));
+    if (!session || session.status !== "active" || Date.parse(session.expires_at) <= Date.now()) throw new HTTPException(404, { message: "Upload session not found or expired" });
+    await requireCrudPermission(c.env, principal, UPLOAD, session.object_key);
+    const offset = (partNumber - 1) * session.part_size;
+    const expectedLength = Math.min(session.part_size, session.expected_size - offset);
+    const suppliedLength = Number(c.req.header("Content-Length") || 0);
+    if (!Number.isSafeInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || expectedLength <= 0 ||
+      suppliedLength !== expectedLength || !c.req.raw.body) throw new HTTPException(400, { message: "Upload part size or number is invalid" });
+    const result = await c.env.DATA_BUCKET.resumeMultipartUpload(session.staging_key, session.upload_id).uploadPart(partNumber, c.req.raw.body);
+    await c.env.OPS_DB.prepare(`INSERT INTO r2_upload_parts(session_id,part_number,etag,size) VALUES(?,?,?,?)
+      ON CONFLICT(session_id,part_number) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=datetime('now')`)
+      .bind(session.id, partNumber, result.etag, suppliedLength).run();
+    return c.json({ partNumber: result.partNumber, etag: result.etag, size: suppliedLength });
+  });
 
-  app.post("/api/delivery/uploads/:id/complete", async c => { const principal = c.get("principal"); await requirePermission(c.env, principal, UPLOAD); const session = await c.env.OPS_DB.prepare("SELECT id,upload_id,object_key,status,expected_size,expires_at FROM r2_upload_sessions WHERE id=? AND created_by=?").bind(c.req.param("id"), principal.id).first<any>(); if (!session || session.status !== "active" || Date.parse(session.expires_at) <= Date.now()) throw new HTTPException(404, { message: "Upload session not found or expired" }); const body = await jsonBody(c); if (!Array.isArray(body.parts) || !body.parts.length) throw new HTTPException(400, { message: "Upload parts are required" }); const parts = body.parts.map((part: any) => ({ partNumber: Number(part.partNumber), etag: String(part.etag) })).sort((a: any, b: any) => a.partNumber - b.partNumber); if (parts.some((part: any, index: number) => !Number.isSafeInteger(part.partNumber) || part.partNumber < 1 || (index > 0 && parts[index - 1]!.partNumber === part.partNumber) || !/^"?[A-Za-z0-9+/=_-]+"?$/.test(part.etag))) throw new HTTPException(400, { message: "Invalid upload parts" }); const stored = await c.env.OPS_DB.prepare("SELECT part_number,etag,size FROM r2_upload_parts WHERE session_id=? ORDER BY part_number").bind(session.id).all<{part_number:number;etag:string;size:number}>(); if (stored.results.length&&(stored.results.length !== parts.length || parts.some((part: any, i: number) => part.partNumber !== stored.results[i]!.part_number || part.etag !== stored.results[i]!.etag))) throw new HTTPException(409, { message: "Upload parts do not match the session" }); const upload = c.env.DATA_BUCKET.resumeMultipartUpload(session.object_key, session.upload_id); const object=await upload.complete(parts); if(object.size!==session.expected_size){await c.env.DATA_BUCKET.delete(session.object_key);await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET status='aborted' WHERE id=? AND status='active'").bind(session.id).run();throw new HTTPException(422,{message:"Uploaded bytes do not match the declared size"});} await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET status='completed',completed_at=datetime('now') WHERE id=? AND status='active'").bind(session.id).run();if(canonicalThumbnailSourceKey(session.object_key)&&mediaKind(session.object_key)==="image")await enqueueThumbnailJob(c.env,{sourceKey:session.object_key,sourceEtag:object.httpEtag,sourceSize:object.size,eventTime:object.uploaded.toISOString()}); await audit(c.env, c.req.raw, principal, "delivery.upload.completed", session.object_key, { sessionId: session.id, size: object.size }); return c.json({ sessionId: session.id, key: session.object_key, size: object.size }); });
+  app.post("/api/delivery/uploads/:id/complete", async c => {
+    const principal = c.get("principal");
+    let session = await uploadSession(c.env, c.req.param("id"), principal.id);
+    if (!session) throw new HTTPException(404, { message: "Upload session not found" });
+    await requireCrudPermission(c.env, principal, UPLOAD, session.object_key);
+    if (session.status === "completed") return c.json(sessionResponse(session));
+    const staleCompletion = session.status === "completing" && Boolean(session.completion_claimed_at) &&
+      Date.parse(session.completion_claimed_at!) <= Date.now() - 5 * 60 * 1000;
+    if ((session.status !== "active" && !staleCompletion) || Date.parse(session.expires_at) <= Date.now()) {
+      if (session.status === "completing") throw new HTTPException(409, { message: "Upload completion is already in progress; retry shortly" });
+      throw new HTTPException(404, { message: "Upload session not found or expired" });
+    }
+    const claim = await c.env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET status='completing',completion_claimed_at=datetime('now')
+      WHERE id=? AND datetime(expires_at)>datetime('now') AND (
+        status='active' OR (status='completing' AND datetime(completion_claimed_at)<=datetime('now','-5 minutes'))
+      )`)
+      .bind(session.id).run();
+    if (claim.meta.changes !== 1) throw new HTTPException(409, { message: "Upload completion is already in progress; retry shortly" });
+    let recovery: { id: string; key: string } | null = null;
+    let replacementPublished = false;
+    try {
+    const stored = await c.env.OPS_DB.prepare("SELECT part_number,etag,size FROM r2_upload_parts WHERE session_id=? ORDER BY part_number")
+      .bind(session.id).all<{part_number:number;etag:string;size:number}>();
+    const activeSession = session;
+    const expectedParts = Math.ceil(activeSession.expected_size / activeSession.part_size);
+    if (stored.results.length !== expectedParts || stored.results.some((part, index) => part.part_number !== index + 1 ||
+      part.size !== Math.min(activeSession.part_size, activeSession.expected_size - index * activeSession.part_size))) {
+      await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET status='active',completion_claimed_at=NULL WHERE id=? AND status='completing'").bind(session.id).run();
+      throw new HTTPException(409, { message: "Upload parts are incomplete" });
+    }
+    let staged = await c.env.DATA_BUCKET.head(session.staging_key);
+    if (!staged) {
+      staged = await c.env.DATA_BUCKET.resumeMultipartUpload(session.staging_key, session.upload_id)
+        .complete(stored.results.map((part) => ({ partNumber: part.part_number, etag: part.etag })));
+    }
+    if (staged.size !== session.expected_size) {
+      await c.env.DATA_BUCKET.delete(session.staging_key);
+      await c.env.OPS_DB.batch([
+        c.env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET status='aborted',completion_claimed_at=NULL,
+          cleanup_status='pending',cleanup_next_attempt_at=datetime('now'),cleanup_claimed_at=NULL,cleanup_error=NULL
+          WHERE id=? AND status='completing'`).bind(session.id),
+        c.env.OPS_DB.prepare("UPDATE browser_upload_intent_files SET status='failed',error_code='size_mismatch',updated_at=datetime('now') WHERE intent_id=? AND ordinal=?").bind(session.intent_id, session.intent_ordinal),
+      ]);
+      await cleanupBrowserUploadSessions(c.env, 1, session.id);
+      throw new HTTPException(422, { message: "Uploaded bytes do not match the declared size" });
+    }
 
-  app.delete("/api/delivery/uploads/:id", async c => { const principal = c.get("principal"); await requirePermission(c.env, principal, UPLOAD); const session = await c.env.OPS_DB.prepare("SELECT id,upload_id,object_key,status FROM r2_upload_sessions WHERE id=? AND created_by=?").bind(c.req.param("id"), principal.id).first<any>(); if (!session || session.status !== "active") throw new HTTPException(404, { message: "Upload session not found" }); await c.env.DATA_BUCKET.resumeMultipartUpload(session.object_key, session.upload_id).abort(); await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET status='aborted' WHERE id=? AND status='active'").bind(session.id).run(); await audit(c.env, c.req.raw, principal, "delivery.upload.aborted", session.object_key, { sessionId: session.id }); return c.json({ success: true }); });
+    const current = await c.env.DATA_BUCKET.head(session.object_key);
+    if (current?.customMetadata?.browserUploadSession === session.id && current.size === session.expected_size) {
+      if (session.replacement_recovery_id) {
+        await c.env.OPS_DB.prepare("UPDATE r2_replacement_recovery SET replacement_result_etag=? WHERE id=? AND replacement_result_etag IS NULL")
+          .bind(current.httpEtag, session.replacement_recovery_id).run();
+      }
+      await finalizeBrowserUpload(c.env, session, current);
+      await cleanupBrowserUploadSessions(c.env, 1, session.id);
+      session = (await uploadSession(c.env, session.id, principal.id))!;
+      return c.json(sessionResponse(session));
+    }
+    if (session.conflict_policy !== "replace" && current) {
+      await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET status='active',completion_claimed_at=NULL WHERE id=? AND status='completing'").bind(session.id).run();
+      throw new HTTPException(409, { message: "The upload destination changed before completion" });
+    }
 
-  app.get("/api/delivery/uploads/:id", async c => { const principal = c.get("principal"); await requirePermission(c.env, principal, permission("delivery.browse")); const session = await c.env.OPS_DB.prepare("SELECT id,object_key,expected_size,content_type,status,created_at,expires_at,completed_at FROM r2_upload_sessions WHERE id=? AND created_by=?").bind(c.req.param("id"), principal.id).first<any>(); if (!session) throw new HTTPException(404, { message: "Upload session not found" }); const parts = await c.env.OPS_DB.prepare("SELECT part_number,etag,size,uploaded_at FROM r2_upload_parts WHERE session_id=? ORDER BY part_number").bind(session.id).all(); return c.json({ session, parts: parts.results }); });
+    if (session.conflict_policy === "replace") {
+      const baselineMatches = session.destination_baseline === "absent"
+        ? !current
+        : session.destination_baseline.startsWith("etag:") &&
+          current?.httpEtag === session.destination_baseline.slice("etag:".length);
+      if (!baselineMatches) {
+        await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET status='active',completion_claimed_at=NULL WHERE id=? AND status='completing'").bind(session.id).run();
+        throw new HTTPException(409, { message: "The upload destination changed before replacement" });
+      }
+    }
+
+    const stagedBody = await c.env.DATA_BUCKET.get(session.staging_key);
+    if (!stagedBody) throw new HTTPException(409, { message: "Completed upload staging object is unavailable" });
+    if (current && session.conflict_policy === "replace") {
+      const original = await c.env.DATA_BUCKET.get(session.object_key);
+      const baselineEtag = session.destination_baseline.slice("etag:".length);
+      if (!original || original.httpEtag !== baselineEtag) throw new HTTPException(409, { message: "The upload destination changed before replacement" });
+      recovery = { id: crypto.randomUUID(), key: `Jobs/Clients/_ltds/replacements/${crypto.randomUUID()}/${leaf(session.object_key)}` };
+      try {
+        await c.env.DATA_BUCKET.put(recovery.key, original.body, { httpMetadata: original.httpMetadata, customMetadata: original.customMetadata });
+        await c.env.OPS_DB.prepare("INSERT INTO r2_replacement_recovery(id,original_key,recovery_key,purge_after) VALUES(?,?,?,datetime('now','+7 days'))")
+          .bind(recovery.id, session.object_key, recovery.key).run();
+        const linked = await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET replacement_recovery_id=? WHERE id=? AND status='completing'")
+          .bind(recovery.id, session.id).run();
+        if (linked.meta.changes !== 1) throw new HTTPException(409, { message: "Upload completion no longer owns the recovery" });
+        session.replacement_recovery_id = recovery.id;
+      } catch (error) {
+        await c.env.DATA_BUCKET.delete(recovery.key);
+        await c.env.OPS_DB.prepare("DELETE FROM r2_replacement_recovery WHERE id=?").bind(recovery.id).run();
+        throw error;
+      }
+    }
+    const condition = new Headers();
+    if (session.conflict_policy === "replace" && session.destination_baseline.startsWith("etag:")) {
+      condition.set("If-Match", session.destination_baseline.slice("etag:".length));
+    } else {
+      condition.set("If-None-Match", "*");
+    }
+    const stillClaimed = await c.env.OPS_DB.prepare("SELECT id FROM r2_upload_sessions WHERE id=? AND status='completing'")
+      .bind(session.id).first<{id:string}>();
+    if (!stillClaimed) throw new HTTPException(409, { message: "Upload completion no longer owns the session" });
+    const published = await c.env.DATA_BUCKET.put(session.object_key, stagedBody.body, {
+      onlyIf: condition,
+      httpMetadata: { ...stagedBody.httpMetadata, contentType: session.content_type },
+      customMetadata: {
+        ...(stagedBody.customMetadata || {}),
+        browserUploadSession: session.id,
+        ...(recovery ? { replacementRecoveryId: recovery.id } : {}),
+      },
+    });
+    if (!published) {
+      if (recovery) {
+        await c.env.DATA_BUCKET.delete(recovery.key);
+        await c.env.OPS_DB.prepare("DELETE FROM r2_replacement_recovery WHERE id=?").bind(recovery.id).run();
+        await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET replacement_recovery_id=NULL WHERE id=?").bind(session.id).run();
+        recovery = null;
+      }
+      await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET status='active',completion_claimed_at=NULL WHERE id=? AND status='completing'").bind(session.id).run();
+      throw new HTTPException(409, { message: "The upload destination changed before publication" });
+    }
+    replacementPublished = true;
+    if (recovery) {
+      await c.env.OPS_DB.prepare("UPDATE r2_replacement_recovery SET replacement_result_etag=? WHERE id=?")
+        .bind(published.httpEtag, recovery.id).run();
+    }
+    await finalizeBrowserUpload(c.env, session, published);
+    await cleanupBrowserUploadSessions(c.env, 1, session.id);
+    await audit(c.env, c.req.raw, principal, "delivery.upload.completed", published.key, { sessionId: session.id, intentId: session.intent_id, size: published.size, collisionPolicy: session.conflict_policy });
+    session = (await uploadSession(c.env, session.id, principal.id))!;
+    return c.json(sessionResponse(session));
+    } catch (error) {
+      if (recovery && !replacementPublished) {
+        await c.env.DATA_BUCKET.delete(recovery.key);
+        await c.env.OPS_DB.prepare("DELETE FROM r2_replacement_recovery WHERE id=?").bind(recovery.id).run();
+        await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET replacement_recovery_id=NULL WHERE id=?").bind(session.id).run();
+      }
+      await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET status='active',completion_claimed_at=NULL WHERE id=? AND status='completing'").bind(session.id).run();
+      throw error;
+    }
+  });
+
+  app.delete("/api/delivery/uploads/:id", async c => {
+    const principal = c.get("principal");
+    const session = await uploadSession(c.env, c.req.param("id"), principal.id);
+    if (!session || session.status !== "active") throw new HTTPException(404, { message: "Upload session not found" });
+    await requireCrudPermission(c.env, principal, UPLOAD, session.object_key);
+    const cancelled = await c.env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET status='aborted',completion_claimed_at=NULL,
+      cleanup_status='pending',cleanup_next_attempt_at=datetime('now'),cleanup_claimed_at=NULL,cleanup_error=NULL
+      WHERE id=? AND status='active'`)
+      .bind(session.id).run();
+    if (cancelled.meta.changes !== 1) throw new HTTPException(409, { message: "Upload completion is already in progress" });
+    await cleanupBrowserUploadSessions(c.env, 1, session.id);
+    await c.env.OPS_DB.batch([
+      c.env.OPS_DB.prepare("UPDATE browser_upload_intent_files SET status='aborted',error_code='cancelled',updated_at=datetime('now') WHERE intent_id=? AND ordinal=? AND status<>'completed'").bind(session.intent_id, session.intent_ordinal),
+    ]);
+    await audit(c.env, c.req.raw, principal, "delivery.upload.aborted", session.object_key, { sessionId: session.id, intentId: session.intent_id });
+    return c.json({ success: true });
+  });
+
+  app.post("/api/delivery/uploads/:id/cleanup/retry", async c => {
+    const principal = c.get("principal");
+    const session = await uploadSession(c.env, c.req.param("id"), principal.id);
+    if (!session || !["completed", "aborted", "expired"].includes(session.status)) throw new HTTPException(404, { message: "Terminal upload session not found" });
+    await requireCrudPermission(c.env, principal, UPLOAD, session.result_key || session.object_key);
+    const reset = await c.env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET cleanup_status='pending',cleanup_attempts=0,
+      cleanup_next_attempt_at=datetime('now'),cleanup_claimed_at=NULL,cleanup_error=NULL WHERE id=? AND cleanup_status='failed'`)
+      .bind(session.id).run();
+    if (reset.meta.changes !== 1) throw new HTTPException(409, { message: "Upload cleanup is not in a failed state" });
+    await cleanupBrowserUploadSessions(c.env, 1, session.id);
+    const updated = await uploadSession(c.env, session.id, principal.id);
+    return c.json(sessionResponse(updated!));
+  });
+
+  app.get("/api/delivery/uploads/:id", async c => {
+    const principal = c.get("principal");
+    const session = await uploadSession(c.env, c.req.param("id"), principal.id);
+    if (!session) throw new HTTPException(404, { message: "Upload session not found" });
+    await requireCrudPermission(c.env, principal, permission("delivery.browse"), session.result_key || session.object_key);
+    const parts = await c.env.OPS_DB.prepare("SELECT part_number,etag,size FROM r2_upload_parts WHERE session_id=? ORDER BY part_number")
+      .bind(session.id).all<{part_number:number;etag:string;size:number}>();
+    return c.json(sessionResponse(session, parts.results));
+  });
 
   app.post("/api/delivery/fs/trash/:id/restore", async c => { const principal = c.get("principal"); await requirePermission(c.env, principal, RESTORE); await restoreTombstone(c.env, principal, c.req.param("id")); return c.json({ success: true }); });
 }

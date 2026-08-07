@@ -165,7 +165,9 @@ npx.cmd wrangler secret put R2_SECRET_ACCESS_KEY
 
 These credentials sign direct browser download URLs only. Delivery's normal R2 reads use the `DATA_BUCKET` binding, and preview SHA identities do not use these secrets.
 
-Create a separate least-privilege R2 credential for the Operations Worker. Scope Object Read & Write to exactly `client-data` and `ltds-incoming`; do not reuse the TrueNAS or Delivery credential:
+Create a separate least-privilege R2 credential for the Operations Worker's
+public Incoming multipart flow. Scope Object Read & Write to `ltds-incoming`;
+do not reuse the TrueNAS or Delivery credential:
 
 ```powershell
 Set-Location apps/operations
@@ -173,15 +175,28 @@ npx.cmd wrangler secret put R2_ACCESS_KEY_ID
 npx.cmd wrangler secret put R2_SECRET_ACCESS_KEY
 ```
 
-These credentials sign direct multipart browser uploads for both staff Delivery uploads and public Incoming uploads. The relevant bucket and object key are always selected server-side. Normal Worker reads/writes use R2 bindings.
+These credentials sign only short-lived, object-specific Incoming quarantine
+parts. Authenticated staff delivery uploads do not use them: the browser sends
+parts to same-origin Operations routes and the Worker writes through its private
+`DATA_BUCKET` binding. The staff route never returns a public/presigned R2 URL.
 
-Set the account S3 endpoint and bucket name as non-secret Operations variables. Apply an R2 CORS policy that permits only the production Operations origin and the dedicated staging Operations origin, allows the headers signed by the upload flow, and exposes `ETag`. Never permit `*` origins with credentialed staff uploads. Presigned upload authorization must remain short-lived and object-specific.
+Set the account S3 endpoint and Incoming bucket name as non-secret Operations
+variables. Apply CORS only to the private Incoming bucket for its direct
+quarantine-part flow. Permit only the production Incoming origin and dedicated
+staging Incoming origin, allow only the signed headers, and expose `ETag`.
+Never permit `*`. The `client-data` bucket needs no browser-upload CORS rule for
+the same-origin staff flow; do not add one for this feature.
 
-After replacing the staging hostname in `apps/operations/r2-cors.json` with the deployed staging hostname, apply it from the Operations directory:
+Apply the checked-in production policy from the Operations directory:
 
 ```powershell
-npx.cmd wrangler r2 bucket cors set client-data --file r2-cors.json
+npx.cmd wrangler r2 bucket cors set ltds-incoming --file r2-incoming-cors.json
 ```
+
+For isolated staging, use a separately reviewed policy containing only the
+exact staging Incoming origin and apply it to the separately named staging
+bucket. Do not edit the production policy to include a temporary origin or
+apply the production policy to staging.
 
 ## 5. Project Alpha
 
@@ -226,6 +241,28 @@ npx.cmd wrangler secret put INCOMING_PICKUP_SECRET
 
 Apply `apps/operations/r2-incoming-cors.json`, expose `ETag`, and configure a 14-day lifecycle backstop for quarantine objects and abandoned multipart uploads. Operations deployment creates the `ltds-incoming-upload-lifecycle` Workflow, which aborts incomplete uploads after 24 hours and expires unclaimed quarantine after 14 days. TrueNAS calls the authenticated pickup endpoint only after ClamAV, checksum verification, durable local copy, and removal of the quarantine object.
 
+## 7a. Authenticated staff delivery uploads
+
+Authenticated delivery uploads remain on `ltds-ops`; a separate public upload
+Worker or endpoint is neither required nor permitted. Keep
+`DIRECT_DELIVERY_UPLOADS_ENABLED=false` while applying Operations migration
+`0018_browser_upload_intents.sql` and validating the same-origin route. The
+final reviewed production version may set it to `true` only after migration,
+queue/binding verification, and synthetic authorization/lifecycle acceptance;
+rollback first returns it to `false` without removing cleanup-capable code. The
+feature requires the existing Operations Access application and audience,
+`OPS_DB`, private `DATA_BUCKET`, `DELIVERY_DB`, `THUMBNAIL_QUEUE`, and both
+five-minute and 15-minute Cron Triggers. It requires no new R2 API credential,
+CORS rule, public bucket domain, route, hostname, queue, or Worker.
+
+The active access model is deliberately narrow: an Operations staff principal
+must pass the expected-host, Access JWT/session, origin/CSRF, administrator, and
+scoped `delivery.files.upload` checks for the selected folder and every resolved
+file. Client Portal identities, public-share sessions, and Incoming contributor
+sessions have no authority on these routes. See the [thumbnail and upload
+runbook](media-thumbnail-pipeline.md#authenticated-operations-browser-uploads)
+for limits, collision policy, lifecycle, acceptance, and rollback.
+
 ## 7b. Dropbox import (Operations Worker)
 
 To enable staff Dropbox import, provision these Operations Worker secrets and variables:
@@ -242,7 +279,7 @@ Set `DROPBOX_CLIENT_ID` and `DROPBOX_IMPORT_ENABLED` in `apps/operations/wrangle
 
 Export both production D1 databases before migration. Apply Delivery migrations
 to `client-data` first because the new Operations Worker depends on Delivery
-tables `0105`, `0106`, and `0107`; then apply Operations migrations to `ltds-ops`:
+tables from migrations `0105` through `0108`; then apply Operations migrations to `ltds-ops`:
 
 ```powershell
 Set-Location apps/client
@@ -251,15 +288,16 @@ Set-Location ../operations
 npm.cmd run db:migrate:remote
 ```
 
-Confirm Delivery migrations through `0107_thumbnail_cleanup_jobs.sql` and
-Operations migrations through `0017_operational_job_briefs.sql` appear in the
+Confirm Delivery migrations through `0108_thumbnail_backfill_runs.sql` and
+Operations migrations through `0018_browser_upload_intents.sql` appear in the
 remote migration lists before deploying dependent Workers. Before the
 Operations deployment, separately verify that Images transformations are
 enabled, the thumbnail queue and DLQ exist, the producer/main-consumer/DLQ
 consumer bindings resolve to those exact queues, the existing R2 object-create
 notification still feeds `ltds-file-events`, and both the 15-minute and
-5-minute crons are present. Repository configuration does not prove those
-remote resources exist.
+5-minute crons are present. The existing private `ltds-ops` Worker owns the
+thumbnail consumer; no separate or public `ltds-thumbnails` Worker is needed.
+Repository configuration does not prove those remote resources exist.
 
 Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding,
 the `ltds-cloud-transfer` Workflow binding, and the hourly cleanup Cron Trigger.
@@ -288,7 +326,7 @@ Onboard the sending domain in Cloudflare Email Service, add an `EMAIL` send-emai
 - R2: `client-data`
 - Incoming R2: `ltds-incoming` (private; production-origin CORS and quarantine lifecycle configured)
 - Queue: `ltds-file-events`
-- Thumbnail Queue/DLQ (required by the new config; create during rollout): `ltds-thumbnail-jobs`, `ltds-thumbnail-jobs-dlq`
+- Thumbnail Queue/DLQ: `ltds-thumbnail-jobs`, `ltds-thumbnail-jobs-dlq`
 - R2 notifications: object-create and object-delete to `ltds-file-events`
 - Workflows: `ltds-bulk-download`, `ltds-cloud-transfer` (delivery), `ltds-r2-crud`, `ltds-incoming-upload-lifecycle`, `ltds-dropbox-import` (operations)
 

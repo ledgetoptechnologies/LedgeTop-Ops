@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BRAND, type Permission, type SessionUser } from "@ltds/shared";
 import { Brand, Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
-import { api, setCsrf } from "./api";
+import { ApiError, api, setCsrf } from "./api";
 import { generateSecureAccessCode } from "./access-code";
 import {
   DELIVERY_ROOT_PREFIX,
@@ -1406,65 +1406,327 @@ function joinDeliveryPath(prefix: string, name: string, folder = false) {
 function itemKey(item: DeliveryItem) {
   return item.physicalKey || item.prefix || "";
 }
-async function uploadDeliveryFile(
-  prefix: string,
-  file: File,
-): Promise<DeliveryOperation> {
-  const relative =
+type BrowserUploadCollisionPolicy = "fail" | "rename" | "replace";
+type BrowserUploadProgress = {
+  ordinal: number;
+  name: string;
+  relativePath: string;
+  uploadedBytes: number;
+  totalBytes: number;
+  status: "pending" | "uploading" | "completed" | "failed" | "stopped";
+  error?: string;
+};
+type BrowserUploadSession = {
+  sessionId: string;
+  partSize: number;
+  status: "active" | "completed" | "aborted" | "expired";
+  parts?: Array<{ partNumber: number; etag: string; size: number }>;
+};
+const MAX_BROWSER_UPLOAD_FILES = 100;
+const MAX_BROWSER_UPLOAD_BYTES = 500 * 1024 ** 3;
+const MAX_BROWSER_UPLOAD_FILE_BYTES = 500 * 1024 ** 3;
+const BLOCKED_BROWSER_UPLOAD_TYPES = new Set([
+  "text/html",
+  "image/svg+xml",
+  "application/xhtml+xml",
+  "application/javascript",
+  "text/javascript",
+]);
+const RESERVED_BROWSER_UPLOAD_SEGMENTS = new Set([
+  "dump",
+  "_ltds",
+  ".previews",
+]);
+
+class UploadAuthorizationError extends Error {}
+
+function browserUploadRelativePath(file: File) {
+  const supplied =
     (file as File & { webkitRelativePath?: string }).webkitRelativePath ||
     file.name;
-  const created = await api<{ sessionId: string; partSize?: number }>(
-    "/api/delivery/uploads",
-    {
-      method: "POST",
-      body: JSON.stringify({
-        key: joinDeliveryPath(prefix, relative),
-        size: file.size,
-        contentType: file.type || "application/octet-stream",
-      }),
-    },
+  if (
+    !supplied ||
+    supplied.length > 1000 ||
+    supplied.startsWith("/") ||
+    supplied.includes("\\") ||
+    supplied.endsWith("/") ||
+    supplied.includes("//") ||
+    /[\0-\x1f\x7f]/.test(supplied)
+  )
+    throw new Error(`“${file.name}” has an invalid relative path.`);
+  const normalized = supplied.normalize("NFC"),
+    parts = normalized.split("/");
+  if (
+    parts.some(
+      (part) =>
+        !part ||
+        part === "." ||
+        part === ".." ||
+        RESERVED_BROWSER_UPLOAD_SEGMENTS.has(part.toLowerCase()),
+    )
+  )
+    throw new Error(`“${file.name}” has an invalid or reserved path.`);
+  return normalized;
+}
+
+function uploadError(error: unknown): Error {
+  if (error instanceof ApiError && (error.status === 401 || error.status === 403))
+    return new UploadAuthorizationError(
+      "Upload stopped because your Operations authorization expired or changed. Reauthenticate and verify access before retrying.",
+    );
+  return error instanceof Error ? error : new Error("The upload failed.");
+}
+
+function retryableUploadError(error: unknown) {
+  if (!(error instanceof ApiError)) return error instanceof TypeError;
+  return (
+    error.status === 408 ||
+    error.status === 425 ||
+    error.status === 429 ||
+    error.status >= 500 ||
+    (error.status === 409 &&
+      error.message.toLowerCase().includes("already in progress"))
   );
-  const partSize = created.partSize || 32 * 1024 * 1024;
-  const parts: Array<{ partNumber: number; etag: string }> = [];
-  try {
-    for (
-      let offset = 0, partNumber = 1;
-      offset < file.size;
-      offset += partSize, partNumber += 1
-    ) {
-      const chunk = file.slice(offset, Math.min(file.size, offset + partSize));
-      const ticket = await api<{ url: string }>(
-        `/api/delivery/uploads/${encodeURIComponent(created.sessionId)}/parts/${partNumber}/ticket`,
+}
+
+async function uploadIntentFile(
+  intentId: string,
+  ordinal: number,
+  file: File,
+  progress: (value: BrowserUploadProgress) => void,
+  relativePath: string,
+) {
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const created = await api<BrowserUploadSession>("/api/delivery/uploads", {
+        method: "POST",
+        body: JSON.stringify({ intentId, ordinal }),
+      });
+      if (created.status === "completed") {
+        progress({
+          ordinal,
+          name: file.name,
+          relativePath,
+          uploadedBytes: file.size,
+          totalBytes: file.size,
+          status: "completed",
+        });
+        return;
+      }
+      const checkpoint = await api<BrowserUploadSession>(
+        `/api/delivery/uploads/${encodeURIComponent(created.sessionId)}`,
+      );
+      if (checkpoint.status === "completed") {
+        progress({
+          ordinal,
+          name: file.name,
+          relativePath,
+          uploadedBytes: file.size,
+          totalBytes: file.size,
+          status: "completed",
+        });
+        return;
+      }
+      const uploadedParts = new Map(
+        (checkpoint.parts || []).map((part) => [part.partNumber, part.size]),
+      );
+      let uploadedBytes = [...uploadedParts.values()].reduce(
+        (total, size) => total + size,
+        0,
+      );
+      progress({
+        ordinal,
+        name: file.name,
+        relativePath,
+        uploadedBytes,
+        totalBytes: file.size,
+        status: "uploading",
+      });
+      for (
+        let offset = 0, partNumber = 1;
+        offset < file.size;
+        offset += created.partSize, partNumber += 1
+      ) {
+        if (uploadedParts.has(partNumber)) continue;
+        const chunk = file.slice(
+          offset,
+          Math.min(file.size, offset + created.partSize),
+        );
+        await api(
+          `/api/delivery/uploads/${encodeURIComponent(created.sessionId)}/parts/${partNumber}`,
+          {
+            method: "PUT",
+            headers: { "Content-Type": "application/octet-stream" },
+            body: chunk,
+          },
+        );
+        uploadedBytes += chunk.size;
+        progress({
+          ordinal,
+          name: file.name,
+          relativePath,
+          uploadedBytes,
+          totalBytes: file.size,
+          status: "uploading",
+        });
+      }
+      await api(
+        `/api/delivery/uploads/${encodeURIComponent(created.sessionId)}/complete`,
         { method: "POST", body: "{}" },
       );
-      const response = await fetch(ticket.url, { method: "PUT", body: chunk });
-      if (!response.ok)
-        throw new Error(
-          `Upload part ${partNumber} failed (${response.status})`,
-        );
-      const etag = response.headers.get("ETag");
-      if (!etag)
-        throw new Error(
-          "R2 did not return an ETag. Check the bucket CORS exposed headers.",
-        );
-      parts.push({ partNumber, etag });
+      progress({
+        ordinal,
+        name: file.name,
+        relativePath,
+        uploadedBytes: file.size,
+        totalBytes: file.size,
+        status: "completed",
+      });
+      return;
+    } catch (caught) {
+      lastError = uploadError(caught);
+      if (lastError instanceof UploadAuthorizationError) throw lastError;
+      if (!retryableUploadError(caught) || attempt === 2) throw lastError;
+      await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** attempt));
     }
-    await api(
-      `/api/delivery/uploads/${encodeURIComponent(created.sessionId)}/complete`,
-      { method: "POST", body: JSON.stringify({ parts }) },
-    );
-    return {
-      status: "completed",
-      progress: 1,
-      message: `Uploaded ${file.name}`,
-    };
-  } catch (error) {
-    await api(
-      `/api/delivery/uploads/${encodeURIComponent(created.sessionId)}`,
-      { method: "DELETE" },
-    ).catch(() => undefined);
-    throw error;
   }
+  throw lastError || new Error("The upload failed.");
+}
+
+async function uploadDeliveryFiles(
+  prefix: string,
+  files: File[],
+  collisionPolicy: BrowserUploadCollisionPolicy,
+  progress: (value: BrowserUploadProgress) => void,
+) {
+  if (!files.length) return { completed: 0, failed: 0 };
+  if (files.length > MAX_BROWSER_UPLOAD_FILES)
+    throw new Error(
+      `Choose no more than ${MAX_BROWSER_UPLOAD_FILES} files at a time.`,
+    );
+  const prepared = files.map((file, ordinal) => {
+    const relativePath = browserUploadRelativePath(file),
+      contentType = (file.type || "application/octet-stream").toLowerCase();
+    if (file.size <= 0 || file.size > MAX_BROWSER_UPLOAD_FILE_BYTES)
+      throw new Error(`“${relativePath}” has an unsupported file size.`);
+    if (BLOCKED_BROWSER_UPLOAD_TYPES.has(contentType))
+      throw new Error(`“${relativePath}” is an active web file and cannot be uploaded.`);
+    return { file, ordinal, relativePath, contentType };
+  });
+  const totalBytes = prepared.reduce((total, item) => total + item.file.size, 0);
+  if (!Number.isSafeInteger(totalBytes) || totalBytes > MAX_BROWSER_UPLOAD_BYTES)
+    throw new Error(`The selected batch exceeds the ${bytes(MAX_BROWSER_UPLOAD_BYTES)} limit.`);
+  prepared.forEach(({ file, ordinal, relativePath }) =>
+    progress({
+      ordinal,
+      name: file.name,
+      relativePath,
+      uploadedBytes: 0,
+      totalBytes: file.size,
+      status: "pending",
+    }),
+  );
+  const idempotencyKey = crypto.randomUUID(),
+    intentRequest = {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+      body: JSON.stringify({
+        rootPrefix: prefix,
+        collisionPolicy,
+        files: prepared.map(({ relativePath, file, contentType }) => ({
+          relativePath,
+          size: file.size,
+          contentType,
+        })),
+      }),
+    } satisfies RequestInit;
+  let intent: { intentId: string } | undefined;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      intent = await api<{ intentId: string }>(
+        "/api/delivery/uploads/intents",
+        intentRequest,
+      );
+      break;
+    } catch (caught) {
+      const error = uploadError(caught);
+      if (error instanceof UploadAuthorizationError) {
+        prepared.forEach(({ file, ordinal, relativePath }) =>
+          progress({
+            ordinal,
+            name: file.name,
+            relativePath,
+            uploadedBytes: 0,
+            totalBytes: file.size,
+            status: "stopped",
+            error: error.message,
+          }),
+        );
+      }
+      if (
+        error instanceof UploadAuthorizationError ||
+        !retryableUploadError(caught) ||
+        attempt === 2
+      )
+        throw error;
+      await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** attempt));
+    }
+  }
+  if (!intent) throw new Error("The upload intent could not be created.");
+  let completed = 0,
+    failed = 0;
+  for (let index = 0; index < prepared.length; index += 1) {
+    const item = prepared[index]!;
+    try {
+      await uploadIntentFile(
+        intent.intentId,
+        item.ordinal,
+        item.file,
+        progress,
+        item.relativePath,
+      );
+      completed += 1;
+    } catch (caught) {
+      const error = uploadError(caught);
+      if (error instanceof UploadAuthorizationError) {
+        for (let rest = index; rest < prepared.length; rest += 1) {
+          const stopped = prepared[rest]!;
+          progress({
+            ordinal: stopped.ordinal,
+            name: stopped.file.name,
+            relativePath: stopped.relativePath,
+            uploadedBytes: 0,
+            totalBytes: stopped.file.size,
+            status: "stopped",
+            error: error.message,
+          });
+        }
+        throw error;
+      }
+      failed += 1;
+      progress({
+        ordinal: item.ordinal,
+        name: item.file.name,
+        relativePath: item.relativePath,
+        uploadedBytes: 0,
+        totalBytes: item.file.size,
+        status: "failed",
+        error: error.message,
+      });
+    }
+  }
+  return { completed, failed };
+}
+
+async function uploadDeliveryFile(prefix: string, file: File) {
+  const result = await uploadDeliveryFiles(prefix, [file], "fail", () => {});
+  if (result.failed) throw new Error(`Upload failed for ${file.name}.`);
+  return {
+    status: "completed",
+    progress: 1,
+    message: `Uploaded ${file.name}`,
+  } satisfies DeliveryOperation;
 }
 const deliveryOperations = {
   createFolder: (prefix: string, name: string) =>
@@ -1540,6 +1802,10 @@ function DeliveryWorkspace({ session }: { session: Session }) {
     : [];
   const canWrite =
       session.user.isAdministrator || allowed(session.user, "delivery.rename"),
+    canUpload =
+      session.user.isAdministrator &&
+      allowed(session.user, "delivery.files.upload") &&
+      session.capabilities?.directDeliveryUploads?.enabled === true,
     canDelete =
       session.user.isAdministrator || allowed(session.user, "delivery.delete"),
     canShare = allowed(session.user, "delivery.share.create");
@@ -1639,14 +1905,18 @@ function DeliveryWorkspace({ session }: { session: Session }) {
   };
   const upload = (files: FileList | File[]) => {
     const list = Array.from(files);
-    if (!list.length) return;
+    if (!list.length || !canUpload) return;
     setUploading(true);
-    void Promise.all(
-      list.map((file) => deliveryOperations.upload(prefix, file)),
-    )
-      .then((results) =>
-        results.forEach((result) => void run(Promise.resolve(result))),
-      )
+    void uploadDeliveryFiles(prefix, list, "fail", () => {})
+      .then(({ completed, failed }) => {
+        setOperation({
+          status: failed ? "failed" : "completed",
+          progress: completed / list.length,
+          message: `Uploaded ${completed} of ${list.length} items`,
+        });
+        if (failed) setOperationError(`${failed} upload${failed === 1 ? "" : "s"} failed.`);
+        void refresh();
+      })
       .catch((caught) => setOperationError((caught as Error).message))
       .finally(() => setUploading(false));
   };
@@ -1674,7 +1944,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
           </button>
           <button
             className="button-ghost"
-            disabled={!canWrite || uploading}
+            disabled={!canUpload || uploading}
             onClick={() => input?.click()}
           >
             {uploading ? "Uploading…" : "Upload"}
@@ -1862,6 +2132,9 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   const [uploading, setUploading] = useState(false),
     [fileInput, setFileInput] = useState<HTMLInputElement | null>(null),
     [folderInput, setFolderInput] = useState<HTMLInputElement | null>(null);
+  const [collisionPolicy, setCollisionPolicy] =
+      useState<BrowserUploadCollisionPolicy>("fail"),
+    [uploadProgress, setUploadProgress] = useState<BrowserUploadProgress[]>([]);
   const [showDropboxImport, setShowDropboxImport] = useState(() => {
     const params = new URLSearchParams(location.search);
     return Boolean(params.get("dropboxImportAuthorization"));
@@ -1877,6 +2150,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   const admin = session.user.isAdministrator;
   const canCreate = admin && allowed(session.user, "delivery.files.create"),
     canUpload =
+      admin &&
       allowed(session.user, "delivery.files.upload") &&
       session.capabilities?.directDeliveryUploads?.enabled === true;
   const canCopy = admin && allowed(session.user, "delivery.files.copy"),
@@ -2062,19 +2336,51 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     if (!list.length || !canUpload) return;
     setUploading(true);
     setOperationError("");
+    setUploadProgress([]);
     try {
-      for (const file of list) {
-        setOperation({ status: "running", message: `Uploading ${file.name}` });
-        await deliveryOperations.upload(prefix, file);
-      }
+      const live = new Map<number, BrowserUploadProgress>();
+      const result = await uploadDeliveryFiles(
+        prefix,
+        list,
+        collisionPolicy,
+        (next) => {
+          const previous = live.get(next.ordinal),
+            merged =
+              (next.status === "stopped" || next.status === "failed") && previous
+                ? { ...next, uploadedBytes: previous.uploadedBytes }
+                : next;
+          live.set(next.ordinal, merged);
+          const entries = [...live.values()].sort(
+              (left, right) => left.ordinal - right.ordinal,
+            ),
+            total = entries.reduce(
+              (sum, entry) => sum + entry.totalBytes,
+              0,
+            ),
+            uploaded = entries.reduce(
+              (sum, entry) => sum + entry.uploadedBytes,
+              0,
+            );
+          setUploadProgress(entries);
+          setOperation({
+            status: "running",
+            progress: total ? uploaded / total : 0,
+            message: `Uploaded ${bytes(uploaded)} of ${bytes(total)}`,
+          });
+        },
+      );
       await refresh();
       setOperation({
-        status: "completed",
-        progress: 1,
-        message: `Uploaded ${list.length} item${list.length === 1 ? "" : "s"}`,
+        status: result.failed ? "failed" : "completed",
+        progress: result.completed / list.length,
+        message: `Uploaded ${result.completed} of ${list.length} item${list.length === 1 ? "" : "s"}`,
       });
+      if (result.failed)
+        setOperationError(
+          `${result.failed} upload${result.failed === 1 ? "" : "s"} failed. Review the file results below.`,
+        );
     } catch (caught) {
-      setOperationError((caught as Error).message);
+      setOperationError(uploadError(caught).message);
     } finally {
       setUploading(false);
     }
@@ -2097,9 +2403,28 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           </button>
           {!canUpload && allowed(session.user, "delivery.files.upload") && (
             <span className="managed-badge">
-              Direct browser uploads are disabled. Use an Incoming request link.
+              {!admin
+                ? "Direct browser uploads require administrator access."
+                : "Direct browser uploads are disabled. Use an Incoming request link."}
             </span>
           )}
+          <label>
+            <span className="sr-only">Upload collision policy</span>
+            <select
+              aria-label="Upload collision policy"
+              disabled={!canUpload || uploading}
+              value={collisionPolicy}
+              onChange={(event) =>
+                setCollisionPolicy(
+                  event.target.value as BrowserUploadCollisionPolicy,
+                )
+              }
+            >
+              <option value="fail">Fail existing files</option>
+              <option value="rename">Keep both files</option>
+              <option value="replace">Replace existing file</option>
+            </select>
+          </label>
           <button
             className="button-ghost"
             disabled={!canUpload || uploading}
@@ -2250,6 +2575,38 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
               `${Math.round((operation?.progress || 0) * 100)}% complete`}
           </span>
         </div>
+      )}
+      {uploadProgress.length > 0 && (
+        <Card className="upload-progress" aria-label="Upload progress">
+          <header>
+            <strong>Browser upload</strong>
+            <small>
+              {uploadProgress.filter((item) => item.status === "completed").length}
+              /{uploadProgress.length} files complete
+            </small>
+          </header>
+          <div className="simple-rows">
+            {uploadProgress.map((item) => (
+              <div key={`${item.ordinal}-${item.relativePath}`}>
+                <span>
+                  <strong>{item.relativePath}</strong>
+                  <small>
+                    {bytes(item.uploadedBytes)} of {bytes(item.totalBytes)}
+                    {item.error ? ` · ${item.error}` : ""}
+                  </small>
+                </span>
+                <span>
+                  <progress
+                    aria-label={`${item.relativePath} upload progress`}
+                    max={item.totalBytes}
+                    value={item.uploadedBytes}
+                  />
+                  <small>{item.status}</small>
+                </span>
+              </div>
+            ))}
+          </div>
+        </Card>
       )}
       <ErrorLine error={error} />
       <div

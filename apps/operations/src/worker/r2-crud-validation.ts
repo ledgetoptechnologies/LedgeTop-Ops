@@ -1,14 +1,51 @@
 import { HTTPException } from "hono/http-exception";
 
 const MAX_KEY_LENGTH=1000;
+export const MAX_BROWSER_UPLOAD_FILES = 100;
+export const MAX_BROWSER_UPLOAD_BYTES = 500 * 1024 ** 3;
+export const MAX_BROWSER_UPLOAD_FILE_BYTES = 500 * 1024 ** 3;
 function reservedSegment(value:string):boolean{const segment=value.toLowerCase();return segment==="dump"||segment==="_ltds"||segment===".previews";}
 
 export function normalizeCrudKey(value:unknown,folder=false):string{
-  if(typeof value!=="string"||value.length>MAX_KEY_LENGTH)throw new HTTPException(400,{message:"A valid R2 path is required"});
+  if(typeof value!=="string"||value.length>MAX_KEY_LENGTH||/[\0-\x1f\x7f]/.test(value))throw new HTTPException(400,{message:"A valid R2 path is required"});
   const normalized=value.trim().replace(/\\/g,"/").replace(/^\/+/,"").replace(/\/{2,}/g,"/"),clean=normalized.replace(/\/+$/,""),parts=clean.split("/");
   if(!clean||parts.some(part=>!part||part==="."||part===".."||reservedSegment(part)))throw new HTTPException(400,{message:"The R2 path is reserved or invalid"});
   if(!clean.startsWith("Jobs/Clients/")||clean==="Jobs/Clients")throw new HTTPException(400,{message:"R2 paths must be under Jobs/Clients"});
   return folder?`${clean}/`:clean;
+}
+
+export function normalizeUploadRelativePath(value: unknown): string {
+  if (typeof value !== "string" || !value || value.length > MAX_KEY_LENGTH || value.startsWith("/") ||
+    value.includes("\\") || value.endsWith("/") || value.includes("//") || /[\0-\x1f\x7f]/.test(value)) {
+    throw new HTTPException(400, { message: "Upload relative path is invalid" });
+  }
+  const normalized = value.normalize("NFC");
+  const parts = normalized.split("/");
+  if (parts.some((part) => !part || part === "." || part === ".." || reservedSegment(part))) {
+    throw new HTTPException(400, { message: "Upload relative path is invalid" });
+  }
+  return normalized;
+}
+
+export function browserUploadContentType(value: unknown): string {
+  if (value === undefined || value === null || value === "") return "application/octet-stream";
+  if (typeof value !== "string" || value.length > 200 ||
+    !/^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/.test(value)) {
+    throw new HTTPException(400, { message: "Upload content type is invalid" });
+  }
+  const normalized = value.toLowerCase();
+  if (["text/html", "image/svg+xml", "application/xhtml+xml", "application/javascript", "text/javascript"].includes(normalized)) {
+    throw new HTTPException(415, { message: "Active web content cannot be uploaded to delivery storage" });
+  }
+  return normalized;
+}
+
+export function browserUploadObjectKey(rootPrefix: unknown, relativePath: unknown): { root: string; relative: string; key: string } {
+  const root = normalizeCrudKey(rootPrefix, true);
+  const relative = normalizeUploadRelativePath(relativePath);
+  const key = normalizeCrudKey(`${root}${relative}`, false);
+  if (!key.startsWith(root)) throw new HTTPException(400, { message: "Upload path escapes the selected folder" });
+  return { root, relative, key };
 }
 
 export function assertSafeCrudDestination(source:string,target:string,folder:boolean):void{

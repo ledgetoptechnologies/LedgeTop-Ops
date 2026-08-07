@@ -20,7 +20,7 @@ if (errors.length) {
   for (const error of errors) console.error(`- ${error}`);
   process.exit(1);
 }
-for (const script of ["staging:check:test", "staging:evidence:check:test", "check", "test", "build"]) {
+for (const script of ["staging:check:test", "staging:evidence:check:test", "check", "test", "build", "test:browser"]) {
   const result = spawnSync("npm", ["run", script], { shell: process.platform === "win32", stdio: "inherit" });
   if (result.status !== 0) {
     console.error(`Refusing release preparation because npm run ${script} failed.`);

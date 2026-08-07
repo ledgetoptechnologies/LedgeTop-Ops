@@ -95,6 +95,9 @@ describe("client portal grant enforcement", () => {
       "association.project_id=?",
       "association.revoked_at IS NULL",
       "member_grant.revoked_at IS NULL",
+      "tombstone.restored_at IS NULL",
+      "tombstone.physical_key=f.r2_key",
+      "tombstone.tombstone_kind='prefix'",
     ]) expect(call.sql).toContain(condition);
   });
 

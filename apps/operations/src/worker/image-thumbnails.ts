@@ -57,6 +57,7 @@ export interface ThumbnailJobRow {
   thumbnail_key: string;
   status: "pending" | "processing" | "ready" | "failed";
   error_code: string | null;
+  queue_published_at?: string | null;
 }
 
 export type ThumbnailQueueBatchKind = "jobs" | "dead_letters" | "other" | "mixed";
@@ -121,7 +122,7 @@ function extension(key: string): string {
   return leaf.includes(".") ? leaf.slice(leaf.lastIndexOf(".") + 1).toLowerCase() : "";
 }
 
-function supportedImage(key: string, contentType?: string): boolean {
+export function supportedThumbnailSource(key: string, contentType?: string): boolean {
   const normalizedType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
   return Boolean((normalizedType && SUPPORTED_IMAGE_CONTENT_TYPES.has(normalizedType)) || SUPPORTED_IMAGE_EXTENSIONS.has(extension(key)));
 }
@@ -133,6 +134,9 @@ function errorDetails(error: unknown): { code: string; message: string; permanen
   if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === 9412) {
     return { code: "invalid_image", message: "Cloudflare Images rejected the original image", permanent: true };
   }
+  if (error && typeof error === "object" && "code" in error && (error as { code?: unknown }).code === 9422) {
+    return { code: "images_quota_exceeded", message: "Cloudflare Images transformation quota is exhausted", permanent: true };
+  }
   const message = error instanceof Error ? error.message : "Unknown thumbnail processing error";
   return { code: "thumbnail_processing_error", message, permanent: false };
 }
@@ -143,7 +147,7 @@ function safeErrorMessage(message: string): string {
 
 async function currentJob(env: Pick<Env, "DELIVERY_DB">, sourceKey: string): Promise<ThumbnailJobRow | null> {
   return env.DELIVERY_DB.prepare(`/* thumbnail.current-row */
-    SELECT source_etag,thumbnail_key,status,error_code FROM image_thumbnail_jobs WHERE source_key=?`)
+    SELECT source_etag,thumbnail_key,status,error_code,queue_published_at FROM image_thumbnail_jobs WHERE source_key=?`)
     .bind(sourceKey)
     .first<ThumbnailJobRow>();
 }
@@ -281,6 +285,7 @@ async function registerJob(
       ready_at=CASE WHEN image_thumbnail_jobs.source_etag=excluded.source_etag THEN image_thumbnail_jobs.ready_at ELSE NULL END,
       failed_at=CASE WHEN image_thumbnail_jobs.source_etag=excluded.source_etag THEN image_thumbnail_jobs.failed_at ELSE NULL END,
       dead_lettered_at=CASE WHEN image_thumbnail_jobs.source_etag=excluded.source_etag THEN image_thumbnail_jobs.dead_lettered_at ELSE NULL END,
+      queue_published_at=CASE WHEN image_thumbnail_jobs.source_etag=excluded.source_etag THEN image_thumbnail_jobs.queue_published_at ELSE NULL END,
       last_event_at=excluded.last_event_at,updated_at=datetime('now')
     WHERE image_thumbnail_jobs.last_event_at IS NULL
       OR julianday(excluded.last_event_at)>julianday(image_thumbnail_jobs.last_event_at)
@@ -337,11 +342,11 @@ export async function enqueueThumbnailJob(
       .run();
     return { enqueued: false, state: "failed" };
   }
-  const current = await getThumbnailState(env, input.sourceKey, sourceEtag);
-  if (current.state === "ready" || current.state === "failed") return { enqueued: false, state: current.state };
+  const current = await currentJob(env, input.sourceKey);
+  if (current?.status === "ready" || current?.status === "failed") return { enqueued: false, state: current.status };
+  if (current?.queue_published_at) return { enqueued: false, state: "pending" };
   try {
     await env.THUMBNAIL_QUEUE.send({ kind: THUMBNAIL_JOB_KIND, sourceKey: input.sourceKey, sourceEtag });
-    return { enqueued: true, state: "pending" };
   } catch (error) {
     await env.DELIVERY_DB.prepare(`/* thumbnail.enqueue-fail */
       UPDATE image_thumbnail_jobs
@@ -351,6 +356,23 @@ export async function enqueueThumbnailJob(
       .run();
     throw error;
   }
+  try {
+    await env.DELIVERY_DB.prepare(`/* thumbnail.publish-record */
+      UPDATE image_thumbnail_jobs SET queue_published_at=COALESCE(queue_published_at,datetime('now')),updated_at=datetime('now')
+      WHERE source_key=? AND source_etag=? AND status IN ('pending','processing')`)
+      .bind(input.sourceKey, sourceEtag).run();
+  } catch (error) {
+    // The queue accepted the message. A marker write failure must not poison
+    // the pending job: at-least-once delivery plus the versioned consumer is
+    // safer than recording a false publish failure after successful send.
+    console.error(JSON.stringify({
+      event: "thumbnail.publish_marker.error",
+      sourceKey: input.sourceKey,
+      sourceEtag,
+      message: safeErrorMessage(error instanceof Error ? error.message : "Thumbnail publish marker failed"),
+    }));
+  }
+  return { enqueued: true, state: "pending" };
 }
 
 async function claimJob(env: Env, sourceKey: string, sourceEtag: string): Promise<boolean> {
@@ -446,7 +468,7 @@ export async function enqueueThumbnailsForPath(env: Env, sourceKey: string, isPr
   }
   let queued = 0;
   for (const object of objects) {
-    if (!canonicalThumbnailSourceKey(object.key) || !supportedImage(object.key, object.httpMetadata?.contentType)) continue;
+    if (!canonicalThumbnailSourceKey(object.key) || !supportedThumbnailSource(object.key, object.httpMetadata?.contentType)) continue;
     const result = await enqueueThumbnailJob(env, {
       sourceKey: object.key,
       sourceEtag: object.httpEtag,
@@ -496,11 +518,18 @@ export async function processThumbnailJob(
   if (!(await claimJob(env, message.sourceKey, sourceEtag))) return { outcome: "duplicate", thumbnailKey };
 
   try {
-    if (!supportedImage(message.sourceKey, sourceHead.httpMetadata?.contentType)) {
+    if (!supportedThumbnailSource(message.sourceKey, sourceHead.httpMetadata?.contentType)) {
       throw new PermanentThumbnailError("unsupported_file", "The original is not a supported image format");
     }
     if (sourceHead.size > THUMBNAIL_MAX_INPUT_BYTES) {
       throw new PermanentThumbnailError("input_too_large", "The original exceeds the Cloudflare Images binding input limit");
+    }
+
+    // Trash can race the queue claim. Re-check immediately before the only
+    // original-body read so a newly tombstoned source never reaches Images.
+    if (await sourceIsTrashed(env, message.sourceKey)) {
+      await removeThumbnailStateForPath(env, message.sourceKey);
+      return { outcome: "obsolete" };
     }
 
     const source = await env.DATA_BUCKET.get(message.sourceKey);

@@ -3,7 +3,7 @@ import type { Env } from "./types";
 import { artifactDirectory } from "./artifacts";
 import { sendAdminAlert } from "./alerts";
 import { notificationStatement } from "./notifications";
-import { canonicalThumbnailSourceKey, enqueueThumbnailJob, removeThumbnailStateForPath } from "./image-thumbnails";
+import { canonicalThumbnailSourceKey, enqueueThumbnailJob, removeThumbnailStateForPath, supportedThumbnailSource } from "./image-thumbnails";
 
 export interface R2Notification {
   action: string;
@@ -52,11 +52,11 @@ function metadata(value: string): string { let binary = ""; for (const byte of n
 export function thumbnailJobForCreatedObject(
   action: string,
   key: string,
-  kind: string,
-  head: Pick<R2Object, "httpEtag" | "size">,
+  _kind: string,
+  head: Pick<R2Object, "httpEtag" | "size" | "httpMetadata">,
   eventTime?: string,
 ): { sourceKey: string; sourceEtag: string; sourceSize: number; eventTime?: string } | null {
-  return created(action) && kind === "image" && canonicalThumbnailSourceKey(key)
+  return created(action) && canonicalThumbnailSourceKey(key) && supportedThumbnailSource(key, head.httpMetadata?.contentType)
     ? { sourceKey: key, sourceEtag: head.httpEtag, sourceSize: head.size, ...(eventTime ? { eventTime } : {}) }
     : null;
 }
@@ -267,6 +267,7 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       ]);
       const thumbnailJob = thumbnailJobForCreatedObject(event.action, key, kind, head, event.eventTime);
       if (thumbnailJob) await enqueueThumbnailJob(env, thumbnailJob);
+      else if (canonicalThumbnailSourceKey(key)) await removeThumbnailStateForPath(env, key);
       message.ack();
     } catch (error) {
       console.error(JSON.stringify({ event: "file-index.error", message: error instanceof Error ? error.message : "unknown" }));
@@ -302,7 +303,7 @@ export async function reconcileFileIndex(env: Env): Promise<number> {
         visibleBytes += object.size;
         for (const share of activeShares.results) if (object.key.startsWith(share.r2_prefix.endsWith("/") ? share.r2_prefix : `${share.r2_prefix}/`)) presentShares.add(share.id);
         statements.push(env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,last_seen_reconcile) VALUES (?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,last_seen_reconcile=excluded.last_seen_reconcile,updated_at=datetime('now')`).bind(object.key, object.httpEtag, object.size, object.uploaded.toISOString(), mime(object.key), mediaKind(object.key), marker)); count += 1;
-        if (canonicalThumbnailSourceKey(object.key) && mediaKind(object.key) === "image") {
+        if (canonicalThumbnailSourceKey(object.key) && supportedThumbnailSource(object.key, object.httpMetadata?.contentType)) {
           await enqueueThumbnailJob(env, { sourceKey: object.key, sourceEtag: object.httpEtag, sourceSize: object.size, eventTime: object.uploaded.toISOString() });
         }
       }

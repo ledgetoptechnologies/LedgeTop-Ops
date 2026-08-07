@@ -100,15 +100,17 @@ production migrations; deploy the same pinned commit with optional capabilities
 still disabled; run baseline smoke tests; and only then request separate
 approval for each capability rollout. A branch push alone is never a release.
 
-The current combined schema gate requires Delivery migrations `0096`–`0107`
-and Operations `0014`–`0017`, with fresh staging exports and exact list/apply
+The current combined schema gate requires Delivery migrations `0096`–`0108`
+and Operations `0014`–`0018`, with fresh staging exports and exact list/apply
 evidence. Client `0100` preserves independent share rotation/revocation by
 removing `share_version` from the delivery-grant foreign-key parent while
 retaining the recorded version as a fail-closed authorization check. Client
 `0105` adds immutable direct-folder grant versions and their notification
 outbox, `0106` adds thumbnail jobs, `0107` adds the durable thumbnail cleanup
-ledger and atomic retirement triggers, and Operations `0017` adds operational job
-briefs. These migrations are not rolled back with Worker code. The Project
+ledger and atomic retirement triggers, and `0108` adds resumable thumbnail
+backfill and queue-publication state. Operations `0017` adds operational job
+briefs and `0018` adds private browser-upload intents and staging sessions.
+These migrations are not rolled back with Worker code. The Project
 Alpha payment/billing contract is a blocking dependency, never an exception to
 local staff, client-team, account, project, delivery, request, or billing ACLs.
 After separately approved staging activation tests, restore the false flag and

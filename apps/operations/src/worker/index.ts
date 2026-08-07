@@ -30,6 +30,7 @@ import {
   type R2Notification,
 } from "./file-events";
 import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, type ThumbnailJobMessage } from "./image-thumbnails";
+import { processThumbnailBackfills } from "./thumbnail-backfill";
 import {
   authorizeItem,
   createDeliveryShare,
@@ -65,6 +66,8 @@ import {
   restoreTombstone,
 } from "./trash";
 import {
+  cleanupBrowserUploadSessions,
+  expireBrowserUploadSessions,
   processR2OperationJobs,
   purgeReplacementRecovery,
   registerR2CrudRoutes,
@@ -2110,6 +2113,7 @@ async function scheduled(
   ctx: ExecutionContext,
 ) {
   if (event.cron === CLIENT_REQUEST_NOTIFICATION_CRON) {
+    ctx.waitUntil(processThumbnailBackfills(env));
     try {
       await Promise.all([
         processClientPortalRequestNotifications(env),
@@ -2165,7 +2169,10 @@ async function scheduled(
   if (r2PurgeEnabled(env)) ctx.waitUntil(purgeTrash(env));
   ctx.waitUntil(processR2OperationJobs(env));
   ctx.waitUntil(purgeReplacementRecovery(env));
+  ctx.waitUntil(expireBrowserUploadSessions(env));
+  ctx.waitUntil(cleanupBrowserUploadSessions(env));
   ctx.waitUntil(drainThumbnailCleanup(env));
+  ctx.waitUntil(processThumbnailBackfills(env));
   ctx.waitUntil(
     enqueueExpiringNotifications(env).then(() =>
       processDeliveryNotifications(env),

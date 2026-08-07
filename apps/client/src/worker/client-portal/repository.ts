@@ -554,6 +554,12 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
         AND f.r2_key NOT LIKE '_ltds/%' AND f.r2_key NOT LIKE '%/_ltds/%'
         AND f.r2_key NOT LIKE '.previews/%' AND f.r2_key NOT LIKE '%/.previews/%'
         AND f.r2_key NOT LIKE 'dump/%' AND f.r2_key NOT LIKE '%/dump/%'
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_tombstones tombstone
+          WHERE tombstone.restored_at IS NULL
+            AND (tombstone.physical_key=f.r2_key OR
+              (tombstone.tombstone_kind='prefix' AND substr(f.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key))
+        )
       ORDER BY f.r2_key LIMIT 101`,
       )
       .bind(session.accountId, session.identityId, projectId, cursor || "")
@@ -584,6 +590,12 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
         AND f.r2_key NOT LIKE '_ltds/%' AND f.r2_key NOT LIKE '%/_ltds/%'
         AND f.r2_key NOT LIKE '.previews/%' AND f.r2_key NOT LIKE '%/.previews/%'
         AND f.r2_key NOT LIKE 'dump/%' AND f.r2_key NOT LIKE '%/dump/%'
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_tombstones tombstone
+          WHERE tombstone.restored_at IS NULL
+            AND (tombstone.physical_key=f.r2_key OR
+              (tombstone.tombstone_kind='prefix' AND substr(f.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key))
+        )
       ORDER BY f.r2_key LIMIT 101`,
       )
       .bind(session.accountId, session.identityId, cursor || "")
@@ -618,6 +630,12 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       WHERE association.account_id=a.id AND association.scope_type=?
         AND ${projectId ? "association.project_id=?" : "association.project_id IS NULL"}
         AND association.revoked_at IS NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_tombstones tombstone
+          WHERE tombstone.restored_at IS NULL
+            AND (tombstone.physical_key=f.r2_key OR
+              (tombstone.tombstone_kind='prefix' AND substr(f.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key))
+        )
         ${projectId ? memberProjectConstraint : ""}
       ORDER BY length(association.r2_prefix) DESC LIMIT 1`,
       )

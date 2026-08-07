@@ -34,10 +34,12 @@ The intended public boundary is:
 
 The domain migration must keep the existing Worker identity and bindings stable,
 and the cutover must be independently reversible without deleting or recreating
-the Worker or any bound resource. Browser writes to client-visible `client-data`
-remain disabled. Incoming browser uploads stay confined to the private
-quarantine boundary, pass through TrueNAS verification, and require an
-authorized publication step before becoming client-browsable.
+the Worker or any bound resource. Public-share and Client Portal identities
+cannot write to `client-data`; separately gated authenticated Operations staff
+uploads use the Operations authorization boundary. Incoming browser uploads
+stay confined to the private quarantine boundary, pass through TrueNAS
+verification, and require an authorized publication step before becoming
+client-browsable.
 
 ### Current implementation boundary
 

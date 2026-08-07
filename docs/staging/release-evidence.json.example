@@ -136,7 +136,8 @@
         "0104_service_request_thread.sql",
         "0105_internal_folder_grants.sql",
         "0106_image_thumbnail_jobs.sql",
-        "0107_thumbnail_cleanup_jobs.sql"
+        "0107_thumbnail_cleanup_jobs.sql",
+        "0108_thumbnail_backfill_runs.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -147,7 +148,8 @@
         "0014_staff_acl_controls.sql",
         "0015_staff_acl_explicit_controls.sql",
         "0016_projection_entity_leases.sql",
-        "0017_operational_job_briefs.sql"
+        "0017_operational_job_briefs.sql",
+        "0018_browser_upload_intents.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",

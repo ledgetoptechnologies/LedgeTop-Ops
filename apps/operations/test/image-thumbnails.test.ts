@@ -25,10 +25,13 @@ interface StoredJob extends ThumbnailJobRow {
   attempt_count: number;
   error_message: string | null;
   dead_lettered: boolean;
+  queue_published_at: string | null;
 }
 
 class FakeThumbnailDb {
   job: StoredJob | undefined;
+  tombstoneChecks = 0;
+  tombstoneOnCheck: number | undefined;
 
   async batch(statements: Array<{ run(): Promise<unknown> }>) {
     return Promise.all(statements.map(statement => statement.run()));
@@ -58,6 +61,7 @@ class FakeThumbnailDb {
               error_code: null,
               error_message: null,
               dead_lettered: false,
+              queue_published_at: null,
             };
           }
           return result(1);
@@ -124,7 +128,20 @@ class FakeThumbnailDb {
           }
           return result(0);
         }
+        if (sql.includes("thumbnail.publish-record")) {
+          const [sourceKey, sourceEtag] = values as [string, string];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag &&
+            (db.job.status === "pending" || db.job.status === "processing")) {
+            db.job.queue_published_at ||= "2026-08-07 00:00:00";
+            return result(1);
+          }
+          return result(0);
+        }
         if (sql.includes("thumbnail.cleanup-schedule")) return result(1);
+        if (sql.includes("thumbnail.cleanup-delete")) {
+          db.job = undefined;
+          return result(1);
+        }
         if (sql.includes("thumbnail.cleanup-prune")) return result(0);
         throw new Error(`Unhandled run query: ${sql}`);
       },
@@ -139,7 +156,11 @@ class FakeThumbnailDb {
           return null;
         }
         if (sql.includes("thumbnail.state") || sql.includes("thumbnail.current-row")) return (db.job || null) as T | null;
-        if (sql.includes("thumbnail.trashed") || sql.includes("thumbnail.cleanup-referenced")) return null;
+        if (sql.includes("thumbnail.trashed")) {
+          db.tombstoneChecks += 1;
+          return (db.tombstoneOnCheck && db.tombstoneChecks >= db.tombstoneOnCheck ? { id: "trash-race" } : null) as T | null;
+        }
+        if (sql.includes("thumbnail.cleanup-referenced")) return null;
         throw new Error(`Unhandled first query: ${sql}`);
       },
       async all<T>() {
@@ -180,12 +201,13 @@ function r2Object(key: string, etag: string, size: number, contentType: string, 
   };
 }
 
-function fixture(options: { sourceKey?: string; contentType?: string; size?: number; transformError?: unknown; queueError?: Error } = {}) {
+function fixture(options: { sourceKey?: string; contentType?: string; size?: number; transformError?: unknown; queueError?: Error; tombstoneOnCheck?: number } = {}) {
   const sourceKey = options.sourceKey || "Jobs/Clients/Synthetic/photo.jpg";
   const sourceEtag = "source-etag";
   const originalBody = stream([1, 2, 3, 4]);
   const thumbnailBody = stream([9, 8, 7]);
   const db = new FakeThumbnailDb();
+  db.tombstoneOnCheck = options.tombstoneOnCheck;
   db.job = {
     source_key: sourceKey,
     source_etag: sourceEtag,
@@ -198,6 +220,7 @@ function fixture(options: { sourceKey?: string; contentType?: string; size?: num
     error_code: null,
     error_message: null,
     dead_lettered: false,
+    queue_published_at: null,
   };
   const putBodies: unknown[] = [];
   const putOptions: unknown[] = [];
@@ -296,7 +319,21 @@ describe("Cloudflare image thumbnail pipeline", () => {
     });
     expect(queued).toEqual({ enqueued: true, state: "pending" });
     expect(value.db.job?.status).toBe("pending");
+    expect(value.db.job?.queue_published_at).toBeTruthy();
     expect(value.send).toHaveBeenCalledWith(value.message);
+  });
+
+  it("publishes a same-version pending job only once after recording queue publication", async () => {
+    const value = fixture();
+    const input = {
+      sourceKey: value.message.sourceKey,
+      sourceEtag: value.message.sourceEtag,
+      sourceSize: 4096,
+      eventTime: "2026-08-02T12:00:00Z",
+    };
+    await expect(enqueueThumbnailJob(value.env, input)).resolves.toEqual({ enqueued: true, state: "pending" });
+    await expect(enqueueThumbnailJob(value.env, input)).resolves.toEqual({ enqueued: false, state: "pending" });
+    expect(value.send).toHaveBeenCalledTimes(1);
   });
 
   it("makes queue publication failures visible in durable state and rethrows", async () => {
@@ -358,6 +395,16 @@ describe("Cloudflare image thumbnail pipeline", () => {
     expect(value.getKeys).toEqual([]);
     expect(value.input).not.toHaveBeenCalled();
     expect(value.db.job).toMatchObject({ status: "failed", error_code: "unsupported_file" });
+  });
+
+  it("rechecks trash after claiming and prevents a raced tombstone from reading the source or invoking Images", async () => {
+    const value = fixture({ tombstoneOnCheck: 2 });
+    const result = await processThumbnailJob(value.env, value.message);
+    expect(result).toEqual({ outcome: "obsolete" });
+    expect(value.db.tombstoneChecks).toBe(2);
+    expect(value.getKeys).toEqual([]);
+    expect(value.input).not.toHaveBeenCalled();
+    expect(value.db.job).toBeUndefined();
   });
 
   it("classifies Cloudflare Images invalid-image errors as permanent", async () => {

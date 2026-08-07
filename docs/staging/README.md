@@ -51,7 +51,7 @@ Only after the unexpected production branch deployment has been resolved and a s
 3. Back up both staging D1 databases.
 4. List pending migrations with the explicit `--config apps/<app>/wrangler.staging.json` path and confirm the resolved IDs are staging IDs.
 5. Apply staging migrations one database at a time with that explicit config.
-6. Deploy with `wrangler deploy --config apps/<app>/wrangler.staging.json`. Never use an unqualified package `deploy` script for staging.
+6. Upload reviewable versions with `wrangler versions upload --strict --config apps/<app>/wrangler.staging.json`, inspect the returned version IDs and bindings, and deploy only those reviewed versions as described in `release-checklist.md`. Never use an unqualified package `deploy` script for staging. Keep Ops Sync undeployed until its service-auth, Access-group, and Ed25519 prerequisites are proven.
 7. Verify Access rejection, host rejection, `/health`, object authorization, upload/download, recycle/restore, and audit/log behavior. Follow the separate client-portal activation/restore sequence; provider integrations and permanent purge stay disabled.
 
 These are operator instructions, not commands run by repository automation. Record version IDs, migration output, health evidence, and rollback targets in the release ticket.

@@ -64,15 +64,22 @@ Operations:
 - `PROJECT_ALPHA_API_KEY`
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
+- `TURNSTILE_SITE_KEY`
+- `TURNSTILE_SECRET`
+- `INCOMING_SESSION_SECRET`
+- `INCOMING_ACCESS_CODE_PEPPER`
+- `INCOMING_PICKUP_SECRET`
 
 Ops Sync:
 
 - `CF_ACCESS_GROUP_API_TOKEN`
 - `PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY`
 
-Provider, incoming-upload, previous-key, and Stream management secrets are not
-required while their corresponding capabilities remain disabled. Never place
-secret values in Git, Wrangler `vars`, shell arguments, or release evidence.
+The staging manifest currently requires the complete 12-name Operations set
+even while incoming capability flags remain disabled. This keeps the checked
+configuration, evidence packet, and version upload contract identical and
+fail-closed. Never place secret values in Git, Wrangler `vars`, shell
+arguments, or release evidence.
 
 ## Non-mutating gates
 
@@ -93,9 +100,13 @@ npm.cmd run staging:release:prepare
 & '.\apps\ops-sync\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/ops-sync/wrangler.staging.json --outdir C:\tmp\ltds-ops-sync-staging-dry-run
 ```
 
-The isolated incoming staging hostname is required for quarantine intake testing.
-Keep direct browser uploads into client delivery storage disabled with
-`DIRECT_DELIVERY_UPLOADS_ENABLED=false`.
+The isolated incoming staging hostname is required for quarantine intake
+testing. Keep direct browser uploads into client delivery storage disabled with
+`DIRECT_DELIVERY_UPLOADS_ENABLED=false` during baseline deployment. Enable it
+only for the separately approved synthetic Operations acceptance run described
+in the [thumbnail and upload runbook](../media-thumbnail-pipeline.md), then
+return it to the intended reviewed state and record the deployed value. Client
+Portal, public-share, and Incoming identities remain denied in either state.
 
 The example evidence intentionally fails until the client Access/public-path
 contract, migrations, end-to-end tests, and final default-off state are
@@ -137,17 +148,18 @@ npm.cmd run staging:evidence:check
 Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
-`0106_image_thumbnail_jobs.sql` and Operations
+`0108_thumbnail_backfill_runs.sql` and Operations
 `0014_staff_acl_controls.sql` through
-`0017_operational_job_briefs.sql`. Migration `0100` removes
+`0018_browser_upload_intents.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any
 unexpected pending migration. Migration `0105` must be present before the
 Operations version that exposes direct authenticated folder grants or runs its
-five-minute notification consumer; `0106` must be present before thumbnail jobs
-are indexed or served; `0017` must be present before job-brief routes are
-registered. Worker rollback does not undo either database.
+five-minute notification consumer; `0106`/`0107`/`0108` must be present before
+thumbnail jobs, cleanup, or backfill run; `0017` must be present before
+job-brief routes and `0018` before browser-upload routes are registered. Worker
+rollback does not undo either database.
 
 Before version upload, verify rather than infer the remaining operator-owned
 media prerequisites: the staging thumbnail queue and DLQ exist, Operations has

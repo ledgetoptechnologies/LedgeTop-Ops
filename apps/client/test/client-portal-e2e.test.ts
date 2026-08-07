@@ -238,6 +238,20 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     expect(revokedProjectDownload.status).toBe(404);
     expect(bucketGetKeys).toEqual([]);
     await db.prepare("UPDATE client_project_grants SET revoked_at=NULL WHERE account_id='account-a' AND project_id='project-a'").run();
+
+    await db.prepare(`INSERT INTO delivery_tombstones(id,physical_key,tombstone_kind,deleted_by,purge_after)
+      VALUES('portal-tombstone','clients/acme/north/report.pdf','exact','staff-owner',datetime('now','+7 days'))`).run();
+    const trashedListing = await portal().request(`${portalOrigin}/projects/project-a/files`, {}, env);
+    expect((await trashedListing.json() as { files: Array<{ key: string }> }).files.map(file => file.key))
+      .not.toContain("clients/acme/north/report.pdf");
+    const trashedDownload = await portal().request(`${portalOrigin}${routePath}`, {}, env);
+    expect(trashedDownload.status).toBe(404);
+    expect(bucketGetKeys).toEqual([]);
+
+    await db.prepare("UPDATE delivery_tombstones SET restored_at=datetime('now'),restored_by='staff-owner' WHERE id='portal-tombstone'").run();
+    const restoredDownload = await portal().request(`${portalOrigin}${routePath}`, {}, env);
+    expect(restoredDownload.status).toBe(200);
+    expect(bucketGetKeys).toEqual(["clients/acme/north/report.pdf"]);
   });
 
   it("creates an idempotent request and durable staff-notification/audit records", async () => {

@@ -40,7 +40,7 @@ describe("thumbnail lifecycle cleanup", () => {
       d1Databases: { DELIVERY_DB: "thumbnail-lifecycle" },
     });
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
-    for (const migration of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql"]) {
+    for (const migration of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql", "0108_thumbnail_backfill_runs.sql"]) {
       const sql = readFileSync(new URL(`../../client/migrations/${migration}`, import.meta.url), "utf8")
         .replace(/\r\n/g, "\n")
         .replace(/^\s*--.*$/gm, "")
