@@ -1381,6 +1381,7 @@ type DeliveryItem = {
   size?: number;
   isShared?: boolean;
   thumbnailUrl?: string;
+  thumbnailFallbackKind?: string;
   downloadUrl?: string;
   previewUrl?: string;
   sourceUrl?: string;
@@ -2871,10 +2872,11 @@ function FileCardV2({ item, preview }: { item: any; preview: () => void }) {
 }
 function OperationsThumbnail({ item }: { item: DeliveryItem }) {
   const [failed, setFailed] = useState(!item.thumbnailUrl);
+  const fallback = item.thumbnailFallbackKind === "pdf" ? "PDF" : item.thumbnailFallbackKind === "archive" ? "ZIP" : item.thumbnailFallbackKind === "spreadsheet" ? "Sheet" : item.thumbnailFallbackKind === "document" ? "Doc" : item.thumbnailFallbackKind || item.kind || "File";
   if (failed)
     return (
-      <span className="ops-preview-placeholder">
-        <img src={BRAND.logoUrl} alt="" loading="lazy" decoding="async" />
+      <span className="ops-preview-placeholder file-type-placeholder" aria-label={`${fallback} preview unavailable`}>
+        <span className="file-kind" aria-hidden="true">{fallback}</span>
         <small>No preview generated yet</small>
       </span>
     );

@@ -1,14 +1,7 @@
-export interface ImagesBindingLike {
-  input(stream: ReadableStream): {
-    transform(options: Record<string, unknown>): { output(options: Record<string, unknown>): Promise<{ response(): Response }> };
-  };
-}
-
 export interface Env {
   DELIVERY_DB: D1Database;
   DATA_BUCKET: R2Bucket;
   ASSETS: Fetcher;
-  IMAGES: ImagesBindingLike;
   STREAM: { video(id: string): { generateToken(): Promise<string> } };
   ACCESS_CODE_RATE_LIMITER: RateLimit;
   PUBLIC_SESSION_RATE_LIMITER: RateLimit;

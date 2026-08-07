@@ -3,6 +3,7 @@ import { aliasMap } from "./aliases";
 import { artifactDirectory } from "./artifacts";
 import { normalizePrefix } from "./delivery";
 import type { Env, StaffPrincipal } from "./types";
+import { enqueueThumbnailsForPath, removeThumbnailStateForPath } from "./image-thumbnails";
 
 const BATCH = 1000;
 
@@ -95,13 +96,18 @@ export async function listTrash(env: Env): Promise<Array<Tombstone & { display_n
 }
 
 export async function restoreTombstone(env: Env, principal: StaffPrincipal, id: string): Promise<void> {
-  const tombstone = await env.DELIVERY_DB.prepare("SELECT id,physical_key FROM delivery_tombstones WHERE id=? AND restored_at IS NULL AND purging_at IS NULL").bind(id).first<{ id: string; physical_key: string }>();
+  const tombstone = await env.DELIVERY_DB.prepare("SELECT id,physical_key,tombstone_kind FROM delivery_tombstones WHERE id=? AND restored_at IS NULL AND purging_at IS NULL").bind(id).first<{ id: string; physical_key: string; tombstone_kind: "exact" | "prefix" }>();
   if (!tombstone) throw new HTTPException(404, { message: "Trash item not found or already restored" });
   const restoredAt = new Date().toISOString();
   const restored = await env.DELIVERY_DB.prepare("UPDATE delivery_tombstones SET restored_by=?,restored_at=? WHERE id=? AND restored_at IS NULL AND purging_at IS NULL").bind(principal.id, restoredAt, id).run();
   if (restored.meta.changes !== 1) throw new HTTPException(409, { message: "This item is already being purged and can no longer be restored" });
   await env.OPS_DB.prepare(`INSERT INTO audit_events(actor_type,actor_id,actor_email,actor_display_name,action,entity_type,entity_id,details_json)
     VALUES('staff',?,?,?,?,?,?,?)`).bind(principal.id, principal.email, principal.displayName, "delivery.source_restored", "trash", id, JSON.stringify({ physicalKey: tombstone.physical_key })).run();
+  try {
+    await enqueueThumbnailsForPath(env, tombstone.physical_key, tombstone.tombstone_kind === "prefix");
+  } catch (error) {
+    console.error(JSON.stringify({ event: "thumbnail.restore-requeue-failed", tombstoneId: id, message: error instanceof Error ? error.message : "unknown" }));
+  }
 }
 
 async function listObjects(bucket: R2Bucket, prefix: string, exact: boolean, relation: "source" | "derived"): Promise<TrashObjectIdentity[]> {
@@ -176,6 +182,7 @@ export async function purgeTrash(env: Env): Promise<number> {
       .bind(tombstone.id).first<{ count: number }>();
     if (Number(pending?.count || 0) > 0) continue;
     const prefix = tombstone.tombstone_kind === "prefix" ? tombstone.physical_key : `${tombstone.physical_key}/`;
+    await removeThumbnailStateForPath(env, tombstone.physical_key, tombstone.tombstone_kind === "prefix");
     await env.DELIVERY_DB.batch([
       env.DELIVERY_DB.prepare(`DELETE FROM file_aliases WHERE physical_key=? OR substr(physical_key,1,length(?))=?`).bind(tombstone.physical_key, prefix, prefix),
       env.DELIVERY_DB.prepare(`DELETE FROM file_index WHERE r2_key=? OR substr(r2_key,1,length(?))=?`).bind(tombstone.physical_key, prefix, prefix),

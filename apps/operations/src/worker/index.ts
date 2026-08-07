@@ -29,7 +29,7 @@ import {
   refreshStreamStatuses,
   type R2Notification,
 } from "./file-events";
-import { classifyThumbnailQueueBatch, consumeThumbnailDeadLetters, consumeThumbnailJobs, getThumbnailForAuthorizedSource, type ThumbnailJobMessage } from "./image-thumbnails";
+import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, type ThumbnailJobMessage } from "./image-thumbnails";
 import {
   authorizeItem,
   createDeliveryShare,
@@ -2165,6 +2165,7 @@ async function scheduled(
   if (r2PurgeEnabled(env)) ctx.waitUntil(purgeTrash(env));
   ctx.waitUntil(processR2OperationJobs(env));
   ctx.waitUntil(purgeReplacementRecovery(env));
+  ctx.waitUntil(drainThumbnailCleanup(env));
   ctx.waitUntil(
     enqueueExpiringNotifications(env).then(() =>
       processDeliveryNotifications(env),
@@ -2183,11 +2184,10 @@ async function fetch(
   return app.fetch(request, env, ctx);
 }
 async function queue(batch: MessageBatch<R2Notification | ThumbnailJobMessage>, env: Env): Promise<void> {
-  const thumbnailBatch = classifyThumbnailQueueBatch(batch);
-  if (thumbnailBatch === "dead_letters") return consumeThumbnailDeadLetters(batch, env);
-  if (thumbnailBatch === "jobs") return consumeThumbnailJobs(batch, env);
-  if (thumbnailBatch === "mixed") throw new Error("Mixed thumbnail and file-event queue batch");
-  return consumeFileEvents(batch as MessageBatch<R2Notification>, env);
+  if (batch.queue === env.THUMBNAIL_DLQ_NAME) return consumeThumbnailDeadLetters(batch, env);
+  if (batch.queue === env.THUMBNAIL_QUEUE_NAME) return consumeThumbnailJobs(batch, env);
+  if (batch.queue === env.FILE_EVENTS_QUEUE_NAME) return consumeFileEvents(batch as MessageBatch<R2Notification>, env);
+  throw new Error("Unrecognized queue binding");
 }
 export default {
   fetch,

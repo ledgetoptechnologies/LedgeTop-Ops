@@ -37,6 +37,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const migrationsDirectory = fileURLToPath(new URL("../migrations/", import.meta.url));
     for (const migration of readdirSync(migrationsDirectory).filter(name => name.endsWith(".sql")).sort()) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+      if (migration === "0107_thumbnail_cleanup_jobs.sql") { await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " ")); continue; }
       if (migration === "0103_client_portal_workspace.sql") {
         await db.batch([
           db.prepare("INSERT INTO client_accounts (id,display_name,status) VALUES ('migration-account','Migration Client','active')"),

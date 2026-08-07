@@ -25,6 +25,13 @@ export interface ThumbnailJobMessage {
   sourceEtag: string;
 }
 
+export interface ThumbnailEnqueueInput {
+  sourceKey: string;
+  sourceEtag: string;
+  sourceSize: number;
+  eventTime?: string;
+}
+
 export type ThumbnailJobOutcome =
   | { outcome: "ready"; thumbnailKey: string }
   | { outcome: "duplicate"; thumbnailKey: string }
@@ -45,6 +52,7 @@ export type AuthorizedThumbnail =
   | { state: "pending" | "failed"; object: null; errorCode?: string };
 
 export interface ThumbnailJobRow {
+  source_key?: string;
   source_etag: string;
   thumbnail_key: string;
   status: "pending" | "processing" | "ready" | "failed";
@@ -85,11 +93,20 @@ function hex(bytes: ArrayBuffer): string {
   return [...new Uint8Array(bytes)].map((value) => value.toString(16).padStart(2, "0")).join("");
 }
 
-/** A filename-free, stable key. D1 source_etag gates stale delivery after an overwrite. */
-export async function thumbnailObjectKey(sourceKey: string): Promise<string> {
-  const material = new TextEncoder().encode(`ltds-thumbnail:v1\0${sourceKey}`);
-  return `_ltds/thumbnails/v1/${hex(await crypto.subtle.digest("SHA-256", material))}.webp`;
+/** A filename-free key scoped to an exact source object version. */
+export async function thumbnailObjectKey(sourceKey: string, sourceEtag: string): Promise<string> {
+  const material = new TextEncoder().encode(`ltds-thumbnail:v2\0${sourceKey}\0${cleanEtag(sourceEtag)}`);
+  return `_ltds/thumbnails/v2/${hex(await crypto.subtle.digest("SHA-256", material))}.webp`;
 }
+
+interface ThumbnailCleanupRow {
+  thumbnail_key: string;
+  source_key: string;
+  source_etag: string;
+  attempt_count: number;
+}
+
+const THUMBNAIL_CLEANUP_MAX_ATTEMPTS = 8;
 
 export function isThumbnailJobMessage(value: unknown): value is ThumbnailJobMessage {
   if (!value || typeof value !== "object") return false;
@@ -124,16 +141,132 @@ function safeErrorMessage(message: string): string {
   return message.replace(/[\r\n\t]+/g, " ").slice(0, 240) || "Thumbnail processing failed";
 }
 
+async function currentJob(env: Pick<Env, "DELIVERY_DB">, sourceKey: string): Promise<ThumbnailJobRow | null> {
+  return env.DELIVERY_DB.prepare(`/* thumbnail.current-row */
+    SELECT source_etag,thumbnail_key,status,error_code FROM image_thumbnail_jobs WHERE source_key=?`)
+    .bind(sourceKey)
+    .first<ThumbnailJobRow>();
+}
+
+async function scheduleThumbnailCleanup(
+  env: Pick<Env, "DELIVERY_DB">,
+  input: { thumbnailKey: string; sourceKey: string; sourceEtag: string; reason: string },
+): Promise<void> {
+  await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-schedule */
+    INSERT INTO image_thumbnail_cleanup_jobs(thumbnail_key,source_key,source_etag,reason,status,next_attempt_at)
+    VALUES(?,?,?,?,'pending',datetime('now'))
+    ON CONFLICT(thumbnail_key) DO UPDATE SET
+      status='pending',reason=excluded.reason,next_attempt_at=datetime('now'),
+      lease_until=NULL,error_code=NULL,error_message=NULL,completed_at=NULL,updated_at=datetime('now')`)
+    .bind(input.thumbnailKey, input.sourceKey, cleanEtag(input.sourceEtag), input.reason)
+    .run();
+}
+
+function cleanupRetryDelay(attempt: number): string {
+  return `+${Math.min(3600, 15 * 2 ** Math.max(0, attempt - 1))} seconds`;
+}
+
+export async function drainThumbnailCleanup(env: Env, limit = 100): Promise<number> {
+  const due = await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-due */
+    SELECT thumbnail_key,source_key,source_etag,attempt_count FROM image_thumbnail_cleanup_jobs
+    WHERE ((status IN ('pending','failed') AND (next_attempt_at IS NULL OR datetime(next_attempt_at)<=datetime('now')))
+      OR (status='processing' AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now'))))
+      AND attempt_count<? ORDER BY updated_at LIMIT ?`)
+    .bind(THUMBNAIL_CLEANUP_MAX_ATTEMPTS, Math.max(1, Math.min(100, limit)))
+    .all<ThumbnailCleanupRow>();
+  let completed = 0;
+  for (const cleanup of due.results) {
+    const claimed = await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-claim */
+      UPDATE image_thumbnail_cleanup_jobs SET status='processing',attempt_count=attempt_count+1,
+        lease_until=datetime('now',?),updated_at=datetime('now')
+      WHERE thumbnail_key=? AND ((status IN ('pending','failed')
+          AND (next_attempt_at IS NULL OR datetime(next_attempt_at)<=datetime('now')))
+        OR (status='processing' AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now'))))`)
+      .bind(`+${THUMBNAIL_LEASE_MINUTES} minutes`, cleanup.thumbnail_key).run();
+    if (claimed.meta.changes !== 1) continue;
+    try {
+      const referenced = await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-referenced */
+        SELECT source_key,status FROM image_thumbnail_jobs WHERE thumbnail_key=? LIMIT 1`)
+        .bind(cleanup.thumbnail_key).first<{ source_key: string; status: ThumbnailJobRow["status"] }>();
+      if (referenced && referenced.status !== "failed") {
+        await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-complete */
+          UPDATE image_thumbnail_cleanup_jobs SET status='completed',error_code='still_referenced',error_message=NULL,
+            next_attempt_at=NULL,lease_until=NULL,completed_at=datetime('now'),updated_at=datetime('now') WHERE thumbnail_key=?`)
+          .bind(cleanup.thumbnail_key).run();
+        completed += 1;
+        continue;
+      }
+      await env.DATA_BUCKET.delete(cleanup.thumbnail_key);
+      if (await env.DATA_BUCKET.head(cleanup.thumbnail_key)) throw new Error("Thumbnail object still exists after delete");
+      const revived = await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-revived */
+        SELECT source_key,source_etag,status FROM image_thumbnail_jobs WHERE thumbnail_key=? LIMIT 1`)
+        .bind(cleanup.thumbnail_key)
+        .first<{ source_key: string; source_etag: string; status: ThumbnailJobRow["status"] }>();
+      if (revived && revived.status !== "failed") {
+        await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-regenerate */
+          UPDATE image_thumbnail_jobs SET status='pending',thumbnail_etag=NULL,thumbnail_size=NULL,
+            error_code=NULL,error_message=NULL,lease_until=NULL,ready_at=NULL,failed_at=NULL,updated_at=datetime('now')
+          WHERE source_key=? AND source_etag=? AND thumbnail_key=? AND status<>'failed'`)
+          .bind(revived.source_key, revived.source_etag, cleanup.thumbnail_key).run();
+        try {
+          await env.THUMBNAIL_QUEUE.send({ kind: THUMBNAIL_JOB_KIND, sourceKey: revived.source_key, sourceEtag: cleanEtag(revived.source_etag) });
+        } catch (error) {
+          await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-regenerate-failed */
+            UPDATE image_thumbnail_jobs SET status='failed',error_code='queue_publish_failed',error_message=?,
+              failed_at=datetime('now'),updated_at=datetime('now') WHERE source_key=? AND source_etag=? AND status='pending'`)
+            .bind(safeErrorMessage(error instanceof Error ? error.message : "Thumbnail regeneration queue publish failed"), revived.source_key, revived.source_etag)
+            .run();
+          throw error;
+        }
+      }
+      await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-complete */
+        UPDATE image_thumbnail_cleanup_jobs SET status='completed',error_code=NULL,error_message=NULL,
+          next_attempt_at=NULL,lease_until=NULL,completed_at=datetime('now'),updated_at=datetime('now') WHERE thumbnail_key=?`)
+        .bind(cleanup.thumbnail_key).run();
+      completed += 1;
+    } catch (error) {
+      const nextAttempt = cleanup.attempt_count + 1;
+      const terminal = nextAttempt >= THUMBNAIL_CLEANUP_MAX_ATTEMPTS;
+      await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-fail */
+        UPDATE image_thumbnail_cleanup_jobs SET status='failed',error_code=?,error_message=?,
+          next_attempt_at=CASE WHEN ? THEN NULL ELSE datetime('now',?) END,lease_until=NULL,updated_at=datetime('now')
+        WHERE thumbnail_key=?`)
+        .bind(terminal ? "cleanup_exhausted" : "cleanup_retry", safeErrorMessage(error instanceof Error ? error.message : "Thumbnail cleanup failed"), terminal, cleanupRetryDelay(nextAttempt), cleanup.thumbnail_key)
+        .run();
+    }
+  }
+  await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-prune */
+    DELETE FROM image_thumbnail_cleanup_jobs WHERE status='completed' AND datetime(completed_at)<=datetime('now','-7 days')`).run();
+  return completed;
+}
+
+export function canonicalThumbnailSourceKey(key: string): boolean {
+  if (!key.startsWith("Jobs/Clients/") || key.length > 1024 || key.includes("\\") || /[\0-\x1f\x7f]/.test(key)) return false;
+  const parts = key.split("/");
+  return parts.every(part => part && part !== "." && part !== ".." && !["_ltds", ".previews", "dump"].includes(part.toLowerCase()));
+}
+
+export function normalizeThumbnailEventTime(value: string | undefined, now = new Date()): string {
+  const nowMs = now.getTime();
+  const parsed = value ? Date.parse(value) : Number.NaN;
+  if (!Number.isFinite(parsed)) return now.toISOString();
+  // Managed R2 event timestamps are historical observations. Never let an
+  // internal message pin a source path ahead of the consumer's trusted clock.
+  return new Date(Math.min(parsed, nowMs)).toISOString();
+}
+
 async function registerJob(
   env: Env,
   sourceKey: string,
   sourceEtag: string,
   sourceSize: number,
   thumbnailKey: string,
-): Promise<void> {
+  eventTime: string,
+): Promise<{ applied: boolean; previousThumbnailKey?: string }> {
+  const previous = await currentJob(env, sourceKey);
   await env.DELIVERY_DB.prepare(`/* thumbnail.register */
     INSERT INTO image_thumbnail_jobs(source_key,source_etag,source_size,thumbnail_key,status,last_event_at)
-    VALUES(?,?,?,?,'pending',datetime('now'))
+    VALUES(?,?,?,?,'pending',?)
     ON CONFLICT(source_key) DO UPDATE SET
       source_etag=excluded.source_etag,
       source_size=excluded.source_size,
@@ -148,9 +281,25 @@ async function registerJob(
       ready_at=CASE WHEN image_thumbnail_jobs.source_etag=excluded.source_etag THEN image_thumbnail_jobs.ready_at ELSE NULL END,
       failed_at=CASE WHEN image_thumbnail_jobs.source_etag=excluded.source_etag THEN image_thumbnail_jobs.failed_at ELSE NULL END,
       dead_lettered_at=CASE WHEN image_thumbnail_jobs.source_etag=excluded.source_etag THEN image_thumbnail_jobs.dead_lettered_at ELSE NULL END,
-      last_event_at=datetime('now'),updated_at=datetime('now')`)
-    .bind(sourceKey, sourceEtag, sourceSize, thumbnailKey)
+      last_event_at=excluded.last_event_at,updated_at=datetime('now')
+    WHERE image_thumbnail_jobs.last_event_at IS NULL
+      OR julianday(excluded.last_event_at)>julianday(image_thumbnail_jobs.last_event_at)
+      OR (julianday(excluded.last_event_at)=julianday(image_thumbnail_jobs.last_event_at)
+        AND image_thumbnail_jobs.source_etag=excluded.source_etag)`)
+    .bind(sourceKey, sourceEtag, sourceSize, thumbnailKey, eventTime)
     .run();
+  const registered = await currentJob(env, sourceKey);
+  const applied = Boolean(registered && cleanEtag(registered.source_etag) === sourceEtag && registered.thumbnail_key === thumbnailKey);
+  if (applied && previous?.thumbnail_key && previous.thumbnail_key !== thumbnailKey) {
+    await scheduleThumbnailCleanup(env, {
+      thumbnailKey: previous.thumbnail_key,
+      sourceKey,
+      sourceEtag: previous.source_etag,
+      reason: "source_replaced",
+    });
+    await drainThumbnailCleanup(env, 1);
+  }
+  return { applied, ...(previous?.thumbnail_key ? { previousThumbnailKey: previous.thumbnail_key } : {}) };
 }
 
 async function resetQueuePublishFailure(env: Env, sourceKey: string, sourceEtag: string): Promise<void> {
@@ -163,14 +312,19 @@ async function resetQueuePublishFailure(env: Env, sourceKey: string, sourceEtag:
 
 export async function enqueueThumbnailJob(
   env: Env,
-  input: { sourceKey: string; sourceEtag: string; sourceSize: number },
+  input: ThumbnailEnqueueInput,
 ): Promise<{ enqueued: boolean; state: ThumbnailState }> {
   const sourceEtag = cleanEtag(input.sourceEtag);
-  if (!input.sourceKey || !sourceEtag || !Number.isSafeInteger(input.sourceSize) || input.sourceSize < 0) {
+  if (!canonicalThumbnailSourceKey(input.sourceKey) || !sourceEtag || !Number.isSafeInteger(input.sourceSize) || input.sourceSize < 0) {
     throw new Error("Invalid thumbnail enqueue input");
   }
-  const thumbnailKey = await thumbnailObjectKey(input.sourceKey);
-  await registerJob(env, input.sourceKey, sourceEtag, input.sourceSize, thumbnailKey);
+  const thumbnailKey = await thumbnailObjectKey(input.sourceKey, sourceEtag);
+  const eventTime = normalizeThumbnailEventTime(input.eventTime);
+  const registration = await registerJob(env, input.sourceKey, sourceEtag, input.sourceSize, thumbnailKey, eventTime);
+  if (!registration.applied) {
+    const current = await currentJob(env, input.sourceKey);
+    return { enqueued: false, state: current?.status === "ready" ? "ready" : current?.status === "failed" ? "failed" : "pending" };
+  }
   await resetQueuePublishFailure(env, input.sourceKey, sourceEtag);
   if (input.sourceSize === 0) {
     await env.DELIVERY_DB.prepare(`/* thumbnail.empty-source */
@@ -240,6 +394,70 @@ async function completeJob(env: Env, sourceKey: string, sourceEtag: string, thum
   return result.meta.changes === 1;
 }
 
+async function sourceIsTrashed(env: Pick<Env, "DELIVERY_DB">, sourceKey: string): Promise<boolean> {
+  const row = await env.DELIVERY_DB.prepare(`/* thumbnail.trashed */
+    SELECT id FROM delivery_tombstones WHERE restored_at IS NULL
+    AND (physical_key=? OR (tombstone_kind='prefix' AND substr(?,1,length(physical_key))=physical_key)) LIMIT 1`)
+    .bind(sourceKey, sourceKey)
+    .first<{ id: string }>();
+  return Boolean(row);
+}
+
+export async function removeThumbnailStateForPath(
+  env: Env,
+  sourceKey: string,
+  isPrefix = false,
+): Promise<{ rows: number; objects: number }> {
+  const normalizedPrefix = isPrefix ? (sourceKey.endsWith("/") ? sourceKey : `${sourceKey}/`) : sourceKey;
+  const exact = isPrefix ? null : await currentJob(env, sourceKey);
+  const rows = isPrefix
+    ? await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-list */
+        SELECT source_key,source_etag,thumbnail_key,status,error_code FROM image_thumbnail_jobs
+        WHERE substr(source_key,1,length(?))=? ORDER BY source_key`)
+      .bind(normalizedPrefix, normalizedPrefix).all<ThumbnailJobRow>()
+    : { results: exact ? [exact] : [] };
+  if (!rows.results.length) return { rows: 0, objects: 0 };
+  const statements = isPrefix
+    ? [env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-delete-prefix */ DELETE FROM image_thumbnail_jobs WHERE substr(source_key,1,length(?))=?`).bind(normalizedPrefix, normalizedPrefix)]
+    : rows.results.map(row => env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-delete */ DELETE FROM image_thumbnail_jobs WHERE source_key=? AND source_etag=?`).bind(sourceKey, row.source_etag));
+  const deleted = await env.DELIVERY_DB.batch(statements);
+  const removedRows = deleted.reduce((sum, result) => sum + Number(result.meta.changes || 0), 0);
+  const keys = [...new Set(rows.results.map(row => row.thumbnail_key).filter(Boolean))];
+  for (const row of rows.results) {
+    await scheduleThumbnailCleanup(env, { thumbnailKey: row.thumbnail_key, sourceKey: row.source_key || sourceKey, sourceEtag: row.source_etag, reason: "source_removed" });
+  }
+  await drainThumbnailCleanup(env, Math.min(100, keys.length));
+  return { rows: removedRows, objects: keys.length };
+}
+
+export async function enqueueThumbnailsForPath(env: Env, sourceKey: string, isPrefix: boolean): Promise<number> {
+  const objects: R2Object[] = [];
+  if (!isPrefix) {
+    const object = await env.DATA_BUCKET.head(sourceKey);
+    if (object) objects.push(object);
+  } else {
+    const prefix = sourceKey.endsWith("/") ? sourceKey : `${sourceKey}/`;
+    let cursor: string | undefined;
+    do {
+      const page = await env.DATA_BUCKET.list({ prefix, limit: 1000, cursor });
+      objects.push(...page.objects.filter(object => !object.key.endsWith("/")));
+      cursor = page.truncated ? page.cursor : undefined;
+    } while (cursor);
+  }
+  let queued = 0;
+  for (const object of objects) {
+    if (!canonicalThumbnailSourceKey(object.key) || !supportedImage(object.key, object.httpMetadata?.contentType)) continue;
+    const result = await enqueueThumbnailJob(env, {
+      sourceKey: object.key,
+      sourceEtag: object.httpEtag,
+      sourceSize: object.size,
+      eventTime: object.uploaded.toISOString(),
+    });
+    if (result.enqueued) queued += 1;
+  }
+  return queued;
+}
+
 /**
  * Process one queue job. The original is streamed from private R2 directly into
  * Cloudflare Images and only the fixed WebP output stream is written to R2.
@@ -250,6 +468,16 @@ export async function processThumbnailJob(
   options: { finalAttempt?: boolean } = {},
 ): Promise<ThumbnailJobOutcome> {
   const sourceEtag = cleanEtag(message.sourceEtag);
+  if (!canonicalThumbnailSourceKey(message.sourceKey)) return { outcome: "obsolete" };
+  const registered = await currentJob(env, message.sourceKey);
+  if (!registered || cleanEtag(registered.source_etag) !== sourceEtag) return { outcome: "obsolete" };
+  const thumbnailKey = registered.thumbnail_key;
+  if (registered.status === "ready") return { outcome: "duplicate", thumbnailKey };
+  if (registered.status === "failed") return { outcome: "obsolete" };
+  if (await sourceIsTrashed(env, message.sourceKey)) {
+    await removeThumbnailStateForPath(env, message.sourceKey);
+    return { outcome: "obsolete" };
+  }
   const sourceHead = await env.DATA_BUCKET.head(message.sourceKey);
   if (!sourceHead) {
     if (await claimJob(env, message.sourceKey, sourceEtag)) {
@@ -265,9 +493,6 @@ export async function processThumbnailJob(
     return { outcome: "obsolete" };
   }
 
-  const thumbnailKey = await thumbnailObjectKey(message.sourceKey);
-  await registerJob(env, message.sourceKey, sourceEtag, sourceHead.size, thumbnailKey);
-  await resetQueuePublishFailure(env, message.sourceKey, sourceEtag);
   if (!(await claimJob(env, message.sourceKey, sourceEtag))) return { outcome: "duplicate", thumbnailKey };
 
   try {
@@ -280,7 +505,8 @@ export async function processThumbnailJob(
 
     const source = await env.DATA_BUCKET.get(message.sourceKey);
     if (!source || cleanEtag(source.httpEtag) !== sourceEtag) {
-      throw new Error("The original changed or disappeared before thumbnail generation");
+      await failJob(env, message.sourceKey, sourceEtag, "source_changed", "The original changed before thumbnail generation", true);
+      return { outcome: "obsolete" };
     }
     const transformed = await env.IMAGES.input(source.body)
       .transform({ width: THUMBNAIL_WIDTH, height: THUMBNAIL_HEIGHT, fit: "cover", gravity: "center" })
@@ -290,7 +516,7 @@ export async function processThumbnailJob(
     }
 
     const currentSource = await env.DATA_BUCKET.head(message.sourceKey);
-    if (!currentSource || cleanEtag(currentSource.httpEtag) !== sourceEtag) {
+    if (!currentSource || cleanEtag(currentSource.httpEtag) !== sourceEtag || await sourceIsTrashed(env, message.sourceKey)) {
       await failJob(env, message.sourceKey, sourceEtag, "source_changed", "The original changed during thumbnail generation", true);
       return { outcome: "obsolete" };
     }
@@ -310,10 +536,16 @@ export async function processThumbnailJob(
     }
     if (stored.size <= 0) throw new Error("R2 did not persist the thumbnail output");
     if (stored.size > THUMBNAIL_MAX_OUTPUT_BYTES) {
-      await env.DATA_BUCKET.delete(thumbnailKey);
-      throw new PermanentThumbnailError("output_too_large", "The generated thumbnail exceeds the delivery size limit");
+      await failJob(env, message.sourceKey, sourceEtag, "output_too_large", "The generated thumbnail exceeds the delivery size limit", true);
+      await scheduleThumbnailCleanup(env, { thumbnailKey, sourceKey: message.sourceKey, sourceEtag, reason: "invalid_output" });
+      await drainThumbnailCleanup(env, 1);
+      return { outcome: "failed", errorCode: "output_too_large" };
     }
-    if (!(await completeJob(env, message.sourceKey, sourceEtag, stored))) return { outcome: "obsolete" };
+    if (!(await completeJob(env, message.sourceKey, sourceEtag, stored))) {
+      await scheduleThumbnailCleanup(env, { thumbnailKey, sourceKey: message.sourceKey, sourceEtag, reason: "lost_completion_race" });
+      await drainThumbnailCleanup(env, 1);
+      return { outcome: "obsolete" };
+    }
     return { outcome: "ready", thumbnailKey };
   } catch (error) {
     const details = errorDetails(error);
@@ -370,6 +602,13 @@ export async function consumeThumbnailDeadLetters(batch: MessageBatch<unknown>, 
         WHERE source_key=? AND source_etag=? AND status<>'ready'`)
         .bind(queueMessage.body.sourceKey, cleanEtag(queueMessage.body.sourceEtag))
         .run();
+      await scheduleThumbnailCleanup(env, {
+        thumbnailKey: await thumbnailObjectKey(queueMessage.body.sourceKey, queueMessage.body.sourceEtag),
+        sourceKey: queueMessage.body.sourceKey,
+        sourceEtag: queueMessage.body.sourceEtag,
+        reason: "dead_lettered",
+      });
+      await drainThumbnailCleanup(env, 1);
       queueMessage.ack();
     } catch (error) {
       console.error(JSON.stringify({

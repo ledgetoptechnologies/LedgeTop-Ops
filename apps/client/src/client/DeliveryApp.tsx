@@ -364,6 +364,6 @@ function OriginalVideo({ item }: { item: DeliveryItem }) {
 
 function Thumbnail({ item }: { item: DeliveryItem }) {
   const [failed, setFailed] = useState(false); const [loaded, setLoaded] = useState(false);
-  if (failed) return <span className="media-placeholder branded-media-placeholder" aria-label={`${iconFor(item)} preview unavailable`}><img src={BRAND.logoUrl} alt="" loading="lazy" decoding="async" /><small>No preview generated yet</small></span>;
+  if (failed) return <span className="media-placeholder file-type-placeholder" aria-label={`${iconFor(item)} preview unavailable`}><span className="file-kind" aria-hidden="true">{iconFor(item)}</span><small>No preview generated yet</small></span>;
   return <>{!loaded && <span className="thumbnail-skeleton" aria-hidden="true" />}<img src={item.thumbnailUrl} loading="lazy" decoding="async" alt="" onLoad={() => setLoaded(true)} onError={() => setFailed(true)} /></>;
 }

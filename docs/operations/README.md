@@ -41,7 +41,7 @@ Review monthly R2 storage, Class A/Class B operations, egress, Workers requests/
 - Local tests and dry-run configuration checks do not prove Cloudflare Images
   entitlement, decoder behavior, queue/DLQ existence, R2 event subscriptions,
   cron installation, or production bindings. Verify each in isolated staging.
-- Delivery migrations `0105`/`0106` and Operations migration `0017` are
+- Delivery migrations `0105`/`0106`/`0107` and Operations migration `0017` are
   additive and remain after a Worker version rollback. Preserve verified D1
   exports and prior Worker version IDs before rollout.
 - Folder-grant mail is at-least-once. Revocation before the final authorization

@@ -3,12 +3,13 @@ import type { Env } from "./types";
 import { artifactDirectory } from "./artifacts";
 import { sendAdminAlert } from "./alerts";
 import { notificationStatement } from "./notifications";
-import { enqueueThumbnailJob } from "./image-thumbnails";
+import { canonicalThumbnailSourceKey, enqueueThumbnailJob, removeThumbnailStateForPath } from "./image-thumbnails";
 
 export interface R2Notification {
   action: string;
   object?: { key?: string; size?: number; eTag?: string };
   bucket?: string;
+  eventTime?: string;
 }
 
 interface TusState { etag: string; stream_uid: string | null; stream_status: string | null; stream_upload_url: string | null; stream_upload_offset: number | null }
@@ -53,25 +54,35 @@ export function thumbnailJobForCreatedObject(
   key: string,
   kind: string,
   head: Pick<R2Object, "httpEtag" | "size">,
-): { sourceKey: string; sourceEtag: string; sourceSize: number } | null {
-  return created(action) && kind === "image" && !hidden(key)
-    ? { sourceKey: key, sourceEtag: head.httpEtag, sourceSize: head.size }
+  eventTime?: string,
+): { sourceKey: string; sourceEtag: string; sourceSize: number; eventTime?: string } | null {
+  return created(action) && kind === "image" && canonicalThumbnailSourceKey(key)
+    ? { sourceKey: key, sourceEtag: head.httpEtag, sourceSize: head.size, ...(eventTime ? { eventTime } : {}) }
     : null;
 }
 
 /**
  * A delete event may arrive after a replacement at the same key. Live objects
  * make that event stale. On a real removal, retain the source-identity-scoped
- * thumbnail row and opaque object so an out-of-order event cannot delete a
- * newer replacement; reconciliation or separately approved cleanup can prune
- * orphans without racing object-create processing.
+ * thumbnail row and exact source-version object are retired through the
+ * durable cleanup ledger. A final live-source check repairs resurrection.
  */
 export async function handleRemovedSource(
-  env: Pick<Env, "DATA_BUCKET" | "DELIVERY_DB">,
+  env: Env,
   key: string,
 ): Promise<"stale" | "removed"> {
   if (await env.DATA_BUCKET.head(key)) return "stale";
+  await removeThumbnailStateForPath(env, key);
   await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run();
+  const resurrected = await env.DATA_BUCKET.head(key);
+  if (resurrected && canonicalThumbnailSourceKey(key) && mediaKind(key) === "image") {
+    await enqueueThumbnailJob(env, {
+      sourceKey: key,
+      sourceEtag: resurrected.httpEtag,
+      sourceSize: resurrected.size,
+      eventTime: resurrected.uploaded.toISOString(),
+    });
+  }
   return "removed";
 }
 
@@ -225,20 +236,11 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       const event = message.body; const key = event.object?.key;
       if (!key) { message.ack(); continue; }
       if (previewManifest(key)) {
-        if (created(event.action)) {
-          const result = await finalizePreviewManifest(env, key);
-          if (result === "invalid") console.warn(JSON.stringify({ event: "preview-manifest.invalid", key }));
-        }
+        // Legacy preview artifacts are intentionally ignored. This release only
+        // creates still-image thumbnails through the dedicated queue pipeline.
         message.ack(); continue;
       }
       if (previewDerivative(key)) {
-        if (created(event.action)) {
-          const manifestKey = key.replace(/(?:thumb|preview|poster)\.webp$/i, "manifest.json");
-          if (await env.DATA_BUCKET.head(manifestKey)) {
-            const result = await finalizePreviewManifest(env, manifestKey);
-            if (result === "invalid") console.warn(JSON.stringify({ event: "preview-manifest.invalid", key: manifestKey }));
-          }
-        }
         message.ack(); continue;
       }
       if (removed(event.action)) {
@@ -257,20 +259,14 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       const existing = await env.DELIVERY_DB.prepare("SELECT etag,stream_uid,stream_status,stream_upload_url,stream_upload_offset FROM file_index WHERE r2_key=?").bind(key).first<TusState>();
       if (existing?.etag === head.httpEtag && existing.stream_uid && !existing.stream_upload_url) { message.ack(); continue; }
       let stream = { uid: existing?.stream_uid || null, status: existing?.stream_status || null, error: null as string | null };
-      if (kind === "video") stream = await uploadVideo(env, key, head.size, head.httpEtag);
+      // Video thumbnailing/transcoding is intentionally disabled for this release.
+      if (kind === "video") stream = { uid: null, status: "disabled", error: null };
       await env.DELIVERY_DB.batch([
         env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status,stream_error) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,stream_uid=excluded.stream_uid,stream_status=excluded.stream_status,stream_error=excluded.stream_error,updated_at=datetime('now')`).bind(key, head.httpEtag, head.size, head.uploaded.toISOString(), mime(key), kind, stream.uid, stream.status, stream.error),
         env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,last_success_at,status,details_json) VALUES ('truenas',datetime('now'),datetime('now'),'healthy',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=datetime('now'),status='healthy',details_json=excluded.details_json,updated_at=datetime('now')`).bind(JSON.stringify({ lastKey: key })),
       ]);
-      const thumbnailJob = thumbnailJobForCreatedObject(event.action, key, kind, head);
+      const thumbnailJob = thumbnailJobForCreatedObject(event.action, key, kind, head, event.eventTime);
       if (thumbnailJob) await enqueueThumbnailJob(env, thumbnailJob);
-      if (canonicalPreviewSource(key)) {
-        const manifestKey = `${await artifactDirectory(key)}manifest.json`;
-        if (await env.DATA_BUCKET.head(manifestKey)) {
-          const result = await finalizePreviewManifest(env, manifestKey);
-          if (result === "invalid") console.warn(JSON.stringify({ event: "preview-manifest.invalid", key: manifestKey }));
-        }
-      }
       message.ack();
     } catch (error) {
       console.error(JSON.stringify({ event: "file-index.error", message: error instanceof Error ? error.message : "unknown" }));
@@ -306,6 +302,9 @@ export async function reconcileFileIndex(env: Env): Promise<number> {
         visibleBytes += object.size;
         for (const share of activeShares.results) if (object.key.startsWith(share.r2_prefix.endsWith("/") ? share.r2_prefix : `${share.r2_prefix}/`)) presentShares.add(share.id);
         statements.push(env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,last_seen_reconcile) VALUES (?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,last_seen_reconcile=excluded.last_seen_reconcile,updated_at=datetime('now')`).bind(object.key, object.httpEtag, object.size, object.uploaded.toISOString(), mime(object.key), mediaKind(object.key), marker)); count += 1;
+        if (canonicalThumbnailSourceKey(object.key) && mediaKind(object.key) === "image") {
+          await enqueueThumbnailJob(env, { sourceKey: object.key, sourceEtag: object.httpEtag, sourceSize: object.size, eventTime: object.uploaded.toISOString() });
+        }
       }
       if (statements.length) await env.DELIVERY_DB.batch(statements); cursor = listed.truncated ? listed.cursor : undefined;
     } while (cursor);

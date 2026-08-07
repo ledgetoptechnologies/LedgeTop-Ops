@@ -72,8 +72,8 @@ test("the client source directory retains the deployed delivery service identity
   assert(!read("package.json").includes("apps/delivery"));
 });
 
-test("the deployed Worker, resources, hosts, and reviewed portal asset routing remain unchanged", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "4973a2b2786868d00c6cfa7ca8a236f3236ca617e221ef8d7199503215fae92e");
+test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "eeb2e7c56cf45f5f57a4f960f3b75d4ea575291a92fd2e05f19cd36098019f94");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -100,7 +100,7 @@ test("the deployed Worker, resources, hosts, and reviewed portal asset routing r
     database_id: "7f40a7b7-c3ec-470e-a626-e798867f71f8",
     migrations_dir: "migrations",
   }]);
-  assert.deepEqual(config.images, { binding: "IMAGES" });
+  assert.equal(config.images, undefined);
   assert.deepEqual(config.stream, { binding: "STREAM" });
   assert.deepEqual(config.workflows, [
     { name: "ltds-bulk-download", binding: "BULK_DOWNLOAD_WORKFLOW", class_name: "BulkDownloadWorkflow" },

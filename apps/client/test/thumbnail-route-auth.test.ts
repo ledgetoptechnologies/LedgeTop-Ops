@@ -10,7 +10,7 @@ const relative = "Edited/photo.jpg";
 const sourceKey = `${share.r2_prefix}${relative}`;
 const thumbnailKey = "_ltds/thumbnails/v1/opaque.webp";
 
-async function fixture(status: "pending" | "failed" | "ready" = "ready") {
+async function fixture(status: "pending" | "failed" | "ready" = "ready", options: { active?: boolean; cookieVersion?: number } = {}) {
   const reads: string[] = [];
   const statementFor = (query: string) => {
     let values: unknown[] = [];
@@ -18,7 +18,7 @@ async function fixture(status: "pending" | "failed" | "ready" = "ready") {
       bind(...bound: unknown[]) { values = bound; return statement; },
       async first<T>() {
         if (query.includes("FROM image_thumbnail_jobs")) return { source_etag: '"source"', thumbnail_key: thumbnailKey, thumbnail_etag: status === "ready" ? '"thumb"' : null, thumbnail_size: status === "ready" ? 5 : null, status } as T;
-        if (query.includes("s.id=? AND s.public_id=?")) return values[1] === share.public_id ? share as T : null;
+        if (query.includes("s.id=? AND s.public_id=?")) return options.active !== false && values[1] === share.public_id ? share as T : null;
         return null;
       },
       async all<T>() { return { results: [] as T[] }; },
@@ -39,7 +39,7 @@ async function fixture(status: "pending" | "failed" | "ready" = "ready") {
   const limiter = { async limit() { return { success: true }; } };
   const secret = "s".repeat(48);
   const env: any = { ENVIRONMENT: "development", EXPECTED_HOST: "client.example", DELIVERY_DB: database, DATA_BUCKET: bucket, PUBLIC_THUMBNAIL_RATE_LIMITER: limiter, DELIVERY_SESSION_SECRET: secret, SESSION_KEY_ID: "v1", AUDIT_IP_SECRET: "a".repeat(48) };
-  const cookie = (await createSessionCookie(secret, "v1", share.id, share.share_version, Date.now() + 60_000)).split(";")[0]!;
+  const cookie = (await createSessionCookie(secret, "v1", share.id, options.cookieVersion ?? share.share_version, Date.now() + 60_000)).split(";")[0]!;
   const ctx: ExecutionContext = { waitUntil() {}, passThroughOnException() {}, exports: {}, props: undefined, tracing: undefined as never };
   const path = `/api/public/shares/${share.public_id}/items/${encodeURIComponent(encodeItemRef(relative))}/thumbnail`;
   return { env, cookie, ctx, path, reads };
@@ -68,5 +68,15 @@ describe("thumbnail route authorization", () => {
     const crossPath = value.path.replace(`/shares/${share.public_id}/`, "/shares/public-b/");
     expect((await worker.fetch(new Request(`https://client.example${crossPath}`, { headers: { Cookie: value.cookie } }), value.env, value.ctx)).status).toBe(404);
     expect(value.reads).toEqual([]);
+  });
+
+  it("denies revoked or expired shares and revoked session versions with zero R2 reads", async () => {
+    const revoked = await fixture("ready", { active: false });
+    expect((await worker.fetch(new Request(`https://client.example${revoked.path}`, { headers: { Cookie: revoked.cookie } }), revoked.env, revoked.ctx)).status).toBe(404);
+    expect(revoked.reads).toEqual([]);
+
+    const staleSession = await fixture("ready", { cookieVersion: share.share_version - 1 });
+    expect((await worker.fetch(new Request(`https://client.example${staleSession.path}`, { headers: { Cookie: staleSession.cookie } }), staleSession.env, staleSession.ctx)).status).toBe(401);
+    expect(staleSession.reads).toEqual([]);
   });
 });

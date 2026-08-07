@@ -138,9 +138,14 @@ After deployment, verify the Worker dashboard has not re-enabled a `workers.dev`
 
 ## 4. Images and Stream
 
-Activate Cloudflare Images Transformations and Stream billing in the Cloudflare dashboard. Both apps use an Images binding; Stream is used for private video previews.
+Activate Cloudflare Images Transformations for the Operations Worker. The Client
+Worker deliberately has no Images binding: it serves only an already-generated
+private R2 thumbnail after reauthorization. Stream remains available for private
+playback of previously processed videos, but this release does not submit new
+videos for thumbnailing or transcoding.
 
-Ops ingests R2 videos with the resumable TUS protocol in streamed 50 MB ranges. It supports Stream's large-file path and never reads a whole video into Worker memory. Delivery uses the Stream binding to generate one-hour signed tokens. Original R2 objects remain the download source.
+Delivery uses the Stream binding to generate one-hour signed tokens for existing
+Stream assets. Original R2 objects remain the authorized download source.
 
 After Stream activation, create a Stream Write API token and set these Ops runtime secrets/settings:
 
@@ -237,7 +242,7 @@ Set `DROPBOX_CLIENT_ID` and `DROPBOX_IMPORT_ENABLED` in `apps/operations/wrangle
 
 Export both production D1 databases before migration. Apply Delivery migrations
 to `client-data` first because the new Operations Worker depends on Delivery
-tables `0105` and `0106`; then apply Operations migrations to `ltds-ops`:
+tables `0105`, `0106`, and `0107`; then apply Operations migrations to `ltds-ops`:
 
 ```powershell
 Set-Location apps/client
@@ -246,7 +251,7 @@ Set-Location ../operations
 npm.cmd run db:migrate:remote
 ```
 
-Confirm Delivery migrations through `0106_image_thumbnail_jobs.sql` and
+Confirm Delivery migrations through `0107_thumbnail_cleanup_jobs.sql` and
 Operations migrations through `0017_operational_job_briefs.sql` appear in the
 remote migration lists before deploying dependent Workers. Before the
 Operations deployment, separately verify that Images transformations are

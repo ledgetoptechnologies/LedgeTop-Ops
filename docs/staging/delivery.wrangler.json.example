@@ -53,7 +53,6 @@
   ],
   "r2_buckets": [{ "binding": "DATA_BUCKET", "bucket_name": "<DELIVERY_STAGING_R2_BUCKET>" }],
   "d1_databases": [{ "binding": "DELIVERY_DB", "database_name": "<DELIVERY_STAGING_D1_NAME>", "database_id": "<DELIVERY_STAGING_D1_ID>", "migrations_dir": "migrations" }],
-  "images": { "binding": "IMAGES" },
   "stream": { "binding": "STREAM" },
   "workflows": [
     { "name": "<BULK_DOWNLOAD_STAGING_WORKFLOW>", "binding": "BULK_DOWNLOAD_WORKFLOW", "class_name": "BulkDownloadWorkflow" },

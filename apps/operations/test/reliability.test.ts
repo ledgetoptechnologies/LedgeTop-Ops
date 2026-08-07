@@ -10,25 +10,33 @@ describe("delivery reliability controls", () => {
     expect(thumbnailJobForCreatedObject("CompleteMultipartUpload", "Jobs/Clients/Synthetic/photo.jpg", "image", { httpEtag: '"source-etag"', size: 4096 })).toEqual({ sourceKey: "Jobs/Clients/Synthetic/photo.jpg", sourceEtag: '"source-etag"', sourceSize: 4096 });
     expect(thumbnailJobForCreatedObject("CompleteMultipartUpload", "Jobs/Clients/Synthetic/archive.zip", "other", { httpEtag: '"archive"', size: 10 })).toBeNull();
   });
-  it("retains thumbnail state and objects when handling current or stale source deletes", async () => {
-    const run = vi.fn(async () => ({ meta: { changes: 1 } }));
-    const bind = vi.fn(() => ({ run }));
-    const prepare = vi.fn((_sql: string) => ({ bind }));
+  it("ignores stale delete events and runs thumbnail cleanup for a real source delete", async () => {
+    const queries: string[] = [];
+    const prepare = vi.fn((sql: string) => {
+      queries.push(sql);
+      const statement = {
+        bind() { return statement; },
+        async first() { return null; },
+        async all() { return { results: [] }; },
+        async run() { return { meta: { changes: 1 } }; },
+      };
+      return statement;
+    });
     const deleteObject = vi.fn();
     const liveHead = vi.fn(async (): Promise<{ httpEtag: string } | null> => ({ httpEtag: '"replacement"' }));
     const env = {
       DATA_BUCKET: { head: liveHead, delete: deleteObject },
-      DELIVERY_DB: { prepare },
+      DELIVERY_DB: { prepare, async batch(statements: Array<{ run(): Promise<unknown> }>) { return Promise.all(statements.map(statement => statement.run())); } },
     } as any;
 
     await expect(handleRemovedSource(env, "Jobs/Clients/Synthetic/photo.jpg")).resolves.toBe("stale");
     expect(prepare).not.toHaveBeenCalled();
     expect(deleteObject).not.toHaveBeenCalled();
 
-    liveHead.mockResolvedValueOnce(null);
+    liveHead.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
     await expect(handleRemovedSource(env, "Jobs/Clients/Synthetic/photo.jpg")).resolves.toBe("removed");
-    expect(prepare).toHaveBeenCalledOnce();
-    expect(prepare.mock.calls[0]?.[0]).toBe("DELETE FROM file_index WHERE r2_key=?");
+    expect(queries.some(query => query.includes("thumbnail.current-row"))).toBe(true);
+    expect(queries).toContain("DELETE FROM file_index WHERE r2_key=?");
     expect(deleteObject).not.toHaveBeenCalled();
   });
   it("rejects reserved segments everywhere in Operations paths", () => {

@@ -31,6 +31,9 @@ export type Env = Omit<Cloudflare.Env, "DIRECT_DELIVERY_UPLOADS_ENABLED" | "R2_P
     sourceKey: string;
     sourceEtag: string;
   }>;
+  FILE_EVENTS_QUEUE_NAME: string;
+  THUMBNAIL_QUEUE_NAME: string;
+  THUMBNAIL_DLQ_NAME: string;
   ALERT_EMAIL?: SendEmail;
   ALERT_FROM?: string;
   ALERT_TO?: string;

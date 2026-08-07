@@ -103,7 +103,6 @@
       "migrations_dir": "migrations"
     }
   ],
-  "images": { "binding": "IMAGES" },
   "stream": { "binding": "STREAM" }
   ,"workflows": [
     {

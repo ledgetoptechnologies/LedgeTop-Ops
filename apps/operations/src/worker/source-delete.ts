@@ -4,6 +4,7 @@ import { notificationStatement } from "./notifications";
 import { artifactDirectory } from "./artifacts";
 import { decodeRef, normalizePrefix } from "./delivery";
 import type { Env, StaffPrincipal } from "./types";
+import { removeThumbnailStateForPath } from "./image-thumbnails";
 
 const BATCH = 1000;
 
@@ -73,6 +74,7 @@ export async function executeSourceDelete(env: Env, principal: StaffPrincipal, i
     }
   }
   const tombstone = await createTombstone(env, principal, preview.key, preview.isFolder, [...byKey.values()]);
+  await removeThumbnailStateForPath(env, preview.key, preview.isFolder);
   const statements: D1PreparedStatement[] = [];
   for (const share of affected.results) {
     statements.push(env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='staff_deleted_source',share_version=share_version+1 WHERE id=? AND revoked_at IS NULL").bind(share.id));

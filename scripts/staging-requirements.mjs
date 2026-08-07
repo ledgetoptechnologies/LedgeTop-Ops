@@ -76,6 +76,9 @@ export const STAGING_STATIC_VARS = Object.freeze({
     R2_ACCOUNT_ID: STAGING_ACCOUNT_ID,
     R2_BUCKET_NAME: "client-data-staging",
     R2_INCOMING_BUCKET_NAME: "ltds-incoming-staging",
+    FILE_EVENTS_QUEUE_NAME: "ltds-file-events-staging",
+    THUMBNAIL_QUEUE_NAME: "ltds-thumbnail-jobs-staging",
+    THUMBNAIL_DLQ_NAME: "ltds-thumbnail-jobs-staging-dlq",
     APPLICATION_KEY: "ltds_ops_staging",
   }),
   "ops-sync": Object.freeze({
@@ -99,7 +102,6 @@ export const STAGING_INVENTORY = Object.freeze({
       { name: "ltds-cloud-transfer-staging", binding: "CLOUD_TRANSFER_WORKFLOW", class_name: "CloudTransferWorkflow" },
     ],
     queues: [],
-    images: { binding: "IMAGES" },
     crons: ["15 * * * *"],
     ratelimits: [
       { name: "ACCESS_CODE_RATE_LIMITER", namespace_id: "730202601", simple: { limit: 10, period: 60 } },

@@ -149,7 +149,6 @@ function authenticatedEnv(
     DELIVERY_DB: database,
     DATA_BUCKET: { async delete() {} } as unknown as R2Bucket,
     ASSETS: { fetch: async () => new Response() },
-    IMAGES: {} as Env["IMAGES"],
     STREAM: {} as Env["STREAM"],
     ACCESS_CODE_RATE_LIMITER: successLimiter,
     PUBLIC_SESSION_RATE_LIMITER: successLimiter,

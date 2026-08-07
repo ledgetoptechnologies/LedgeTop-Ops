@@ -135,7 +135,8 @@
         "0103_client_portal_workspace.sql",
         "0104_service_request_thread.sql",
         "0105_internal_folder_grants.sql",
-        "0106_image_thumbnail_jobs.sql"
+        "0106_image_thumbnail_jobs.sql",
+        "0107_thumbnail_cleanup_jobs.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",

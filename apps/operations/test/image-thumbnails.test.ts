@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import {
   classifyThumbnailQueueBatch,
   consumeThumbnailDeadLetters,
@@ -28,6 +29,10 @@ interface StoredJob extends ThumbnailJobRow {
 
 class FakeThumbnailDb {
   job: StoredJob | undefined;
+
+  async batch(statements: Array<{ run(): Promise<unknown> }>) {
+    return Promise.all(statements.map(statement => statement.run()));
+  }
 
   prepare(sql: string) {
     const db = this;
@@ -119,6 +124,8 @@ class FakeThumbnailDb {
           }
           return result(0);
         }
+        if (sql.includes("thumbnail.cleanup-schedule")) return result(1);
+        if (sql.includes("thumbnail.cleanup-prune")) return result(0);
         throw new Error(`Unhandled run query: ${sql}`);
       },
       async first<T>() {
@@ -131,8 +138,13 @@ class FakeThumbnailDb {
           }
           return null;
         }
-        if (sql.includes("thumbnail.state")) return (db.job || null) as T | null;
+        if (sql.includes("thumbnail.state") || sql.includes("thumbnail.current-row")) return (db.job || null) as T | null;
+        if (sql.includes("thumbnail.trashed") || sql.includes("thumbnail.cleanup-referenced")) return null;
         throw new Error(`Unhandled first query: ${sql}`);
+      },
+      async all<T>() {
+        if (sql.includes("thumbnail.cleanup-due") || sql.includes("thumbnail.cleanup-list")) return { results: [] as T[] };
+        throw new Error(`Unhandled all query: ${sql}`);
       },
     };
     return statement;
@@ -145,6 +157,10 @@ function result(changes: number) {
 
 function stream(bytes: number[]): ReadableStream<Uint8Array> {
   return new ReadableStream({ start(controller) { controller.enqueue(Uint8Array.from(bytes)); controller.close(); } });
+}
+
+function fixtureThumbnailKey(sourceKey: string, sourceEtag: string): string {
+  return `_ltds/thumbnails/v2/${createHash("sha256").update(`ltds-thumbnail:v2\0${sourceKey}\0${sourceEtag}`).digest("hex")}.webp`;
 }
 
 function r2Object(key: string, etag: string, size: number, contentType: string, body?: ReadableStream<Uint8Array>) {
@@ -170,6 +186,19 @@ function fixture(options: { sourceKey?: string; contentType?: string; size?: num
   const originalBody = stream([1, 2, 3, 4]);
   const thumbnailBody = stream([9, 8, 7]);
   const db = new FakeThumbnailDb();
+  db.job = {
+    source_key: sourceKey,
+    source_etag: sourceEtag,
+    source_size: options.size ?? 4096,
+    thumbnail_key: fixtureThumbnailKey(sourceKey, sourceEtag),
+    thumbnail_etag: null,
+    thumbnail_size: null,
+    status: "pending",
+    attempt_count: 0,
+    error_code: null,
+    error_message: null,
+    dead_lettered: false,
+  };
   const putBodies: unknown[] = [];
   const putOptions: unknown[] = [];
   const getKeys: string[] = [];
@@ -201,6 +230,9 @@ function fixture(options: { sourceKey?: string; contentType?: string; size?: num
       object.customMetadata = (metadata as { customMetadata?: Record<string, string> }).customMetadata || {};
       stored.set(key, object);
       return object;
+    },
+    async delete(key: string | string[]) {
+      for (const item of Array.isArray(key) ? key : [key]) stored.delete(item);
     },
   };
   const send = options.queueError ? vi.fn(async () => { throw options.queueError; }) : vi.fn(async () => ({ metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } }));
@@ -247,11 +279,12 @@ describe("Cloudflare image thumbnail pipeline", () => {
   });
 
   it("uses an opaque deterministic _ltds key scoped to the original object", async () => {
-    const key = await thumbnailObjectKey("Jobs/Clients/Secret Client/client-name.jpg");
-    expect(key).toMatch(/^_ltds\/thumbnails\/v1\/[a-f0-9]{64}\.webp$/);
+    const key = await thumbnailObjectKey("Jobs/Clients/Secret Client/client-name.jpg", "etag-a");
+    expect(key).toMatch(/^_ltds\/thumbnails\/v2\/[a-f0-9]{64}\.webp$/);
     expect(key).not.toContain("Secret");
-    expect(await thumbnailObjectKey("Jobs/Clients/Secret Client/client-name.jpg")).toBe(key);
-    expect(await thumbnailObjectKey("Jobs/Clients/Secret Client/other.jpg")).not.toBe(key);
+    expect(await thumbnailObjectKey("Jobs/Clients/Secret Client/client-name.jpg", "etag-a")).toBe(key);
+    expect(await thumbnailObjectKey("Jobs/Clients/Secret Client/client-name.jpg", "etag-b")).not.toBe(key);
+    expect(await thumbnailObjectKey("Jobs/Clients/Secret Client/other.jpg", "etag-a")).not.toBe(key);
   });
 
   it("durably registers pending state before publishing the queue message", async () => {
