@@ -1,8 +1,10 @@
 import { HTTPException } from "hono/http-exception";
+import { isMovedSourceMarker } from "@ltds/shared";
 import { thumbnailFallbackKindForFile, type DeliveryItem, type ThumbnailState } from "@ltds/shared";
 import { matchesEtag } from "./prepared-images";
 
 const MAX_THUMBNAIL_BYTES = 128 * 1024;
+const MAX_VIDEO_THUMBNAIL_INPUT_BYTES = 100_000_000;
 
 export interface ThumbnailJobRow {
   source_etag: string;
@@ -21,14 +23,27 @@ export function thumbnailStateForObject(
   return job.status === "ready" && Boolean(job.thumbnail_etag) ? "ready" : "pending";
 }
 
+export function isVideoThumbnailCandidate(
+  sourceKey: string,
+  sourceSize: number | undefined,
+  contentType: string | undefined,
+): boolean {
+  const normalizedType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  return /\.mp4$/i.test(sourceKey) && normalizedType === "video/mp4" &&
+    (sourceSize === undefined || (sourceSize > 0 && sourceSize < MAX_VIDEO_THUMBNAIL_INPUT_BYTES));
+}
+
 export function thumbnailFieldsForObject(
   sourceKey: string,
   kind: Exclude<DeliveryItem["kind"], "folder">,
   baseUrl: string,
   sourceEtag: string,
   job: ThumbnailJobRow | null | undefined,
+  sourceSize?: number,
+  contentType?: string,
 ): Pick<DeliveryItem, "thumbnailState" | "thumbnailFallbackKind" | "thumbnailUrl"> {
-  const thumbnailState = kind === "image" ? thumbnailStateForObject(sourceEtag, job) : "not_applicable";
+  const videoCandidate = kind === "video" && isVideoThumbnailCandidate(sourceKey, sourceSize, contentType);
+  const thumbnailState = kind === "image" || videoCandidate ? thumbnailStateForObject(sourceEtag, job) : "not_applicable";
   return {
     thumbnailState,
     thumbnailFallbackKind: thumbnailFallbackKindForFile(sourceKey, kind),
@@ -54,7 +69,7 @@ export async function serveAuthorizedThumbnail(
     throw new HTTPException(409, { message: "Thumbnail is not ready", cause: { code: job?.status === "failed" ? "THUMBNAIL_FAILED" : "THUMBNAIL_PENDING" } });
   }
   const source = await env.DATA_BUCKET.head(sourceKey);
-  if (!source) throw new HTTPException(404, { message: "File not found" });
+  if (!source || isMovedSourceMarker(source)) throw new HTTPException(404, { message: "File not found" });
   if (cleanEtag(source.httpEtag) !== cleanEtag(job.source_etag)) {
     throw new HTTPException(409, { message: "Thumbnail is not ready", cause: { code: "THUMBNAIL_PENDING" } });
   }
@@ -92,7 +107,7 @@ interface StatementLike {
 interface EnvLike {
   DELIVERY_DB: { prepare(query: string): StatementLike };
   DATA_BUCKET: {
-    head(key: string): Promise<{ size: number; etag: string; httpEtag: string } | null>;
+    head(key: string): Promise<{ size: number; etag: string; httpEtag: string; customMetadata?:Record<string,string> } | null>;
     get(key: string, options: { onlyIf: { etagMatches: string } }): Promise<{ size: number; body?: BodyInit } | null>;
   };
 }

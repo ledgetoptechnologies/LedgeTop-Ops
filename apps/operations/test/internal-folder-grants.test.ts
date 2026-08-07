@@ -69,8 +69,9 @@ describe("direct authenticated client folder grants", () => {
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('identity-b','account-b','https://issuer.test','subject-b','client-b@example.test')"),
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('account-a','identity-a','manager')"),
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('account-b','identity-b','manager')"),
-      db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES('Jobs/Clients/Acme/Delivery/photo.jpg','etag-a',12,'2026-08-02T12:00:00Z','image/jpeg','image')"),
+      db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES('Jobs/Clients/Acme/Delivery/photo.jpg','\"etag-a\"',12,'2026-08-02T12:00:00Z','image/jpeg','image')"),
       db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES('Jobs/Clients/Acme/Second/report.pdf','etag-b',20,'2026-08-02T12:00:00Z','application/pdf','pdf')"),
+      db.prepare("INSERT INTO image_asset_locations(source_key,source_etag,folder_prefix,latitude,longitude,status,processed_at) VALUES('Jobs/Clients/Acme/Delivery/photo.jpg','etag-a','Jobs/Clients/Acme/Delivery/',44.5,-88.1,'ready',datetime('now'))"),
     ]);
     const opsDb = {
       withSession() { return this; },
@@ -115,10 +116,16 @@ describe("direct authenticated client folder grants", () => {
     expect(await db.prepare("SELECT status FROM client_folder_grant_notifications WHERE association_id=?").bind(created.id).first("status")).toBe("pending");
     const session = { accountId: "account-a", displayName: "Acme", identityId: "identity-a", role: "manager" as const, canViewBilling: false };
     expect((await d1ClientPortalRepository.listPastDeliveries(env, session)).files.map(file => file.key)).toContain("Jobs/Clients/Acme/Delivery/photo.jpg");
+    expect(await d1ClientPortalRepository.listPastDeliveryLocations(env, session)).toEqual({
+      points: [{ latitude: 44.5, longitude: -88.1, imageCount: 1 }],
+      imageCount: 1,
+      truncated: false,
+    });
 
     await revokeClientFolderGrant(env, request, principal, "account-a", created.grantId);
     expect(mocks.requirePermission.mock.calls.at(-1)?.slice(1)).toEqual([principal, "delivery.share.revoke", { divisionId: "division-a" }, true]);
     expect((await d1ClientPortalRepository.listPastDeliveries(env, session)).files.map(file => file.key)).not.toContain("Jobs/Clients/Acme/Delivery/photo.jpg");
+    expect(await d1ClientPortalRepository.listPastDeliveryLocations(env, session)).toEqual({ points: [], imageCount: 0, truncated: false });
     await db.prepare("UPDATE client_folder_grant_notifications SET next_attempt_at=datetime('now','-1 minute') WHERE association_id=?").bind(created.id).run();
     await processClientFolderGrantNotifications(env);
     expect(mocks.sendNotificationMail).not.toHaveBeenCalled();

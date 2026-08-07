@@ -136,13 +136,18 @@ Both `wrangler.jsonc` files set:
 
 After deployment, verify the Worker dashboard has not re-enabled a `workers.dev` route. Both Workers also reject unexpected `Host` headers.
 
-## 4. Images and Stream
+## 4. Images, Media Transformations, and Stream
 
 Activate Cloudflare Images Transformations for the Operations Worker. The Client
 Worker deliberately has no Images binding: it serves only an already-generated
-private R2 thumbnail after reauthorization. Stream remains available for private
-playback of previously processed videos, but this release does not submit new
-videos for thumbnailing or transcoding.
+private R2 thumbnail after reauthorization. Enable the `MEDIA` binding on the
+Operations Worker as well; it reads eligible private-R2 MP4 streams directly and
+extracts only a still frame. It does not require a public R2 or Stream URL and
+does not request video output. Media Transformations has no local simulator, so
+use a remote staging Worker to prove the account/Worker entitlement and real
+H.264 decoding before production. Stream remains available for private playback
+of previously processed videos, but this thumbnail path does not submit new
+videos to Stream or create a video transcode.
 
 Delivery uses the Stream binding to generate one-hour signed tokens for existing
 Stream assets. Original R2 objects remain the authorized download source.
@@ -217,10 +222,9 @@ The checked-in LTDS production configuration uses `ltds_ops`; this is not a Proj
 ```powershell
 npx.cmd wrangler secret put CF_ACCESS_GROUP_API_TOKEN --name ltds-ops-sync
 npx.cmd wrangler secret put PROJECT_ALPHA_WEBHOOK_HMAC_SECRET --name ltds-ops-sync
-npx.cmd wrangler secret put PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY --name ltds-ops-sync
 ```
 
-Use `PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY` only during rotation. The Access Groups API token belongs only on the sync Worker, never in Project Alpha. Production has legacy HMAC disabled; verify Ed25519 in staging before that configuration is deployed.
+The current Project Alpha contract is HMAC-only, so production explicitly sets `PROJECT_ALPHA_ALLOW_LEGACY_HMAC=true`. LTDS verifies `sha256=<hex>` over the exact `${timestamp}.${rawBody}` bytes. Ed25519 remains preferred if its header and public key are introduced later; an invalid Ed25519 signature never falls back to HMAC. Use `PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY` only during a coordinated future rotation. The Access Groups API token belongs only on the sync Worker, never in Project Alpha.
 
 ## 6. Staging before rollout
 
@@ -246,7 +250,9 @@ Apply `apps/operations/r2-incoming-cors.json`, expose `ETag`, and configure a 14
 Authenticated delivery uploads remain on `ltds-ops`; a separate public upload
 Worker or endpoint is neither required nor permitted. Keep
 `DIRECT_DELIVERY_UPLOADS_ENABLED=false` while applying Operations migration
-`0018_browser_upload_intents.sql` and validating the same-origin route. The
+`0018_browser_upload_intents.sql` followed by Operations migrations through
+`0022_r2_operation_retries.sql` and validating the same-origin
+route. The
 final reviewed production version may set it to `true` only after migration,
 queue/binding verification, and synthetic authorization/lifecycle acceptance;
 rollback first returns it to `false` without removing cleanup-capable code. The
@@ -261,7 +267,7 @@ scoped `delivery.files.upload` checks for the selected folder and every resolved
 file. Client Portal identities, public-share sessions, and Incoming contributor
 sessions have no authority on these routes. See the [thumbnail and upload
 runbook](media-thumbnail-pipeline.md#authenticated-operations-browser-uploads)
-for limits, collision policy, lifecycle, acceptance, and rollback.
+for limits, collision resolution, lifecycle, acceptance, and rollback.
 
 ## 7b. Dropbox import (Operations Worker)
 
@@ -279,7 +285,7 @@ Set `DROPBOX_CLIENT_ID` and `DROPBOX_IMPORT_ENABLED` in `apps/operations/wrangle
 
 Export both production D1 databases before migration. Apply Delivery migrations
 to `client-data` first because the new Operations Worker depends on Delivery
-tables from migrations `0105` through `0108`; then apply Operations migrations to `ltds-ops`:
+tables from migrations `0105` through `0109`; then apply Operations migrations to `ltds-ops`:
 
 ```powershell
 Set-Location apps/client
@@ -288,16 +294,22 @@ Set-Location ../operations
 npm.cmd run db:migrate:remote
 ```
 
-Confirm Delivery migrations through `0108_thumbnail_backfill_runs.sql` and
-Operations migrations through `0018_browser_upload_intents.sql` appear in the
+Confirm Delivery migrations through `0109_image_asset_locations.sql` and
+Operations migrations through `0022_r2_operation_retries.sql` appear in the
 remote migration lists before deploying dependent Workers. Before the
-Operations deployment, separately verify that Images transformations are
-enabled, the thumbnail queue and DLQ exist, the producer/main-consumer/DLQ
+Operations deployment, separately verify that Images and Media Transformations
+are enabled on the Worker, the `MEDIA` binding resolves, the thumbnail queue and
+DLQ exist, the producer/main-consumer/DLQ
 consumer bindings resolve to those exact queues, the existing R2 object-create
 notification still feeds `ltds-file-events`, and both the 15-minute and
-5-minute crons are present. The existing private `ltds-ops` Worker owns the
+5-minute crons are present. Apply the Operations migration before uploading its
+dependent Worker version. The existing private `ltds-ops` Worker owns the
 thumbnail consumer; no separate or public `ltds-thumbnails` Worker is needed.
 Repository configuration does not prove those remote resources exist.
+
+The authenticated photo-location map reuses the private thumbnail queue and
+adds no public R2 route or Cloudflare binding. Its minimal, version-bound
+metadata lifecycle is documented in [Delivery image-location maps](delivery-image-location-maps.md).
 
 Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding,
 the `ltds-cloud-transfer` Workflow binding, and the hourly cleanup Cron Trigger.

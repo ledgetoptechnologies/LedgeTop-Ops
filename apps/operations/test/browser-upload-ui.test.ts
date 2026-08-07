@@ -22,13 +22,19 @@ describe("authenticated browser upload UI", () => {
     expect(source).toContain("Direct browser uploads require administrator access.");
   });
 
-  it("supports bounded file and folder batches with explicit collision behavior", () => {
+  it("supports bounded file and folder batches with collision choices shown only after detection", () => {
     expect(source).toContain("const MAX_BROWSER_UPLOAD_FILES = 100");
     expect(source).toContain("const MAX_BROWSER_UPLOAD_BYTES = 500 * 1024 ** 3");
     expect(source).toContain('webkitdirectory: ""');
-    expect(source).toContain('<option value="fail">Fail existing files</option>');
-    expect(source).toContain('<option value="rename">');
-    expect(source).toContain('<option value="replace">');
+    expect(source).not.toContain('aria-label="Upload collision policy"');
+    expect(source).toContain('caught.payload.error === "upload_destination_conflict"');
+    expect(source).toContain("File already exists");
+    expect(source).toContain("Keep old");
+    expect(source).toContain("Keep new");
+    expect(source).toContain("Keep both");
+    expect(source).toContain('prompt.resolve("skip")');
+    expect(source).toContain('prompt.resolve("replace")');
+    expect(source).toContain('prompt.resolve("rename")');
   });
 
   it("stops rather than retrying when authorization expires or is revoked", () => {

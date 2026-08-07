@@ -4,6 +4,7 @@ import { secureHeaders } from "hono/secure-headers";
 import { z } from "zod";
 import {
   buildServiceRequestNotificationSnapshot,
+  isMovedSourceMarker,
   type Permission,
   type ServiceRequestNotificationLifecycle,
   type ServiceRequestNotificationSnapshot,
@@ -29,8 +30,10 @@ import {
   refreshStreamStatuses,
   type R2Notification,
 } from "./file-events";
-import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, type ThumbnailJobMessage } from "./image-thumbnails";
+import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, thumbnailSourceEligible, type ThumbnailJobMessage } from "./image-thumbnails";
 import { processThumbnailBackfills } from "./thumbnail-backfill";
+import { enqueueImageLocationBackfill } from "./image-locations";
+import { listDeliveryFolderLocations } from "./delivery-locations";
 import {
   authorizeItem,
   createDeliveryShare,
@@ -103,6 +106,7 @@ import {
   revokeClientFolderGrant,
 } from "./client-folder-grants";
 import { registerJobBriefRoutes } from "./job-brief";
+import { registerSopRoutes } from "./sop";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -974,6 +978,7 @@ app.get("/api/operations", async (c) => {
 app.post("/api/operations", () => managedInProjectAlpha());
 app.patch("/api/operations/:id", () => managedInProjectAlpha());
 registerJobBriefRoutes(app);
+registerSopRoutes(app);
 
 app.get("/api/tasks", async (c) => {
   const principal = c.get("principal");
@@ -1681,6 +1686,13 @@ app.get("/api/delivery/folders", async (c) =>
     ),
   ),
 );
+app.get("/api/delivery/folders/locations", async (c) =>
+  c.json(await listDeliveryFolderLocations(
+    c.env,
+    c.get("principal"),
+    c.req.query("prefix") || "",
+  )),
+);
 app.get("/api/delivery/shares", async (c) =>
   c.json({ shares: await listDeliveryShares(c.env, c.get("principal")) }),
 );
@@ -1842,9 +1854,12 @@ app.on(["GET", "HEAD"], "/api/delivery/items/:itemRef/thumbnail", async (c) => {
     c.get("principal"),
     c.req.param("itemRef"),
   );
-  const kind = mediaKind(key);
-  if (kind !== "image") return c.json({ state: "not_applicable" }, 409);
-  const thumbnail = await getThumbnailForAuthorizedSource(c.env, key);
+  const source = await c.env.DATA_BUCKET.head(key);
+  if (!source||isMovedSourceMarker(source)) throw new HTTPException(404,{message:"File not found"});
+  if (!thumbnailSourceEligible(key, source.size, source.httpMetadata?.contentType)) {
+    return c.json({ state: "not_applicable" }, 409);
+  }
+  const thumbnail = await getThumbnailForAuthorizedSource(c.env, key, source);
   if (thumbnail.state !== "ready") return c.json({ state: thumbnail.state, errorCode: thumbnail.errorCode }, 409);
   const headers = new Headers({
     "Content-Type": "image/webp",
@@ -2173,6 +2188,7 @@ async function scheduled(
   ctx.waitUntil(cleanupBrowserUploadSessions(env));
   ctx.waitUntil(drainThumbnailCleanup(env));
   ctx.waitUntil(processThumbnailBackfills(env));
+  ctx.waitUntil(enqueueImageLocationBackfill(env));
   ctx.waitUntil(
     enqueueExpiringNotifications(env).then(() =>
       processDeliveryNotifications(env),

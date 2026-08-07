@@ -14,6 +14,7 @@ type UploadApiOptions = {
   uploadPermission?: boolean;
   uploadCapability?: boolean;
   rejectPartWith?: 401 | 403;
+  conflictOrdinal?: number;
 };
 
 function session(options: UploadApiOptions) {
@@ -88,7 +89,28 @@ async function installUploadApi(page: Page, options: UploadApiOptions = {}) {
       return;
     }
     if (incoming.method() === "POST" && path === "/api/delivery/uploads") {
-      const ordinal = Number((record.json as { ordinal: number }).ordinal);
+      const request = record.json as { ordinal: number; conflictResolution?: "skip" | "replace" | "rename" };
+      const ordinal = Number(request.ordinal);
+      if (options.conflictOrdinal === ordinal && !request.conflictResolution) {
+        await route.fulfill({
+          status: 409,
+          json: {
+            error: "upload_destination_conflict",
+            message: "A file already exists at this destination.",
+            conflict: {
+              intentId: `intent-${intentSequence}`,
+              ordinal,
+              relativePath: "conflict.jpg",
+              choices: ["skip", "replace", "rename"],
+            },
+          },
+        });
+        return;
+      }
+      if (request.conflictResolution === "skip") {
+        await route.fulfill({ status: 200, json: { status: "skipped", conflictResolution: "skip" } });
+        return;
+      }
       await route.fulfill({
         status: 201,
         json: { sessionId: `session-${ordinal}`, partSize: 3, status: "active" },
@@ -165,7 +187,7 @@ test("direct upload controls require the runtime capability, administrator role,
   await expect(page.getByText("Direct browser uploads are disabled. Use an Incoming request link.")).toBeVisible();
   await expect(page.getByRole("button", { name: "Upload files" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "Upload folder" })).toBeDisabled();
-  await expect(page.getByLabel("Upload collision policy")).toBeDisabled();
+  await expect(page.getByLabel("Upload collision policy")).toHaveCount(0);
 
   await page.unrouteAll({ behavior: "wait" });
   await installUploadApi(page, { administrator: false });
@@ -191,7 +213,6 @@ test("direct upload controls require the runtime capability, administrator role,
 test("single-file upload uses a same-origin resumable sequence and exposes byte progress", async ({ page }) => {
   const requests = await installUploadApi(page);
   await page.goto("/delivery");
-  await page.getByLabel("Upload collision policy").selectOption("rename");
 
   await page.locator('input[type="file"]:not([webkitdirectory])').setInputFiles({
     name: "site-photo.jpg",
@@ -199,10 +220,10 @@ test("single-file upload uses a same-origin resumable sequence and exposes byte 
     buffer: Buffer.from([1, 2, 3, 4, 5, 6]),
   });
 
-  await expect(page.getByText("1/1 files complete", { exact: true })).toBeVisible();
+  await expect(page.getByText("1/1 files resolved", { exact: true })).toBeVisible();
   await expect(page.getByLabel("site-photo.jpg upload progress")).toHaveAttribute("value", "6");
   await expect(page.getByText("6 B of 6 B")).toBeVisible();
-  await expect(page.getByText("Uploaded 1 of 1 item")).toBeVisible();
+  await expect(page.getByText("Uploaded 1 item", { exact: true })).toBeVisible();
 
   const mutations = apiMutations(requests);
   expect(mutations.map(({ method, path }) => `${method} ${path}`)).toEqual([
@@ -216,7 +237,6 @@ test("single-file upload uses a same-origin resumable sequence and exposes byte 
   expect(intent.headers["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
   expect(intent.json).toEqual({
     rootPrefix: "Jobs/Clients/",
-    collisionPolicy: "rename",
     files: [{ relativePath: "site-photo.jpg", size: 6, contentType: "image/jpeg" }],
   });
   expect(mutations.every((request) => request.headers["x-csrf-token"] === "csrf-browser-upload-test")).toBe(true);
@@ -239,17 +259,16 @@ test("single-file upload uses a same-origin resumable sequence and exposes byte 
   ]);
 });
 
-test("folder upload preserves webkit relative paths and the selected replacement policy", async ({ page }) => {
+test("folder upload preserves webkit relative paths without a preselected collision policy", async ({ page }) => {
   const requests = await installUploadApi(page);
   await page.goto("/delivery/Acme/Project-7");
-  await page.getByLabel("Upload collision policy").selectOption("replace");
 
   await setFolderFiles(page, [
     { name: "front.jpg", relativePath: "Album/front.jpg", mimeType: "image/jpeg", bytes: [1, 2] },
     { name: "map.png", relativePath: "Album/Maps/map.png", mimeType: "image/png", bytes: [3, 4, 5] },
   ]);
 
-  await expect(page.getByText("2/2 files complete", { exact: true })).toBeVisible();
+  await expect(page.getByText("2/2 files resolved", { exact: true })).toBeVisible();
   await expect(page.getByText("Album/front.jpg", { exact: true })).toBeVisible();
   await expect(page.getByText("Album/Maps/map.png", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Album/front.jpg upload progress")).toHaveAttribute("value", "2");
@@ -260,7 +279,6 @@ test("folder upload preserves webkit relative paths and the selected replacement
   )!;
   expect(intent.json).toEqual({
     rootPrefix: "Jobs/Clients/Acme/Project-7/",
-    collisionPolicy: "replace",
     files: [
       { relativePath: "Album/front.jpg", size: 2, contentType: "image/jpeg" },
       { relativePath: "Album/Maps/map.png", size: 3, contentType: "image/png" },
@@ -277,6 +295,60 @@ test("folder upload preserves webkit relative paths and the selected replacement
     "PUT /api/delivery/uploads/session-1/parts/1",
     "POST /api/delivery/uploads/session-1/complete",
   ]);
+});
+
+for (const choice of [
+  { button: "Keep old", resolution: "skip", uploadsBytes: false },
+  { button: "Keep new", resolution: "replace", uploadsBytes: true },
+  { button: "Keep both", resolution: "rename", uploadsBytes: true },
+] as const) {
+  test(`warns on an actual collision and resumes with ${choice.button.toLowerCase()}`, async ({ page }) => {
+    const requests = await installUploadApi(page, { conflictOrdinal: 0 });
+    await page.goto("/delivery");
+    await expect(page.getByRole("dialog", { name: "File already exists" })).toHaveCount(0);
+
+    await page.locator('input[type="file"]:not([webkitdirectory])').setInputFiles({
+      name: "conflict.jpg",
+      mimeType: "image/jpeg",
+      buffer: Buffer.from([1, 2, 3]),
+    });
+
+    const dialog = page.getByRole("dialog", { name: "File already exists" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("conflict.jpg", { exact: true })).toBeVisible();
+    await dialog.getByRole("button", { name: choice.button, exact: true }).click();
+    await expect(page.getByText("1/1 files resolved", { exact: true })).toBeVisible();
+
+    const sessionRequests = requests.filter(
+      (request) => request.method === "POST" && request.path === "/api/delivery/uploads",
+    );
+    expect(sessionRequests).toHaveLength(2);
+    expect(sessionRequests[0]!.json).toEqual({ intentId: "intent-1", ordinal: 0 });
+    expect(sessionRequests[1]!.json).toEqual({
+      intentId: "intent-1",
+      ordinal: 0,
+      conflictResolution: choice.resolution,
+    });
+    expect(requests.some((request) => request.method === "PUT")).toBe(choice.uploadsBytes);
+    await expect(dialog).toHaveCount(0);
+  });
+}
+
+test("cancelling an actual collision does not create a session or upload bytes", async ({ page }) => {
+  const requests = await installUploadApi(page, { conflictOrdinal: 0 });
+  await page.goto("/delivery");
+  await page.locator('input[type="file"]:not([webkitdirectory])').setInputFiles({
+    name: "conflict.jpg",
+    mimeType: "image/jpeg",
+    buffer: Buffer.from([1, 2, 3]),
+  });
+  const dialog = page.getByRole("dialog", { name: "File already exists" });
+  await dialog.getByRole("button", { name: "Cancel upload", exact: true }).click();
+  await expect(page.locator(".operation-status.error")).toContainText("1 upload failed");
+  await expect(page.getByText("failed", { exact: true })).toBeVisible();
+  expect(requests.filter((request) => request.method === "POST" && request.path === "/api/delivery/uploads")).toHaveLength(1);
+  expect(requests.some((request) => request.method === "PUT")).toBe(false);
+  await expect(dialog).toHaveCount(0);
 });
 
 for (const status of [401, 403] as const) {

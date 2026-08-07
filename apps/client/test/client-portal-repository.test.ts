@@ -101,6 +101,30 @@ describe("client portal grant enforcement", () => {
     ]) expect(call.sql).toContain(condition);
   });
 
+  it("lists geotags only through current project, member, folder, asset-version, and tombstone controls", async () => {
+    const value = recordingEnv({
+      first: (call) => call.sql.includes("SELECT p.id,p.external_ref") ? {
+        id: "project-a", external_ref: "A", client_name: "Acme", project_name: "Plant",
+        can_request_service: 1, status: "active", summary: null, site_address: null,
+        service_address: null, project_contact_name: null, project_contact_email: null,
+        project_contact_phone: null, next_milestone: null, source_updated_at: null,
+      } : null,
+      all: (call) => call.sql.includes("image_asset_locations")
+        ? [{ latitude: 44.5, longitude: -88.1 }]
+        : [],
+    });
+    await expect(d1ClientPortalRepository.listProjectFileLocations(value.env, session, "project-a"))
+      .resolves.toEqual({ points: [{ latitude: 44.5, longitude: -88.1, imageCount: 1 }], imageCount: 1, truncated: false });
+    const call = value.calls.find(candidate => candidate.sql.includes("image_asset_locations"))!;
+    expect(call.binds).toEqual(["account-a", "identity-a", "project-a", 501]);
+    for (const condition of [
+      "a.status='active'", "i.revoked_at IS NULL", "m.revoked_at IS NULL",
+      "g.revoked_at IS NULL", "p.active=1", "association.revoked_at IS NULL",
+      "location.source_etag=trim(file.etag,'\"')", "location.status='ready'",
+      "tombstone.restored_at IS NULL", "member_grant.revoked_at IS NULL",
+    ]) expect(call.sql).toContain(condition);
+  });
+
   it("lists a delivery only through active account, identity, project, delivery, share, and version joins", async () => {
     const value = recordingEnv({
       all: () => [{

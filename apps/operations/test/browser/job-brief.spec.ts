@@ -44,6 +44,19 @@ function brief(canEdit: boolean, version = 1, items = [
         createdAt: "2026-08-02T12:00:00.000Z",
         contentUrl: "/api/operations/operation-1/job-brief/attachments/attachment-kml/content",
       }],
+      sops: [{
+        sopId: "sop-mapping",
+        revisionId: "revision-mapping-3",
+        revisionNumber: 3,
+        slug: "mapping-flight",
+        title: "Mapping Flight SOP",
+        purpose: "Standard capture checks for mapping flights.",
+        html: '<h2 id="sop-heading-capture">Capture checks</h2><p>Confirm exact overlap from this job brief.</p>',
+        toc: [{ id: "sop-heading-capture", level: 2, text: "Capture checks" }],
+        author: { id: "staff-a", displayName: "Staff Planner" },
+        publishedAt: "2026-08-01T12:00:00.000Z",
+        linkedAt: "2026-08-02T12:00:00.000Z",
+      }],
       createdAt: "2026-08-02T12:00:00.000Z",
       updatedAt: "2026-08-02T12:00:00.000Z",
       updatedBy: { id: "staff-a", displayName: "Staff Planner", email: "staff@example.com" },
@@ -80,6 +93,14 @@ async function mock(page: Page, canEdit: boolean) {
       await route.fulfill({ json: { operations: [operation] } });
     } else if (incoming.method() === "GET" && path === "/api/operations/operation-1/job-brief") {
       await route.fulfill({ json: current });
+    } else if (incoming.method() === "GET" && path === "/api/sops") {
+      await route.fulfill({ json: { sops: [{
+        id: "sop-mapping",
+        title: "Mapping Flight SOP",
+        purpose: "Standard capture checks for mapping flights.",
+        publishedRevisionId: "revision-mapping-3",
+        publishedRevisionNumber: 3,
+      }] } });
     } else if (incoming.method() === "PUT" && path === "/api/operations/operation-1/job-brief") {
       const payload = incoming.postDataJSON() as { expectedVersion: number; items: any[] };
       expect(payload.expectedVersion).toBe(1);
@@ -137,6 +158,8 @@ test("assigned pilot sees the current brief without edit or delivery-browse cont
   await expect(page.getByRole("button", { name: "Add scope item" })).toHaveCount(0);
   await expect(page.getByText("Authorized client project file")).toBeVisible();
   await expect(page.getByLabel("Authorized client project file path")).toHaveCount(0);
+  await page.getByText("Mapping Flight SOP").click();
+  await expect(page.getByText("Confirm exact overlap from this job brief.")).toBeVisible();
 });
 
 test("background refresh preserves a dirty draft and explicit refresh adopts the newer version", async ({ page }) => {

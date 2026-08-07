@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BRAND, type Permission, type SessionUser } from "@ltds/shared";
+import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser } from "@ltds/shared";
 import { Brand, Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import { ApiError, api, setCsrf } from "./api";
 import { generateSecureAccessCode } from "./access-code";
@@ -18,6 +18,8 @@ import {
 import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
 import { JobBriefPanel } from "./JobBriefPanel";
+import { SopLibrary } from "./SopLibrary";
+import { ImageLocationMap } from "./ImageLocationMap";
 
 type OperationsUser = SessionUser & {
   status: "Active";
@@ -93,6 +95,7 @@ const NAV: Array<{
     label: "Operations",
     permissions: ["operations.view", "projects.view", "tasks.view"],
   },
+  { page: "sops", label: "SOP Library", permissions: ["sops.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
   { page: "delivery", label: "Delivery", permissions: ["delivery.browse"] },
   { page: "team", label: "Team", permissions: ["team.view"] },
@@ -202,6 +205,9 @@ export function OperationsApp() {
         <PageHeading page={page} />
         {page === "dashboard" && <Dashboard {...props} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
+        {page === "sops" && allowed(session.user, "sops.view") && (
+          <SopLibrary user={session.user} />
+        )}{" "}
         {page === "airspace" && <Airspace />}{" "}
         {page === "delivery" && allowed(session.user, "delivery.browse") && (
           <DeliveryHub {...props} />
@@ -227,6 +233,10 @@ function PageHeading({ page }: { page: Page }) {
     operations: [
       "Operations",
       "Detailed operational schedules, projects, and task queues managed in Project Alpha.",
+    ],
+    sops: [
+      "Internal SOP library",
+      "Published field guidance and Operations-owned procedures for staff and pilots.",
     ],
     airspace: [
       "Airspace awareness",
@@ -1406,20 +1416,32 @@ function joinDeliveryPath(prefix: string, name: string, folder = false) {
 function itemKey(item: DeliveryItem) {
   return item.physicalKey || item.prefix || "";
 }
-type BrowserUploadCollisionPolicy = "fail" | "rename" | "replace";
+type BrowserUploadConflictResolution = "skip" | "rename" | "replace";
+type BrowserUploadConflict = {
+  intentId: string;
+  ordinal: number;
+  relativePath: string;
+  choices: BrowserUploadConflictResolution[];
+};
+type BrowserUploadConflictResolver = (
+  conflict: BrowserUploadConflict,
+) => Promise<BrowserUploadConflictResolution | null>;
+type BrowserUploadConflictPrompt = BrowserUploadConflict & {
+  resolve: (resolution: BrowserUploadConflictResolution | null) => void;
+};
 type BrowserUploadProgress = {
   ordinal: number;
   name: string;
   relativePath: string;
   uploadedBytes: number;
   totalBytes: number;
-  status: "pending" | "uploading" | "completed" | "failed" | "stopped";
+  status: "pending" | "uploading" | "completed" | "skipped" | "failed" | "stopped";
   error?: string;
 };
 type BrowserUploadSession = {
-  sessionId: string;
-  partSize: number;
-  status: "active" | "completed" | "aborted" | "expired";
+  sessionId?: string;
+  partSize?: number;
+  status: "active" | "completed" | "skipped" | "aborted" | "expired";
   parts?: Array<{ partNumber: number; etag: string; size: number }>;
 };
 const MAX_BROWSER_UPLOAD_FILES = 100;
@@ -1495,14 +1517,32 @@ async function uploadIntentFile(
   file: File,
   progress: (value: BrowserUploadProgress) => void,
   relativePath: string,
+  resolveConflict: BrowserUploadConflictResolver,
 ) {
   let lastError: Error | undefined;
+  let selectedResolution: BrowserUploadConflictResolution | null = null;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const created = await api<BrowserUploadSession>("/api/delivery/uploads", {
         method: "POST",
-        body: JSON.stringify({ intentId, ordinal }),
+        body: JSON.stringify({
+          intentId,
+          ordinal,
+          ...(selectedResolution ? { conflictResolution: selectedResolution } : {}),
+        }),
       });
+      if (created.status === "skipped") {
+        progress({
+          ordinal,
+          name: file.name,
+          relativePath,
+          uploadedBytes: 0,
+          totalBytes: file.size,
+          status: "skipped",
+          error: "Kept the existing file.",
+        });
+        return "skipped" as const;
+      }
       if (created.status === "completed") {
         progress({
           ordinal,
@@ -1512,8 +1552,9 @@ async function uploadIntentFile(
           totalBytes: file.size,
           status: "completed",
         });
-        return;
+        return "completed" as const;
       }
+      if (!created.sessionId || !created.partSize) throw new Error("The upload session response was incomplete.");
       const checkpoint = await api<BrowserUploadSession>(
         `/api/delivery/uploads/${encodeURIComponent(created.sessionId)}`,
       );
@@ -1526,7 +1567,7 @@ async function uploadIntentFile(
           totalBytes: file.size,
           status: "completed",
         });
-        return;
+        return "completed" as const;
       }
       const uploadedParts = new Map(
         (checkpoint.parts || []).map((part) => [part.partNumber, part.size]),
@@ -1571,10 +1612,52 @@ async function uploadIntentFile(
           status: "uploading",
         });
       }
-      await api(
-        `/api/delivery/uploads/${encodeURIComponent(created.sessionId)}/complete`,
-        { method: "POST", body: "{}" },
-      );
+      let completionResolution: BrowserUploadConflictResolution | null = null;
+      let completion: { status?: string } | undefined;
+      for (let completionAttempt = 0; completionAttempt < 3; completionAttempt += 1) {
+        try {
+          completion = await api<{ status?: string }>(
+            `/api/delivery/uploads/${encodeURIComponent(created.sessionId)}/complete`,
+            {
+              method: "POST",
+              body: JSON.stringify(completionResolution ? { conflictResolution: completionResolution } : {}),
+            },
+          );
+          break;
+        } catch (caught) {
+          if (
+            caught instanceof ApiError &&
+            caught.status === 409 &&
+            caught.payload.error === "upload_destination_conflict"
+          ) {
+            const conflict = caught.payload.conflict as BrowserUploadConflict | undefined;
+            if (!conflict || conflict.intentId !== intentId || conflict.ordinal !== ordinal)
+              throw new Error("The upload conflict response was invalid.");
+            if (completionAttempt === 2)
+              throw new Error(`The collision for “${relativePath}” changed repeatedly. Refresh and try again.`);
+            completionResolution = await resolveConflict(conflict);
+            if (!completionResolution) throw new Error(`Upload cancelled for “${relativePath}”.`);
+            continue;
+          }
+          const error = uploadError(caught);
+          if (error instanceof UploadAuthorizationError) throw error;
+          if (!retryableUploadError(caught) || completionAttempt === 2) throw error;
+          await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** completionAttempt));
+        }
+      }
+      if (!completion) throw new Error("The upload could not be completed.");
+      if (completion.status === "skipped") {
+        progress({
+          ordinal,
+          name: file.name,
+          relativePath,
+          uploadedBytes: 0,
+          totalBytes: file.size,
+          status: "skipped",
+          error: "Kept the existing file.",
+        });
+        return "skipped" as const;
+      }
       progress({
         ordinal,
         name: file.name,
@@ -1583,8 +1666,21 @@ async function uploadIntentFile(
         totalBytes: file.size,
         status: "completed",
       });
-      return;
+      return "completed" as const;
     } catch (caught) {
+      if (
+        caught instanceof ApiError &&
+        caught.status === 409 &&
+        caught.payload.error === "upload_destination_conflict"
+      ) {
+        const conflict = caught.payload.conflict as BrowserUploadConflict | undefined;
+        if (!conflict || conflict.intentId !== intentId || conflict.ordinal !== ordinal)
+          throw new Error("The upload conflict response was invalid.");
+        if (attempt === 2) throw new Error(`The collision for “${relativePath}” changed repeatedly. Refresh and try again.`);
+        selectedResolution = await resolveConflict(conflict);
+        if (!selectedResolution) throw new Error(`Upload cancelled for “${relativePath}”.`);
+        continue;
+      }
       lastError = uploadError(caught);
       if (lastError instanceof UploadAuthorizationError) throw lastError;
       if (!retryableUploadError(caught) || attempt === 2) throw lastError;
@@ -1597,10 +1693,10 @@ async function uploadIntentFile(
 async function uploadDeliveryFiles(
   prefix: string,
   files: File[],
-  collisionPolicy: BrowserUploadCollisionPolicy,
   progress: (value: BrowserUploadProgress) => void,
+  resolveConflict: BrowserUploadConflictResolver,
 ) {
-  if (!files.length) return { completed: 0, failed: 0 };
+  if (!files.length) return { completed: 0, skipped: 0, failed: 0 };
   if (files.length > MAX_BROWSER_UPLOAD_FILES)
     throw new Error(
       `Choose no more than ${MAX_BROWSER_UPLOAD_FILES} files at a time.`,
@@ -1633,7 +1729,6 @@ async function uploadDeliveryFiles(
       headers: { "Idempotency-Key": idempotencyKey },
       body: JSON.stringify({
         rootPrefix: prefix,
-        collisionPolicy,
         files: prepared.map(({ relativePath, file, contentType }) => ({
           relativePath,
           size: file.size,
@@ -1675,18 +1770,21 @@ async function uploadDeliveryFiles(
   }
   if (!intent) throw new Error("The upload intent could not be created.");
   let completed = 0,
+    skipped = 0,
     failed = 0;
   for (let index = 0; index < prepared.length; index += 1) {
     const item = prepared[index]!;
     try {
-      await uploadIntentFile(
+      const outcome = await uploadIntentFile(
         intent.intentId,
         item.ordinal,
         item.file,
         progress,
         item.relativePath,
+        resolveConflict,
       );
-      completed += 1;
+      if (outcome === "skipped") skipped += 1;
+      else completed += 1;
     } catch (caught) {
       const error = uploadError(caught);
       if (error instanceof UploadAuthorizationError) {
@@ -1716,11 +1814,15 @@ async function uploadDeliveryFiles(
       });
     }
   }
-  return { completed, failed };
+  return { completed, skipped, failed };
 }
 
+const legacyBrowserUploadConflict: BrowserUploadConflictResolver = async (conflict) => {
+  throw new Error(`“${conflict.relativePath}” already exists. Resolve the collision in the current Delivery workspace.`);
+};
+
 async function uploadDeliveryFile(prefix: string, file: File) {
-  const result = await uploadDeliveryFiles(prefix, [file], "fail", () => {});
+  const result = await uploadDeliveryFiles(prefix, [file], () => {}, legacyBrowserUploadConflict);
   if (result.failed) throw new Error(`Upload failed for ${file.name}.`);
   return {
     status: "completed",
@@ -1907,7 +2009,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
     const list = Array.from(files);
     if (!list.length || !canUpload) return;
     setUploading(true);
-    void uploadDeliveryFiles(prefix, list, "fail", () => {})
+    void uploadDeliveryFiles(prefix, list, () => {}, legacyBrowserUploadConflict)
       .then(({ completed, failed }) => {
         setOperation({
           status: failed ? "failed" : "completed",
@@ -2132,9 +2234,8 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   const [uploading, setUploading] = useState(false),
     [fileInput, setFileInput] = useState<HTMLInputElement | null>(null),
     [folderInput, setFolderInput] = useState<HTMLInputElement | null>(null);
-  const [collisionPolicy, setCollisionPolicy] =
-      useState<BrowserUploadCollisionPolicy>("fail"),
-    [uploadProgress, setUploadProgress] = useState<BrowserUploadProgress[]>([]);
+  const [uploadProgress, setUploadProgress] = useState<BrowserUploadProgress[]>([]),
+    [uploadConflict, setUploadConflict] = useState<BrowserUploadConflictPrompt | null>(null);
   const [showDropboxImport, setShowDropboxImport] = useState(() => {
     const params = new URLSearchParams(location.search);
     return Boolean(params.get("dropboxImportAuthorization"));
@@ -2144,6 +2245,31 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
       api<any>(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`),
     [prefix],
   );
+  const [locationState, setLocationState] = useState<{
+    prefix: string;
+    data: DeliveryLocationCollection | null;
+    error: string;
+  }>({ prefix: "", data: null, error: "" });
+  const reloadLocations = useCallback(async () => {
+    const requestedPrefix = prefix;
+    try {
+      const value = await api<DeliveryLocationCollection>(
+        `/api/delivery/folders/locations?prefix=${encodeURIComponent(requestedPrefix)}`,
+      );
+      setLocationState({ prefix: requestedPrefix, data: value, error: "" });
+    } catch (caught) {
+      setLocationState({
+        prefix: requestedPrefix,
+        data: null,
+        error: (caught as Error).message,
+      });
+    }
+  }, [prefix]);
+  useEffect(() => {
+    void reloadLocations();
+  }, [reloadLocations]);
+  const locations = locationState.prefix === prefix ? locationState.data : null;
+  const locationError = locationState.prefix === prefix ? locationState.error : "";
   const items: DeliveryItem[] = data
     ? [...(data.folders || []), ...(data.files || [])]
     : [];
@@ -2203,7 +2329,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   };
   const refresh = async () => {
     setSelected([]);
-    await reload();
+    await Promise.all([reload(), reloadLocations()]);
   };
   const run = async (request: Promise<DeliveryOperation>) => {
     setOperationError("");
@@ -2339,10 +2465,11 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     setUploadProgress([]);
     try {
       const live = new Map<number, BrowserUploadProgress>();
+      const resolveConflict: BrowserUploadConflictResolver = (conflict) =>
+        new Promise((resolve) => setUploadConflict({ ...conflict, resolve }));
       const result = await uploadDeliveryFiles(
         prefix,
         list,
-        collisionPolicy,
         (next) => {
           const previous = live.get(next.ordinal),
             merged =
@@ -2358,7 +2485,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
               0,
             ),
             uploaded = entries.reduce(
-              (sum, entry) => sum + entry.uploadedBytes,
+              (sum, entry) => sum + (entry.status === "skipped" ? entry.totalBytes : entry.uploadedBytes),
               0,
             );
           setUploadProgress(entries);
@@ -2368,12 +2495,13 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
             message: `Uploaded ${bytes(uploaded)} of ${bytes(total)}`,
           });
         },
+        resolveConflict,
       );
       await refresh();
       setOperation({
         status: result.failed ? "failed" : "completed",
-        progress: result.completed / list.length,
-        message: `Uploaded ${result.completed} of ${list.length} item${list.length === 1 ? "" : "s"}`,
+        progress: (result.completed + result.skipped) / list.length,
+        message: `Uploaded ${result.completed} item${result.completed === 1 ? "" : "s"}${result.skipped ? `; kept ${result.skipped} existing` : ""}`,
       });
       if (result.failed)
         setOperationError(
@@ -2408,23 +2536,6 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
                 : "Direct browser uploads are disabled. Use an Incoming request link."}
             </span>
           )}
-          <label>
-            <span className="sr-only">Upload collision policy</span>
-            <select
-              aria-label="Upload collision policy"
-              disabled={!canUpload || uploading}
-              value={collisionPolicy}
-              onChange={(event) =>
-                setCollisionPolicy(
-                  event.target.value as BrowserUploadCollisionPolicy,
-                )
-              }
-            >
-              <option value="fail">Fail existing files</option>
-              <option value="rename">Keep both files</option>
-              <option value="replace">Replace existing file</option>
-            </select>
-          </label>
           <button
             className="button-ghost"
             disabled={!canUpload || uploading}
@@ -2576,13 +2687,68 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           </span>
         </div>
       )}
+      {uploadConflict && (
+        <div className="modal-backdrop">
+          <div className="ltds-card" role="dialog" aria-modal="true" aria-labelledby="upload-conflict-title">
+            <header>
+              <h2 id="upload-conflict-title">File already exists</h2>
+            </header>
+            <p>
+              <strong>{uploadConflict.relativePath}</strong> already exists in this folder.
+              Choose which version to keep.
+            </p>
+            <div className="actions">
+              <button
+                className="button-ghost"
+                onClick={() => {
+                  const prompt = uploadConflict;
+                  setUploadConflict(null);
+                  prompt.resolve("skip");
+                }}
+              >
+                Keep old
+              </button>
+              <button
+                className="button-orange"
+                onClick={() => {
+                  const prompt = uploadConflict;
+                  setUploadConflict(null);
+                  prompt.resolve("replace");
+                }}
+              >
+                Keep new
+              </button>
+              <button
+                className="button-ghost"
+                onClick={() => {
+                  const prompt = uploadConflict;
+                  setUploadConflict(null);
+                  prompt.resolve("rename");
+                }}
+              >
+                Keep both
+              </button>
+              <button
+                className="button-ghost"
+                onClick={() => {
+                  const prompt = uploadConflict;
+                  setUploadConflict(null);
+                  prompt.resolve(null);
+                }}
+              >
+                Cancel upload
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {uploadProgress.length > 0 && (
         <Card className="upload-progress" aria-label="Upload progress">
           <header>
             <strong>Browser upload</strong>
             <small>
-              {uploadProgress.filter((item) => item.status === "completed").length}
-              /{uploadProgress.length} files complete
+              {uploadProgress.filter((item) => item.status === "completed" || item.status === "skipped").length}
+              /{uploadProgress.length} files resolved
             </small>
           </header>
           <div className="simple-rows">
@@ -2609,6 +2775,13 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         </Card>
       )}
       <ErrorLine error={error} />
+      <ErrorLine error={locationError} />
+      <ImageLocationMap
+        key={prefix}
+        token={session.mapboxPublicToken}
+        locations={locations}
+        scopeLabel="this folder"
+      />
       <div
         className="delivery-dropzone"
         onDragOver={(event) => {

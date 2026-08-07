@@ -50,7 +50,8 @@ The portal also denies `Dump` and `.previews` independently, so legacy content c
 5. Compare file counts and total sizes for allowed source files.
 6. Compare representative checksums for images, video, PDFs, and uncommon formats.
 7. Confirm new, modified, and renamed files appear dynamically in Ops/Delivery.
-8. Confirm R2 create events populate `file_index` and Stream ingestion starts for video.
+8. Confirm R2 create events populate `file_index` and enqueue eligible still-image
+   and MP4 frame thumbnails. Stream ingestion/transcoding remains disabled.
 9. Confirm ZFS snapshots can restore an accidentally changed/deleted source file.
 
 ## 4. Copy-to-Sync cutover
@@ -69,7 +70,14 @@ If deletion behavior is unexpected, stop the task, return to Copy, restore from 
 
 ## 5. Monitoring
 
-R2 create/delete notifications feed `ltds-file-events`. Queue processing updates the delivery file index and TrueNAS health timestamp. For supported still images, it records a durable D1 job and sends a second queue message so the Operations Worker can create one fixed WebP thumbnail through its Cloudflare Images binding. TrueNAS does not generate or upload preview derivatives and needs no R2 credentials beyond its existing sync path. A daily live R2 reconciliation repairs missed file-index events. See [the thumbnail-only pipeline](../media-thumbnail-pipeline.md).
+R2 create/delete notifications feed `ltds-file-events`. Queue processing updates
+the delivery file index and TrueNAS health timestamp. For supported still images
+and eligible private MP4/H.264 videos, it records a durable D1 job and sends a
+second queue message so the Operations Worker can create one fixed WebP
+thumbnail through its private Cloudflare Images/Media bindings. TrueNAS does not
+generate or upload preview derivatives and needs no R2 credentials beyond its
+existing sync path. A daily live R2 reconciliation repairs missed file-index
+events. See [the thumbnail-only pipeline](../media-thumbnail-pipeline.md).
 
 The file browser uses live R2 prefix/delimiter listing as the authority, so it updates even if the index temporarily lags. The index exists for search, media state, and thumbnails—not file existence.
 
@@ -77,8 +85,9 @@ The file browser uses live R2 prefix/delimiter listing as the authority, so it u
 
 The material below is retained only as rollback history. Do not deploy or run
 the former producer. `preview-gen.sh` now exits non-zero when executed. New
-uploads sync untouched originals only; Cloudflare creates one small still-image
-thumbnail as documented in [the current pipeline](../media-thumbnail-pipeline.md).
+uploads sync untouched originals only; Cloudflare creates at most one small
+still-image or eligible MP4 frame thumbnail as documented in [the current
+pipeline](../media-thumbnail-pipeline.md).
 
 The canonical producer script is [`preview-gen.sh`](preview-gen.sh). Deploy
 that repository copy into the FFmpeg container rather than maintaining an
@@ -115,7 +124,13 @@ Outputs are:
 
 `thumb.webp` must be at most 100 KiB. `preview.webp` has a hard cap of 500 KiB (`512000` bytes) and a preferred target of 450 KiB. Reduce WebP quality iteratively first; if the target is not met, reduce dimensions and repeat quality reduction. Reject any preview that remains above the hard cap.
 
-Operations and Delivery never load originals for cards or filmstrips. Cards use a real Cloudflare-generated thumbnail when ready or a local generic file-kind icon. When a user deliberately opens an image, the authorized route streams the full-resolution original. No medium or large preview is generated. Videos use Cloudflare Stream when ready and fall back to the range-enabled original with metadata-only preloading.
+Operations and Delivery never load originals for cards or filmstrips. Cards use
+a current Cloudflare-generated thumbnail when ready or a local generic file-kind
+icon. Eligible private MP4/H.264 videos use the Cloudflare queue consumer to
+extract one frame at five seconds; unsupported, pending, oversized, or failed
+videos remain icon-only. A deliberate user activation may open the authorized
+range-enabled original, but the UI never uses or preloads that original as a
+thumbnail fallback. No medium preview or video transcode is generated.
 
 The local producer writes `sourceEtag: "pending"` and the exact local source size, plus source key, deterministic derivative keys, dimensions, MIME type, producer version, and creation time. After upload, the Operations queue consumer records the exact R2 ETag in D1 only after the source size and all derivative objects validate. Preview routes compare that registered identity with the live source. The exact R2 ETag/size—not a local pre-upload checksum—determines whether a derivative is current.
 

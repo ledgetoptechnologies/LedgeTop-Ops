@@ -93,6 +93,7 @@
     ]
   },
   "images": { "binding": "IMAGES" },
+  "media": { "binding": "MEDIA" },
   "stream": { "binding": "STREAM" }
   ,"workflows": [
     {

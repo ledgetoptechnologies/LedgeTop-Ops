@@ -1,4 +1,5 @@
 import type { Env } from "../types";
+import type { DeliveryLocationCollection } from "@ltds/shared";
 
 export interface VerifiedClientPrincipal {
   issuer: string;
@@ -155,6 +156,8 @@ export interface ClientPortalRepository {
   getProject(env: Env, session: ClientPortalSession, projectId: string): Promise<ClientProject | null>;
   listProjectFiles(env: Env, session: ClientPortalSession, projectId: string, cursor?: string | null): Promise<ClientFilePage | null>;
   listPastDeliveries(env: Env, session: ClientPortalSession, cursor?: string | null): Promise<ClientFilePage>;
+  listProjectFileLocations(env: Env, session: ClientPortalSession, projectId: string): Promise<DeliveryLocationCollection | null>;
+  listPastDeliveryLocations(env: Env, session: ClientPortalSession): Promise<DeliveryLocationCollection>;
   getAuthorizedFile(env: Env, session: ClientPortalSession, fileId: string, projectId?: string | null): Promise<ClientPortalFile | null>;
   listDeliveries(env: Env, session: ClientPortalSession, projectId: string): Promise<ClientDelivery[]>;
   getDeliveryHandoff(env: Env, session: ClientPortalSession, projectId: string, shareId: string): Promise<{ publicId: string } | null>;

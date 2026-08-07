@@ -1,6 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 import { artifactKey } from "./artifacts";
 import type { Env } from "./types";
+import { isMovedSourceMarker } from "@ltds/shared";
 
 export type PreparedArtifactVariant = "thumb" | "preview" | "poster";
 
@@ -43,6 +44,7 @@ export async function servePreparedArtifact(
   const expected = etags[variant];
   if (
     !source
+    || isMovedSourceMarker(source)
     || !manifest
     || !registered
     || typeof expected !== "string"

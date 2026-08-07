@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
 import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import { parseEntitlementEvent, parseIntegrationEvent } from "../src/schema";
 import { validateRequestTimestamp, verifyAccessAssertion, verifyWebhookHmac, verifyWebhookSignature } from "../src/security";
@@ -11,6 +13,12 @@ const baseEvent = {
   user: { id: 42, email: "User@Example.COM", display_name: "Example User", active: true },
   entitlement: { application_key: "ltds_ops", enabled: true, role_key: "role-operator", business_unit_ids: [30,30,20] },
 };
+
+async function paHmacHeader(body:Uint8Array,timestamp:string,secret:string):Promise<string>{
+  const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(secret),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+  const signature=new Uint8Array(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(`${timestamp}.${new TextDecoder().decode(body)}`)));
+  return `sha256=${[...signature].map((byte)=>byte.toString(16).padStart(2,"0")).join("")}`;
+}
 
 describe("Project Alpha webhook validation", () => {
   beforeEach(() => vi.unstubAllGlobals());
@@ -52,6 +60,19 @@ describe("Project Alpha webhook validation", () => {
     await expect(verifyWebhookHmac(body,timestamp,`sha256=${"0".repeat(64)}`,secret)).rejects.toThrow("signature-invalid");
   });
 
+  it("accepts the exact PA HMAC-only contract when compatibility is enabled",async()=>{
+    const body=new TextEncoder().encode(JSON.stringify(baseEvent));
+    const timestamp="2026-07-17T20:00:00Z",secret="a-long-random-test-secret";
+    const header=await paHmacHeader(body,timestamp,secret);
+    await expect(verifyWebhookSignature(body,timestamp,null,"future-ed25519-public-key",undefined,header,secret,true)).resolves.toBe("hmac-legacy");
+    await expect(verifyWebhookSignature(body,timestamp,null,undefined,undefined,header,secret,false)).rejects.toThrow("signature-required");
+  });
+
+  it("enables the audited HMAC-only contract in the production Worker configuration",async()=>{
+    const config=JSON.parse(await readFile(resolve(import.meta.dirname,"../wrangler.jsonc"),"utf8")) as {vars?:Record<string,string>};
+    expect(config.vars?.PROJECT_ALPHA_ALLOW_LEGACY_HMAC).toBe("true");
+  });
+
   it("prefers Ed25519 and permits the previous key during rotation", async () => {
     const body = new TextEncoder().encode(JSON.stringify(baseEvent));
     const timestamp = "2026-07-17T20:00:00Z";
@@ -63,8 +84,9 @@ describe("Project Alpha webhook validation", () => {
     const signature = btoa(String.fromCharCode(...rawSignature)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
     const invalidRawSignature = rawSignature.slice(); invalidRawSignature[0] = invalidRawSignature[0]! ^ 1;
     const invalidSignature = btoa(String.fromCharCode(...invalidRawSignature)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    const validHmac=await paHmacHeader(body,timestamp,"valid-fallback-secret");
     await expect(verifyWebhookSignature(body, timestamp, `ed25519=${signature}`, undefined, publicValue, null, "", false)).resolves.toBe("ed25519-previous");
-    await expect(verifyWebhookSignature(body, timestamp, `ed25519=${invalidSignature}`, publicValue, undefined, null, "", true)).rejects.toThrow("signature-invalid");
+    await expect(verifyWebhookSignature(body, timestamp, `ed25519=${invalidSignature}`, publicValue, undefined, validHmac, "valid-fallback-secret", true)).rejects.toThrow("signature-invalid");
   });
 
   it("verifies issuer, audience, algorithm, and signature on the Access assertion", async () => {

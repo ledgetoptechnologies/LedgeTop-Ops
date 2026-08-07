@@ -1,7 +1,9 @@
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import { DropboxImportClient, DropboxImportError, refreshDropboxToken } from "./dropbox-import-client";
+import { mime } from "./delivery";
 import { normalizeCrudKey } from "./r2-crud-validation";
 import type { Env, StaffPrincipal } from "./types";
+import { isMovedSourceMarker } from "@ltds/shared";
 
 const MIN_PART_SIZE = 8 * 1024 * 1024;
 const MAX_PART_SIZE = 5 * 1024 * 1024 * 1024;
@@ -150,12 +152,20 @@ export async function jobCancelled(env: Env, jobId: string): Promise<boolean> {
   return !row || row.status === "cancelling" || row.status === "cancelled" || Boolean(row.cancel_requested_at);
 }
 
-async function resolveDestinationKeyForItem(env: Env, destKey: string, conflictMode: string): Promise<string | null> {
-  if (conflictMode === "skip" && await env.DATA_BUCKET.head(destKey)) return null;
-  if (conflictMode === "fail" && await env.DATA_BUCKET.head(destKey)) throw new Error("destination-exists");
-  if (conflictMode === "replace") return destKey;
-  // autorename: find unique name
-  if (!await env.DATA_BUCKET.head(destKey)) return destKey;
+interface DropboxDestination { key:string; baseline:string|null; published:R2Object|null }
+
+function importedByItem(object:R2Object|null,itemId:string):boolean{
+  return Boolean(itemId&&object&&object.customMetadata?.ltdsDropboxImportItem===itemId);
+}
+
+async function resolveDestinationKeyForItem(env: Env, destKey: string, conflictMode: string,itemId:string): Promise<DropboxDestination | null> {
+  const existing=await env.DATA_BUCKET.head(destKey);
+  if(importedByItem(existing,itemId))return{key:destKey,baseline:existing!.httpEtag,published:existing};
+  const logicallyAbsent=!existing||isMovedSourceMarker(existing);
+  if (conflictMode === "skip" && !logicallyAbsent) return null;
+  if (conflictMode === "fail" && !logicallyAbsent) throw new Error("destination-exists");
+  if (conflictMode === "replace"||logicallyAbsent) return {key:destKey,baseline:existing?.httpEtag||null,published:null};
+  // autorename: find a unique name or the exact publication from this item.
   const slash = destKey.lastIndexOf("/");
   const parent = slash >= 0 ? destKey.slice(0, slash + 1) : "";
   const name = slash >= 0 ? destKey.slice(slash + 1) : destKey;
@@ -163,7 +173,9 @@ async function resolveDestinationKeyForItem(env: Env, destKey: string, conflictM
   const stem = ext ? name.slice(0, -ext.length) : name;
   for (let i = 2; i <= 1001; i++) {
     const candidate = `${parent}${stem} (${i})${ext}`;
-    if (!await env.DATA_BUCKET.head(candidate)) return candidate;
+    const object=await env.DATA_BUCKET.head(candidate);
+    if(importedByItem(object,itemId))return{key:candidate,baseline:object!.httpEtag,published:object};
+    if(!object||isMovedSourceMarker(object))return{key:candidate,baseline:object?.httpEtag||null,published:null};
   }
   throw new Error("destination-unavailable");
 }
@@ -178,26 +190,36 @@ export async function importOneFile(
   item: ImportItem,
   conflictMode: string,
 ): Promise<{ r2Etag: string; size: number }> {
-  // item.destination_key is the full R2 key set by replaceImportItems.
-  // resolveDestinationKey applies the conflict policy to determine the final key.
-  const destKey = await resolveDestinationKeyForItem(env, item.destination_key, conflictMode);
-  if (!destKey) return { r2Etag: "", size: 0 }; // skipped
+  const destination=await resolveDestinationKeyForItem(env,item.destination_key,conflictMode,item.id);
+  if(!destination)return{r2Etag:"",size:0};
+  const destKey=destination.key,stagingKey=`_ltds/dropbox-imports/${item.job_id}/${item.id}`;
+  if(destination.published){
+    if(await env.DATA_BUCKET.head(stagingKey)){
+      await env.DATA_BUCKET.delete(stagingKey);
+      if(await env.DATA_BUCKET.head(stagingKey))throw new RetryableImportError("dropbox-staging-cleanup-failed");
+    }
+    return{r2Etag:destination.published.httpEtag,size:destination.published.size};
+  }
 
   // Download from Dropbox in chunks and upload to R2 via multipart
   const totalSize = item.size;
   if (totalSize > MAX_BYTES) throw new Error("file-too-large");
 
   if (totalSize === 0) {
-    const written = await env.DATA_BUCKET.put(destKey, new Uint8Array(0));
-    if (!written) throw new Error("r2-upload-failed");
+    const written=await env.DATA_BUCKET.put(destKey,new Uint8Array(0),{
+      onlyIf:new Headers(destination.baseline?{"If-Match":destination.baseline}:{"If-None-Match":"*"}),
+      httpMetadata:{contentType:mime(destKey)},customMetadata:{ltdsDropboxImportItem:item.id},
+    });
+    if(!written)throw new Error("destination-changed-before-publication");
     return { r2Etag: written.httpEtag, size: 0 };
   }
 
   // Use bounded range downloads and multipart upload for every non-empty file.
   // Each buffered part is bounded and the chosen size stays below R2's part-count ceiling.
   const partSize = dropboxImportPartSize(totalSize);
-  const multipart = await env.DATA_BUCKET.createMultipartUpload(destKey, {
-    httpMetadata: { contentType: "application/octet-stream" },
+  const multipart = await env.DATA_BUCKET.createMultipartUpload(stagingKey, {
+    httpMetadata: { contentType: mime(destKey) },
+    customMetadata:{ltdsDropboxImportItem:item.id},
   });
   try {
     const parts: Array<{ partNumber: number; etag: string }> = [];
@@ -227,10 +249,22 @@ export async function importOneFile(
       ).bind(item.job_id, item.job_id).run();
     }
 
-    const completed = await multipart.complete(parts);
-    return { r2Etag: completed.httpEtag, size: totalSize };
+    const completed=await multipart.complete(parts);
+    const staged=await env.DATA_BUCKET.get(stagingKey,{onlyIf:{etagMatches:completed.etag}});
+    if(!staged||!("body" in staged))throw new RetryableImportError("dropbox-staging-read-failed");
+    const published=await env.DATA_BUCKET.put(destKey,staged.body,{
+      onlyIf:new Headers(destination.baseline?{"If-Match":destination.baseline}:{"If-None-Match":"*"}),
+      httpMetadata:{...staged.httpMetadata,contentType:mime(destKey)},
+      customMetadata:{...(staged.customMetadata||{}),ltdsDropboxImportItem:item.id},
+    });
+    if(!published)throw new Error("destination-changed-before-publication");
+    await env.DATA_BUCKET.delete(stagingKey);
+    if(await env.DATA_BUCKET.head(stagingKey))throw new RetryableImportError("dropbox-staging-cleanup-failed");
+    return{r2Etag:published.httpEtag,size:totalSize};
   } catch (error) {
     try { await multipart.abort(); } catch { /* best effort cleanup */ }
+    await env.DATA_BUCKET.delete(stagingKey);
+    if(await env.DATA_BUCKET.head(stagingKey))throw new RetryableImportError("dropbox-staging-cleanup-failed");
     throw error;
   }
 }
@@ -247,14 +281,17 @@ async function markItemResult(env: Env, item: ImportItem, result: { r2Etag: stri
 }
 
 async function markItemFailure(env: Env, item: ImportItem, error: unknown): Promise<void> {
-  const isRetryable = error instanceof DropboxImportError && error.retryable;
+  const message=error instanceof Error?error.message:"import-failed";
+  const permanent=new Set(["cancelled","file-too-large","file-too-large-for-multipart","destination-exists","destination-unavailable","destination-changed-before-publication"]);
+  const isRetryable=error instanceof RetryableImportError||
+    (error instanceof DropboxImportError?error.retryable:!permanent.has(message));
   const status = isRetryable && item.attempts < 4 ? "retrying" : "failed";
-  const code = error instanceof Error ? error.message : "import-failed";
-  const message = error instanceof Error ? error.message.slice(0, 240) : "Import failed";
+  const code = message;
+  const safeMessage = message.slice(0,240);
   await env.OPS_DB.batch([
     opsDb(env).prepare(
       "UPDATE dropbox_import_items SET status=?,error_code=?,error_message=?,updated_at=datetime('now') WHERE id=?",
-    ).bind(status, code, message, item.id),
+    ).bind(status,code,safeMessage,item.id),
     ...(status === "failed" ? [opsDb(env).prepare(
       "UPDATE dropbox_import_jobs SET processed_files=processed_files+1,failed_files=failed_files+1,updated_at=datetime('now') WHERE id=? AND status IN ('running','cancelling')",
     ).bind(item.job_id)] : []),
@@ -456,3 +493,5 @@ export async function cleanupDropboxImports(env: Env, now = new Date()): Promise
     "DELETE FROM dropbox_import_jobs WHERE status IN ('completed','partial','failed','cancelled','expired') AND datetime(updated_at)<=datetime(?)",
   ).bind(cutoff).run();
 }
+
+class RetryableImportError extends Error {}

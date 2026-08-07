@@ -90,9 +90,10 @@ describe("public item references",()=>{
 });
 
 describe("shared folder availability",()=>{
-  function bucket(tree:Record<string,{objects?:string[];folders?:string[]}>):VisibleContentBucket{return{async list({prefix}){const value=tree[prefix]||{};return{objects:(value.objects||[]).map(key=>({key})),delimitedPrefixes:value.folders||[],truncated:false};}};}
+  function bucket(tree:Record<string,{objects?:Array<string|{key:string;customMetadata?:Record<string,string>}>;folders?:string[]}>):VisibleContentBucket{return{async list({prefix}){const value=tree[prefix]||{};return{objects:(value.objects||[]).map(object=>typeof object==="string"?{key:object}:object),delimitedPrefixes:value.folders||[],truncated:false};}};}
   it("finds visible content recursively",async()=>{await expect(prefixHasVisibleContent(bucket({"jobs/client/":{folders:["jobs/client/edited/"]},"jobs/client/edited/":{objects:["jobs/client/edited/photo.jpg"]}}),"jobs/client/")).resolves.toBe(true);});
   it("does not treat dump, reserved metadata, previews, or folder markers as client content",async()=>{await expect(prefixHasVisibleContent(bucket({"jobs/client/":{objects:["jobs/client/"],folders:["jobs/client/dump/","jobs/client/_ltds/","jobs/client/.previews/"]}}),"jobs/client/")).resolves.toBe(false);expect(isHiddenKey("jobs/client/_ltds/index.json")).toBe(true);expect(isHiddenKey("jobs/client/.previews/hash/preview.webp")).toBe(true);});
+  it("does not treat move markers or marker-only child folders as visible content",async()=>{const marker={ltdsMoveMarker:"ltds-moved-source-v1"};await expect(prefixHasVisibleContent(bucket({"jobs/client/":{objects:[{key:"jobs/client/old.jpg",customMetadata:marker}],folders:["jobs/client/child/"]},"jobs/client/child/":{objects:[{key:"jobs/client/child/old.jpg",customMetadata:marker}]}}),"jobs/client/")).resolves.toBe(false);});
 });
 
 describe("shared folder unavailability grace",()=>{

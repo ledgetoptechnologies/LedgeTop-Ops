@@ -22,6 +22,7 @@ const SNAPSHOT_COLLECTIONS = [
 type CollectionName = (typeof SNAPSHOT_COLLECTIONS)[number];
 type SnapshotCollections = Record<CollectionName, Row[]>;
 type CollectionFingerprints = Record<CollectionName, string>;
+type ProjectionEntityType = "business_unit"|"client"|"organization"|"project"|"project_assignment"|"operation"|"operation_assignment"|"task"|"task_assignment";
 
 interface Snapshot extends SnapshotCollections {
   generated_at: string;
@@ -30,6 +31,12 @@ interface Snapshot extends SnapshotCollections {
 }
 
 const SUPPORTED_ROLES = new Set(["role-admin", "role-operator", "role-delivery-coordinator", "role-division-manager"]);
+const SNAPSHOT_MAX_PAGES = 100;
+const SNAPSHOT_MAX_RECORDS = 50_000;
+const SNAPSHOT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
+const SNAPSHOT_TIMEOUT_MS = 10_000;
+const SNAPSHOT_FETCH_ATTEMPTS = 3;
+const PROJECTION_LEASE_DURATION = "+10 minutes";
 
 function text(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
@@ -109,44 +116,136 @@ async function changedCollections(db: D1Database, fingerprints: CollectionFinger
   return new Set(SNAPSHOT_COLLECTIONS.filter((collection) => byCollection.get(collection) !== fingerprints[collection]));
 }
 
+const VERSIONED_COLLECTIONS: ReadonlyArray<[CollectionName,ProjectionEntityType]> = [
+  ["business_units","business_unit"],["clients","client"],["organizations","organization"],["projects","project"],
+  ["project_assignments","project_assignment"],["operations","operation"],["operation_assignments","operation_assignment"],
+  ["tasks","task"],["task_assignments","task_assignment"],
+];
+
+function snapshotEntityId(collection:CollectionName,row:Row):string|null {
+  if(collection==="operation_assignments"){
+    const operationId=text(row.operation_id),userId=text(row.user_id);
+    return operationId&&userId?`${operationId}:${userId}`:null;
+  }
+  if(collection==="task_assignments"){
+    const taskId=text(row.task_id),userId=text(row.user_id);
+    return taskId&&userId?`${taskId}:${userId}`:null;
+  }
+  return text(row.id);
+}
+
+async function preserveNewerIncrementalRows(db:D1Database,data:SnapshotCollections,generatedAt:string):Promise<SnapshotCollections>{
+  const versions=await db.prepare("SELECT entity_type,entity_id,source_updated_at FROM pa_projection_entity_versions").all<{entity_type:string;entity_id:string;source_updated_at:string}>();
+  const entitlementVersions=await db.prepare("SELECT user_id,last_event_at FROM pa_application_entitlements WHERE last_event_at IS NOT NULL").all<{user_id:string;last_event_at:string}>();
+  const latest=new Map(versions.results.map((row)=>[`${row.entity_type}:${row.entity_id}`,Date.parse(row.source_updated_at)]));
+  const latestEntitlement=new Map(entitlementVersions.results.map((row)=>[row.user_id,Date.parse(row.last_event_at)]));
+  const protectedData={...data} as SnapshotCollections;
+  protectedData.users=data.users.filter((row)=>(latestEntitlement.get(text(row.id)??"")??-Infinity)<=Date.parse(text(row.updated_at)??generatedAt));
+  protectedData.application_entitlements=data.application_entitlements.filter((row)=>(latestEntitlement.get(text(row.user_id)??"")??-Infinity)<=Date.parse(text(row.updated_at)??generatedAt));
+  for(const [collection,entityType] of VERSIONED_COLLECTIONS){
+    protectedData[collection]=data[collection].filter((row)=>{
+      const entityId=snapshotEntityId(collection,row);
+      if(!entityId)return true;
+      const snapshotTimestamp=Date.parse(text(row.updated_at)??generatedAt);
+      const projectedTimestamp=latest.get(`${entityType}:${entityId}`);
+      return projectedTimestamp===undefined||!Number.isFinite(projectedTimestamp)||projectedTimestamp<=snapshotTimestamp;
+    });
+  }
+  return protectedData;
+}
+
 function validatePage(value: unknown): Snapshot {
   if (!value || typeof value !== "object") throw new Error("project-alpha-schema-root");
   const page = value as Partial<Snapshot>;
   for (const key of SNAPSHOT_COLLECTIONS) {
     if (!Array.isArray(page[key])) throw new Error(`project-alpha-schema-${key}`);
   }
+  if(typeof page.generated_at!=="string"||!Number.isFinite(Date.parse(page.generated_at)))throw new Error("project-alpha-schema-generated-at");
   if (typeof page.has_more !== "boolean") throw new Error("project-alpha-schema-has-more");
   return page as Snapshot;
 }
 
-async function fetchCompleteSnapshot(env: Env): Promise<SnapshotCollections> {
+function retryableSnapshotResponse(response: Response): boolean { return response.status === 429 || response.status >= 500; }
+async function retryDelay(milliseconds: number): Promise<void> { await new Promise((resolve) => setTimeout(resolve,milliseconds)); }
+
+async function fetchSnapshotPage(url: URL, env: Env, beforeAttempt?:()=>Promise<void>): Promise<Response> {
+  let lastError: unknown;
+  for(let attempt=1;attempt<=SNAPSHOT_FETCH_ATTEMPTS;attempt+=1){
+    try {
+      await beforeAttempt?.();
+      const response=await fetch(url,{headers:{Authorization:`Bearer ${env.PROJECT_ALPHA_API_KEY}`,Accept:"application/json"},signal:AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS)});
+      if(!retryableSnapshotResponse(response)||attempt===SNAPSHOT_FETCH_ATTEMPTS)return response;
+      lastError=new Error(`project-alpha-http-${response.status}`);
+      await response.body?.cancel();
+    } catch(error) {
+      lastError=error;
+      if(attempt===SNAPSHOT_FETCH_ATTEMPTS)break;
+    }
+    await retryDelay(50*2**(attempt-1));
+  }
+  throw new Error(`project-alpha-network:${lastError instanceof Error?lastError.message:"unknown"}`);
+}
+
+async function fetchCompleteSnapshot(env: Env, beforeAttempt?:()=>Promise<void>): Promise<{data:SnapshotCollections;generatedAt:string}> {
   const result = emptyCollections();
   const baseUrl = snapshotBaseUrl(env.PROJECT_ALPHA_BASE_URL);
   let pageNumber = 1;
-  for (let pagesRead = 0; pagesRead < 1000; pagesRead += 1) {
+  let records=0;
+  let generatedAt="";
+  let generatedAtTimestamp=-Infinity;
+  for (let pagesRead = 0; pagesRead < SNAPSHOT_MAX_PAGES; pagesRead += 1) {
     const url = new URL("/api/v1/ops/snapshot", baseUrl);
     url.searchParams.set("page", String(pageNumber));
     url.searchParams.set("limit", "500");
-    const response = await fetch(url, {
-      headers: { Authorization: `Bearer ${env.PROJECT_ALPHA_API_KEY}`, Accept: "application/json" },
-    });
+    const response = await fetchSnapshotPage(url,env,beforeAttempt);
     if (!response.ok) throw new Error(`project-alpha-http-${response.status}`);
-    const page = validatePage(await response.json());
-    for (const key of SNAPSHOT_COLLECTIONS) result[key].push(...page[key]);
-    if (!page.has_more) return result;
+    const declaredBytes=Number(response.headers.get("content-length")??0);
+    if(declaredBytes>SNAPSHOT_MAX_PAGE_BYTES)throw new Error("project-alpha-page-too-large");
+    const bytes=await response.arrayBuffer();
+    if(bytes.byteLength>SNAPSHOT_MAX_PAGE_BYTES)throw new Error("project-alpha-page-too-large");
+    const page = validatePage(JSON.parse(new TextDecoder().decode(bytes)));
+    const pageGeneratedAt=Date.parse(page.generated_at);
+    if(pageGeneratedAt>generatedAtTimestamp){generatedAtTimestamp=pageGeneratedAt;generatedAt=page.generated_at;}
+    for (const key of SNAPSHOT_COLLECTIONS) {
+      records+=page[key].length;
+      if(records>SNAPSHOT_MAX_RECORDS)throw new Error("project-alpha-record-limit");
+      result[key].push(...page[key]);
+    }
+    if (!page.has_more) return {data:result,generatedAt};
     if (!page.next_page || page.next_page <= pageNumber) throw new Error("project-alpha-pagination");
     pageNumber = page.next_page;
   }
   throw new Error("project-alpha-page-limit");
 }
 
-async function runBatches(db: D1Database, statements: D1PreparedStatement[]): Promise<void> {
+async function claimSnapshotLease(db: D1Database, owner: string): Promise<void> {
+  const claimed=await db.prepare(`INSERT INTO pa_projection_entity_leases (entity_type,entity_id,owner_event_id,lease_until)
+    VALUES ('integration_projection','project-alpha',?,datetime('now',?))
+    ON CONFLICT(entity_type,entity_id) DO UPDATE SET owner_event_id=excluded.owner_event_id,lease_until=excluded.lease_until,updated_at=datetime('now')
+    WHERE datetime(pa_projection_entity_leases.lease_until)<=datetime('now') RETURNING owner_event_id`)
+    .bind(owner,PROJECTION_LEASE_DURATION).first<{owner_event_id:string}>();
+  if(claimed?.owner_event_id!==owner)throw new Error("project-alpha-sync-busy");
+}
+
+async function releaseSnapshotLease(db: D1Database, owner: string): Promise<void> {
+  await db.prepare("DELETE FROM pa_projection_entity_leases WHERE entity_type='integration_projection' AND entity_id='project-alpha' AND owner_event_id=?").bind(owner).run();
+}
+
+async function refreshSnapshotLease(db:D1Database,owner:string):Promise<void>{
+  const refreshed=await db.prepare(`UPDATE pa_projection_entity_leases SET lease_until=datetime('now',?),updated_at=datetime('now')
+    WHERE entity_type='integration_projection' AND entity_id='project-alpha' AND owner_event_id=? RETURNING owner_event_id`)
+    .bind(PROJECTION_LEASE_DURATION,owner).first<{owner_event_id:string}>();
+  if(refreshed?.owner_event_id!==owner)throw new Error("project-alpha-sync-lease-lost");
+}
+
+async function runBatches(db: D1Database, statements: D1PreparedStatement[], beforeBatch?:()=>Promise<void>): Promise<void> {
   for (let index = 0; index < statements.length; index += 75) {
+    await beforeBatch?.();
     await db.batch(statements.slice(index, index + 75));
   }
 }
 
-function projectionStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, applicationKey: string): D1PreparedStatement[] {
+function projectionStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, applicationKey: string, generatedAt: string): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = [];
   if (changed.has("users")) for (const row of data.users) {
     const id = text(row.id);
@@ -228,9 +327,10 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
   if (changed.has("application_entitlements")) for (const row of data.application_entitlements) {
     const id = text(row.id), userId = text(row.user_id), role = text(row.role_key);
     if (!id || !userId || !role || !SUPPORTED_ROLES.has(role) || text(row.application_key) !== applicationKey) continue;
-    statements.push(db.prepare(`INSERT INTO pa_application_entitlements (id,user_id,application_key,enabled,role_key,business_unit_ids_json,payload_json,last_sync_id,active) VALUES (?,?,?,?,?,?,?,?,1)
-      ON CONFLICT(user_id) DO UPDATE SET application_key=excluded.application_key,enabled=excluded.enabled,role_key=excluded.role_key,business_unit_ids_json=excluded.business_unit_ids_json,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,active=1,updated_at=datetime('now')`)
-      .bind(id, userId, applicationKey, enabled(row.enabled), role, "[]", JSON.stringify(row), syncId));
+    statements.push(db.prepare(`INSERT INTO pa_application_entitlements (id,user_id,application_key,enabled,role_key,business_unit_ids_json,payload_json,last_event_at,last_sync_id,active) VALUES (?,?,?,?,?,?,?,?,?,1)
+      ON CONFLICT(user_id) DO UPDATE SET application_key=excluded.application_key,enabled=excluded.enabled,role_key=excluded.role_key,business_unit_ids_json=excluded.business_unit_ids_json,payload_json=excluded.payload_json,last_event_at=excluded.last_event_at,last_sync_id=excluded.last_sync_id,active=1,updated_at=datetime('now')
+      WHERE pa_application_entitlements.last_event_at IS NULL OR datetime(pa_application_entitlements.last_event_at)<=datetime(excluded.last_event_at)`)
+      .bind(id, userId, applicationKey, enabled(row.enabled), role, "[]", JSON.stringify(row), generatedAt, syncId));
   }
   if (changed.has("operations")) for (const row of data.operations) {
     const id = text(row.id), projectId = text(row.project_id), title = text(row.title), status = text(row.status);
@@ -268,9 +368,29 @@ function projectionStatements(db: D1Database, data: SnapshotCollections, syncId:
   return statements;
 }
 
-function clientPortalProjectionStatements(env: Env, data: SnapshotCollections, changed: ReadonlySet<CollectionName>): D1PreparedStatement[] {
+interface CurrentPortalProjectionState {
+  clients: Array<{ id: string; active: number }>;
+  organizations: Array<{ id: string; active: number }>;
+  projects: Array<{ id: string; client_id: string | null; organization_id: string | null; active: number }>;
+}
+
+async function currentPortalProjectionState(env: Env): Promise<CurrentPortalProjectionState> {
+  const [clients, organizations, projects] = await Promise.all([
+    env.OPS_DB.prepare("SELECT id,active FROM pa_clients").all<{ id: string; active: number }>(),
+    env.OPS_DB.prepare("SELECT id,active FROM pa_organizations").all<{ id: string; active: number }>(),
+    env.OPS_DB.prepare("SELECT id,client_id,organization_id,active FROM pa_projects").all<{ id: string; client_id: string | null; organization_id: string | null; active: number }>(),
+  ]);
+  return { clients: clients.results, organizations: organizations.results, projects: projects.results };
+}
+
+async function clientPortalProjectionStatements(env: Env, data: SnapshotCollections, changed: ReadonlySet<CollectionName>): Promise<D1PreparedStatement[]> {
   const db = env.DELIVERY_DB;
   const statements: D1PreparedStatement[] = [];
+  const portalChanged = changed.has("clients") || changed.has("organizations") || changed.has("projects");
+  // The filtered snapshot intentionally omits entities protected by a newer
+  // webhook. Use the already-reconciled OPS_DB projection as the authoritative
+  // active set so an omission cannot be misread as a portal deletion.
+  const current = portalChanged ? await currentPortalProjectionState(env) : { clients: [], organizations: [], projects: [] };
   if (changed.has("clients")) for (const row of data.clients) {
     const id = text(row.id), name = text(row.name);
     if (id && name) statements.push(db.prepare("UPDATE client_accounts SET display_name=?,project_alpha_organization_id=?,status=?,updated_at=datetime('now') WHERE project_alpha_client_id=?")
@@ -297,32 +417,32 @@ function clientPortalProjectionStatements(env: Env, data: SnapshotCollections, c
     }
   }
   if (changed.has("clients")) {
-    const activeClientIds = data.clients.filter(sourceActive).map(row => text(row.id)).filter((id): id is string => Boolean(id));
+    const activeClientIds = current.clients.filter(row => row.active === 1).map(row => row.id);
     statements.push(activeClientIds.length
       ? db.prepare(`UPDATE client_accounts SET status='suspended',updated_at=datetime('now') WHERE project_alpha_client_id IS NOT NULL AND project_alpha_client_id NOT IN (${activeClientIds.map(() => "?").join(",")})`).bind(...activeClientIds)
       : db.prepare("UPDATE client_accounts SET status='suspended',updated_at=datetime('now') WHERE project_alpha_client_id IS NOT NULL"));
   }
   if (changed.has("organizations")) {
-    const activeOrganizationIds = data.organizations.filter(sourceActive).map(row => text(row.id)).filter((id): id is string => Boolean(id));
+    const activeOrganizationIds = current.organizations.filter(row => row.active === 1).map(row => row.id);
     statements.push(activeOrganizationIds.length
       ? db.prepare(`UPDATE client_accounts SET status='suspended',updated_at=datetime('now') WHERE project_alpha_client_id IS NULL AND project_alpha_organization_id IS NOT NULL AND project_alpha_organization_id NOT IN (${activeOrganizationIds.map(() => "?").join(",")})`).bind(...activeOrganizationIds)
       : db.prepare("UPDATE client_accounts SET status='suspended',updated_at=datetime('now') WHERE project_alpha_client_id IS NULL AND project_alpha_organization_id IS NOT NULL"));
   }
   if (changed.has("projects")) {
-    const activeProjectIds = data.projects.filter(sourceActive).map(row => text(row.id)).filter((id): id is string => Boolean(id));
+    const activeProjectIds = current.projects.filter(row => row.active === 1).map(row => row.id);
     statements.push(activeProjectIds.length
       ? db.prepare(`UPDATE projects SET active=0,updated_at=datetime('now') WHERE project_alpha_project_id IS NOT NULL AND project_alpha_project_id NOT IN (${activeProjectIds.map(() => "?").join(",")})`).bind(...activeProjectIds)
       : db.prepare("UPDATE projects SET active=0,updated_at=datetime('now') WHERE project_alpha_project_id IS NOT NULL"));
   }
 
-  if (changed.has("clients") || changed.has("organizations") || changed.has("projects")) {
-    const activeClients = new Set(data.clients.filter(sourceActive).map(row => text(row.id)).filter(Boolean));
-    const activeOrganizations = new Set(data.organizations.filter(sourceActive).map(row => text(row.id)).filter(Boolean));
-    for (const row of data.projects) {
-      const projectId = text(row.id); if (!projectId) continue;
-      const clientId = activeClients.has(text(row.client_id)) ? text(row.client_id) : null;
-      const organizationId = activeOrganizations.has(text(row.organization_id)) ? text(row.organization_id) : null;
-      const active = sourceActive(row);
+  if (portalChanged) {
+    const activeClients = new Set(current.clients.filter(row => row.active === 1).map(row => row.id));
+    const activeOrganizations = new Set(current.organizations.filter(row => row.active === 1).map(row => row.id));
+    for (const row of current.projects) {
+      const projectId = row.id;
+      const clientId = row.client_id && activeClients.has(row.client_id) ? row.client_id : null;
+      const organizationId = row.organization_id && activeOrganizations.has(row.organization_id) ? row.organization_id : null;
+      const active = row.active === 1 ? 1 : 0;
       const invalidAccounts = `SELECT g.account_id FROM client_project_grants g
         JOIN client_accounts a ON a.id=g.account_id
         JOIN projects p ON p.id=g.project_id
@@ -349,7 +469,7 @@ function clientPortalProjectionStatements(env: Env, data: SnapshotCollections, c
   return statements;
 }
 
-function reconciliationStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, applicationKey: string): D1PreparedStatement[] {
+function reconciliationStatements(db: D1Database, data: SnapshotCollections, syncId: string, changed: ReadonlySet<CollectionName>, applicationKey: string, generatedAt: string): D1PreparedStatement[] {
   const tables: Record<CollectionName, string> = {
     users: "pa_users", business_units: "pa_business_units", worker_business_units: "pa_worker_business_units",
     clients: "pa_clients", organizations: "pa_organizations", projects: "pa_projects",
@@ -357,9 +477,22 @@ function reconciliationStatements(db: D1Database, data: SnapshotCollections, syn
     application_entitlements: "pa_application_entitlements", operations: "pa_operations",
     operation_assignments: "pa_operation_assignments", tasks: "pa_tasks", task_assignments: "pa_task_assignments", calendar_events: "pa_calendar_events",
   };
+  const entityTypes=new Map<CollectionName,ProjectionEntityType>(VERSIONED_COLLECTIONS);
   const statements: D1PreparedStatement[] = SNAPSHOT_COLLECTIONS
     .filter((collection) => changed.has(collection))
-    .map((collection) => db.prepare(`UPDATE ${tables[collection]} SET active=0 WHERE last_sync_id<>? AND active<>0`).bind(syncId));
+    .map((collection) => {
+      const entityType=entityTypes.get(collection);
+      if(collection==="application_entitlements")return db.prepare(`UPDATE pa_application_entitlements SET active=0 WHERE last_sync_id<>? AND active<>0
+        AND (last_event_at IS NULL OR datetime(last_event_at)<=datetime(?))`).bind(syncId,generatedAt);
+      if(collection==="users")return db.prepare(`UPDATE pa_users SET active=0 WHERE last_sync_id<>? AND active<>0
+        AND NOT EXISTS (SELECT 1 FROM pa_application_entitlements e WHERE e.user_id=pa_users.id AND datetime(e.last_event_at)>datetime(?))`).bind(syncId,generatedAt);
+      if(!entityType)return db.prepare(`UPDATE ${tables[collection]} SET active=0 WHERE last_sync_id<>? AND active<>0`).bind(syncId);
+      return db.prepare(`UPDATE ${tables[collection]} SET active=0 WHERE last_sync_id<>? AND active<>0
+        AND NOT (last_sync_id LIKE 'event:%' AND EXISTS (
+          SELECT 1 FROM pa_projection_entity_versions v WHERE v.entity_type=? AND v.event_id=substr(${tables[collection]}.last_sync_id,7)
+            AND datetime(v.source_updated_at)>datetime(?)
+        ))`).bind(syncId,entityType,generatedAt);
+    });
 
   const authorizationChanged = changed.has("users") || changed.has("business_units") || changed.has("application_entitlements");
   if (!authorizationChanged) return statements;
@@ -377,24 +510,16 @@ function reconciliationStatements(db: D1Database, data: SnapshotCollections, syn
     db.prepare(`DELETE FROM staff_divisions WHERE staff_id IN (SELECT id FROM staff_users WHERE provisioning_source='project-alpha' AND sync_protected=0)`),
   );
 
-  for (const row of data.application_entitlements) {
-    const userId = text(row.user_id), role = text(row.role_key);
-    if (!userId || !role || !SUPPORTED_ROLES.has(role) || text(row.application_key) !== applicationKey || !isTrue(row.enabled)) continue;
-    if (role === "role-admin") {
-      statements.push(db.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key)
-        SELECT ?,s.id,'role-admin','global',NULL,'global' FROM staff_users s
-        WHERE s.project_alpha_user_id=? AND s.sync_protected=0 AND s.status='active'`)
-        .bind(stableId("pa-role", `${userId}-role-admin-global`), userId));
-      continue;
-    }
-
-    // All non-admin PA entitlements are deliberately reduced to the employee role.
-    // Project, Operation, and Task assignments are the only record-visibility grants.
-    statements.push(db.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key)
-      SELECT ?,s.id,'role-operator','assigned',NULL,'assigned' FROM staff_users s
-      WHERE s.project_alpha_user_id=? AND s.sync_protected=0 AND s.status='active'`)
-      .bind(stableId("pa-role", `${userId}-role-operator-assigned`), userId));
-  }
+  statements.push(
+    db.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key)
+      SELECT 'pa-role-'||replace(e.user_id,':','-')||'-role-admin-global',s.id,'role-admin','global',NULL,'global'
+      FROM pa_application_entitlements e JOIN staff_users s ON s.project_alpha_user_id=e.user_id
+      WHERE e.active=1 AND e.enabled=1 AND e.application_key=? AND e.role_key='role-admin' AND s.sync_protected=0 AND s.status='active'`).bind(applicationKey),
+    db.prepare(`INSERT OR IGNORE INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key)
+      SELECT 'pa-role-'||replace(e.user_id,':','-')||'-role-operator-assigned',s.id,'role-operator','assigned',NULL,'assigned'
+      FROM pa_application_entitlements e JOIN staff_users s ON s.project_alpha_user_id=e.user_id
+      WHERE e.active=1 AND e.enabled=1 AND e.application_key=? AND e.role_key<>'role-admin' AND s.sync_protected=0 AND s.status='active'`).bind(applicationKey),
+  );
   return statements;
 }
 
@@ -403,6 +528,24 @@ function fingerprintStatements(db: D1Database, fingerprints: CollectionFingerpri
     INSERT INTO pa_projection_fingerprints (collection,fingerprint,last_sync_id) VALUES (?,?,?)
     ON CONFLICT(collection) DO UPDATE SET fingerprint=excluded.fingerprint,last_sync_id=excluded.last_sync_id,updated_at=datetime('now')
   `).bind(collection, fingerprints[collection], syncId));
+}
+
+function snapshotVersionStatements(db:D1Database,data:SnapshotCollections,changed:ReadonlySet<CollectionName>,syncId:string,generatedAt:string):D1PreparedStatement[]{
+  const statements:D1PreparedStatement[]=[];
+  for(const [collection,entityType] of VERSIONED_COLLECTIONS){
+    if(!changed.has(collection))continue;
+    for(const row of data[collection]){
+      const entityId=snapshotEntityId(collection,row);
+      if(!entityId)continue;
+      const candidate=text(row.updated_at)??generatedAt;
+      const sourceUpdatedAt=Number.isFinite(Date.parse(candidate))?candidate:generatedAt;
+      statements.push(db.prepare(`INSERT INTO pa_projection_entity_versions (entity_type,entity_id,source_updated_at,event_id) VALUES (?,?,?,?)
+        ON CONFLICT(entity_type,entity_id) DO UPDATE SET source_updated_at=excluded.source_updated_at,event_id=excluded.event_id,updated_at=datetime('now')
+        WHERE datetime(pa_projection_entity_versions.source_updated_at)<=datetime(excluded.source_updated_at)`)
+        .bind(entityType,entityId,sourceUpdatedAt,`snapshot:${syncId}`));
+    }
+  }
+  return statements;
 }
 
 export interface ProjectAlphaSyncResult {
@@ -419,36 +562,66 @@ export async function syncProjectAlpha(env: Env): Promise<ProjectAlphaSyncResult
   const applicationKey = configuredApplicationKey(env.APPLICATION_KEY);
   const syncId = crypto.randomUUID();
   const runId = crypto.randomUUID();
+  const leaseOwner=`snapshot:${runId}`;
+  let leaseClaimed=false;
+  const circuit=await env.OPS_DB.prepare("SELECT circuit_open_until FROM integration_health WHERE integration='project-alpha'").first<{circuit_open_until:string|null}>();
+  if(circuit?.circuit_open_until&&Date.parse(`${circuit.circuit_open_until.replace(" ","T")}Z`)>Date.now())throw new Error("project-alpha-circuit-open");
   await env.OPS_DB.batch([
     env.OPS_DB.prepare("INSERT INTO sync_runs (id,integration,status) VALUES (?,'project-alpha','running')").bind(runId),
     env.OPS_DB.prepare("UPDATE integration_health SET last_attempt_at=datetime('now'),updated_at=datetime('now') WHERE integration='project-alpha'"),
   ]);
   try {
     if (!env.DELIVERY_DB) throw new Error("delivery-db-binding-required");
+    await claimSnapshotLease(env.OPS_DB,leaseOwner);
+    leaseClaimed=true;
     // Fetch and validate every page before touching projection data. A failed or partial
     // snapshot therefore leaves the last known good projection entirely intact.
-    const data = await fetchCompleteSnapshot(env);
-    const records = SNAPSHOT_COLLECTIONS.reduce((count, key) => count + data[key].length, 0);
-    const fingerprints = await collectionFingerprints(data);
-    const changed = await changedCollections(env.OPS_DB, fingerprints);
-    await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed, applicationKey));
-    await runBatches(env.OPS_DB, reconciliationStatements(env.OPS_DB, data, syncId, changed, applicationKey));
-    await runBatches(env.DELIVERY_DB, clientPortalProjectionStatements(env, data, changed));
+    const refreshLease=()=>refreshSnapshotLease(env.OPS_DB,leaseOwner);
+    const snapshot = await fetchCompleteSnapshot(env,refreshLease);
+    await refreshLease();
+    // Project Alpha uses OFFSET pagination and assigns generated_at per page.
+    // Require two complete, byte-bounded passes to produce identical logical
+    // collection fingerprints before any projection or deactivation is allowed.
+    const firstFingerprints=await collectionFingerprints(snapshot.data);
+    const stableSnapshot=await fetchCompleteSnapshot(env,refreshLease);
+    await refreshLease();
+    const stableFingerprints=await collectionFingerprints(stableSnapshot.data);
+    if(SNAPSHOT_COLLECTIONS.some((collection)=>firstFingerprints[collection]!==stableFingerprints[collection]))throw new Error("project-alpha-snapshot-unstable");
+    if(Date.parse(stableSnapshot.generatedAt)<Date.parse(snapshot.generatedAt))throw new Error("project-alpha-snapshot-time-regressed");
+    const {data:fetchedData,generatedAt}=stableSnapshot;
+    const records = SNAPSHOT_COLLECTIONS.reduce((count, key) => count + fetchedData[key].length, 0);
+    const fingerprints = stableFingerprints;
+    const fingerprintChanged = await changedCollections(env.OPS_DB, fingerprints);
+    const changed = new Set(fingerprintChanged);
+    // These collections contain time-bounded memberships. Re-evaluate them on
+    // every daily recovery even when the source payload fingerprint is unchanged.
+    changed.add("worker_business_units");
+    changed.add("project_assignments");
+    const data=await preserveNewerIncrementalRows(env.OPS_DB,fetchedData,generatedAt);
+    await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt),refreshLease);
+    await runBatches(env.OPS_DB, reconciliationStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt),refreshLease);
+    await refreshLease();
+    await runBatches(env.DELIVERY_DB, await clientPortalProjectionStatements(env, data, changed),refreshLease);
     // Commit source fingerprints only after the idempotent portal projection.
     // If DELIVERY_DB is unavailable, the next run must retry the same changed
     // collections instead of falsely reporting a healthy but stale portal.
-    await runBatches(env.OPS_DB, fingerprintStatements(env.OPS_DB, fingerprints, changed, syncId));
+    await runBatches(env.OPS_DB,snapshotVersionStatements(env.OPS_DB,data,changed,syncId,generatedAt),refreshLease);
+    await runBatches(env.OPS_DB, fingerprintStatements(env.OPS_DB, fingerprints, fingerprintChanged, syncId),refreshLease);
     await env.OPS_DB.batch([
       env.OPS_DB.prepare("UPDATE sync_runs SET status='success',completed_at=datetime('now'),records_seen=? WHERE id=?").bind(records, runId),
-      env.OPS_DB.prepare("UPDATE integration_health SET status='healthy',last_success_at=datetime('now'),last_error_code=NULL,updated_at=datetime('now') WHERE integration='project-alpha'"),
+      env.OPS_DB.prepare("UPDATE integration_health SET status='healthy',last_success_at=datetime('now'),last_error_code=NULL,consecutive_failures=0,circuit_open_until=NULL,updated_at=datetime('now') WHERE integration='project-alpha'"),
     ]);
     return { status: "success", records, changedCollections: [...changed] };
   } catch (error) {
     const code = error instanceof Error ? error.message.slice(0, 120) : "unknown";
     await env.OPS_DB.batch([
       env.OPS_DB.prepare("UPDATE sync_runs SET status='failed',completed_at=datetime('now'),error_code=? WHERE id=?").bind(code, runId),
-      env.OPS_DB.prepare("UPDATE integration_health SET status='error',last_error_code=?,updated_at=datetime('now') WHERE integration='project-alpha'").bind(code),
+      env.OPS_DB.prepare(`UPDATE integration_health SET status='error',last_error_code=?,
+        circuit_open_until=CASE WHEN consecutive_failures+1>=3 THEN datetime('now','+5 minutes') ELSE circuit_open_until END,
+        consecutive_failures=consecutive_failures+1,updated_at=datetime('now') WHERE integration='project-alpha'`).bind(code),
     ]);
     throw error;
+  } finally {
+    if(leaseClaimed)await releaseSnapshotLease(env.OPS_DB,leaseOwner);
   }
 }

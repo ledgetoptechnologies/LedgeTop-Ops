@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { isMovedSourceMarker } from "@ltds/shared";
 import { z } from "zod";
 import type { Env } from "../types";
 import { d1ClientPortalRepository } from "./repository";
@@ -284,6 +285,20 @@ export function createClientPortalRouter(
     return c.json(page);
   });
 
+  router.get("/projects/:projectId/file-locations", async (c) => {
+    const projectId = opaqueId.safeParse(c.req.param("projectId"));
+    if (!projectId.success)
+      throw new HTTPException(404, { message: "Project not found" });
+    const locations = await repository.listProjectFileLocations(
+      c.env,
+      c.get("clientSession"),
+      projectId.data,
+    );
+    if (!locations)
+      throw new HTTPException(404, { message: "Project not found" });
+    return c.json(locations);
+  });
+
   router.get("/past-deliveries", async (c) => {
     const cursor = c.req.query("cursor") || null;
     if (cursor && cursor.length > 1000)
@@ -296,6 +311,13 @@ export function createClientPortalRouter(
       ),
     );
   });
+
+  router.get("/past-delivery-locations", async (c) =>
+    c.json(await repository.listPastDeliveryLocations(
+      c.env,
+      c.get("clientSession"),
+    )),
+  );
 
   async function authorizedFile(c: any, disposition: "inline" | "attachment") {
     const fileId = c.req.param("fileId");
@@ -325,7 +347,7 @@ export function createClientPortalRouter(
     if (disposition === "inline" && (!file.previewPath || !safeInline))
       throw new HTTPException(415, { message: "Preview unavailable" });
     const object = await c.env.DATA_BUCKET.get(file.key);
-    if (!object) throw new HTTPException(404, { message: "File not found" });
+    if (!object || isMovedSourceMarker(object)) throw new HTTPException(404, { message: "File not found" });
     const safeName =
       file.name.replace(/[\r\n"\\]/g, "_").slice(0, 200) || "download";
     const headers = new Headers();

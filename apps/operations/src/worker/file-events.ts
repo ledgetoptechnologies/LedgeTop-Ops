@@ -4,6 +4,8 @@ import { artifactDirectory } from "./artifacts";
 import { sendAdminAlert } from "./alerts";
 import { notificationStatement } from "./notifications";
 import { canonicalThumbnailSourceKey, enqueueThumbnailJob, removeThumbnailStateForPath, supportedThumbnailSource } from "./image-thumbnails";
+import { deleteImageLocation, enqueueImageLocationJob } from "./image-locations";
+import { isMovedSourceMarker } from "@ltds/shared";
 
 export interface R2Notification {
   action: string;
@@ -61,6 +63,17 @@ export function thumbnailJobForCreatedObject(
     : null;
 }
 
+export function imageLocationJobForCreatedObject(
+  action: string,
+  key: string,
+  kind: string,
+  head: Pick<R2Object, "httpEtag">,
+): { sourceKey: string; sourceEtag: string } | null {
+  return created(action) && kind === "image" && canonicalThumbnailSourceKey(key)
+    ? { sourceKey: key, sourceEtag: head.httpEtag }
+    : null;
+}
+
 /**
  * A delete event may arrive after a replacement at the same key. Live objects
  * make that event stale. On a real removal, retain the source-identity-scoped
@@ -70,18 +83,41 @@ export function thumbnailJobForCreatedObject(
 export async function handleRemovedSource(
   env: Env,
   key: string,
+  removedEtag?: string,
 ): Promise<"stale" | "removed"> {
   if (await env.DATA_BUCKET.head(key)) return "stale";
+  const indexed = await env.DELIVERY_DB.prepare("SELECT etag FROM file_index WHERE r2_key=?")
+    .bind(key).first<{ etag: string }>();
+  const expectedEtag = removedEtag || indexed?.etag;
   await removeThumbnailStateForPath(env, key);
-  await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run();
+  if (expectedEtag) {
+    await deleteImageLocation(env, key, expectedEtag);
+    await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=? AND trim(etag,'\"')=trim(?,'\"')")
+      .bind(key, expectedEtag).run();
+  }
   const resurrected = await env.DATA_BUCKET.head(key);
-  if (resurrected && canonicalThumbnailSourceKey(key) && mediaKind(key) === "image") {
-    await enqueueThumbnailJob(env, {
-      sourceKey: key,
-      sourceEtag: resurrected.httpEtag,
-      sourceSize: resurrected.size,
-      eventTime: resurrected.uploaded.toISOString(),
-    });
+  if (resurrected) {
+    const kind = mediaKind(key);
+    await env.DELIVERY_DB.prepare(`INSERT INTO file_index
+      (r2_key,etag,size,uploaded_at,content_type,media_kind)
+      VALUES(?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET
+        etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,
+        content_type=excluded.content_type,media_kind=excluded.media_kind,updated_at=datetime('now')`)
+      .bind(key, resurrected.httpEtag, resurrected.size, resurrected.uploaded.toISOString(), mime(key), kind)
+      .run();
+    const stable = await env.DATA_BUCKET.head(key);
+    if (stable && stable.httpEtag === resurrected.httpEtag && canonicalThumbnailSourceKey(key)) {
+      if (supportedThumbnailSource(key, stable.httpMetadata?.contentType)) {
+        await enqueueThumbnailJob(env, {
+          sourceKey: key,
+          sourceEtag: stable.httpEtag,
+          sourceSize: stable.size,
+          eventTime: stable.uploaded.toISOString(),
+        });
+      } else if (kind === "image") {
+        await enqueueImageLocationJob(env, { sourceKey: key, sourceEtag: stable.httpEtag });
+      }
+    }
   }
   return "removed";
 }
@@ -237,14 +273,14 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       if (!key) { message.ack(); continue; }
       if (previewManifest(key)) {
         // Legacy preview artifacts are intentionally ignored. This release only
-        // creates still-image thumbnails through the dedicated queue pipeline.
+        // creates fixed still thumbnails through the dedicated queue pipeline.
         message.ack(); continue;
       }
       if (previewDerivative(key)) {
         message.ack(); continue;
       }
       if (removed(event.action)) {
-        if (!hidden(key)) await handleRemovedSource(env, key);
+        if (!hidden(key)) await handleRemovedSource(env, key, event.object?.eTag);
         else await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run();
         message.ack(); continue;
       }
@@ -255,11 +291,25 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       const suppressed=await env.OPS_DB.prepare("DELETE FROM r2_event_suppressions WHERE object_key=? AND event_kind='create' AND datetime(expires_at)>datetime('now') RETURNING object_key").bind(key).first();
       if(suppressed){message.ack();continue;}
       const head = await env.DATA_BUCKET.head(key); if (!head) { message.retry(); continue; }
+      if(isMovedSourceMarker(head)){
+        const movedEtag=head.customMetadata?.ltdsMovedSourceEtag;
+        if(movedEtag){
+          await deleteImageLocation(env,key,movedEtag);
+          await removeThumbnailStateForPath(env,key,false,movedEtag);
+          await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=? AND trim(etag,'\"')=trim(?,'\"')").bind(key,movedEtag).run();
+        }
+        message.ack();continue;
+      }
       const kind = mediaKind(key);
       const existing = await env.DELIVERY_DB.prepare("SELECT etag,stream_uid,stream_status,stream_upload_url,stream_upload_offset FROM file_index WHERE r2_key=?").bind(key).first<TusState>();
-      if (existing?.etag === head.httpEtag && existing.stream_uid && !existing.stream_upload_url) { message.ack(); continue; }
+      if (existing?.etag === head.httpEtag && existing.stream_uid && !existing.stream_upload_url) {
+        const thumbnailJob = thumbnailJobForCreatedObject(event.action, key, kind, head, event.eventTime);
+        if (thumbnailJob) await enqueueThumbnailJob(env, thumbnailJob);
+        message.ack(); continue;
+      }
       let stream = { uid: existing?.stream_uid || null, status: existing?.stream_status || null, error: null as string | null };
-      // Video thumbnailing/transcoding is intentionally disabled for this release.
+      // Stream ingestion/transcoding remains disabled. The independent thumbnail
+      // job may extract one still frame through Media Transformations below.
       if (kind === "video") stream = { uid: null, status: "disabled", error: null };
       await env.DELIVERY_DB.batch([
         env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status,stream_error) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,stream_uid=excluded.stream_uid,stream_status=excluded.stream_status,stream_error=excluded.stream_error,updated_at=datetime('now')`).bind(key, head.httpEtag, head.size, head.uploaded.toISOString(), mime(key), kind, stream.uid, stream.status, stream.error),
@@ -267,7 +317,11 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       ]);
       const thumbnailJob = thumbnailJobForCreatedObject(event.action, key, kind, head, event.eventTime);
       if (thumbnailJob) await enqueueThumbnailJob(env, thumbnailJob);
-      else if (canonicalThumbnailSourceKey(key)) await removeThumbnailStateForPath(env, key);
+      else if (canonicalThumbnailSourceKey(key)) {
+        const locationJob = imageLocationJobForCreatedObject(event.action, key, kind, head);
+        if (locationJob) await enqueueImageLocationJob(env, locationJob);
+        await removeThumbnailStateForPath(env, key);
+      }
       message.ack();
     } catch (error) {
       console.error(JSON.stringify({ event: "file-index.error", message: error instanceof Error ? error.message : "unknown" }));
@@ -297,9 +351,9 @@ export async function reconcileFileIndex(env: Env): Promise<number> {
   const presentShares = new Set<string>();
   try {
     do {
-      const listed = await env.DATA_BUCKET.list({ limit: 1000, cursor }); const statements: D1PreparedStatement[] = [];
+      const listed = await env.DATA_BUCKET.list({ limit: 1000, cursor, include:["httpMetadata","customMetadata"] }); const statements: D1PreparedStatement[] = [];
       for (const object of listed.objects) {
-        if (object.key.endsWith("/") || hidden(object.key)) continue;
+        if (object.key.endsWith("/") || hidden(object.key) || isMovedSourceMarker(object)) continue;
         visibleBytes += object.size;
         for (const share of activeShares.results) if (object.key.startsWith(share.r2_prefix.endsWith("/") ? share.r2_prefix : `${share.r2_prefix}/`)) presentShares.add(share.id);
         statements.push(env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,last_seen_reconcile) VALUES (?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,last_seen_reconcile=excluded.last_seen_reconcile,updated_at=datetime('now')`).bind(object.key, object.httpEtag, object.size, object.uploaded.toISOString(), mime(object.key), mediaKind(object.key), marker)); count += 1;

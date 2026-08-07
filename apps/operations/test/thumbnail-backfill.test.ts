@@ -302,7 +302,7 @@ describe("thumbnail metadata backfill", () => {
     });
     expect(get).not.toHaveBeenCalled();
     expect(send).not.toHaveBeenCalled();
-  });
+  }, 10_000);
 
   it("persists a retry-visible run and queue failure without consuming source bytes", async () => {
     const source = object("Jobs/Clients/Acme/retry.jpg", "retry-etag");

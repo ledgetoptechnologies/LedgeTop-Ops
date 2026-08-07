@@ -6,12 +6,15 @@ import {
   type ReactNode,
 } from "react";
 import { Brand, Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
+import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
   createPortalChangeRequest,
   createPortalServiceRequest,
   loadPortalBootstrap,
   loadPortalPastDeliveries,
+  loadPortalPastDeliveryLocations,
+  loadPortalProjectFileLocations,
   loadPortalProjectFiles,
   respondToPortalEstimate,
   updatePortalServiceRequest,
@@ -32,6 +35,7 @@ import {
   type ClientPortalPage,
 } from "./portal-route";
 import { MapAreaSelector } from "./MapAreaSelector";
+import { ImageLocationMap } from "./ImageLocationMap";
 
 type TopPage = "dashboard" | "projects" | "deliveries" | "requests" | "account";
 type WorkspaceTab = "overview" | "files" | "requests";
@@ -147,10 +151,16 @@ function PortalBoundary({ children }: { children: ReactNode }) {
 
 function FileBrowser({
   load,
+  loadLocations,
+  mapToken,
+  locationScopeLabel,
   emptyTitle,
   emptyDetail,
 }: {
   load: (cursor: string | null) => Promise<PortalFilePage>;
+  loadLocations: () => Promise<DeliveryLocationCollection>;
+  mapToken: string | null;
+  locationScopeLabel: string;
   emptyTitle: string;
   emptyDetail: string;
 }) {
@@ -159,6 +169,8 @@ function FileBrowser({
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [locations, setLocations] = useState<DeliveryLocationCollection | null>(null);
+  const [locationError, setLocationError] = useState<string | null>(null);
   useEffect(() => {
     let active = true;
     setLoading(true);
@@ -182,6 +194,15 @@ function FileBrowser({
       active = false;
     };
   }, [load]);
+  useEffect(() => {
+    let active = true;
+    setLocations(null);
+    setLocationError(null);
+    loadLocations()
+      .then((result) => { if (active) setLocations(result); })
+      .catch(() => { if (active) setLocationError("Image locations could not be loaded."); });
+    return () => { active = false; };
+  }, [loadLocations]);
   const more = async () => {
     if (!cursor || loadingMore) return;
     setLoadingMore(true);
@@ -196,18 +217,15 @@ function FileBrowser({
       setLoadingMore(false);
     }
   };
-  if (loading) return <Loading />;
-  if (error && files.length === 0)
-    return (
-      <p className="portal-message error" role="alert">
-        {error}
-      </p>
-    );
-  if (files.length === 0)
-    return <EmptyState title={emptyTitle} detail={emptyDetail} />;
   return (
     <div>
-      <div className="portal-file-list">
+      <ImageLocationMap token={mapToken} locations={locations} scopeLabel={locationScopeLabel} />
+      {locationError && <p className="portal-message error" role="alert">{locationError}</p>}
+      {loading ? <Loading /> : error && files.length === 0 ? (
+        <p className="portal-message error" role="alert">{error}</p>
+      ) : files.length === 0 ? (
+        <EmptyState title={emptyTitle} detail={emptyDetail} />
+      ) : <div className="portal-file-list">
         {files.map((file) => (
           <article key={file.id} className="portal-file-row">
             <div className="portal-file-icon" aria-hidden="true">
@@ -242,7 +260,7 @@ function FileBrowser({
             </div>
           </article>
         ))}
-      </div>
+      </div>}
       {error && (
         <p className="portal-message error" role="alert">
           {error}
@@ -772,6 +790,10 @@ function ProjectWorkspace({
     () => (cursor: string | null) => loadPortalProjectFiles(project.id, cursor),
     [project.id],
   );
+  const loadLocations = useMemo(
+    () => () => loadPortalProjectFileLocations(project.id),
+    [project.id],
+  );
   return (
     <>
       <button className="portal-back" onClick={onBack}>
@@ -865,6 +887,9 @@ function ProjectWorkspace({
         <Card title="Project files">
           <FileBrowser
             load={loadFiles}
+            loadLocations={loadLocations}
+            mapToken={mapboxPublicToken}
+            locationScopeLabel="this project's available files"
             emptyTitle="No project files yet"
             emptyDetail="Deliverables will appear here when your LTDS team publishes them."
           />
@@ -908,6 +933,10 @@ export function ClientPortalApp({
   const [requestNotice, setRequestNotice] = useState<string | null>(null);
   const pastDeliveryLoader = useMemo(
     () => (cursor: string | null) => loadPortalPastDeliveries(cursor),
+    [],
+  );
+  const pastDeliveryLocationLoader = useMemo(
+    () => () => loadPortalPastDeliveryLocations(),
     [],
   );
 
@@ -1193,6 +1222,9 @@ export function ClientPortalApp({
         <Card title="Delivery archive">
           <FileBrowser
             load={pastDeliveryLoader}
+            loadLocations={pastDeliveryLocationLoader}
+            mapToken={mapboxPublicToken}
+            locationScopeLabel="your available delivery files"
             emptyTitle="No past deliveries"
             emptyDetail="Files published to your client archive will appear here."
           />

@@ -4,7 +4,35 @@ export type ProjectionResult = "applied" | "duplicate" | "ignored";
 
 function staffId(userId: string): string { return `staff-pa-${userId.replace(/[^a-zA-Z0-9_-]/g, "-")}`; }
 
-export async function applyEntitlementEvent(env: Env, event: EntitlementEvent, payloadHash: string): Promise<ProjectionResult> {
+const PROJECTION_LEASE_DURATION = "+10 minutes";
+const GLOBAL_PROJECTION_ENTITY_TYPE = "integration_projection";
+const GLOBAL_PROJECTION_ENTITY_ID = "project-alpha";
+
+async function claimGlobalProjection(env: Env, ownerEventId: string): Promise<void> {
+  const claimed = await env.OPS_DB.prepare(`INSERT INTO pa_projection_entity_leases (entity_type,entity_id,owner_event_id,lease_until)
+    VALUES (?,?,?,datetime('now',?))
+    ON CONFLICT(entity_type,entity_id) DO UPDATE SET owner_event_id=excluded.owner_event_id,lease_until=excluded.lease_until,updated_at=datetime('now')
+    WHERE datetime(pa_projection_entity_leases.lease_until)<=datetime('now')
+    RETURNING owner_event_id`)
+    .bind(GLOBAL_PROJECTION_ENTITY_TYPE,GLOBAL_PROJECTION_ENTITY_ID,ownerEventId,PROJECTION_LEASE_DURATION)
+    .first<{owner_event_id:string}>();
+  if(claimed?.owner_event_id!==ownerEventId)throw new Error("projection-global-busy");
+}
+
+async function releaseGlobalProjection(env: Env, ownerEventId: string): Promise<void> {
+  await env.OPS_DB.prepare("DELETE FROM pa_projection_entity_leases WHERE entity_type=? AND entity_id=? AND owner_event_id=?")
+    .bind(GLOBAL_PROJECTION_ENTITY_TYPE,GLOBAL_PROJECTION_ENTITY_ID,ownerEventId).run();
+}
+
+async function refreshGlobalProjection(env:Env,ownerEventId:string):Promise<void>{
+  const refreshed=await env.OPS_DB.prepare(`UPDATE pa_projection_entity_leases SET lease_until=datetime('now',?),updated_at=datetime('now')
+    WHERE entity_type=? AND entity_id=? AND owner_event_id=? RETURNING owner_event_id`)
+    .bind(PROJECTION_LEASE_DURATION,GLOBAL_PROJECTION_ENTITY_TYPE,GLOBAL_PROJECTION_ENTITY_ID,ownerEventId)
+    .first<{owner_event_id:string}>();
+  if(refreshed?.owner_event_id!==ownerEventId)throw new Error("projection-global-lease-lost");
+}
+
+async function applyEntitlementEventLocked(env: Env, event: EntitlementEvent, payloadHash: string): Promise<ProjectionResult> {
   const receipt = await env.OPS_DB.prepare("SELECT payload_hash,status FROM integration_event_receipts WHERE event_id=?").bind(event.event_id).first<{ payload_hash: string; status: string }>();
   if (receipt) {
     if (receipt.payload_hash !== payloadHash) throw new Error("event-id-conflict");
@@ -41,31 +69,26 @@ export async function applyEntitlementEvent(env: Env, event: EntitlementEvent, p
       if (roleKey === "role-admin") {
         await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-admin','global',NULL,'global') ON CONFLICT(id) DO NOTHING")
           .bind(`assignment-pa-${event.user.id}-global`,id).run();
-      } else if (roleKey === "role-delivery-coordinator") {
-        await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-delivery-coordinator','global',NULL,'global') ON CONFLICT(id) DO NOTHING")
-          .bind(`assignment-pa-${event.user.id}-delivery-coordinator`,id).run();
-      } else if (roleKey === "role-division-manager") {
-        const businessUnitIds = event.entitlement.business_unit_ids;
-        if (businessUnitIds.length > 0) {
-          const divisionRows = await env.OPS_DB.prepare(`SELECT id FROM divisions WHERE project_alpha_business_unit_id IN (${businessUnitIds.map(() => "?").join(",")})`)
-            .bind(...businessUnitIds).all<{ id: string }>();
-          for (const div of divisionRows.results) {
-            await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-division-manager','division',?,?) ON CONFLICT(id) DO NOTHING")
-              .bind(`assignment-pa-${event.user.id}-div-mgr-${div.id}`,id,div.id,div.id).run();
-            await env.OPS_DB.prepare("INSERT INTO staff_divisions (staff_id,division_id) VALUES (?,?) ON CONFLICT(staff_id,division_id) DO NOTHING")
-              .bind(id,div.id).run();
-          }
-        } else {
-          await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-division-manager','global',NULL,'global') ON CONFLICT(id) DO NOTHING")
-            .bind(`assignment-pa-${event.user.id}-div-mgr-global`,id).run();
-        }
       } else {
+        // Keep incremental authorization identical to daily recovery: PA
+        // assignments grant visibility; non-admin entitlement labels do not.
         await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-operator','assigned',NULL,'assigned') ON CONFLICT(id) DO NOTHING")
           .bind(`assignment-pa-${event.user.id}-assigned`,id).run();
       }
     }
   }
   return "applied";
+}
+
+export async function applyEntitlementEvent(env: Env, event: EntitlementEvent, payloadHash: string): Promise<ProjectionResult> {
+  await claimGlobalProjection(env,event.event_id);
+  let processingError: unknown;
+  try { return await applyEntitlementEventLocked(env,event,payloadHash); }
+  catch(error) { processingError=error; throw error; }
+  finally {
+    try { await releaseGlobalProjection(env,event.event_id); }
+    catch(releaseError) { if(!processingError)throw releaseError; }
+  }
 }
 
 function value(data: Record<string,unknown>, key: string): string | null { const current=data[key];return current===null||current===undefined?null:String(current); }
@@ -99,7 +122,7 @@ async function applyPortalProjection(env: Env, event: ProjectionEvent, active: n
   }
 }
 
-async function reconcilePortalProjectionAccess(env: Env): Promise<void> {
+async function reconcilePortalProjectionAccess(env: Env, ownerEventId: string): Promise<void> {
   const db = env.DELIVERY_DB;
   if (!db) throw new Error("delivery-db-binding-required");
   const [projects, clients, organizations] = await Promise.all([
@@ -131,10 +154,11 @@ async function reconcilePortalProjectionAccess(env: Env): Promise<void> {
   }
   statements.push(db.prepare(`UPDATE client_folder_associations SET revoked_at=COALESCE(revoked_at,datetime('now'))
     WHERE scope_type='client' AND revoked_at IS NULL AND account_id IN (SELECT id FROM client_accounts WHERE status<>'active')`));
-  for(let index=0;index<statements.length;index+=75)await db.batch(statements.slice(index,index+75));
+  for(let index=0;index<statements.length;index+=75){
+    await refreshGlobalProjection(env,ownerEventId);
+    await db.batch(statements.slice(index,index+75));
+  }
 }
-
-const PROJECTION_LEASE_DURATION = "+10 minutes";
 
 async function claimProjectionEntity(env: Env, event: ProjectionEvent): Promise<void> {
   const claimed = await env.OPS_DB.prepare(`INSERT INTO pa_projection_entity_leases (entity_type,entity_id,owner_event_id,lease_until)
@@ -151,6 +175,7 @@ async function claimProjectionEntity(env: Env, event: ProjectionEvent): Promise<
 }
 
 async function refreshProjectionEntityLease(env: Env, event: ProjectionEvent): Promise<void> {
+  await refreshGlobalProjection(env,event.event_id);
   const refreshed = await env.OPS_DB.prepare(`UPDATE pa_projection_entity_leases
     SET lease_until=datetime('now',?),updated_at=datetime('now')
     WHERE entity_type=? AND entity_id=? AND owner_event_id=?
@@ -165,7 +190,7 @@ async function releaseProjectionEntity(env: Env, event: ProjectionEvent): Promis
     .bind(event.projection.entity_type,event.projection.entity_id,event.event_id).run();
 }
 
-export async function applyProjectionEvent(env: Env, event: ProjectionEvent, payloadHash: string): Promise<ProjectionResult> {
+async function applyProjectionEventLocked(env: Env, event: ProjectionEvent, payloadHash: string): Promise<ProjectionResult> {
   const receipt=await env.OPS_DB.prepare("SELECT payload_hash,status FROM integration_event_receipts WHERE event_id=?").bind(event.event_id).first<{payload_hash:string;status:string}>();
   if(receipt){if(receipt.payload_hash!==payloadHash)throw new Error("event-id-conflict");if(receipt.status==="completed"||receipt.status==="ignored")return "duplicate";}
   else await env.OPS_DB.prepare("INSERT INTO integration_event_receipts (event_id,integration,event_type,user_id,occurred_at,payload_hash,status) VALUES (?,'project-alpha',?,?,?,?, 'pending')").bind(event.event_id,event.event_type,value(event.projection.data,"user_id")??event.projection.entity_id,event.occurred_at,payloadHash).run();
@@ -223,7 +248,7 @@ export async function applyProjectionEvent(env: Env, event: ProjectionEvent, pay
     // after DELIVERY_DB has accepted its idempotent projection.
     await refreshProjectionEntityLease(env,event);
     await applyPortalProjection(env,event,active);
-    if(event.projection.entity_type==="client"||event.projection.entity_type==="organization"||event.projection.entity_type==="project")await reconcilePortalProjectionAccess(env);
+    if(event.projection.entity_type==="client"||event.projection.entity_type==="organization"||event.projection.entity_type==="project")await reconcilePortalProjectionAccess(env,event.event_id);
     await refreshProjectionEntityLease(env,event);
     await env.OPS_DB.prepare(`INSERT INTO pa_projection_entity_versions (entity_type,entity_id,source_updated_at,event_id) VALUES (?,?,?,?) ON CONFLICT(entity_type,entity_id) DO UPDATE SET source_updated_at=excluded.source_updated_at,event_id=excluded.event_id,updated_at=datetime('now')`).bind(event.projection.entity_type,event.projection.entity_id,event.projection.source_updated_at,event.event_id).run();
     return "applied";
@@ -235,24 +260,51 @@ export async function applyProjectionEvent(env: Env, event: ProjectionEvent, pay
   }
 }
 
-export async function completeEvent(env: Env, event: IntegrationEvent): Promise<void> {
+export async function applyProjectionEvent(env: Env, event: ProjectionEvent, payloadHash: string): Promise<ProjectionResult> {
+  await claimGlobalProjection(env,event.event_id);
+  let processingError: unknown;
+  try { return await applyProjectionEventLocked(env,event,payloadHash); }
+  catch(error) { processingError=error; throw error; }
+  finally {
+    try { await releaseGlobalProjection(env,event.event_id); }
+    catch(releaseError) { if(!processingError)throw releaseError; }
+  }
+}
+
+export async function completeEvent(env: Env, event: IntegrationEvent, preserveError = false): Promise<void> {
   await env.OPS_DB.batch([
-    env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='completed',processed_at=datetime('now'),last_error=NULL WHERE event_id=?").bind(event.event_id),
+    env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='completed',processed_at=datetime('now'),last_error=CASE WHEN ?=1 THEN last_error ELSE NULL END WHERE event_id=?").bind(preserveError?1:0,event.event_id),
     env.OPS_DB.prepare("UPDATE integration_reconciliation SET last_event_at=?,updated_at=datetime('now') WHERE integration='project-alpha'").bind(event.occurred_at),
   ]);
 }
 
 export async function recordAccessSuccess(env: Env): Promise<void> {
-  await env.OPS_DB.prepare("UPDATE integration_reconciliation SET last_access_attempt_at=datetime('now'),last_access_success_at=datetime('now'),last_access_error=NULL,updated_at=datetime('now') WHERE integration='project-alpha'").run();
+  await env.OPS_DB.prepare("UPDATE integration_reconciliation SET last_access_attempt_at=datetime('now'),last_access_success_at=datetime('now'),last_access_error=NULL,access_consecutive_failures=0,access_circuit_open_until=NULL,updated_at=datetime('now') WHERE integration='project-alpha'").run();
+}
+
+export async function accessCircuitIsOpen(env: Env): Promise<boolean> {
+  const row=await env.OPS_DB.prepare("SELECT access_circuit_open_until FROM integration_reconciliation WHERE integration='project-alpha'").first<{access_circuit_open_until:string|null}>();
+  if(!row?.access_circuit_open_until)return false;
+  const timestamp=Date.parse(`${row.access_circuit_open_until.replace(" ","T")}Z`);
+  return Number.isFinite(timestamp)&&timestamp>Date.now();
 }
 
 export async function recordAccessFailure(env: Env, eventId: string | null, error: string): Promise<void> {
   const safeError = error.slice(0, 500);
   const statements = [
-    env.OPS_DB.prepare("UPDATE integration_reconciliation SET last_access_attempt_at=datetime('now'),last_access_error=?,updated_at=datetime('now') WHERE integration='project-alpha'").bind(safeError),
+    env.OPS_DB.prepare(`UPDATE integration_reconciliation SET
+      last_access_attempt_at=datetime('now'),last_access_error=?,
+      access_circuit_open_until=CASE WHEN access_consecutive_failures+1>=3 THEN datetime('now','+5 minutes') ELSE access_circuit_open_until END,
+      access_consecutive_failures=access_consecutive_failures+1,updated_at=datetime('now')
+      WHERE integration='project-alpha'`).bind(safeError),
   ];
   if (eventId) {
     statements.unshift(env.OPS_DB.prepare("UPDATE integration_event_receipts SET last_error=? WHERE event_id=?").bind(safeError,eventId));
   }
   await env.OPS_DB.batch(statements);
+}
+
+export async function recordEventFailure(env: Env, eventId: string, error: string): Promise<void> {
+  await env.OPS_DB.prepare("UPDATE integration_event_receipts SET last_error=? WHERE event_id=? AND status='pending'")
+    .bind(error.slice(0,500),eventId).run();
 }

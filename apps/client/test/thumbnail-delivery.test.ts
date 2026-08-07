@@ -69,5 +69,12 @@ describe("authorized thumbnail delivery", () => {
     const unsupported = thumbnailFieldsForObject("Jobs/Clients/Synthetic/archive.zip", "other", "/api/items/archive", '"zip"', null);
     expect(unsupported).toEqual({ thumbnailState: "not_applicable", thumbnailFallbackKind: "archive" });
     expect(unsupported).not.toHaveProperty("thumbnailUrl");
+
+    const videoReady = thumbnailFieldsForObject("Jobs/Clients/Synthetic/flight.mp4", "video", "/api/items/video", '"current"', ready, 4096, "video/mp4");
+    expect(videoReady).toEqual({ thumbnailState: "ready", thumbnailFallbackKind: "video", thumbnailUrl: "/api/items/video/thumbnail" });
+    expect(thumbnailFieldsForObject("Jobs/Clients/Synthetic/flight.mov", "video", "/api/items/mov", '"current"', null, 4096, "video/quicktime"))
+      .toEqual({ thumbnailState: "not_applicable", thumbnailFallbackKind: "video" });
+    expect(thumbnailFieldsForObject("Jobs/Clients/Synthetic/huge.mp4", "video", "/api/items/huge", '"current"', null, 100_000_000, "video/mp4"))
+      .toEqual({ thumbnailState: "not_applicable", thumbnailFallbackKind: "video" });
   });
 });

@@ -3,6 +3,7 @@ import { Miniflare } from "miniflare";
 import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { MOVED_SOURCE_MARKER } from "@ltds/shared";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const acl = vi.hoisted(() => ({ requirePermission: vi.fn() }));
@@ -73,7 +74,7 @@ class FakeBucket {
     const etag = `seed-${++this.sequence}`;
     const stored: StoredObject = {
       key, version: `version-${etag}`, etag, httpEtag: `"${etag}"`, size: bytes.byteLength,
-      uploaded: new Date("2026-08-07T12:00:00Z"), httpMetadata: { contentType }, customMetadata,
+      uploaded: new Date(Date.parse("2026-08-07T12:00:00Z") + this.sequence * 1000), httpMetadata: { contentType }, customMetadata,
       storageClass: "Standard", checksums: {}, bytes,
     };
     this.objects.set(key, stored);
@@ -206,7 +207,7 @@ describe("authenticated browser delivery uploads", () => {
     });
     opsDb = await miniflare.getD1Database("OPS_DB") as unknown as D1Database;
     deliveryDb = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
-    for (const name of ["0001_operations.sql", "0011_r2_crud_jobs.sql", "0018_browser_upload_intents.sql"]) {
+    for (const name of ["0001_operations.sql", "0011_r2_crud_jobs.sql", "0018_browser_upload_intents.sql", "0019_browser_upload_conflict_resolution.sql"]) {
       const sql = sqlFile(new URL(`../migrations/${name}`, import.meta.url));
       // The route fixture mocks ACL evaluation, so it needs the 0011 tables but
       // not its role-grant seed statements (which depend on the separate seed migration).
@@ -260,22 +261,27 @@ describe("authenticated browser delivery uploads", () => {
     }, env);
   }
 
-  const manifest = (files: unknown[], collisionPolicy = "fail") => ({
-    rootPrefix: "Jobs/Clients/Acme/Delivery/", collisionPolicy, files,
+  const manifest = (files: unknown[]) => ({
+    rootPrefix: "Jobs/Clients/Acme/Delivery/", files,
   });
 
-  async function createIntent(instance: TestApp, files: unknown[], key = "browser_upload_test_key_0001", collisionPolicy = "fail") {
-    const response = await jsonRequest(instance, "/api/delivery/uploads/intents", manifest(files, collisionPolicy), key);
+  async function createIntent(instance: TestApp, files: unknown[], key = "browser_upload_test_key_0001") {
+    const response = await jsonRequest(instance, "/api/delivery/uploads/intents", manifest(files), key);
     const text = await response.text();
     let body = {} as { intentId: string; status: string; fileCount: number; totalBytes: number };
     try { body = JSON.parse(text) as typeof body; } catch { /* Hono renders uncaught HTTPException messages as text. */ }
     return { response, body };
   }
 
-  async function createFourByteSession(instance: TestApp, relativePath: string, idempotencyKey: string, collisionPolicy = "replace") {
-    const intent = await createIntent(instance, [{ relativePath, size: 4, contentType: "image/jpeg" }], idempotencyKey, collisionPolicy);
+  async function createFourByteSession(instance: TestApp, relativePath: string, idempotencyKey: string, resolution: "skip" | "replace" | "rename" = "replace") {
+    const intent = await createIntent(instance, [{ relativePath, size: 4, contentType: "image/jpeg" }], idempotencyKey);
     expect(intent.response.status).toBe(201);
-    const response = await jsonRequest(instance, "/api/delivery/uploads", { intentId: intent.body.intentId, ordinal: 0 });
+    let response = await jsonRequest(instance, "/api/delivery/uploads", { intentId: intent.body.intentId, ordinal: 0 });
+    if (response.status === 409) {
+      response = await jsonRequest(instance, "/api/delivery/uploads", {
+        intentId: intent.body.intentId, ordinal: 0, conflictResolution: resolution,
+      });
+    }
     expect(response.status).toBe(201);
     const session = await response.json() as {sessionId:string};
     const part = await instance.request(`/api/delivery/uploads/${session.sessionId}/parts/1`, {
@@ -446,20 +452,114 @@ describe("authenticated browser delivery uploads", () => {
     expect(queueSend).toHaveBeenCalledOnce();
   });
 
-  it("applies fail and rename collision policies before creating a staging upload", async () => {
+  it.each([
+    ["single file", "moved-source.jpg"],
+    ["nested folder file", "Field/Nested/moved-source.jpg"],
+  ])("re-uploads a %s over a moved-source marker without collision or recovery", async (_label, relativePath) => {
+    const key = `Jobs/Clients/Acme/Delivery/${relativePath}`;
+    const marker = bucket.seed(key, new Uint8Array(), "application/x-ltds-moved-source", {
+      ltdsMoveMarker: MOVED_SOURCE_MARKER,
+      ltdsMovedSourceEtag: "prior-source-etag",
+      ltdsMoveTargetKey: `Jobs/Clients/Acme/Archive/${relativePath}`,
+    });
+    const instance = app();
+    const intent = await createIntent(instance, [{ relativePath, size: 4, contentType: "image/jpeg" }],
+      `browser_marker_reupload_${relativePath.includes("/") ? "nested" : "single"}`);
+
+    const opened = await jsonRequest(instance, "/api/delivery/uploads", { intentId: intent.body.intentId, ordinal: 0 });
+    expect(opened.status).toBe(201);
+    const session = await opened.json() as { sessionId: string; key: string };
+    expect(session.key).toBe(key);
+    expect(await opsDb.prepare("SELECT conflict_policy,destination_baseline,replacement_recovery_id FROM r2_upload_sessions WHERE id=?")
+      .bind(session.sessionId).first()).toEqual({
+        conflict_policy: "replace", destination_baseline: `etag:${marker.httpEtag}`, replacement_recovery_id: null,
+      });
+
+    const part = await instance.request(`/api/delivery/uploads/${session.sessionId}/parts/1`, {
+      method: "PUT", headers: { "Content-Length": "4", "Content-Type": "application/octet-stream" },
+      body: Uint8Array.from([1, 2, 3, 4]),
+    }, env);
+    expect(part.status).toBe(200);
+    const completed = await jsonRequest(instance, `/api/delivery/uploads/${session.sessionId}/complete`, {});
+
+    expect(completed.status).toBe(200);
+    expect(await completed.json()).toMatchObject({ status: "completed", key });
+    expect(bucket.objects.get(key)).toMatchObject({
+      bytes: Uint8Array.from([1, 2, 3, 4]),
+      httpMetadata: { contentType: "image/jpeg" },
+    });
+    expect(bucket.objects.get(key)?.customMetadata.ltdsMoveMarker).toBeUndefined();
+    expect(await opsDb.prepare("SELECT COUNT(*) count FROM r2_replacement_recovery").first()).toEqual({ count: 0 });
+    expect(queueSend).toHaveBeenCalledOnce();
+    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: key }));
+  });
+
+  it("pauses only on a real collision and idempotently applies skip or safe rename", async () => {
     const existing = "Jobs/Clients/Acme/Delivery/existing.jpg";
     bucket.seed(existing, Uint8Array.from([9]), "image/jpeg");
     const instance = app();
-    const failedIntent = await createIntent(instance, [{ relativePath: "existing.jpg", size: 4, contentType: "image/jpeg" }], "browser_collision_fail_0001", "fail");
-    const failedSession = await jsonRequest(instance, "/api/delivery/uploads", { intentId: failedIntent.body.intentId, ordinal: 0 });
-    expect(failedSession.status).toBe(409);
+    const skippedIntent = await createIntent(instance, [{ relativePath: "existing.jpg", size: 4, contentType: "image/jpeg" }], "browser_collision_skip_0001");
+    const conflict = await jsonRequest(instance, "/api/delivery/uploads", { intentId: skippedIntent.body.intentId, ordinal: 0 });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({
+      error: "upload_destination_conflict",
+      message: "A file already exists at this destination.",
+      conflict: {
+        intentId: skippedIntent.body.intentId,
+        ordinal: 0,
+        relativePath: "existing.jpg",
+        choices: ["skip", "replace", "rename"],
+      },
+    });
     expect(bucket.calls.create).toEqual([]);
+    const skipped = await jsonRequest(instance, "/api/delivery/uploads", {
+      intentId: skippedIntent.body.intentId, ordinal: 0, conflictResolution: "skip",
+    });
+    expect(skipped.status).toBe(200);
+    expect(await skipped.json()).toEqual({ status: "skipped", conflictResolution: "skip" });
+    expect((await jsonRequest(instance, "/api/delivery/uploads", {
+      intentId: skippedIntent.body.intentId, ordinal: 0, conflictResolution: "replace",
+    })).status).toBe(200);
+    expect(bucket.objects.get(existing)?.bytes).toEqual(Uint8Array.from([9]));
 
-    const renamedIntent = await createIntent(instance, [{ relativePath: "existing.jpg", size: 4, contentType: "image/jpeg" }], "browser_collision_rename_01", "rename");
-    const renamedSession = await jsonRequest(instance, "/api/delivery/uploads", { intentId: renamedIntent.body.intentId, ordinal: 0 });
+    const renamedIntent = await createIntent(instance, [{ relativePath: "existing.jpg", size: 4, contentType: "image/jpeg" }], "browser_collision_rename_01");
+    expect((await jsonRequest(instance, "/api/delivery/uploads", { intentId: renamedIntent.body.intentId, ordinal: 0 })).status).toBe(409);
+    const renamedSession = await jsonRequest(instance, "/api/delivery/uploads", {
+      intentId: renamedIntent.body.intentId, ordinal: 0, conflictResolution: "rename",
+    });
     expect(renamedSession.status).toBe(201);
     expect(await renamedSession.json()).toMatchObject({ key: "Jobs/Clients/Acme/Delivery/existing (2).jpg" });
     expect(bucket.objects.get(existing)?.bytes).toEqual(Uint8Array.from([9]));
+  });
+
+  it("pauses a completion race and resumes against staged bytes without re-uploading parts", async () => {
+    const key = "Jobs/Clients/Acme/Delivery/completion-race.jpg";
+    const instance = app();
+    const intent = await createIntent(instance, [{ relativePath: "completion-race.jpg", size: 4, contentType: "image/jpeg" }], "browser_completion_race_1");
+    const sessionResponse = await jsonRequest(instance, "/api/delivery/uploads", { intentId: intent.body.intentId, ordinal: 0 });
+    const session = await sessionResponse.json() as {sessionId:string};
+    expect((await instance.request(`/api/delivery/uploads/${session.sessionId}/parts/1`, {
+      method: "PUT", headers: { "Content-Length": "4", "Content-Type": "application/octet-stream" },
+      body: Uint8Array.from([1, 2, 3, 4]),
+    }, env)).status).toBe(200);
+    const winner = bucket.seed(key, Uint8Array.from([9]), "image/jpeg");
+
+    const conflict = await jsonRequest(instance, `/api/delivery/uploads/${session.sessionId}/complete`, {});
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({
+      error: "upload_destination_conflict",
+      conflict: { intentId: intent.body.intentId, ordinal: 0, relativePath: "completion-race.jpg" },
+    });
+    expect(await opsDb.prepare("SELECT status FROM r2_upload_sessions WHERE id=?").bind(session.sessionId).first()).toEqual({ status: "active" });
+
+    const completed = await jsonRequest(instance, `/api/delivery/uploads/${session.sessionId}/complete`, { conflictResolution: "rename" });
+    expect(completed.status).toBe(200);
+    expect(bucket.objects.get(key)).toMatchObject({ httpEtag: winner.httpEtag, bytes: Uint8Array.from([9]) });
+    expect(bucket.objects.get("Jobs/Clients/Acme/Delivery/completion-race (2).jpg")?.bytes)
+      .toEqual(Uint8Array.from([1, 2, 3, 4]));
+    expect(await opsDb.prepare("SELECT COUNT(*) count FROM r2_upload_parts WHERE session_id=?").bind(session.sessionId).first()).toEqual({ count: 1 });
+    expect(queueSend).toHaveBeenCalledOnce();
+    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: "Jobs/Clients/Acme/Delivery/completion-race (2).jpg" }));
   });
 
   it("atomically admits only one of two concurrent requests for the tenth owner slot", async () => {
@@ -522,8 +622,11 @@ describe("authenticated browser delivery uploads", () => {
 
     const instance = app();
     const intent = await createIntent(instance, [{ relativePath: "replaced.jpg", size: 4, contentType: "image/jpeg" }],
-      "browser_collision_replace_1", "replace");
-    const sessionResponse = await jsonRequest(instance, "/api/delivery/uploads", { intentId: intent.body.intentId, ordinal: 0 });
+      "browser_collision_replace_1");
+    expect((await jsonRequest(instance, "/api/delivery/uploads", { intentId: intent.body.intentId, ordinal: 0 })).status).toBe(409);
+    const sessionResponse = await jsonRequest(instance, "/api/delivery/uploads", {
+      intentId: intent.body.intentId, ordinal: 0, conflictResolution: "replace",
+    });
     const session = await sessionResponse.json() as {sessionId:string};
     const part = await instance.request(`/api/delivery/uploads/${session.sessionId}/parts/1`, {
       method: "PUT", headers: { "Content-Length": "4", "Content-Type": "application/octet-stream" },
@@ -726,7 +829,7 @@ describe("authenticated browser delivery uploads", () => {
 
   it("does not publish when cancellation atomically wins the completion claim race", async () => {
     const instance = app();
-    const session = await createFourByteSession(instance, "cancel-race.jpg", "browser_cancel_race_0001", "fail");
+    const session = await createFourByteSession(instance, "cancel-race.jpg", "browser_cancel_race_0001");
     const finalKey = "Jobs/Clients/Acme/Delivery/cancel-race.jpg";
     let cancellation: Response | undefined;
     interceptCompletionClaim(async () => {
@@ -744,7 +847,7 @@ describe("authenticated browser delivery uploads", () => {
 
   it("does not publish when expiry atomically wins the completion claim race", async () => {
     const instance = app();
-    const session = await createFourByteSession(instance, "expiry-race.jpg", "browser_expiry_race_0001", "fail");
+    const session = await createFourByteSession(instance, "expiry-race.jpg", "browser_expiry_race_0001");
     const row = await opsDb.prepare("SELECT intent_id FROM r2_upload_sessions WHERE id=?")
       .bind(session.sessionId).first<{intent_id:string}>();
     const finalKey = "Jobs/Clients/Acme/Delivery/expiry-race.jpg";
@@ -768,7 +871,7 @@ describe("authenticated browser delivery uploads", () => {
 
   it("durably retries transient terminal staging cleanup without reopening completion", async () => {
     const instance = app();
-    const session = await createFourByteSession(instance, "cleanup-retry.jpg", "browser_cleanup_retry_0001", "fail");
+    const session = await createFourByteSession(instance, "cleanup-retry.jpg", "browser_cleanup_retry_0001");
     const row = await opsDb.prepare("SELECT staging_key FROM r2_upload_sessions WHERE id=?").bind(session.sessionId).first<{staging_key:string}>();
     bucket.abortFailures = 1;
 
@@ -791,7 +894,7 @@ describe("authenticated browser delivery uploads", () => {
 
   it("reclaims a stale cleanup claim and an expired stale completion lease", async () => {
     const instance = app();
-    const cleanupSession = await createFourByteSession(instance, "cleanup-crash.jpg", "browser_cleanup_crash_0001", "fail");
+    const cleanupSession = await createFourByteSession(instance, "cleanup-crash.jpg", "browser_cleanup_crash_0001");
     const cleanupRow = await opsDb.prepare("SELECT staging_key FROM r2_upload_sessions WHERE id=?").bind(cleanupSession.sessionId).first<{staging_key:string}>();
     bucket.seed(cleanupRow!.staging_key, Uint8Array.from([1]), "image/jpeg");
     await opsDb.prepare(`UPDATE r2_upload_sessions SET status='aborted',cleanup_status='pending',cleanup_next_attempt_at=datetime('now'),
@@ -803,7 +906,7 @@ describe("authenticated browser delivery uploads", () => {
     await expect(cleanupBrowserUploadSessions(env, 1)).resolves.toBe(1);
     expect(bucket.objects.has(cleanupRow!.staging_key)).toBe(false);
 
-    const expiring = await createFourByteSession(instance, "stale-completing.jpg", "browser_stale_completing_1", "fail");
+    const expiring = await createFourByteSession(instance, "stale-completing.jpg", "browser_stale_completing_1");
     const expiringRow = await opsDb.prepare("SELECT intent_id FROM r2_upload_sessions WHERE id=?").bind(expiring.sessionId).first<{intent_id:string}>();
     await opsDb.prepare(`UPDATE r2_upload_sessions SET status='completing',expires_at='2000-01-01T00:00:00Z',
       completion_claimed_at=datetime('now','-6 minutes') WHERE id=?`).bind(expiring.sessionId).run();

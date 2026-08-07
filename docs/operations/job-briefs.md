@@ -15,12 +15,15 @@ Migration `0017_operational_job_briefs.sql` adds:
 
 A version-1 snapshot contains ordered items with stable IDs, category, title, instructions, and nullable `presetRef`. `presetRef` is intentionally unused by the current UI; it provides a future extension point for preset-derived items without adding a preset library now.
 
+Migration `0020_internal_sop_library.sql` extends that snapshot with exact linked SOP revision snapshots and a foreign-key-backed current link set. See [Internal browser SOP library](sops.md). Existing scope, KML, file-reference, authorization, and Project Alpha authority behavior is unchanged.
+
 ## API and concurrency
 
 The same-origin contract is:
 
 - `GET /api/operations/:operationId/job-brief`: current items, private attachment URLs, operation destination hint, history, and `canEdit`.
 - `PUT /api/operations/:operationId/job-brief`: replaces the ordered scope item snapshot and requires `expectedVersion` (`0` creates the first version).
+- `PUT /api/operations/:operationId/job-brief/sops`: replaces the exact current published SOP revision set and requires `expectedVersion`.
 - `POST .../attachments/upload`: streams a staff file through the Worker to `DATA_BUCKET`, limited to 25 MiB, and requires `X-Expected-Version`.
 - `POST .../attachments/reference`: adds an existing indexed client-project file and requires `expectedVersion`.
 - `GET|HEAD .../attachments/:attachmentId/content`: reauthorizes the viewer, verifies the pinned ETag, and streams the file with private/no-store behavior.
@@ -41,11 +44,11 @@ replaced automatically; it warns that a newer version is available.
 - The assigned pilot reads or downloads only through the brief route. Brief access never grants `delivery.browse`, delivery sharing, client-workspace, or unrelated file access.
 - R2 credentials, presigned R2 URLs, and object keys are never sent to pilots. KML/KMZ uses the authorized same-origin content path.
 
-`project_file` is deliberate provenance wording. The current portal can prove that the object is an authorized file in the client's linked project, but it cannot prove which human originally uploaded it. The UI therefore says “Authorized client project file,” not “client uploaded.”
+`project_file` is deliberate provenance wording. The current portal can prove that the object is an authorized file in the client's linked project, but it cannot prove which human originally uploaded it. The UI therefore says â€œAuthorized client project file,â€ not â€œclient uploaded.â€
 
 ## External navigation
 
-Authorized request/job viewers receive clearly labelled HTTPS actions for Google Maps and Apple Maps. HTTPS lets each provider open its native app when supported and fall back to its web experience otherwise. Links contain only a destination coordinate and optional human-readable label—never a Mapbox token, private geometry URL, attachment URL, or R2 credential.
+Authorized request/job viewers receive clearly labelled HTTPS actions for Google Maps and Apple Maps. HTTPS lets each provider open its native app when supported and fall back to its web experience otherwise. Links contain only a destination coordinate and optional human-readable labelâ€”never a Mapbox token, private geometry URL, attachment URL, or R2 credential.
 
 Request review derives its destination from the submitted polygon or POIs and
 then falls back to the stored request point. The current job-brief route does

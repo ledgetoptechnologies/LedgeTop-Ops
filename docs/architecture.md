@@ -113,16 +113,16 @@ Optional access codes are PBKDF2-derived with a random salt, application pepper,
 
 R2 paths use opaque base64url item references. Validation rejects traversal, backslashes, controls, absolute paths, exact case-insensitive `dump` components, nested `.previews` artifacts, and the reserved `_ltds` root. Unsafe formats such as HTML, XML, JavaScript, and SVG are downloads rather than inline content.
 
-Folder grids use one current Cloudflare Queue-generated still-image thumbnail
-and never request originals as thumbnail fallbacks. Clicking an image streams
-that authorized full-resolution original with range support; no medium or large
-preview derivative is created. PDF, video, archive, office-document, and unknown
-items expose a coarse fallback-kind enum. The current Hermes UI uses its local
-file-kind/brand placeholders; mapping the enum to client-bundled SVGs remains a
-future UI refinement. Videos continue to prefer the pre-existing Cloudflare
-Stream path and otherwise use the authorized original with metadata-only
-preloading; this thumbnail work adds no video processing. See [Cloudflare
-thumbnail-only media delivery](media-thumbnail-pipeline.md).
+Folder grids use one current Cloudflare Queue-generated thumbnail and never
+request originals as thumbnail fallbacks. Supported still images are normalized
+through Cloudflare Images. Eligible private MP4/H.264 videos use Cloudflare
+Media Transformations to extract one frame at five seconds, then the same Images
+normalization path. Pending, unsupported, oversized, and failed media use a
+client-bundled file-kind icon; PDF, text, archive, office-document, and unknown
+items remain icon-only. Clicking an eligible item is the only action that opens
+its authorized full-resolution original with range support. Cards and filmstrips
+never preload the original, and no medium preview or video transcode is created.
+See [Cloudflare thumbnail-only media delivery](media-thumbnail-pipeline.md).
 
 ## Airspace safety model
 

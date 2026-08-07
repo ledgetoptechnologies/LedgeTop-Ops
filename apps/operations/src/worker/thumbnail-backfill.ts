@@ -1,10 +1,10 @@
 import type { Env } from "./types";
 import {
-  THUMBNAIL_MAX_INPUT_BYTES,
   THUMBNAIL_MAX_OUTPUT_BYTES,
   canonicalThumbnailSourceKey,
   enqueueThumbnailJob,
-  supportedThumbnailSource,
+  thumbnailSourceKind,
+  thumbnailSourceWithinInputLimit,
 } from "./image-thumbnails";
 
 export const THUMBNAIL_BACKFILL_PREFIX = "Jobs/Clients/" as const;
@@ -152,9 +152,9 @@ async function processPage(env: Env, run: BackfillRun): Promise<{ cursor: string
 
   for (const object of listed.objects) {
     const indexed = index.get(object.key);
+    const sourceKind = thumbnailSourceKind(object.key, object.httpMetadata?.contentType);
     if (object.key.endsWith("/") || !canonicalThumbnailSourceKey(object.key) ||
-      !supportedThumbnailSource(object.key, object.httpMetadata?.contentType) || object.size <= 0 ||
-      object.size > THUMBNAIL_MAX_INPUT_BYTES || tombstonedKeys.has(object.key) ||
+      !sourceKind || !thumbnailSourceWithinInputLimit(sourceKind, object.size) || tombstonedKeys.has(object.key) ||
       !indexed || cleanEtag(indexed.etag) !== cleanEtag(object.httpEtag) || indexed.size !== object.size) {
       counts.skipped += 1;
       continue;

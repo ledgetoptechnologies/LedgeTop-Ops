@@ -10,8 +10,10 @@ const relative = "Edited/photo.jpg";
 const sourceKey = `${share.r2_prefix}${relative}`;
 const thumbnailKey = "_ltds/thumbnails/v1/opaque.webp";
 
-async function fixture(status: "pending" | "failed" | "ready" = "ready", options: { active?: boolean; cookieVersion?: number } = {}) {
+async function fixture(status: "pending" | "failed" | "ready" = "ready", options: { active?: boolean; cookieVersion?: number; relativePath?: string; contentType?: string; sourceSize?: number } = {}) {
   const reads: string[] = [];
+  const fixtureRelative = options.relativePath || relative;
+  const fixtureSourceKey = `${share.r2_prefix}${fixtureRelative}`;
   const statementFor = (query: string) => {
     let values: unknown[] = [];
     const statement = {
@@ -30,7 +32,7 @@ async function fixture(status: "pending" | "failed" | "ready" = "ready", options
   const bucket = {
     async head(key: string) {
       reads.push(`head:${key}`);
-      if (key === sourceKey) return { size: 100, etag: "source", httpEtag: '"source"' };
+      if (key === fixtureSourceKey) return { size: options.sourceSize ?? 100, etag: "source", httpEtag: '"source"', httpMetadata: { contentType: options.contentType || "image/jpeg" } };
       if (key === thumbnailKey) return { size: 5, etag: "thumb", httpEtag: '"thumb"' };
       return null;
     },
@@ -41,8 +43,8 @@ async function fixture(status: "pending" | "failed" | "ready" = "ready", options
   const env: any = { ENVIRONMENT: "development", EXPECTED_HOST: "client.example", DELIVERY_DB: database, DATA_BUCKET: bucket, PUBLIC_THUMBNAIL_RATE_LIMITER: limiter, DELIVERY_SESSION_SECRET: secret, SESSION_KEY_ID: "v1", AUDIT_IP_SECRET: "a".repeat(48) };
   const cookie = (await createSessionCookie(secret, "v1", share.id, options.cookieVersion ?? share.share_version, Date.now() + 60_000)).split(";")[0]!;
   const ctx: ExecutionContext = { waitUntil() {}, passThroughOnException() {}, exports: {}, props: undefined, tracing: undefined as never };
-  const path = `/api/public/shares/${share.public_id}/items/${encodeURIComponent(encodeItemRef(relative))}/thumbnail`;
-  return { env, cookie, ctx, path, reads };
+  const path = `/api/public/shares/${share.public_id}/items/${encodeURIComponent(encodeItemRef(fixtureRelative))}/thumbnail`;
+  return { env, cookie, ctx, path, reads, sourceKey: fixtureSourceKey };
 }
 
 describe("thumbnail route authorization", () => {
@@ -68,6 +70,27 @@ describe("thumbnail route authorization", () => {
     const crossPath = value.path.replace(`/shares/${share.public_id}/`, "/shares/public-b/");
     expect((await worker.fetch(new Request(`https://client.example${crossPath}`, { headers: { Cookie: value.cookie } }), value.env, value.ctx)).status).toBe(404);
     expect(value.reads).toEqual([]);
+  });
+
+  it("serves an eligible MP4 derivative and never reads the video body", async () => {
+    const value = await fixture("ready", { relativePath: "Edited/flight.mp4", contentType: "video/mp4", sourceSize: 4096 });
+    const response = await worker.fetch(new Request(`https://client.example${value.path}`, { headers: { Cookie: value.cookie } }), value.env, value.ctx);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("thumb");
+    expect(value.reads).toEqual([`head:${value.sourceKey}`, `head:${value.sourceKey}`, `head:${thumbnailKey}`, `get:${thumbnailKey}`]);
+    expect(value.reads).not.toContain(`get:${value.sourceKey}`);
+  });
+
+  it.each([
+    ["Edited/flight.mov", "video/quicktime", 4096],
+    ["Edited/flight.mp4", "application/octet-stream", 4096],
+    ["Edited/flight.mp4", "video/mp4", 100_000_000],
+  ] as const)("denies unsupported video thumbnails without reading an original body: %s", async (relativePath, contentType, sourceSize) => {
+    const value = await fixture("ready", { relativePath, contentType, sourceSize });
+    const response = await worker.fetch(new Request(`https://client.example${value.path}`, { headers: { Cookie: value.cookie } }), value.env, value.ctx);
+    expect(response.status).toBe(409);
+    expect(value.reads).toEqual([`head:${value.sourceKey}`]);
+    expect(value.reads).not.toContain(`get:${value.sourceKey}`);
   });
 
   it("denies revoked or expired shares and revoked session versions with zero R2 reads", async () => {

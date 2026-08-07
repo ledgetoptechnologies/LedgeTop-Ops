@@ -6,9 +6,11 @@ container and do not generate `.previews/*/preview.webp`, `poster.webp`, or
 
 Original files continue to sync untouched into private R2. R2 object-create
 events feed Cloudflare Queues, and the Operations Worker creates only one small
-still-image thumbnail through the Cloudflare Images binding. Clicking an image
-uses the existing authorized same-origin route to stream the full-resolution
-original.
+thumbnail for a supported still image or eligible private MP4/H.264 video.
+Video processing extracts one frame at five seconds and does not transcode the
+video. A deliberate activation uses the existing authorized same-origin route
+to stream the full-resolution original; cards never preload it or use it as a
+thumbnail fallback.
 
 The current contract, prerequisites, deployment order, rollback, retry/DLQ
 handling, and limitations are documented in

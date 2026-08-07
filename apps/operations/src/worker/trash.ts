@@ -185,6 +185,7 @@ export async function purgeTrash(env: Env): Promise<number> {
     await removeThumbnailStateForPath(env, tombstone.physical_key, tombstone.tombstone_kind === "prefix");
     await env.DELIVERY_DB.batch([
       env.DELIVERY_DB.prepare(`DELETE FROM file_aliases WHERE physical_key=? OR substr(physical_key,1,length(?))=?`).bind(tombstone.physical_key, prefix, prefix),
+      env.DELIVERY_DB.prepare(`DELETE FROM image_asset_locations WHERE source_key=? OR substr(source_key,1,length(?))=?`).bind(tombstone.physical_key, prefix, prefix),
       env.DELIVERY_DB.prepare(`DELETE FROM file_index WHERE r2_key=? OR substr(r2_key,1,length(?))=?`).bind(tombstone.physical_key, prefix, prefix),
       env.DELIVERY_DB.prepare(`DELETE FROM preview_artifacts WHERE source_key=? OR substr(source_key,1,length(?))=?`).bind(tombstone.physical_key, prefix, prefix),
       env.DELIVERY_DB.prepare("DELETE FROM delivery_tombstones WHERE id=? AND restored_at IS NULL AND purging_at IS NOT NULL").bind(tombstone.id),

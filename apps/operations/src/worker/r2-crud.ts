@@ -6,8 +6,8 @@ import { auditStatement, requireMutationSecurity } from "./request-security";
 import { executeSourceDelete } from "./source-delete";
 import { restoreTombstone } from "./trash";
 import type { Env, StaffPrincipal } from "./types";
-import type { Permission } from "@ltds/shared";
-import { canonicalThumbnailSourceKey, enqueueThumbnailJob, removeThumbnailStateForPath, supportedThumbnailSource } from "./image-thumbnails";
+import { isMovedSourceMarker, MOVED_SOURCE_MARKER, type Permission } from "@ltds/shared";
+import { canonicalThumbnailSourceKey, enqueueThumbnailJob, removeThumbnailStateForPath, supportedThumbnailSource, thumbnailSourceEligible } from "./image-thumbnails";
 import { WorkflowEntrypoint, type WorkflowEvent, type WorkflowStep } from "cloudflare:workers";
 import {
   MAX_BROWSER_UPLOAD_BYTES,
@@ -41,6 +41,7 @@ const MAX_JOB_OBJECTS_PER_TURN = 1;
 const DEFAULT_UPLOAD_TTL_MS = 24 * 60 * 60 * 1000;
 const MAX_ACTIVE_UPLOAD_SESSIONS = 10;
 const MAX_UPLOAD_CLEANUP_ATTEMPTS = 8;
+const MAX_R2_OPERATION_ATTEMPTS = 5;
 
 function jsonBody(c: any): Promise<any> {
   return c.req.json().catch(() => { throw new HTTPException(400, { message: "Request body must be JSON" }); });
@@ -72,44 +73,73 @@ async function requireCrudPermission(env: Env, principal: StaffPrincipal, requir
   await requirePermission(env, principal, required, context, true);
 }
 
-async function ensureSource(env: Env, key: string): Promise<{ object: R2Object; folder: boolean }> {
+async function prefixObjectState(env:Env,prefix:string):Promise<{visible:boolean;markers:boolean}>{let cursor:string|undefined,markers=false;do{const page=await env.DATA_BUCKET.list({prefix,limit:1000,cursor,include:["customMetadata"]});for(const object of page.objects){if(object.key.endsWith("/"))continue;if(isMovedSourceMarker(object))markers=true;else return{visible:true,markers};}cursor=page.truncated?page.cursor:undefined;}while(cursor);return{visible:false,markers};}
+
+async function ensureSource(env: Env, key: string, allowMoveMarker=false): Promise<{ object: R2Object; folder: boolean }> {
   const object = key.endsWith("/") ? null : await env.DATA_BUCKET.head(key);
-  if (object) return { object, folder: false };
+  if (object&&(!isMovedSourceMarker(object)||allowMoveMarker)) return { object, folder: false };
   const folder = prefixFor(key);
-  const listed = await env.DATA_BUCKET.list({ prefix: folder, limit: 1 });
-  if (!listed.objects.length && !listed.delimitedPrefixes.length) throw new HTTPException(404, { message: "Source object or folder not found" });
+  const state=await prefixObjectState(env,folder);
+  if (!state.visible&&!(allowMoveMarker&&state.markers)) throw new HTTPException(404, { message: "Source object or folder not found" });
   return { object: null as never, folder: true };
 }
 
-async function targetName(env: Env, target: string, conflict: ConflictPolicy): Promise<string | null> {
-  if (!(await env.DATA_BUCKET.head(target))) return target;
+function matchingCrudPublication(object:R2Object|null,operationId:string|undefined,sourceEtag:string):boolean{
+  return Boolean(operationId&&object?.customMetadata?.ltdsCrudOperationId===operationId&&object.customMetadata?.ltdsCrudSourceEtag===sourceEtag);
+}
+
+async function targetName(env: Env, target: string, conflict: ConflictPolicy,operationId?:string,sourceEtag=""): Promise<string | null> {
+  const existing=await env.DATA_BUCKET.head(target);
+  if(matchingCrudPublication(existing,operationId,sourceEtag))return target;
+  if (!existing||isMovedSourceMarker(existing)) return target;
   if (conflict === "skip") return null;
   if (conflict === "fail") throw new HTTPException(409, { message: "The destination already exists" });
   if (conflict === "replace") return target;
   const slash = target.lastIndexOf("/"); const parent = slash >= 0 ? target.slice(0, slash + 1) : ""; const name = slash >= 0 ? target.slice(slash + 1) : target;
   const extension = name.includes(".") ? name.slice(name.lastIndexOf(".")) : ""; const stem = extension ? name.slice(0, -extension.length) : name;
-  for (let index = 2; index <= 1001; index += 1) { const candidate = `${parent}${stem} (${index})${extension}`; if (!(await env.DATA_BUCKET.head(candidate))) return candidate; }
+  for (let index = 2; index <= 1001; index += 1) { const candidate = `${parent}${stem} (${index})${extension}`,candidateObject=await env.DATA_BUCKET.head(candidate);if(matchingCrudPublication(candidateObject,operationId,sourceEtag)||!candidateObject)return candidate; }
   throw new HTTPException(409, { message: "Could not find an available destination name" });
 }
 
 async function targetFolderName(env:Env,target:string,conflict:ConflictPolicy):Promise<string|null>{
-  const exists=Boolean(await env.DATA_BUCKET.head(target))||(await env.DATA_BUCKET.list({prefix:prefixFor(target),limit:1})).objects.length>0;
+  const head=await env.DATA_BUCKET.head(target),state=await prefixObjectState(env,prefixFor(target));
+  const exists=Boolean(head&&!isMovedSourceMarker(head))||state.visible;
   if(!exists)return prefixFor(target);if(conflict==="skip")return null;if(conflict==="fail")throw new HTTPException(409,{message:"The destination already exists"});if(conflict==="replace")return prefixFor(target);
   const clean=target.replace(/\/$/,""),slash=clean.lastIndexOf("/"),parent=slash>=0?clean.slice(0,slash+1):"",name=slash>=0?clean.slice(slash+1):clean;
-  for(let index=2;index<=1001;index+=1){const candidate=`${parent}${name} (${index})/`;const found=Boolean(await env.DATA_BUCKET.head(candidate))||(await env.DATA_BUCKET.list({prefix:candidate,limit:1})).objects.length>0;if(!found)return candidate;}
+  for(let index=2;index<=1001;index+=1){const candidate=`${parent}${name} (${index})/`,candidateHead=await env.DATA_BUCKET.head(candidate),candidateState=await prefixObjectState(env,candidate);const found=Boolean(candidateHead&&!isMovedSourceMarker(candidateHead))||candidateState.visible;if(!found)return candidate;}
   throw new HTTPException(409,{message:"Could not find an available destination folder name"});
 }
 
-async function copyObject(env: Env, source: string, target: string, conflict: ConflictPolicy,roots?:{source:string;target:string},allowRecovery=true): Promise<{ target: string | null; skipped: boolean }> {
+async function copyObject(env: Env, source: string, target: string, conflict: ConflictPolicy,roots?:{source:string;target:string},allowRecovery=true,moving=false,operationId?:string): Promise<{ target: string | null; skipped: boolean; sourceEtag: string; alreadyRetired?: boolean }> {
   const sourceHead = await env.DATA_BUCKET.head(source); if (!sourceHead) throw new Error("source-disappeared");
-  const resolved = await targetName(env, target, conflict); if (!resolved) return { target: null, skipped: true };
+  if(isMovedSourceMarker(sourceHead)){
+    const priorEtag=sourceHead.customMetadata?.ltdsMovedSourceEtag,priorTarget=sourceHead.customMetadata?.ltdsMoveTargetKey;
+    const priorCopy=priorTarget===target?await env.DATA_BUCKET.head(target):null;
+    if(moving&&priorEtag&&priorCopy?.customMetadata?.ltdsMoveSourceKey===source&&priorCopy.customMetadata?.ltdsMoveSourceEtag===priorEtag){
+      return{target,skipped:false,sourceEtag:priorEtag,alreadyRetired:true};
+    }
+    throw new Error("source-moved");
+  }
+  const sourceEtag=sourceHead.httpEtag.trim().replace(/^"|"$/g,"");
+  let resolved=await targetName(env,target,conflict,operationId,sourceEtag);if(!resolved)return{target:null,skipped:true,sourceEtag};
+  const priorCopy=await env.DATA_BUCKET.head(resolved);
+  const resumedCopy=matchingCrudPublication(priorCopy,operationId,sourceEtag)||
+    (moving&&priorCopy?.customMetadata?.ltdsMoveSourceKey===source&&priorCopy.customMetadata?.ltdsMoveSourceEtag===sourceEtag)?priorCopy:null;
   const indexed=await env.DELIVERY_DB.prepare("SELECT content_type,media_kind,stream_uid,stream_status,stream_error FROM file_index WHERE r2_key=?").bind(source).first<{content_type:string|null;media_kind:string;stream_uid:string|null;stream_status:string|null;stream_error:string|null}>();
-  if(indexed&&indexed.media_kind!=="image")await env.OPS_DB.prepare("INSERT INTO r2_event_suppressions(object_key,event_kind,expires_at) VALUES(?,'create',datetime('now','+1 hour')) ON CONFLICT(object_key) DO UPDATE SET expires_at=excluded.expires_at").bind(resolved).run();
-  const sourceObject = await env.DATA_BUCKET.get(source); if (!sourceObject) throw new Error("source-disappeared");
+  const sourceObject = await env.DATA_BUCKET.get(source,{onlyIf:{etagMatches:sourceHead.etag}});
+  if (!sourceObject || !("body" in sourceObject)) throw new Error("source-changed-before-copy");
   let recovery: { id: string; key: string } | null = null;
-  let replacementBaseline: string | null = null;
-  if (conflict === "replace") {
-    const existing = await env.DATA_BUCKET.get(resolved);
+  let destinationAtCopy=resumedCopy??await env.DATA_BUCKET.head(resolved);
+  if(!resumedCopy&&destinationAtCopy&&!isMovedSourceMarker(destinationAtCopy)&&conflict!=="replace"){
+    if(conflict==="skip")return{target:null,skipped:true,sourceEtag};
+    if(conflict==="fail")throw new HTTPException(409,{message:"The destination changed before publication"});
+    resolved=(await targetName(env,target,"rename",operationId,sourceEtag))!;
+    destinationAtCopy=await env.DATA_BUCKET.head(resolved);
+    if(destinationAtCopy&&!isMovedSourceMarker(destinationAtCopy))throw new HTTPException(409,{message:"The renamed destination changed before publication"});
+  }
+  let replacementBaseline: string | null = destinationAtCopy?.httpEtag||null;
+  if (conflict === "replace"&&!resumedCopy&&!isMovedSourceMarker(destinationAtCopy||{})) {
+    const existing = await env.DATA_BUCKET.get(resolved,{onlyIf:destinationAtCopy?{etagMatches:destinationAtCopy.etag}:undefined});
     replacementBaseline = existing?.httpEtag || null;
     if (existing && allowRecovery) {
       const id = crypto.randomUUID();
@@ -125,17 +155,16 @@ async function copyObject(env: Env, source: string, target: string, conflict: Co
       }
     }
   }
-  const destinationMetadata = { ...(sourceObject.customMetadata || {}), ...(recovery ? { replacementRecoveryId: recovery.id } : {}) };
-  const replacementCondition = conflict === "replace"
-    ? new Headers(replacementBaseline ? { "If-Match": replacementBaseline } : { "If-None-Match": "*" })
-    : undefined;
-  let written:R2Object|null = null;
+  const destinationMetadata = { ...(sourceObject.customMetadata || {}), ...(recovery ? { replacementRecoveryId: recovery.id } : {}), ...(operationId?{ltdsCrudOperationId:operationId,ltdsCrudSourceEtag:sourceEtag}:{}), ...(moving?{ltdsMoveSourceKey:source,ltdsMoveSourceEtag:sourceEtag}:{}) };
+  const replacementCondition = new Headers(replacementBaseline ? { "If-Match": replacementBaseline } : { "If-None-Match": "*" });
+  let written:R2Object|null = resumedCopy;
   try {
-    if(roots&&source.endsWith("/manifest.json")&&source.includes("/.previews/")){const bytes=await sourceObject.arrayBuffer(),manifest=(()=>{try{return JSON.parse(new TextDecoder().decode(bytes))}catch{return null}})();if(manifest&&typeof manifest.sourceKey==="string"&&manifest.sourceKey.startsWith(roots.source)){manifest.sourceKey=`${roots.target}${manifest.sourceKey.slice(roots.source.length)}`;written=await env.DATA_BUCKET.put(resolved,JSON.stringify(manifest),{onlyIf:replacementCondition,httpMetadata:{...sourceObject.httpMetadata,contentType:"application/json"},customMetadata:destinationMetadata});}else written=await env.DATA_BUCKET.put(resolved,bytes,{onlyIf:replacementCondition,httpMetadata:sourceObject.httpMetadata,customMetadata:destinationMetadata});}
-    else written=await env.DATA_BUCKET.put(resolved, sourceObject.body, { onlyIf: replacementCondition, httpMetadata: sourceObject.httpMetadata, customMetadata: destinationMetadata });
+    if(!written&&roots&&source.endsWith("/manifest.json")&&source.includes("/.previews/")){const bytes=await sourceObject.arrayBuffer(),manifest=(()=>{try{return JSON.parse(new TextDecoder().decode(bytes))}catch{return null}})();if(manifest&&typeof manifest.sourceKey==="string"&&manifest.sourceKey.startsWith(roots.source)){manifest.sourceKey=`${roots.target}${manifest.sourceKey.slice(roots.source.length)}`;written=await env.DATA_BUCKET.put(resolved,JSON.stringify(manifest),{onlyIf:replacementCondition,httpMetadata:{...sourceObject.httpMetadata,contentType:"application/json"},customMetadata:destinationMetadata});}else written=await env.DATA_BUCKET.put(resolved,bytes,{onlyIf:replacementCondition,httpMetadata:sourceObject.httpMetadata,customMetadata:destinationMetadata});}
+    else if(!written)written=await env.DATA_BUCKET.put(resolved, sourceObject.body, { onlyIf: replacementCondition, httpMetadata: sourceObject.httpMetadata, customMetadata: destinationMetadata });
     if (!written) throw new HTTPException(409, { message: "The replacement destination changed before publication" });
-    if (recovery) await env.OPS_DB.prepare("UPDATE r2_replacement_recovery SET replacement_result_etag=? WHERE id=?")
-      .bind(written.httpEtag, recovery.id).run();
+    const recoveryId=recovery?.id||written.customMetadata?.replacementRecoveryId;
+    if (recoveryId) await env.OPS_DB.prepare("UPDATE r2_replacement_recovery SET replacement_result_etag=? WHERE id=?")
+      .bind(written.httpEtag,recoveryId).run();
   } catch (error) {
     if (recovery && !written) {
       await env.DATA_BUCKET.delete(recovery.key);
@@ -147,14 +176,34 @@ async function copyObject(env: Env, source: string, target: string, conflict: Co
   if(indexed)await env.DELIVERY_DB.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status,stream_error)
     VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,stream_uid=excluded.stream_uid,stream_status=excluded.stream_status,stream_error=excluded.stream_error,updated_at=datetime('now')`)
     .bind(resolved,written.httpEtag,written.size,written.uploaded.toISOString(),indexed.content_type,indexed.media_kind,indexed.stream_uid,indexed.stream_status,indexed.stream_error).run();
-  if(indexed?.media_kind==="image"&&mediaKind(resolved)==="image"){
+  if(indexed&&thumbnailSourceEligible(resolved,written.size,written.httpMetadata?.contentType||indexed.content_type||undefined)){
     try{await enqueueThumbnailJob(env,{sourceKey:resolved,sourceEtag:written.httpEtag,sourceSize:written.size});}
     catch(error){console.error(JSON.stringify({event:"thumbnail.copy-enqueue-failed",key:resolved,error:error instanceof Error?error.message:"unknown"}));}
   }
-  return { target: resolved, skipped: false };
+  return { target: resolved, skipped: false, sourceEtag };
 }
 
-async function copyPreparedArtifacts(env:Env,source:string,target:string,move:boolean):Promise<void>{const sourcePrefix=await artifactDirectory(source),targetPrefix=await artifactDirectory(target);let cursor:string|undefined;do{const page=await env.DATA_BUCKET.list({prefix:sourcePrefix,limit:100,cursor});for(const object of page.objects){const destination=`${targetPrefix}${object.key.slice(sourcePrefix.length)}`;await copyObject(env,object.key,destination,"replace",{source,target},false);if(move)await env.DATA_BUCKET.delete(object.key);}cursor=page.truncated?page.cursor:undefined;}while(cursor);}
+async function cleanupMovedSourceState(env:Pick<Env,"DELIVERY_DB">,sourceKey:string,sourceEtag:string):Promise<void>{
+  const etag=sourceEtag.trim().replace(/^"|"$/g,"");
+  await env.DELIVERY_DB.prepare("DELETE FROM image_asset_locations WHERE source_key=? AND source_etag=?").bind(sourceKey,etag).run();
+  await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=? AND trim(etag,'\"')=?").bind(sourceKey,etag).run();
+}
+
+async function retireMovedSource(env:Pick<Env,"DATA_BUCKET">,sourceKey:string,sourceEtag:string,targetKey:string):Promise<void>{
+  const etag=sourceEtag.trim().replace(/^"|"$/g,"");
+  // R2 has no conditional delete. Atomically replace only the exact copied
+  // version with a private zero-byte marker; a concurrent replacement makes
+  // this CAS fail and is never deleted. A later upload can safely overwrite
+  // the marker and normal object-create processing resumes.
+  const marker=await env.DATA_BUCKET.put(sourceKey,null,{
+    onlyIf:{etagMatches:etag},
+    httpMetadata:{contentType:"application/x-ltds-moved-source",cacheControl:"private, no-store"},
+    customMetadata:{ltdsMoveMarker:MOVED_SOURCE_MARKER,ltdsMovedSourceEtag:etag,ltdsMoveTargetKey:targetKey},
+  });
+  if(!marker)throw new Error("source-changed-before-move-retire");
+}
+
+async function copyPreparedArtifacts(env:Env,source:string,target:string,move:boolean,operationId:string):Promise<void>{const sourcePrefix=await artifactDirectory(source),targetPrefix=await artifactDirectory(target);let cursor:string|undefined;do{const page=await env.DATA_BUCKET.list({prefix:sourcePrefix,limit:100,cursor,include:["customMetadata"]});for(const object of page.objects){if(isMovedSourceMarker(object))continue;const destination=`${targetPrefix}${object.key.slice(sourcePrefix.length)}`;const result=await copyObject(env,object.key,destination,"replace",{source,target},false,move,`${operationId}:artifact:${object.etag}`);if(move&&!result.skipped&&!result.alreadyRetired)await retireMovedSource(env,object.key,result.sourceEtag,destination);}cursor=page.truncated?page.cursor:undefined;}while(cursor);}
 
 async function revokeImpactedShares(env: Env, actorId: string, key: string): Promise<number> {
   const prefix = prefixFor(key);
@@ -199,38 +248,70 @@ async function createJob(env: Env, principal: StaffPrincipal, kind: "copy" | "mo
 }
 
 async function processJob(env: Env, id: string): Promise<void> {
-  const job = await env.OPS_DB.prepare("SELECT id,kind,status,requested_by,source_key,target_key,conflict_policy,payload_json,cursor,processed_items FROM r2_operation_jobs WHERE id=?").bind(id).first<any>();
-  if (!job || job.status === "completed" || job.status === "failed" || job.status === "cancelled") return;
-  await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='running',lease_until=datetime('now','+10 minutes'),updated_at=datetime('now') WHERE id=?").bind(id).run();
+  const claimToken=crypto.randomUUID();
+  const job = await env.OPS_DB.prepare(`UPDATE r2_operation_jobs
+    SET status='running',attempt_count=attempt_count+1,next_attempt_at=NULL,claim_token=?,
+      lease_until=datetime('now','+35 minutes'),updated_at=datetime('now')
+    WHERE id=? AND (
+      (status='queued' AND (next_attempt_at IS NULL OR datetime(next_attempt_at)<=datetime('now')))
+      OR (status='running' AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now')))
+    )
+    RETURNING id,kind,status,requested_by,source_key,target_key,conflict_policy,payload_json,cursor,
+      processed_items,attempt_count,claim_token`).bind(claimToken,id).first<any>();
+  if (!job) return;
   try {
     if (job.kind === "batch") {
       const operations = JSON.parse(job.payload_json) as Array<{ kind: "copy" | "move"; sourceKey: string; targetKey: string; conflict: ConflictPolicy;sharePolicy?:"keep"|"revoke" }>;
       const start = Number(job.cursor || 0); const end = Math.min(operations.length, start + MAX_JOB_OBJECTS_PER_TURN);
-      for (let index = start; index < end; index += 1) { const op = operations[index]!; const source = normalizeCrudKey(op.sourceKey, op.sourceKey.endsWith("/")); const target = normalizeCrudKey(op.targetKey, op.targetKey.endsWith("/")); const found = await ensureSource(env, source); if (found.folder) throw new Error("batch-folder-operation-requires-dedicated-job"); assertSafeCrudDestination(source,target,false);const result = await copyObject(env, source, target, op.conflict);if(result.target&&!result.skipped)await copyPreparedArtifacts(env,source,result.target,op.kind==="move"); if (op.kind === "move" && !result.skipped&&result.target) {await env.DATA_BUCKET.delete(source);await removeThumbnailStateForPath(env,source);if(op.sharePolicy==="keep")await keepImpactedShares(env,source,result.target);else await revokeImpactedShares(env,job.requested_by,source);} }
-      if (end >= operations.length) await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='completed',processed_items=?,total_items=?,completed_at=datetime('now'),updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running'").bind(end, operations.length, id).run();
-      else await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET cursor=?,processed_items=?,total_items=?,updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running'").bind(end, end, operations.length, id).run();
+      for (let index = start; index < end; index += 1) { const op = operations[index]!; const source = normalizeCrudKey(op.sourceKey, op.sourceKey.endsWith("/")); const target = normalizeCrudKey(op.targetKey, op.targetKey.endsWith("/")); const found = await ensureSource(env, source,true); if (found.folder) throw new Error("batch-folder-operation-requires-dedicated-job"); assertSafeCrudDestination(source,target,false);const operationId=`${id}:${index}`,result = await copyObject(env, source, target, op.conflict,undefined,true,op.kind==="move",operationId);if(result.target&&!result.skipped)await copyPreparedArtifacts(env,source,result.target,op.kind==="move",operationId); if (op.kind === "move" && !result.skipped&&result.target) {if(!result.alreadyRetired)await retireMovedSource(env,source,result.sourceEtag,result.target);await cleanupMovedSourceState(env,source,result.sourceEtag);await removeThumbnailStateForPath(env,source,false,result.sourceEtag);if(op.sharePolicy==="keep")await keepImpactedShares(env,source,result.target);else await revokeImpactedShares(env,job.requested_by,source);} }
+      if (end >= operations.length) await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='completed',processed_items=?,total_items=?,attempt_count=0,error_code=NULL,error_message=NULL,next_attempt_at=NULL,claim_token=NULL,completed_at=datetime('now'),updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running' AND claim_token=?").bind(end, operations.length, id,claimToken).run();
+      else await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET cursor=?,processed_items=?,total_items=?,attempt_count=0,error_code=NULL,error_message=NULL,next_attempt_at=NULL,claim_token=NULL,updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running' AND claim_token=?").bind(end, end, operations.length, id,claimToken).run();
       return;
     }
-    const source = normalizeCrudKey(job.source_key, true); const target = normalizeCrudKey(job.target_key, true); assertSafeCrudDestination(source,target,true);const page=await env.DATA_BUCKET.list({prefix:source,limit:MAX_JOB_OBJECTS_PER_TURN,...(job.cursor?{startAfter:String(job.cursor)}:{})});const batch=page.objects;
-    for (const object of batch) { const relative = object.key.slice(source.length); const result = await copyObject(env, object.key, `${target}${relative}`, job.conflict_policy,{source,target}); if (job.kind === "move" && !result.skipped) { await env.DATA_BUCKET.delete(object.key); await removeThumbnailStateForPath(env,object.key); } }
+    const source = normalizeCrudKey(job.source_key, true); const target = normalizeCrudKey(job.target_key, true); assertSafeCrudDestination(source,target,true);const page=await env.DATA_BUCKET.list({prefix:source,limit:MAX_JOB_OBJECTS_PER_TURN,include:["customMetadata"],...(job.cursor?{startAfter:String(job.cursor)}:{})});const batch=page.objects;
+    for (const object of batch) { const relative = object.key.slice(source.length),destination=`${target}${relative}`,operationId=`${id}:${object.etag}`; const result = await copyObject(env, object.key, destination, job.conflict_policy,{source,target},true,job.kind==="move",operationId); if (job.kind === "move" && !result.skipped) {if(!result.alreadyRetired)await retireMovedSource(env,object.key,result.sourceEtag,destination);await cleanupMovedSourceState(env,object.key,result.sourceEtag);await removeThumbnailStateForPath(env,object.key,false,result.sourceEtag); } }
     const processed = Number(job.processed_items || 0) + batch.length;
-    if (!page.truncated) {const active=await env.OPS_DB.prepare("SELECT status FROM r2_operation_jobs WHERE id=?").bind(id).first<{status:string}>();if(active?.status!=="running")return;if(job.kind==="move"){const payload=JSON.parse(job.payload_json||"{}");if(payload.sharePolicy==="keep")await keepImpactedShares(env,source,target);else await revokeImpactedShares(env,job.requested_by,source);}await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='completed',processed_items=?,total_items=MAX(COALESCE(total_items,0),?),completed_at=datetime('now'),updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running'").bind(processed, processed, id).run();}
-    else await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET cursor=?,processed_items=?,total_items=MAX(COALESCE(total_items,0),?),updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running'").bind(batch[batch.length - 1]!.key, processed, processed + 1, id).run();
+    if (!page.truncated) {const active=await env.OPS_DB.prepare("SELECT status,claim_token FROM r2_operation_jobs WHERE id=?").bind(id).first<{status:string;claim_token:string|null}>();if(active?.status!=="running"||active.claim_token!==claimToken)return;if(job.kind==="move"){const payload=JSON.parse(job.payload_json||"{}");if(payload.sharePolicy==="keep")await keepImpactedShares(env,source,target);else await revokeImpactedShares(env,job.requested_by,source);}await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='completed',processed_items=?,total_items=MAX(COALESCE(total_items,0),?),attempt_count=0,error_code=NULL,error_message=NULL,next_attempt_at=NULL,claim_token=NULL,completed_at=datetime('now'),updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running' AND claim_token=?").bind(processed, processed, id,claimToken).run();}
+    else await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET cursor=?,processed_items=?,total_items=MAX(COALESCE(total_items,0),?),attempt_count=0,error_code=NULL,error_message=NULL,next_attempt_at=NULL,claim_token=NULL,updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running' AND claim_token=?").bind(page.objects[page.objects.length - 1]!.key, processed, processed + 1, id,claimToken).run();
   } catch (error) {
-    await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='failed',error_code='r2-operation-failed',error_message=?,updated_at=datetime('now'),lease_until=NULL WHERE id=?").bind((error instanceof Error ? error.message : "r2-operation-failed").slice(0, 240), id).run();
+    const message=(error instanceof Error?error.message:"r2-operation-failed").slice(0,240);
+    const permanent=(error instanceof HTTPException&&error.status!==429)||[
+      "batch-folder-operation-requires-dedicated-job",
+      "source-changed-before-copy",
+      "source-changed-before-move-retire",
+      "source-disappeared",
+      "source-moved",
+    ].includes(message);
+    if(permanent||Number(job.attempt_count)>=MAX_R2_OPERATION_ATTEMPTS){
+      await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='failed',error_code='r2-operation-failed',error_message=?,next_attempt_at=NULL,claim_token=NULL,updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running' AND claim_token=?").bind(message,id,claimToken).run();
+    }else{
+      const delaySeconds=Math.min(300,10*2**Math.max(0,Number(job.attempt_count)-1));
+      await env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='queued',error_code='r2-operation-retry',error_message=?,next_attempt_at=datetime('now',?),claim_token=NULL,updated_at=datetime('now'),lease_until=NULL WHERE id=? AND status='running' AND claim_token=?")
+        .bind(message,`+${delaySeconds} seconds`,id,claimToken).run();
+    }
   }
 }
 
 export async function processR2OperationJobs(env: Env): Promise<void> {
-  const jobs = await env.OPS_DB.prepare(`SELECT id FROM r2_operation_jobs WHERE status='queued' OR (status='running' AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now'))) ORDER BY created_at LIMIT 3`).all<{ id: string }>();
+  const jobs = await env.OPS_DB.prepare(`SELECT id FROM r2_operation_jobs
+    WHERE (status='queued' AND (next_attempt_at IS NULL OR datetime(next_attempt_at)<=datetime('now')))
+      OR (status='running' AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now')))
+    ORDER BY created_at LIMIT 3`).all<{ id: string }>();
   for (const job of jobs.results) await processJob(env, job.id);
 }
 
 export class R2CrudWorkflow extends WorkflowEntrypoint<Env,{jobId:string}>{
   async run(event:WorkflowEvent<{jobId:string}>,step:WorkflowStep):Promise<void>{
     for(let turn=0;turn<10_000;turn+=1){
-      const status=await step.do(`r2-operation-${turn}`,{retries:{limit:3,delay:"10 seconds",backoff:"exponential"},timeout:"30 minutes"},async()=>{await processJob(this.env,event.payload.jobId);const row=await this.env.OPS_DB.prepare("SELECT status FROM r2_operation_jobs WHERE id=?").bind(event.payload.jobId).first<{status:string}>();return row?.status||"missing";});
-      if(["completed","failed","cancelled","missing"].includes(status))return;
+      const state=await step.do(`r2-operation-${turn}`,{retries:{limit:3,delay:"10 seconds",backoff:"exponential"},timeout:"30 minutes"},async()=>{await processJob(this.env,event.payload.jobId);const row=await this.env.OPS_DB.prepare("SELECT status,next_attempt_at,lease_until FROM r2_operation_jobs WHERE id=?").bind(event.payload.jobId).first<{status:string;next_attempt_at:string|null;lease_until:string|null}>();return row??{status:"missing",next_attempt_at:null,lease_until:null};});
+      if(["completed","failed","cancelled","missing"].includes(state.status))return;
+      if(state.status==="queued"&&state.next_attempt_at){
+        const wakeAt=Date.parse(`${state.next_attempt_at.replace(" ","T")}Z`);
+        await step.sleepUntil(`r2-operation-retry-${turn}`,Number.isFinite(wakeAt)?wakeAt:Date.now()+10_000);
+      }else if(state.status==="running"){
+        const leaseAt=state.lease_until?Date.parse(`${state.lease_until.replace(" ","T")}Z`):NaN;
+        await step.sleepUntil(`r2-operation-lease-${turn}`,Number.isFinite(leaseAt)?leaseAt:Date.now()+10_000);
+      }
     }
     await this.env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='failed',error_code='operation_limit',error_message='Operation exceeded 10,000 durable steps',updated_at=datetime('now') WHERE id=? AND status IN ('queued','running')").bind(event.payload.jobId).run();
   }
@@ -241,6 +322,7 @@ async function startJob(c:any,jobId:string,instanceId=jobId):Promise<void>{try{a
 export async function purgeReplacementRecovery(env:Env):Promise<number>{const rows=await env.OPS_DB.prepare("SELECT id,recovery_key FROM r2_replacement_recovery WHERE datetime(purge_after)<=datetime('now') ORDER BY purge_after LIMIT 25").all<{id:string;recovery_key:string}>();for(const row of rows.results){await env.DATA_BUCKET.delete(row.recovery_key);await env.OPS_DB.prepare("DELETE FROM r2_replacement_recovery WHERE id=?").bind(row.id).run();}await env.OPS_DB.prepare("DELETE FROM r2_event_suppressions WHERE datetime(expires_at)<=datetime('now')").run();return rows.results.length;}
 
 type BrowserUploadCollisionPolicy = "fail" | "rename" | "replace";
+type BrowserUploadConflictResolution = "skip" | "rename" | "replace";
 interface BrowserUploadIntentFile {
   ordinal: number;
   relativePath: string;
@@ -272,10 +354,10 @@ interface BrowserUploadSessionRow {
   cleanup_error: string | null;
 }
 
-function browserCollisionPolicy(value: unknown): BrowserUploadCollisionPolicy {
-  if (value === undefined || value === "fail") return "fail";
-  if (value === "rename" || value === "replace") return value;
-  throw new HTTPException(400, { message: "Upload collision policy is invalid" });
+function browserConflictResolution(value: unknown): BrowserUploadConflictResolution | null {
+  if (value === undefined || value === null) return null;
+  if (value === "skip" || value === "rename" || value === "replace") return value;
+  throw new HTTPException(400, { message: "Upload conflict resolution is invalid" });
 }
 
 async function browserUploadFingerprint(value: unknown): Promise<string> {
@@ -349,7 +431,7 @@ async function finalizeBrowserUpload(
   ]);
   await env.OPS_DB.prepare(`UPDATE browser_upload_intents SET status='completed',completed_at=datetime('now'),updated_at=datetime('now')
     WHERE id=? AND status='active' AND NOT EXISTS (
-      SELECT 1 FROM browser_upload_intent_files WHERE intent_id=? AND status<>'completed'
+      SELECT 1 FROM browser_upload_intent_files WHERE intent_id=? AND status NOT IN ('completed','skipped')
     )`).bind(session.intent_id, session.intent_id).run();
 }
 
@@ -465,7 +547,8 @@ export function registerR2CrudRoutes(app: App): void {
 
   app.post("/api/delivery/fs/folders", async c => {
     const principal = c.get("principal"); const body = await jsonBody(c); const key = normalizeCrudKey(body.key, true); await requireCrudPermission(c.env, principal, CREATE, key);
-    if (await c.env.DATA_BUCKET.head(key)||(await c.env.DATA_BUCKET.list({prefix:key,limit:1})).objects.length) throw new HTTPException(409, { message: "The folder already exists" });
+    const folderHead=await c.env.DATA_BUCKET.head(key),folderState=await prefixObjectState(c.env,key);
+    if ((folderHead&&!isMovedSourceMarker(folderHead))||folderState.visible) throw new HTTPException(409, { message: "The folder already exists" });
     await c.env.DATA_BUCKET.put(`${key}_ltds/folder.json`,JSON.stringify({version:1,createdAt:new Date().toISOString(),createdBy:principal.id}),{httpMetadata:{contentType:"application/json"}}); await audit(c.env, c.req.raw, principal, "delivery.folder.created", key); return c.json({ key, id: encodeRef(key),status:"completed" }, 201);
   });
 
@@ -481,9 +564,9 @@ export function registerR2CrudRoutes(app: App): void {
 
   app.post("/api/delivery/fs/batch", async c => { const principal = c.get("principal"); const body = await jsonBody(c); if (!Array.isArray(body.operations) || body.operations.length < 1 || body.operations.length > MAX_BATCH_OPERATIONS) throw new HTTPException(400, { message: `Batch operations must contain 1-${MAX_BATCH_OPERATIONS} items` }); const operations = body.operations.map((item: any) => ({ kind: item.kind === "move" ? "move" : item.kind === "copy" ? "copy" : (() => { throw new HTTPException(400, { message: "Unsupported batch operation" }); })(), sourceKey: normalizeCrudKey(item.sourceKey, false), targetKey: normalizeCrudKey(item.targetKey, false), conflict: policy(item.conflict),sharePolicy:item.sharePolicy==="keep"?"keep":"revoke" })); for (const operation of operations) { assertSafeCrudDestination(operation.sourceKey,operation.targetKey,false);await requireCrudPermission(c.env, principal, BATCH, operation.sourceKey); await requireCrudPermission(c.env, principal, BATCH, operation.targetKey); } const id = await createJob(c.env, principal, "batch", operations, null, null, "fail");await startJob(c,id);await audit(c.env, c.req.raw, principal, "delivery.batch.queued", id, { count: operations.length }); return c.json({ jobId: id, status: "queued" }, 202); });
 
-  app.get("/api/delivery/fs/jobs/:id", async c => { const principal = c.get("principal"); await requirePermission(c.env, principal, permission("delivery.browse")); const job = await c.env.OPS_DB.prepare("SELECT id,kind,status,source_key,target_key,conflict_policy,total_items,processed_items,error_code,error_message,created_at,updated_at,completed_at FROM r2_operation_jobs WHERE id=? AND requested_by=?").bind(c.req.param("id"), principal.id).first(); if (!job) throw new HTTPException(404, { message: "Operation job not found" }); return c.json({ job }); });
-  app.post("/api/delivery/fs/jobs/:id/cancel",async c=>{const principal=c.get("principal");await requirePermission(c.env,principal,BATCH);const result=await c.env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='cancelled',updated_at=datetime('now'),lease_until=NULL WHERE id=? AND requested_by=? AND status IN ('queued','running')").bind(c.req.param("id"),principal.id).run();if(result.meta.changes!==1)throw new HTTPException(409,{message:"Operation cannot be cancelled"});return c.json({success:true});});
-  app.post("/api/delivery/fs/jobs/:id/retry",async c=>{const principal=c.get("principal");await requirePermission(c.env,principal,BATCH);const result=await c.env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='queued',error_code=NULL,error_message=NULL,updated_at=datetime('now'),lease_until=NULL WHERE id=? AND requested_by=? AND status='failed'").bind(c.req.param("id"),principal.id).run();if(result.meta.changes!==1)throw new HTTPException(409,{message:"Only failed operations can be retried"});await startJob(c,c.req.param("id"),`${c.req.param("id")}-${crypto.randomUUID()}`);return c.json({success:true,status:"queued"});});
+  app.get("/api/delivery/fs/jobs/:id", async c => { const principal = c.get("principal"); await requirePermission(c.env, principal, permission("delivery.browse")); const job = await c.env.OPS_DB.prepare("SELECT id,kind,status,source_key,target_key,conflict_policy,total_items,processed_items,attempt_count,next_attempt_at,error_code,error_message,created_at,updated_at,completed_at FROM r2_operation_jobs WHERE id=? AND requested_by=?").bind(c.req.param("id"), principal.id).first(); if (!job) throw new HTTPException(404, { message: "Operation job not found" }); return c.json({ job }); });
+  app.post("/api/delivery/fs/jobs/:id/cancel",async c=>{const principal=c.get("principal");await requirePermission(c.env,principal,BATCH);const result=await c.env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='cancelled',next_attempt_at=NULL,claim_token=NULL,updated_at=datetime('now'),lease_until=NULL WHERE id=? AND requested_by=? AND status IN ('queued','running')").bind(c.req.param("id"),principal.id).run();if(result.meta.changes!==1)throw new HTTPException(409,{message:"Operation cannot be cancelled"});return c.json({success:true});});
+  app.post("/api/delivery/fs/jobs/:id/retry",async c=>{const principal=c.get("principal");await requirePermission(c.env,principal,BATCH);const result=await c.env.OPS_DB.prepare("UPDATE r2_operation_jobs SET status='queued',attempt_count=0,next_attempt_at=NULL,claim_token=NULL,error_code=NULL,error_message=NULL,updated_at=datetime('now'),lease_until=NULL WHERE id=? AND requested_by=? AND status='failed'").bind(c.req.param("id"),principal.id).run();if(result.meta.changes!==1)throw new HTTPException(409,{message:"Only failed operations can be retried"});await audit(c.env,c.req.raw,principal,"delivery.r2.retry",c.req.param("id"));await startJob(c,c.req.param("id"),`${c.req.param("id")}-${crypto.randomUUID()}`);return c.json({success:true,status:"queued"});});
   app.get("/api/delivery/fs/replacements", async c => {
     const principal = c.get("principal");
     if (c.get("administrator")) await requirePermission(c.env, principal, permission("delivery.delete"));
@@ -548,7 +631,7 @@ export function registerR2CrudRoutes(app: App): void {
     const principal = c.get("principal");
     const idempotencyKey = browserIdempotencyKey(c.req.raw);
     const body = await jsonBody(c);
-    const collisionPolicy = browserCollisionPolicy(body.collisionPolicy);
+    const collisionPolicy: BrowserUploadCollisionPolicy = "fail";
     if (!Array.isArray(body.files) || body.files.length < 1 || body.files.length > MAX_BROWSER_UPLOAD_FILES) {
       throw new HTTPException(400, { message: `Upload intents require 1-${MAX_BROWSER_UPLOAD_FILES} files` });
     }
@@ -570,7 +653,7 @@ export function registerR2CrudRoutes(app: App): void {
     const root = browserUploadObjectKey(body.rootPrefix, normalized[0]!.relativePath).root;
     await requireCrudPermission(c.env, principal, UPLOAD, root);
     for (const file of normalized) await requireCrudPermission(c.env, principal, UPLOAD, file.key);
-    const fingerprint = await browserUploadFingerprint({ root, collisionPolicy, files: normalized.map(({ relativePath, size, contentType }) => ({ relativePath, size, contentType })) });
+    const fingerprint = await browserUploadFingerprint({ root, files: normalized.map(({ relativePath, size, contentType }) => ({ relativePath, size, contentType })) });
     const existing = await c.env.OPS_DB.prepare("SELECT id,request_fingerprint,status,expires_at FROM browser_upload_intents WHERE created_by=? AND idempotency_key=?")
       .bind(principal.id, idempotencyKey).first<{id:string;request_fingerprint:string;status:string;expires_at:string}>();
     if (existing) {
@@ -595,7 +678,7 @@ export function registerR2CrudRoutes(app: App): void {
       if (replay.request_fingerprint !== fingerprint) throw new HTTPException(409, { message: "Idempotency-Key was already used for a different upload" });
       return c.json({ intentId: replay.id, status: replay.status, expiresAt: replay.expires_at, fileCount: normalized.length, totalBytes });
     }
-    await audit(c.env, c.req.raw, principal, "delivery.upload.intent.created", id, { fileCount: normalized.length, totalBytes, collisionPolicy });
+    await audit(c.env, c.req.raw, principal, "delivery.upload.intent.created", id, { fileCount: normalized.length, totalBytes, collisionMode: "detect" });
     return c.json({ intentId: id, status: "active", expiresAt: expires, fileCount: normalized.length, totalBytes }, 201);
   });
 
@@ -603,27 +686,60 @@ export function registerR2CrudRoutes(app: App): void {
     const principal = c.get("principal");
     const body = await jsonBody(c);
     const ordinal = Number(body.ordinal);
+    const requestedResolution = browserConflictResolution(body.conflictResolution);
     if (typeof body.intentId !== "string" || !Number.isSafeInteger(ordinal) || ordinal < 0 || ordinal >= MAX_BROWSER_UPLOAD_FILES) {
       throw new HTTPException(400, { message: "A valid upload intent item is required" });
     }
     const file = await c.env.OPS_DB.prepare(`SELECT i.id intent_id,i.collision_policy,i.expires_at,i.status intent_status,
-      f.ordinal,f.object_key,f.expected_size,f.content_type,f.session_id
+      f.ordinal,f.relative_path,f.object_key,f.expected_size,f.content_type,f.session_id,f.status file_status,f.conflict_resolution
       FROM browser_upload_intents i JOIN browser_upload_intent_files f ON f.intent_id=i.id
       WHERE i.id=? AND i.created_by=? AND f.ordinal=?`).bind(body.intentId, principal.id, ordinal)
-      .first<{intent_id:string;collision_policy:BrowserUploadCollisionPolicy;expires_at:string;intent_status:string;ordinal:number;object_key:string;expected_size:number;content_type:string;session_id:string|null}>();
-    if (!file || file.intent_status !== "active" || Date.parse(file.expires_at) <= Date.now()) throw new HTTPException(404, { message: "Upload intent not found or expired" });
+      .first<{intent_id:string;collision_policy:BrowserUploadCollisionPolicy;expires_at:string;intent_status:string;ordinal:number;relative_path:string;object_key:string;expected_size:number;content_type:string;session_id:string|null;file_status:string;conflict_resolution:BrowserUploadConflictResolution|null}>();
+    if (!file || Date.parse(file.expires_at) <= Date.now()) throw new HTTPException(404, { message: "Upload intent not found or expired" });
     await requireCrudPermission(c.env, principal, UPLOAD, file.object_key);
+    if (file.file_status === "skipped") {
+      return c.json({ status: "skipped", conflictResolution: "skip" });
+    }
     if (file.session_id) {
       const existing = await uploadSession(c.env, file.session_id, principal.id);
       if (existing) return c.json(sessionResponse(existing));
     }
+    if (file.intent_status !== "active") throw new HTTPException(404, { message: "Upload intent not found or expired" });
     let target = file.object_key;
-    if (file.collision_policy === "fail" && await c.env.DATA_BUCKET.head(target)) throw new HTTPException(409, { message: "The upload destination already exists" });
-    if (file.collision_policy === "rename") target = (await targetName(c.env, target, "rename"))!;
-    const destinationAtOpen = file.collision_policy === "replace" ? await c.env.DATA_BUCKET.head(target) : null;
-    const destinationBaseline = file.collision_policy === "replace"
-      ? destinationAtOpen ? `etag:${destinationAtOpen.httpEtag}` : "absent"
-      : "unknown";
+    const physicalDestinationAtOpen = await c.env.DATA_BUCKET.head(target);
+    const markerAtOpen=Boolean(physicalDestinationAtOpen&&isMovedSourceMarker(physicalDestinationAtOpen));
+    const destinationAtOpen = markerAtOpen ? null : physicalDestinationAtOpen;
+    if (destinationAtOpen && !requestedResolution) {
+      return c.json({
+        error: "upload_destination_conflict",
+        message: "A file already exists at this destination.",
+        conflict: {
+          intentId: file.intent_id,
+          ordinal: file.ordinal,
+          relativePath: file.relative_path,
+          choices: ["skip", "replace", "rename"],
+        },
+      }, 409);
+    }
+    if (destinationAtOpen && requestedResolution === "skip") {
+      const skipped = await c.env.OPS_DB.prepare(`UPDATE browser_upload_intent_files SET status='skipped',
+        conflict_resolution='skip',result_key=?,result_etag=?,error_code=NULL,updated_at=datetime('now')
+        WHERE intent_id=? AND ordinal=? AND session_id IS NULL AND status='pending'`)
+        .bind(file.object_key, destinationAtOpen.httpEtag, file.intent_id, file.ordinal).run();
+      if (skipped.meta.changes !== 1) throw new HTTPException(409, { message: "Upload conflict was already resolved" });
+      await c.env.OPS_DB.prepare(`UPDATE browser_upload_intents SET status='completed',completed_at=datetime('now'),updated_at=datetime('now')
+        WHERE id=? AND status='active' AND NOT EXISTS (
+          SELECT 1 FROM browser_upload_intent_files WHERE intent_id=? AND status NOT IN ('completed','skipped')
+        )`).bind(file.intent_id, file.intent_id).run();
+      await audit(c.env, c.req.raw, principal, "delivery.upload.conflict.skipped", file.object_key, { intentId: file.intent_id, ordinal });
+      return c.json({ status: "skipped", conflictResolution: "skip" });
+    }
+    const conflictPolicy: BrowserUploadCollisionPolicy = markerAtOpen ? "replace" : destinationAtOpen && requestedResolution
+      ? requestedResolution === "skip" ? "fail" : requestedResolution
+      : "fail";
+    if (destinationAtOpen && conflictPolicy === "rename") target = (await targetName(c.env, target, "rename"))!;
+    const targetAtOpen = target === file.object_key ? physicalDestinationAtOpen : await c.env.DATA_BUCKET.head(target);
+    const destinationBaseline = targetAtOpen ? `etag:${targetAtOpen.httpEtag}` : "absent";
     const id = crypto.randomUUID();
     const stagingKey = `_ltds/browser-uploads/${file.intent_id}/${id}`;
     const partSize = operationsMultipartPartSize(file.expected_size);
@@ -639,12 +755,12 @@ export function registerR2CrudRoutes(app: App): void {
           WHERE (SELECT COUNT(*) FROM r2_upload_sessions
             WHERE created_by=? AND status IN ('active','completing') AND datetime(expires_at)>datetime('now')) < ?`)
           .bind(id, upload.uploadId, target, file.expected_size, file.content_type,
-            principal.id, file.expires_at, file.intent_id, file.ordinal, stagingKey, partSize, file.collision_policy,
+            principal.id, file.expires_at, file.intent_id, file.ordinal, stagingKey, partSize, conflictPolicy,
             destinationBaseline, principal.id, MAX_ACTIVE_UPLOAD_SESSIONS),
-        c.env.OPS_DB.prepare(`UPDATE browser_upload_intent_files SET status='uploading',session_id=?,updated_at=datetime('now')
+        c.env.OPS_DB.prepare(`UPDATE browser_upload_intent_files SET status='uploading',session_id=?,conflict_resolution=?,updated_at=datetime('now')
           WHERE intent_id=? AND ordinal=? AND session_id IS NULL
             AND EXISTS (SELECT 1 FROM r2_upload_sessions WHERE id=? AND created_by=? AND status='active')`)
-          .bind(id, file.intent_id, file.ordinal, id, principal.id),
+          .bind(id, destinationAtOpen ? requestedResolution : null, file.intent_id, file.ordinal, id, principal.id),
       ]);
       if (created[0]?.meta.changes !== 1) {
         await upload.abort();
@@ -696,6 +812,8 @@ export function registerR2CrudRoutes(app: App): void {
 
   app.post("/api/delivery/uploads/:id/complete", async c => {
     const principal = c.get("principal");
+    const completionBody = await jsonBody(c);
+    const requestedResolution = browserConflictResolution(completionBody.conflictResolution);
     let session = await uploadSession(c.env, c.req.param("id"), principal.id);
     if (!session) throw new HTTPException(404, { message: "Upload session not found" });
     await requireCrudPermission(c.env, principal, UPLOAD, session.object_key);
@@ -741,7 +859,7 @@ export function registerR2CrudRoutes(app: App): void {
       throw new HTTPException(422, { message: "Uploaded bytes do not match the declared size" });
     }
 
-    const current = await c.env.DATA_BUCKET.head(session.object_key);
+    let current = await c.env.DATA_BUCKET.head(session.object_key);
     if (current?.customMetadata?.browserUploadSession === session.id && current.size === session.expected_size) {
       if (session.replacement_recovery_id) {
         await c.env.OPS_DB.prepare("UPDATE r2_replacement_recovery SET replacement_result_etag=? WHERE id=? AND replacement_result_etag IS NULL")
@@ -752,25 +870,65 @@ export function registerR2CrudRoutes(app: App): void {
       session = (await uploadSession(c.env, session.id, principal.id))!;
       return c.json(sessionResponse(session));
     }
-    if (session.conflict_policy !== "replace" && current) {
-      await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET status='active',completion_claimed_at=NULL WHERE id=? AND status='completing'").bind(session.id).run();
-      throw new HTTPException(409, { message: "The upload destination changed before completion" });
-    }
-
-    if (session.conflict_policy === "replace") {
-      const baselineMatches = session.destination_baseline === "absent"
-        ? !current
-        : session.destination_baseline.startsWith("etag:") &&
-          current?.httpEtag === session.destination_baseline.slice("etag:".length);
-      if (!baselineMatches) {
+    const baselineMatches = session.destination_baseline === "absent"
+      ? !current
+      : session.destination_baseline.startsWith("etag:") &&
+        current?.httpEtag === session.destination_baseline.slice("etag:".length);
+    if (current && (session.conflict_policy !== "replace" || !baselineMatches)) {
+      if (!requestedResolution) {
+        const conflictFile = await c.env.OPS_DB.prepare("SELECT relative_path FROM browser_upload_intent_files WHERE intent_id=? AND ordinal=?")
+          .bind(session.intent_id, session.intent_ordinal).first<{relative_path:string}>();
         await c.env.OPS_DB.prepare("UPDATE r2_upload_sessions SET status='active',completion_claimed_at=NULL WHERE id=? AND status='completing'").bind(session.id).run();
-        throw new HTTPException(409, { message: "The upload destination changed before replacement" });
+        return c.json({
+          error: "upload_destination_conflict",
+          message: "A file already exists at this destination.",
+          conflict: {
+            intentId: session.intent_id,
+            ordinal: session.intent_ordinal,
+            relativePath: conflictFile?.relative_path || leaf(session.object_key),
+            choices: ["skip", "replace", "rename"],
+          },
+        }, 409);
+      }
+      if (requestedResolution === "skip") {
+        await c.env.OPS_DB.batch([
+          c.env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET status='aborted',completion_claimed_at=NULL,
+            cleanup_status='pending',cleanup_next_attempt_at=datetime('now'),cleanup_claimed_at=NULL,cleanup_error=NULL
+            WHERE id=? AND status='completing'`).bind(session.id),
+          c.env.OPS_DB.prepare(`UPDATE browser_upload_intent_files SET status='skipped',conflict_resolution='skip',
+            session_id=NULL,result_key=NULL,result_etag=NULL,error_code=NULL,updated_at=datetime('now')
+            WHERE intent_id=? AND ordinal=? AND session_id=?`).bind(session.intent_id, session.intent_ordinal, session.id),
+        ]);
+        await c.env.OPS_DB.prepare(`UPDATE browser_upload_intents SET status='completed',completed_at=datetime('now'),updated_at=datetime('now')
+          WHERE id=? AND status='active' AND NOT EXISTS (
+            SELECT 1 FROM browser_upload_intent_files WHERE intent_id=? AND status NOT IN ('completed','skipped')
+          )`).bind(session.intent_id, session.intent_id).run();
+        await cleanupBrowserUploadSessions(c.env, 1, session.id);
+        await audit(c.env, c.req.raw, principal, "delivery.upload.conflict.skipped", session.object_key, { intentId: session.intent_id, ordinal: session.intent_ordinal, phase: "completion" });
+        return c.json({ status: "skipped", conflictResolution: "skip" });
+      }
+      if (requestedResolution === "rename") {
+        const renamed = (await targetName(c.env, session.object_key, "rename"))!;
+        await requireCrudPermission(c.env, principal, UPLOAD, renamed);
+        const changed = await c.env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET object_key=?,conflict_policy='fail',
+          destination_baseline='absent' WHERE id=? AND status='completing'`).bind(renamed, session.id).run();
+        if (changed.meta.changes !== 1) throw new HTTPException(409, { message: "Upload completion no longer owns the session" });
+        session.object_key = renamed;
+        session.conflict_policy = "fail";
+        session.destination_baseline = "absent";
+        current = null;
+      } else {
+        const changed = await c.env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET conflict_policy='replace',
+          destination_baseline=? WHERE id=? AND status='completing'`).bind(`etag:${current.httpEtag}`, session.id).run();
+        if (changed.meta.changes !== 1) throw new HTTPException(409, { message: "Upload completion no longer owns the session" });
+        session.conflict_policy = "replace";
+        session.destination_baseline = `etag:${current.httpEtag}`;
       }
     }
 
     const stagedBody = await c.env.DATA_BUCKET.get(session.staging_key);
     if (!stagedBody) throw new HTTPException(409, { message: "Completed upload staging object is unavailable" });
-    if (current && session.conflict_policy === "replace") {
+    if (current && session.conflict_policy === "replace"&&!isMovedSourceMarker(current)) {
       const original = await c.env.DATA_BUCKET.get(session.object_key);
       const baselineEtag = session.destination_baseline.slice("etag:".length);
       if (!original || original.httpEtag !== baselineEtag) throw new HTTPException(409, { message: "The upload destination changed before replacement" });

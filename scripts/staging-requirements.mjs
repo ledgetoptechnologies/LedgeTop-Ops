@@ -12,7 +12,7 @@ export const APP_SOURCE_DIRS = Object.freeze({
 export const REQUIRED_STAGING_SECRETS = Object.freeze({
   delivery: Object.freeze(["DELIVERY_SESSION_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]),
   operations: Object.freeze(["OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "PROJECT_ALPHA_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "TURNSTILE_SITE_KEY", "TURNSTILE_SECRET", "INCOMING_SESSION_SECRET", "INCOMING_ACCESS_CODE_PEPPER", "INCOMING_PICKUP_SECRET"]),
-  "ops-sync": Object.freeze(["CF_ACCESS_GROUP_API_TOKEN", "PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY"]),
+  "ops-sync": Object.freeze(["CF_ACCESS_GROUP_API_TOKEN", "PROJECT_ALPHA_WEBHOOK_HMAC_SECRET"]),
 });
 
 export const STAGING_HOSTS = Object.freeze({
@@ -47,6 +47,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0106_image_thumbnail_jobs.sql",
     "0107_thumbnail_cleanup_jobs.sql",
     "0108_thumbnail_backfill_runs.sql",
+    "0109_image_asset_locations.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -54,6 +55,10 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0016_projection_entity_leases.sql",
     "0017_operational_job_briefs.sql",
     "0018_browser_upload_intents.sql",
+    "0019_browser_upload_conflict_resolution.sql",
+    "0020_internal_sop_library.sql",
+    "0021_project_alpha_sync_hardening.sql",
+    "0022_r2_operation_retries.sql",
   ]),
 });
 

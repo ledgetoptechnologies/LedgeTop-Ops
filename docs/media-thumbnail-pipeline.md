@@ -1,16 +1,25 @@
 # Cloudflare thumbnail-only media delivery
 
+The same private queue also performs bounded, version-bound GPS extraction for
+authenticated photo maps. That metadata has a separate privacy and retention
+contract in [Delivery image-location maps](delivery-image-location-maps.md); it
+does not change the thumbnail-only or original-file access rules below.
+
 ## Contract and trust boundary
 
 Private R2 originals remain authoritative and are never modified. A successful
 R2 object-create event is indexed by the Operations Worker, which records a
 durable D1 thumbnail job and sends an `image-thumbnail.v1` message to
-`ltds-thumbnail-jobs`. The queue consumer streams the original through the
-Cloudflare Images binding and stores one current referenced fixed `320x240`
-WebP for the source key's current ETag under `_ltds/thumbnails/v2/`. The opaque
+`ltds-thumbnail-jobs` (the legacy message-kind name is retained for queue
+compatibility). The queue consumer streams an image through Cloudflare Images,
+or streams an eligible MP4 through the Media Transformations binding in
+frame-only mode at `5s` and passes only the resulting JPEG frame to Images. It
+stores one current referenced fixed `320x240` WebP for the source key's current
+ETag under `_ltds/thumbnails/v2/`. The opaque
 object key under `v2/` includes both source path and normalized ETag, so in-flight work for
 an old version cannot overwrite or delete a replacement's derivative. It does
-not create `preview`, `medium`, `large`, PDF, or video-poster derivatives.
+not create `preview`, `medium`, `large`, PDF, spritesheet, audio, or video-proxy
+derivatives and never submits a full-video output transformation.
 
 The public and staff APIs continue to return opaque same-origin routes. They do
 not return R2 URLs, presigned bearer URLs, or credentials. Every original and
@@ -52,18 +61,23 @@ authorized `downloadUrl`. Authorization is rechecked before any R2 read.
 
 ## Prerequisites and limits
 
-- The Operations Worker must have `DATA_BUCKET`, `DELIVERY_DB`, `IMAGES`, and
-  `THUMBNAIL_QUEUE` bindings. The repository already declares the Images
-  binding, but the Cloudflare account must have Images transformations enabled.
+- The Operations Worker must have `DATA_BUCKET`, `DELIVERY_DB`, `IMAGES`,
+  `MEDIA`, and `THUMBNAIL_QUEUE` bindings. The Cloudflare account must allow
+  both Images and Media Transformations. Media is enabled per Worker, is in
+  public beta, and has no local simulator; validate it with a remote staging
+  Worker before rollout.
 - R2 object-create notifications for `PutObject`, `CopyObject`, and
   `CompleteMultipartUpload` must feed `ltds-file-events`.
 - Create `ltds-thumbnail-jobs` and `ltds-thumbnail-jobs-dlq` before deploying
   the binding configuration. Queue dispatch is fail-closed against the exact
   configured file-event, thumbnail, and DLQ names.
-- This implementation caps thumbnail input at 20 MiB through
-  `THUMBNAIL_MAX_INPUT_BYTES`. Larger originals remain downloadable and
-  zoomable, but their thumbnail job is visibly failed until a future
-  large-input transform path is approved.
+- Still-image input is capped at 20 MiB. Video input is limited to an exact
+  `.mp4`/`video/mp4` candidate strictly below 100,000,000 bytes. Cloudflare
+  documents MP4/H.264 with AAC or MP3 audio as the reliable input and a maximum
+  duration of ten minutes. Codec and duration are validated by Media
+  Transformations; rejected or over-duration inputs finish in explicit failed
+  fallback state after bounded delivery attempts. Non-MP4 video and oversized
+  video remain `not_applicable` or failed and never fall back to the original.
 - Queue delivery is at-least-once. D1 source-ETag state and a lease make
   generation idempotent. Six total delivery attempts are aligned with
   `max_retries: 5`; exhausted messages move to the DLQ and its consumer records
@@ -74,7 +88,8 @@ authorized `downloadUrl`. Authorization is rechecked before any R2 read.
   current source version and adds the resumable one-time backfill ledger. It is
   required before deploying code that publishes thumbnail work.
 - Each current ready derivative is capped at 128 KiB. Account for one source
-  read and Images transformation, the derivative write and authorized serves,
+  read and Images transformation, plus one Media frame extraction for video,
+  the derivative write and authorized serves,
   Queue operations including retries, Worker CPU, D1 operations, and cleanup
   retries for retired source versions. Check current
   pricing and limits during rollout; this repository does not verify the
@@ -96,7 +111,8 @@ authorized `downloadUrl`. Authorization is rechecked before any R2 read.
    event queue. Do not add overlapping R2 notification rules.
 5. Deploy Operations, then Client, to staging. Upload a synthetic image and
    verify `pending -> ready`, one thumbnail object, and authorized original
-   streaming. Also test a synthetic invalid image and an input over 20 MiB.
+   streaming. Also test a synthetic invalid image, an image over 20 MiB, a
+   short H.264 MP4, a corrupt/non-H.264 MP4, and a video at the 100 MB boundary.
 6. Review Workers structured logs, failed/dead-letter rows, and cleanup-ledger
    failures before production rollout.
 
@@ -108,9 +124,11 @@ listing reads object metadata, not source bodies. The run skips folder markers,
 zero-byte and over-limit objects, unsupported media, unindexed or stale-index
 objects, active exact/prefix tombstones, and every path rejected by the normal
 canonical-source check (including `_ltds`, `.previews`, and `Dump` segments).
-PDFs, videos, archives, office documents, and other unsupported files are not
-queued. Eligible still-image extensions are AVIF, GIF, HEIC/HEIF, JPEG/JPG,
-PNG, and WebP when the extension or stored content type is supported. Checking
+PDFs, non-MP4 videos, archives, office documents, and other unsupported files
+are not queued. Eligible still-image extensions are AVIF, GIF, HEIC/HEIF,
+JPEG/JPG, PNG, and WebP when the extension or stored content type is supported.
+Eligible video requires both an `.mp4` extension and `video/mp4` stored content
+type and must be strictly below 100 MB. Checking
 an already-ready job may issue a metadata-only HEAD for its version-scoped
 derivative; it never opens the original during inventory.
 
@@ -205,8 +223,8 @@ Turnstile, quota, quarantine-bucket, and malware-scan flow; they cannot call or
 substitute for authenticated delivery upload routes.
 
 The browser first creates an upload intent with a 16-128 character
-`Idempotency-Key`, one root prefix, a `fail`, `rename`, or `replace` collision
-policy, and the full single-file or folder manifest. The application limits an
+`Idempotency-Key`, one root prefix, and the full single-file or folder manifest.
+There is no preselected or always-visible collision policy. The application limits an
 intent to 100 non-empty files, 500 GiB per file, 500 GiB aggregate, and ten
 active multipart sessions per staff identity. Intents and their sessions expire
 after 24 hours. Paths are normalized to Unicode NFC and must be relative
@@ -221,10 +239,14 @@ the existing intent; reusing that key for another manifest fails. Each file is
 uploaded in bounded parts to `_ltds/browser-uploads/` staging, with D1
 checkpoints exposed only through its owning same-origin session. Completion
 validates every part and the declared byte count, then conditionally publishes
-the final key. `fail` never overwrites, `rename` selects a non-conflicting name,
-and `replace` records whether the destination was absent or its exact R2 HTTP
-ETag when the session opens. Completion returns `409` if that baseline was
-created, deleted, or changed; only the verified baseline version can be copied
+the final key. When the Worker observes an actual conflict, either before staging
+or during the final conditional publication, it returns the structured
+`upload_destination_conflict` response and preserves any staged bytes. Only then
+does the UI warn the staff member and offer **Keep old** (skip), **Keep new**
+(ETag-CAS replace), or **Keep both** (safe conditional auto-rename). The selected
+resolution resumes the same intent/session idempotently; it is never an
+unconditional overwrite. Completion returns another structured conflict if the
+chosen baseline changes again. Only the verified baseline version can be copied
 to a seven-day private recovery object and conditionally replaced. Completion,
 cancel, and expiry first record durable staging cleanup work. The scheduler
 reclaims stale completion leases and retries multipart abort/object deletion
@@ -241,15 +263,25 @@ supported-thumbnail enqueue or unsupported-thumbnail cleanup lifecycle before
 the recovery is retired. Internal derived-artifact copies are not exposed as
 user-restorable recovery rows.
 
-Successful publication updates the same file index and sends the same
+Successful browser publication updates the same file index and sends the same
 ETag-scoped thumbnail job used by R2 create events and server-side uploads.
 Duplicate object-create delivery therefore converges on the same job. Folder
 uploads do not create a different indexing or thumbnail path. Replacement and
 later copy/move/rename/delete/trash/restore use the standard derivative
 retirement, cleanup, and conditional current-source rules. Trash immediately
 retires the derivative while retaining the hidden original; restore republishes
-only an eligible still image; retention purge cannot resurrect stale state. An
+only an eligible still image or MP4; retention purge cannot resurrect stale state. An
 old event or consumer can never make a replaced/deleted source version current.
+
+All other delivery writers converge through the existing private
+`client-data` object-create notification to `ltds-file-events`: TrueNAS/rclone,
+Dropbox multipart import, and any authorized server-side write. Copy, move, and
+browser publication additionally index/enqueue synchronously, so a duplicate
+notification is harmless. Preserve exactly one overlapping object-create rule;
+removing it would break Dropbox/TrueNAS automatic indexing and thumbnail work.
+Uploaders must preserve authoritative MIME metadata. In particular, MP4 must be
+stored as `video/mp4`; the Dropbox importer derives this from the final key, and
+TrueNAS/rclone must not replace it with `application/octet-stream`.
 
 Before enabling the flag, staging acceptance must cover a valid single file and
 folder; per-file/overall progress and partial error display; retry/resume;
@@ -257,7 +289,9 @@ duplicate completion; all collision policies; malicious relative paths; size,
 type, file-count, and active-session limits; Access reauthentication and
 revocation; cross-client/project and public/share denial; expired/cancelled
 staging cleanup; `pending -> ready`; replacement; delete/trash/restore/expiry;
-and absence of original fallback. Use synthetic content only.
+and absence of original fallback. Include a destination-created-during-completion
+race to prove the same staged parts resume without a second byte upload. Use
+synthetic content only.
 
 ### Cloudflare limits and cost gate
 
@@ -355,18 +389,19 @@ reviewed, recoverable cleanup plan that proves source ownership and version.
 
 ## Known limitations
 
-- Only supported still-image inputs at or below the implementation's 20 MiB cap
-  receive real thumbnails. PDF, video, archives, office documents, and unknown
-  files use local generic icons.
-- Video thumbnails, poster extraction, and new video transcoding are disabled
-  for this release. Existing originals remain available only through authorized
-  activation routes. `thumbnailFallbackKind: "video"` deliberately
-  remains presentation-only so a future separately authorized adaptive-video
-  contract can be added without changing the fallback enum. This change does
-  not create or expand any video processing path.
-- Queue and Images unit tests use synthetic mocks; a non-production Cloudflare
-  staging smoke test is still required to validate account entitlement and real
-  decoder behavior.
+- Supported still images and eligible MP4 videos receive real thumbnails. PDF,
+  non-MP4 video, archives, office documents, and unknown files use local generic
+  icons. MP4 files that are not H.264 or exceed ten minutes are expected to be
+  rejected by Cloudflare and end in failed icon fallback.
+- Frame extraction requests `5s`. Cloudflare does not document an error code
+  that distinguishes a short clip from entitlement, quota, decoder, or service
+  failures, so the Worker does not broadly retry failures at `0s`. Short clips
+  succeed if the service clamps the requested time; otherwise bounded queue
+  retries end in failed fallback. Add an early-frame retry only after Cloudflare
+  publishes a stable, testable out-of-range signal.
+- Queue, Images, and Media unit tests use synthetic mocks; a non-production
+  remote Cloudflare staging smoke test is still required to validate binding
+  entitlement, short-clip behavior, and real decoder behavior.
 - Pending, failed, and unsupported items render a local file-type placeholder;
   a failed thumbnail request never switches to the original or a public asset.
 - Legacy prepared-artifact tables and readers are retained for rollback and

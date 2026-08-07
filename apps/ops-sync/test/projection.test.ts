@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { Miniflare } from "miniflare";
-import { applyEntitlementEvent, applyProjectionEvent, completeEvent } from "../src/projection";
+import { applyEntitlementEvent, applyProjectionEvent, completeEvent, recordAccessFailure } from "../src/projection";
 import type { EntitlementEvent, Env, ProjectionEvent } from "../src/types";
 
 let miniflare: Miniflare;
@@ -37,7 +37,7 @@ describe("entitlement projection",()=>{
   beforeEach(async()=>{
     miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await miniflare.getD1Database("OPS_DB") as D1Database;
-    for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql","0007_pa_projection_fingerprints.sql","0008_project_units_task_assignments.sql","0009_project_managers.sql","0016_projection_entity_leases.sql"]){
+    for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql","0007_pa_projection_fingerprints.sql","0008_project_units_task_assignments.sql","0009_project_managers.sql","0016_projection_entity_leases.sql","0021_project_alpha_sync_hardening.sql"]){
       const sql=await readFile(resolve(import.meta.dirname,"../../operations/migrations",migration),"utf8");
       for(const statement of sql.replace(/\r\n/g,"\n").split(";").map((part)=>part.trim()).filter((part)=>part && !part.startsWith("PRAGMA foreign_keys"))){
         await db.prepare(statement).run();
@@ -64,6 +64,15 @@ describe("entitlement projection",()=>{
     expect(await db.prepare("SELECT count(*) AS total FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first("total")).toBe(0);
   });
 
+  it("preserves a per-event Access failure when projection completion is acknowledged",async()=>{
+    const grant=event();
+    await applyEntitlementEvent(env(),grant,"access-pending");
+    await recordAccessFailure(env(),grant.event_id,"access-group-update-503");
+    await completeEvent(env(),grant,true);
+    expect(await db.prepare("SELECT status FROM integration_event_receipts WHERE event_id=?").bind(grant.event_id).first("status")).toBe("completed");
+    expect(await db.prepare("SELECT last_error FROM integration_event_receipts WHERE event_id=?").bind(grant.event_id).first("last_error")).toBe("access-group-update-503");
+  });
+
   it("maps PA administrators to immutable global admin access",async()=>{
     const admin=event({entitlement:{application_key:"ltds_ops",enabled:true,role_key:"role-admin",business_unit_ids:["30"]}});
     await expect(applyEntitlementEvent(env(),admin,"admin-hash")).resolves.toBe("applied");
@@ -73,15 +82,16 @@ describe("entitlement projection",()=>{
     expect(await db.prepare("SELECT count(*) AS total FROM staff_divisions WHERE staff_id='staff-pa-42'").first("total")).toBe(0);
   });
 
-  it("assigns PA division manager roles to division-scoped access when divisions exist",async()=>{
+  it("reduces non-admin PA entitlement labels to assigned-only operator access",async()=>{
     const legacy=event({entitlement:{application_key:"ltds_ops",enabled:true,role_key:"role-division-manager",business_unit_ids:["30"]}});
     await expect(applyEntitlementEvent(env(),legacy,"legacy-hash")).resolves.toBe("applied");
-    const assignment=await db.prepare("SELECT role_id,scope,division_id FROM staff_role_assignments WHERE staff_id='staff-pa-42' AND role_id='role-division-manager'").first<{role_id:string;scope:string;division_id:string|null}>();
+    const assignment=await db.prepare("SELECT role_id,scope,division_id FROM staff_role_assignments WHERE staff_id='staff-pa-42'").first<{role_id:string;scope:string;division_id:string|null}>();
     expect(assignment).toBeTruthy();
-    expect(assignment!.role_id).toBe("role-division-manager");
+    expect(assignment!.role_id).toBe("role-operator");
+    expect(assignment!.scope).toBe("assigned");
     expect(await db.prepare("SELECT role_key FROM pa_application_entitlements WHERE user_id='42'").first("role_key")).toBe("role-division-manager");
     const divisions=await db.prepare("SELECT count(*) AS total FROM staff_divisions WHERE staff_id='staff-pa-42'").first<{total:number}>();
-    expect(divisions!.total).toBeGreaterThanOrEqual(0);
+    expect(divisions!.total).toBe(0);
   });
 
   it("ignores older events and never changes the protected Owner",async()=>{
@@ -188,7 +198,7 @@ describe("entitlement projection",()=>{
     const olderRun=applyProjectionEvent(env(delivery),older,"older-client-hash");
     await portalWriteStarted;
     try {
-      await expect(applyProjectionEvent(env(delivery),newer,"newer-client-hash")).rejects.toThrow("projection-entity-busy");
+      await expect(applyProjectionEvent(env(delivery),newer,"newer-client-hash")).rejects.toThrow("projection-global-busy");
     } finally {
       releasePortalWrite();
       await olderRun;

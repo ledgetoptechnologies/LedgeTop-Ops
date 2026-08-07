@@ -103,6 +103,9 @@ function setup() {
   ops.exec(`
     PRAGMA foreign_keys=ON;
     CREATE TABLE staff_users(id TEXT PRIMARY KEY,email TEXT NOT NULL,display_name TEXT NOT NULL,project_alpha_user_id TEXT UNIQUE);
+    CREATE TABLE permissions(key TEXT PRIMARY KEY,description TEXT NOT NULL);
+    CREATE TABLE roles(id TEXT PRIMARY KEY);
+    CREATE TABLE role_permissions(role_id TEXT NOT NULL,permission_key TEXT NOT NULL,PRIMARY KEY(role_id,permission_key),FOREIGN KEY(role_id) REFERENCES roles(id),FOREIGN KEY(permission_key) REFERENCES permissions(key));
     CREATE TABLE divisions(id TEXT PRIMARY KEY,project_alpha_business_unit_id TEXT UNIQUE);
     CREATE TABLE pa_operations(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,business_unit_id TEXT,title TEXT NOT NULL,status TEXT NOT NULL,scheduled_start_at TEXT,scheduled_end_at TEXT,location TEXT,active INTEGER NOT NULL);
     CREATE TABLE pa_operation_assignments(operation_id TEXT,user_id TEXT,active INTEGER NOT NULL,PRIMARY KEY(operation_id,user_id));
@@ -110,6 +113,7 @@ function setup() {
     CREATE TABLE audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT,actor_type TEXT,actor_id TEXT,actor_email TEXT,actor_display_name TEXT,action TEXT,entity_type TEXT,entity_id TEXT,division_id TEXT,details_json TEXT,client_address_hash TEXT,created_at TEXT DEFAULT(datetime('now')));
   `);
   ops.exec(readFileSync(new URL("../migrations/0017_operational_job_briefs.sql", import.meta.url), "utf8"));
+  ops.exec(readFileSync(new URL("../migrations/0020_internal_sop_library.sql", import.meta.url), "utf8"));
   const insertStaff = ops.prepare("INSERT INTO staff_users VALUES (?,?,?,?)");
   for (const value of Object.values(principals)) insertStaff.run(value.id, value.email, value.displayName, value.projectAlphaUserId);
   ops.prepare("INSERT INTO divisions VALUES (?,?)").run("division-flight", "unit-flight");
@@ -372,5 +376,76 @@ describe("operational job brief routes", () => {
     state.setObjectEtag(state.projectKml, '"changed-etag"');
     const changedProject = await worker.fetch(request(projectContentUrl, "pilot"), state.env, executionCtx);
     expect(changedProject.status).toBe(409);
+  });
+
+  it("pins published SOP revisions to an authorized job and preserves them after archival", async () => {
+    const state = setup();
+    const sopId = "00000000-0000-4000-8000-000000000010";
+    const revisionId = "00000000-0000-4000-8000-000000000011";
+    state.ops.prepare(`INSERT INTO sop_documents
+      (id,slug,status,version,created_by,updated_by) VALUES (?,?,'draft',1,?,?)`)
+      .run(sopId, "mapping-flight", principals.admin.id, principals.admin.id);
+    state.ops.prepare(`INSERT INTO sop_revisions
+      (id,sop_id,revision_number,parent_revision_id,change_kind,title,purpose,markdown_body,
+        rendered_html,toc_json,sanitizer_version,author_id,author_email,author_display_name,published_at)
+      VALUES (?,?,1,NULL,'published','Mapping flight','Standard mapping capture','## Capture\nUse 80/75 overlap.',
+        '<h2 id="sop-heading-capture">Capture</h2><p>Use 80/75 overlap.</p>',?,1,?,?,?,datetime('now'))`)
+      .run(revisionId, sopId, JSON.stringify([{ id: "sop-heading-capture", level: 2, text: "Capture" }]),
+        principals.admin.id, principals.admin.email, principals.admin.displayName);
+    state.ops.prepare(`UPDATE sop_documents SET status='published',published_revision_id=?,
+      published_at=datetime('now') WHERE id=?`).run(revisionId, sopId);
+
+    const seed = await worker.fetch(request("/api/operations/operation-1/job-brief", "admin", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 0, items: [] }),
+    }), state.env, executionCtx);
+    expect(seed.status).toBe(200);
+
+    const linked = await worker.fetch(request("/api/operations/operation-1/job-brief/sops", "admin", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 1, revisionIds: [revisionId] }),
+    }), state.env, executionCtx);
+    expect(linked.status).toBe(200);
+    expect((await linked.json() as any).brief.sops[0]).toMatchObject({
+      sopId,
+      revisionId,
+      revisionNumber: 1,
+      title: "Mapping flight",
+    });
+
+    const snapshot = state.ops.prepare(
+      "SELECT snapshot_json FROM operational_job_brief_revisions WHERE operation_id=? AND version=2",
+    ).get("operation-1") as { snapshot_json: string };
+    expect(JSON.parse(snapshot.snapshot_json).sops[0].revisionId).toBe(revisionId);
+
+    state.ops.prepare(`UPDATE sop_documents SET status='archived',version=version+1,
+      archived_at=datetime('now') WHERE id=?`).run(sopId);
+    const pilot = await worker.fetch(
+      request("/api/operations/operation-1/job-brief", "pilot"),
+      state.env,
+      executionCtx,
+    );
+    expect(pilot.status).toBe(200);
+    expect((await pilot.json() as any).brief.sops[0]).toMatchObject({
+      revisionId,
+      html: expect.stringContaining("80/75 overlap"),
+    });
+    expect((await worker.fetch(
+      request("/api/operations/operation-1/job-brief", "unrelated"),
+      state.env,
+      executionCtx,
+    )).status).toBe(404);
+
+    const secondSeed = await worker.fetch(request("/api/operations/operation-2/job-brief", "admin", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 0, items: [] }),
+    }), state.env, executionCtx);
+    expect(secondSeed.status).toBe(200);
+    const archivedLink = await worker.fetch(request("/api/operations/operation-2/job-brief/sops", "admin", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 1, revisionIds: [revisionId] }),
+    }), state.env, executionCtx);
+    expect(archivedLink.status).toBe(409);
+    expect(state.ops.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
   });
 });

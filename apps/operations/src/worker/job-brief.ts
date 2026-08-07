@@ -49,6 +49,13 @@ const referenceSchema = z
     displayName: z.string().trim().min(1).max(255).optional(),
   })
   .strict();
+const sopLinksSchema = z.object({
+  expectedVersion: z.number().int().min(0),
+  revisionIds: z.array(z.string().uuid()).max(20),
+}).strict().superRefine((value, context) => {
+  if (new Set(value.revisionIds).size !== value.revisionIds.length)
+    context.addIssue({ code: "custom", message: "SOP revision IDs must be unique" });
+});
 const storedScopeItemSchema = scopeItemSchema.extend({
   sortOrder: z.number().int().min(0),
   presetRef: z.string().trim().min(1).max(128).nullable(),
@@ -57,6 +64,8 @@ const storedSnapshotSchema = z.object({
   schemaVersion: z.literal(1),
   items: z.array(storedScopeItemSchema).max(50),
   attachments: z.array(z.unknown()).max(500),
+  sops: z.array(z.unknown()).max(20).optional(),
+  mutationId: z.string().uuid().optional(),
 });
 
 export interface JobBriefScopeItem {
@@ -72,6 +81,8 @@ interface BriefSnapshot {
   schemaVersion: 1;
   items: JobBriefScopeItem[];
   attachments: AttachmentDto[];
+  sops: SopLinkDto[];
+  mutationId: string;
 }
 
 interface OperationRow {
@@ -145,6 +156,35 @@ interface NewAttachment {
   contentType: string;
   size: number;
   etag: string;
+}
+
+interface SopLinkRow {
+  sop_id: string;
+  revision_id: string;
+  linked_at: string;
+  revision_number: number;
+  slug: string;
+  title: string;
+  purpose: string;
+  rendered_html: string;
+  toc_json: string;
+  author_id: string;
+  author_display_name: string;
+  published_at: string;
+}
+
+interface SopLinkDto {
+  sopId: string;
+  revisionId: string;
+  revisionNumber: number;
+  slug: string;
+  title: string;
+  purpose: string;
+  html: string;
+  toc: Array<{ id: string; level: number; text: string }>;
+  author: { id: string; displayName: string };
+  publishedAt: string;
+  linkedAt: string;
 }
 
 function parseJsonBody<T>(value: unknown, schema: z.ZodType<T>): T {
@@ -228,11 +268,36 @@ function parseSnapshot(value: string): BriefSnapshot {
         schemaVersion: 1,
         items: parsed.data.items,
         attachments: [],
+        sops: [],
+        mutationId: parsed.data.mutationId || crypto.randomUUID(),
       };
   } catch {
     // The generic error handler logs corrupted persisted state without leaking it.
   }
   throw new Error("Operational job brief snapshot is invalid");
+}
+
+function sopLinkDto(row: SopLinkRow): SopLinkDto {
+  let toc: SopLinkDto["toc"];
+  try {
+    toc = JSON.parse(row.toc_json) as SopLinkDto["toc"];
+    if (!Array.isArray(toc)) throw new Error("invalid TOC");
+  } catch {
+    throw new Error("Linked SOP table of contents is invalid");
+  }
+  return {
+    sopId: row.sop_id,
+    revisionId: row.revision_id,
+    revisionNumber: row.revision_number,
+    slug: row.slug,
+    title: row.title,
+    purpose: row.purpose,
+    html: row.rendered_html,
+    toc,
+    author: { id: row.author_id, displayName: row.author_display_name },
+    publishedAt: row.published_at,
+    linkedAt: row.linked_at,
+  };
 }
 
 function attachmentDto(operationId: string, row: AttachmentRow): AttachmentDto {
@@ -270,13 +335,26 @@ async function loadAttachments(env: Env, operationId: string): Promise<Attachmen
   return result.results;
 }
 
+async function loadLinkedSops(env: Env, operationId: string): Promise<SopLinkRow[]> {
+  const result = await env.OPS_DB.withSession("first-primary")
+    .prepare(`SELECT l.sop_id,l.revision_id,l.linked_at,r.revision_number,d.slug,r.title,r.purpose,
+      r.rendered_html,r.toc_json,r.author_id,r.author_display_name,r.published_at
+      FROM operational_job_brief_sop_links l
+      JOIN sop_documents d ON d.id=l.sop_id
+      JOIN sop_revisions r ON r.id=l.revision_id AND r.sop_id=l.sop_id
+      WHERE l.operation_id=? ORDER BY r.title COLLATE NOCASE,r.id`)
+    .bind(operationId)
+    .all<SopLinkRow>();
+  return result.results;
+}
+
 async function loadBrief(
   env: Env,
   principal: StaffPrincipal,
   operation: OperationRow,
 ) {
   const session = env.OPS_DB.withSession("first-primary");
-  const results = await session.batch<BriefRow | AttachmentRow | RevisionRow>([
+  const results = await session.batch<BriefRow | AttachmentRow | RevisionRow | SopLinkRow>([
     session.prepare(
         `SELECT b.operation_id,b.version,b.snapshot_json,b.created_at,b.updated_at,b.updated_by,s.display_name updated_by_name,s.email updated_by_email
          FROM operational_job_briefs b JOIN staff_users s ON s.id=b.updated_by
@@ -294,11 +372,21 @@ async function loadBrief(
          FROM operational_job_brief_revisions WHERE operation_id=? ORDER BY version DESC LIMIT 100`,
       )
       .bind(operation.id),
+    session.prepare(
+        `SELECT l.sop_id,l.revision_id,l.linked_at,r.revision_number,d.slug,r.title,r.purpose,
+          r.rendered_html,r.toc_json,r.author_id,r.author_display_name,r.published_at
+         FROM operational_job_brief_sop_links l
+         JOIN sop_documents d ON d.id=l.sop_id
+         JOIN sop_revisions r ON r.id=l.revision_id AND r.sop_id=l.sop_id
+         WHERE l.operation_id=? ORDER BY r.title COLLATE NOCASE,r.id`,
+      )
+      .bind(operation.id),
   ]);
-  const briefResult = results[0]!, attachments = results[1]!, revisions = results[2]!;
+  const briefResult = results[0]!, attachments = results[1]!, revisions = results[2]!, sops = results[3]!;
   const row = briefResult.results.find((value): value is BriefRow => "snapshot_json" in value);
   const attachmentRows = attachments.results.filter((value): value is AttachmentRow => "object_key" in value);
   const revisionRows = revisions.results.filter((value): value is RevisionRow => "change_kind" in value);
+  const sopRows = sops.results.filter((value): value is SopLinkRow => "revision_id" in value);
   const canEdit = await hasPermission(
     env,
     principal,
@@ -325,6 +413,7 @@ async function loadBrief(
           version: row.version,
           items: parseSnapshot(row.snapshot_json).items,
           attachments: attachmentRows.map(item => attachmentDto(operation.id, item)),
+          sops: sopRows.map(sopLinkDto),
           createdAt: row.created_at,
           updatedAt: row.updated_at,
           updatedBy: {
@@ -346,8 +435,8 @@ async function loadBrief(
   };
 }
 
-function snapshot(items: JobBriefScopeItem[], attachments: AttachmentDto[]): BriefSnapshot {
-  return { schemaVersion: 1, items, attachments };
+function snapshot(items: JobBriefScopeItem[], attachments: AttachmentDto[], sops: SopLinkDto[]): BriefSnapshot {
+  return { schemaVersion: 1, items, attachments, sops, mutationId: crypto.randomUUID() };
 }
 
 async function mutationStatements(
@@ -424,6 +513,7 @@ async function mutationStatements(
         version,
         itemCount: nextSnapshot.items.length,
         attachmentCount: nextSnapshot.attachments.length,
+        sopCount: nextSnapshot.sops.length,
         attachmentId: attachment?.id || null,
         attachmentSource: attachment?.sourceKind || null,
       }),
@@ -441,6 +531,7 @@ async function saveScope(
   value: z.infer<typeof saveBriefSchema>,
 ): Promise<boolean> {
   const attachments = await loadAttachments(env, operation.id);
+  const sops = await loadLinkedSops(env, operation.id);
   const items = value.items.map((item, sortOrder) => ({
     ...item,
     sortOrder,
@@ -449,6 +540,7 @@ async function saveScope(
   const nextSnapshot = snapshot(
     items,
     attachments.map(item => attachmentDto(operation.id, item)),
+    sops.map(sopLinkDto),
   );
   const results = await env.OPS_DB.batch(
     await mutationStatements(
@@ -479,6 +571,7 @@ async function addAttachment(
   if (expectedVersion > 0 && !current) return false;
   const items = current ? parseSnapshot(current.snapshot_json).items : [];
   const attachments = await loadAttachments(env, operation.id);
+  const sops = await loadLinkedSops(env, operation.id);
   const addedRow: AttachmentRow = {
     id: attachment.id,
     operation_id: operation.id,
@@ -496,7 +589,7 @@ async function addAttachment(
   const nextSnapshot = snapshot(items, [
     ...attachments.map(item => attachmentDto(operation.id, item)),
     attachmentDto(operation.id, addedRow),
-  ]);
+  ], sops.map(sopLinkDto));
   const results = await env.OPS_DB.batch(
     await mutationStatements(
       env,
@@ -510,6 +603,84 @@ async function addAttachment(
     ),
   );
   return Boolean(results[0]?.meta.changes);
+}
+
+async function replaceSopLinks(
+  env: Env,
+  request: Request,
+  principal: StaffPrincipal,
+  operation: OperationRow,
+  value: z.infer<typeof sopLinksSchema>,
+): Promise<boolean> {
+  const current = await env.OPS_DB.withSession("first-primary")
+    .prepare("SELECT snapshot_json FROM operational_job_briefs WHERE operation_id=? AND version=?")
+    .bind(operation.id, value.expectedVersion)
+    .first<{ snapshot_json: string }>();
+  if (value.expectedVersion > 0 && !current) return false;
+  const selected = value.revisionIds.length
+    ? await env.OPS_DB.withSession("first-primary")
+        .prepare(`SELECT d.id sop_id,r.id revision_id,datetime('now') linked_at,r.revision_number,d.slug,
+          r.title,r.purpose,r.rendered_html,r.toc_json,r.author_id,r.author_display_name,r.published_at
+          FROM sop_documents d JOIN sop_revisions r ON r.id=d.published_revision_id
+          WHERE d.status='published' AND r.id IN (${value.revisionIds.map(() => "?").join(",")})`)
+        .bind(...value.revisionIds)
+        .all<SopLinkRow>()
+    : { results: [] as SopLinkRow[] };
+  if (selected.results.length !== value.revisionIds.length)
+    throw new HTTPException(409, {
+      message: "Every linked SOP must be its current published revision",
+    });
+
+  const items = current ? parseSnapshot(current.snapshot_json).items : [];
+  const attachments = await loadAttachments(env, operation.id);
+  const sops = selected.results.map(sopLinkDto);
+  const nextSnapshot = snapshot(
+    items,
+    attachments.map(item => attachmentDto(operation.id, item)),
+    sops,
+  );
+  const snapshotJson = JSON.stringify(nextSnapshot);
+  const statements = await mutationStatements(
+    env,
+    request,
+    principal,
+    operation,
+    value.expectedVersion,
+    nextSnapshot,
+    "scope_saved",
+  );
+  statements.push(
+    env.OPS_DB.prepare(`DELETE FROM operational_job_brief_sop_links
+      WHERE operation_id=? AND EXISTS (SELECT 1 FROM operational_job_briefs
+        WHERE operation_id=? AND version=? AND snapshot_json=?)`)
+      .bind(operation.id, operation.id, value.expectedVersion + 1, snapshotJson),
+  );
+  for (const row of selected.results)
+    statements.push(
+      env.OPS_DB.prepare(`INSERT INTO operational_job_brief_sop_links
+        (operation_id,sop_id,revision_id,linked_by)
+        SELECT ?,?,?,? WHERE EXISTS (SELECT 1 FROM operational_job_briefs
+          WHERE operation_id=? AND version=? AND snapshot_json=?)`)
+        .bind(
+          operation.id,
+          row.sop_id,
+          row.revision_id,
+          principal.id,
+          operation.id,
+          value.expectedVersion + 1,
+          snapshotJson,
+        ),
+    );
+  try {
+    const results = await env.OPS_DB.batch(statements);
+    return Boolean(results[0]?.meta.changes);
+  } catch (error) {
+    if (error instanceof Error && /current published SOP revision|UNIQUE constraint/i.test(error.message))
+      throw new HTTPException(409, {
+        message: "The published SOP selection changed. Refresh and try again.",
+      });
+    throw error;
+  }
 }
 
 function safeFileName(value: string): string {
@@ -586,6 +757,21 @@ export function registerJobBriefRoutes(app: App): void {
     await requireEdit(c.env, principal, operation);
     const value = await jsonBody(c, saveBriefSchema);
     if (!(await saveScope(c.env, c.req.raw, principal, operation, value)))
+      return conflict(c, await currentVersion(c.env, operation.id));
+    return c.json(await loadBrief(c.env, principal, operation));
+  });
+
+  app.put("/api/operations/:id/job-brief/sops", async c => {
+    const principal = c.get("principal");
+    const operation = await visibleOperation(
+      c.env,
+      principal,
+      c.get("administrator"),
+      c.req.param("id"),
+    );
+    await requireEdit(c.env, principal, operation);
+    const value = await jsonBody(c, sopLinksSchema);
+    if (!(await replaceSopLinks(c.env, c.req.raw, principal, operation, value)))
       return conflict(c, await currentVersion(c.env, operation.id));
     return c.json(await loadBrief(c.env, principal, operation));
   });

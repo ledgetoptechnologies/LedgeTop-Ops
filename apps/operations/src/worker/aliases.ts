@@ -1,5 +1,6 @@
 import { HTTPException } from "hono/http-exception";
 import type { Env, StaffPrincipal } from "./types";
+import { isMovedSourceMarker } from "@ltds/shared";
 
 const CONTROL = /[\0-\x1f\x7f]/;
 
@@ -32,10 +33,15 @@ export function normalizeAliasKey(value: string): string {
 
 export async function resolveAliasKey(env: Env, value: string): Promise<string> {
   const key = normalizeAliasKey(value).replace(/\/$/, "");
-  if (await env.DATA_BUCKET.head(key)) return key;
+  const head=await env.DATA_BUCKET.head(key);
+  if (head&&!isMovedSourceMarker(head)) return key;
   const folder = `${key}/`;
-  const listed = await env.DATA_BUCKET.list({ prefix: folder, limit: 1 });
-  if (listed.objects.length || listed.delimitedPrefixes.length) return folder;
+  let cursor:string|undefined;
+  do{
+    const listed=await env.DATA_BUCKET.list({prefix:folder,limit:1000,cursor,include:["customMetadata"]});
+    if(listed.objects.some(object=>!isMovedSourceMarker(object))||listed.delimitedPrefixes.length)return folder;
+    cursor=listed.truncated?listed.cursor:undefined;
+  }while(cursor);
   throw new HTTPException(404, { message: "File or folder not found" });
 }
 

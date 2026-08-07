@@ -1,4 +1,5 @@
 import { requestJson } from "./bulk-download";
+import type { DeliveryLocationCollection } from "@ltds/shared";
 
 export interface PortalCapabilities {
   manageTeam: boolean;
@@ -183,6 +184,21 @@ export async function loadPortalPastDeliveries(
 ): Promise<PortalFilePage> {
   const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
   return request<PortalFilePage>(`/api/client/past-deliveries${query}`);
+}
+
+export async function loadPortalProjectFileLocations(
+  projectId: string,
+  request: PortalRequest = requestJson,
+): Promise<DeliveryLocationCollection> {
+  return request<DeliveryLocationCollection>(
+    `/api/client/projects/${encodeURIComponent(projectId)}/file-locations`,
+  );
+}
+
+export async function loadPortalPastDeliveryLocations(
+  request: PortalRequest = requestJson,
+): Promise<DeliveryLocationCollection> {
+  return request<DeliveryLocationCollection>("/api/client/past-delivery-locations");
 }
 
 export async function createPortalServiceRequest(

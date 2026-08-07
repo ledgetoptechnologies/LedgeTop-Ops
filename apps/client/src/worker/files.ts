@@ -1,4 +1,5 @@
 import { HTTPException } from "hono/http-exception";
+import { isMovedSourceMarker } from "@ltds/shared";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -64,7 +65,7 @@ export function isHiddenKey(key: string): boolean {
 }
 
 export interface VisibleContentBucket {
-  list(options:{prefix:string;delimiter:"/";limit:number;cursor?:string}):Promise<{objects:Array<{key:string}>;delimitedPrefixes:string[];truncated:boolean;cursor?:string}>;
+  list(options:{prefix:string;delimiter:"/";limit:number;cursor?:string;include?:Array<"customMetadata">}):Promise<{objects:Array<{key:string;customMetadata?:Record<string,string>}>;delimitedPrefixes:string[];truncated:boolean;cursor?:string}>;
 }
 
 export async function prefixHasVisibleContent(bucket: VisibleContentBucket, rootValue: string): Promise<boolean> {
@@ -77,13 +78,27 @@ export async function prefixHasVisibleContent(bucket: VisibleContentBucket, root
     visited.add(directory);
     let cursor: string | undefined;
     do {
-      const listed = await bucket.list({ prefix: directory, delimiter: "/", limit: 1000, cursor });
-      if (listed.objects.some(object => object.key !== directory && !object.key.endsWith("/") && !isHiddenKey(object.key))) return true;
+      const listed = await bucket.list({ prefix: directory, delimiter: "/", limit: 1000, cursor, include:["customMetadata"] });
+      if (listed.objects.some(object => object.key !== directory && !object.key.endsWith("/") && !isHiddenKey(object.key) && !isMovedSourceMarker(object))) return true;
       for (const child of listed.delimitedPrefixes) if (!isHiddenKey(child)) pending.push(child);
       cursor = listed.truncated ? listed.cursor : undefined;
     } while (cursor);
   }
   return false;
+}
+
+/** Scans each descendant directory at most once and avoids per-folder fan-out. */
+export async function visibleImmediateChildPrefixes(bucket:VisibleContentBucket,rootValue:string,candidates:readonly string[]):Promise<Set<string>>{
+  const root=normalizeRoot(rootValue),allowed=new Set(candidates),visible=new Set<string>();
+  const pending=candidates.filter(value=>value.startsWith(root)).map(value=>({directory:value,child:value}));
+  const visited=new Set<string>();
+  while(pending.length){const item=pending.shift()!;if(visible.has(item.child)||visited.has(item.directory)||isHiddenKey(item.directory))continue;visited.add(item.directory);let cursor:string|undefined;do{
+    const listed=await bucket.list({prefix:item.directory,delimiter:"/",limit:1000,cursor,include:["customMetadata"]});
+    if(listed.objects.some(object=>object.key!==item.directory&&!object.key.endsWith("/")&&!isHiddenKey(object.key)&&!isMovedSourceMarker(object))){visible.add(item.child);break;}
+    for(const child of listed.delimitedPrefixes)if(!isHiddenKey(child))pending.push({directory:child,child:item.child});
+    cursor=listed.truncated?listed.cursor:undefined;
+  }while(cursor);}
+  return new Set([...visible].filter(value=>allowed.has(value)));
 }
 
 function extension(key: string): string { const name = key.split("/").pop() || ""; return name.includes(".") ? (name.split(".").pop() || "").toLowerCase() : ""; }

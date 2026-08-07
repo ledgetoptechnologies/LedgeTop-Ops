@@ -25,6 +25,28 @@ interface Attachment {
   contentUrl: string;
 }
 
+interface LinkedSop {
+  sopId: string;
+  revisionId: string;
+  revisionNumber: number;
+  slug: string;
+  title: string;
+  purpose: string;
+  html: string;
+  toc: Array<{ id: string; level: number; text: string }>;
+  author: { id: string; displayName: string };
+  publishedAt: string;
+  linkedAt: string;
+}
+
+interface PublishedSopSummary {
+  id: string;
+  title: string;
+  purpose: string;
+  publishedRevisionId: string;
+  publishedRevisionNumber: number;
+}
+
 interface JobBriefResponse {
   operation: {
     id: string;
@@ -39,6 +61,7 @@ interface JobBriefResponse {
     version: number;
     items: ScopeItem[];
     attachments: Attachment[];
+    sops?: LinkedSop[];
     createdAt: string;
     updatedAt: string;
     updatedBy: { id: string; displayName: string };
@@ -94,6 +117,9 @@ export function JobBriefPanel({
   const [busy, setBusy] = useState(false);
   const [file, setFile] = useState<File | null>(null);
   const [projectKey, setProjectKey] = useState("");
+  const [publishedSops, setPublishedSops] = useState<PublishedSopSummary[]>([]);
+  const [sopSelection, setSopSelection] = useState<string[]>([]);
+  const [sopDirty, setSopDirty] = useState(false);
 
   const load = useCallback(async (replaceDraft = false) => {
     try {
@@ -111,18 +137,27 @@ export function JobBriefPanel({
       });
       if (!dirty || replaceDraft) {
         setItems(editableItems(value));
+        setSopSelection(value.brief?.sops?.map(sop => sop.revisionId) || []);
         setDirty(false);
+        setSopDirty(false);
         if (replaceDraft) setNotice("");
       }
       setError("");
     } catch (caught) {
       setError((caught as Error).message);
     }
-  }, [operationId, dirty]);
+  }, [operationId, dirty, sopDirty]);
 
   useEffect(() => {
-    onDirtyChange?.(dirty);
-  }, [dirty, onDirtyChange]);
+    if (!data?.canEdit) return;
+    void api<{ sops: PublishedSopSummary[] }>("/api/sops")
+      .then(value => setPublishedSops(value.sops))
+      .catch(caught => setError((caught as Error).message));
+  }, [data?.canEdit]);
+
+  useEffect(() => {
+    onDirtyChange?.(dirty || sopDirty);
+  }, [dirty, sopDirty, onDirtyChange]);
 
   useEffect(() => {
     void load();
@@ -144,7 +179,9 @@ export function JobBriefPanel({
   const accept = (value: JobBriefResponse, message: string) => {
     setData(value);
     setItems(editableItems(value));
+    setSopSelection(value.brief?.sops?.map(sop => sop.revisionId) || []);
     setDirty(false);
+    setSopDirty(false);
     setError("");
     setNotice(message);
   };
@@ -330,6 +367,73 @@ export function JobBriefPanel({
             title="Brief not published yet"
             detail="Operations has not added scope instructions for this job."
           />
+        )}
+      </section>
+
+      <section className="job-brief-section" aria-labelledby="job-brief-sops-heading">
+        <div className="job-brief-section-heading">
+          <div>
+            <h3 id="job-brief-sops-heading">Linked standard operating procedures</h3>
+            <small>Each link is pinned to the exact published revision shown here.</small>
+          </div>
+        </div>
+        {data.brief?.sops?.length ? (
+          <div className="job-brief-sops">
+            {data.brief.sops.map(sop => (
+              <details key={sop.revisionId} className="job-brief-sop">
+                <summary>
+                  <span><strong>{sop.title}</strong><small>Revision {sop.revisionNumber} · published {date(sop.publishedAt)}</small></span>
+                  <span>{sop.purpose}</span>
+                </summary>
+                <article className="sop-content" dangerouslySetInnerHTML={{ __html: sop.html }} />
+              </details>
+            ))}
+          </div>
+        ) : (
+          <p className="muted">No SOP revisions are linked to this job.</p>
+        )}
+        {data.canEdit && (
+          <div className="job-brief-sop-selector">
+            <fieldset disabled={busy || dirty}>
+              <legend>Published SOP revisions available to this job</legend>
+              {publishedSops.length ? publishedSops.map(sop => (
+                <label key={sop.publishedRevisionId}>
+                  <input
+                    type="checkbox"
+                    checked={sopSelection.includes(sop.publishedRevisionId)}
+                    onChange={event => {
+                      setSopSelection(current => event.target.checked
+                        ? [...current, sop.publishedRevisionId]
+                        : current.filter(id => id !== sop.publishedRevisionId));
+                      setSopDirty(true);
+                    }}
+                  />
+                  <span><strong>{sop.title}</strong><small>Revision {sop.publishedRevisionNumber} · {sop.purpose}</small></span>
+                </label>
+              )) : <small>No published SOPs are available.</small>}
+            </fieldset>
+            <button
+              className="button-orange button-small"
+              disabled={busy || dirty || !sopDirty}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  const value = await api<JobBriefResponse>(
+                    `/api/operations/${encodeURIComponent(operationId)}/job-brief/sops`,
+                    { method: "PUT", body: JSON.stringify({ expectedVersion: version, revisionIds: sopSelection }) },
+                  );
+                  accept(value, `Saved linked SOPs in job brief version ${value.brief?.version}.`);
+                } catch (caught) {
+                  mutationError(caught);
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Save SOP links
+            </button>
+            {dirty && <small>Save or refresh the scope draft before changing SOP links.</small>}
+          </div>
         )}
       </section>
 

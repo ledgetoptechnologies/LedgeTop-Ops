@@ -1,4 +1,5 @@
 import { HTTPException } from "hono/http-exception";
+import { isMovedSourceMarker } from "@ltds/shared";
 import { mediaKind, mime } from "./delivery";
 
 type ByteRange={offset:number;length:number};
@@ -6,6 +7,7 @@ type ByteRange={offset:number;length:number};
 interface SourceObjectHead{
   size:number;
   httpEtag:string;
+  customMetadata?:Record<string,string>;
 }
 
 interface SourceObjectBody{
@@ -51,7 +53,7 @@ export async function serveSourceFile(
   expectedEtag?:string,
 ):Promise<Response>{
   const head=await bucket.head(key);
-  if(!head)throw new HTTPException(404,{message:"File not found"});
+  if(!head||isMovedSourceMarker(head))throw new HTTPException(404,{message:"File not found"});
   if(expectedEtag&&head.httpEtag!==expectedEtag)throw new HTTPException(409,{message:"File content no longer matches its audited version"});
 
   let requested:ByteRange|undefined;

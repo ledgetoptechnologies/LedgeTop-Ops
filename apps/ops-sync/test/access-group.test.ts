@@ -42,6 +42,17 @@ describe("Access rule-group reconciliation", () => {
     await expect(reconcileAccessGroup(env)).rejects.toThrow("access-group-configuration-invalid");
   });
 
+  it("skips the PUT when managed email membership already matches", async () => {
+    const all=vi.fn(async()=>({results:[{email:"owner@example.com"},{email:"user@example.com"}]}));
+    const db={prepare:vi.fn(()=>({all}))} as unknown as D1Database;
+    const fetchMock=vi.fn(async()=>Response.json({success:true,result:{id:"group",name:"LTDS Ops Users",include:[{email:{email:"user@example.com"}},{email:{email:"owner@example.com"}}],exclude:[],require:[]}}));
+    vi.stubGlobal("fetch",fetchMock);
+    const env={OPS_DB:db,CF_ACCOUNT_ID:"account",CF_ACCESS_GROUP_ID:"group",CF_ACCESS_GROUP_API_TOKEN:"token"};
+
+    await expect(reconcileAccessGroup(env)).resolves.toEqual(["owner@example.com","user@example.com"]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   it("reports a failed group update so the event remains retryable", async () => {
     const db={prepare:vi.fn(()=>({all:vi.fn(async()=>({results:[{email:"user@example.com"}]}))}))} as unknown as D1Database;
     vi.stubGlobal("fetch",vi.fn(async(_url:string,init?:RequestInit)=>{

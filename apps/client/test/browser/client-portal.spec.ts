@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { PortalServiceRequest } from "../../src/client/portal-api";
 
 const account = { id: "account-a", displayName: "Acme Surveying" };
@@ -22,6 +23,10 @@ async function mockAuthorizedPortal(
   mapboxPublicToken: string | null = null,
   fixtureRequests = requests,
   workflowEvents?: { edited?: boolean; changeRequested?: boolean; estimateAccepted?: boolean },
+  locationFixtures: { project: DeliveryLocationCollection; past: DeliveryLocationCollection } = {
+    project: { points: [], imageCount: 0, truncated: false },
+    past: { points: [], imageCount: 0, truncated: false },
+  },
 ) {
   await page.route("**/api/client/**", async route => {
     const request = route.request();
@@ -36,8 +41,12 @@ async function mockAuthorizedPortal(
       await route.fulfill({ json: { requests: fixtureRequests } });
     } else if (request.method() === "GET" && path === "/api/client/projects/project-a/files") {
       await route.fulfill({ json: filePage });
+    } else if (request.method() === "GET" && path === "/api/client/projects/project-a/file-locations") {
+      await route.fulfill({ json: locationFixtures.project });
     } else if (request.method() === "GET" && path === "/api/client/past-deliveries") {
       await route.fulfill({ json: { ...filePage, files: [{ ...filePage.files[0], id: "file-history", name: "historic-orthomosaic.tif", previewPath: null, downloadPath: "/api/client/files/file-history/download" }] } });
+    } else if (request.method() === "GET" && path === "/api/client/past-delivery-locations") {
+      await route.fulfill({ json: locationFixtures.past });
     } else if (request.method() === "POST" && path === "/api/client/service-requests") {
       expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
       expect(request.postDataJSON()).toMatchObject({ projectId: "project-a", requestType: "service", title: "North Site spring imagery" });
@@ -118,6 +127,35 @@ test("authorized portal supports project, delivery, and request workflows", asyn
   await expect(page.getByText("North Site spring imagery")).toBeVisible();
 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("authorized photo map supports compact, enlarged, and empty states", async ({ page }) => {
+  await mockMapbox(page);
+  await mockAuthorizedPortal(page, "pk.local-browser-test", requests, undefined, {
+    project: {
+      points: [
+        { latitude: 44.501, longitude: -88.071, imageCount: 2 },
+        { latitude: 44.513, longitude: -88.083, imageCount: 1 },
+      ],
+      imageCount: 3,
+      truncated: false,
+    },
+    past: { points: [], imageCount: 0, truncated: false },
+  });
+  await page.goto("/portal");
+  await page.getByRole("link", { name: "Projects" }).click();
+  await page.getByRole("button", { name: /North Site/ }).click();
+  await page.getByRole("button", { name: "Files" }).click();
+  await expect(page.getByRole("heading", { name: "Image locations from available photo metadata" })).toBeVisible();
+  await expect(page.locator(".image-location-map-canvas").first()).toBeVisible();
+  await page.getByRole("button", { name: "Enlarge map" }).click();
+  const dialog = page.getByRole("dialog", { name: "Image locations from available photo metadata" });
+  await expect(dialog).toBeVisible();
+  await expect(page.locator("body")).toHaveCSS("overflow", "hidden");
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await page.getByRole("link", { name: "Past deliveries" }).click();
+  await expect(page.getByText("No image locations are available for your available delivery files.")).toBeVisible();
 });
 
 test("disabled or unavailable session stops before account data requests", async ({ page }) => {

@@ -13,8 +13,9 @@ const clientUi = readFileSync(new URL("../../client/src/client/DeliveryApp.tsx",
 const operationsUi = readFileSync(new URL("../src/client/OperationsApp.tsx", import.meta.url), "utf8");
 
 describe("thumbnail deployment contract", () => {
-  it("binds the Images/R2/D1 services, producer, retry policy, and consumed DLQ", () => {
+  it("binds the Media/Images/R2/D1 services, producer, retry policy, and consumed DLQ", () => {
     expect(config.images).toEqual({ binding: "IMAGES" });
+    expect(config.media).toEqual({ binding: "MEDIA" });
     expect(config.r2_buckets).toContainEqual({ binding: "DATA_BUCKET", bucket_name: "client-data" });
     expect(config.d1_databases.some((value: { binding: string }) => value.binding === "DELIVERY_DB")).toBe(true);
     expect(config.queues.producers).toContainEqual({ binding: "THUMBNAIL_QUEUE", queue: "ltds-thumbnail-jobs" });
@@ -40,7 +41,7 @@ describe("thumbnail deployment contract", () => {
   });
 
   it("wires cleanup into move, trash, restore, and expiry without original fallback", () => {
-    expect(crud).toMatch(/DATA_BUCKET\.delete\(source\);await removeThumbnailStateForPath\(env,source\)/);
+    expect(crud).toContain("executeSourceDelete");
     expect(sourceDelete).toContain("removeThumbnailStateForPath(env, preview.key, preview.isFolder)");
     expect(trash).toContain("enqueueThumbnailsForPath(env, tombstone.physical_key");
     expect(trash).toContain("removeThumbnailStateForPath(env, tombstone.physical_key");

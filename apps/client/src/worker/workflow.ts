@@ -3,6 +3,7 @@ import { decodeItemRef, isHiddenKey, keyWithinRoot, normalizeRoot } from "./file
 import { buildZipLayout, crc32, readZipPart, type ZipManifestEntry } from "./zip";
 import { classifyWorkflowFailure } from "./bulk-download-errors";
 import type { Env } from "./types";
+import { isMovedSourceMarker } from "@ltds/shared";
 export { classifyWorkflowFailure } from "./bulk-download-errors";
 
 const MAX_FILES = 2_000;
@@ -90,14 +91,14 @@ export async function snapshot(env: Env, job: JobRow): Promise<Snapshot> {
   if (request.all === true) folderPrefixes.add(root);
   for (const ref of refs) {
     const key = keyWithinRoot(root, decodeItemRef(ref)); if (isTrashed(tombstones, key)) continue; const head = await env.DATA_BUCKET.head(key);
-    if (head && !key.endsWith("/")) files.set(key, { size: head.size, etag: head.etag });
+    if (head && !key.endsWith("/") && !isMovedSourceMarker(head)) files.set(key, { size: head.size, etag: head.etag });
     else folderPrefixes.add(key.endsWith("/") ? key : `${key}/`);
   }
   for (const prefix of folderPrefixes) {
     let cursor: string | undefined;
     do {
-      const listed = await env.DATA_BUCKET.list({ prefix, limit: 1000, cursor });
-      for (const object of listed.objects) if (!object.key.endsWith("/") && !isHiddenKey(object.key) && !isTrashed(tombstones, object.key)) files.set(object.key, { size: object.size, etag: object.etag });
+      const listed = await env.DATA_BUCKET.list({ prefix, limit: 1000, cursor, include:["customMetadata"] });
+      for (const object of listed.objects) if (!object.key.endsWith("/") && !isHiddenKey(object.key) && !isTrashed(tombstones, object.key) && !isMovedSourceMarker(object)) files.set(object.key, { size: object.size, etag: object.etag });
       cursor = listed.truncated ? listed.cursor : undefined;
     } while (cursor);
   }

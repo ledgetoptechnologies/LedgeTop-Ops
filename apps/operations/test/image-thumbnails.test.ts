@@ -10,7 +10,9 @@ import {
   THUMBNAIL_HEIGHT,
   THUMBNAIL_JOB_KIND,
   THUMBNAIL_WIDTH,
+  VIDEO_THUMBNAIL_MAX_INPUT_BYTES,
   thumbnailObjectKey,
+  thumbnailSourceEligible,
   thumbnailStateForObject,
   type ThumbnailJobMessage,
   type ThumbnailJobRow,
@@ -201,10 +203,11 @@ function r2Object(key: string, etag: string, size: number, contentType: string, 
   };
 }
 
-function fixture(options: { sourceKey?: string; contentType?: string; size?: number; transformError?: unknown; queueError?: Error; tombstoneOnCheck?: number } = {}) {
+function fixture(options: { sourceKey?: string; contentType?: string; size?: number; transformError?: unknown; mediaError?: unknown; mediaStatus?: number; mediaContentType?: string; queueError?: Error; tombstoneOnCheck?: number } = {}) {
   const sourceKey = options.sourceKey || "Jobs/Clients/Synthetic/photo.jpg";
   const sourceEtag = "source-etag";
   const originalBody = stream([1, 2, 3, 4]);
+  const frameBody = stream([5, 6, 7]);
   const thumbnailBody = stream([9, 8, 7]);
   const db = new FakeThumbnailDb();
   db.tombstoneOnCheck = options.tombstoneOnCheck;
@@ -233,8 +236,21 @@ function fixture(options: { sourceKey?: string; contentType?: string; size?: num
   const input = vi.fn(() => ({
     transform(value: unknown) { transform(value); return { output }; },
   }));
+  const mediaTransform = vi.fn();
+  const mediaOutput = vi.fn(() => ({
+    async response() {
+      if (options.mediaError) throw options.mediaError;
+      return new Response(frameBody, {
+        status: options.mediaStatus ?? 200,
+        headers: { "Content-Type": options.mediaContentType || "image/jpeg" },
+      });
+    },
+  }));
+  const mediaInput = vi.fn(() => ({
+    transform(value: unknown) { mediaTransform(value); return { output: mediaOutput }; },
+  }));
   const stored = new Map<string, ReturnType<typeof r2Object>>();
-  const sourceHead = r2Object(sourceKey, sourceEtag, options.size || 4096, options.contentType || "image/jpeg");
+  const sourceHead = r2Object(sourceKey, sourceEtag, options.size ?? 4096, options.contentType || "image/jpeg");
   const sourceObject = r2Object(sourceKey, sourceEtag, sourceHead.size, sourceHead.httpMetadata.contentType || "image/jpeg", originalBody);
   const bucket = {
     async head(key: string) {
@@ -259,15 +275,16 @@ function fixture(options: { sourceKey?: string; contentType?: string; size?: num
     },
   };
   const send = options.queueError ? vi.fn(async () => { throw options.queueError; }) : vi.fn(async () => ({ metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } }));
-  const bindings: Pick<Env, "DELIVERY_DB" | "DATA_BUCKET" | "IMAGES" | "THUMBNAIL_QUEUE"> = {
+  const bindings: Pick<Env, "DELIVERY_DB" | "DATA_BUCKET" | "IMAGES" | "MEDIA" | "THUMBNAIL_QUEUE"> = {
     DELIVERY_DB: db as never,
     DATA_BUCKET: bucket as never,
     IMAGES: { input } as never,
+    MEDIA: { input: mediaInput } as never,
     THUMBNAIL_QUEUE: { send } as never,
   };
   const env = bindings as Env;
   const message: ThumbnailJobMessage = { kind: THUMBNAIL_JOB_KIND, sourceKey, sourceEtag };
-  return { env, db, message, input, transform, output, originalBody, thumbnailBody, putBodies, putOptions, getKeys, stored, send };
+  return { env, db, message, input, transform, output, mediaInput, mediaTransform, mediaOutput, originalBody, frameBody, thumbnailBody, putBodies, putOptions, getKeys, stored, send };
 }
 
 function queueBatch(body: unknown, attempts = 1) {
@@ -287,6 +304,15 @@ function queueBatch(body: unknown, attempts = 1) {
 }
 
 describe("Cloudflare image thumbnail pipeline", () => {
+  it("uses one strict eligibility policy for authorized image and MP4 thumbnail delivery", () => {
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/photo.jpg", 1024, "image/jpeg")).toBe(true);
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mp4", 1024, "video/mp4")).toBe(true);
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mp4", 1024, "video/quicktime")).toBe(false);
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mov", 1024, "video/mp4")).toBe(false);
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mp4", VIDEO_THUMBNAIL_MAX_INPUT_BYTES, "video/mp4")).toBe(false);
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/report.pdf", 1024, "application/pdf")).toBe(false);
+  });
+
   it("creates one fixed WebP from the original stream and never stores the original as a thumbnail", async () => {
     const value = fixture();
     const result = await processThumbnailJob(value.env, value.message);
@@ -321,6 +347,44 @@ describe("Cloudflare image thumbnail pipeline", () => {
     expect(value.db.job?.status).toBe("pending");
     expect(value.db.job?.queue_published_at).toBeTruthy();
     expect(value.send).toHaveBeenCalledWith(value.message);
+  });
+
+  it("extracts only a five-second MP4 frame before creating the private WebP thumbnail", async () => {
+    const value = fixture({ sourceKey: "Jobs/Clients/Synthetic/flight.mp4", contentType: "video/mp4" });
+    const result = await processThumbnailJob(value.env, value.message);
+
+    expect(result.outcome).toBe("ready");
+    expect(value.mediaInput).toHaveBeenCalledWith(value.originalBody);
+    expect(value.mediaTransform).toHaveBeenCalledWith({ width: THUMBNAIL_WIDTH, height: THUMBNAIL_HEIGHT, fit: "cover" });
+    expect(value.mediaOutput).toHaveBeenCalledWith({ mode: "frame", time: "5s", format: "jpg" });
+    expect(value.input).toHaveBeenCalledWith(value.frameBody);
+    expect(value.input).not.toHaveBeenCalledWith(value.originalBody);
+    expect(value.putBodies).toEqual([value.thumbnailBody]);
+    expect(value.putBodies).not.toContain(value.originalBody);
+    expect(value.db.job).toMatchObject({ status: "ready", thumbnail_size: 1234 });
+  });
+
+  it("fails MP4s at the documented 100 MB boundary before reading or transforming them", async () => {
+    const value = fixture({
+      sourceKey: "Jobs/Clients/Synthetic/oversized.mp4",
+      contentType: "video/mp4",
+      size: VIDEO_THUMBNAIL_MAX_INPUT_BYTES,
+    });
+
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({ outcome: "failed", errorCode: "video_input_too_large" });
+    expect(value.getKeys).toEqual([]);
+    expect(value.mediaInput).not.toHaveBeenCalled();
+    expect(value.input).not.toHaveBeenCalled();
+    expect(value.db.job).toMatchObject({ status: "failed", error_code: "video_input_too_large" });
+  });
+
+  it("keeps non-MP4 videos on the explicit icon fallback without reading the original", async () => {
+    const value = fixture({ sourceKey: "Jobs/Clients/Synthetic/flight.mov", contentType: "video/quicktime" });
+
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({ outcome: "failed", errorCode: "unsupported_file" });
+    expect(value.getKeys).toEqual([]);
+    expect(value.mediaInput).not.toHaveBeenCalled();
+    expect(value.input).not.toHaveBeenCalled();
   });
 
   it("publishes a same-version pending job only once after recording queue publication", async () => {

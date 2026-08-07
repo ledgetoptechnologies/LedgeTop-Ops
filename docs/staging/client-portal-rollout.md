@@ -54,7 +54,7 @@ and warns that Bypass disables Access enforcement in
 1. Run `npm.cmd run staging:check:test`, the repository tests, and build from
    the pinned commit. Record all config hashes.
 2. Export both staging D1 databases. List migrations and confirm only Delivery
-   `0096`–`0108` and Operations `0014`–`0018` are newly expected for the current
+   `0096`–`0109` and Operations `0014`–`0018` are newly expected for the current
    combined release; `0096`–`0106` and `0014`–`0017` were the original
    portal-only milestone. Client `0100` is required because a portal delivery grant must
    not make `share_version` a foreign-key parent that blocks existing
@@ -63,7 +63,8 @@ and warns that Bypass disables Access enforcement in
    workspace and `0104` adds revisions, immutable operational-estimate versions,
    and the rebuilt notification dedupe contract. Client `0105` adds direct
    client-folder grants, `0106` adds thumbnail jobs, `0107`/`0108` add cleanup
-   and resumable backfill, Operations `0017` adds job briefs, and `0018` adds
+   and resumable backfill, `0109` adds minimal version-bound image locations,
+   Operations `0017` adds job briefs, and `0018` adds
    authenticated browser-upload intent/session state.
 3. After migration approval, apply Delivery migrations first and Operations
    `0014`–`0018` second. Record the list/apply output and confirm production
@@ -100,7 +101,7 @@ route drift.
 3. Remove traffic from `client-staging` only after `delivery-staging` health
    and public-share checks pass. Disable (do not silently repurpose) the client
    portal and public Bypass Access apps.
-4. Do not reverse migrations 0096–0108 or 0014–0018. Use a
+4. Do not reverse migrations 0096–0109 or 0014–0018. Use a
    reviewed forward fix. Do not delete D1/R2 data, queues, workflows, secrets,
    groups, or audit/outbox evidence during incident handling.
 5. Re-run public-share and Delivery health checks and record the final route,

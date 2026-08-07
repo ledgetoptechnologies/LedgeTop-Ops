@@ -137,7 +137,8 @@
         "0105_internal_folder_grants.sql",
         "0106_image_thumbnail_jobs.sql",
         "0107_thumbnail_cleanup_jobs.sql",
-        "0108_thumbnail_backfill_runs.sql"
+        "0108_thumbnail_backfill_runs.sql",
+        "0109_image_asset_locations.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -149,7 +150,11 @@
         "0015_staff_acl_explicit_controls.sql",
         "0016_projection_entity_leases.sql",
         "0017_operational_job_briefs.sql",
-        "0018_browser_upload_intents.sql"
+        "0018_browser_upload_intents.sql",
+        "0019_browser_upload_conflict_resolution.sql",
+        "0020_internal_sop_library.sql",
+        "0021_project_alpha_sync_hardening.sql",
+        "0022_r2_operation_retries.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -196,7 +201,7 @@
     "ops-sync": {
       "names": [
         "CF_ACCESS_GROUP_API_TOKEN",
-        "PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY"
+        "PROJECT_ALPHA_WEBHOOK_HMAC_SECRET"
       ],
       "verifiedAt": "<ISO_8601_TIMESTAMP>",
       "source": "<wrangler-secret-list|reviewed-secrets-file>",

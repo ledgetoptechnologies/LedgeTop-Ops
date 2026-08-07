@@ -1,6 +1,7 @@
 import { HTTPException } from "hono/http-exception";
 
 const MAX_KEY_LENGTH=1000;
+const MAX_R2_KEY_BYTES=1024;
 export const MAX_BROWSER_UPLOAD_FILES = 100;
 export const MAX_BROWSER_UPLOAD_BYTES = 500 * 1024 ** 3;
 export const MAX_BROWSER_UPLOAD_FILE_BYTES = 500 * 1024 ** 3;
@@ -11,7 +12,9 @@ export function normalizeCrudKey(value:unknown,folder=false):string{
   const normalized=value.trim().replace(/\\/g,"/").replace(/^\/+/,"").replace(/\/{2,}/g,"/"),clean=normalized.replace(/\/+$/,""),parts=clean.split("/");
   if(!clean||parts.some(part=>!part||part==="."||part===".."||reservedSegment(part)))throw new HTTPException(400,{message:"The R2 path is reserved or invalid"});
   if(!clean.startsWith("Jobs/Clients/")||clean==="Jobs/Clients")throw new HTTPException(400,{message:"R2 paths must be under Jobs/Clients"});
-  return folder?`${clean}/`:clean;
+  const result=folder?`${clean}/`:clean;
+  if(new TextEncoder().encode(result).byteLength>MAX_R2_KEY_BYTES)throw new HTTPException(400,{message:"The R2 path exceeds the 1,024-byte storage limit"});
+  return result;
 }
 
 export function normalizeUploadRelativePath(value: unknown): string {
@@ -72,6 +75,7 @@ export function requiresAdministratorForMutation(method:string,path:string):bool
   const dropboxImport=parts.length>=3&&parts[0]==="api"&&parts[1]==="dropbox-import";
   const jobBrief=parts[0]==="api"&&parts[1]==="operations"&&delegatedRouteToken(parts[2])&&parts[3]==="job-brief"&&(
     (normalizedMethod==="PUT"&&parts.length===4)||
+    (normalizedMethod==="PUT"&&parts.length===5&&parts[4]==="sops")||
     (normalizedMethod==="POST"&&parts.length===6&&parts[4]==="attachments"&&["upload","reference"].includes(parts[5]||""))
   );
   return !shareCreate&&!shareRevoke&&!internalFolderGrantCreate&&!internalFolderGrantRevoke&&!streamTicket&&!incomingLink&&!dropboxImport&&!jobBrief;

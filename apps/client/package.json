@@ -17,7 +17,7 @@
   "dependencies": {
     "@ltds/shared": "file:../../packages/shared",
     "@ltds/ui": "file:../../packages/ui",
-    "hono": "^4.9.9",
+    "hono": "^4.12.34",
     "jose": "^6.2.3",
     "mapbox-gl": "^3.14.0",
     "react": "^19.1.1",

@@ -39,6 +39,8 @@ function repository(overrides: Partial<ClientPortalRepository> = {}): ClientPort
     getProject: vi.fn(async () => null),
     listProjectFiles: vi.fn(async () => null),
     listPastDeliveries: vi.fn(async () => ({ files: [], prefix: "", cursor: null })),
+    listProjectFileLocations: vi.fn(async () => null),
+    listPastDeliveryLocations: vi.fn(async () => ({ points: [], imageCount: 0, truncated: false })),
     getAuthorizedFile: vi.fn(async () => null),
     listDeliveries: vi.fn(async () => []),
     getDeliveryHandoff: vi.fn(async () => null),
@@ -133,6 +135,31 @@ describe("client portal route authorization context", () => {
       .request("/projects/project-a/deliveries", {}, env("true"));
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ deliveries: [{ publicId: "public-a", requiresPassword: true }] });
+  });
+
+  it("returns only repository-authorized project image locations and no asset keys", async () => {
+    const listProjectFileLocations = vi.fn(async (_env: Env, activeSession: ClientPortalSession, projectId: string) => {
+      expect(activeSession).toEqual(session);
+      expect(projectId).toBe("project-a");
+      return { points: [{ latitude: 44.5, longitude: -88.1, imageCount: 2 }], imageCount: 2, truncated: false };
+    });
+    const response = await createClientPortalRouter({
+      resolvePrincipal: principal,
+      repository: repository({ listProjectFileLocations }),
+    }).request("/projects/project-a/file-locations", {}, env("true"));
+    expect(response.status).toBe(200);
+    const body = await response.json() as Record<string, unknown>;
+    expect(body).toMatchObject({ imageCount: 2, points: [{ imageCount: 2 }] });
+    expect(JSON.stringify(body)).not.toMatch(/source|key|etag/i);
+  });
+
+  it("uses a non-enumerating 404 for revoked or cross-client project location scopes", async () => {
+    const response = await createClientPortalRouter({
+      resolvePrincipal: principal,
+      repository: repository({ listProjectFileLocations: vi.fn(async () => null) }),
+    }).request("/projects/project-b/file-locations", {}, env("true"));
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("Project not found");
   });
 
   it("rechecks the local delivery grant before redirecting into the existing public-share flow", async () => {

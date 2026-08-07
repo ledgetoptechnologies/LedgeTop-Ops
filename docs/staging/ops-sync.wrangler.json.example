@@ -17,10 +17,10 @@
     "CF_ACCESS_GROUP_ID": "<STAGING_ACCESS_GROUP_ID>",
     "CF_ACCESS_GROUP_NAME": "<STAGING_ACCESS_GROUP_NAME>",
     "APPLICATION_KEY": "ltds_ops_staging",
-    "PROJECT_ALPHA_ALLOW_LEGACY_HMAC": "false"
+    "PROJECT_ALPHA_ALLOW_LEGACY_HMAC": "true"
   },
   "secrets": {
-    "required": ["CF_ACCESS_GROUP_API_TOKEN", "PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY"]
+    "required": ["CF_ACCESS_GROUP_API_TOKEN", "PROJECT_ALPHA_WEBHOOK_HMAC_SECRET"]
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "triggers": { "crons": ["*/5 * * * *"] },

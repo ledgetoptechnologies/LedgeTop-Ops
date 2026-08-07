@@ -1,11 +1,11 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
-import { type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
-import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName } from "./files";
+import { isMovedSourceMarker, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
+import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName, visibleImmediateChildPrefixes } from "./files";
 import { createSessionCookie, hmac, parseCookie, randomSecret, sha256, verifyAccessCode, verifyRotatingSessionCookie } from "./security";
 import { matchesEtag } from "./prepared-images";
-import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
+import { isVideoThumbnailCandidate, serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import { recordFirstAccessNotification } from "./notifications";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
@@ -346,36 +346,39 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   const share = c.get("share"); await requireAvailableFolder(c.env,share); const root = normalizeRoot(share.r2_prefix); const tombstones = await loadTombstones(c.env);
   const folderRef = c.req.query("folder") || ""; const relativeFolder = folderRef ? decodeItemRef(folderRef) : "";
   const prefix = relativeFolder ? `${keyWithinRoot(root, relativeFolder).replace(/\/$/, "")}/` : root;
-  const listed = await c.env.DATA_BUCKET.list({ prefix, delimiter: "/", limit: 500, cursor: c.req.query("cursor") });
+  const listed = await c.env.DATA_BUCKET.list({ prefix, delimiter: "/", limit: 500, cursor: c.req.query("cursor"), include: ["httpMetadata", "customMetadata"] });
   const aliasKeys = [root, prefix, ...listed.delimitedPrefixes, ...listed.objects.map(object => object.key)]; let breadcrumbPhysical = root;
   for (const segment of relativeFolder.split("/").filter(Boolean)) { breadcrumbPhysical += `${segment}/`; aliasKeys.push(breadcrumbPhysical); }
   const aliases = await loadAliases(c.env, aliasKeys);
   const items: DeliveryItem[] = [];
+  const candidateFolders=listed.delimitedPrefixes.filter(folderPrefix=>!isHiddenKey(folderPrefix)&&!isTrashed(tombstones,folderPrefix));
+  const visibleFolders=await visibleImmediateChildPrefixes(c.env.DATA_BUCKET,prefix,candidateFolders);
   for (const folderPrefix of listed.delimitedPrefixes) {
-    if (isHiddenKey(folderPrefix) || isTrashed(tombstones, folderPrefix)) continue;
+    if (!visibleFolders.has(folderPrefix)) continue;
     const relative = folderPrefix.slice(root.length).replace(/\/$/, ""); if (!relative) continue;
     items.push({ id: encodeItemRef(relative), name: aliases.get(folderPrefix) || relative.split("/").pop() || relative, kind: "folder", size: null, uploadedAt: null });
   }
   const videos: Array<{ index: number; key: string }> = [];
-  const images: Array<{ index: number; key: string; etag: string; base: string }> = [];
+  const thumbnails: Array<{ index: number; key: string; etag: string; base: string; kind: "image" | "video"; size: number; contentType?: string }> = [];
   for (const object of listed.objects) {
-    if (object.key === prefix || object.key.endsWith("/") || isHiddenKey(object.key) || isTrashed(tombstones, object.key)) continue;
+    if (object.key === prefix || object.key.endsWith("/") || isHiddenKey(object.key) || isTrashed(tombstones, object.key) || isMovedSourceMarker(object)) continue;
     const relative = object.key.slice(root.length); const id = encodeItemRef(relative); const kind = kindForKey(object.key);
     const base = `/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${id}`;
-    const item: DeliveryItem = { id, name: aliases.get(object.key) || relative.split("/").pop() || relative, kind, size: object.size, uploadedAt: object.uploaded.toISOString(), downloadUrl: `${base}/download`, previewStatus: kind === "video" ? "processing" : undefined, ...thumbnailFieldsForObject(object.key, kind, base, object.httpEtag, null) };
+    const item: DeliveryItem = { id, name: aliases.get(object.key) || relative.split("/").pop() || relative, kind, size: object.size, uploadedAt: object.uploaded.toISOString(), downloadUrl: `${base}/download`, previewStatus: kind === "video" ? "processing" : undefined, ...thumbnailFieldsForObject(object.key, kind, base, object.httpEtag, null, object.size, object.httpMetadata?.contentType) };
     item.sourceUrl = sourceUrlForItem(base, kind);
-    if (kind === "image") { item.previewUrl = item.sourceUrl; images.push({ index: items.length, key: object.key, etag: object.httpEtag, base }); }
+    if (kind === "image") item.previewUrl = item.sourceUrl;
     else if (kind === "audio" || kind === "text") item.previewUrl = `${base}/preview`;
     if (kind === "video") item.previewUrl = undefined;
     if (kind === "video") videos.push({ index: items.length, key: object.key });
+    if ((kind === "image" || kind === "video") && item.thumbnailState !== "not_applicable") thumbnails.push({ index: items.length, key: object.key, etag: object.httpEtag, base, kind, size: object.size, contentType: object.httpMetadata?.contentType });
     items.push(item);
   }
-  if (images.length) {
-    const db = primaryDb(c.env); const records = await db.batch(images.map(image => db.prepare("SELECT source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status FROM image_thumbnail_jobs WHERE source_key=?").bind(image.key)));
+  if (thumbnails.length) {
+    const db = primaryDb(c.env); const records = await db.batch(thumbnails.map(thumbnail => db.prepare("SELECT source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status FROM image_thumbnail_jobs WHERE source_key=?").bind(thumbnail.key)));
     records.forEach((result, index) => {
-      const row = result.results[0] as ThumbnailJobRow | undefined; const image = images[index]!; const item = items[image.index];
+      const row = result.results[0] as ThumbnailJobRow | undefined; const thumbnail = thumbnails[index]!; const item = items[thumbnail.index];
       if (!item) return;
-      Object.assign(item, thumbnailFieldsForObject(image.key, "image", image.base, image.etag, row));
+      Object.assign(item, thumbnailFieldsForObject(thumbnail.key, thumbnail.kind, thumbnail.base, thumbnail.etag, row, thumbnail.size, thumbnail.contentType));
     });
   }
   if (videos.length) {
@@ -400,7 +403,7 @@ export async function streamItem(c: any, disposition: "inline" | "attachment", r
   const kind = kindForKey(key);
   if (requiredKind && kind !== requiredKind) throw new HTTPException(415, { message: "PDF preview is not available for this file" });
   if (disposition === "inline" && !["image", "video", "audio", "pdf", "text"].includes(kind)) throw new HTTPException(415, { message: "Preview is not available for this file" });
-  const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" });
+  const head = await c.env.DATA_BUCKET.head(key); if (!head || isMovedSourceMarker(head)) throw new HTTPException(404, { message: "File not found" });
   if (!raw && disposition === "inline" && kind === "pdf") return streamItem(c, "inline", true, "pdf");
   if (!raw && disposition === "inline" && kind === "video") throw new HTTPException(409, { message: "Video preview is available through Stream" });
   let range: { offset: number; length: number } | undefined;
@@ -432,7 +435,7 @@ async function downloadItem(c: any): Promise<Response> {
   const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string;
   const relative = decodeItemRef(itemRef); const key = keyWithinRoot(share.r2_prefix, relative);
   await assertNotTrashed(c.env, key);
-  const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" });
+  const head = await c.env.DATA_BUCKET.head(key); if (!head || isMovedSourceMarker(head)) throw new HTTPException(404, { message: "File not found" });
   const alias = await primaryDb(c.env).prepare("SELECT display_name FROM file_aliases WHERE physical_key=?").bind(key).first<{ display_name: string }>();
   const rawName = alias?.display_name || safeFileName(key);
   const downloadName = rawName.replace(/[\0-\x1f\x7f"\\]/g, "_").slice(0, 180) || "file";
@@ -459,7 +462,7 @@ app.get("/api/public/shares/:publicId/items/:itemRef/download-ticket", async c =
   const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string;
   const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
   await assertNotTrashed(c.env, key);
-  const head = await c.env.DATA_BUCKET.head(key); if (!head) throw new HTTPException(404, { message: "File not found" });
+  const head = await c.env.DATA_BUCKET.head(key); if (!head || isMovedSourceMarker(head)) throw new HTTPException(404, { message: "File not found" });
   const base = baseForItem(share, itemRef);
   const sessionMaxMs = 12 * 60 * 60 * 1000;
   const shareRemainingMs = share.expires_at ? Math.max(0, new Date(share.expires_at).getTime() - Date.now()) : sessionMaxMs;
@@ -484,7 +487,16 @@ app.post("/api/public/shares/:publicId/items/:itemRef/stream-ticket", async c =>
 app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/thumbnail", async c => {
   const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
   await assertNotTrashed(c.env, key);
-  if (kindForKey(key) !== "image") throw new HTTPException(409, { message: "Thumbnail is not available for this file type", cause: { code: "THUMBNAIL_NOT_APPLICABLE" } });
+  const kind = kindForKey(key);
+  if (kind !== "image") {
+    const source = kind === "video" ? await c.env.DATA_BUCKET.head(key) : null;
+    if (!source || isMovedSourceMarker(source)) {
+      if (kind === "video") throw new HTTPException(404, { message: "File not found" });
+      throw new HTTPException(409, { message: "Thumbnail is not available for this file type", cause: { code: "THUMBNAIL_NOT_APPLICABLE" } });
+    }
+    if (!isVideoThumbnailCandidate(key, source.size, source.httpMetadata?.contentType))
+      throw new HTTPException(409, { message: "Thumbnail is not available for this file type", cause: { code: "THUMBNAIL_NOT_APPLICABLE" } });
+  }
   return serveAuthorizedThumbnail(c.env, key, { method: c.req.method, ifNoneMatch: c.req.header("If-None-Match") });
 });
 

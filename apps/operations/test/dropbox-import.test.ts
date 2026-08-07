@@ -161,7 +161,10 @@ describe("Dropbox import multipart lifecycle", () => {
   function dbForStatus(status: string) {
     return {
       withSession: () => ({
-        prepare: () => ({ bind: () => ({ first: async () => ({ status, cancel_requested_at: status === "cancelling" ? "now" : null }) }) }),
+        prepare: () => ({ bind: () => ({
+          first: async () => ({ status, cancel_requested_at: status === "cancelling" ? "now" : null }),
+          run: async () => ({ meta: { changes: 1 } }),
+        }) }),
       }),
     };
   }
@@ -179,6 +182,7 @@ describe("Dropbox import multipart lifecycle", () => {
       OPS_DB: dbForStatus("cancelling"),
       DATA_BUCKET: {
         head: vi.fn(async () => null),
+        delete: vi.fn(async () => undefined),
         createMultipartUpload: vi.fn(async () => ({ uploadPart: vi.fn(), complete: vi.fn(), abort })),
       },
     } as any;
@@ -193,6 +197,7 @@ describe("Dropbox import multipart lifecycle", () => {
       OPS_DB: dbForStatus("running"),
       DATA_BUCKET: {
         head: vi.fn(async () => null),
+        delete: vi.fn(async () => undefined),
         createMultipartUpload: vi.fn(async () => ({
           uploadPart: vi.fn(async () => { throw new Error("r2-part-failed"); }), complete: vi.fn(), abort,
         })),
@@ -202,6 +207,109 @@ describe("Dropbox import multipart lifecycle", () => {
     await expect(importOneFile(env, client as any, item as any, "replace")).rejects.toThrow("r2-part-failed");
     expect(client.downloadFile).toHaveBeenCalledWith("rev:immutable-1", { offset: 0, length: 8 });
     expect(abort).toHaveBeenCalledOnce();
+  });
+
+  it("writes an imported MP4 with authoritative video/mp4 object metadata", async () => {
+    const stagingKey = "_ltds/dropbox-imports/job-1/item-1";
+    let stagingExists = true;
+    const complete = vi.fn(async () => ({ etag: "staging-etag", httpEtag: '"staging-etag"' }));
+    const createMultipartUpload = vi.fn(async () => ({
+      uploadPart: vi.fn(async (partNumber: number) => ({ partNumber, etag: "part-1" })),
+      complete,
+      abort: vi.fn(),
+    }));
+    const put = vi.fn(async (_key: string, _body: unknown, _options: any) => ({ httpEtag: '"imported-video"' }));
+    const remove = vi.fn(async (key: string) => { if (key === stagingKey) stagingExists = false; });
+    const env = {
+      OPS_DB: dbForStatus("running"),
+      DATA_BUCKET: {
+        head: vi.fn(async (key: string) => key === stagingKey && stagingExists ? { key: stagingKey } : null),
+        get: vi.fn(async () => ({
+          body: new ReadableStream(), httpMetadata: { contentType: "video/mp4" },
+          customMetadata: { ltdsDropboxImportItem: item.id },
+        })),
+        put, delete: remove, createMultipartUpload,
+      },
+    } as any;
+    const videoItem = {
+      ...item,
+      dropbox_path: "/flight.mp4",
+      destination_key: "Jobs/Clients/Acme/Delivery/flight.mp4",
+    };
+    const client = { downloadFile: vi.fn(async () => new Response(new Uint8Array(8), { status: 206 })) };
+
+    await expect(importOneFile(env, client as any, videoItem as any, "replace"))
+      .resolves.toEqual({ r2Etag: '"imported-video"', size: 8 });
+
+    expect(createMultipartUpload).toHaveBeenCalledWith(stagingKey, {
+      httpMetadata: { contentType: "video/mp4" },
+      customMetadata: { ltdsDropboxImportItem: item.id },
+    });
+    expect(complete).toHaveBeenCalledWith([{ partNumber: 1, etag: "part-1" }]);
+    expect(env.DATA_BUCKET.get).toHaveBeenCalledWith(stagingKey, { onlyIf: { etagMatches: "staging-etag" } });
+    expect(put).toHaveBeenCalledOnce();
+    const [publishedKey, , publishOptions] = put.mock.calls[0]!;
+    expect(publishedKey).toBe(videoItem.destination_key);
+    expect(publishOptions.httpMetadata).toEqual({ contentType: "video/mp4" });
+    expect(publishOptions.customMetadata).toEqual({ ltdsDropboxImportItem: item.id });
+    expect(publishOptions.onlyIf).toBeInstanceOf(Headers);
+    expect(publishOptions.onlyIf.get("If-None-Match")).toBe("*");
+    expect(remove).toHaveBeenCalledWith(stagingKey);
+    expect(stagingExists).toBe(false);
+  });
+
+  it("cleans staging and preserves a destination that wins the conditional publish race", async () => {
+    const stagingKey = "_ltds/dropbox-imports/job-1/item-1";
+    let stagingExists = true;
+    const remove = vi.fn(async (key: string) => { if (key === stagingKey) stagingExists = false; });
+    const env = {
+      OPS_DB: dbForStatus("running"),
+      DATA_BUCKET: {
+        head: vi.fn(async (key: string) => key === stagingKey && stagingExists ? { key: stagingKey } : null),
+        get: vi.fn(async () => ({ body: new ReadableStream(), httpMetadata: {}, customMetadata: {} })),
+        put: vi.fn(async () => null),
+        delete: remove,
+        createMultipartUpload: vi.fn(async () => ({
+          uploadPart: vi.fn(async (partNumber: number) => ({ partNumber, etag: "part-1" })),
+          complete: vi.fn(async () => ({ etag: "staging-etag", httpEtag: '"staging-etag"' })),
+          abort: vi.fn(async () => undefined),
+        })),
+      },
+    } as any;
+    const client = { downloadFile: vi.fn(async () => new Response(new Uint8Array(8), { status: 206 })) };
+
+    await expect(importOneFile(env, client as any, item as any, "replace"))
+      .rejects.toThrow("destination-changed-before-publication");
+    expect(env.DATA_BUCKET.put).toHaveBeenCalledOnce();
+    expect(remove).toHaveBeenCalledWith(stagingKey);
+    expect(stagingExists).toBe(false);
+  });
+
+  it("recognizes its already-published object on retry and removes leftover staging without re-downloading", async () => {
+    const stagingKey = "_ltds/dropbox-imports/job-1/item-1";
+    let stagingExists = true;
+    const published = {
+      key: item.destination_key, httpEtag: '"published-etag"', size: item.size,
+      customMetadata: { ltdsDropboxImportItem: item.id },
+    };
+    const remove = vi.fn(async (key: string) => { if (key === stagingKey) stagingExists = false; });
+    const env = {
+      OPS_DB: dbForStatus("running"),
+      DATA_BUCKET: {
+        head: vi.fn(async (key: string) => key === item.destination_key ? published :
+          key === stagingKey && stagingExists ? { key: stagingKey } : null),
+        delete: remove,
+        createMultipartUpload: vi.fn(),
+      },
+    } as any;
+    const client = { downloadFile: vi.fn() };
+
+    await expect(importOneFile(env, client as any, item as any, "replace"))
+      .resolves.toEqual({ r2Etag: '"published-etag"', size: item.size });
+    expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(env.DATA_BUCKET.createMultipartUpload).not.toHaveBeenCalled();
+    expect(remove).toHaveBeenCalledWith(stagingKey);
+    expect(stagingExists).toBe(false);
   });
 });
 

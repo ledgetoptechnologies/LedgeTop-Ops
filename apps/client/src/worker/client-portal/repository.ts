@@ -1,4 +1,8 @@
-import { buildServiceRequestNotificationSnapshot } from "@ltds/shared";
+import {
+  aggregateDeliveryLocations,
+  buildServiceRequestNotificationSnapshot,
+  type DeliveryLocationCollection,
+} from "@ltds/shared";
 import { sha256 } from "../security";
 import type { Env } from "../types";
 import type {
@@ -51,6 +55,14 @@ interface DeliveryRow {
   expires_at: string | null;
   requires_password: number;
 }
+
+interface LocationRow {
+  source_key: string;
+  latitude: number;
+  longitude: number;
+}
+
+const LOCATION_MAP_LIMIT = 500;
 
 interface ServiceRequestRow {
   id: string;
@@ -607,6 +619,71 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       prefix: "",
       cursor: rows.length > 100 ? page.at(-1)!.r2_key : null,
     };
+  },
+
+  async listProjectFileLocations(
+    env: Env,
+    session: ClientPortalSession,
+    projectId: string,
+  ): Promise<DeliveryLocationCollection | null> {
+    const project = await this.getProject(env, session, projectId);
+    if (!project) return null;
+    const result = await portalDb(env).prepare(`
+      SELECT DISTINCT location.source_key,location.latitude,location.longitude
+      FROM client_folder_associations association
+      ${sessionJoin}
+      JOIN client_project_grants g
+        ON g.account_id=a.id AND g.project_id=association.project_id AND g.revoked_at IS NULL
+      JOIN projects p ON p.id=g.project_id AND p.active=1
+      JOIN file_index file ON substr(file.r2_key,1,length(association.r2_prefix))=association.r2_prefix
+      JOIN image_asset_locations location
+        ON location.source_key=file.r2_key AND location.source_etag=trim(file.etag,'"') AND location.status='ready'
+      WHERE association.account_id=a.id AND association.scope_type='project' AND association.project_id=?
+        AND association.revoked_at IS NULL ${memberProjectConstraint}
+        AND file.media_kind='image'
+        AND file.r2_key NOT LIKE '_ltds/%' AND file.r2_key NOT LIKE '%/_ltds/%'
+        AND file.r2_key NOT LIKE '.previews/%' AND file.r2_key NOT LIKE '%/.previews/%'
+        AND file.r2_key NOT LIKE 'dump/%' AND file.r2_key NOT LIKE '%/dump/%'
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_tombstones tombstone
+          WHERE tombstone.restored_at IS NULL AND (
+            tombstone.physical_key=file.r2_key OR
+            (tombstone.tombstone_kind='prefix' AND substr(file.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key)
+          )
+        )
+      ORDER BY location.source_key LIMIT ?`)
+      .bind(session.accountId, session.identityId, projectId, LOCATION_MAP_LIMIT + 1)
+      .all<LocationRow>();
+    return aggregateDeliveryLocations(result.results, LOCATION_MAP_LIMIT);
+  },
+
+  async listPastDeliveryLocations(
+    env: Env,
+    session: ClientPortalSession,
+  ): Promise<DeliveryLocationCollection> {
+    const result = await portalDb(env).prepare(`
+      SELECT DISTINCT location.source_key,location.latitude,location.longitude
+      FROM client_folder_associations association
+      ${sessionJoin}
+      JOIN file_index file ON substr(file.r2_key,1,length(association.r2_prefix))=association.r2_prefix
+      JOIN image_asset_locations location
+        ON location.source_key=file.r2_key AND location.source_etag=trim(file.etag,'"') AND location.status='ready'
+      WHERE association.account_id=a.id AND association.scope_type='client' AND association.project_id IS NULL
+        AND association.revoked_at IS NULL AND file.media_kind='image'
+        AND file.r2_key NOT LIKE '_ltds/%' AND file.r2_key NOT LIKE '%/_ltds/%'
+        AND file.r2_key NOT LIKE '.previews/%' AND file.r2_key NOT LIKE '%/.previews/%'
+        AND file.r2_key NOT LIKE 'dump/%' AND file.r2_key NOT LIKE '%/dump/%'
+        AND NOT EXISTS (
+          SELECT 1 FROM delivery_tombstones tombstone
+          WHERE tombstone.restored_at IS NULL AND (
+            tombstone.physical_key=file.r2_key OR
+            (tombstone.tombstone_kind='prefix' AND substr(file.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key)
+          )
+        )
+      ORDER BY location.source_key LIMIT ?`)
+      .bind(session.accountId, session.identityId, LOCATION_MAP_LIMIT + 1)
+      .all<LocationRow>();
+    return aggregateDeliveryLocations(result.results, LOCATION_MAP_LIMIT);
   },
 
   async getAuthorizedFile(

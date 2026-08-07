@@ -3,6 +3,8 @@ export const PERMISSIONS = [
   "operations.view",
   "operations.view_all",
   "operations.manage",
+  "sops.view",
+  "sops.manage",
   "projects.view",
   "tasks.view",
   "tasks.create",
@@ -316,6 +318,52 @@ export interface DeliveryItem {
   streamUrl?: string | null;
   previewStatus?: "ready" | "processing" | "unavailable";
   displayName?: string;
+}
+
+export interface DeliveryLocationPoint {
+  latitude: number;
+  longitude: number;
+  /** Multiple images can share the same recorded position. */
+  imageCount: number;
+}
+
+export interface DeliveryLocationCollection {
+  points: DeliveryLocationPoint[];
+  imageCount: number;
+  truncated: boolean;
+}
+
+export const MOVED_SOURCE_MARKER = "ltds-moved-source-v1" as const;
+
+/** A zero-byte CAS marker left at a moved R2 key instead of an unsafe delete. */
+export function isMovedSourceMarker(object: { customMetadata?: Record<string, string> }): boolean {
+  return object.customMetadata?.ltdsMoveMarker === MOVED_SOURCE_MARKER;
+}
+
+/**
+ * Aggregates authorized, version-checked asset rows without carrying asset or
+ * storage identifiers across the API boundary.
+ */
+export function aggregateDeliveryLocations(
+  rows: ReadonlyArray<{ latitude: number; longitude: number }>,
+  maximumImages = 500,
+): DeliveryLocationCollection {
+  const limit = Number.isSafeInteger(maximumImages) && maximumImages > 0 ? maximumImages : 500;
+  const selected = rows.slice(0, limit);
+  const grouped = new Map<string, DeliveryLocationPoint>();
+  let imageCount = 0;
+  for (const row of selected) {
+    if (!Number.isFinite(row.latitude) || !Number.isFinite(row.longitude) ||
+      row.latitude < -90 || row.latitude > 90 || row.longitude < -180 || row.longitude > 180) continue;
+    imageCount += 1;
+    const latitude = Number(row.latitude.toFixed(6));
+    const longitude = Number(row.longitude.toFixed(6));
+    const key = `${latitude}:${longitude}`;
+    const existing = grouped.get(key);
+    if (existing) existing.imageCount += 1;
+    else grouped.set(key, { latitude, longitude, imageCount: 1 });
+  }
+  return { points: [...grouped.values()], imageCount, truncated: rows.length > limit };
 }
 
 export interface DeliveryManifest {

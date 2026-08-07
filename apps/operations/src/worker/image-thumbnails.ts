@@ -1,9 +1,13 @@
 import type { Env } from "./types";
+import { currentLocationStatus, deleteImageLocation, processImageLocation } from "./image-locations";
+import { isMovedSourceMarker } from "@ltds/shared";
 
 export const THUMBNAIL_JOB_KIND = "image-thumbnail.v1" as const;
 export const THUMBNAIL_WIDTH = 320;
 export const THUMBNAIL_HEIGHT = 240;
 export const THUMBNAIL_MAX_INPUT_BYTES = 20 * 1024 * 1024;
+/** Cloudflare Media Transformations requires video inputs to be strictly below 100 MB. */
+export const VIDEO_THUMBNAIL_MAX_INPUT_BYTES = 100_000_000;
 export const THUMBNAIL_MAX_OUTPUT_BYTES = 128 * 1024;
 export const THUMBNAIL_MAX_DELIVERY_ATTEMPTS = 6;
 
@@ -18,6 +22,11 @@ const SUPPORTED_IMAGE_CONTENT_TYPES = new Set([
   "image/png",
   "image/webp",
 ]);
+const SUPPORTED_VIDEO_EXTENSION = "mp4";
+const SUPPORTED_VIDEO_CONTENT_TYPE = "video/mp4";
+const VIDEO_EXTENSIONS = new Set(["m4v", "mov", "mp4", "webm"]);
+
+export type ThumbnailSourceKind = "image" | "video";
 
 export interface ThumbnailJobMessage {
   kind: typeof THUMBNAIL_JOB_KIND;
@@ -123,8 +132,43 @@ function extension(key: string): string {
 }
 
 export function supportedThumbnailSource(key: string, contentType?: string): boolean {
+  return thumbnailSourceKind(key, contentType) !== null;
+}
+
+/**
+ * Video eligibility is intentionally conservative. The container must be an
+ * MP4 by both name and metadata; Media Transformations then validates that its
+ * contents are decodable (Cloudflare documents H.264 as the reliable codec).
+ */
+export function thumbnailSourceKind(key: string, contentType?: string): ThumbnailSourceKind | null {
   const normalizedType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
-  return Boolean((normalizedType && SUPPORTED_IMAGE_CONTENT_TYPES.has(normalizedType)) || SUPPORTED_IMAGE_EXTENSIONS.has(extension(key)));
+  const sourceExtension = extension(key);
+  if (VIDEO_EXTENSIONS.has(sourceExtension)) {
+    return sourceExtension === SUPPORTED_VIDEO_EXTENSION && normalizedType === SUPPORTED_VIDEO_CONTENT_TYPE ? "video" : null;
+  }
+  if ((normalizedType && SUPPORTED_IMAGE_CONTENT_TYPES.has(normalizedType)) || SUPPORTED_IMAGE_EXTENSIONS.has(sourceExtension)) return "image";
+  return null;
+}
+
+export function thumbnailSourceWithinInputLimit(kind: ThumbnailSourceKind, size: number): boolean {
+  return Number.isSafeInteger(size) && size > 0 && (kind === "video"
+    ? size < VIDEO_THUMBNAIL_MAX_INPUT_BYTES
+    : size <= THUMBNAIL_MAX_INPUT_BYTES);
+}
+
+/**
+ * Exact source eligibility shared by listing, generation, and authorized
+ * delivery. For video this requires both an MP4 name and authoritative
+ * `video/mp4` object metadata; unsupported media must never reach a thumbnail
+ * body lookup through a forged or stale D1 row.
+ */
+export function thumbnailSourceEligible(
+  key: string,
+  size: number,
+  contentType?: string,
+): boolean {
+  const kind = thumbnailSourceKind(key, contentType);
+  return kind !== null && thumbnailSourceWithinInputLimit(kind, size);
 }
 
 function errorDetails(error: unknown): { code: string; message: string; permanent: boolean } {
@@ -150,6 +194,32 @@ async function currentJob(env: Pick<Env, "DELIVERY_DB">, sourceKey: string): Pro
     SELECT source_etag,thumbnail_key,status,error_code,queue_published_at FROM image_thumbnail_jobs WHERE source_key=?`)
     .bind(sourceKey)
     .first<ThumbnailJobRow>();
+}
+
+async function fixedWebpThumbnail(env: Pick<Env, "IMAGES">, input: ReadableStream<Uint8Array>) {
+  return env.IMAGES.input(input)
+    .transform({ width: THUMBNAIL_WIDTH, height: THUMBNAIL_HEIGHT, fit: "cover", gravity: "center" })
+    .output({ format: "image/webp", quality: 78, anim: false });
+}
+
+async function videoFrameThumbnail(env: Pick<Env, "IMAGES" | "MEDIA">, input: ReadableStream<Uint8Array>) {
+  const frame = await env.MEDIA.input(input)
+    .transform({ width: THUMBNAIL_WIDTH, height: THUMBNAIL_HEIGHT, fit: "cover" })
+    .output({ mode: "frame", time: "5s", format: "jpg" })
+    .response();
+  if (!frame.ok) {
+    if (frame.status >= 400 && frame.status < 500) {
+      throw new PermanentThumbnailError("unsupported_video", "Cloudflare Media Transformations rejected the MP4 video");
+    }
+    throw new Error(`Cloudflare Media Transformations returned HTTP ${frame.status}`);
+  }
+  const contentType = frame.headers.get("Content-Type")?.split(";", 1)[0]?.trim().toLowerCase();
+  if (!frame.body || (contentType !== "image/jpeg" && contentType !== "image/jpg")) {
+    throw new PermanentThumbnailError("invalid_media_output", "Cloudflare Media Transformations returned an invalid frame");
+  }
+  // Only the extracted still frame reaches Images. The original video is never
+  // copied to the derivative namespace and is never submitted for transcoding.
+  return fixedWebpThumbnail(env, frame.body);
 }
 
 async function scheduleThumbnailCleanup(
@@ -429,9 +499,11 @@ export async function removeThumbnailStateForPath(
   env: Env,
   sourceKey: string,
   isPrefix = false,
+  expectedSourceEtag?: string,
 ): Promise<{ rows: number; objects: number }> {
   const normalizedPrefix = isPrefix ? (sourceKey.endsWith("/") ? sourceKey : `${sourceKey}/`) : sourceKey;
-  const exact = isPrefix ? null : await currentJob(env, sourceKey);
+  const current = isPrefix ? null : await currentJob(env, sourceKey);
+  const exact = current && (!expectedSourceEtag || cleanEtag(current.source_etag) === cleanEtag(expectedSourceEtag)) ? current : null;
   const rows = isPrefix
     ? await env.DELIVERY_DB.prepare(`/* thumbnail.cleanup-list */
         SELECT source_key,source_etag,thumbnail_key,status,error_code FROM image_thumbnail_jobs
@@ -456,13 +528,13 @@ export async function enqueueThumbnailsForPath(env: Env, sourceKey: string, isPr
   const objects: R2Object[] = [];
   if (!isPrefix) {
     const object = await env.DATA_BUCKET.head(sourceKey);
-    if (object) objects.push(object);
+    if (object && !isMovedSourceMarker(object)) objects.push(object);
   } else {
     const prefix = sourceKey.endsWith("/") ? sourceKey : `${sourceKey}/`;
     let cursor: string | undefined;
     do {
-      const page = await env.DATA_BUCKET.list({ prefix, limit: 1000, cursor });
-      objects.push(...page.objects.filter(object => !object.key.endsWith("/")));
+      const page = await env.DATA_BUCKET.list({ prefix, limit: 1000, cursor, include:["httpMetadata","customMetadata"] });
+      objects.push(...page.objects.filter(object => !object.key.endsWith("/") && !isMovedSourceMarker(object)));
       cursor = page.truncated ? page.cursor : undefined;
     } while (cursor);
   }
@@ -481,8 +553,9 @@ export async function enqueueThumbnailsForPath(env: Env, sourceKey: string, isPr
 }
 
 /**
- * Process one queue job. The original is streamed from private R2 directly into
- * Cloudflare Images and only the fixed WebP output stream is written to R2.
+ * Process one queue job. Images stream directly into Cloudflare Images. MP4
+ * videos stream into Media Transformations in frame-only mode, and only that
+ * extracted frame reaches Images. Only the fixed WebP output is written to R2.
  */
 export async function processThumbnailJob(
   env: Env,
@@ -491,38 +564,80 @@ export async function processThumbnailJob(
 ): Promise<ThumbnailJobOutcome> {
   const sourceEtag = cleanEtag(message.sourceEtag);
   if (!canonicalThumbnailSourceKey(message.sourceKey)) return { outcome: "obsolete" };
-  const registered = await currentJob(env, message.sourceKey);
-  if (!registered || cleanEtag(registered.source_etag) !== sourceEtag) return { outcome: "obsolete" };
-  const thumbnailKey = registered.thumbnail_key;
-  if (registered.status === "ready") return { outcome: "duplicate", thumbnailKey };
-  if (registered.status === "failed") return { outcome: "obsolete" };
   if (await sourceIsTrashed(env, message.sourceKey)) {
     await removeThumbnailStateForPath(env, message.sourceKey);
     return { outcome: "obsolete" };
   }
+
+  // Reject forged, retired, and terminal duplicate messages from durable state
+  // before touching R2. Location-only jobs (for example TIFF EXIF extraction)
+  // have their own exact-version row and may proceed without a thumbnail row.
+  const registered = await currentJob(env, message.sourceKey);
+  const currentThumbnail = registered && cleanEtag(registered.source_etag) === sourceEtag
+    ? registered
+    : null;
+  if (currentThumbnail?.status === "ready") {
+    return { outcome: "duplicate", thumbnailKey: currentThumbnail.thumbnail_key };
+  }
+  if (currentThumbnail?.status === "failed") return { outcome: "obsolete" };
+  const location = currentThumbnail ? null : await currentLocationStatus(env, message.sourceKey);
+  const currentLocation = location && cleanEtag(location.source_etag) === sourceEtag &&
+    ["pending", "processing", "failed"].includes(location.status)
+    ? location
+    : null;
+  if (!currentThumbnail && !currentLocation) return { outcome: "obsolete" };
+
   const sourceHead = await env.DATA_BUCKET.head(message.sourceKey);
   if (!sourceHead) {
-    if (await claimJob(env, message.sourceKey, sourceEtag)) {
+    if (currentThumbnail && await claimJob(env, message.sourceKey, sourceEtag)) {
       await failJob(env, message.sourceKey, sourceEtag, "source_missing", "The original no longer exists", true);
       return { outcome: "failed", errorCode: "source_missing" };
     }
+    if (currentLocation) await deleteImageLocation(env, message.sourceKey, sourceEtag);
     return { outcome: "obsolete" };
   }
   if (cleanEtag(sourceHead.httpEtag) !== sourceEtag) {
-    if (await claimJob(env, message.sourceKey, sourceEtag)) {
+    if (currentThumbnail && await claimJob(env, message.sourceKey, sourceEtag)) {
       await failJob(env, message.sourceKey, sourceEtag, "source_changed", "The queued original version is obsolete", true);
     }
+    if (currentLocation) await deleteImageLocation(env, message.sourceKey, sourceEtag);
     return { outcome: "obsolete" };
   }
+
+  if (currentLocation || thumbnailSourceKind(message.sourceKey, sourceHead.httpMetadata?.contentType) === "image") {
+    try {
+      await processImageLocation(env, {
+        sourceKey: message.sourceKey,
+        sourceEtag,
+        sourceSize: sourceHead.size,
+      });
+    } catch (error) {
+      // Location metadata is best-effort and must never block thumbnail
+      // readiness. Its versioned state remains failed for bounded backfill.
+      console.error(JSON.stringify({
+        event: "image-location.process-failed",
+        message: safeErrorMessage(error instanceof Error ? error.message : "Image location extraction failed"),
+      }));
+    }
+  }
+
+  if (!currentThumbnail) return { outcome: "obsolete" };
+  const thumbnailKey = currentThumbnail.thumbnail_key;
 
   if (!(await claimJob(env, message.sourceKey, sourceEtag))) return { outcome: "duplicate", thumbnailKey };
 
   try {
-    if (!supportedThumbnailSource(message.sourceKey, sourceHead.httpMetadata?.contentType)) {
-      throw new PermanentThumbnailError("unsupported_file", "The original is not a supported image format");
+    const sourceKind = thumbnailSourceKind(message.sourceKey, sourceHead.httpMetadata?.contentType);
+    if (!sourceKind) {
+      throw new PermanentThumbnailError("unsupported_file", "The original is not a supported thumbnail format");
     }
-    if (sourceHead.size > THUMBNAIL_MAX_INPUT_BYTES) {
-      throw new PermanentThumbnailError("input_too_large", "The original exceeds the Cloudflare Images binding input limit");
+    if (!thumbnailSourceWithinInputLimit(sourceKind, sourceHead.size)) {
+      throw new PermanentThumbnailError(
+        sourceKind === "video" ? "video_input_too_large" : "input_too_large",
+        sourceKind === "video"
+          ? "The original must be smaller than the Cloudflare Media Transformations 100 MB input limit"
+          : "The original exceeds the Cloudflare Images binding input limit",
+      );
     }
 
     // Trash can race the queue claim. Re-check immediately before the only
@@ -532,14 +647,14 @@ export async function processThumbnailJob(
       return { outcome: "obsolete" };
     }
 
-    const source = await env.DATA_BUCKET.get(message.sourceKey);
-    if (!source || cleanEtag(source.httpEtag) !== sourceEtag) {
+    const source = await env.DATA_BUCKET.get(message.sourceKey, { onlyIf: { etagMatches: sourceEtag } });
+    if (!source || !("body" in source) || cleanEtag(source.httpEtag) !== sourceEtag) {
       await failJob(env, message.sourceKey, sourceEtag, "source_changed", "The original changed before thumbnail generation", true);
       return { outcome: "obsolete" };
     }
-    const transformed = await env.IMAGES.input(source.body)
-      .transform({ width: THUMBNAIL_WIDTH, height: THUMBNAIL_HEIGHT, fit: "cover", gravity: "center" })
-      .output({ format: "image/webp", quality: 78, anim: false });
+    const transformed = sourceKind === "video"
+      ? await videoFrameThumbnail(env, source.body)
+      : await fixedWebpThumbnail(env, source.body);
     if (transformed.contentType() !== "image/webp") {
       throw new PermanentThumbnailError("invalid_transform_output", "Cloudflare Images returned an unexpected output format");
     }
@@ -667,8 +782,12 @@ export async function getThumbnailState(
  * Call only after the route has authenticated and authorized sourceKey. This
  * helper verifies the current original ETag but never reads the original body.
  */
-export async function getThumbnailForAuthorizedSource(env: Env, sourceKey: string): Promise<AuthorizedThumbnail> {
-  const source = await env.DATA_BUCKET.head(sourceKey);
+export async function getThumbnailForAuthorizedSource(
+  env: Env,
+  sourceKey: string,
+  authorizedSource?: R2Object,
+): Promise<AuthorizedThumbnail> {
+  const source = authorizedSource ?? await env.DATA_BUCKET.head(sourceKey);
   if (!source) return { state: "pending", object: null };
   const state = await getThumbnailState(env, sourceKey, source.httpEtag);
   if (state.state !== "ready" || !state.thumbnailKey) {

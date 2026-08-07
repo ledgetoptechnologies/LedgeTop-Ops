@@ -1,5 +1,6 @@
 import { cloudDb } from "./repository";
 import type { CloudTransferEnv, CloudTransferItem } from "./types";
+import { isMovedSourceMarker } from "@ltds/shared";
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -92,7 +93,7 @@ export async function validateSourceGrant(
     .bind(await digest(token), now.toISOString(), now.toISOString()).first<CloudTransferItem>();
   if (!item) throw new Error("source-grant-invalid");
   const object = await env.DATA_BUCKET.head(item.source_key);
-  if (!object) throw new Error("source-missing");
+  if (!object || isMovedSourceMarker(object)) throw new Error("source-missing");
   if (object.etag !== item.source_etag || object.size !== item.source_size) throw new Error("source-changed");
   return { item, object };
 }

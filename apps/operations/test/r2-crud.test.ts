@@ -12,6 +12,18 @@ describe("Operations R2 CRUD boundaries", () => {
     expect(() => normalizeCrudKey("Jobs/Clients/Acme/../Other/photo.jpg")).toThrow();
   });
 
+  it("enforces R2's 1,024-byte key limit using UTF-8 bytes rather than characters", () => {
+    const prefix = "Jobs/Clients/Acme/";
+    const exact = `${prefix}${"é".repeat(503)}`;
+    const over = `${prefix}${"é".repeat(502)}€`;
+
+    expect(new TextEncoder().encode(exact)).toHaveLength(1_024);
+    expect(normalizeCrudKey(exact)).toBe(exact);
+    expect(new TextEncoder().encode(over)).toHaveLength(1_025);
+    expect(() => normalizeCrudKey(over)).toThrow("1,024-byte storage limit");
+    expect(() => normalizeCrudKey(exact, true)).toThrow("1,024-byte storage limit");
+  });
+
   it("keeps a 500 GiB upload inside R2's part-count limit", () => {
     const size = 500 * 1024 ** 3;
     const partSize = operationsMultipartPartSize(size);

@@ -73,7 +73,7 @@ Operations:
 Ops Sync:
 
 - `CF_ACCESS_GROUP_API_TOKEN`
-- `PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY`
+- `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET`
 
 The staging manifest currently requires the complete 12-name Operations set
 even while incoming capability flags remain disabled. This keeps the checked
@@ -148,7 +148,7 @@ npm.cmd run staging:evidence:check
 Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
-`0108_thumbnail_backfill_runs.sql` and Operations
+`0109_image_asset_locations.sql` and Operations
 `0014_staff_acl_controls.sql` through
 `0018_browser_upload_intents.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
@@ -157,7 +157,8 @@ still records the approved version for authorization checks. Reject any
 unexpected pending migration. Migration `0105` must be present before the
 Operations version that exposes direct authenticated folder grants or runs its
 five-minute notification consumer; `0106`/`0107`/`0108` must be present before
-thumbnail jobs, cleanup, or backfill run; `0017` must be present before
+thumbnail jobs, cleanup, or backfill run; `0109` must be present before photo
+location extraction or map routes run; `0017` must be present before
 job-brief routes and `0018` before browser-upload routes are registered. Worker
 rollback does not undo either database.
 
@@ -197,7 +198,9 @@ configuration.
 After deployment, verify Access rejection, host rejection, health, role and
 object authorization, fault handling, recycle/restore, audit logs, queue/DLQ,
 and rollback. Ops Sync stays undeployed and default-deny until Project Alpha
-service auth, Access group authority, and Ed25519 verification are ready.
+service auth, Access group authority, and the exact timestamp/body HMAC contract
+are verified. If Ed25519 is added later, prove its precedence and rotation path
+separately before configuring a public key.
 
 For the portal, first prove the false flag returns `404`. Temporary activation
 requires its own approval and version; after the full client/team/request/share
