@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 const source = readFileSync(
   new URL("../src/client/OperationsApp.tsx", import.meta.url),
   "utf8",
-);
+).replaceAll("\r\n", "\n");
 
 describe("authenticated browser upload UI", () => {
   it("uses the private same-origin intent, checkpoint, part, and completion routes", () => {
