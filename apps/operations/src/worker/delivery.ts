@@ -26,8 +26,48 @@ export function mediaKind(key:string):MediaKind{const value=mime(key);if(value.s
 export function deliverySourceUrl(kind:DeliveryItem["kind"],id:string):string|undefined{return["image","video","audio","pdf","text"].includes(kind)?`/api/delivery/items/${id}/${kind==="pdf"?"pdf":"source"}`:undefined;}
 function thumbnailEligible(object: Pick<R2Object, "key" | "size" | "httpMetadata">): boolean { return thumbnailSourceEligible(object.key,object.size,object.httpMetadata?.contentType); }
 
+const FOLDER_VISIBILITY_CANDIDATE_BATCH = 40;
+
+function prefixUpperBound(prefix:string):string{
+  // Normalized folder prefixes always end in "/". Replacing that final byte
+  // with the next ASCII byte creates a strict upper bound for every descendant
+  // while preserving SQLite's primary-key range lookup on file_index.r2_key.
+  return `${prefix.slice(0,-1)}0`;
+}
+
+async function indexedVisibleDeliveryFolders(env:Env,candidates:readonly string[]):Promise<Set<string>>{
+  const visible=new Set<string>();
+  for(let offset=0;offset<candidates.length;offset+=FOLDER_VISIBILITY_CANDIDATE_BATCH){
+    const batch=candidates.slice(offset,offset+FOLDER_VISIBILITY_CANDIDATE_BATCH);
+    const valuesSql=batch.map(()=>"(?,?)").join(",");
+    const bindings=batch.flatMap(prefix=>[prefix,prefixUpperBound(prefix)]);
+    const result=await env.DELIVERY_DB.prepare(`WITH candidates(prefix,upper_bound) AS (VALUES ${valuesSql})
+      SELECT c.prefix FROM candidates c WHERE EXISTS (
+        SELECT 1 FROM file_index fi
+        WHERE fi.r2_key>=c.prefix AND fi.r2_key<c.upper_bound
+          AND fi.r2_key<>c.prefix AND substr(fi.r2_key,-1,1)<>'/'
+          AND instr(lower('/'||fi.r2_key||'/'),'/_ltds/')=0
+          AND instr(lower('/'||fi.r2_key||'/'),'/.previews/')=0
+          AND instr(lower('/'||fi.r2_key||'/'),'/dump/')=0
+          AND NOT EXISTS (
+            SELECT 1 FROM delivery_tombstones t WHERE t.restored_at IS NULL AND (
+              (t.tombstone_kind='exact' AND t.physical_key=fi.r2_key) OR
+              (t.tombstone_kind='prefix' AND substr(fi.r2_key,1,length(t.physical_key))=t.physical_key)
+            )
+          )
+        LIMIT 1
+      )`).bind(...bindings).all<{prefix:string}>();
+    for(const row of result.results)if(batch.includes(row.prefix))visible.add(row.prefix);
+  }
+  return visible;
+}
+
 async function visibleDeliveryFolders(env:Env,candidates:readonly string[],trashed:(key:string)=>boolean):Promise<Set<string>>{
-  const allowed=new Set(candidates),visible=new Set<string>(),pending=candidates.map(value=>({directory:value,child:value})),visited=new Set<string>();
+  const allowed=new Set(candidates),visible=await indexedVisibleDeliveryFolders(env,candidates).catch(error=>{
+    console.warn(JSON.stringify({event:"delivery.folder-index-visibility-fallback",candidateCount:candidates.length,message:error instanceof Error?error.message:"unknown"}));
+    return new Set<string>();
+  });
+  const pending=candidates.filter(value=>!visible.has(value)).map(value=>({directory:value,child:value})),visited=new Set<string>();
   while(pending.length){const item=pending.shift()!;if(visible.has(item.child)||visited.has(item.directory)||hidden(item.directory)||trashed(item.directory))continue;visited.add(item.directory);let cursor:string|undefined;do{
     const page=await env.DATA_BUCKET.list({prefix:item.directory,delimiter:"/",limit:500,cursor,include:["customMetadata"]});
     if(page.objects.some(object=>object.key!==item.directory&&!object.key.endsWith("/")&&!hidden(object.key)&&!trashed(object.key)&&!isMovedSourceMarker(object))){visible.add(item.child);break;}
@@ -60,7 +100,9 @@ export async function listDeliveryFolder(env:Env,principal:StaffPrincipal,prefix
   const access=await browseRoots(env,principal);
   const tombstones=await activeTombstones(env); const trashed=(key:string)=>tombstones.some(tombstone=>tombstoneMatches(tombstone,key));
   if(!access.global&&!prefixValue){const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string}>();const shared=(key:string)=>activeShares.results.some(share=>{try{return key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});const roots=access.roots.filter(root=>!trashed(root.prefix));const aliases=await aliasMap(env,roots.map(root=>root.prefix));return{prefix:"",folders:roots.map(root=>({id:encodeRef(root.prefix.slice(0,-1)),prefix:root.prefix,name:aliases.get(root.prefix)||root.name,isShared:shared(root.prefix)})),files:[],nextCursor:null};}
-  const prefix=prefixValue?await authorizeDeliveryFolderPrefix(env,principal,prefixValue):"";
+  const prefix=prefixValue?normalizePrefix(prefixValue):"";
+  if(prefix&&!access.global&&!access.roots.some(root=>prefix.startsWith(root.prefix)))throw new HTTPException(404,{message:"Folder not found"});
+  if(prefix)await assertNotTrashed(env,prefix);
   const listed=await env.DATA_BUCKET.list({prefix,delimiter:"/",limit:500,cursor,include:["httpMetadata","customMetadata"]});
   const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string}>();
   const shared=(key:string)=>activeShares.results.some(share=>{try{return key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});

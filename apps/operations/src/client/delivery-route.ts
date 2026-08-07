@@ -1,3 +1,4 @@
+export const DELIVERY_JOBS_PREFIX="Jobs/";
 export const DELIVERY_ROOT_PREFIX="Jobs/Clients/";
 
 function validSegment(value:string):boolean{
@@ -8,6 +9,14 @@ function validSegment(value:string):boolean{
 export function prefixFromDeliveryPath(pathname:string):string{
   const raw=pathname.split("?")[0]!.split("#")[0]!;
   const parts=raw.split("/").filter(Boolean);
+  if(parts[0]==="jobs"){
+    if(parts.length===1)return DELIVERY_JOBS_PREFIX;
+    try{
+      const decoded=parts.slice(1).map(decodeURIComponent);
+      if(decoded.some(segment=>!validSegment(segment)))return DELIVERY_JOBS_PREFIX;
+      return `${DELIVERY_JOBS_PREFIX}${decoded.join("/")}/`;
+    }catch{return DELIVERY_JOBS_PREFIX}
+  }
   if(parts[0]!=="delivery"||parts.length===1)return DELIVERY_ROOT_PREFIX;
   try{
     const decoded=parts.slice(1).map(decodeURIComponent);
@@ -18,7 +27,14 @@ export function prefixFromDeliveryPath(pathname:string):string{
 
 export function deliveryPathFromPrefix(prefix:string):string{
   const normalized=prefix.replace(/\\/g,"/").replace(/\/{2,}/g,"/").replace(/\/+$/,"")+"/";
-  if(!normalized.startsWith(DELIVERY_ROOT_PREFIX))return"/delivery";
+  if(!normalized.startsWith(DELIVERY_JOBS_PREFIX))return"/delivery";
+  if(normalized===DELIVERY_JOBS_PREFIX)return"/jobs";
+  if(!normalized.startsWith(DELIVERY_ROOT_PREFIX)){
+    const relative=normalized.slice(DELIVERY_JOBS_PREFIX.length).replace(/\/$/,"");
+    const segments=relative.split("/");
+    if(segments.some(segment=>!validSegment(segment)))return"/delivery";
+    return `/jobs/${segments.map(encodeURIComponent).join("/")}`;
+  }
   const relative=normalized.slice(DELIVERY_ROOT_PREFIX.length).replace(/\/$/,"");
   if(!relative)return"/delivery";
   const segments=relative.split("/");

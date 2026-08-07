@@ -6,6 +6,7 @@ const PAGES:OperationsPage[]=["dashboard","operations","sops","airspace","delive
 export function pathPage(pathname:string):OperationsPage{
   const value=pathname.split("/").filter(Boolean)[0];
   if(value==="projects"||value==="tasks")return"operations";
+  if(value==="jobs")return"delivery";
   return PAGES.includes(value as OperationsPage)?value as OperationsPage:"dashboard";
 }
 

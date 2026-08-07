@@ -4,6 +4,7 @@ import { Brand, Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import { ApiError, api, setCsrf } from "./api";
 import { generateSecureAccessCode } from "./access-code";
 import {
+  DELIVERY_JOBS_PREFIX,
   DELIVERY_ROOT_PREFIX,
   deliveryPathFromPrefix,
   prefixFromDeliveryPath,
@@ -42,6 +43,7 @@ interface Session {
       enabled: boolean;
       reason: "available" | "disabled";
     };
+    deliveryJobsRoot?: { enabled: boolean };
   };
 }
 interface ActiveDeliveryShare {
@@ -1418,12 +1420,20 @@ type DeliveryItem = {
   size?: number;
   isShared?: boolean;
   thumbnailUrl?: string;
+  thumbnailState?: "pending" | "ready" | "failed" | "not_applicable";
   thumbnailFallbackKind?: string;
   downloadUrl?: string;
   previewUrl?: string;
   sourceUrl?: string;
   previewStatus?: string;
 };
+type DeliveryFolderPage = {
+  prefix: string;
+  folders?: DeliveryItem[];
+  files?: DeliveryItem[];
+  nextCursor?: string | null;
+};
+const MAX_DELIVERY_FOLDER_PAGES = 100;
 type DeliveryOperation = {
   id?: string;
   operationId?: string;
@@ -2260,6 +2270,8 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     [selectionMode, setSelectionMode] = useState(false),
     [operation, setOperation] = useState<DeliveryOperation | null>(null),
     [operationError, setOperationError] = useState("");
+  const currentPrefixRef = useRef(prefix);
+  currentPrefixRef.current = prefix;
   const [uploading, setUploading] = useState(false),
     [fileInput, setFileInput] = useState<HTMLInputElement | null>(null),
     [folderInput, setFolderInput] = useState<HTMLInputElement | null>(null);
@@ -2269,30 +2281,117 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     const params = new URLSearchParams(location.search);
     return Boolean(params.get("dropboxImportAuthorization"));
   });
-  const { data, error, reload, loading } = useLoad<any>(
-    () => cachedFolderApi(prefix),
-    [prefix],
-  );
-  const cachedData = cachedFolderData(prefix);
-  const displayData = data ?? cachedData;
+  const [folderState, setFolderState] = useState<{
+    prefix: string;
+    data: DeliveryFolderPage | null;
+    error: string;
+    loading: boolean;
+  }>({ prefix: "", data: null, error: "", loading: true });
+  const folderRequestId = useRef(0);
+  const folderRequest = useRef<AbortController | null>(null);
+  const reload = useCallback(async () => {
+    const requestedPrefix = prefix;
+    if (requestedPrefix !== currentPrefixRef.current) return;
+    const requestId = ++folderRequestId.current;
+    folderRequest.current?.abort();
+    const controller = new AbortController();
+    folderRequest.current = controller;
+    setFolderState({
+      prefix: requestedPrefix,
+      data: cachedFolderData(requestedPrefix),
+      error: "",
+      loading: true,
+    });
+    let accumulated: DeliveryFolderPage | null = null;
+    try {
+      const folders = new Map<string, DeliveryItem>();
+      const files = new Map<string, DeliveryItem>();
+      const seenCursors = new Set<string>();
+      let cursor: string | null = null;
+      let completed = false;
+      for (let pageNumber = 0; pageNumber < MAX_DELIVERY_FOLDER_PAGES; pageNumber += 1) {
+        if (requestedPrefix !== currentPrefixRef.current || requestId !== folderRequestId.current || controller.signal.aborted) return;
+        const query = new URLSearchParams({ prefix: requestedPrefix });
+        if (cursor) query.set("cursor", cursor);
+        const page = await api<DeliveryFolderPage>(
+          `/api/delivery/folders?${query.toString()}`,
+          { signal: controller.signal },
+        );
+        if (requestedPrefix !== currentPrefixRef.current || requestId !== folderRequestId.current || controller.signal.aborted) return;
+        for (const [index, item] of (page.folders || []).entries()) {
+          const key = itemRef(item) || `folder:${pageNumber}:${index}`;
+          if (!folders.has(key)) folders.set(key, item);
+        }
+        for (const [index, item] of (page.files || []).entries()) {
+          const key = itemRef(item) || `file:${pageNumber}:${index}`;
+          if (!files.has(key)) files.set(key, item);
+        }
+        const nextCursor = typeof page.nextCursor === "string" && page.nextCursor.trim()
+          ? page.nextCursor
+          : null;
+         accumulated = {
+           prefix: requestedPrefix,
+           folders: [...folders.values()],
+           files: [...files.values()],
+           nextCursor,
+         };
+         const cacheKey = `/api/delivery/folders?prefix=${encodeURIComponent(requestedPrefix)}`;
+         folderCache.set(cacheKey, { data: accumulated, ts: Date.now() });
+         setFolderState({ prefix: requestedPrefix, data: accumulated, error: "", loading: Boolean(nextCursor) });
+        if (!nextCursor) {
+          completed = true;
+          break;
+        }
+        if (seenCursors.has(nextCursor)) throw new Error("Folder listing returned a repeated cursor.");
+        seenCursors.add(nextCursor);
+        cursor = nextCursor;
+      }
+      if (!completed) throw new Error(`Folder listing exceeded ${MAX_DELIVERY_FOLDER_PAGES} pages. Narrow the folder or refresh to try again.`);
+    } catch (caught) {
+      if (requestId !== folderRequestId.current || controller.signal.aborted) return;
+       setFolderState({
+         prefix: requestedPrefix,
+         data: accumulated,
+         error: (caught as Error).message,
+         loading: false,
+       });
+    }
+  }, [prefix]);
+  useEffect(() => {
+    void reload();
+    return () => {
+      folderRequestId.current += 1;
+      folderRequest.current?.abort();
+    };
+  }, [reload]);
+  const data = folderState.prefix === prefix ? folderState.data : null;
+  const error = folderState.prefix === prefix ? folderState.error : "";
+  const loading = folderState.prefix !== prefix || folderState.loading;
+  const displayData = data ?? cachedFolderData(prefix);
   const [locationState, setLocationState] = useState<{
     prefix: string;
     data: DeliveryLocationCollection | null;
     error: string;
   }>({ prefix: "", data: null, error: "" });
   const locationRequestId = useRef(0);
+  const locationRequest = useRef<AbortController | null>(null);
   const reloadLocations = useCallback(async () => {
     const requestedPrefix = prefix;
+    if (requestedPrefix !== currentPrefixRef.current) return;
     const requestId = ++locationRequestId.current;
+    locationRequest.current?.abort();
+    const controller = new AbortController();
+    locationRequest.current = controller;
     setLocationState({ prefix: requestedPrefix, data: null, error: "" });
     try {
       const value = await api<DeliveryLocationCollection>(
         `/api/delivery/folders/locations?prefix=${encodeURIComponent(requestedPrefix)}`,
+        { signal: controller.signal },
       );
-      if (requestId !== locationRequestId.current) return;
+      if (requestId !== locationRequestId.current || controller.signal.aborted) return;
       setLocationState({ prefix: requestedPrefix, data: value, error: "" });
     } catch (caught) {
-      if (requestId !== locationRequestId.current) return;
+      if (requestId !== locationRequestId.current || controller.signal.aborted) return;
       setLocationState({
         prefix: requestedPrefix,
         data: null,
@@ -2302,6 +2401,10 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   }, [prefix]);
   useEffect(() => {
     void reloadLocations();
+    return () => {
+      locationRequestId.current += 1;
+      locationRequest.current?.abort();
+    };
   }, [reloadLocations]);
   const locations = locationState.prefix === prefix ? locationState.data : null;
   const locationError = locationState.prefix === prefix ? locationState.error : "";
@@ -2363,6 +2466,8 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     );
   };
   const refresh = async () => {
+    const requestedPrefix = prefix;
+    if (requestedPrefix !== currentPrefixRef.current) return;
     setSelected([]);
     folderCache.delete(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`);
     await Promise.all([reload(), reloadLocations()]);
@@ -2642,9 +2747,11 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           </button>
         </div>
         <nav className="delivery-crumbs" aria-label="Current delivery folder">
-          <button title="Jobs" onClick={() => openFolder(DELIVERY_ROOT_PREFIX)}>
-            Jobs
-          </button>
+          {session.capabilities?.deliveryJobsRoot?.enabled ? (
+            <button title="Jobs" onClick={() => openFolder(DELIVERY_JOBS_PREFIX)}>
+              Jobs
+            </button>
+          ) : <span>Jobs</span>}
           {crumbs.slice(1).map((crumb) => (
             <span key={crumb.prefix}>
               /
@@ -2818,6 +2925,10 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           token={session.mapboxPublicToken}
           locations={locations}
           scopeLabel="this folder"
+          loadAsset={(assetRef) => api<DeliveryItem>(
+            `/api/delivery/folders/location-assets/${encodeURIComponent(assetRef)}?prefix=${encodeURIComponent(prefix)}`,
+          ) as Promise<any>}
+          openAsset={(asset) => setPreview(asset)}
         />
       )}
       <div

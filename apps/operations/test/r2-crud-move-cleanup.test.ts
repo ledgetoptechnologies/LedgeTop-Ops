@@ -171,6 +171,7 @@ describe("R2 move location cleanup", () => {
         OPS_DB: opsDb,
         DATA_BUCKET: dataBucket,
         THUMBNAIL_QUEUE: { send: vi.fn() },
+        DELIVERY_TOKEN_SECRET: "r2-move-location-asset-test-secret",
       } as any,
       dataBucket,
       stored,
@@ -231,7 +232,12 @@ describe("R2 move location cleanup", () => {
     expect(await deliveryDb.prepare("SELECT source_etag FROM image_asset_locations WHERE source_key=?").bind(source).first("source_etag"))
       .toBe("etag-replacement");
     await expect(listDeliveryFolderLocations(value.env, principal as any, oldPrefix)).resolves.toEqual({
-      points: [{ latitude: 45.25, longitude: -89.75, imageCount: 1 }],
+      points: [{
+        latitude: 45.25,
+        longitude: -89.75,
+        imageCount: 1,
+        assetRef: expect.stringMatching(/^loc_[A-Za-z0-9_-]{43}$/),
+      }],
       imageCount: 1,
       truncated: false,
     });

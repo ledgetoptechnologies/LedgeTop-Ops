@@ -3,6 +3,7 @@ import type { Env, StaffPrincipal } from "./types";
 import { isMovedSourceMarker } from "@ltds/shared";
 
 const CONTROL = /[\0-\x1f\x7f]/;
+const ALIAS_QUERY_BATCH = 75;
 
 export interface AliasRow { physical_key: string; parent_key: string; display_name: string }
 
@@ -48,8 +49,11 @@ export async function resolveAliasKey(env: Env, value: string): Promise<string> 
 export async function aliasMap(env: Env, keys: string[]): Promise<Map<string, string>> {
   const unique = [...new Set(keys)]; const map = new Map<string, string>();
   if (!unique.length) return map;
-  const rows = await env.DELIVERY_DB.prepare(`SELECT physical_key,display_name FROM file_aliases WHERE physical_key IN (${unique.map(() => "?").join(",")})`).bind(...unique).all<{ physical_key: string; display_name: string }>();
-  for (const row of rows.results) map.set(row.physical_key, row.display_name);
+  for (let offset = 0; offset < unique.length; offset += ALIAS_QUERY_BATCH) {
+    const batch = unique.slice(offset, offset + ALIAS_QUERY_BATCH);
+    const rows = await env.DELIVERY_DB.prepare(`SELECT physical_key,display_name FROM file_aliases WHERE physical_key IN (${batch.map(() => "?").join(",")})`).bind(...batch).all<{ physical_key: string; display_name: string }>();
+    for (const row of rows.results) map.set(row.physical_key, row.display_name);
+  }
   return map;
 }
 

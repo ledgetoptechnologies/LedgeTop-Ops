@@ -13,14 +13,17 @@ async function mockMapbox(page: Page) {
 }
 
 async function mockDelivery(page: Page, locationResponse: {
-  points: Array<{ latitude: number; longitude: number; imageCount: number }>;
+  points: Array<{ latitude: number; longitude: number; imageCount: number; assetRef?: string }>;
   imageCount: number;
   truncated: boolean;
 } = {
   points: [{ latitude: 44.501, longitude: -88.071, imageCount: 2 }],
   imageCount: 2,
   truncated: false,
-}) {
+}, resolveAsset?: (assetRef: string) => Promise<{
+  status?: number;
+  json: Record<string, unknown>;
+}>) {
   await page.route("**/api/**", async route => {
     const request = route.request();
     const url = new URL(request.url());
@@ -47,12 +50,29 @@ async function mockDelivery(page: Page, locationResponse: {
       await route.fulfill({ json: locationResponse });
     } else if (url.pathname === "/api/delivery/folders") {
       await route.fulfill({ json: { prefix: "Jobs/Clients/Acme/Current/", folders: [], files: [], nextCursor: null } });
+    } else if (url.pathname.startsWith("/api/delivery/folders/location-assets/")) {
+      expect(url.searchParams.get("prefix")).toBe("Jobs/Clients/Acme/Current/");
+      const assetRef = decodeURIComponent(url.pathname.split("/").pop() || "");
+      const resolved = resolveAsset
+        ? await resolveAsset(assetRef)
+        : { status: 404, json: { error: "Mapped image is no longer available." } };
+      await route.fulfill({ status: resolved.status || 200, json: resolved.json });
     } else if (url.pathname === "/api/delivery/trash") {
       await route.fulfill({ json: { items: [] } });
     } else {
       await route.fulfill({ status: 404, json: { error: "Not found" } });
     }
   });
+}
+
+async function clickMappedPoint(page: Page) {
+  const canvas = page
+    .getByRole("dialog", { name: "Image locations from available photo metadata" })
+    .locator(".image-location-map-canvas.expanded");
+  await expect(canvas.locator("canvas.mapboxgl-canvas")).toBeVisible();
+  const box = await canvas.boundingBox();
+  expect(box).not.toBeNull();
+  await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height / 2);
 }
 
 test("assigned Operations viewer gets a compact and fullscreen photo map without overflow", async ({ page }, testInfo) => {
@@ -94,4 +114,83 @@ test("hides the entire photo map when the folder has no mapped photos", async ({
   await expect(page.locator(".image-location-map")).toHaveCount(0);
   await expect(page.getByText("No image locations are available for this folder.")).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Image locations from available photo metadata" })).toHaveCount(0);
+});
+
+test("mapped pin opens an authorized thumbnail and returns from the full-resolution viewer without recreating the map", async ({ page }) => {
+  await mockMapbox(page);
+  await mockDelivery(page, {
+    points: [{ latitude: 44.501, longitude: -88.071, imageCount: 1, assetRef: "opaque-photo-a" }],
+    imageCount: 1,
+    truncated: false,
+  }, async assetRef => {
+    expect(assetRef).toBe("opaque-photo-a");
+    return {
+      json: {
+        id: "opaque-item-a",
+        kind: "image",
+        name: "mapped-photo.jpg",
+        displayName: "mapped-photo.jpg",
+        size: 1234,
+        thumbnailUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+        thumbnailState: "ready",
+        previewUrl: "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==",
+        downloadUrl: "/api/delivery/items/opaque-item-a/download",
+      },
+    };
+  });
+
+  await page.goto("/delivery/Acme/Current");
+  await page.getByRole("button", { name: "Enlarge map" }).click();
+  const mapDialog = page.getByRole("dialog", { name: "Image locations from available photo metadata" });
+  const expandedCanvas = mapDialog.locator(".image-location-map-canvas.expanded");
+  await expandedCanvas.evaluate(element => ((window as any).__mappedCanvas = element));
+
+  await clickMappedPoint(page);
+  const selection = page.getByRole("complementary", { name: "Selected mapped image" });
+  await expect(selection.getByAltText("Selected mapped image thumbnail")).toBeVisible();
+  await selection.getByRole("button", { name: "Open selected image" }).click();
+
+  const preview = page.getByRole("dialog", { name: "Preview mapped-photo.jpg" });
+  await expect(preview).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(preview).toHaveCount(0);
+  await expect(mapDialog).toBeVisible();
+  await expect(selection).toBeVisible();
+  expect(await expandedCanvas.evaluate(element => element === (window as any).__mappedCanvas)).toBe(true);
+
+  await selection.getByRole("button", { name: "Back to map" }).click();
+  await expect(selection).toHaveCount(0);
+  await expect(mapDialog).toBeVisible();
+
+  await clickMappedPoint(page);
+  await expect(selection).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(selection).toHaveCount(0);
+  await expect(mapDialog).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(mapDialog).toHaveCount(0);
+});
+
+test("stale mapped asset errors stay inside the selection panel without an original fallback", async ({ page }) => {
+  await mockMapbox(page);
+  await mockDelivery(page, {
+    points: [{ latitude: 44.501, longitude: -88.071, imageCount: 1, assetRef: "stale-photo" }],
+    imageCount: 1,
+    truncated: false,
+  }, async () => ({
+    status: 410,
+    json: { error: "Mapped image is no longer available." },
+  }));
+
+  await page.goto("/delivery/Acme/Current");
+  await page.getByRole("button", { name: "Enlarge map" }).click();
+  await clickMappedPoint(page);
+
+  const selection = page.getByRole("complementary", { name: "Selected mapped image" });
+  await expect(selection.getByText("Mapped image is no longer available.")).toBeVisible();
+  await expect(selection.getByRole("button", { name: "Open selected image" })).toHaveCount(0);
+  await expect(selection.locator("img")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(selection).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "Image locations from available photo metadata" })).toBeVisible();
 });

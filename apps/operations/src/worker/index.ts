@@ -33,7 +33,7 @@ import {
 import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, thumbnailSourceEligible, type ThumbnailJobMessage } from "./image-thumbnails";
 import { processThumbnailBackfills } from "./thumbnail-backfill";
 import { enqueueImageLocationBackfill } from "./image-locations";
-import { listDeliveryFolderLocations } from "./delivery-locations";
+import { listDeliveryFolderLocations, resolveDeliveryLocationAsset } from "./delivery-locations";
 import {
   authorizeItem,
   createDeliveryShare,
@@ -449,9 +449,10 @@ app.get("/health", (c) => c.json({ status: "ok", service: "ltds-ops" }));
 app.get("/api/session", async (c) => {
   const principal = c.get("principal"),
     administrator = c.get("administrator");
-  const [permissions, globalScope] = await Promise.all([
+  const [permissions, globalScope, deliveryBrowseScope] = await Promise.all([
     permissionKeys(c.env, principal),
     sqlScope(c.env, principal, "dashboard.view"),
+    sqlScope(c.env, principal, "delivery.browse"),
   ]);
   const divisions =
     administrator && globalScope.global
@@ -482,6 +483,9 @@ app.get("/api/session", async (c) => {
       dropboxImport: dropboxImportCapability(c.env),
       incomingUploads: incomingUploadsCapability(c.env),
       directDeliveryUploads: directDeliveryUploadsCapability(c.env),
+      deliveryJobsRoot: {
+        enabled: !deliveryBrowseScope.deniedGlobal && deliveryBrowseScope.global && deliveryBrowseScope.deniedDivisions.length === 0,
+      },
     },
   });
 });
@@ -1691,6 +1695,14 @@ app.get("/api/delivery/folders/locations", async (c) =>
     c.env,
     c.get("principal"),
     c.req.query("prefix") || "",
+  )),
+);
+app.get("/api/delivery/folders/location-assets/:assetRef", async (c) =>
+  c.json(await resolveDeliveryLocationAsset(
+    c.env,
+    c.get("principal"),
+    c.req.query("prefix") || "",
+    c.req.param("assetRef"),
   )),
 );
 app.get("/api/delivery/shares", async (c) =>

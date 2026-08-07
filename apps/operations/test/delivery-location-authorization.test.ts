@@ -1,6 +1,6 @@
 import { Miniflare } from "miniflare";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { listDeliveryFolderLocations } from "../src/worker/delivery-locations";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { listDeliveryFolderLocations, resolveDeliveryLocationAsset } from "../src/worker/delivery-locations";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const principal: StaffPrincipal = {
@@ -25,6 +25,7 @@ describe("Operations delivery location authorization", () => {
   let deliveryDb: D1Database;
   let env: Env;
   let coordinateQueries: string[];
+  const r2Reads = { head: vi.fn(), get: vi.fn(), list: vi.fn() };
 
   beforeAll(async () => {
     miniflare = new Miniflare({
@@ -50,14 +51,18 @@ describe("Operations delivery location authorization", () => {
     );
     await applySql(
       deliveryDb,
-      `CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,media_kind TEXT NOT NULL);
+      `CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,uploaded_at TEXT NOT NULL,content_type TEXT,media_kind TEXT NOT NULL);
        CREATE TABLE image_asset_locations(source_key TEXT PRIMARY KEY,source_etag TEXT NOT NULL,folder_prefix TEXT NOT NULL,latitude REAL,longitude REAL,status TEXT NOT NULL);
+       CREATE TABLE image_thumbnail_jobs(source_key TEXT PRIMARY KEY,source_etag TEXT NOT NULL,thumbnail_key TEXT NOT NULL,status TEXT NOT NULL,error_code TEXT);
        CREATE TABLE delivery_tombstones(id TEXT PRIMARY KEY,physical_key TEXT NOT NULL,tombstone_kind TEXT NOT NULL,restored_at TEXT);`,
     );
   });
 
   beforeEach(async () => {
     coordinateQueries = [];
+    r2Reads.head.mockReset();
+    r2Reads.get.mockReset();
+    r2Reads.list.mockReset();
     await opsDb.batch([
       opsDb.prepare("DELETE FROM staff_permission_overrides"),
       opsDb.prepare("DELETE FROM staff_role_assignments"),
@@ -73,14 +78,16 @@ describe("Operations delivery location authorization", () => {
     await deliveryDb.batch([
       deliveryDb.prepare("DELETE FROM delivery_tombstones"),
       deliveryDb.prepare("DELETE FROM image_asset_locations"),
+      deliveryDb.prepare("DELETE FROM image_thumbnail_jobs"),
       deliveryDb.prepare("DELETE FROM file_index"),
-      deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,media_kind) VALUES('Jobs/Clients/Acme/Delivery/photo.jpg','etag-a','image')"),
+      deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES('Jobs/Clients/Acme/Delivery/photo.jpg','etag-a',4096,'2026-08-07T12:00:00.000Z','image/jpeg','image')"),
       deliveryDb.prepare("INSERT INTO image_asset_locations(source_key,source_etag,folder_prefix,latitude,longitude,status) VALUES('Jobs/Clients/Acme/Delivery/photo.jpg','etag-a','Jobs/Clients/Acme/Delivery/',44.5,-88.1,'ready')"),
+      deliveryDb.prepare("INSERT INTO image_thumbnail_jobs(source_key,source_etag,thumbnail_key,status,error_code) VALUES('Jobs/Clients/Acme/Delivery/photo.jpg','etag-a','_ltds/thumbnails/ready.webp','ready',NULL)"),
     ]);
 
     const trackedDeliveryDb = {
       prepare(sql: string) {
-        if (sql.includes("image-location.operations-list")) coordinateQueries.push(sql);
+        if (sql.includes("image-location.operations-assets")) coordinateQueries.push(sql);
         return deliveryDb.prepare(sql);
       },
     };
@@ -94,6 +101,8 @@ describe("Operations delivery location authorization", () => {
         },
       },
       DELIVERY_DB: trackedDeliveryDb,
+      DELIVERY_TOKEN_SECRET: "test-location-secret-that-is-at-least-32-characters",
+      DATA_BUCKET: r2Reads,
     } as unknown as Env;
   });
 
@@ -103,7 +112,12 @@ describe("Operations delivery location authorization", () => {
     await expect(
       listDeliveryFolderLocations(env, principal, "Jobs/Clients/Acme/Delivery"),
     ).resolves.toEqual({
-      points: [{ latitude: 44.5, longitude: -88.1, imageCount: 1 }],
+      points: [{
+        latitude: 44.5,
+        longitude: -88.1,
+        imageCount: 1,
+        assetRef: expect.stringMatching(/^loc_[A-Za-z0-9_-]{43}$/),
+      }],
       imageCount: 1,
       truncated: false,
     });
@@ -137,5 +151,66 @@ describe("Operations delivery location authorization", () => {
       listDeliveryFolderLocations(env, principal, "Jobs/Clients/Acme/Delivery"),
     ).rejects.toMatchObject({ status: 403 });
     expect(coordinateQueries).toHaveLength(0);
+  });
+
+  it("resolves the listed current version and returns existing authorized URLs without R2 reads", async () => {
+    const listed = await listDeliveryFolderLocations(env, principal, "Jobs/Clients/Acme/Delivery");
+    const assetRef = listed.points[0]?.assetRef;
+    expect(assetRef).toBeTruthy();
+    await expect(resolveDeliveryLocationAsset(
+      env,
+      principal,
+      "Jobs/Clients/Acme/Delivery",
+      assetRef!,
+    )).resolves.toMatchObject({
+      name: "photo.jpg",
+      displayName: "photo.jpg",
+      kind: "image",
+      size: 4096,
+      thumbnailState: "ready",
+      thumbnailUrl: expect.stringMatching(/^\/api\/delivery\/items\/.+\/thumbnail$/),
+      sourceUrl: expect.stringMatching(/^\/api\/delivery\/items\/.+\/source$/),
+      previewUrl: expect.stringMatching(/^\/api\/delivery\/items\/.+\/source$/),
+      downloadUrl: expect.stringMatching(/^\/api\/delivery\/items\/.+\/download$/),
+    });
+    expect(coordinateQueries).toHaveLength(2);
+    expect(r2Reads.head).not.toHaveBeenCalled();
+    expect(r2Reads.get).not.toHaveBeenCalled();
+    expect(r2Reads.list).not.toHaveBeenCalled();
+  });
+
+  it("returns 404 for a stale exact-version reference without reading R2", async () => {
+    const listed = await listDeliveryFolderLocations(env, principal, "Jobs/Clients/Acme/Delivery");
+    const assetRef = listed.points[0]?.assetRef;
+    await deliveryDb.prepare("UPDATE file_index SET etag='etag-b' WHERE r2_key='Jobs/Clients/Acme/Delivery/photo.jpg'").run();
+    await expect(resolveDeliveryLocationAsset(
+      env,
+      principal,
+      "Jobs/Clients/Acme/Delivery",
+      assetRef!,
+    )).rejects.toMatchObject({ status: 404 });
+    expect(r2Reads.head).not.toHaveBeenCalled();
+    expect(r2Reads.get).not.toHaveBeenCalled();
+  });
+
+  it("normalizes revoked and cross-client resolver authorization failures to 404 before asset query", async () => {
+    const opaqueRef = `loc_${"a".repeat(43)}`;
+    await expect(resolveDeliveryLocationAsset(
+      env,
+      principal,
+      "Jobs/Clients/Other/Delivery",
+      opaqueRef,
+    )).rejects.toMatchObject({ status: 404 });
+    expect(coordinateQueries).toHaveLength(0);
+
+    await opsDb.prepare("INSERT INTO staff_permission_overrides(staff_id,permission_key,effect,scope,division_id) VALUES('staff-a','delivery.browse','deny','global',NULL)").run();
+    await expect(resolveDeliveryLocationAsset(
+      env,
+      principal,
+      "Jobs/Clients/Acme/Delivery",
+      opaqueRef,
+    )).rejects.toMatchObject({ status: 404 });
+    expect(coordinateQueries).toHaveLength(0);
+    expect(r2Reads.get).not.toHaveBeenCalled();
   });
 });

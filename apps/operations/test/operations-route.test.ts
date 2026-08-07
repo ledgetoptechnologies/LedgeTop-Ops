@@ -22,6 +22,7 @@ describe("consolidated Operations routes", () => {
   it.each([
     ["/", "dashboard"],
     ["/delivery", "delivery"],
+    ["/jobs/archive", "delivery"],
     ["/airspace", "airspace"],
   ] as const)("keeps %s outside the Operations route group", (pathname, page) => {
     expect(pathPage(pathname)).toBe(page);

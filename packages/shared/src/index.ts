@@ -325,6 +325,8 @@ export interface DeliveryLocationPoint {
   longitude: number;
   /** Multiple images can share the same recorded position. */
   imageCount: number;
+  /** Operations may attach an opaque, authorization-bound representative. */
+  assetRef?: string;
 }
 
 export interface DeliveryLocationCollection {
@@ -345,7 +347,7 @@ export function isMovedSourceMarker(object: { customMetadata?: Record<string, st
  * storage identifiers across the API boundary.
  */
 export function aggregateDeliveryLocations(
-  rows: ReadonlyArray<{ latitude: number; longitude: number }>,
+  rows: ReadonlyArray<{ latitude: number; longitude: number; assetRef?: string }>,
   maximumImages = 500,
 ): DeliveryLocationCollection {
   const limit = Number.isSafeInteger(maximumImages) && maximumImages > 0 ? maximumImages : 500;
@@ -361,7 +363,12 @@ export function aggregateDeliveryLocations(
     const key = `${latitude}:${longitude}`;
     const existing = grouped.get(key);
     if (existing) existing.imageCount += 1;
-    else grouped.set(key, { latitude, longitude, imageCount: 1 });
+    else grouped.set(key, {
+      latitude,
+      longitude,
+      imageCount: 1,
+      ...(row.assetRef ? { assetRef: row.assetRef } : {}),
+    });
   }
   return { points: [...grouped.values()], imageCount, truncated: rows.length > limit };
 }
