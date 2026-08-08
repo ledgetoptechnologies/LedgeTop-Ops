@@ -263,6 +263,25 @@ function PageHeading({ page }: { page: Page }) {
     </div>
   );
 }
+const folderCache = new Map<string, { data: any; ts: number }>();
+const FOLDER_CACHE_TTL = 60_000;
+
+async function cachedFolderApi(prefix: string): Promise<any> {
+  const key = `/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`;
+  const cached = folderCache.get(key);
+  if (cached && Date.now() - cached.ts < FOLDER_CACHE_TTL) {
+    return cached.data;
+  }
+  const data = await api<any>(key);
+  folderCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
+function cachedFolderData(prefix: string): any | null {
+  const key = `/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`;
+  return folderCache.get(key)?.data ?? null;
+}
+
 function useLoad<T>(loader: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null),
     [error, setError] = useState(""),
@@ -1903,12 +1922,13 @@ function DeliveryWorkspace({ session }: { session: Session }) {
     [uploading, setUploading] = useState(false),
     [input, setInput] = useState<HTMLInputElement | null>(null);
   const { data, error, reload, loading } = useLoad<any>(
-    () =>
-      api<any>(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`),
+    () => cachedFolderApi(prefix),
     [prefix],
   );
-  const items: DeliveryItem[] = data
-    ? [...(data.folders || []), ...(data.files || [])]
+  const cachedData = cachedFolderData(prefix);
+  const displayData = data ?? cachedData;
+  const items: DeliveryItem[] = displayData
+    ? [...(displayData.folders || []), ...(displayData.files || [])]
     : [];
   const canWrite =
       session.user.isAdministrator || allowed(session.user, "delivery.rename"),
@@ -1938,6 +1958,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
   };
   const refresh = async () => {
     setSelected([]);
+    folderCache.delete(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`);
     await reload();
   };
   const run = async (request: Promise<DeliveryOperation>) => {
@@ -2165,7 +2186,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
         }}
       >
         <Card className="file-browser">
-          {!data && loading ? (
+          {!displayData && loading ? (
             <DeliverySkeleton />
           ) : !items.length && !loading ? (
             <EmptyState
@@ -2249,10 +2270,11 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     return Boolean(params.get("dropboxImportAuthorization"));
   });
   const { data, error, reload, loading } = useLoad<any>(
-    () =>
-      api<any>(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`),
+    () => cachedFolderApi(prefix),
     [prefix],
   );
+  const cachedData = cachedFolderData(prefix);
+  const displayData = data ?? cachedData;
   const [locationState, setLocationState] = useState<{
     prefix: string;
     data: DeliveryLocationCollection | null;
@@ -2283,8 +2305,8 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   }, [reloadLocations]);
   const locations = locationState.prefix === prefix ? locationState.data : null;
   const locationError = locationState.prefix === prefix ? locationState.error : "";
-  const items: DeliveryItem[] = data
-    ? [...(data.folders || []), ...(data.files || [])]
+  const items: DeliveryItem[] = displayData
+    ? [...(displayData.folders || []), ...(displayData.files || [])]
     : [];
   const admin = session.user.isAdministrator;
   const canCreate = admin && allowed(session.user, "delivery.files.create"),
@@ -2342,6 +2364,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   };
   const refresh = async () => {
     setSelected([]);
+    folderCache.delete(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`);
     await Promise.all([reload(), reloadLocations()]);
   };
   const run = async (request: Promise<DeliveryOperation>) => {
@@ -2809,7 +2832,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         }}
       >
         <Card className="file-browser">
-          {!data && loading ? (
+          {!displayData && loading ? (
             <DeliverySkeleton />
           ) : !items.length && !loading ? (
             <EmptyState

@@ -382,7 +382,7 @@ tbody tr:last-child td { border: 0; }
    File browser (grid + list views)
    --------------------------------------------------------------------------- */
 
-.file-browser { border-radius: 0 0 14px 14px; margin-bottom: 1rem; }
+.file-browser { border-radius: 14px; }
 
 .file-grid {
   display: grid;
@@ -564,6 +564,7 @@ tbody tr:last-child td { border: 0; }
   flex-direction: column;
   gap: .65rem;
   padding: .8rem 1rem;
+  margin-bottom: 1rem;
   background: rgba(255, 255, 255, .96);
   border: 1px solid var(--line, #d9dee7);
   border-radius: 14px;
@@ -607,6 +608,7 @@ tbody tr:last-child td { border: 0; }
 .delivery-selection-bar {
   justify-content: flex-start;
   padding: .65rem .2rem;
+  margin-bottom: 1rem;
   min-height: 2.6rem;
   color: #58647a;
 }
@@ -1654,6 +1656,7 @@ ul { color: var(--muted); }
 .delivery-dropzone {
   display: block;
   border-radius: 14px;
+  margin-bottom: 1.5rem;
   transition: background .15s ease;
 }
 .delivery-dropzone:hover {
