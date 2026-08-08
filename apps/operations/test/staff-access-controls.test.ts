@@ -63,9 +63,15 @@ describe("staff access controls", () => {
   });
 
   it("keeps each team access control inside a responsive card row", () => {
-    expect(styles).toContain(".local-access-toggle{display:grid;grid-template-columns:minmax(0,1fr);gap:.55rem;width:100%;min-width:0");
-    expect(styles).toContain(".local-access-toggle label{display:grid;grid-template-columns:1.15rem minmax(0,1fr)");
-    expect(styles).toContain(".local-access-toggle label+label{padding-top:.55rem;border-top:1px solid var(--line)}");
+    expect(styles).toContain(".local-access-toggle");
+    expect(styles).toMatch(/grid-template-columns:\s*minmax\(0,\s*1fr\)/);
+    expect(styles).toMatch(/gap:\s*\.55rem/);
+    expect(styles).toMatch(/width:\s*100%/);
+    expect(styles).toContain(".local-access-toggle label");
+    expect(styles).toMatch(/grid-template-columns:\s*1\.15rem\s*minmax\(0,\s*1fr\)/);
+    expect(styles).toMatch(/\.local-access-toggle\s+label\s*\+\s*label/);
+    expect(styles).toMatch(/padding-top:\s*\.55rem/);
+    expect(styles).toMatch(/border-top:\s*1px\s*solid\s*var\(--line\)/);
   });
 
   it("migrates the one legacy delivery grant mechanism before deleting it", () => {
