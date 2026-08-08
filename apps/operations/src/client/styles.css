@@ -561,9 +561,8 @@ tbody tr:last-child td { border: 0; }
   top: 0;
   z-index: 5;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 1rem;
+  flex-direction: column;
+  gap: .65rem;
   padding: .8rem 1rem;
   background: rgba(255, 255, 255, .96);
   border: 1px solid var(--line, #d9dee7);
@@ -575,12 +574,13 @@ tbody tr:last-child td { border: 0; }
   display: flex;
   align-items: center;
   gap: .35rem;
-  flex: 1 1 auto;
   min-width: 0;
   overflow-x: auto;
   overflow-y: hidden;
   white-space: nowrap;
   scrollbar-width: thin;
+  padding-top: .35rem;
+  border-top: 1px solid var(--line);
 }
 .delivery-crumbs > button, .delivery-crumbs > span { flex: 0 0 auto; }
 .delivery-crumbs > span { display: inline-flex; align-items: center; gap: .35rem; }
@@ -603,7 +603,7 @@ tbody tr:last-child td { border: 0; }
   gap: .45rem;
   flex-wrap: wrap;
 }
-.delivery-toolbar-actions { flex: 0 0 auto; }
+.delivery-toolbar-actions { width: 100%; }
 .delivery-selection-bar {
   justify-content: flex-start;
   padding: .65rem .2rem;
@@ -1652,20 +1652,12 @@ ul { color: var(--muted); }
    --------------------------------------------------------------------------- */
 
 .delivery-dropzone {
-  display: grid;
-  place-items: center;
-  gap: .75rem;
-  padding: 2.5rem 1.5rem;
-  border: 2px dashed #cbd2d8;
+  display: block;
   border-radius: 14px;
-  background: #f7f9fa;
-  color: var(--muted);
-  text-align: center;
-  transition: border-color .15s ease, background .15s ease;
+  transition: background .15s ease;
 }
 .delivery-dropzone:hover {
-  border-color: var(--orange);
-  background: #fff7f1;
+  background: #f0f5f8;
 }
 
 /* ---------------------------------------------------------------------------
@@ -1755,9 +1747,7 @@ ul { color: var(--muted); }
   .managed-notice, .stale-notice { align-items: flex-start; flex-direction: column; gap: .2rem; }
   .airspace-counts { grid-template-columns: repeat(2, 1fr); }
   .airspace-counts p { grid-column: 1 / -1; padding-left: 0; border-left: 0; border-top: 2px solid var(--line); padding-top: .65rem; }
-  .delivery-toolbar { flex-direction: column; align-items: stretch; justify-content: flex-start; gap: .65rem; }
-  .delivery-toolbar-actions { width: 100%; justify-content: flex-end; }
-  .delivery-crumbs { width: 100%; flex: none; }
+  .delivery-toolbar-actions { justify-content: flex-start; }
   .delivery-list-item { grid-template-columns: 1.4rem 1.3rem minmax(0, 1fr) auto; }
   .delivery-list-item small { display: none; }
 }

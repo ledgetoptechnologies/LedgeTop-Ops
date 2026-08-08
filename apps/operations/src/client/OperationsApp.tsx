@@ -265,17 +265,25 @@ function PageHeading({ page }: { page: Page }) {
 }
 function useLoad<T>(loader: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null),
-    [error, setError] = useState("");
+    [error, setError] = useState(""),
+    [loading, setLoading] = useState(true);
   const reload = useCallback(() => {
     setError("");
+    setLoading(true);
     return loader()
-      .then(setData)
-      .catch((caught) => setError(caught.message));
+      .then((value) => {
+        setData(value);
+        setLoading(false);
+      })
+      .catch((caught) => {
+        setError(caught.message);
+        setLoading(false);
+      });
   }, deps);
   useEffect(() => {
     void reload();
   }, [reload]);
-  return { data, error, reload };
+  return { data, error, reload, loading };
 }
 function ErrorLine({ error }: { error: string }) {
   return error ? <div className="notice error">{error}</div> : null;
@@ -1894,7 +1902,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
     [operationError, setOperationError] = useState(""),
     [uploading, setUploading] = useState(false),
     [input, setInput] = useState<HTMLInputElement | null>(null);
-  const { data, error, reload } = useLoad<any>(
+  const { data, error, reload, loading } = useLoad<any>(
     () =>
       api<any>(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`),
     [prefix],
@@ -2157,9 +2165,9 @@ function DeliveryWorkspace({ session }: { session: Session }) {
         }}
       >
         <Card className="file-browser">
-          {!data ? (
+          {!data && loading ? (
             <DeliverySkeleton />
-          ) : !items.length ? (
+          ) : !items.length && !loading ? (
             <EmptyState
               title="This folder is empty"
               detail="Drop files here or use Upload to add delivery content."
@@ -2240,7 +2248,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     const params = new URLSearchParams(location.search);
     return Boolean(params.get("dropboxImportAuthorization"));
   });
-  const { data, error, reload } = useLoad<any>(
+  const { data, error, reload, loading } = useLoad<any>(
     () =>
       api<any>(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`),
     [prefix],
@@ -2801,9 +2809,9 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         }}
       >
         <Card className="file-browser">
-          {!data ? (
+          {!data && loading ? (
             <DeliverySkeleton />
-          ) : !items.length ? (
+          ) : !items.length && !loading ? (
             <EmptyState
               title="This folder is empty"
               detail={
