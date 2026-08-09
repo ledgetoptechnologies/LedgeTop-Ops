@@ -17,6 +17,8 @@ describe("thumbnail deployment contract", () => {
     expect(config).not.toHaveProperty("images");
     expect(config).not.toHaveProperty("media");
     expect(config.durable_objects.bindings).toContainEqual({ name: "THUMBNAIL_RENDERER", class_name: "ThumbnailRendererContainer" });
+    expect(config.exports).toEqual({ ThumbnailRendererContainer: { type: "durable-object", storage: "sqlite" } });
+    expect(config.migrations).toBeUndefined();
     expect(config.containers).toContainEqual(expect.objectContaining({ class_name: "ThumbnailRendererContainer", max_instances: 1 }));
     expect(config.r2_buckets).toContainEqual({ binding: "DATA_BUCKET", bucket_name: "client-data" });
     expect(config.d1_databases.some((value: { binding: string }) => value.binding === "DELIVERY_DB")).toBe(true);
