@@ -14,7 +14,7 @@ Maintain separate staging Workers, D1 databases, R2 buckets, queues, hostnames, 
 
 D1 stores share metadata, access-code hashes, lifecycle state, file-index metadata, thumbnail jobs, job briefs, browser SOPs, and audit records. Export production D1 daily to a separate protected R2 prefix or offline destination, retain at least 30 daily copies, and periodically restore into staging. Record the restore owner, timestamp, database version, row counts, and validation results.
 
-TrueNAS ZFS snapshots remain the primary recovery source for originals. R2 is a delivery mirror, not the only backup. Keep the rclone task configuration, R2 bucket lifecycle configuration, Worker bindings, and secret inventory in the operator password manager. Pull `_ltds/audit-archive/**` with a separate protected backup task. The normal `Jobs/Clients/` push must not publish new `.previews` content and must exclude top-level Worker-owned `_ltds` paths and all other reserved subtrees; legacy `.previews` objects may remain only for the documented rollback window. A recovery exercise must cover: restore D1, restore a sample source tree from ZFS, replay or rebuild the file index and current thumbnail jobs, and verify one client link.
+TrueNAS ZFS snapshots remain the primary recovery source for originals. R2 is a delivery mirror, not the only backup. Keep the rclone task configuration, R2 bucket lifecycle configuration, Worker bindings, and secret inventory in the operator password manager. Pull `_ltds/audit-archive/**` with a separate protected backup task. Thumbnail events and backfill cover the exact `Jobs/` tree; normal client delivery uploads still land under `Jobs/Clients/`. A `Jobs/` push must not publish new `.previews` content and must exclude Worker-owned `_ltds` paths and all other reserved subtrees; legacy `.previews` objects may remain only for the documented rollback window. A recovery exercise must cover: restore D1, restore a sample source tree from ZFS, replay or rebuild the file index and current thumbnail jobs, and verify one client link.
 
 Moves do not issue an unsafe R2 `delete(key)`. After an ETag-conditional copy,
 the exact old source version is ETag-conditionally replaced by a private
@@ -34,7 +34,7 @@ Send an actionable alert to the team channel/email for: failed or stale rclone s
 
 ## Cost and retention controls
 
-Review monthly R2 storage, Class A/Class B operations, egress, Workers requests/CPU, D1 reads/writes, Images transformations, Stream minutes/storage, queue usage, and email volume. Set a budget alert before enabling client bulk downloads at scale. Temporary ZIPs and inbound objects must have lifecycle expiry; derivative objects are rebuildable and should have a documented retention window. The consolidated Operations schedule gzip-archives aged audit/sync rows under the hidden `_ltds/audit-archive/` prefix before deleting D1 rows. Configure TrueNAS to pull that archive prefix into protected backup storage. Never use lifecycle deletion on `Jobs/` originals without a separately approved retention policy.
+Review monthly R2 storage, Class A/Class B operations, egress, Workers requests/CPU, D1 reads/writes, Container compute, Stream minutes/storage, queue usage, and email volume. Set a budget alert before enabling client bulk downloads at scale. Temporary ZIPs and inbound objects must have lifecycle expiry; derivative objects are rebuildable and should have a documented retention window. The consolidated Operations schedule gzip-archives aged audit/sync rows under the hidden `_ltds/audit-archive/` prefix before deleting D1 rows. Configure TrueNAS to pull that archive prefix into protected backup storage. Never use lifecycle deletion on `Jobs/` originals without a separately approved retention policy.
 
 ## Incident order
 
@@ -46,12 +46,28 @@ Review monthly R2 storage, Class A/Class B operations, egress, Workers requests/
 6. Reconcile R2, the file index, current thumbnail jobs, and shares; treat
    legacy previews as rollback-only artifacts, then resume normal jobs.
 
+## Delivery navigation and thumbnail recovery
+
+Delivery opens at `Jobs/Clients/` because that is the normal workspace. For a
+currently authorized global delivery operator, the `Jobs` breadcrumb is active
+and opens the true `Jobs/` root so internal job folders are reachable. Scoped
+operators do not receive that root capability and the breadcrumb is not an
+authorization bypass. Direct `/jobs` navigation is subject to the same current
+staff session and `delivery.browse` checks.
+
+New supported uploads anywhere under `Jobs/` enter the same version-bound
+thumbnail lifecycle. A transient processing or Queue publication failure gets
+one automatic bounded second queue lifecycle after a 15-minute delay, with an
+overall twelve-attempt ceiling. Continuing failures remain visible for review;
+do not manually replay them concurrently. Unsupported files and permanent size
+failures correctly remain on their local file-type icon.
+
 ## Combined release residual risks and non-deployment boundary
 
-- Local tests and dry-run configuration checks do not prove Cloudflare Images
+- Local tests and dry-run configuration checks do not prove Cloudflare Container
   entitlement, decoder behavior, queue/DLQ existence, R2 event subscriptions,
   cron installation, or production bindings. Verify each in isolated staging.
-- Delivery migrations `0105`/`0106`/`0107`/`0108`/`0109` and Operations migrations `0017` through `0022` are
+- Delivery migrations `0105` through `0111` and Operations migrations `0017` through `0022` are
   additive and remain after a Worker version rollback. Preserve verified D1
   exports and prior Worker version IDs before rollout.
 - Folder-grant mail is at-least-once. Revocation before the final authorization
@@ -61,11 +77,14 @@ Review monthly R2 storage, Class A/Class B operations, egress, Workers requests/
   complete snapshot reaches the LTDS projection. External event delivery or
   control-plane delay can extend the last-known-good projection window and must
   be monitored.
-- Invalid, empty, unsupported, over-20-MiB still images, and ineligible MP4
-  videos use a local file-type icon. Eligible MP4 is strictly `video/mp4`,
-  below 100,000,000 bytes, and uses a five-second frame request.
-  Thumbnail DLQ rows and retained unreferenced objects for deleted sources require monitoring and
-  separately reviewed replay/cleanup.
+- Invalid, empty, unsupported, over-512-MiB or over-110-MP still images and
+  over-256-MiB PDFs use a local file-type icon. Supported PDFs render page one.
+  All video, Office, audio and archive files remain icon-only and are not sent
+  to a decoder. Thumbnail DLQ rows and retained unregistered prebuilt objects
+  require monitoring and separately reviewed replay/cleanup.
+- The active private Container fallback and optional TrueNAS prebuilt renderer
+  require separate entitlement/cost and staging evidence. Neither may expose a
+  public route, public R2 URL, source credential, or original fallback.
 - Job-brief attachments are append-only and consume private R2 storage. Brief
   updates use best-effort polling, unsaved drafts exist only in browser memory,
   and map actions are representative coordinates rather than road, access,

@@ -4,6 +4,13 @@ This prompt is retained only as rollback history. The product now uses the
 [Cloudflare thumbnail-only pipeline](../media-thumbnail-pipeline.md). Do not
 generate or upload any of the derivatives described below.
 
+> **RETIRED — DO NOT IMPLEMENT OR DEPLOY.** This file is preserved only as
+> historical context for the rejected `.previews`/`sourceEtag:"pending"`
+> design. The current production contract is the private prebuilt renderer in
+> [`apps/thumbnail-renderer`](../../apps/thumbnail-renderer/README.md) and the
+> [thumbnail runbook](../media-thumbnail-pipeline.md). The current endpoint
+> will not accept the contract below.
+
 I need you to create, test, and harden the production TrueNAS Scale preview-generation script used by the LTDS Cloudflare Operations and Delivery Workers.
 
 Use my attached/current `preview-gen.sh`, `docker-compose.yml`, and TrueNAS directory mappings as your starting point. You understand my TrueNAS deployment better than Codex, so adapt the container setup safely, but the output contract below is authoritative because it matches the deployed Workers.

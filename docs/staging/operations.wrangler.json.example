@@ -15,6 +15,7 @@
     "DIRECT_DELIVERY_UPLOADS_ENABLED": "false",
     "INCOMING_BASE_URL": "https://<INCOMING_STAGING_HOST>",
     "INCOMING_EXPECTED_HOST": "<INCOMING_STAGING_HOST>",
+    "THUMBNAIL_INGEST_EXPECTED_HOST": "<OPERATIONS_STAGING_HOST>",
     "ENVIRONMENT": "staging",
     "TEAM_DOMAIN": "https://<ACCESS_TEAM_DOMAIN>",
     "OPERATIONS_AUD": "<OPERATIONS_STAGING_ACCESS_AUD>",
@@ -40,7 +41,7 @@
     "DROPBOX_CLIENT_ID": ""
   },
   "secrets": {
-    "required": ["OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "PROJECT_ALPHA_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "TURNSTILE_SITE_KEY", "TURNSTILE_SECRET", "INCOMING_SESSION_SECRET", "INCOMING_ACCESS_CODE_PEPPER", "INCOMING_PICKUP_SECRET"]
+    "required": ["OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "PROJECT_ALPHA_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "TURNSTILE_SITE_KEY", "TURNSTILE_SECRET", "INCOMING_SESSION_SECRET", "INCOMING_ACCESS_CODE_PEPPER", "INCOMING_PICKUP_SECRET", "THUMBNAIL_INGEST_SECRET"]
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *"] },
@@ -56,12 +57,27 @@
     "producers": [{ "binding": "THUMBNAIL_QUEUE", "queue": "<THUMBNAIL_STAGING_QUEUE>" }],
     "consumers": [
       { "queue": "<FILE_EVENTS_STAGING_QUEUE>", "max_batch_size": 25, "max_batch_timeout": 10, "max_retries": 5, "dead_letter_queue": "<FILE_EVENTS_STAGING_DLQ>" },
-      { "queue": "<THUMBNAIL_STAGING_QUEUE>", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "dead_letter_queue": "<THUMBNAIL_STAGING_DLQ>" },
+      { "queue": "<THUMBNAIL_STAGING_QUEUE>", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "<THUMBNAIL_STAGING_DLQ>" },
       { "queue": "<THUMBNAIL_STAGING_DLQ>", "max_batch_size": 10, "max_batch_timeout": 5 }
     ]
   },
-  "images": { "binding": "IMAGES" },
   "stream": { "binding": "STREAM" },
+  "durable_objects": {
+    "bindings": [{ "name": "THUMBNAIL_RENDERER", "class_name": "ThumbnailRendererContainer" }]
+  },
+  "migrations": [
+    { "tag": "thumbnail-renderer-v1", "new_sqlite_classes": ["ThumbnailRendererContainer"] }
+  ],
+  "containers": [
+    {
+      "class_name": "ThumbnailRendererContainer",
+      "image": "./containers/thumbnail-renderer/Dockerfile",
+      "max_instances": 1,
+      "instance_type": "standard-1",
+      "constraints": { "regions": ["WNAM"] },
+      "ssh": { "enabled": false }
+    }
+  ],
   "workflows": [
     { "name": "<R2_CRUD_STAGING_WORKFLOW>", "binding": "R2_CRUD_WORKFLOW", "class_name": "R2CrudWorkflow" },
     { "name": "<INCOMING_LIFECYCLE_STAGING_WORKFLOW>", "binding": "INCOMING_LIFECYCLE_WORKFLOW", "class_name": "IncomingUploadLifecycleWorkflow" },

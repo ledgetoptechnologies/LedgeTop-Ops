@@ -1,0 +1,14 @@
+{
+  "name": "@ltds/thumbnail-renderer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "check": "node --check src/index.mjs && node --check src/broker-index.mjs && node --check src/broker.mjs && node --check src/config.mjs && node --check src/errors.mjs && node --check src/files.mjs && node --check src/process.mjs && node --check src/render.mjs && node --check src/state.mjs && node --check src/watcher.mjs && node --check src/webp.mjs && node --check bin/healthcheck.mjs",
+    "start": "node src/index.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

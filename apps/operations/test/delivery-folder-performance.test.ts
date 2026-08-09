@@ -1,6 +1,6 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { listDeliveryFolder } from "../src/worker/delivery";
+import { deliveryBrowseRevision, listDeliveryFolder } from "../src/worker/delivery";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const principal:StaffPrincipal={
@@ -54,6 +54,7 @@ describe("Delivery folder-only listing performance",()=>{
     await opsDb.batch([
       opsDb.prepare("DELETE FROM staff_permission_overrides"),opsDb.prepare("DELETE FROM staff_role_assignments"),
       opsDb.prepare("DELETE FROM local_staff_role_assignments"),opsDb.prepare("DELETE FROM role_permissions"),
+      opsDb.prepare("DELETE FROM project_folders"),opsDb.prepare("DELETE FROM pa_projects"),
       opsDb.prepare("INSERT INTO role_permissions(role_id,permission_key) VALUES('delivery-role','delivery.browse')"),
       opsDb.prepare("INSERT INTO staff_role_assignments(staff_id,role_id,scope,division_id) VALUES('staff-a','delivery-role','global',NULL)"),
     ]);
@@ -74,6 +75,24 @@ describe("Delivery folder-only listing performance",()=>{
     } as unknown as Env;
   }
 
+  it("changes the server-issued cache revision when effective folder scope changes without reading R2",async()=>{
+    const env=environment();
+    const globalRevision=await deliveryBrowseRevision(env,principal);
+    expect(globalRevision).toMatch(/^dbr_[A-Za-z0-9_-]{43}$/);
+    await opsDb.batch([
+      opsDb.prepare("DELETE FROM staff_role_assignments"),
+      opsDb.prepare("INSERT INTO staff_role_assignments(staff_id,role_id,scope,division_id) VALUES('staff-a','delivery-role','division','division-a')"),
+      opsDb.prepare("INSERT INTO pa_projects(id,name) VALUES('project-a','Project A')"),
+      opsDb.prepare("INSERT INTO project_folders(project_id,division_id,r2_prefix) VALUES('project-a','division-a','Jobs/Clients/Scoped/')"),
+    ]);
+    const scopedRevision=await deliveryBrowseRevision(env,principal);
+    expect(scopedRevision).toMatch(/^dbr_[A-Za-z0-9_-]{43}$/);
+    expect(scopedRevision).not.toBe(globalRevision);
+    expect(list).not.toHaveBeenCalled();
+    expect(head).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+  });
+
   it("uses one R2 metadata listing for 120 indexed child folders and never reads files or thumbnails",async()=>{
     const folders=Array.from({length:120},(_,index)=>`Jobs/Clients/Client-${String(index).padStart(3,"0")}/`);
     for(let offset=0;offset<folders.length;offset+=75){
@@ -90,7 +109,9 @@ describe("Delivery folder-only listing performance",()=>{
       return {objects:[],delimitedPrefixes:folders,truncated:false};
     });
 
+    const started=performance.now();
     const result=await listDeliveryFolder(environment(),principal,"Jobs/Clients/");
+    const elapsedMs=performance.now()-started;
 
     expect(result.folders).toHaveLength(120);
     expect(result.folders[0]?.name).toBe("First client");
@@ -104,7 +125,28 @@ describe("Delivery folder-only listing performance",()=>{
     expect(deliveryQueries.filter(sql=>sql.includes("WITH candidates(prefix,upper_bound)")).length).toBe(3);
     expect(deliveryQueries.filter(sql=>sql.includes("FROM file_aliases WHERE physical_key IN")).length).toBe(2);
     expect(deliveryQueries.some(sql=>sql.includes("image_thumbnail_jobs"))).toBe(false);
+    expect(elapsedMs).toBeLessThan(1500);
   },15_000);
+
+  it("lists the true Jobs root with one delimiter query and no recursive object or thumbnail reads",async()=>{
+    const folders=["Jobs/Archive/","Jobs/Clients/","Jobs/Demo/"];
+    await deliveryDb.batch(folders.map((folder,index)=>deliveryDb.prepare(
+      "INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')",
+    ).bind(`${folder}photo-${index}.jpg`,`root-etag-${index}`,1024,"2026-08-07T12:00:00.000Z","image/jpeg")));
+    list.mockResolvedValue({objects:[],delimitedPrefixes:folders,truncated:false});
+
+    const started=performance.now();
+    const result=await listDeliveryFolder(environment(),principal,"Jobs/");
+    const elapsedMs=performance.now()-started;
+
+    expect(result.folders.map(folder=>folder.prefix)).toEqual(folders);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledWith({prefix:"Jobs/",delimiter:"/",limit:500,cursor:undefined,include:["httpMetadata","customMetadata"]});
+    expect(head).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(deliveryQueries.some(sql=>sql.includes("image_thumbnail_jobs"))).toBe(false);
+    expect(elapsedMs).toBeLessThan(1500);
+  });
 
   it("forwards the opaque R2 cursor and returns only the next authorized folder page",async()=>{
     const folder="Jobs/Clients/Page-Two/";
@@ -154,6 +196,21 @@ describe("Delivery folder-only listing performance",()=>{
   it("denies revoked global browse access before any R2 or folder-index query",async()=>{
     await opsDb.prepare("INSERT INTO staff_permission_overrides(staff_id,permission_key,effect,scope,division_id) VALUES('staff-a','delivery.browse','deny','global',NULL)").run();
     await expect(listDeliveryFolder(environment(),principal,"Jobs/Clients/")).rejects.toMatchObject({status:403});
+    expect(list).not.toHaveBeenCalled();
+    expect(head).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+    expect(deliveryQueries).toEqual([]);
+  });
+
+  it("denies a division-scoped principal at the true Jobs root before R2 enumeration",async()=>{
+    await opsDb.batch([
+      opsDb.prepare("DELETE FROM staff_role_assignments WHERE staff_id='staff-a'"),
+      opsDb.prepare("INSERT INTO staff_role_assignments(staff_id,role_id,scope,division_id) VALUES('staff-a','delivery-role','division','division-a')"),
+      opsDb.prepare("INSERT INTO project_folders(project_id,division_id,r2_prefix) VALUES('project-a','division-a','Jobs/Clients/Acme/')"),
+      opsDb.prepare("INSERT INTO pa_projects(id,name) VALUES('project-a','Acme')"),
+    ]);
+
+    await expect(listDeliveryFolder(environment(),principal,"Jobs/")).rejects.toMatchObject({status:404});
     expect(list).not.toHaveBeenCalled();
     expect(head).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();

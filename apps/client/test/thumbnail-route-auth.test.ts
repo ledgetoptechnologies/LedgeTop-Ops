@@ -72,24 +72,25 @@ describe("thumbnail route authorization", () => {
     expect(value.reads).toEqual([]);
   });
 
-  it("serves an eligible MP4 derivative and never reads the video body", async () => {
-    const value = await fixture("ready", { relativePath: "Edited/flight.mp4", contentType: "video/mp4", sourceSize: 4096 });
+  it("serves an eligible PDF derivative and never reads the PDF body", async () => {
+    const value = await fixture("ready", { relativePath: "Edited/report.pdf", contentType: "application/pdf", sourceSize: 4096 });
     const response = await worker.fetch(new Request(`https://client.example${value.path}`, { headers: { Cookie: value.cookie } }), value.env, value.ctx);
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("thumb");
-    expect(value.reads).toEqual([`head:${value.sourceKey}`, `head:${value.sourceKey}`, `head:${thumbnailKey}`, `get:${thumbnailKey}`]);
+    expect(value.reads).toEqual([`head:${value.sourceKey}`, `head:${thumbnailKey}`, `get:${thumbnailKey}`]);
     expect(value.reads).not.toContain(`get:${value.sourceKey}`);
   });
 
   it.each([
-    ["Edited/flight.mov", "video/quicktime", 4096],
-    ["Edited/flight.mp4", "application/octet-stream", 4096],
-    ["Edited/flight.mp4", "video/mp4", 100_000_000],
-  ] as const)("denies unsupported video thumbnails without reading an original body: %s", async (relativePath, contentType, sourceSize) => {
+    ["Edited/flight.mov", "video/quicktime", 4096, []],
+    ["Edited/flight.mp4", "video/mp4", 4096, []],
+    ["Edited/huge.pdf", "application/pdf", 256 * 1024 * 1024 + 1, [`head:${share.r2_prefix}Edited/huge.pdf`]],
+    ["Edited/huge.jpg", "image/jpeg", 512 * 1024 * 1024 + 1, [`head:${share.r2_prefix}Edited/huge.jpg`]],
+  ] as const)("denies unsupported or oversized thumbnails without reading an original body: %s", async (relativePath, contentType, sourceSize, expectedReads) => {
     const value = await fixture("ready", { relativePath, contentType, sourceSize });
     const response = await worker.fetch(new Request(`https://client.example${value.path}`, { headers: { Cookie: value.cookie } }), value.env, value.ctx);
     expect(response.status).toBe(409);
-    expect(value.reads).toEqual([`head:${value.sourceKey}`]);
+    expect(value.reads).toEqual(expectedReads);
     expect(value.reads).not.toContain(`get:${value.sourceKey}`);
   });
 
@@ -101,5 +102,98 @@ describe("thumbnail route authorization", () => {
     const staleSession = await fixture("ready", { cookieVersion: share.share_version - 1 });
     expect((await worker.fetch(new Request(`https://client.example${staleSession.path}`, { headers: { Cookie: staleSession.cookie } }), staleSession.env, staleSession.ctx)).status).toBe(401);
     expect(staleSession.reads).toEqual([]);
+  });
+
+  it("publishes a ready PDF thumbnail while keeping video icon-only in the authorized manifest", async () => {
+    const pdfKey = `${share.r2_prefix}Edited/report.pdf`;
+    const videoKey = `${share.r2_prefix}Edited/flight.mov`;
+    const thumbnailQueries: string[] = [];
+    const objects = [
+      {
+        key: pdfKey,
+        size: 4096,
+        etag: "pdf-source",
+        httpEtag: '"pdf-source"',
+        uploaded: new Date("2026-08-01T12:00:00.000Z"),
+        httpMetadata: { contentType: "application/pdf" },
+        customMetadata: {},
+      },
+      {
+        key: videoKey,
+        size: 8192,
+        etag: "video-source",
+        httpEtag: '"video-source"',
+        uploaded: new Date("2026-08-01T12:01:00.000Z"),
+        httpMetadata: { contentType: "video/quicktime" },
+        customMetadata: {},
+      },
+    ];
+    const statementFor = (query: string) => {
+      let values: unknown[] = [];
+      const statement = {
+        query,
+        get values() { return values; },
+        bind(...bound: unknown[]) { values = bound; return statement; },
+        async first<T>() {
+          if (query.includes("FROM shares s JOIN projects p") && query.includes("s.id=? AND s.public_id=?")) return share as T;
+          return null;
+        },
+        async all<T>() { return { results: [] as T[] }; },
+        async run() { return { meta: { changes: 1 } }; },
+      };
+      return statement;
+    };
+    const database = {
+      prepare: statementFor,
+      withSession() { return database; },
+      async batch(statements: Array<ReturnType<typeof statementFor>>) {
+        return statements.map(statement => {
+          if (statement.query.includes("FROM image_thumbnail_jobs")) {
+            thumbnailQueries.push(String(statement.values[0]));
+            return { results: [{
+              source_etag: '"pdf-source"',
+              thumbnail_key: thumbnailKey,
+              thumbnail_etag: '"thumb"',
+              thumbnail_size: 5,
+              status: "ready",
+            }] };
+          }
+          return { results: [] };
+        });
+      },
+    };
+    const bucket = {
+      async list() {
+        return { objects, delimitedPrefixes: [], truncated: false };
+      },
+    };
+    const limiter = { async limit() { return { success: true }; } };
+    const secret = "s".repeat(48);
+    const env: any = {
+      ENVIRONMENT: "development",
+      EXPECTED_HOST: "client.example",
+      DELIVERY_DB: database,
+      DATA_BUCKET: bucket,
+      PUBLIC_MANIFEST_RATE_LIMITER: limiter,
+      DELIVERY_SESSION_SECRET: secret,
+      SESSION_KEY_ID: "v1",
+      AUDIT_IP_SECRET: "a".repeat(48),
+    };
+    const cookie = (await createSessionCookie(secret, "v1", share.id, share.share_version, Date.now() + 60_000)).split(";")[0]!;
+    const ctx: ExecutionContext = { waitUntil() {}, passThroughOnException() {}, exports: {}, props: undefined, tracing: undefined as never };
+    const response = await worker.fetch(new Request(
+      `https://client.example/api/public/shares/${share.public_id}/manifest`,
+      { headers: { Cookie: cookie } },
+    ), env, ctx);
+
+    expect(response.status).toBe(200);
+    const manifest = await response.json() as { items: Array<Record<string, unknown>> };
+    const pdf = manifest.items.find(item => item.name === "report.pdf");
+    const video = manifest.items.find(item => item.name === "flight.mov");
+    expect(pdf).toMatchObject({ kind: "pdf", thumbnailState: "ready", thumbnailFallbackKind: "pdf" });
+    expect(pdf?.thumbnailUrl).toMatch(/\/items\/.+\/thumbnail$/);
+    expect(video).toMatchObject({ kind: "video", thumbnailState: "not_applicable", thumbnailFallbackKind: "video" });
+    expect(video).not.toHaveProperty("thumbnailUrl");
+    expect(thumbnailQueries).toEqual([pdfKey]);
   });
 });

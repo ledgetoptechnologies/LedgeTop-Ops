@@ -2,7 +2,7 @@
 
 Status: the standalone storage resources, file-event queue/DLQ, and three
 staging Access applications listed under **Created standalone resources** were
-provisioned. The thumbnail queue/DLQ and Images entitlement have not been
+provisioned. The thumbnail queue/DLQ and private Container entitlement have not been
 verified by this repository audit and must be treated as pending until a fresh
 Cloudflare inventory records their IDs/status. Delivery and Operations have one
 narrow human test policy each; Ops Sync remains default-deny. Worker deployment,
@@ -43,6 +43,7 @@ feature.
 | Dead-letter queue | `ltds-file-events-staging-dlq` |
 | Thumbnail queue | `ltds-thumbnail-jobs-staging` (required; existence unverified) |
 | Thumbnail DLQ | `ltds-thumbnail-jobs-staging-dlq` (required; existence unverified) |
+| Thumbnail renderer | private `ThumbnailRendererContainer`, one `standard-1` maximum instance (required; entitlement unverified) |
 | R2 retention | Disposable test data; no bucket lock or automatic expiry |
 | Provider flags | Dropbox, Google, and Google Picker `false` |
 | Direct R2 upload | `false` |
@@ -118,8 +119,8 @@ Before ignored `apps/*/wrangler.staging.json` files can pass preflight:
 - the staging Access group ID/name and approved test identities;
 - a staging-only Project Alpha origin and service-token policy;
 - interactive staging secrets, never committed or placed in shell commands;
-- verified Images transformations entitlement plus the thumbnail queue/DLQ
-  identities;
+- verified Workers Containers entitlement plus the private renderer binding,
+  thumbnail queue/DLQ identities, and one-instance resource cap;
 - eight unused positive-integer rate-limit namespace values;
 - the reviewed commit and build artifact checksum.
 
@@ -160,8 +161,7 @@ Empty D1 databases scale to zero. Empty R2 buckets incur charges only when
 objects or operations are added. Queues are billed by message operations, so
 unattached empty queues have no message operations. Worker and Workflow usage
 does not begin until deployment and invocation. Once enabled, thumbnails add
-Images transformations, Queue retries, D1 reads/writes, R2 source reads,
-derivative writes/serves, and up to 128 KiB of R2 storage per current ready
-derivative; retained obsolete ETag derivatives add storage until reviewed
-cleanup. Current pricing and account entitlement must be checked in Cloudflare
-during rollout.
+Container compute, Queue retries, D1 reads/writes, R2 source reads, derivative
+writes/serves, and up to 128 KiB of R2 storage per current ready derivative;
+retained obsolete ETag derivatives add storage until reviewed cleanup. Current
+pricing and account entitlement must be checked in Cloudflare during rollout.

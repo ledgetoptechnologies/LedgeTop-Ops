@@ -21,6 +21,13 @@ import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
 import { ImageLocationMap } from "./ImageLocationMap";
+import {
+  activateDeliveryFolderCache,
+  deactivateDeliveryFolderCache,
+  invalidateDeliveryFolderCache,
+  readDeliveryFolderCache,
+  writeDeliveryFolderCache,
+} from "./delivery-folder-cache";
 
 type OperationsUser = SessionUser & {
   status: "Active";
@@ -142,6 +149,13 @@ export function OperationsApp() {
     api<Session>("/api/session")
       .then((value) => {
         setCsrf(value.csrfToken);
+        activateDeliveryFolderCache(JSON.stringify({
+          userId: value.user.id,
+          permissions: [...value.user.permissions].sort(),
+          divisions: value.user.divisions.map((division) => JSON.stringify(division)).sort(),
+          administrator: value.user.isAdministrator,
+          jobsRoot: value.capabilities?.deliveryJobsRoot?.enabled === true,
+        }));
         setSession(value);
         const current = NAV.find((item) => item.page === page),
           visible = current && navAllowed(value.user, current);
@@ -265,23 +279,22 @@ function PageHeading({ page }: { page: Page }) {
     </div>
   );
 }
-const folderCache = new Map<string, { data: any; ts: number }>();
-const FOLDER_CACHE_TTL = 60_000;
-
 async function cachedFolderApi(prefix: string): Promise<any> {
   const key = `/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`;
-  const cached = folderCache.get(key);
-  if (cached && Date.now() - cached.ts < FOLDER_CACHE_TTL) {
-    return cached.data;
-  }
   const data = await api<any>(key);
-  folderCache.set(key, { data, ts: Date.now() });
+  writeDeliveryFolderCache(prefix, data);
   return data;
 }
 
 function cachedFolderData(prefix: string): any | null {
-  const key = `/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`;
-  return folderCache.get(key)?.data ?? null;
+  return readDeliveryFolderCache(prefix);
+}
+
+function invalidateDeliveryCacheOnAccessError(error: unknown, prefix: string): boolean {
+  if (!(error instanceof ApiError) || ![401, 403, 404].includes(error.status)) return false;
+  if (error.status === 401 || error.status === 403) invalidateDeliveryFolderCache();
+  else invalidateDeliveryFolderCache(prefix);
+  return true;
 }
 
 function useLoad<T>(loader: () => Promise<T>, deps: unknown[] = []) {
@@ -1421,6 +1434,7 @@ type DeliveryItem = {
   isShared?: boolean;
   thumbnailUrl?: string;
   thumbnailState?: "pending" | "ready" | "failed" | "not_applicable";
+  thumbnailErrorCode?: string;
   thumbnailFallbackKind?: string;
   downloadUrl?: string;
   previewUrl?: string;
@@ -1935,8 +1949,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
     () => cachedFolderApi(prefix),
     [prefix],
   );
-  const cachedData = cachedFolderData(prefix);
-  const displayData = data ?? cachedData;
+  const displayData = data;
   const items: DeliveryItem[] = displayData
     ? [...(displayData.folders || []), ...(displayData.files || [])]
     : [];
@@ -1968,7 +1981,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
   };
   const refresh = async () => {
     setSelected([]);
-    folderCache.delete(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`);
+    invalidateDeliveryFolderCache(prefix);
     await reload();
   };
   const run = async (request: Promise<DeliveryOperation>) => {
@@ -2296,14 +2309,19 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     folderRequest.current?.abort();
     const controller = new AbortController();
     folderRequest.current = controller;
-    setFolderState({
-      prefix: requestedPrefix,
-      data: cachedFolderData(requestedPrefix),
-      error: "",
-      loading: true,
-    });
+    setFolderState({ prefix: requestedPrefix, data: null, error: "", loading: true });
     let accumulated: DeliveryFolderPage | null = null;
     try {
+      try {
+        const access = await api<{ revision: string }>("/api/delivery/access-revision", { signal: controller.signal });
+        if (requestedPrefix !== currentPrefixRef.current || requestId !== folderRequestId.current || controller.signal.aborted) return;
+        if (!/^dbr_[A-Za-z0-9_-]{43}$/.test(access.revision)) throw new Error("Delivery authorization revision was invalid.");
+        activateDeliveryFolderCache(JSON.stringify({ userId: session.user.id, revision: access.revision }));
+        setFolderState({ prefix: requestedPrefix, data: cachedFolderData(requestedPrefix), error: "", loading: true });
+      } catch {
+        if (requestedPrefix !== currentPrefixRef.current || requestId !== folderRequestId.current || controller.signal.aborted) return;
+        deactivateDeliveryFolderCache();
+      }
       const folders = new Map<string, DeliveryItem>();
       const files = new Map<string, DeliveryItem>();
       const seenCursors = new Set<string>();
@@ -2335,8 +2353,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
            files: [...files.values()],
            nextCursor,
          };
-         const cacheKey = `/api/delivery/folders?prefix=${encodeURIComponent(requestedPrefix)}`;
-         folderCache.set(cacheKey, { data: accumulated, ts: Date.now() });
+         writeDeliveryFolderCache(requestedPrefix, accumulated);
          setFolderState({ prefix: requestedPrefix, data: accumulated, error: "", loading: Boolean(nextCursor) });
         if (!nextCursor) {
           completed = true;
@@ -2349,14 +2366,15 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
       if (!completed) throw new Error(`Folder listing exceeded ${MAX_DELIVERY_FOLDER_PAGES} pages. Narrow the folder or refresh to try again.`);
     } catch (caught) {
       if (requestId !== folderRequestId.current || controller.signal.aborted) return;
+      const accessDenied = invalidateDeliveryCacheOnAccessError(caught, requestedPrefix);
        setFolderState({
          prefix: requestedPrefix,
-         data: accumulated,
+         data: accessDenied ? null : accumulated,
          error: (caught as Error).message,
          loading: false,
        });
     }
-  }, [prefix]);
+  }, [prefix, session.user.id]);
   useEffect(() => {
     void reload();
     return () => {
@@ -2367,7 +2385,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   const data = folderState.prefix === prefix ? folderState.data : null;
   const error = folderState.prefix === prefix ? folderState.error : "";
   const loading = folderState.prefix !== prefix || folderState.loading;
-  const displayData = data ?? cachedFolderData(prefix);
+  const displayData = data;
   const [locationState, setLocationState] = useState<{
     prefix: string;
     data: DeliveryLocationCollection | null;
@@ -2469,7 +2487,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     const requestedPrefix = prefix;
     if (requestedPrefix !== currentPrefixRef.current) return;
     setSelected([]);
-    folderCache.delete(`/api/delivery/folders?prefix=${encodeURIComponent(prefix)}`);
+    invalidateDeliveryFolderCache(prefix);
     await Promise.all([reload(), reloadLocations()]);
   };
   const run = async (request: Promise<DeliveryOperation>) => {
@@ -2494,8 +2512,10 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         throw new Error(
           current.error || current.error_message || "The operation failed.",
         );
+      invalidateDeliveryFolderCache();
       await refresh();
     } catch (caught) {
+      invalidateDeliveryCacheOnAccessError(caught, prefix);
       setOperationError((caught as Error).message);
     }
   };
@@ -2638,6 +2658,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         },
         resolveConflict,
       );
+      invalidateDeliveryFolderCache();
       await refresh();
       setOperation({
         status: result.failed ? "failed" : "completed",
@@ -2649,6 +2670,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           `${result.failed} upload${result.failed === 1 ? "" : "s"} failed. Review the file results below.`,
         );
     } catch (caught) {
+      invalidateDeliveryCacheOnAccessError(caught, prefix);
       setOperationError(uploadError(caught).message);
     } finally {
       setUploading(false);
@@ -2943,7 +2965,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         }}
       >
         <Card className="file-browser">
-          {!displayData && loading ? (
+          {loading && items.length === 0 ? (
             <DeliverySkeleton />
           ) : !items.length && !loading ? (
             <EmptyState
@@ -2997,7 +3019,10 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
           close={() => setPreview(null)}
-          changed={() => void reload()}
+          changed={() => {
+            invalidateDeliveryFolderCache(prefix);
+            void reload();
+          }}
         />
       )}{" "}
       {preview && !preview.shareFolder && (
@@ -3015,7 +3040,10 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           destinationPrefix={prefix}
           canUpload={canUpload}
           onClose={() => setShowDropboxImport(false)}
-          onStarted={() => void reload()}
+          onStarted={() => {
+            invalidateDeliveryFolderCache(prefix);
+            void reload();
+          }}
         />
       )}
     </>
@@ -3340,7 +3368,18 @@ function DeliveryGridItem({
   return (
     <article
       className={`file-card selectable-card ${selected ? "selected" : ""}`}
-      onClick={() => (selectionMode ? toggle() : open())}
+      role="button"
+      tabIndex={0}
+      aria-label={`${selectionMode ? "Select" : "Open"} ${displayName(item)}`}
+      onClick={(event) => {
+        event.currentTarget.focus();
+        if (selectionMode) toggle(); else open();
+      }}
+      onKeyDown={(event) => {
+        if (event.currentTarget !== event.target || !["Enter", " "].includes(event.key)) return;
+        event.preventDefault();
+        if (selectionMode) toggle(); else open();
+      }}
     >
       {selectionMode && (
         <button
@@ -3552,11 +3591,22 @@ function FileCardV2({ item, preview }: { item: any; preview: () => void }) {
 function OperationsThumbnail({ item }: { item: DeliveryItem }) {
   const [failed, setFailed] = useState(!item.thumbnailUrl);
   const fallback = item.thumbnailFallbackKind === "pdf" ? "PDF" : item.thumbnailFallbackKind === "archive" ? "ZIP" : item.thumbnailFallbackKind === "spreadsheet" ? "Sheet" : item.thumbnailFallbackKind === "document" ? "Doc" : item.thumbnailFallbackKind || item.kind || "File";
+  const status = item.thumbnailState === "pending"
+    ? "Thumbnail processing\u2026"
+    : item.thumbnailState === "failed" && item.thumbnailErrorCode === "renderer_unavailable"
+      ? "Private renderer pending"
+    : item.thumbnailState === "failed" && ["input_too_large", "video_input_too_large"].includes(item.thumbnailErrorCode || "")
+      ? "Needs heavy-media renderer"
+      : item.thumbnailState === "failed"
+        ? "Thumbnail generation failed"
+        : item.thumbnailState === "not_applicable"
+          ? "File-type icon"
+          : "Thumbnail unavailable";
   if (failed)
     return (
       <span className="ops-preview-placeholder file-type-placeholder" aria-label={`${fallback} preview unavailable`}>
         <span className="file-kind" aria-hidden="true">{fallback}</span>
-        <small>No preview generated yet</small>
+        <small>{status}</small>
       </span>
     );
   return (
@@ -4047,7 +4097,7 @@ function FilePreview({
   return (
     <div
       className="modal-backdrop"
-      onMouseDown={(event) => {
+      onPointerDown={(event) => {
         if (event.currentTarget === event.target) close();
       }}
     >

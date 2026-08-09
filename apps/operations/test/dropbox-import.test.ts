@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 
 import { dropboxImportPartSize, encryptImportSecret, decryptImportSecret, importOneFile, loadDropboxImportCredential, revokeDropboxImportAuthorization } from "../src/worker/dropbox-import";
 import { DropboxImportClient, DropboxImportError } from "../src/worker/dropbox-import-client";

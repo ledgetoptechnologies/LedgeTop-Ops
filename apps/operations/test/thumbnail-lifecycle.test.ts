@@ -7,7 +7,9 @@ import {
   enqueueThumbnailsForPath,
   normalizeThumbnailEventTime,
   processThumbnailJob,
+  PDF_THUMBNAIL_MAX_INPUT_BYTES,
   removeThumbnailStateForPath,
+  THUMBNAIL_MAX_INPUT_BYTES,
   thumbnailObjectKey,
   THUMBNAIL_JOB_KIND,
 } from "../src/worker/image-thumbnails";
@@ -41,7 +43,7 @@ describe("thumbnail lifecycle cleanup", () => {
     });
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await db.exec("CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,media_kind TEXT NOT NULL);");
-    for (const migration of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql", "0108_thumbnail_backfill_runs.sql", "0109_image_asset_locations.sql"]) {
+    for (const migration of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql", "0108_thumbnail_backfill_runs.sql", "0109_image_asset_locations.sql", "0111_thumbnail_render_provenance.sql"]) {
       const sql = readFileSync(new URL(`../../client/migrations/${migration}`, import.meta.url), "utf8")
         .replace(/\r\n/g, "\n")
         .replace(/^\s*--.*$/gm, "")
@@ -138,12 +140,57 @@ describe("thumbnail lifecycle cleanup", () => {
     expect(objects.has(keys[2]!)).toBe(true);
   });
 
-  it("requeues only supported still images when a trashed path is restored", async () => {
+  it("re-arms retained cleanup rows when the same prebuilt version is recreated and deleted again", async () => {
+    const sourceKey = "Jobs/Clients/Synthetic/repeated-prebuilt.jpg";
+    const sourceEtag = "same-source-version";
+    const fingerprint = "b".repeat(64);
+    const base = `_ltds/derivatives/thumbnails/v1/prebuilt/${sourceKey}/${fingerprint}`;
+    const thumbnailKey = `${base}.webp`;
+    const manifestKey = `${base}.json`;
+
+    const register = async () => {
+      store(thumbnailKey, "same-thumbnail-version", "image/webp", 1000);
+      store(manifestKey, "same-manifest-version", "application/json", 2000);
+      await db.prepare(`INSERT INTO image_thumbnail_jobs(
+        source_key,source_etag,source_size,thumbnail_key,thumbnail_etag,thumbnail_size,status,last_event_at,
+        thumbnail_provider,thumbnail_profile,thumbnail_manifest_key,thumbnail_manifest_etag)
+        VALUES(?,?,?,?,?,1000,'ready',datetime('now'),'ltds-truenas','ltds-thumbnail-320x240-webp-v1',?,?)`)
+        .bind(sourceKey, sourceEtag, 4096, thumbnailKey, '"same-thumbnail-version"', manifestKey, '"same-manifest-version"').run();
+    };
+
+    await register();
+    await removeThumbnailStateForPath(env, sourceKey, false, sourceEtag);
+    expect(objects.has(thumbnailKey)).toBe(false);
+    expect(objects.has(manifestKey)).toBe(false);
+
+    await register();
+    await removeThumbnailStateForPath(env, sourceKey, false, sourceEtag);
+
+    expect(objects.has(thumbnailKey)).toBe(false);
+    expect(objects.has(manifestKey)).toBe(false);
+    expect(deletes.filter((key) => key === thumbnailKey)).toHaveLength(2);
+    expect(deletes.filter((key) => key === manifestKey)).toHaveLength(2);
+    const cleanup = await db.prepare(`SELECT thumbnail_key,status,attempt_count,artifact_etag,completed_at
+      FROM image_thumbnail_cleanup_jobs WHERE thumbnail_key IN (?,?) ORDER BY thumbnail_key`)
+      .bind(thumbnailKey, manifestKey).all<Record<string, unknown>>();
+    expect(cleanup.results).toHaveLength(2);
+    for (const row of cleanup.results) {
+      expect(row).toMatchObject({ status: "completed", attempt_count: 1, completed_at: expect.any(String) });
+      expect(row.artifact_etag).toMatch(/same-(?:manifest|thumbnail)-version/);
+    }
+  });
+
+  it("requeues only bounded images and PDFs when a trashed path is restored", async () => {
     store("Jobs/Clients/Restore/photo.jpg", "image");
+    store("Jobs/Clients/Restore/report.pdf", "pdf", "application/pdf", PDF_THUMBNAIL_MAX_INPUT_BYTES);
     store("Jobs/Clients/Restore/clip.mov", "video", "video/quicktime");
+    store("Jobs/Clients/Restore/too-large.jpg", "large", "image/jpeg", THUMBNAIL_MAX_INPUT_BYTES + 1);
     store("Jobs/Clients/Restore/archive.zip", "zip", "application/zip");
-    await expect(enqueueThumbnailsForPath(env, "Jobs/Clients/Restore/", true)).resolves.toBe(1);
-    expect(sends).toEqual([{ kind: THUMBNAIL_JOB_KIND, sourceKey: "Jobs/Clients/Restore/photo.jpg", sourceEtag: "image" }]);
+    await expect(enqueueThumbnailsForPath(env, "Jobs/Clients/Restore/", true)).resolves.toBe(2);
+    expect(sends).toEqual([
+      { kind: THUMBNAIL_JOB_KIND, sourceKey: "Jobs/Clients/Restore/photo.jpg", sourceEtag: "image" },
+      { kind: THUMBNAIL_JOB_KIND, sourceKey: "Jobs/Clients/Restore/report.pdf", sourceEtag: "pdf" },
+    ]);
   });
 
   it("keeps cleanup failure visible after bounded attempts and can safely recover", async () => {

@@ -8,7 +8,7 @@ import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const acl = vi.hoisted(() => ({ requirePermission: vi.fn() }));
 
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/acl", () => ({ requirePermission: acl.requirePermission }));
 vi.mock("../src/worker/request-security", () => ({
   requireMutationSecurity: vi.fn(),
@@ -216,7 +216,7 @@ describe("authenticated browser delivery uploads", () => {
         : sql);
     }
     await deliveryDb.exec("CREATE TABLE file_index (r2_key TEXT PRIMARY KEY, etag TEXT NOT NULL, size INTEGER NOT NULL, uploaded_at TEXT NOT NULL, content_type TEXT, media_kind TEXT NOT NULL, stream_uid TEXT, stream_status TEXT, stream_upload_url TEXT, stream_upload_offset INTEGER NOT NULL DEFAULT 0, stream_error TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')));");
-    for (const name of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql", "0108_thumbnail_backfill_runs.sql"]) {
+    for (const name of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql", "0108_thumbnail_backfill_runs.sql", "0111_thumbnail_render_provenance.sql"]) {
       await deliveryDb.exec(sqlFile(new URL(`../../client/migrations/${name}`, import.meta.url)));
     }
   });
@@ -225,7 +225,7 @@ describe("authenticated browser delivery uploads", () => {
 
   beforeEach(async () => {
     await opsDb.exec("DELETE FROM r2_upload_parts; DELETE FROM r2_upload_sessions; DELETE FROM browser_upload_intent_files; DELETE FROM browser_upload_intents; DELETE FROM r2_replacement_recovery; DELETE FROM project_folders; DELETE FROM staff_users; DELETE FROM divisions;");
-    await deliveryDb.exec("DELETE FROM image_thumbnail_jobs; DELETE FROM file_index;");
+    await deliveryDb.exec("DELETE FROM image_thumbnail_jobs; DELETE FROM image_thumbnail_cleanup_jobs; DELETE FROM file_index;");
     await opsDb.prepare("INSERT INTO divisions(id,name,code) VALUES('division-acme','Acme Division','ACME')").run();
     await opsDb.prepare("INSERT INTO staff_users(id,email,display_name,access_subject) VALUES(?,?,?,?)")
       .bind(admin.id, admin.email, admin.displayName, admin.accessSubject).run();
@@ -443,7 +443,7 @@ describe("authenticated browser delivery uploads", () => {
     expect(queueSend).toHaveBeenCalledOnce();
     expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({
       kind: "image-thumbnail.v1", sourceKey: "Jobs/Clients/Acme/Delivery/photo.jpg",
-    }));
+    }), { delaySeconds: 30 });
     expect(await deliveryDb.prepare("SELECT status,queue_published_at FROM image_thumbnail_jobs WHERE source_key=?")
       .bind("Jobs/Clients/Acme/Delivery/photo.jpg").first()).toMatchObject({ status: "pending", queue_published_at: expect.any(String) });
 
@@ -491,7 +491,7 @@ describe("authenticated browser delivery uploads", () => {
     expect(bucket.objects.get(key)?.customMetadata.ltdsMoveMarker).toBeUndefined();
     expect(await opsDb.prepare("SELECT COUNT(*) count FROM r2_replacement_recovery").first()).toEqual({ count: 0 });
     expect(queueSend).toHaveBeenCalledOnce();
-    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: key }));
+    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: key }), { delaySeconds: 30 });
   });
 
   it("pauses only on a real collision and idempotently applies skip or safe rename", async () => {
@@ -559,7 +559,7 @@ describe("authenticated browser delivery uploads", () => {
       .toEqual(Uint8Array.from([1, 2, 3, 4]));
     expect(await opsDb.prepare("SELECT COUNT(*) count FROM r2_upload_parts WHERE session_id=?").bind(session.sessionId).first()).toEqual({ count: 1 });
     expect(queueSend).toHaveBeenCalledOnce();
-    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: "Jobs/Clients/Acme/Delivery/completion-race (2).jpg" }));
+    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: "Jobs/Clients/Acme/Delivery/completion-race (2).jpg" }), { delaySeconds: 30 });
   });
 
   it("atomically admits only one of two concurrent requests for the tenth owner slot", async () => {
@@ -617,7 +617,7 @@ describe("authenticated browser delivery uploads", () => {
     });
     await deliveryDb.prepare(`INSERT INTO image_thumbnail_jobs(
       source_key,source_etag,source_size,thumbnail_key,thumbnail_etag,thumbnail_size,status,last_event_at,ready_at)
-      VALUES(?,?,?,?,?,?,'ready',datetime('now','-1 day'),datetime('now','-1 day'))`)
+      VALUES(?,?,?,?,?,?,'ready','2026-08-06T00:00:00.000Z','2026-08-06T00:00:00.000Z')`)
       .bind(key, previous.httpEtag, previous.size, previousThumbnailKey, previousThumbnail.httpEtag, previousThumbnail.size).run();
 
     const instance = app();
@@ -671,7 +671,7 @@ describe("authenticated browser delivery uploads", () => {
     expect(await deliveryDb.prepare("SELECT etag,size,content_type,media_kind FROM file_index WHERE r2_key=?").bind(key).first())
       .toEqual({ etag: restored.httpEtag, size: 1, content_type: "image/jpeg", media_kind: "image" });
     expect(queueSend).toHaveBeenCalledOnce();
-    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: key, sourceEtag: restored.etag }));
+    expect(queueSend).toHaveBeenCalledWith(expect.objectContaining({ sourceKey: key, sourceEtag: restored.etag }), { delaySeconds: 30 });
   });
 
   it("preserves recovery when a newer writer wins before restore", async () => {

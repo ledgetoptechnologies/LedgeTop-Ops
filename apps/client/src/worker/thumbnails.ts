@@ -4,7 +4,8 @@ import { thumbnailFallbackKindForFile, type DeliveryItem, type ThumbnailState } 
 import { matchesEtag } from "./prepared-images";
 
 const MAX_THUMBNAIL_BYTES = 128 * 1024;
-const MAX_VIDEO_THUMBNAIL_INPUT_BYTES = 100_000_000;
+const MAX_IMAGE_THUMBNAIL_INPUT_BYTES = 512 * 1024 * 1024;
+const MAX_PDF_THUMBNAIL_INPUT_BYTES = 256 * 1024 * 1024;
 
 export interface ThumbnailJobRow {
   source_etag: string;
@@ -23,14 +24,12 @@ export function thumbnailStateForObject(
   return job.status === "ready" && Boolean(job.thumbnail_etag) ? "ready" : "pending";
 }
 
-export function isVideoThumbnailCandidate(
-  sourceKey: string,
+export function isThumbnailCandidate(
+  kind: Exclude<DeliveryItem["kind"], "folder">,
   sourceSize: number | undefined,
-  contentType: string | undefined,
 ): boolean {
-  const normalizedType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
-  return /\.mp4$/i.test(sourceKey) && normalizedType === "video/mp4" &&
-    (sourceSize === undefined || (sourceSize > 0 && sourceSize < MAX_VIDEO_THUMBNAIL_INPUT_BYTES));
+  const limit = kind === "image" ? MAX_IMAGE_THUMBNAIL_INPUT_BYTES : kind === "pdf" ? MAX_PDF_THUMBNAIL_INPUT_BYTES : 0;
+  return limit > 0 && (sourceSize === undefined || (sourceSize > 0 && sourceSize <= limit));
 }
 
 export function thumbnailFieldsForObject(
@@ -42,8 +41,7 @@ export function thumbnailFieldsForObject(
   sourceSize?: number,
   contentType?: string,
 ): Pick<DeliveryItem, "thumbnailState" | "thumbnailFallbackKind" | "thumbnailUrl"> {
-  const videoCandidate = kind === "video" && isVideoThumbnailCandidate(sourceKey, sourceSize, contentType);
-  const thumbnailState = kind === "image" || videoCandidate ? thumbnailStateForObject(sourceEtag, job) : "not_applicable";
+  const thumbnailState = isThumbnailCandidate(kind, sourceSize) ? thumbnailStateForObject(sourceEtag, job) : "not_applicable";
   return {
     thumbnailState,
     thumbnailFallbackKind: thumbnailFallbackKindForFile(sourceKey, kind),
@@ -58,7 +56,7 @@ function cleanEtag(value: string): string {
 export async function serveAuthorizedThumbnail(
   env: Pick<EnvLike, "DELIVERY_DB" | "DATA_BUCKET">,
   sourceKey: string,
-  request: { method: string; ifNoneMatch?: string },
+  request: { method: string; ifNoneMatch?: string; kind?: Exclude<DeliveryItem["kind"], "folder"> },
 ): Promise<Response> {
   const job = await env.DELIVERY_DB
     .prepare(`SELECT source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status
@@ -70,6 +68,8 @@ export async function serveAuthorizedThumbnail(
   }
   const source = await env.DATA_BUCKET.head(sourceKey);
   if (!source || isMovedSourceMarker(source)) throw new HTTPException(404, { message: "File not found" });
+  if (!isThumbnailCandidate(request.kind || "image", source.size))
+    throw new HTTPException(409, { message: "Thumbnail is not available for this file type", cause: { code: "THUMBNAIL_NOT_APPLICABLE" } });
   if (cleanEtag(source.httpEtag) !== cleanEtag(job.source_etag)) {
     throw new HTTPException(409, { message: "Thumbnail is not ready", cause: { code: "THUMBNAIL_PENDING" } });
   }

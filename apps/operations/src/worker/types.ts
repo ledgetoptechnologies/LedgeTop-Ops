@@ -1,6 +1,7 @@
 import type { Permission, PermissionScope } from "@ltds/shared";
+import type { ThumbnailRendererContainer } from "./thumbnail-renderer-container";
 
-export type Env = Omit<Cloudflare.Env, "DIRECT_DELIVERY_UPLOADS_ENABLED" | "R2_PURGE_ENABLED"> & {
+export type Env = Omit<Cloudflare.Env, "DIRECT_DELIVERY_UPLOADS_ENABLED" | "R2_PURGE_ENABLED" | "THUMBNAIL_RENDERER"> & {
   PROJECT_ALPHA_API_KEY?: string;
   OPERATIONS_SESSION_SECRET: string;
   DELIVERY_TOKEN_SECRET: string;
@@ -31,9 +32,14 @@ export type Env = Omit<Cloudflare.Env, "DIRECT_DELIVERY_UPLOADS_ENABLED" | "R2_P
     sourceKey: string;
     sourceEtag: string;
   }>;
+  THUMBNAIL_RENDERER: DurableObjectNamespace<ThumbnailRendererContainer>;
   FILE_EVENTS_QUEUE_NAME: string;
   THUMBNAIL_QUEUE_NAME: string;
   THUMBNAIL_DLQ_NAME: string;
+  /** Dedicated bearer secret for the bounded TrueNAS thumbnail ingest endpoint. */
+  THUMBNAIL_INGEST_SECRET?: string;
+  /** Exact Operations edge hostname accepted by the ingest endpoint. */
+  THUMBNAIL_INGEST_EXPECTED_HOST?: string;
   ALERT_EMAIL?: SendEmail;
   ALERT_FROM?: string;
   ALERT_TO?: string;

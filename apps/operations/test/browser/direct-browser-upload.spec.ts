@@ -240,7 +240,7 @@ test("single-file upload uses a same-origin resumable sequence and exposes byte 
     files: [{ relativePath: "site-photo.jpg", size: 6, contentType: "image/jpeg" }],
   });
   expect(mutations.every((request) => request.headers["x-csrf-token"] === "csrf-browser-upload-test")).toBe(true);
-  expect(mutations.every((request) => request.origin === "http://127.0.0.1:4174")).toBe(true);
+  expect(mutations.every((request) => request.origin === new URL(page.url()).origin)).toBe(true);
   expect(
     requests
       .filter((request) => request.path.startsWith("/api/delivery/uploads"))

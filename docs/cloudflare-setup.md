@@ -136,18 +136,47 @@ Both `wrangler.jsonc` files set:
 
 After deployment, verify the Worker dashboard has not re-enabled a `workers.dev` route. Both Workers also reject unexpected `Host` headers.
 
-## 4. Images, Media Transformations, and Stream
+## 4. Private thumbnail renderer and Stream
 
-Activate Cloudflare Images Transformations for the Operations Worker. The Client
-Worker deliberately has no Images binding: it serves only an already-generated
-private R2 thumbnail after reauthorization. Enable the `MEDIA` binding on the
-Operations Worker as well; it reads eligible private-R2 MP4 streams directly and
-extracts only a still frame. It does not require a public R2 or Stream URL and
-does not request video output. Media Transformations has no local simulator, so
-use a remote staging Worker to prove the account/Worker entitlement and real
-H.264 decoding before production. Stream remains available for private playback
-of previously processed videos, but this thumbnail path does not submit new
-videos to Stream or create a video transcode.
+Thumbnail generation does not use Cloudflare Images or Media Transformations.
+Do not add either binding or run an Images-dependent backfill. The Operations
+Worker owns the existing thumbnail Queue/DLQ and a private RPC-only
+`ThumbnailRendererContainer`; the Client Worker only serves an already-ready
+private R2 derivative after reauthorization. The Container has no public route,
+internet access, or source credentials and is capped at one `standard-1`
+instance. It renders still images with libvips and the first PDF page with
+Poppler. Video and Office/document media remain type-specific icons.
+
+Operations waits 15 minutes for an optional TrueNAS prebuilt registration on
+raw server/rclone R2 events; direct browser/staff enqueue keeps a 30-second
+grace. It then uses the Container fallback. Prebuilt artifacts live only under
+`_ltds/derivatives/thumbnails/v1/prebuilt/`; Cloudflare fallback objects live
+only under the sibling `managed/` namespace. Configure the TrueNAS Custom App,
+outbound Access service token, application secret and prebuilt-only rclone sync
+exactly as documented in the [thumbnail runbook](media-thumbnail-pipeline.md).
+Current rclone multipart objects do not expose the full-object SHA-256 proof
+required for prebuilt registration, so they fail closed to the private Container
+fallback. Do not enable an undocumented S3 checksum-mode HEAD header, accept a
+composite checksum, or weaken source ETag checks to make prebuilt registration
+succeed.
+The internal endpoint requires both Cloudflare Access service-token headers and
+`THUMBNAIL_INGEST_SECRET`; it never accepts a browser/user session as renderer
+authority.
+
+Create a path-specific self-hosted Access application for
+`https://ops.ledgetopdroneservices.com/api/internal/thumbnail-ingest/v1` with a
+Service Auth policy that includes only a dedicated TrueNAS service token. Enter
+that token's client ID/secret only in the TrueNAS broker UI as
+`CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. Set a separate random
+Operations runtime secret named `THUMBNAIL_INGEST_SECRET` and enter the same
+value only in the broker. Keep `THUMBNAIL_INGEST_EXPECTED_HOST` equal to the
+exact Operations hostname. Do not reuse staff Access, Worker/Wrangler, rclone,
+Project Alpha, or Incoming credentials. Give the broker a separate
+bucket-scoped R2 Object Read credential for HEAD requests; rclone alone owns
+prebuilt writes.
+
+Stream remains available for private playback of existing Stream assets, but
+the thumbnail path does not send video to Stream or extract video frames.
 
 Delivery uses the Stream binding to generate one-hour signed tokens for existing
 Stream assets. Original R2 objects remain the authorized download source.
@@ -294,18 +323,19 @@ Set-Location ../operations
 npm.cmd run db:migrate:remote
 ```
 
-Confirm Delivery migrations through `0109_image_asset_locations.sql` and
+Confirm Delivery migrations through `0111_thumbnail_render_provenance.sql` and
 Operations migrations through `0022_r2_operation_retries.sql` appear in the
 remote migration lists before deploying dependent Workers. Before the
-Operations deployment, separately verify that Images and Media Transformations
-are enabled on the Worker, the `MEDIA` binding resolves, the thumbnail queue and
-DLQ exist, the producer/main-consumer/DLQ
-consumer bindings resolve to those exact queues, the existing R2 object-create
-notification still feeds `ltds-file-events`, and both the 15-minute and
-5-minute crons are present. Apply the Operations migration before uploading its
-dependent Worker version. The existing private `ltds-ops` Worker owns the
-thumbnail consumer; no separate or public `ltds-thumbnails` Worker is needed.
-Repository configuration does not prove those remote resources exist.
+Operations deployment, separately verify the thumbnail queue and DLQ exist;
+the producer/main-consumer/DLQ consumer bindings resolve to those exact queues;
+the private `THUMBNAIL_RENDERER` Container binding resolves with one maximum
+instance, internet disabled and no SSH/public route; the existing R2
+object-create notification still feeds `ltds-file-events`; and both the
+15-minute and 5-minute crons are present. Apply Delivery `0111` before
+uploading the dependent Operations version. The existing private `ltds-ops`
+Worker owns the thumbnail consumer; no separate or public `ltds-thumbnails`
+Worker is needed. Repository configuration does not prove remote resources or
+Container entitlement exist.
 
 The authenticated photo-location map reuses the private thumbnail queue and
 adds no public R2 route or Cloudflare binding. Its minimal, version-bound

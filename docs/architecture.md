@@ -10,7 +10,7 @@ ops.ledgetopdroneservices.com
       |-- OPS_DB: staff, ACL, projects, operations, tasks, FAA, audit
       |-- DELIVERY_DB: grants, notification/thumbnail jobs, file index
       |-- private R2: staff browsing, originals, private brief attachments
-      `-- file-event/thumbnail Queues, Images transforms, Stream management
+      `-- file-event/thumbnail Queues, private Container rendering, Stream management
 
 delivery.ledgetopdroneservices.com
       |-- DELIVERY_DB only
@@ -113,16 +113,16 @@ Optional access codes are PBKDF2-derived with a random salt, application pepper,
 
 R2 paths use opaque base64url item references. Validation rejects traversal, backslashes, controls, absolute paths, exact case-insensitive `dump` components, nested `.previews` artifacts, and the reserved `_ltds` root. Unsafe formats such as HTML, XML, JavaScript, and SVG are downloads rather than inline content.
 
-Folder grids use one current Cloudflare Queue-generated thumbnail and never
-request originals as thumbnail fallbacks. Supported still images are normalized
-through Cloudflare Images. Eligible private MP4/H.264 videos use Cloudflare
-Media Transformations to extract one frame at five seconds, then the same Images
-normalization path. Pending, unsupported, oversized, and failed media use a
-client-bundled file-kind icon; PDF, text, archive, office-document, and unknown
-items remain icon-only. Clicking an eligible item is the only action that opens
-its authorized full-resolution original with range support. Cards and filmstrips
-never preload the original, and no medium preview or video transcode is created.
-See [Cloudflare thumbnail-only media delivery](media-thumbnail-pipeline.md).
+Folder grids use one current Queue-generated thumbnail and never request
+originals as thumbnail fallbacks. Supported still images and first-page PDFs
+use the private, internet-disabled libvips/Poppler Container fallback; an exact
+source-version TrueNAS prebuilt may win the same D1 mapping after independent
+manifest and derivative validation. Video, text, archive, office-document,
+audio, unknown, pending, oversized, and failed items use a client-bundled
+file-kind icon. Clicking an eligible item is the only action that opens its
+authorized full-resolution original with range support. Cards and filmstrips
+never preload the original, and no medium preview or video transcode is
+created. See [private thumbnail-only media delivery](media-thumbnail-pipeline.md).
 
 ## Airspace safety model
 

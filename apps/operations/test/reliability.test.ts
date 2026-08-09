@@ -4,12 +4,17 @@ import { canonicalPreviewSource, finalizePreviewManifest, handleRemovedSource, h
 import { derivativePrefixes, validateDeleteConfirmation } from "../src/worker/source-delete";
 import { artifactDirectory, previewIdentity } from "../src/worker/artifacts";
 import { r2PurgeEnabled, tombstoneMatches, trashSnapshotBlockReason } from "../src/worker/trash";
+import { PDF_THUMBNAIL_MAX_INPUT_BYTES, THUMBNAIL_MAX_INPUT_BYTES } from "../src/worker/image-thumbnails";
 
 describe("delivery reliability controls", () => {
-  it("maps supported image and MP4 uploads to thumbnail queue payloads", () => {
-    expect(thumbnailJobForCreatedObject("CompleteMultipartUpload", "Jobs/Clients/Synthetic/photo.jpg", "image", { httpEtag: '"source-etag"', size: 4096 })).toEqual({ sourceKey: "Jobs/Clients/Synthetic/photo.jpg", sourceEtag: '"source-etag"', sourceSize: 4096 });
-    expect(thumbnailJobForCreatedObject("PutObject", "Jobs/Clients/Synthetic/flight.mp4", "video", { httpEtag: '"video-etag"', size: 8192, httpMetadata: { contentType: "video/mp4" } })).toEqual({ sourceKey: "Jobs/Clients/Synthetic/flight.mp4", sourceEtag: '"video-etag"', sourceSize: 8192 });
+  it("maps only bounded image and PDF uploads throughout Jobs to thumbnail queue payloads", () => {
+    expect(thumbnailJobForCreatedObject("PutObject", "Jobs/Internal/root-photo.jpg", "image", { httpEtag: '"root-etag"', size: 2048 })).toEqual({ sourceKey: "Jobs/Internal/root-photo.jpg", sourceEtag: '"root-etag"', sourceSize: 2048, delaySeconds: 900 });
+    expect(thumbnailJobForCreatedObject("CompleteMultipartUpload", "Jobs/Clients/Synthetic/photo.jpg", "image", { httpEtag: '"source-etag"', size: 4096, customMetadata: { browserUploadSession: "session" } })).toEqual({ sourceKey: "Jobs/Clients/Synthetic/photo.jpg", sourceEtag: '"source-etag"', sourceSize: 4096, delaySeconds: 30 });
+    expect(thumbnailJobForCreatedObject("PutObject", "Jobs/Internal/report.pdf", "pdf", { httpEtag: '"pdf-etag"', size: PDF_THUMBNAIL_MAX_INPUT_BYTES, httpMetadata: { contentType: "application/pdf" } })).toEqual({ sourceKey: "Jobs/Internal/report.pdf", sourceEtag: '"pdf-etag"', sourceSize: PDF_THUMBNAIL_MAX_INPUT_BYTES, delaySeconds: 900 });
+    expect(thumbnailJobForCreatedObject("PutObject", "Jobs/Clients/Synthetic/flight.mp4", "video", { httpEtag: '"video-etag"', size: 8192, httpMetadata: { contentType: "video/mp4" } })).toBeNull();
     expect(thumbnailJobForCreatedObject("PutObject", "Jobs/Clients/Synthetic/flight.mov", "video", { httpEtag: '"mov-etag"', size: 8192, httpMetadata: { contentType: "video/quicktime" } })).toBeNull();
+    expect(thumbnailJobForCreatedObject("PutObject", "Jobs/Internal/too-large.jpg", "image", { httpEtag: '"large-image"', size: THUMBNAIL_MAX_INPUT_BYTES + 1, httpMetadata: { contentType: "image/jpeg" } })).toBeNull();
+    expect(thumbnailJobForCreatedObject("PutObject", "Jobs/Internal/too-large.pdf", "pdf", { httpEtag: '"large-pdf"', size: PDF_THUMBNAIL_MAX_INPUT_BYTES + 1, httpMetadata: { contentType: "application/pdf" } })).toBeNull();
     expect(thumbnailJobForCreatedObject("CompleteMultipartUpload", "Jobs/Clients/Synthetic/archive.zip", "other", { httpEtag: '"archive"', size: 10 })).toBeNull();
     expect(imageLocationJobForCreatedObject("PutObject", "Jobs/Clients/Synthetic/source.tiff", "image", { httpEtag: '"tiff-etag"' }))
       .toEqual({ sourceKey: "Jobs/Clients/Synthetic/source.tiff", sourceEtag: '"tiff-etag"' });
@@ -37,7 +42,7 @@ describe("delivery reliability controls", () => {
     expect(prepare).not.toHaveBeenCalled();
     expect(deleteObject).not.toHaveBeenCalled();
 
-    liveHead.mockResolvedValueOnce(null).mockResolvedValueOnce(null);
+    liveHead.mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce(null);
     await expect(handleRemovedSource(env, "Jobs/Clients/Synthetic/photo.jpg")).resolves.toBe("removed");
     expect(queries.some(query => query.includes("thumbnail.current-row"))).toBe(true);
     expect(queries).toContain("SELECT etag FROM file_index WHERE r2_key=?");
@@ -47,13 +52,24 @@ describe("delivery reliability controls", () => {
 
   it("uses the removed ETag and rebuilds current index state when a source resurrects", async () => {
     const queries: string[] = [];
+    let registeredThumbnailKey: string | null = null;
     const prepare = vi.fn((sql: string) => {
       queries.push(sql);
+      let values: unknown[] = [];
       const statement = {
-        bind() { return statement; },
-        async first() { return sql === "SELECT etag FROM file_index WHERE r2_key=?" ? { etag: '"old"' } : null; },
+        bind(...input: unknown[]) { values = input; return statement; },
+        async first() {
+          if (sql === "SELECT etag FROM file_index WHERE r2_key=?") return { etag: '"old"' };
+          if (sql.includes("thumbnail.current-row") && registeredThumbnailKey) {
+            return { source_etag: "new", thumbnail_key: registeredThumbnailKey, status: "pending", error_code: null, queue_published_at: null };
+          }
+          return null;
+        },
         async all() { return { results: [] }; },
-        async run() { return { meta: { changes: 1 } }; },
+        async run() {
+          if (sql.includes("thumbnail.register")) registeredThumbnailKey = String(values[3]);
+          return { meta: { changes: 1 } };
+        },
       };
       return statement;
     });
@@ -62,6 +78,7 @@ describe("delivery reliability controls", () => {
       httpMetadata: { contentType: "image/tiff" },
     };
     const head = vi.fn()
+      .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(null)
       .mockResolvedValueOnce(replacement)
       .mockResolvedValueOnce(replacement);
@@ -76,7 +93,10 @@ describe("delivery reliability controls", () => {
     expect(queries).toContain("DELETE FROM image_asset_locations WHERE source_key=? AND source_etag=?");
     expect(queries).toContain("DELETE FROM file_index WHERE r2_key=? AND trim(etag,'\"')=trim(?,'\"')");
     expect(queries.some(query => query.includes("INSERT INTO file_index"))).toBe(true);
-    expect(send).toHaveBeenCalledWith({ kind: "image-thumbnail.v1", sourceKey: "Jobs/Clients/Synthetic/source.tiff", sourceEtag: "new" });
+    expect(send).toHaveBeenCalledWith(
+      { kind: "image-thumbnail.v1", sourceKey: "Jobs/Clients/Synthetic/source.tiff", sourceEtag: "new" },
+      { delaySeconds: 30 },
+    );
   });
   it("rejects reserved segments everywhere in Operations paths", () => {
     for (const key of ["_ltds/a.jpg", "jobs/_ltds/a.jpg", "jobs/client/.previews/hash/thumb.webp", "jobs/client/dump/a.jpg", "jobs/dump/client/a.jpg"]) expect(hidden(key)).toBe(true);

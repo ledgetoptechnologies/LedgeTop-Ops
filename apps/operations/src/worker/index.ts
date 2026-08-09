@@ -30,14 +30,16 @@ import {
   refreshStreamStatuses,
   type R2Notification,
 } from "./file-events";
-import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, thumbnailSourceEligible, type ThumbnailJobMessage } from "./image-thumbnails";
+import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, reconcileManagedThumbnailOrphans, reconcileThumbnailRegistrations, recoverTransientThumbnailFailures, thumbnailSourceEligible, type ThumbnailJobMessage } from "./image-thumbnails";
 import { processThumbnailBackfills } from "./thumbnail-backfill";
 import { enqueueImageLocationBackfill } from "./image-locations";
 import { listDeliveryFolderLocations, resolveDeliveryLocationAsset } from "./delivery-locations";
+import { dispatchThumbnailIngestRequest } from "./thumbnail-ingest-api";
 import {
   authorizeItem,
   createDeliveryShare,
   decodeRef,
+  deliveryBrowseRevision,
   encodeRef,
   getActiveDeliveryShare,
   listDeliveryFolder,
@@ -1690,6 +1692,9 @@ app.get("/api/delivery/folders", async (c) =>
     ),
   ),
 );
+app.get("/api/delivery/access-revision", async (c) =>
+  c.json({ revision: await deliveryBrowseRevision(c.env, c.get("principal")) }),
+);
 app.get("/api/delivery/folders/locations", async (c) =>
   c.json(await listDeliveryFolderLocations(
     c.env,
@@ -2199,6 +2204,9 @@ async function scheduled(
   ctx.waitUntil(expireBrowserUploadSessions(env));
   ctx.waitUntil(cleanupBrowserUploadSessions(env));
   ctx.waitUntil(drainThumbnailCleanup(env));
+  ctx.waitUntil(reconcileThumbnailRegistrations(env));
+  ctx.waitUntil(reconcileManagedThumbnailOrphans(env));
+  ctx.waitUntil(recoverTransientThumbnailFailures(env));
   ctx.waitUntil(processThumbnailBackfills(env));
   ctx.waitUntil(enqueueImageLocationBackfill(env));
   ctx.waitUntil(
@@ -2214,6 +2222,8 @@ async function fetch(
   env: Env,
   ctx: ExecutionContext,
 ): Promise<Response> {
+  const thumbnailIngest = await dispatchThumbnailIngestRequest(request, env);
+  if (thumbnailIngest) return thumbnailIngest;
   const incoming = dispatchIncomingPublicRequest(request, env, ctx);
   if (incoming) return await incoming;
   return app.fetch(request, env, ctx);
@@ -2232,3 +2242,4 @@ export default {
 export { R2CrudWorkflow } from "./r2-crud";
 export { IncomingUploadLifecycleWorkflow } from "./incoming";
 export { DropboxImportWorkflow } from "./dropbox-import";
+export { ThumbnailRendererContainer } from "./thumbnail-renderer-container";

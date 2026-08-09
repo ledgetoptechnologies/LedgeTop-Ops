@@ -193,13 +193,18 @@ test("request map is primary, responsive, accessible, and supports targeted POI 
   await expect(map).toBeVisible();
   await expect(canvas).toBeVisible();
   const mapBox = await map.boundingBox();
+  const mapRegionBox = await page.locator(".portal-request-map").boundingBox();
+  const requestFieldsBox = await page.locator(".portal-request-fields").boundingBox();
   const titleBox = await page.getByLabel("Service request title").boundingBox();
   expect(mapBox).not.toBeNull();
+  expect(mapRegionBox).not.toBeNull();
+  expect(requestFieldsBox).not.toBeNull();
   expect(titleBox).not.toBeNull();
   const mobile = testInfo.project.name.includes("mobile");
-  expect(mapBox!.width).toBeGreaterThanOrEqual(mobile ? 330 : 760);
+  if (mobile) expect(mapBox!.width).toBeGreaterThanOrEqual(page.viewportSize()!.width * 0.8);
+  else expect(mapRegionBox!.width).toBeGreaterThan(requestFieldsBox!.width);
   expect(mapBox!.height).toBeGreaterThanOrEqual(mobile ? 430 : 560);
-  expect(mapBox!.y).toBeLessThan(titleBox!.y);
+  expect(mapRegionBox!.y).toBeLessThan(titleBox!.y);
   expect(mapBox!.x).toBeGreaterThanOrEqual(0);
   expect(mapBox!.x + mapBox!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
 

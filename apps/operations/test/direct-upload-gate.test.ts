@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 
 import { registerR2CrudRoutes } from "../src/worker/r2-crud";
 

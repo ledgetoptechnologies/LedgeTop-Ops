@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 
 import { dispatchIncomingPublicRequest } from "../src/worker/incoming";
 

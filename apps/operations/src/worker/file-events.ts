@@ -3,7 +3,7 @@ import type { Env } from "./types";
 import { artifactDirectory } from "./artifacts";
 import { sendAdminAlert } from "./alerts";
 import { notificationStatement } from "./notifications";
-import { canonicalThumbnailSourceKey, enqueueThumbnailJob, removeThumbnailStateForPath, supportedThumbnailSource } from "./image-thumbnails";
+import { canonicalThumbnailSourceKey, enqueueThumbnailJob, handleRemovedPrebuiltThumbnail, prebuiltThumbnailArtifactKey, removeThumbnailStateForPath, THUMBNAIL_PREBUILT_GRACE_SECONDS, THUMBNAIL_SIDECAR_GRACE_SECONDS, thumbnailSourceEligible } from "./image-thumbnails";
 import { deleteImageLocation, enqueueImageLocationJob } from "./image-locations";
 import { isMovedSourceMarker } from "@ltds/shared";
 
@@ -55,11 +55,12 @@ export function thumbnailJobForCreatedObject(
   action: string,
   key: string,
   _kind: string,
-  head: Pick<R2Object, "httpEtag" | "size" | "httpMetadata">,
+  head: Pick<R2Object, "httpEtag" | "size" | "httpMetadata" | "customMetadata">,
   eventTime?: string,
-): { sourceKey: string; sourceEtag: string; sourceSize: number; eventTime?: string } | null {
-  return created(action) && canonicalThumbnailSourceKey(key) && supportedThumbnailSource(key, head.httpMetadata?.contentType)
-    ? { sourceKey: key, sourceEtag: head.httpEtag, sourceSize: head.size, ...(eventTime ? { eventTime } : {}) }
+): { sourceKey: string; sourceEtag: string; sourceSize: number; eventTime?: string; delaySeconds: number } | null {
+  return created(action) && canonicalThumbnailSourceKey(key) && thumbnailSourceEligible(key, head.size, head.httpMetadata?.contentType)
+    ? { sourceKey: key, sourceEtag: head.httpEtag, sourceSize: head.size, ...(eventTime ? { eventTime } : {}),
+        delaySeconds: head.customMetadata?.browserUploadSession ? THUMBNAIL_SIDECAR_GRACE_SECONDS : THUMBNAIL_PREBUILT_GRACE_SECONDS }
     : null;
 }
 
@@ -89,7 +90,10 @@ export async function handleRemovedSource(
   const indexed = await env.DELIVERY_DB.prepare("SELECT etag FROM file_index WHERE r2_key=?")
     .bind(key).first<{ etag: string }>();
   const expectedEtag = removedEtag || indexed?.etag;
-  await removeThumbnailStateForPath(env, key);
+  // A replacement can appear after the first HEAD while this delayed delete
+  // notification is being handled. Never retire its versioned derivative.
+  if (await env.DATA_BUCKET.head(key)) return "stale";
+  await removeThumbnailStateForPath(env, key, false, expectedEtag);
   if (expectedEtag) {
     await deleteImageLocation(env, key, expectedEtag);
     await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=? AND trim(etag,'\"')=trim(?,'\"')")
@@ -107,7 +111,7 @@ export async function handleRemovedSource(
       .run();
     const stable = await env.DATA_BUCKET.head(key);
     if (stable && stable.httpEtag === resurrected.httpEtag && canonicalThumbnailSourceKey(key)) {
-      if (supportedThumbnailSource(key, stable.httpMetadata?.contentType)) {
+      if (thumbnailSourceEligible(key, stable.size, stable.httpMetadata?.contentType)) {
         await enqueueThumbnailJob(env, {
           sourceKey: key,
           sourceEtag: stable.httpEtag,
@@ -271,6 +275,10 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
     try {
       const event = message.body; const key = event.object?.key;
       if (!key) { message.ack(); continue; }
+      if (prebuiltThumbnailArtifactKey(key)) {
+        if (removed(event.action)) await handleRemovedPrebuiltThumbnail(env, key, event.object?.eTag);
+        message.ack(); continue;
+      }
       if (previewManifest(key)) {
         // Legacy preview artifacts are intentionally ignored. This release only
         // creates fixed still thumbnails through the dedicated queue pipeline.
@@ -308,8 +316,8 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
         message.ack(); continue;
       }
       let stream = { uid: existing?.stream_uid || null, status: existing?.stream_status || null, error: null as string | null };
-      // Stream ingestion/transcoding remains disabled. The independent thumbnail
-      // job may extract one still frame through Media Transformations below.
+      // Stream ingestion/transcoding and video thumbnail extraction remain
+      // disabled; video items use the client-bundled file-kind icon.
       if (kind === "video") stream = { uid: null, status: "disabled", error: null };
       await env.DELIVERY_DB.batch([
         env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status,stream_error) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,stream_uid=excluded.stream_uid,stream_status=excluded.stream_status,stream_error=excluded.stream_error,updated_at=datetime('now')`).bind(key, head.httpEtag, head.size, head.uploaded.toISOString(), mime(key), kind, stream.uid, stream.status, stream.error),
@@ -357,7 +365,7 @@ export async function reconcileFileIndex(env: Env): Promise<number> {
         visibleBytes += object.size;
         for (const share of activeShares.results) if (object.key.startsWith(share.r2_prefix.endsWith("/") ? share.r2_prefix : `${share.r2_prefix}/`)) presentShares.add(share.id);
         statements.push(env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,last_seen_reconcile) VALUES (?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,last_seen_reconcile=excluded.last_seen_reconcile,updated_at=datetime('now')`).bind(object.key, object.httpEtag, object.size, object.uploaded.toISOString(), mime(object.key), mediaKind(object.key), marker)); count += 1;
-        if (canonicalThumbnailSourceKey(object.key) && supportedThumbnailSource(object.key, object.httpMetadata?.contentType)) {
+        if (canonicalThumbnailSourceKey(object.key) && thumbnailSourceEligible(object.key, object.size, object.httpMetadata?.contentType)) {
           await enqueueThumbnailJob(env, { sourceKey: object.key, sourceEtag: object.httpEtag, sourceSize: object.size, eventTime: object.uploaded.toISOString() });
         }
       }

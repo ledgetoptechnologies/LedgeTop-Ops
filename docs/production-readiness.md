@@ -287,11 +287,12 @@ The queue consumer must:
 - emit structured counters for eligible, ignored, duplicate, queued,
   completed, failed, deleted-race, retry, and dead-letter outcomes.
 
-Images should prefer Cloudflare image transformations only after staging proves
-format support, output-size bounds, access controls, and acceptable billed
-usage. Video may use Stream only when its account, token, signed-delivery
-configuration, limits, and budget are present. PDF/other media stays on the
-sandboxed producer path until a bounded Worker-safe implementation exists.
+Supported still images and first-page PDFs use only the bounded, private
+libvips/Poppler renderer after staging proves format support, decoded-pixel and
+output bounds, access controls, cleanup, and acceptable Container usage. Video
+thumbnails remain disabled; existing Stream playback is a separate authorized
+viewer capability and must not be treated as thumbnail generation. Other media
+stays on a file-kind icon until a sandboxed processor is independently proven.
 
 Cost controls include maximum source bytes/pixels/duration, queue batch and
 retry limits, per-tenant concurrency, daily transformation/minute budgets,

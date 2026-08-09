@@ -375,6 +375,68 @@ async function mockPaginationNavigationRace(page: Page) {
   return { secondPage, secondPageRequested };
 }
 
+async function mockCachedEmptyRootReturn(page: Page) {
+  const secondRoot = deferred();
+  const secondRootRequested = deferred();
+  let rootRequests = 0;
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/session") {
+      await route.fulfill({ json: {
+        user: {
+          id: "staff-cached-empty",
+          email: "staff-cached-empty@example.test",
+          displayName: "Cached Empty Staff",
+          status: "Active",
+          profileType: "Employee",
+          isAdministrator: false,
+          permissions: ["delivery.browse"],
+          divisions: [],
+        },
+        csrfToken: "csrf-cached-empty",
+        timezone: "America/Chicago",
+        mapStyleUrl: null,
+        mapboxPublicToken: null,
+        capabilities: { deliveryJobsRoot: { enabled: true } },
+      } });
+      return;
+    }
+    if (url.pathname === "/api/delivery/folders") {
+      const prefix = url.searchParams.get("prefix") || "";
+      if (prefix === "Jobs/Clients/Acme/Current/") {
+        await route.fulfill({ json: { prefix, folders: [], files: [], nextCursor: null } });
+        return;
+      }
+      if (prefix === "Jobs/Clients/") {
+        rootRequests += 1;
+        if (rootRequests === 1) {
+          await route.fulfill({ json: { prefix, folders: [], files: [], nextCursor: null } });
+          return;
+        }
+        secondRootRequested.release();
+        await secondRoot.promise;
+        await route.fulfill({ json: {
+          prefix,
+          folders: [{ id: "root-acme", prefix: `${prefix}Acme/`, name: "Acme", displayName: "Acme" }],
+          files: [],
+          nextCursor: null,
+        } }).catch(() => {});
+        return;
+      }
+    }
+    if (url.pathname === "/api/delivery/folders/locations") {
+      await route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
+      return;
+    }
+    if (url.pathname === "/api/delivery/shares") {
+      await route.fulfill({ json: { shares: [] } });
+      return;
+    }
+    await route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  return { secondRoot, secondRootRequested };
+}
+
 test("Delivery navigation defaults to the Jobs/Clients workspace", async ({ page }) => {
   const prefixes = await mockDeliveryNavigation(page, { jobsRootEnabled: true });
 
@@ -509,4 +571,84 @@ test("navigation during page two aborts the old cursor chain without contaminati
   await expect(page.locator(".file-card-title", { hasText: "Current root" })).toBeVisible();
   await expect(page.getByText("Late old", { exact: true })).toHaveCount(0);
   await expect(page).toHaveURL(/\/delivery$/);
+});
+
+test("browser back and forward never render a blank grid from a cached empty Jobs/Clients result", async ({ page }) => {
+  const race = await mockCachedEmptyRootReturn(page);
+  await page.goto("/delivery/Acme/Current");
+  await expect(page.getByText("This folder is empty", { exact: true })).toBeVisible();
+
+  await page
+    .getByRole("navigation", { name: "Current delivery folder" })
+    .getByRole("button", { name: "Clients", exact: true })
+    .click();
+  await expect(page).toHaveURL(/\/delivery$/);
+  await expect(page.getByText("This folder is empty", { exact: true })).toBeVisible();
+
+  await page.goBack();
+  await expect(page).toHaveURL(/\/delivery\/Acme\/Current$/);
+  await page.goForward();
+  await race.secondRootRequested.promise;
+  await expect(page.locator(".delivery-skeleton")).toBeVisible();
+  await expect(page.locator(".file-grid")).toHaveCount(0);
+
+  race.secondRoot.release();
+  await expect(page.locator(".file-card-title", { hasText: "Acme" })).toBeVisible();
+});
+
+test("direct Jobs deep links survive refresh for globally authorized Operations staff", async ({ page }) => {
+  const prefixes = await mockDeliveryNavigation(page, { jobsRootEnabled: true });
+  await page.goto("/jobs/Archive/2024");
+  await expect.poll(() => prefixes.filter((prefix) => prefix === "Jobs/Archive/2024/").length).toBe(1);
+  await page.reload();
+  await expect.poll(() => prefixes.filter((prefix) => prefix === "Jobs/Archive/2024/").length).toBe(2);
+  await expect(page).toHaveURL(/\/jobs\/Archive\/2024$/);
+});
+
+test("scoped staff cannot click the Jobs crumb and a direct Jobs request surfaces the server deny", async ({ page }) => {
+  let jobsRequests = 0;
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/session") {
+      await route.fulfill({ json: {
+        user: {
+          id: "staff-scoped",
+          email: "staff-scoped@example.test",
+          displayName: "Scoped Staff",
+          status: "Active",
+          profileType: "Employee",
+          isAdministrator: false,
+          permissions: ["delivery.browse"],
+          divisions: [{ id: "division-a" }],
+        },
+        csrfToken: "csrf-scoped",
+        timezone: "America/Chicago",
+        mapStyleUrl: null,
+        mapboxPublicToken: null,
+        capabilities: { deliveryJobsRoot: { enabled: false } },
+      } });
+      return;
+    }
+    if (url.pathname === "/api/delivery/folders") {
+      jobsRequests += 1;
+      await route.fulfill({ status: 404, json: { error: "Folder not found" } });
+      return;
+    }
+    if (url.pathname === "/api/delivery/folders/locations") {
+      await route.fulfill({ status: 404, json: { error: "Folder not found" } });
+      return;
+    }
+    if (url.pathname === "/api/delivery/shares") {
+      await route.fulfill({ json: { shares: [] } });
+      return;
+    }
+    await route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  await page.goto("/jobs");
+  await expect(page.getByText("Folder not found", { exact: true }).first()).toBeVisible();
+  expect(jobsRequests).toBe(1);
+  await expect(
+    page.getByRole("navigation", { name: "Current delivery folder" }).getByRole("button", { name: "Jobs", exact: true }),
+  ).toHaveCount(0);
 });

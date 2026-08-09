@@ -19,7 +19,7 @@
   "vars": {
     "PUBLIC_BASE_URL": "https://ops.ledgetopdroneservices.com",
     "EXPECTED_HOST": "ops.ledgetopdroneservices.com",
-    "DIRECT_DELIVERY_UPLOADS_ENABLED": "true",
+    "DIRECT_DELIVERY_UPLOADS_ENABLED": "false",
     "INCOMING_BASE_URL": "https://incoming.ledgetopdroneservices.com",
     "INCOMING_EXPECTED_HOST": "incoming.ledgetopdroneservices.com",
     "ENVIRONMENT": "production",
@@ -40,6 +40,7 @@
     "FILE_EVENTS_QUEUE_NAME": "ltds-file-events",
     "THUMBNAIL_QUEUE_NAME": "ltds-thumbnail-jobs",
     "THUMBNAIL_DLQ_NAME": "ltds-thumbnail-jobs-dlq",
+    "THUMBNAIL_INGEST_EXPECTED_HOST": "ops.ledgetopdroneservices.com",
     "ALERT_FROM": "",
     "ALERT_TO": "",
     "NOTIFICATION_FROM": "delivery@ledgetopdroneservices.com",
@@ -83,6 +84,7 @@
         "max_batch_size": 10,
         "max_batch_timeout": 5,
         "max_retries": 5,
+        "max_concurrency": 1,
         "dead_letter_queue": "ltds-thumbnail-jobs-dlq"
       },
       {
@@ -92,9 +94,25 @@
       }
     ]
   },
-  "images": { "binding": "IMAGES" },
-  "media": { "binding": "MEDIA" },
-  "stream": { "binding": "STREAM" }
+  "stream": { "binding": "STREAM" },
+  "durable_objects": {
+    "bindings": [
+      { "name": "THUMBNAIL_RENDERER", "class_name": "ThumbnailRendererContainer" }
+    ]
+  },
+  "migrations": [
+    { "tag": "thumbnail-renderer-v1", "new_sqlite_classes": ["ThumbnailRendererContainer"] }
+  ],
+  "containers": [
+    {
+      "class_name": "ThumbnailRendererContainer",
+      "image": "./containers/thumbnail-renderer/Dockerfile",
+      "max_instances": 1,
+      "instance_type": "standard-1",
+      "constraints": { "regions": ["WNAM"] },
+      "ssh": { "enabled": false }
+    }
+  ]
   ,"workflows": [
     {
       "name": "ltds-r2-crud",

@@ -89,14 +89,13 @@ test("rejects unresolved Ops Sync authority", () => {
   staging.vars.CF_ACCESS_GROUP_ID = "<STAGING_ACCESS_GROUP_ID>";
   assert(validateApp("ops-sync", staging, productionFrom(staging)).some((error) => error.includes("placeholder")));
 });
-test("requires the thumbnail producer, Images binding, and five-minute notification cron", () => {
+test("requires the thumbnail producer and five-minute renderer recovery cron", () => {
   const staging = stagingConfig("operations");
   const production = productionFrom(staging);
   staging.queues.producers = [];
-  staging.images = undefined;
   staging.triggers.crons = ["*/15 * * * *"];
   const errors = validateApp("operations", staging, production);
-  for (const expected of ["queue producers", "images", "cron triggers"]) {
+  for (const expected of ["queue producers", "cron triggers"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });

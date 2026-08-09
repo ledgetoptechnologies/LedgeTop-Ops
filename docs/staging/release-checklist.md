@@ -148,29 +148,49 @@ npm.cmd run staging:evidence:check
 Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
-`0109_image_asset_locations.sql` and Operations
+`0111_thumbnail_render_provenance.sql` and Operations
 `0014_staff_acl_controls.sql` through
-`0018_browser_upload_intents.sql`. Migration `0100` removes
+`0022_r2_operation_retries.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any
 unexpected pending migration. Migration `0105` must be present before the
 Operations version that exposes direct authenticated folder grants or runs its
 five-minute notification consumer; `0106`/`0107`/`0108` must be present before
-thumbnail jobs, cleanup, or backfill run; `0109` must be present before photo
-location extraction or map routes run; `0017` must be present before
-job-brief routes and `0018` before browser-upload routes are registered. Worker
+thumbnail jobs or cleanup; `0109` must be present before photo location
+extraction or map routes run; `0110` must be present before a `Jobs/` backfill
+run; `0111` must precede prebuilt registration, Container fallback activation,
+or exact-ETag derivative reconciliation; `0017` must be present before job-brief routes; `0018`/`0019` must precede
+browser-upload and conflict-resolution routes; `0020` must precede the internal
+SOP library; `0021` must precede Project Alpha sync hardening; and `0022` must
+precede bounded R2 retry state. Worker
 rollback does not undo either database.
 
 Before version upload, verify rather than infer the remaining operator-owned
 media prerequisites: the staging thumbnail queue and DLQ exist, Operations has
-the exact `THUMBNAIL_QUEUE` producer, main consumer, DLQ consumer, and `IMAGES`
-binding, and the 15-minute and 5-minute crons are both present. Confirm the
+the exact `THUMBNAIL_QUEUE` producer, main consumer and DLQ consumer; the
+private `THUMBNAIL_RENDERER` Container binding resolves with one maximum
+instance, internet disabled and no SSH/public route; and the 15-minute and
+5-minute crons are both present. Confirm the
 existing R2 object-create notification still feeds only the staging file-event
-queue; do not add an overlapping notification rule. Disable the retired TrueNAS
-preview cron/container before activating thumbnail processing. The repository
-examples and passing preflight prove configuration shape only, not Cloudflare
-resource existence or Images entitlement.
+queue; do not add an overlapping notification rule. Confirm the path-specific
+Cloudflare Access Service Auth policy and `THUMBNAIL_INGEST_SECRET` before a
+TrueNAS registration smoke. The repository examples and passing preflight prove
+configuration shape only, not remote resource or Container entitlement.
+
+Staging navigation evidence must show that Delivery initially requests
+`Jobs/Clients/`, an authorized global operator can use the `Jobs` breadcrumb to
+request the true `Jobs/` root, and a scoped operator cannot activate that root.
+Upload synthetic supported media in both `Jobs/Clients/` and another authorized
+`Jobs/` folder and verify the same queue lifecycle. Inject one transient
+processing failure and prove exactly one bounded second lifecycle; permanent
+oversize and invalid/encrypted cases must remain icon-only. Supported PDFs must
+render page one; video, Office, audio and archive files must remain icon-only
+with zero renderer source read. Prove the 15-minute raw server/rclone prebuilt
+grace, the 30-second direct-upload grace, and private Container fallback
+independently. Do not enable a delete-authoritative TrueNAS
+source sync until browser/team prefixes are disjoint and excluded by path; R2
+metadata tags are not a deletion boundary.
 
 ## Separately approved version and deployment sequence
 

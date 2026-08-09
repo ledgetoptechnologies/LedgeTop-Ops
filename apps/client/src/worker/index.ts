@@ -5,7 +5,7 @@ import { isMovedSourceMarker, type DeliveryItem, type DeliveryManifest } from "@
 import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName, visibleImmediateChildPrefixes } from "./files";
 import { createSessionCookie, hmac, parseCookie, randomSecret, sha256, verifyAccessCode, verifyRotatingSessionCookie } from "./security";
 import { matchesEtag } from "./prepared-images";
-import { isVideoThumbnailCandidate, serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
+import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import { recordFirstAccessNotification } from "./notifications";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
@@ -359,7 +359,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
     items.push({ id: encodeItemRef(relative), name: aliases.get(folderPrefix) || relative.split("/").pop() || relative, kind: "folder", size: null, uploadedAt: null });
   }
   const videos: Array<{ index: number; key: string }> = [];
-  const thumbnails: Array<{ index: number; key: string; etag: string; base: string; kind: "image" | "video"; size: number; contentType?: string }> = [];
+  const thumbnails: Array<{ index: number; key: string; etag: string; base: string; kind: "image" | "pdf"; size: number; contentType?: string }> = [];
   for (const object of listed.objects) {
     if (object.key === prefix || object.key.endsWith("/") || isHiddenKey(object.key) || isTrashed(tombstones, object.key) || isMovedSourceMarker(object)) continue;
     const relative = object.key.slice(root.length); const id = encodeItemRef(relative); const kind = kindForKey(object.key);
@@ -370,7 +370,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
     else if (kind === "audio" || kind === "text") item.previewUrl = `${base}/preview`;
     if (kind === "video") item.previewUrl = undefined;
     if (kind === "video") videos.push({ index: items.length, key: object.key });
-    if ((kind === "image" || kind === "video") && item.thumbnailState !== "not_applicable") thumbnails.push({ index: items.length, key: object.key, etag: object.httpEtag, base, kind, size: object.size, contentType: object.httpMetadata?.contentType });
+    if ((kind === "image" || kind === "pdf") && item.thumbnailState !== "not_applicable") thumbnails.push({ index: items.length, key: object.key, etag: object.httpEtag, base, kind, size: object.size, contentType: object.httpMetadata?.contentType });
     items.push(item);
   }
   if (thumbnails.length) {
@@ -488,16 +488,9 @@ app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/thumbnail",
   const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
   await assertNotTrashed(c.env, key);
   const kind = kindForKey(key);
-  if (kind !== "image") {
-    const source = kind === "video" ? await c.env.DATA_BUCKET.head(key) : null;
-    if (!source || isMovedSourceMarker(source)) {
-      if (kind === "video") throw new HTTPException(404, { message: "File not found" });
-      throw new HTTPException(409, { message: "Thumbnail is not available for this file type", cause: { code: "THUMBNAIL_NOT_APPLICABLE" } });
-    }
-    if (!isVideoThumbnailCandidate(key, source.size, source.httpMetadata?.contentType))
-      throw new HTTPException(409, { message: "Thumbnail is not available for this file type", cause: { code: "THUMBNAIL_NOT_APPLICABLE" } });
-  }
-  return serveAuthorizedThumbnail(c.env, key, { method: c.req.method, ifNoneMatch: c.req.header("If-None-Match") });
+  if (kind !== "image" && kind !== "pdf")
+    throw new HTTPException(409, { message: "Thumbnail is not available for this file type", cause: { code: "THUMBNAIL_NOT_APPLICABLE" } });
+  return serveAuthorizedThumbnail(c.env, key, { method: c.req.method, ifNoneMatch: c.req.header("If-None-Match"), kind });
 });
 
 export function bulkQuotaRetryAfterSeconds(now = Date.now()): number {

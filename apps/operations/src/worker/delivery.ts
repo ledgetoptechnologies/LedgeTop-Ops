@@ -80,6 +80,19 @@ interface FolderAssociation { division_id: string; r2_prefix: string }
 
 async function browseRoots(env:Env,principal:StaffPrincipal):Promise<{global:boolean;roots:Array<{prefix:string;name:string;divisionId:string}>}>{const scope=await sqlScope(env,principal,"delivery.browse");if(scope.deniedGlobal)return{global:false,roots:[]};if(scope.global&&!scope.deniedDivisions.length)return{global:true,roots:[]};const denied=new Set(scope.deniedDivisions),divisions=scope.divisions.filter(divisionId=>!denied.has(divisionId));if(!divisions.length)return{global:false,roots:[]};const result=await env.OPS_DB.prepare(`SELECT pf.r2_prefix,p.name,pf.division_id FROM project_folders pf LEFT JOIN pa_projects p ON p.id=pf.project_id WHERE pf.division_id IN (${divisions.map(()=>"?").join(",")}) ORDER BY p.name,pf.r2_prefix`).bind(...divisions).all<{r2_prefix:string;name:string|null;division_id:string}>();return{global:false,roots:result.results.map(row=>({prefix:normalizePrefix(row.r2_prefix),name:row.name||row.r2_prefix,divisionId:row.division_id}))};}
 
+export async function deliveryBrowseRevision(env:Env,principal:StaffPrincipal):Promise<string>{
+  await requirePermission(env,principal,"delivery.browse");
+  const access=await browseRoots(env,principal);
+  const material=JSON.stringify({
+    principalId:principal.id,
+    global:access.global,
+    roots:access.roots.map(root=>({prefix:root.prefix,divisionId:root.divisionId})).sort((a,b)=>
+      a.prefix.localeCompare(b.prefix)||a.divisionId.localeCompare(b.divisionId)),
+  });
+  const digest=new Uint8Array(await crypto.subtle.digest("SHA-256",encoder.encode(material)));
+  return `dbr_${b64(digest)}`;
+}
+
 export function resolveDivisionAssociation(prefix:string,associations:FolderAssociation[]):string|null{const matches=associations.map(row=>({divisionId:row.division_id,prefix:normalizePrefix(row.r2_prefix)})).filter(row=>prefix.startsWith(row.prefix));if(!matches.length)return null;const longest=Math.max(...matches.map(row=>row.prefix.length));const divisions=[...new Set(matches.filter(row=>row.prefix.length===longest).map(row=>row.divisionId))];if(divisions.length!==1)throw new HTTPException(409,{message:"Folder is associated with multiple divisions and requires review"});return divisions[0]!;}
 
 async function inferDivisionId(env:Env,prefix:string):Promise<string|null>{const associations=await env.OPS_DB.prepare("SELECT division_id,r2_prefix FROM project_folders ORDER BY length(r2_prefix) DESC").all<FolderAssociation>();return resolveDivisionAssociation(prefix,associations.results);}
@@ -98,10 +111,10 @@ export function resolveShareExpiration(value:string|null|undefined,maxDays:numbe
 export async function listDeliveryFolder(env:Env,principal:StaffPrincipal,prefixValue:string,cursor?:string){
   await requirePermission(env,principal,"delivery.browse");
   const access=await browseRoots(env,principal);
-  const tombstones=await activeTombstones(env); const trashed=(key:string)=>tombstones.some(tombstone=>tombstoneMatches(tombstone,key));
-  if(!access.global&&!prefixValue){const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string}>();const shared=(key:string)=>activeShares.results.some(share=>{try{return key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});const roots=access.roots.filter(root=>!trashed(root.prefix));const aliases=await aliasMap(env,roots.map(root=>root.prefix));return{prefix:"",folders:roots.map(root=>({id:encodeRef(root.prefix.slice(0,-1)),prefix:root.prefix,name:aliases.get(root.prefix)||root.name,isShared:shared(root.prefix)})),files:[],nextCursor:null};}
   const prefix=prefixValue?normalizePrefix(prefixValue):"";
   if(prefix&&!access.global&&!access.roots.some(root=>prefix.startsWith(root.prefix)))throw new HTTPException(404,{message:"Folder not found"});
+  const tombstones=await activeTombstones(env); const trashed=(key:string)=>tombstones.some(tombstone=>tombstoneMatches(tombstone,key));
+  if(!access.global&&!prefixValue){const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string}>();const shared=(key:string)=>activeShares.results.some(share=>{try{return key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});const roots=access.roots.filter(root=>!trashed(root.prefix));const aliases=await aliasMap(env,roots.map(root=>root.prefix));return{prefix:"",folders:roots.map(root=>({id:encodeRef(root.prefix.slice(0,-1)),prefix:root.prefix,name:aliases.get(root.prefix)||root.name,isShared:shared(root.prefix)})),files:[],nextCursor:null};}
   if(prefix)await assertNotTrashed(env,prefix);
   const listed=await env.DATA_BUCKET.list({prefix,delimiter:"/",limit:500,cursor,include:["httpMetadata","customMetadata"]});
   const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string}>();
@@ -110,11 +123,11 @@ export async function listDeliveryFolder(env:Env,principal:StaffPrincipal,prefix
   const visibleFolders=await visibleDeliveryFolders(env,folderCandidates,trashed);
   const folders=folderCandidates.filter(value=>visibleFolders.has(value));
   const files=listed.objects.filter(object=>object.key!==prefix&&!object.key.endsWith("/")&&!hidden(object.key)&&!trashed(object.key)&&!isMovedSourceMarker(object));
-  const aliases=await aliasMap(env,[...folders,...files.map(object=>object.key)]); const items=files.map(object=>{const id=encodeRef(object.key);const kind=mediaKind(object.key);const name=aliases.get(object.key)||object.key.slice(prefix.length);const sourceUrl=deliverySourceUrl(kind,id);return{id,name,displayName:name,physicalKey:object.key,kind,size:object.size,uploadedAt:object.uploaded.toISOString(),isShared:shared(object.key),previewUrl:kind==="image"?sourceUrl:["audio","text"].includes(kind)?`/api/delivery/items/${id}/preview`:undefined,sourceUrl,thumbnailUrl:undefined as string|undefined,thumbnailState:(thumbnailEligible(object)?"pending":"not_applicable") as DeliveryItem["thumbnailState"],thumbnailFallbackKind:thumbnailFallbackKindForFile(object.key,kind),downloadUrl:`/api/delivery/items/${id}/download`,previewStatus:kind==="video"?"processing":undefined,actions:{rename:`/api/delivery/items/${id}/display-name`,delete:`/api/delivery/items/${id}/source`}};});
+  const aliases=await aliasMap(env,[...folders,...files.map(object=>object.key)]); const items=files.map(object=>{const id=encodeRef(object.key);const kind=mediaKind(object.key);const name=aliases.get(object.key)||object.key.slice(prefix.length);const sourceUrl=deliverySourceUrl(kind,id);return{id,name,displayName:name,physicalKey:object.key,kind,size:object.size,uploadedAt:object.uploaded.toISOString(),isShared:shared(object.key),previewUrl:kind==="image"?sourceUrl:["audio","text"].includes(kind)?`/api/delivery/items/${id}/preview`:undefined,sourceUrl,thumbnailUrl:undefined as string|undefined,thumbnailState:(thumbnailEligible(object)?"pending":"not_applicable") as DeliveryItem["thumbnailState"],thumbnailErrorCode:undefined as string|undefined,thumbnailFallbackKind:thumbnailFallbackKindForFile(object.key,kind),downloadUrl:`/api/delivery/items/${id}/download`,previewStatus:kind==="video"?"processing":undefined,actions:{rename:`/api/delivery/items/${id}/display-name`,delete:`/api/delivery/items/${id}/source`}};});
   const thumbnails=files.map((object,index)=>({object,index})).filter(value=>thumbnailEligible(value.object));
   if(thumbnails.length){
     const rows=await env.DELIVERY_DB.batch(thumbnails.map(thumbnail=>env.DELIVERY_DB.prepare("SELECT source_etag,thumbnail_key,status,error_code FROM image_thumbnail_jobs WHERE source_key=?").bind(thumbnail.object.key)));
-    rows.forEach((result,index)=>{const thumbnail=thumbnails[index]!,row=result.results[0] as ThumbnailJobRow|undefined,state=thumbnailStateForObject(thumbnail.object.httpEtag,row),item=items[thumbnail.index]!;item.thumbnailState=state.state;if(state.state==="ready")item.thumbnailUrl=`/api/delivery/items/${item.id}/thumbnail`;});
+    rows.forEach((result,index)=>{const thumbnail=thumbnails[index]!,row=result.results[0] as ThumbnailJobRow|undefined,state=thumbnailStateForObject(thumbnail.object.httpEtag,row),item=items[thumbnail.index]!;item.thumbnailState=state.state;item.thumbnailErrorCode=state.errorCode;if(state.state==="ready")item.thumbnailUrl=`/api/delivery/items/${item.id}/thumbnail`;});
   }
   const videos=files.map((object,index)=>({object,index})).filter(value=>mediaKind(value.object.key)==="video");
   if(videos.length){

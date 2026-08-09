@@ -1,8 +1,12 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import migration from "../../client/migrations/0109_image_asset_locations.sql?raw";
+import thumbnailJobsMigration from "../../client/migrations/0106_image_thumbnail_jobs.sql?raw";
+import thumbnailCleanupMigration from "../../client/migrations/0107_thumbnail_cleanup_jobs.sql?raw";
+import thumbnailBackfillMigration from "../../client/migrations/0108_thumbnail_backfill_runs.sql?raw";
+import locationMigration from "../../client/migrations/0109_image_asset_locations.sql?raw";
+import thumbnailProvenanceMigration from "../../client/migrations/0111_thumbnail_render_provenance.sql?raw";
 
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/delivery", async importOriginal => ({
   ...await importOriginal<typeof import("../src/worker/delivery")>(),
   authorizeDeliveryFolderPrefix: vi.fn(async (_env, _principal, prefix: string) => `${prefix.replace(/\/$/, "")}/`),
@@ -33,6 +37,13 @@ async function applySql(db: D1Database, sql: string) {
     .map(value => value.replace(/^\s*--.*$/gm, "").trim())
     .filter(value => value && !/^PRAGMA\s+foreign_keys/i.test(value)))
     await db.prepare(statement).run();
+}
+
+async function applyTriggerMigration(db: D1Database, sql: string) {
+  await db.exec(sql
+    .replace(/^\s*--.*$/gm, "")
+    .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
+    .replace(/\s*\n\s*/g, " "));
 }
 
 function object(key: string, etag: string, contentType = "image/jpeg", customMetadata: Record<string,string> = {}) {
@@ -69,11 +80,6 @@ describe("R2 move location cleanup", () => {
         uploaded_at TEXT, content_type TEXT, media_kind TEXT NOT NULL,
         stream_uid TEXT, stream_status TEXT, stream_error TEXT, updated_at TEXT
       );
-      CREATE TABLE image_thumbnail_jobs(
-        source_key TEXT PRIMARY KEY, source_etag TEXT NOT NULL,
-        thumbnail_key TEXT NOT NULL, status TEXT NOT NULL, error_code TEXT,
-        queue_published_at TEXT
-      );
       CREATE TABLE delivery_tombstones(
         physical_key TEXT PRIMARY KEY, tombstone_kind TEXT NOT NULL, restored_at TEXT
       );
@@ -81,7 +87,11 @@ describe("R2 move location cleanup", () => {
       CREATE TABLE shares(id TEXT PRIMARY KEY, project_id TEXT, r2_prefix TEXT, revoked_at TEXT, expires_at TEXT, share_version INTEGER, revoked_reason TEXT);
       CREATE TABLE audit_log(actor_type TEXT, actor_id TEXT, action TEXT, entity_type TEXT, entity_id TEXT, details_json TEXT);
     `);
-    await applySql(deliveryDb, migration);
+    await applySql(deliveryDb, thumbnailJobsMigration);
+    await applyTriggerMigration(deliveryDb, thumbnailCleanupMigration);
+    await applySql(deliveryDb, thumbnailBackfillMigration);
+    await applyTriggerMigration(deliveryDb, thumbnailProvenanceMigration);
+    await applySql(deliveryDb, locationMigration);
     await deliveryDb.prepare("PRAGMA foreign_keys = ON").run();
     await applySql(opsDb, `
       CREATE TABLE r2_operation_jobs(
@@ -351,7 +361,7 @@ describe("R2 move location cleanup", () => {
     expect(await opsDb.prepare("SELECT COUNT(*) count FROM r2_event_suppressions").first()).toEqual({ count: 0 });
   });
 
-  it.each(["copy", "move"] as const)("preserves video/mp4 metadata and enqueues a thumbnail after %s", async kind => {
+  it.each(["copy", "move"] as const)("preserves video/mp4 metadata with icon-only thumbnail policy after %s", async kind => {
     const videoSource = "Jobs/Clients/Acme/Old/flight.mp4";
     const videoTarget = "Jobs/Clients/Other/New/flight.mp4";
     await seedJob(kind, "fail", videoSource, videoTarget, "video/mp4", "video");
@@ -363,10 +373,7 @@ describe("R2 move location cleanup", () => {
     expect((await value.dataBucket.head(videoTarget))?.httpMetadata.contentType).toBe("video/mp4");
     expect(await deliveryDb.prepare("SELECT content_type,media_kind FROM file_index WHERE r2_key=?")
       .bind(videoTarget).first()).toEqual({ content_type: "video/mp4", media_kind: "video" });
-    expect(vi.mocked(enqueueThumbnailJob)).toHaveBeenCalledOnce();
-    expect(vi.mocked(enqueueThumbnailJob).mock.calls[0]?.[1]).toEqual(expect.objectContaining({
-      sourceKey: videoTarget, sourceEtag: expect.any(String), sourceSize: 4,
-    }));
+    expect(vi.mocked(enqueueThumbnailJob)).not.toHaveBeenCalled();
     if (kind === "move") expect(isMovedSourceMarker((await value.dataBucket.head(videoSource))!)).toBe(true);
     else expect((await value.dataBucket.head(videoSource))?.httpEtag).toBe('"etag-source"');
   });

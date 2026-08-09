@@ -2,22 +2,29 @@ import { describe, expect, it, vi } from "vitest";
 import { createHash } from "node:crypto";
 import {
   classifyThumbnailQueueBatch,
+  canonicalThumbnailSourceKey,
   consumeThumbnailDeadLetters,
   consumeThumbnailJobs,
   enqueueThumbnailJob,
   getThumbnailForAuthorizedSource,
   processThumbnailJob,
-  THUMBNAIL_HEIGHT,
+  recoverTransientThumbnailFailures,
   THUMBNAIL_JOB_KIND,
-  THUMBNAIL_WIDTH,
-  VIDEO_THUMBNAIL_MAX_INPUT_BYTES,
+  THUMBNAIL_MAX_INPUT_BYTES,
+  THUMBNAIL_MAX_RECOVERY_ATTEMPTS,
+  PDF_THUMBNAIL_MAX_INPUT_BYTES,
   thumbnailObjectKey,
   thumbnailSourceEligible,
+  thumbnailSourceKind,
   thumbnailStateForObject,
   type ThumbnailJobMessage,
   type ThumbnailJobRow,
 } from "../src/worker/image-thumbnails";
 import type { Env } from "../src/worker/types";
+import {
+  THUMBNAIL_RENDER_PROFILE,
+  type ContainerThumbnailResult,
+} from "../src/worker/thumbnail-renderer-contract";
 
 interface StoredJob extends ThumbnailJobRow {
   source_key: string;
@@ -48,6 +55,7 @@ class FakeThumbnailDb {
         return statement;
       },
       async run() {
+        if (sql.includes("image-location.register")) return result(0);
         if (sql.includes("thumbnail.register")) {
           const [sourceKey, sourceEtag, sourceSize, thumbnailKey] = values as [string, string, number, string];
           if (!db.job || db.job.source_etag !== sourceEtag) {
@@ -69,7 +77,7 @@ class FakeThumbnailDb {
           return result(1);
         }
         if (sql.includes("thumbnail.ready")) {
-          const [etag, size, sourceKey, sourceEtag] = values as [string, number, string, string];
+          const [etag, size, , , sourceKey, sourceEtag] = values as [string, number, string, string, string, string];
           if (db.job?.source_key !== sourceKey || db.job.source_etag !== sourceEtag || db.job.status !== "processing") return result(0);
           db.job.status = "ready";
           db.job.thumbnail_etag = etag;
@@ -79,8 +87,9 @@ class FakeThumbnailDb {
           return result(1);
         }
         if (sql.includes("thumbnail.fail")) {
-          const [status, code, message, , sourceKey, sourceEtag] = values as ["pending" | "failed", string, string, string, string, string];
-          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "processing") {
+          const [status, code, message, , sourceKey, sourceEtag, expectedAttemptCount] = values as ["pending" | "failed", string, string, string, string, string, number];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "processing" &&
+            db.job.attempt_count === expectedAttemptCount) {
             db.job.status = status;
             db.job.error_code = code;
             db.job.error_message = message;
@@ -90,8 +99,7 @@ class FakeThumbnailDb {
         }
         if (sql.includes("thumbnail.dead-letter")) {
           const [sourceKey, sourceEtag] = values as [string, string];
-          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status !== "ready") {
-            db.job.status = "failed";
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "failed") {
             db.job.error_code ||= "dead_lettered";
             db.job.dead_lettered = true;
             return result(1);
@@ -139,6 +147,38 @@ class FakeThumbnailDb {
           }
           return result(0);
         }
+        if (sql.includes("thumbnail.recovery-claim")) {
+          const [sourceKey, sourceEtag, maxAttempts] = values as [string, string, number];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag &&
+            db.job.status === "failed" && ["thumbnail_processing_error", "queue_publish_failed"].includes(db.job.error_code || "") &&
+            db.job.attempt_count < maxAttempts) {
+            db.job.status = "pending";
+            db.job.attempt_count += 1;
+            db.job.error_code = null;
+            db.job.error_message = null;
+            db.job.dead_lettered = false;
+            db.job.queue_published_at = null;
+            return result(1);
+          }
+          return result(0);
+        }
+        if (sql.includes("thumbnail.recovery-published")) {
+          const [sourceKey, sourceEtag] = values as [string, string];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "pending") {
+            db.job.queue_published_at = "2026-08-07 01:00:00";
+            return result(1);
+          }
+          return result(0);
+        }
+        if (sql.includes("thumbnail.recovery-publish-failed")) {
+          const [, sourceKey, sourceEtag] = values as [string, string, string];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "pending") {
+            db.job.status = "failed";
+            db.job.error_code = "queue_publish_failed";
+            return result(1);
+          }
+          return result(0);
+        }
         if (sql.includes("thumbnail.cleanup-schedule")) return result(1);
         if (sql.includes("thumbnail.cleanup-delete")) {
           db.job = undefined;
@@ -166,6 +206,15 @@ class FakeThumbnailDb {
         throw new Error(`Unhandled first query: ${sql}`);
       },
       async all<T>() {
+        if (sql.includes("thumbnail.recovery-due")) {
+          const [maxAttempts, limit] = values as [number, number];
+          const eligible = db.job?.status === "failed" &&
+            ["thumbnail_processing_error", "queue_publish_failed"].includes(db.job.error_code || "") &&
+            db.job.attempt_count < maxAttempts
+            ? [{ source_key: db.job.source_key, source_etag: db.job.source_etag, source_size: db.job.source_size }]
+            : [];
+          return { results: eligible.slice(0, limit) as T[] };
+        }
         if (sql.includes("thumbnail.cleanup-due") || sql.includes("thumbnail.cleanup-list")) return { results: [] as T[] };
         throw new Error(`Unhandled all query: ${sql}`);
       },
@@ -182,11 +231,24 @@ function stream(bytes: number[]): ReadableStream<Uint8Array> {
   return new ReadableStream({ start(controller) { controller.enqueue(Uint8Array.from(bytes)); controller.close(); } });
 }
 
-function fixtureThumbnailKey(sourceKey: string, sourceEtag: string): string {
-  return `_ltds/thumbnails/v2/${createHash("sha256").update(`ltds-thumbnail:v2\0${sourceKey}\0${sourceEtag}`).digest("hex")}.webp`;
+function validWebpBytes(width = 320, height = 240): Uint8Array {
+  const bytes = new Uint8Array(30);
+  bytes.set([0x52, 0x49, 0x46, 0x46], 0);
+  new DataView(bytes.buffer).setUint32(4, bytes.byteLength - 8, true);
+  bytes.set([0x57, 0x45, 0x42, 0x50, 0x56, 0x50, 0x38, 0x20], 8);
+  new DataView(bytes.buffer).setUint32(16, 10, true);
+  bytes.set([0, 0, 0, 0x9d, 0x01, 0x2a], 20);
+  new DataView(bytes.buffer).setUint16(26, width, true);
+  new DataView(bytes.buffer).setUint16(28, height, true);
+  return bytes;
 }
 
-function r2Object(key: string, etag: string, size: number, contentType: string, body?: ReadableStream<Uint8Array>) {
+function fixtureThumbnailKey(sourceKey: string, sourceEtag: string): string {
+  const digest = createHash("sha256").update(`ltds-thumbnail-managed:v1\0${sourceKey}\0${sourceEtag}`).digest("hex");
+  return `_ltds/derivatives/thumbnails/v1/managed/${digest}.webp`;
+}
+
+function r2Object(key: string, etag: string, size: number, contentType: string, body?: ReadableStream<Uint8Array>, payload?: Uint8Array) {
   return {
     key,
     version: "v1",
@@ -200,15 +262,27 @@ function r2Object(key: string, etag: string, size: number, contentType: string, 
     checksums: {},
     body,
     bodyUsed: false,
+    async arrayBuffer() {
+      const bytes = payload || new Uint8Array();
+      return bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+    },
   };
 }
 
-function fixture(options: { sourceKey?: string; contentType?: string; size?: number; transformError?: unknown; mediaError?: unknown; mediaStatus?: number; mediaContentType?: string; queueError?: Error; tombstoneOnCheck?: number } = {}) {
+function fixture(options: {
+  sourceKey?: string;
+  contentType?: string;
+  size?: number;
+  queueError?: Error;
+  tombstoneOnCheck?: number;
+  rendererResult?: ContainerThumbnailResult;
+  sidecarWinner?: boolean;
+} = {}) {
   const sourceKey = options.sourceKey || "Jobs/Clients/Synthetic/photo.jpg";
   const sourceEtag = "source-etag";
   const originalBody = stream([1, 2, 3, 4]);
-  const frameBody = stream([5, 6, 7]);
-  const thumbnailBody = stream([9, 8, 7]);
+  const thumbnailBytes = validWebpBytes();
+  const thumbnailBody = stream([...thumbnailBytes]);
   const db = new FakeThumbnailDb();
   db.tombstoneOnCheck = options.tombstoneOnCheck;
   db.job = {
@@ -228,33 +302,28 @@ function fixture(options: { sourceKey?: string; contentType?: string; size?: num
   const putBodies: unknown[] = [];
   const putOptions: unknown[] = [];
   const getKeys: string[] = [];
-  const transform = vi.fn();
-  const output = vi.fn(async () => {
-    if (options.transformError) throw options.transformError;
-    return { contentType: () => "image/webp", image: () => thumbnailBody };
-  });
-  const input = vi.fn(() => ({
-    transform(value: unknown) { transform(value); return { output }; },
-  }));
-  const mediaTransform = vi.fn();
-  const mediaOutput = vi.fn(() => ({
-    async response() {
-      if (options.mediaError) throw options.mediaError;
-      return new Response(frameBody, {
-        status: options.mediaStatus ?? 200,
-        headers: { "Content-Type": options.mediaContentType || "image/jpeg" },
-      });
-    },
-  }));
-  const mediaInput = vi.fn(() => ({
-    transform(value: unknown) { mediaTransform(value); return { output: mediaOutput }; },
-  }));
   const stored = new Map<string, ReturnType<typeof r2Object>>();
   const sourceHead = r2Object(sourceKey, sourceEtag, options.size ?? 4096, options.contentType || "image/jpeg");
   const sourceObject = r2Object(sourceKey, sourceEtag, sourceHead.size, sourceHead.httpMetadata.contentType || "image/jpeg", originalBody);
+  const renderThumbnail = vi.fn(async () => options.rendererResult || {
+    ok: true as const,
+    bytes: thumbnailBytes.buffer.slice(0),
+    contentType: "image/webp" as const,
+  });
+  const idFromName = vi.fn(() => ({ name: "ltds-thumbnails" }));
+  const rendererGet = vi.fn(() => ({ renderThumbnail }));
   const bucket = {
     async head(key: string) {
       if (key === sourceKey) return sourceHead;
+      if (key === db.job?.thumbnail_key && options.sidecarWinner && !stored.has(key)) {
+        const winner = r2Object(key, "sidecar-etag", thumbnailBytes.byteLength, "image/webp", stream([...thumbnailBytes]), thumbnailBytes);
+        winner.customMetadata = {
+          sourceEtag,
+          thumbnailProvider: "ltds-truenas",
+          rendererProfile: THUMBNAIL_RENDER_PROFILE,
+        };
+        stored.set(key, winner);
+      }
       return stored.get(key) || null;
     },
     async get(key: string) {
@@ -265,7 +334,8 @@ function fixture(options: { sourceKey?: string; contentType?: string; size?: num
     async put(key: string, body: unknown, metadata: unknown) {
       putBodies.push(body);
       putOptions.push(metadata);
-      const object = r2Object(key, "thumb-etag", 1234, "image/webp", body as ReadableStream<Uint8Array>);
+      const bytes = body instanceof Uint8Array ? body : new Uint8Array();
+      const object = r2Object(key, "thumb-etag", bytes.byteLength, "image/webp", stream([...bytes]), bytes);
       object.customMetadata = (metadata as { customMetadata?: Record<string, string> }).customMetadata || {};
       stored.set(key, object);
       return object;
@@ -275,24 +345,23 @@ function fixture(options: { sourceKey?: string; contentType?: string; size?: num
     },
   };
   const send = options.queueError ? vi.fn(async () => { throw options.queueError; }) : vi.fn(async () => ({ metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } } }));
-  const bindings: Pick<Env, "DELIVERY_DB" | "DATA_BUCKET" | "IMAGES" | "MEDIA" | "THUMBNAIL_QUEUE"> = {
+  const bindings: Pick<Env, "DELIVERY_DB" | "DATA_BUCKET" | "THUMBNAIL_QUEUE" | "THUMBNAIL_RENDERER"> = {
     DELIVERY_DB: db as never,
     DATA_BUCKET: bucket as never,
-    IMAGES: { input } as never,
-    MEDIA: { input: mediaInput } as never,
     THUMBNAIL_QUEUE: { send } as never,
+    THUMBNAIL_RENDERER: { idFromName, get: rendererGet } as never,
   };
-  const env = bindings as Env;
+  const env = { ...bindings } as unknown as Env;
   const message: ThumbnailJobMessage = { kind: THUMBNAIL_JOB_KIND, sourceKey, sourceEtag };
-  return { env, db, message, input, transform, output, mediaInput, mediaTransform, mediaOutput, originalBody, frameBody, thumbnailBody, putBodies, putOptions, getKeys, stored, send };
+  return { env, db, message, originalBody, thumbnailBody, thumbnailBytes, putBodies, putOptions, getKeys, stored, send, renderThumbnail, rendererGet, idFromName };
 }
 
-function queueBatch(body: unknown, attempts = 1) {
+function queueBatch(body: unknown, attempts = 1, queue = "test") {
   const ack = vi.fn();
   const retry = vi.fn();
   return {
     batch: {
-      queue: "test",
+      queue,
       messages: [{ id: "message-1", timestamp: new Date(), body, attempts, ack, retry }],
       ackAll: vi.fn(),
       retryAll: vi.fn(),
@@ -303,33 +372,67 @@ function queueBatch(body: unknown, attempts = 1) {
   };
 }
 
-describe("Cloudflare image thumbnail pipeline", () => {
-  it("uses one strict eligibility policy for authorized image and MP4 thumbnail delivery", () => {
-    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/photo.jpg", 1024, "image/jpeg")).toBe(true);
-    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mp4", 1024, "video/mp4")).toBe(true);
-    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mp4", 1024, "video/quicktime")).toBe(false);
-    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mov", 1024, "video/mp4")).toBe(false);
-    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mp4", VIDEO_THUMBNAIL_MAX_INPUT_BYTES, "video/mp4")).toBe(false);
-    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/report.pdf", 1024, "application/pdf")).toBe(false);
+describe("private server thumbnail pipeline", () => {
+  it("streams an eligible exact-version image through the private Container and records only the derived WebP", async () => {
+    const value = fixture();
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({
+      outcome: "ready",
+      thumbnailKey: value.db.job?.thumbnail_key,
+    });
+    expect(value.getKeys).toEqual([value.message.sourceKey]);
+    expect(value.renderThumbnail).toHaveBeenCalledWith(value.originalBody, { kind: "image", expectedSize: 4096 });
+    expect(value.putBodies).toEqual([value.thumbnailBytes]);
+    expect(value.putBodies[0]).not.toBe(value.originalBody);
+    expect(value.putOptions[0]).toMatchObject({
+      httpMetadata: { contentType: "image/webp", cacheControl: "private, no-store" },
+      customMetadata: {
+        sourceEtag: value.message.sourceEtag,
+        thumbnailProvider: "cloudflare-container",
+        rendererProfile: THUMBNAIL_RENDER_PROFILE,
+      },
+    });
+    expect(value.db.job).toMatchObject({ status: "ready", attempt_count: 1, error_code: null });
   });
 
-  it("creates one fixed WebP from the original stream and never stores the original as a thumbnail", async () => {
-    const value = fixture();
-    const result = await processThumbnailJob(value.env, value.message);
+  it("accepts canonical sources throughout Jobs while rejecting outside and reserved paths", () => {
+    expect(canonicalThumbnailSourceKey("Jobs/Internal/photo.jpg")).toBe(true);
+    expect(canonicalThumbnailSourceKey("Jobs/Clients/Synthetic/photo.jpg")).toBe(true);
+    expect(canonicalThumbnailSourceKey("Jobs2/Internal/photo.jpg")).toBe(false);
+    expect(canonicalThumbnailSourceKey("jobs/Internal/photo.jpg")).toBe(false);
+    expect(canonicalThumbnailSourceKey("Jobs/_ltds/private.jpg")).toBe(false);
+    expect(canonicalThumbnailSourceKey("Jobs/Internal/.previews/thumb.webp")).toBe(false);
+    expect(canonicalThumbnailSourceKey("Jobs/Internal/Dump/source.jpg")).toBe(false);
+    expect(canonicalThumbnailSourceKey("Jobs/Internal/../Clients/photo.jpg")).toBe(false);
+    expect(canonicalThumbnailSourceKey("Jobs\\Internal\\photo.jpg")).toBe(false);
+  });
 
-    expect(result.outcome).toBe("ready");
-    expect(value.input).toHaveBeenCalledWith(value.originalBody);
-    expect(value.transform).toHaveBeenCalledWith({ width: THUMBNAIL_WIDTH, height: THUMBNAIL_HEIGHT, fit: "cover", gravity: "center" });
-    expect(value.output).toHaveBeenCalledWith({ format: "image/webp", quality: 78, anim: false });
-    expect(value.putBodies).toEqual([value.thumbnailBody]);
-    expect(value.putBodies[0]).not.toBe(value.originalBody);
-    expect(value.putOptions[0]).toMatchObject({ httpMetadata: { contentType: "image/webp", cacheControl: "private, no-store" } });
-    expect(value.db.job).toMatchObject({ status: "ready", attempt_count: 1, thumbnail_size: 1234 });
+  it("uses one strict image and PDF eligibility policy while keeping all video on icon fallback", () => {
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/photo.jpg", 1024, "image/jpeg")).toBe(true);
+    expect(thumbnailSourceEligible("Jobs/Internal/source.tiff", THUMBNAIL_MAX_INPUT_BYTES, "image/tiff")).toBe(true);
+    expect(thumbnailSourceEligible("Jobs/Internal/source.bmp", THUMBNAIL_MAX_INPUT_BYTES + 1, "image/bmp")).toBe(false);
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/report.pdf", PDF_THUMBNAIL_MAX_INPUT_BYTES, "application/pdf")).toBe(true);
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/report.pdf", PDF_THUMBNAIL_MAX_INPUT_BYTES + 1, "application/pdf")).toBe(false);
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mp4", 1024, "video/mp4")).toBe(false);
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mov", 1024, "video/quicktime")).toBe(false);
+    expect(thumbnailSourceKind("Jobs/Internal/report.pdf", "application/pdf")).toBe("pdf");
+    expect(thumbnailSourceKind("Jobs/Internal/photo.jpg", "image/jpeg")).toBe("image");
+    expect(thumbnailSourceKind("Jobs/Internal/clip.mp4", "video/mp4")).toBeNull();
+  });
+
+  it("renders an eligible PDF through the same private Container boundary", async () => {
+    const value = fixture({ sourceKey: "Jobs/Internal/report.pdf", contentType: "application/pdf" });
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({
+      outcome: "ready",
+      thumbnailKey: value.db.job?.thumbnail_key,
+    });
+    expect(value.getKeys).toEqual([value.message.sourceKey]);
+    expect(value.renderThumbnail).toHaveBeenCalledWith(value.originalBody, { kind: "pdf", expectedSize: 4096 });
+    expect(value.putBodies).toEqual([value.thumbnailBytes]);
   });
 
   it("uses an opaque deterministic _ltds key scoped to the original object", async () => {
     const key = await thumbnailObjectKey("Jobs/Clients/Secret Client/client-name.jpg", "etag-a");
-    expect(key).toMatch(/^_ltds\/thumbnails\/v2\/[a-f0-9]{64}\.webp$/);
+    expect(key).toMatch(/^_ltds\/derivatives\/thumbnails\/v1\/managed\/[a-f0-9]{64}\.webp$/);
     expect(key).not.toContain("Secret");
     expect(await thumbnailObjectKey("Jobs/Clients/Secret Client/client-name.jpg", "etag-a")).toBe(key);
     expect(await thumbnailObjectKey("Jobs/Clients/Secret Client/client-name.jpg", "etag-b")).not.toBe(key);
@@ -346,45 +449,26 @@ describe("Cloudflare image thumbnail pipeline", () => {
     expect(queued).toEqual({ enqueued: true, state: "pending" });
     expect(value.db.job?.status).toBe("pending");
     expect(value.db.job?.queue_published_at).toBeTruthy();
-    expect(value.send).toHaveBeenCalledWith(value.message);
+    expect(value.send).toHaveBeenCalledWith(value.message, { delaySeconds: 30 });
   });
 
-  it("extracts only a five-second MP4 frame before creating the private WebP thumbnail", async () => {
-    const value = fixture({ sourceKey: "Jobs/Clients/Synthetic/flight.mp4", contentType: "video/mp4" });
-    const result = await processThumbnailJob(value.env, value.message);
-
-    expect(result.outcome).toBe("ready");
-    expect(value.mediaInput).toHaveBeenCalledWith(value.originalBody);
-    expect(value.mediaTransform).toHaveBeenCalledWith({ width: THUMBNAIL_WIDTH, height: THUMBNAIL_HEIGHT, fit: "cover" });
-    expect(value.mediaOutput).toHaveBeenCalledWith({ mode: "frame", time: "5s", format: "jpg" });
-    expect(value.input).toHaveBeenCalledWith(value.frameBody);
-    expect(value.input).not.toHaveBeenCalledWith(value.originalBody);
-    expect(value.putBodies).toEqual([value.thumbnailBody]);
-    expect(value.putBodies).not.toContain(value.originalBody);
-    expect(value.db.job).toMatchObject({ status: "ready", thumbnail_size: 1234 });
-  });
-
-  it("fails MP4s at the documented 100 MB boundary before reading or transforming them", async () => {
+  it("fails an oversized PDF before any source-body read", async () => {
     const value = fixture({
-      sourceKey: "Jobs/Clients/Synthetic/oversized.mp4",
-      contentType: "video/mp4",
-      size: VIDEO_THUMBNAIL_MAX_INPUT_BYTES,
+      sourceKey: "Jobs/Clients/Synthetic/oversized.pdf",
+      contentType: "application/pdf",
+      size: PDF_THUMBNAIL_MAX_INPUT_BYTES + 1,
     });
 
-    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({ outcome: "failed", errorCode: "video_input_too_large" });
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({ outcome: "failed", errorCode: "input_too_large" });
     expect(value.getKeys).toEqual([]);
-    expect(value.mediaInput).not.toHaveBeenCalled();
-    expect(value.input).not.toHaveBeenCalled();
-    expect(value.db.job).toMatchObject({ status: "failed", error_code: "video_input_too_large" });
+    expect(value.db.job).toMatchObject({ status: "failed", error_code: "input_too_large" });
   });
 
-  it("keeps non-MP4 videos on the explicit icon fallback without reading the original", async () => {
-    const value = fixture({ sourceKey: "Jobs/Clients/Synthetic/flight.mov", contentType: "video/quicktime" });
+  it("keeps every video on the explicit icon fallback without reading the original", async () => {
+    const value = fixture({ sourceKey: "Jobs/Clients/Synthetic/flight.mp4", contentType: "video/mp4" });
 
     await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({ outcome: "failed", errorCode: "unsupported_file" });
     expect(value.getKeys).toEqual([]);
-    expect(value.mediaInput).not.toHaveBeenCalled();
-    expect(value.input).not.toHaveBeenCalled();
   });
 
   it("publishes a same-version pending job only once after recording queue publication", async () => {
@@ -433,22 +517,22 @@ describe("Cloudflare image thumbnail pipeline", () => {
     expect(classifyThumbnailQueueBatch({ ...batch, messages: [...batch.messages, fileEvent] })).toBe("mixed");
   });
 
-  it("does not regenerate a ready job when the same event is delivered twice", async () => {
+  it("does not touch R2 for a duplicate ready job", async () => {
     const value = fixture();
-    expect((await processThumbnailJob(value.env, value.message)).outcome).toBe("ready");
+    Object.assign(value.db.job!, { status: "ready", thumbnail_etag: '"thumb-etag"', thumbnail_size: 1234 });
     expect((await processThumbnailJob(value.env, value.message)).outcome).toBe("duplicate");
-    expect(value.input).toHaveBeenCalledTimes(1);
-    expect(value.putBodies).toHaveLength(1);
+    expect(value.getKeys).toEqual([]);
   });
 
-  it("allows only one concurrent claimant for duplicate queue events", async () => {
+  it("allows only one Container render when duplicate eligible queue events race", async () => {
     const value = fixture();
     const results = await Promise.all([
       processThumbnailJob(value.env, value.message),
       processThumbnailJob(value.env, value.message),
     ]);
-    expect(results.map((result) => result.outcome).sort()).toEqual(["duplicate", "ready"]);
-    expect(value.input).toHaveBeenCalledTimes(1);
+    expect(results.map((result) => result.outcome).sort()).toEqual(["ready", "retry"]);
+    expect(value.db.job).toMatchObject({ status: "ready", attempt_count: 1 });
+    expect(value.renderThumbnail).toHaveBeenCalledTimes(1);
     expect(value.putBodies).toHaveLength(1);
   });
 
@@ -457,58 +541,214 @@ describe("Cloudflare image thumbnail pipeline", () => {
     const result = await processThumbnailJob(value.env, value.message);
     expect(result).toEqual({ outcome: "failed", errorCode: "unsupported_file" });
     expect(value.getKeys).toEqual([]);
-    expect(value.input).not.toHaveBeenCalled();
     expect(value.db.job).toMatchObject({ status: "failed", error_code: "unsupported_file" });
   });
 
-  it("rechecks trash after claiming and prevents a raced tombstone from reading the source or invoking Images", async () => {
-    const value = fixture({ tombstoneOnCheck: 2 });
+  it("removes a tombstoned job before any source-body read or renderer handoff", async () => {
+    const value = fixture({ tombstoneOnCheck: 1 });
     const result = await processThumbnailJob(value.env, value.message);
     expect(result).toEqual({ outcome: "obsolete" });
-    expect(value.db.tombstoneChecks).toBe(2);
+    expect(value.db.tombstoneChecks).toBe(1);
     expect(value.getKeys).toEqual([]);
-    expect(value.input).not.toHaveBeenCalled();
     expect(value.db.job).toBeUndefined();
   });
 
-  it("classifies Cloudflare Images invalid-image errors as permanent", async () => {
-    const invalid = Object.assign(new Error("bad bytes"), { code: 9412 });
-    const value = fixture({ transformError: invalid });
-    const queue = queueBatch(value.message);
+  it("acknowledges an eligible queue message only after the Container result is ready", async () => {
+    const value = fixture();
+    const queue = queueBatch(value.message, 6);
     await consumeThumbnailJobs(queue.batch, value.env);
     expect(queue.ack).toHaveBeenCalledOnce();
     expect(queue.retry).not.toHaveBeenCalled();
-    expect(value.db.job).toMatchObject({ status: "failed", error_code: "invalid_image" });
+    expect(value.db.job).toMatchObject({ status: "ready", attempt_count: 1 });
+    expect(value.getKeys).toEqual([value.message.sourceKey]);
   });
 
-  it("keeps transient failures pending for retry and exposes terminal retry exhaustion", async () => {
-    const value = fixture({ transformError: new Error("temporary transform outage") });
-    const first = await processThumbnailJob(value.env, value.message);
-    expect(first).toEqual({ outcome: "retry", errorCode: "thumbnail_processing_error" });
-    expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 1 });
+  it("retries a transient Container timeout while leaving the exact-version job pending", async () => {
+    const value = fixture({
+      rendererResult: { ok: false, errorCode: "render_timeout", message: "bounded renderer timeout" },
+    });
+    const queue = queueBatch(value.message, 2);
 
-    const final = await processThumbnailJob(value.env, value.message, { finalAttempt: true });
-    expect(final).toEqual({ outcome: "failed", errorCode: "thumbnail_processing_error" });
-    expect(value.db.job).toMatchObject({ status: "failed", attempt_count: 2 });
+    await consumeThumbnailJobs(queue.batch, value.env);
 
-    const deadLetter = queueBatch(value.message);
+    expect(queue.ack).not.toHaveBeenCalled();
+    expect(queue.retry).toHaveBeenCalledWith({ delaySeconds: 10 });
+    expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 1, error_code: "render_timeout" });
+    expect(value.putBodies).toHaveLength(0);
+  });
+
+  it("releases the exact processing lease when the renderer RPC throws so a later delivery can claim", async () => {
+    const value = fixture();
+    value.renderThumbnail.mockRejectedValueOnce(new Error("synthetic Container startup outage"));
+
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({
+      outcome: "retry",
+      errorCode: "thumbnail_processing_error",
+    });
+    expect(value.db.job).toMatchObject({
+      status: "pending",
+      attempt_count: 1,
+      error_code: "thumbnail_processing_error",
+    });
+
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({
+      outcome: "ready",
+      thumbnailKey: value.db.job?.thumbnail_key,
+    });
+    expect(value.db.job).toMatchObject({ status: "ready", attempt_count: 2, error_code: null });
+    expect(value.renderThumbnail).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not clear a newer processing lease when a stale renderer attempt throws", async () => {
+    const value = fixture();
+    value.renderThumbnail.mockImplementationOnce(async () => {
+      value.db.job!.attempt_count += 1;
+      throw new Error("synthetic stale Container response");
+    });
+
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({
+      outcome: "retry",
+      errorCode: "thumbnail_processing_error",
+    });
+    expect(value.db.job).toMatchObject({
+      status: "processing",
+      attempt_count: 2,
+      error_code: null,
+    });
+  });
+
+  it("keeps an unexpected final-attempt renderer failure visible through the DLQ", async () => {
+    const value = fixture();
+    value.renderThumbnail.mockRejectedValue(new Error("synthetic persistent Container outage"));
+    const delivery = queueBatch(value.message, 6);
+
+    await consumeThumbnailJobs(delivery.batch, value.env);
+
+    expect(delivery.ack).not.toHaveBeenCalled();
+    expect(delivery.retry).toHaveBeenCalledWith({ delaySeconds: 160 });
+    expect(value.db.job).toMatchObject({
+      status: "failed",
+      attempt_count: 1,
+      error_code: "thumbnail_processing_error",
+      dead_lettered: false,
+    });
+
+    const deadLetter = queueBatch(value.message, 1, "ltds-thumbnail-jobs-dlq");
     await consumeThumbnailDeadLetters(deadLetter.batch, value.env);
     expect(deadLetter.ack).toHaveBeenCalledOnce();
-    expect(value.db.job?.dead_lettered).toBe(true);
+    expect(value.db.job).toMatchObject({
+      status: "failed",
+      error_code: "thumbnail_processing_error",
+      dead_lettered: true,
+    });
   });
 
-  it("retries the final queue delivery so Cloudflare can move it to the DLQ", async () => {
-    const value = fixture({ transformError: new Error("temporary transform outage") });
-    const queue = queueBatch(value.message, 6);
+  it("does not let a delayed DLQ delivery fail a recovered or actively leased exact-version job", async () => {
+    for (const status of ["pending", "processing"] as const) {
+      const value = fixture();
+      Object.assign(value.db.job!, {
+        status,
+        attempt_count: 7,
+        error_code: null,
+        error_message: null,
+        dead_lettered: false,
+      });
+      const delayed = queueBatch(value.message, 1, "ltds-thumbnail-jobs-dlq");
+
+      await consumeThumbnailDeadLetters(delayed.batch, value.env);
+
+      expect(delayed.ack).toHaveBeenCalledOnce();
+      expect(delayed.retry).not.toHaveBeenCalled();
+      expect(value.db.job).toMatchObject({
+        status,
+        attempt_count: 7,
+        error_code: null,
+        dead_lettered: false,
+      });
+    }
+  });
+
+  it("acks a permanent pixel-limit rejection and leaves an explicit icon-fallback failure", async () => {
+    const value = fixture({
+      rendererResult: { ok: false, errorCode: "pixel_limit_exceeded", message: "decoded image exceeds 110 MP" },
+    });
+    const queue = queueBatch(value.message);
+
     await consumeThumbnailJobs(queue.batch, value.env);
-    expect(queue.ack).not.toHaveBeenCalled();
-    expect(queue.retry).toHaveBeenCalledOnce();
-    expect(value.db.job?.status).toBe("failed");
+
+    expect(queue.ack).toHaveBeenCalledOnce();
+    expect(queue.retry).not.toHaveBeenCalled();
+    expect(value.db.job).toMatchObject({ status: "failed", attempt_count: 1, error_code: "pixel_limit_exceeded" });
+    expect(value.putBodies).toHaveLength(0);
+  });
+
+  it("adopts a valid sidecar winner that lands during the Container render race", async () => {
+    const value = fixture({ sidecarWinner: true });
+
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({
+      outcome: "ready",
+      thumbnailKey: value.db.job?.thumbnail_key,
+    });
+
+    expect(value.renderThumbnail).toHaveBeenCalledOnce();
+    expect(value.putBodies).toHaveLength(0);
+    expect(value.getKeys).toEqual([value.message.sourceKey, value.db.job?.thumbnail_key]);
+    expect(value.db.job).toMatchObject({ status: "ready", attempt_count: 1 });
+  });
+
+  it("gives an exhausted transient failure one bounded second queue lifecycle without reading the original body", async () => {
+    const value = fixture();
+    Object.assign(value.db.job!, {
+      status: "failed",
+      attempt_count: 6,
+      error_code: "thumbnail_processing_error",
+      error_message: "temporary transform outage",
+      dead_lettered: true,
+    });
+
+    await expect(recoverTransientThumbnailFailures(value.env)).resolves.toBe(1);
+    expect(value.send).toHaveBeenCalledWith(value.message);
+    expect(value.getKeys).toEqual([]);
+    expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 7, error_code: null, dead_lettered: false });
+    expect(value.db.job?.queue_published_at).toBeTruthy();
+  });
+
+  it("never republishes permanent or recovery-exhausted thumbnail failures", async () => {
+    const permanent = fixture();
+    Object.assign(permanent.db.job!, { status: "failed", attempt_count: 1, error_code: "input_too_large" });
+    await expect(recoverTransientThumbnailFailures(permanent.env)).resolves.toBe(0);
+    expect(permanent.send).not.toHaveBeenCalled();
+
+    const exhausted = fixture();
+    Object.assign(exhausted.db.job!, {
+      status: "failed",
+      attempt_count: THUMBNAIL_MAX_RECOVERY_ATTEMPTS,
+      error_code: "thumbnail_processing_error",
+    });
+    await expect(recoverTransientThumbnailFailures(exhausted.env)).resolves.toBe(0);
+    expect(exhausted.send).not.toHaveBeenCalled();
+  });
+
+  it("keeps recovery queue publication failures visible and bounded", async () => {
+    const value = fixture({ queueError: new Error("queue unavailable") });
+    Object.assign(value.db.job!, { status: "failed", attempt_count: 6, error_code: "thumbnail_processing_error" });
+
+    await expect(recoverTransientThumbnailFailures(value.env)).resolves.toBe(0);
+    expect(value.db.job).toMatchObject({ status: "failed", attempt_count: 7, error_code: "queue_publish_failed" });
+    expect(value.getKeys).toEqual([]);
   });
 
   it("serves only a ready WebP after the caller has authorized the source", async () => {
     const value = fixture();
-    await processThumbnailJob(value.env, value.message);
+    const thumbnailKey = value.db.job!.thumbnail_key;
+    const thumbnail = r2Object(thumbnailKey, "thumb-etag", 1234, "image/webp", value.thumbnailBody);
+    thumbnail.customMetadata = { sourceEtag: value.message.sourceEtag };
+    value.stored.set(thumbnailKey, thumbnail);
+    Object.assign(value.db.job!, {
+      status: "ready",
+      thumbnail_etag: thumbnail.httpEtag,
+      thumbnail_size: thumbnail.size,
+    });
     value.getKeys.length = 0;
     const result = await getThumbnailForAuthorizedSource(value.env, value.message.sourceKey);
     expect(result.state).toBe("ready");

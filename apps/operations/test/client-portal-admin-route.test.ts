@@ -8,7 +8,7 @@ const mocks = vi.hoisted(() => ({
   auditStatement: vi.fn(),
 }));
 
-vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
+vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
 vi.mock("../src/worker/auth", () => ({ authenticateStaff: mocks.authenticateStaff }));
 vi.mock("../src/worker/acl", async importOriginal => ({
   ...await importOriginal<typeof import("../src/worker/acl")>(),

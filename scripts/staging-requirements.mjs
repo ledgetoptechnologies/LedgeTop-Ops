@@ -11,7 +11,7 @@ export const APP_SOURCE_DIRS = Object.freeze({
 
 export const REQUIRED_STAGING_SECRETS = Object.freeze({
   delivery: Object.freeze(["DELIVERY_SESSION_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]),
-  operations: Object.freeze(["OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "PROJECT_ALPHA_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "TURNSTILE_SITE_KEY", "TURNSTILE_SECRET", "INCOMING_SESSION_SECRET", "INCOMING_ACCESS_CODE_PEPPER", "INCOMING_PICKUP_SECRET"]),
+  operations: Object.freeze(["OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "PROJECT_ALPHA_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "TURNSTILE_SITE_KEY", "TURNSTILE_SECRET", "INCOMING_SESSION_SECRET", "INCOMING_ACCESS_CODE_PEPPER", "INCOMING_PICKUP_SECRET", "THUMBNAIL_INGEST_SECRET"]),
   "ops-sync": Object.freeze(["CF_ACCESS_GROUP_API_TOKEN", "PROJECT_ALPHA_WEBHOOK_HMAC_SECRET"]),
 });
 
@@ -48,6 +48,8 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0107_thumbnail_cleanup_jobs.sql",
     "0108_thumbnail_backfill_runs.sql",
     "0109_image_asset_locations.sql",
+    "0110_thumbnail_backfill_jobs_scope.sql",
+    "0111_thumbnail_render_provenance.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -87,6 +89,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     FILE_EVENTS_QUEUE_NAME: "ltds-file-events-staging",
     THUMBNAIL_QUEUE_NAME: "ltds-thumbnail-jobs-staging",
     THUMBNAIL_DLQ_NAME: "ltds-thumbnail-jobs-staging-dlq",
+    THUMBNAIL_INGEST_EXPECTED_HOST: STAGING_HOSTS.operations,
     APPLICATION_KEY: "ltds_ops_staging",
   }),
   "ops-sync": Object.freeze({
@@ -146,7 +149,6 @@ export const STAGING_INVENTORY = Object.freeze({
     queueProducers: [
       { binding: "THUMBNAIL_QUEUE", queue: "ltds-thumbnail-jobs-staging" },
     ],
-    images: { binding: "IMAGES" },
     crons: ["*/15 * * * *", "*/5 * * * *"],
     ratelimits: [],
   },

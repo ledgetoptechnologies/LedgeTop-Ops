@@ -13,15 +13,17 @@ const clientUi = readFileSync(new URL("../../client/src/client/DeliveryApp.tsx",
 const operationsUi = readFileSync(new URL("../src/client/OperationsApp.tsx", import.meta.url), "utf8");
 
 describe("thumbnail deployment contract", () => {
-  it("binds the Media/Images/R2/D1 services, producer, retry policy, and consumed DLQ", () => {
-    expect(config.images).toEqual({ binding: "IMAGES" });
-    expect(config.media).toEqual({ binding: "MEDIA" });
+  it("binds the private Container/R2/D1 services, producer, retry policy, and consumed DLQ without Images", () => {
+    expect(config).not.toHaveProperty("images");
+    expect(config).not.toHaveProperty("media");
+    expect(config.durable_objects.bindings).toContainEqual({ name: "THUMBNAIL_RENDERER", class_name: "ThumbnailRendererContainer" });
+    expect(config.containers).toContainEqual(expect.objectContaining({ class_name: "ThumbnailRendererContainer", max_instances: 1 }));
     expect(config.r2_buckets).toContainEqual({ binding: "DATA_BUCKET", bucket_name: "client-data" });
     expect(config.d1_databases.some((value: { binding: string }) => value.binding === "DELIVERY_DB")).toBe(true);
     expect(config.queues.producers).toContainEqual({ binding: "THUMBNAIL_QUEUE", queue: "ltds-thumbnail-jobs" });
     expect(config.queues.consumers).toContainEqual(expect.objectContaining({ queue: "ltds-thumbnail-jobs", max_retries: 5, dead_letter_queue: "ltds-thumbnail-jobs-dlq" }));
     expect(config.queues.consumers).toContainEqual(expect.objectContaining({ queue: "ltds-thumbnail-jobs-dlq" }));
-    expect(config.vars).toMatchObject({ FILE_EVENTS_QUEUE_NAME: "ltds-file-events", THUMBNAIL_QUEUE_NAME: "ltds-thumbnail-jobs", THUMBNAIL_DLQ_NAME: "ltds-thumbnail-jobs-dlq" });
+    expect(config.vars).toMatchObject({ FILE_EVENTS_QUEUE_NAME: "ltds-file-events", THUMBNAIL_QUEUE_NAME: "ltds-thumbnail-jobs", THUMBNAIL_DLQ_NAME: "ltds-thumbnail-jobs-dlq", THUMBNAIL_INGEST_EXPECTED_HOST: "ops.ledgetopdroneservices.com" });
     expect(clientConfig).not.toHaveProperty("images");
   });
 

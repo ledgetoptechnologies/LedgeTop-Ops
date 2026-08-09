@@ -138,7 +138,9 @@
         "0106_image_thumbnail_jobs.sql",
         "0107_thumbnail_cleanup_jobs.sql",
         "0108_thumbnail_backfill_runs.sql",
-        "0109_image_asset_locations.sql"
+        "0109_image_asset_locations.sql",
+        "0110_thumbnail_backfill_jobs_scope.sql",
+        "0111_thumbnail_render_provenance.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -190,7 +192,8 @@
         "TURNSTILE_SECRET",
         "INCOMING_SESSION_SECRET",
         "INCOMING_ACCESS_CODE_PEPPER",
-        "INCOMING_PICKUP_SECRET"
+        "INCOMING_PICKUP_SECRET",
+        "THUMBNAIL_INGEST_SECRET"
       ],
       "verifiedAt": "<ISO_8601_TIMESTAMP>",
       "source": "<wrangler-secret-list|reviewed-secrets-file>",
