@@ -71,8 +71,9 @@ Run each app locally with `npm.cmd --prefix apps/<app> run dev`. Copy its `.dev.
 - configured thumbnail queue/DLQ names `ltds-thumbnail-jobs` and
   `ltds-thumbnail-jobs-dlq`; their remote existence must be verified before a
   dependent deployment
-- Operations Images and `THUMBNAIL_QUEUE` bindings for one current still-image
-  thumbnail per source ETag
+- Operations `THUMBNAIL_QUEUE`/DLQ bindings and the private, RPC-only
+  `ThumbnailRendererContainer` fallback for one current still-image or
+  first-page PDF thumbnail per source ETag
 - Stream binding for private, signed video playback
 - delivery access-code rate limiter
 - cron schedules for FAA, Project Alpha, Stream status, cleanup,
@@ -82,13 +83,24 @@ Both production configurations disable `workers.dev` and version preview URLs an
 
 ## Before the first production code deployment
 
-Complete [Cloudflare setup](docs/cloudflare-setup.md), including the Operations Access audience and account activation for Images/Stream. Then create a scoped Project Alpha key as described in [Project Alpha integration](docs/project-alpha.md). Follow the [TrueNAS runbook](docs/truenas/README.md) only after a staging delivery has passed.
+Complete [Cloudflare setup](docs/cloudflare-setup.md), including the Operations
+Access audience, private thumbnail Queue/DLQ and Container bindings, and Stream
+only if its separate playback feature is used. Thumbnail generation does not
+use Cloudflare Images or Media Transformations. Then create a scoped Project
+Alpha key as described in [Project Alpha integration](docs/project-alpha.md).
+Follow the [TrueNAS runbook](docs/truenas/README.md) only after a staging
+delivery has passed.
 
 Wrangler configuration declares bindings; it is not evidence that queues,
-Images entitlement, event subscriptions, migrations, or cron triggers exist in
-the remote account. Verify those operator-owned resources during rollout.
+Container entitlement, event subscriptions, migrations, or cron triggers exist
+in the remote account. Verify those operator-owned resources during rollout.
 
-For production operations, use the [operations runbook](docs/operations/README.md), the [media-preview contract](docs/truenas/preview-pipeline.md), and the [inbound request design](docs/inbound-requests.md). These documents distinguish repository behavior from operator-owned Cloudflare, TrueNAS, Hermes, and alerting configuration.
+For production operations, use the [operations runbook](docs/operations/README.md),
+the [private thumbnail runbook](docs/media-thumbnail-pipeline.md), the current
+[TrueNAS synchronization and prebuilt-renderer runbook](docs/truenas/README.md),
+and the [inbound request design](docs/inbound-requests.md). These documents
+distinguish repository behavior from operator-owned Cloudflare, TrueNAS, Hermes,
+and alerting configuration.
 
 See [Cloudflare setup](docs/cloudflare-setup.md), [notification operations](docs/notifications.md), and [future planning proposals](docs/future-plans.md) for the current pilot boundary, mail transport, and deferred work.
 

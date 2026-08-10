@@ -100,7 +100,7 @@ production migrations; deploy the same pinned commit with optional capabilities
 still disabled; run baseline smoke tests; and only then request separate
 approval for each capability rollout. A branch push alone is never a release.
 
-The current combined schema gate requires Delivery migrations `0096`–`0109`
+The current combined schema gate requires Delivery migrations `0096`–`0111`
 and Operations `0014`–`0022`, with fresh staging exports and exact list/apply
 evidence. Operations `0019` follows `0018` for server-detected, per-file upload
 collision resolution; `0020` adds the SOP library, `0021` hardens Project Alpha
@@ -111,8 +111,10 @@ retaining the recorded version as a fail-closed authorization check. Client
 `0105` adds immutable direct-folder grant versions and their notification
 outbox, `0106` adds thumbnail jobs, `0107` adds the durable thumbnail cleanup
 ledger and atomic retirement triggers, `0108` adds resumable thumbnail
-backfill and queue-publication state, and `0109` adds minimal version-bound
-image locations. Operations `0017` adds operational job
+backfill and queue-publication state, `0109` adds minimal version-bound image
+locations, `0110` expands the exact source/index boundary to all authorized
+`Jobs/` paths, and `0111` records renderer provenance plus exact-ETag cleanup
+and reconciliation state. Operations `0017` adds operational job
 briefs and `0018` adds private browser-upload intents and staging sessions;
 `0019` adds the collision-resolution checkpoint without rewriting `0018`.
 Operations `0022` must be applied before deploying a Worker that claims file

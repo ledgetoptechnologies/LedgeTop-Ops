@@ -31,10 +31,14 @@ Do not use the TrueNAS system shell. Install through **Apps > Discover Apps >
 Custom App > Install via YAML** using `compose.truenas.yaml` (labels vary by
 SCALE version).
 
-The YAML expects two prebuilt immutable images. Normal repository CI must
-publish the `decoder` and `broker` targets in `Dockerfile`; TrueNAS only pulls
-them. Use a digest or immutable release tag, never `latest`. Configure a private
-registry credential in the TrueNAS Apps UI if required.
+The YAML expects two prebuilt immutable images. The repository's **Publish
+TrueNAS thumbnail renderer images** GitHub workflow builds the `decoder` and
+`broker` targets for `linux/amd64` on changes to this package or an authorized
+manual dispatch from `main`. It publishes commit tags without overwriting them
+and records each digest-qualified reference in the run summary and receipt
+artifact. Copy those `ghcr.io/ledgetoptechnologies/ltds-thumbnail-...@sha256:...`
+references into the TrueNAS UI; never use `latest`. Configure a private registry
+credential in the TrueNAS Apps UI if the packages are not anonymously readable.
 
 Enter these values through the Custom App environment/substitution UI. If the
 installed SCALE version does not expose Compose substitutions, replace the
@@ -93,20 +97,27 @@ first; a later valid prebuilt registration deterministically replaces the
 managed mapping and queues exact-ETag cleanup. Direct browser/staff enqueue
 keeps a separate 30-second grace. Never predict an R2 ETag to avoid the race.
 
-Keep the original sync as a one-way push/COPY into the existing `client-data`
-bucket; never configure it as bidirectional. The hourly server-managed visible
-Jobs mirror intentionally propagates source deletes, moves, and copies within
-its explicitly owned prefixes. Exclude every browser/team-upload-owned prefix
-from that delete-authoritative rclone scope. Using the same prefix for local
-mirror ownership and browser-only R2 objects is unsafe: rclone can delete an R2
-object merely because it is absent locally. Define disjoint path ownership
-before enabling delete propagation. **This is a production rollout safety gate:**
+Keep the original source task one-way **Push** into the existing `client-data`
+bucket; never configure it as bidirectional. Begin that task in COPY mode. Only
+after the ownership/filter gate is proven may an explicitly server-owned visible
+Jobs prefix move to SYNC so its hourly mirror intentionally propagates source
+deletes, moves, and copies. Exclude every browser/team-upload-owned prefix from
+that delete-authoritative source scope. Using the same prefix for local mirror
+ownership and browser-only R2 objects is unsafe: rclone can delete an R2 object
+merely because it is absent locally. Define disjoint path ownership before
+enabling source delete propagation. **This is a production rollout safety gate:**
 do not enable a delete-authoritative source mirror until a disjoint, visible
-browser/team upload prefix has been selected, excluded by path, and tested.
-R2 metadata or object tags cannot protect an object from an rclone delete.
-Always exclude `_ltds/**` and never sync or
-delete derivatives directly. Worker R2 source events retire the exact-version
-derivative. Deleting a local queued thumbnail has no R2 deletion authority. The
+browser/team upload prefix has been selected, excluded by path, and tested. R2
+metadata or object tags cannot protect an object from an rclone delete.
+
+The source task always excludes `_ltds/**` and never targets a derivative. The
+only task allowed to synchronize derivatives is the separate one-way Push/SYNC
+mapping from the persistent local `prebuilt/` cache to the exact remote
+`_ltds/derivatives/thumbnails/v1/prebuilt/` subtree described above. It may
+delete a remote prebuilt object only when that exact local cached object is
+retired; it has no authority over originals or `managed/`. Worker R2 source
+events independently retire the current exact-version mapping and derivative.
+Deleting a local queued thumbnail has no immediate R2 deletion authority. The
 local parent path may help define a TrueNAS UI sync root, but is not itself a
 security boundary.
 

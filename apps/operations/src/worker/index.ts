@@ -30,7 +30,7 @@ import {
   refreshStreamStatuses,
   type R2Notification,
 } from "./file-events";
-import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, reconcileManagedThumbnailOrphans, reconcileThumbnailRegistrations, recoverTransientThumbnailFailures, thumbnailSourceEligible, type ThumbnailJobMessage } from "./image-thumbnails";
+import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, reconcileManagedThumbnailOrphans, reconcileThumbnailRegistrations, recoverExpiredThumbnailLeases, recoverTransientThumbnailFailures, thumbnailSourceEligible, type ThumbnailJobMessage } from "./image-thumbnails";
 import { processThumbnailBackfills } from "./thumbnail-backfill";
 import { enqueueImageLocationBackfill } from "./image-locations";
 import { listDeliveryFolderLocations, resolveDeliveryLocationAsset } from "./delivery-locations";
@@ -2206,6 +2206,7 @@ async function scheduled(
   ctx.waitUntil(drainThumbnailCleanup(env));
   ctx.waitUntil(reconcileThumbnailRegistrations(env));
   ctx.waitUntil(reconcileManagedThumbnailOrphans(env));
+  ctx.waitUntil(recoverExpiredThumbnailLeases(env));
   ctx.waitUntil(recoverTransientThumbnailFailures(env));
   ctx.waitUntil(processThumbnailBackfills(env));
   ctx.waitUntil(enqueueImageLocationBackfill(env));

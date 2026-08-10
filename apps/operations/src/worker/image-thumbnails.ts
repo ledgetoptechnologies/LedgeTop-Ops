@@ -140,6 +140,18 @@ interface RecoverableThumbnailRow {
   source_size: number;
 }
 
+interface ExpiredThumbnailLeaseRow extends RecoverableThumbnailRow {
+  attempt_count: number;
+}
+
+export interface ExpiredThumbnailLeaseRecovery {
+  scanned: number;
+  queued: number;
+  invalidated: number;
+  exhausted: number;
+  publishFailed: number;
+}
+
 const THUMBNAIL_CLEANUP_MAX_ATTEMPTS = 8;
 const THUMBNAIL_MANAGED_ORPHAN_GRACE_MS = 60 * 60 * 1000;
 
@@ -482,14 +494,15 @@ async function completeJob(
   sourceEtag: string,
   thumbnail: R2Object,
   provider: "ltds-truenas" | "cloudflare-container",
+  expectedAttemptCount: number,
 ): Promise<boolean> {
   const result = await env.DELIVERY_DB.prepare(`/* thumbnail.ready */
     UPDATE image_thumbnail_jobs
     SET status='ready',thumbnail_etag=?,thumbnail_size=?,error_code=NULL,error_message=NULL,
       lease_until=NULL,ready_at=datetime('now'),failed_at=NULL,dead_lettered_at=NULL,
       thumbnail_provider=?,thumbnail_profile=?,thumbnail_manifest_key=NULL,thumbnail_manifest_etag=NULL,updated_at=datetime('now')
-    WHERE source_key=? AND source_etag=? AND status='processing'`)
-    .bind(thumbnail.httpEtag, thumbnail.size, provider, THUMBNAIL_RENDER_PROFILE, sourceKey, sourceEtag)
+    WHERE source_key=? AND source_etag=? AND status='processing' AND attempt_count=?`)
+    .bind(thumbnail.httpEtag, thumbnail.size, provider, THUMBNAIL_RENDER_PROFILE, sourceKey, sourceEtag, expectedAttemptCount)
     .run();
   return result.meta.changes === 1;
 }
@@ -617,6 +630,100 @@ export async function recoverTransientThumbnailFailures(env: Env, limit = 25): P
     }
   }
   return queued;
+}
+
+/**
+ * Re-publish work whose consumer lease expired after its queue message was
+ * lost. Every candidate is re-authorized against the exact current file-index
+ * and R2 metadata before a CAS changes it back to pending. The scheduler never
+ * opens the original body, never touches a fresh lease, and cannot publish the
+ * same expired lease twice.
+ */
+export async function recoverExpiredThumbnailLeases(
+  env: Env,
+  limit = 25,
+): Promise<ExpiredThumbnailLeaseRecovery> {
+  const rows = await env.DELIVERY_DB.prepare(`/* thumbnail.expired-due */
+    SELECT source_key,source_etag,source_size,attempt_count FROM image_thumbnail_jobs
+    WHERE status='processing' AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now'))
+    ORDER BY COALESCE(lease_until,updated_at),source_key LIMIT ?`)
+    .bind(Math.max(1, Math.min(100, limit)))
+    .all<ExpiredThumbnailLeaseRow>();
+  const result: ExpiredThumbnailLeaseRecovery = {
+    scanned: rows.results.length,
+    queued: 0,
+    invalidated: 0,
+    exhausted: 0,
+    publishFailed: 0,
+  };
+
+  for (const row of rows.results) {
+    const sourceEtag = cleanEtag(row.source_etag);
+    const indexed = canonicalThumbnailSourceKey(row.source_key)
+      ? await env.DELIVERY_DB.prepare(`/* thumbnail.expired-index */
+          SELECT etag,size,content_type,media_kind FROM file_index WHERE r2_key=?`)
+        .bind(row.source_key)
+        .first<{ etag: string; size: number; content_type: string | null; media_kind: string }>()
+      : null;
+    const trashed = indexed ? await sourceIsTrashed(env, row.source_key) : false;
+    const source = indexed && !trashed ? await env.DATA_BUCKET.head(row.source_key) : null;
+    const current = Boolean(indexed && source && !isMovedSourceMarker(source) &&
+      cleanEtag(indexed.etag) === sourceEtag && indexed.size === row.source_size &&
+      (indexed.media_kind === "image" || indexed.media_kind === "pdf") &&
+      cleanEtag(source.httpEtag) === sourceEtag && source.size === row.source_size &&
+      thumbnailSourceEligible(row.source_key, source.size, source.httpMetadata?.contentType));
+
+    if (!current) {
+      const removed = await removeThumbnailStateForPath(env, row.source_key, false, sourceEtag);
+      if (removed.rows > 0) result.invalidated += 1;
+      continue;
+    }
+
+    if (row.attempt_count >= THUMBNAIL_MAX_RECOVERY_ATTEMPTS) {
+      const exhausted = await env.DELIVERY_DB.prepare(`/* thumbnail.expired-exhausted */
+        UPDATE image_thumbnail_jobs SET status='failed',error_code='retry_exhausted',
+          error_message='Thumbnail retries were exhausted after an expired processing lease',
+          lease_until=NULL,failed_at=datetime('now'),updated_at=datetime('now')
+        WHERE source_key=? AND source_etag=? AND status='processing'
+          AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now'))
+          AND attempt_count>=?`)
+        .bind(row.source_key, sourceEtag, THUMBNAIL_MAX_RECOVERY_ATTEMPTS).run();
+      result.exhausted += Number(exhausted.meta.changes || 0);
+      continue;
+    }
+
+    const claimed = await env.DELIVERY_DB.prepare(`/* thumbnail.expired-claim */
+      UPDATE image_thumbnail_jobs SET status='pending',error_code=NULL,error_message=NULL,
+        lease_until=NULL,failed_at=NULL,dead_lettered_at=NULL,queue_published_at=NULL,updated_at=datetime('now')
+      WHERE source_key=? AND source_etag=? AND source_size=? AND status='processing'
+        AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now')) AND attempt_count<?
+        AND EXISTS (SELECT 1 FROM file_index f WHERE f.r2_key=image_thumbnail_jobs.source_key
+          AND trim(f.etag,'"')=image_thumbnail_jobs.source_etag AND f.size=image_thumbnail_jobs.source_size
+          AND f.media_kind IN ('image','pdf'))
+        AND NOT EXISTS (SELECT 1 FROM delivery_tombstones t WHERE t.restored_at IS NULL
+          AND (t.physical_key=image_thumbnail_jobs.source_key OR
+            (t.tombstone_kind='prefix' AND substr(image_thumbnail_jobs.source_key,1,length(t.physical_key))=t.physical_key)))`)
+      .bind(row.source_key, sourceEtag, row.source_size, THUMBNAIL_MAX_RECOVERY_ATTEMPTS).run();
+    if (claimed.meta.changes !== 1) continue;
+
+    try {
+      await env.THUMBNAIL_QUEUE.send({ kind: THUMBNAIL_JOB_KIND, sourceKey: row.source_key, sourceEtag });
+      await env.DELIVERY_DB.prepare(`/* thumbnail.expired-published */
+        UPDATE image_thumbnail_jobs SET queue_published_at=datetime('now'),updated_at=datetime('now')
+        WHERE source_key=? AND source_etag=? AND status='pending'`)
+        .bind(row.source_key, sourceEtag).run();
+      result.queued += 1;
+    } catch (error) {
+      const failed = await env.DELIVERY_DB.prepare(`/* thumbnail.expired-publish-failed */
+        UPDATE image_thumbnail_jobs SET status='failed',error_code='queue_publish_failed',error_message=?,
+          lease_until=NULL,failed_at=datetime('now'),updated_at=datetime('now')
+        WHERE source_key=? AND source_etag=? AND status='pending'`)
+        .bind(safeErrorMessage(error instanceof Error ? error.message : "Expired thumbnail lease queue publish failed"),
+          row.source_key, sourceEtag).run();
+      result.publishFailed += Number(failed.meta.changes || 0);
+    }
+  }
+  return result;
 }
 
 export function prebuiltThumbnailArtifactKey(key: string): boolean {
@@ -771,6 +878,7 @@ async function adoptExistingThumbnail(
   sourceEtag: string,
   thumbnailKey: string,
   thumbnail: R2Object,
+  expectedAttemptCount: number,
 ): Promise<{ adopted: boolean; provider?: "ltds-truenas" | "cloudflare-container" }> {
   const provider = thumbnail.customMetadata?.thumbnailProvider;
   if ((provider !== "ltds-truenas" && provider !== "cloudflare-container") ||
@@ -781,7 +889,7 @@ async function adoptExistingThumbnail(
   }
   const object = await env.DATA_BUCKET.get(thumbnailKey, { onlyIf: { etagMatches: cleanEtag(thumbnail.httpEtag) } });
   if (!object || !("body" in object) || !validWebp(new Uint8Array(await object.arrayBuffer()))) return { adopted: false };
-  return { adopted: await completeJob(env, sourceKey, sourceEtag, thumbnail, provider), provider };
+  return { adopted: await completeJob(env, sourceKey, sourceEtag, thumbnail, provider, expectedAttemptCount), provider };
 }
 
 async function renderContainerThumbnail(
@@ -923,7 +1031,7 @@ async function processThumbnailJobAttempt(
 
   const existing = await env.DATA_BUCKET.head(thumbnailKey);
   if (existing) {
-    const adopted = await adoptExistingThumbnail(env, message.sourceKey, sourceEtag, thumbnailKey, existing);
+    const adopted = await adoptExistingThumbnail(env, message.sourceKey, sourceEtag, thumbnailKey, existing, claimAttempt);
     if (adopted.adopted) return { outcome: "ready", thumbnailKey };
     const raced = await currentJob(env, message.sourceKey);
     if (raced?.status === "ready" && cleanEtag(raced.source_etag) === sourceEtag) {
@@ -946,7 +1054,7 @@ async function processThumbnailJobAttempt(
   });
   if (!stored) {
     const winner = await env.DATA_BUCKET.head(thumbnailKey);
-    if (winner && (await adoptExistingThumbnail(env, message.sourceKey, sourceEtag, thumbnailKey, winner)).adopted) {
+    if (winner && (await adoptExistingThumbnail(env, message.sourceKey, sourceEtag, thumbnailKey, winner, claimAttempt)).adopted) {
       return { outcome: "ready", thumbnailKey };
     }
     await failJob(env, message.sourceKey, sourceEtag, "thumbnail_conflict", "The private thumbnail race could not be validated", true, claimAttempt);
@@ -961,7 +1069,7 @@ async function processThumbnailJobAttempt(
     await drainThumbnailCleanup(env, 1);
     return { outcome: "obsolete" };
   }
-  if (!(await completeJob(env, message.sourceKey, sourceEtag, stored, "cloudflare-container"))) {
+  if (!(await completeJob(env, message.sourceKey, sourceEtag, stored, "cloudflare-container", claimAttempt))) {
     const raced = await currentJob(env, message.sourceKey);
     if (raced?.status === "ready" && cleanEtag(raced.source_etag) === sourceEtag) {
       if (raced.thumbnail_key !== thumbnailKey) {

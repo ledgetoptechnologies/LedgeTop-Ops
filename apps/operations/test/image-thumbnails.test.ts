@@ -8,6 +8,7 @@ import {
   enqueueThumbnailJob,
   getThumbnailForAuthorizedSource,
   processThumbnailJob,
+  recoverExpiredThumbnailLeases,
   recoverTransientThumbnailFailures,
   THUMBNAIL_JOB_KIND,
   THUMBNAIL_MAX_INPUT_BYTES,
@@ -41,6 +42,12 @@ class FakeThumbnailDb {
   job: StoredJob | undefined;
   tombstoneChecks = 0;
   tombstoneOnCheck: number | undefined;
+  leaseExpired = true;
+  indexedEtag = "source-etag";
+  indexedSize = 4096;
+  indexedContentType = "image/jpeg";
+  indexedMediaKind = "image";
+  indexMissing = false;
 
   async batch(statements: Array<{ run(): Promise<unknown> }>) {
     return Promise.all(statements.map(statement => statement.run()));
@@ -77,8 +84,9 @@ class FakeThumbnailDb {
           return result(1);
         }
         if (sql.includes("thumbnail.ready")) {
-          const [etag, size, , , sourceKey, sourceEtag] = values as [string, number, string, string, string, string];
-          if (db.job?.source_key !== sourceKey || db.job.source_etag !== sourceEtag || db.job.status !== "processing") return result(0);
+          const [etag, size, , , sourceKey, sourceEtag, expectedAttemptCount] = values as [string, number, string, string, string, string, number];
+          if (db.job?.source_key !== sourceKey || db.job.source_etag !== sourceEtag || db.job.status !== "processing" ||
+            db.job.attempt_count !== expectedAttemptCount) return result(0);
           db.job.status = "ready";
           db.job.thumbnail_etag = etag;
           db.job.thumbnail_size = size;
@@ -179,6 +187,48 @@ class FakeThumbnailDb {
           }
           return result(0);
         }
+        if (sql.includes("thumbnail.expired-exhausted")) {
+          const [sourceKey, sourceEtag, maxAttempts] = values as [string, string, number];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "processing" &&
+            db.leaseExpired && db.job.attempt_count >= maxAttempts) {
+            db.job.status = "failed";
+            db.job.error_code = "retry_exhausted";
+            return result(1);
+          }
+          return result(0);
+        }
+        if (sql.includes("thumbnail.expired-claim")) {
+          const [sourceKey, sourceEtag, sourceSize, maxAttempts] = values as [string, string, number, number];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.source_size === sourceSize &&
+            db.job.status === "processing" && db.leaseExpired && db.job.attempt_count < maxAttempts &&
+            !db.indexMissing && db.indexedEtag === sourceEtag && db.indexedSize === sourceSize &&
+            ["image", "pdf"].includes(db.indexedMediaKind)) {
+            db.job.status = "pending";
+            db.job.error_code = null;
+            db.job.error_message = null;
+            db.job.dead_lettered = false;
+            db.job.queue_published_at = null;
+            return result(1);
+          }
+          return result(0);
+        }
+        if (sql.includes("thumbnail.expired-published")) {
+          const [sourceKey, sourceEtag] = values as [string, string];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "pending") {
+            db.job.queue_published_at = "2026-08-10 20:00:00";
+            return result(1);
+          }
+          return result(0);
+        }
+        if (sql.includes("thumbnail.expired-publish-failed")) {
+          const [, sourceKey, sourceEtag] = values as [string, string, string];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "pending") {
+            db.job.status = "failed";
+            db.job.error_code = "queue_publish_failed";
+            return result(1);
+          }
+          return result(0);
+        }
         if (sql.includes("thumbnail.cleanup-schedule")) return result(1);
         if (sql.includes("thumbnail.cleanup-delete")) {
           db.job = undefined;
@@ -198,6 +248,15 @@ class FakeThumbnailDb {
           return null;
         }
         if (sql.includes("thumbnail.state") || sql.includes("thumbnail.current-row")) return (db.job || null) as T | null;
+        if (sql.includes("thumbnail.expired-index")) {
+          if (db.indexMissing) return null;
+          return {
+            etag: db.indexedEtag,
+            size: db.indexedSize,
+            content_type: db.indexedContentType,
+            media_kind: db.indexedMediaKind,
+          } as T;
+        }
         if (sql.includes("thumbnail.trashed")) {
           db.tombstoneChecks += 1;
           return (db.tombstoneOnCheck && db.tombstoneChecks >= db.tombstoneOnCheck ? { id: "trash-race" } : null) as T | null;
@@ -212,6 +271,18 @@ class FakeThumbnailDb {
             ["thumbnail_processing_error", "queue_publish_failed"].includes(db.job.error_code || "") &&
             db.job.attempt_count < maxAttempts
             ? [{ source_key: db.job.source_key, source_etag: db.job.source_etag, source_size: db.job.source_size }]
+            : [];
+          return { results: eligible.slice(0, limit) as T[] };
+        }
+        if (sql.includes("thumbnail.expired-due")) {
+          const [limit] = values as [number];
+          const eligible = db.job?.status === "processing" && db.leaseExpired
+            ? [{
+                source_key: db.job.source_key,
+                source_etag: db.job.source_etag,
+                source_size: db.job.source_size,
+                attempt_count: db.job.attempt_count,
+              }]
             : [];
           return { results: eligible.slice(0, limit) as T[] };
         }
@@ -277,6 +348,12 @@ function fixture(options: {
   tombstoneOnCheck?: number;
   rendererResult?: ContainerThumbnailResult;
   sidecarWinner?: boolean;
+  sourceHeadMissing?: boolean;
+  sourceHeadEtag?: string;
+  indexMissing?: boolean;
+  indexEtag?: string;
+  leaseExpired?: boolean;
+  duringRender?: (db: FakeThumbnailDb) => void;
 } = {}) {
   const sourceKey = options.sourceKey || "Jobs/Clients/Synthetic/photo.jpg";
   const sourceEtag = "source-etag";
@@ -285,6 +362,12 @@ function fixture(options: {
   const thumbnailBody = stream([...thumbnailBytes]);
   const db = new FakeThumbnailDb();
   db.tombstoneOnCheck = options.tombstoneOnCheck;
+  db.leaseExpired = options.leaseExpired ?? true;
+  db.indexMissing = options.indexMissing ?? false;
+  db.indexedEtag = options.indexEtag || sourceEtag;
+  db.indexedSize = options.size ?? 4096;
+  db.indexedContentType = options.contentType || "image/jpeg";
+  db.indexedMediaKind = db.indexedContentType === "application/pdf" ? "pdf" : "image";
   db.job = {
     source_key: sourceKey,
     source_etag: sourceEtag,
@@ -303,18 +386,21 @@ function fixture(options: {
   const putOptions: unknown[] = [];
   const getKeys: string[] = [];
   const stored = new Map<string, ReturnType<typeof r2Object>>();
-  const sourceHead = r2Object(sourceKey, sourceEtag, options.size ?? 4096, options.contentType || "image/jpeg");
+  const sourceHead = r2Object(sourceKey, options.sourceHeadEtag || sourceEtag, options.size ?? 4096, options.contentType || "image/jpeg");
   const sourceObject = r2Object(sourceKey, sourceEtag, sourceHead.size, sourceHead.httpMetadata.contentType || "image/jpeg", originalBody);
-  const renderThumbnail = vi.fn(async () => options.rendererResult || {
-    ok: true as const,
-    bytes: thumbnailBytes.buffer.slice(0),
-    contentType: "image/webp" as const,
+  const renderThumbnail = vi.fn(async () => {
+    options.duringRender?.(db);
+    return options.rendererResult || {
+      ok: true as const,
+      bytes: thumbnailBytes.buffer.slice(0),
+      contentType: "image/webp" as const,
+    };
   });
   const idFromName = vi.fn(() => ({ name: "ltds-thumbnails" }));
   const rendererGet = vi.fn(() => ({ renderThumbnail }));
   const bucket = {
     async head(key: string) {
-      if (key === sourceKey) return sourceHead;
+      if (key === sourceKey) return options.sourceHeadMissing ? null : sourceHead;
       if (key === db.job?.thumbnail_key && options.sidecarWinner && !stored.has(key)) {
         const winner = r2Object(key, "sidecar-etag", thumbnailBytes.byteLength, "image/webp", stream([...thumbnailBytes]), thumbnailBytes);
         winner.customMetadata = {
@@ -696,6 +782,26 @@ describe("private server thumbnail pipeline", () => {
     expect(value.db.job).toMatchObject({ status: "ready", attempt_count: 1 });
   });
 
+  it("prevents an old claimant from completing after a newer processing attempt wins the lease", async () => {
+    const value = fixture({
+      duringRender(db) {
+        if (!db.job) throw new Error("expected active thumbnail job");
+        db.job.status = "processing";
+        db.job.attempt_count += 1;
+      },
+    });
+
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({
+      outcome: "failed",
+      errorCode: "completion_race",
+    });
+    expect(value.db.job).toMatchObject({
+      status: "processing",
+      attempt_count: 2,
+      thumbnail_etag: null,
+    });
+  });
+
   it("gives an exhausted transient failure one bounded second queue lifecycle without reading the original body", async () => {
     const value = fixture();
     Object.assign(value.db.job!, {
@@ -736,6 +842,90 @@ describe("private server thumbnail pipeline", () => {
     await expect(recoverTransientThumbnailFailures(value.env)).resolves.toBe(0);
     expect(value.db.job).toMatchObject({ status: "failed", attempt_count: 7, error_code: "queue_publish_failed" });
     expect(value.getKeys).toEqual([]);
+  });
+
+  it("requeues one expired current processing lease exactly once without reading the original body", async () => {
+    const value = fixture();
+    Object.assign(value.db.job!, { status: "processing", attempt_count: 2 });
+
+    await expect(recoverExpiredThumbnailLeases(value.env)).resolves.toEqual({
+      scanned: 1,
+      queued: 1,
+      invalidated: 0,
+      exhausted: 0,
+      publishFailed: 0,
+    });
+    await expect(recoverExpiredThumbnailLeases(value.env)).resolves.toEqual({
+      scanned: 0,
+      queued: 0,
+      invalidated: 0,
+      exhausted: 0,
+      publishFailed: 0,
+    });
+    expect(value.send).toHaveBeenCalledTimes(1);
+    expect(value.send).toHaveBeenCalledWith(value.message);
+    expect(value.getKeys).toEqual([]);
+    expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 2, queue_published_at: expect.any(String) });
+  });
+
+  it("leaves a fresh processing lease untouched", async () => {
+    const value = fixture({ leaseExpired: false });
+    Object.assign(value.db.job!, { status: "processing", attempt_count: 1 });
+
+    await expect(recoverExpiredThumbnailLeases(value.env)).resolves.toMatchObject({ scanned: 0, queued: 0 });
+    expect(value.send).not.toHaveBeenCalled();
+    expect(value.db.job).toMatchObject({ status: "processing", attempt_count: 1 });
+  });
+
+  it.each([
+    ["replaced index", { indexEtag: "new-version" }],
+    ["replaced R2 object", { sourceHeadEtag: "new-version" }],
+    ["deleted source", { sourceHeadMissing: true }],
+    ["missing current index", { indexMissing: true }],
+    ["trashed source", { tombstoneOnCheck: 1 }],
+  ])("invalidates an expired %s job instead of resurrecting it", async (_label, options) => {
+    const value = fixture(options);
+    Object.assign(value.db.job!, { status: "processing", attempt_count: 2 });
+
+    await expect(recoverExpiredThumbnailLeases(value.env)).resolves.toMatchObject({
+      scanned: 1,
+      queued: 0,
+      invalidated: 1,
+    });
+    expect(value.send).not.toHaveBeenCalled();
+    expect(value.getKeys).toEqual([]);
+    expect(value.db.job).toBeUndefined();
+  });
+
+  it("keeps expired-lease queue publication failure visible and retry-bounded", async () => {
+    const value = fixture({ queueError: new Error("queue unavailable") });
+    Object.assign(value.db.job!, { status: "processing", attempt_count: 2 });
+
+    await expect(recoverExpiredThumbnailLeases(value.env)).resolves.toEqual({
+      scanned: 1,
+      queued: 0,
+      invalidated: 0,
+      exhausted: 0,
+      publishFailed: 1,
+    });
+    expect(value.db.job).toMatchObject({ status: "failed", attempt_count: 2, error_code: "queue_publish_failed" });
+    expect(value.getKeys).toEqual([]);
+  });
+
+  it("terminally exposes an expired processing lease at the recovery ceiling", async () => {
+    const value = fixture();
+    Object.assign(value.db.job!, {
+      status: "processing",
+      attempt_count: THUMBNAIL_MAX_RECOVERY_ATTEMPTS,
+    });
+
+    await expect(recoverExpiredThumbnailLeases(value.env)).resolves.toMatchObject({
+      scanned: 1,
+      queued: 0,
+      exhausted: 1,
+    });
+    expect(value.send).not.toHaveBeenCalled();
+    expect(value.db.job).toMatchObject({ status: "failed", error_code: "retry_exhausted" });
   });
 
   it("serves only a ready WebP after the caller has authorized the source", async () => {
