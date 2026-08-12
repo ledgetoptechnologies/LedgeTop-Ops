@@ -292,9 +292,24 @@ async function handleThumbnailUpload(request: Request, env: Env, _leaseId: strin
 
   if (!validWebp(bytes)) return json({ error: "invalid_webp" }, 400);
 
+  // Look up the source etag from the lease so we can embed it in the thumbnail's customMetadata.
+  // getThumbnailForAuthorizedSource requires customMetadata.sourceEtag to match the source.
+  const sourceKey = thumbnailKey.replace(/^_ltds\/thumbnails\/v2\//, "");
+  // The thumbnail key is a hash, not the source key. We need to find the job.
+  // Use the lease ID from the path to find the source etag.
+  const job = await env.DELIVERY_DB.prepare(
+    `SELECT source_etag FROM image_thumbnail_jobs WHERE thumbnail_key=? AND status='processing'`
+  ).bind(thumbnailKey).first<{ source_etag: string }>();
+
+  const sourceEtag = job ? cleanThumbnailEtag(job.source_etag) : "";
+
   const stored = await env.DATA_BUCKET.put(thumbnailKey, bytes, {
     httpMetadata: { contentType: "image/webp", cacheControl: "private, no-store" },
-    customMetadata: { rendererProvider: PROVIDER, rendererProfile: THUMBNAIL_RENDER_PROFILE },
+    customMetadata: {
+      rendererProvider: PROVIDER,
+      rendererProfile: THUMBNAIL_RENDER_PROFILE,
+      sourceEtag,
+    },
   });
 
   return json({ status: "stored", etag: cleanThumbnailEtag(stored?.httpEtag || ""), size: length }, 200);
