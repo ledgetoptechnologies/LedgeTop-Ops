@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { pointerAnchoredOffset } from "../src/client/viewer-zoom";
+import { constrainViewerOffset, pointerAnchoredOffset } from "../src/client/viewer-zoom";
 
 describe("pointer anchored viewer zoom", () => {
   it("keeps an off-centre pointer fixed while zooming", () => {
@@ -10,6 +10,13 @@ describe("pointer anchored viewer zoom", () => {
 
   it("resets panning when returning to the fitted scale", () => {
     expect(pointerAnchoredOffset(1.18, 1, { x: 36, y: -18 }, { x: -200, y: 100 }))
+      .toEqual({ x: 0, y: 0 });
+  });
+
+  it("keeps the scaled image from panning out of the media stage", () => {
+    expect(constrainViewerOffset(2, { x: 999, y: -999 }, { width: 800, height: 600 }))
+      .toEqual({ x: 400, y: -300 });
+    expect(constrainViewerOffset(1, { x: 20, y: -20 }, { width: 800, height: 600 }))
       .toEqual({ x: 0, y: 0 });
   });
 });

@@ -21,7 +21,7 @@ import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
 import { ImageLocationMap } from "./ImageLocationMap";
-import { pointerAnchoredOffset } from "./viewer-zoom";
+import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import {
   activateDeliveryFolderCache,
   deactivateDeliveryFolderCache,
@@ -4506,15 +4506,23 @@ function ZoomableOperationsImage({ src, alt, loading, loaded, failed }: { src?: 
       const bounds = event.currentTarget.getBoundingClientRect();
       const point = { x: event.clientX - bounds.left - bounds.width / 2, y: event.clientY - bounds.top - bounds.height / 2 };
       setScale(next);
-      setOffset((value) => pointerAnchoredOffset(scale, next, value, point));
+      setOffset((value) => constrainViewerOffset(next, pointerAnchoredOffset(scale, next, value, point), bounds));
     }}
     onDoubleClick={fit}
     onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY }); if (pointers.current.size === 2) gesture.current = { distance: pointDistance(), scale }; }}
     onPointerMove={(event) => {
       const previous = pointers.current.get(event.pointerId); if (!previous) return;
       const current = { x: event.clientX, y: event.clientY }; pointers.current.set(event.pointerId, current);
-      if (pointers.current.size === 2 && gesture.current) { const distance = pointDistance(); if (gesture.current.distance) setScale(constrain(gesture.current.scale * distance / gesture.current.distance)); }
-      else if (scale > 1) setOffset((value) => ({ x: value.x + current.x - previous.x, y: value.y + current.y - previous.y }));
+      if (pointers.current.size === 2 && gesture.current) {
+        const distance = pointDistance();
+        if (gesture.current.distance) {
+          const next = constrain(gesture.current.scale * distance / gesture.current.distance);
+          setScale(next);
+          setOffset((value) => constrainViewerOffset(next, value, event.currentTarget.getBoundingClientRect()));
+        }
+      } else if (scale > 1) {
+        setOffset((value) => constrainViewerOffset(scale, { x: value.x + current.x - previous.x, y: value.y + current.y - previous.y }, event.currentTarget.getBoundingClientRect()));
+      }
     }}
     onPointerUp={(event) => { pointers.current.delete(event.pointerId); if (pointers.current.size < 2) gesture.current = null; }}
     onPointerCancel={(event) => { pointers.current.delete(event.pointerId); gesture.current = null; }}
