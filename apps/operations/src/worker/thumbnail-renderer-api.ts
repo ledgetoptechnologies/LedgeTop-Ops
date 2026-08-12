@@ -220,9 +220,35 @@ async function handleSourceDownload(request: Request, env: Env, _leaseId: string
   if (!sourceKey) return json({ error: "missing_key" }, 400);
 
   const rangeHeader = request.headers.get("Range");
-  const object = rangeHeader
-    ? await env.DATA_BUCKET.get(sourceKey, { onlyIf: new Headers({ Range: rangeHeader }) })
-    : await env.DATA_BUCKET.get(sourceKey);
+
+  // HEAD the object to get its full size for Content-Range
+  const head = await env.DATA_BUCKET.head(sourceKey);
+  if (!head) return json({ error: "source_not_found" }, 404);
+  const totalSize = head.size;
+
+  if (rangeHeader) {
+    // Parse the Range header (e.g. "bytes=0-1023")
+    const match = /^bytes=(\d+)-(\d*)$/.exec(rangeHeader);
+    if (match) {
+      const start = parseInt(match[1]!, 10);
+      const end = match[2] ? parseInt(match[2], 10) : totalSize - 1;
+
+      const object = await env.DATA_BUCKET.get(sourceKey, { onlyIf: new Headers({ Range: `bytes=${start}-${end}` }) });
+      if (!object || !("body" in object)) return json({ error: "range_not_satisfiable" }, 416);
+
+      const headers = new Headers();
+      headers.set("Content-Type", object.httpMetadata?.contentType || "application/octet-stream");
+      headers.set("ETag", object.httpEtag);
+      headers.set("Content-Length", String(object.size));
+      headers.set("Content-Range", `bytes ${start}-${end}/${totalSize}`);
+      headers.set("Accept-Ranges", "bytes");
+      headers.set("Cache-Control", "private, no-store");
+      return new Response(object.body, { status: 206, headers });
+    }
+  }
+
+  // Full download (no Range header)
+  const object = await env.DATA_BUCKET.get(sourceKey);
   if (!object || !("body" in object)) return json({ error: "source_not_found" }, 404);
 
   const headers = new Headers();
