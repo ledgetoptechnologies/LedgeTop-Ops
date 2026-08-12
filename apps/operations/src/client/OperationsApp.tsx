@@ -4486,7 +4486,9 @@ function ZoomableOperationsImage({ src, alt, loading, loaded, failed }: { src?: 
   const pointers = useRef(new Map<number, { x: number; y: number }>()), gesture = useRef<{ distance: number; scale: number } | null>(null);
   const fit = () => { setScale(1); setOffset({ x: 0, y: 0 }); };
   useEffect(fit, [src]);
-  const constrain = (value: number) => Math.min(8, Math.max(1, value));
+  // Orthomosaics often need inspection far beyond a normal photo viewer.  Keep
+  // the lower bound fitted, but allow enough magnification for tile-level detail.
+  const constrain = (value: number) => Math.min(20, Math.max(1, value));
   const pointDistance = () => {
     const [first, second] = [...pointers.current.values()];
     return first && second ? Math.hypot(first.x - second.x, first.y - second.y) : 0;
