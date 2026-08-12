@@ -149,6 +149,14 @@ test("mapped pin opens an authorized thumbnail and returns from the full-resolut
   const selection = page.getByRole("complementary", { name: "Selected mapped image" });
   await expect(selection.getByAltText("Selected mapped image thumbnail")).toBeVisible();
   await expect(selection.getByRole("button", { name: "Back to map" })).toHaveCount(0);
+  const selectionContrast = await selection.evaluate(element => {
+    const label = element.querySelector(".image-location-selection-preview strong");
+    const style = label ? getComputedStyle(label) : null;
+    const panel = getComputedStyle(element);
+    return { labelColor: style?.color, panelBorder: panel.borderColor };
+  });
+  expect(selectionContrast.labelColor).toBe("rgb(17, 24, 32)");
+  expect(selectionContrast.panelBorder).toBe("rgb(238, 80, 7)");
   await selection.getByRole("button", { name: "Open selected image" }).click();
 
   const preview = page.getByRole("dialog", { name: "Preview mapped-photo.jpg" });
