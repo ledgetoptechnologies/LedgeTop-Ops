@@ -2351,6 +2351,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   const [searchQuery, setSearchQuery] = useState(""),
     [searchState, setSearchState] = useState<{ query: string; items: DeliveryItem[]; nextCursor: string | null; loading: boolean; error: string }>({ query: "", items: [], nextCursor: null, loading: false, error: "" });
   const searchInput = useRef<HTMLInputElement | null>(null);
+  const [thumbnailQueue, setThumbnailQueue] = useState<{ pending: number; processing: number; total: number } | null>(null);
   const [selected, setSelected] = useState<string[]>([]),
     [selectionMode, setSelectionMode] = useState(false),
     [operation, setOperation] = useState<DeliveryOperation | null>(null),
@@ -2543,6 +2544,16 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     canMove = admin && allowed(session.user, "delivery.files.move");
   const canDelete = admin && allowed(session.user, "delivery.delete"),
     canShare = allowed(session.user, "delivery.share.create");
+  useEffect(() => {
+    if (!admin || !allowed(session.user, "delivery.browse")) return;
+    let cancelled = false;
+    const load = () => void api<{ pending: number; processing: number; total: number }>("/api/delivery/thumbnail-queue")
+      .then((value) => { if (!cancelled) setThumbnailQueue(value); })
+      .catch(() => { if (!cancelled) setThumbnailQueue(null); });
+    load();
+    const timer = window.setInterval(load, 15_000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [admin, session.user]);
   const openFolder = useCallback((nextPrefix: string) => {
     const safePrefix = nextPrefix || DELIVERY_ROOT_PREFIX;
     setPrefix(safePrefix);
@@ -2893,6 +2904,11 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           >
             List
           </button>
+          {thumbnailQueue && (
+            <span className="thumbnail-queue-indicator" title={`${thumbnailQueue.pending} pending, ${thumbnailQueue.processing} processing`} aria-label={`Thumbnail queue: ${thumbnailQueue.total} outstanding`}>
+              Thumbnails: {thumbnailQueue.total}
+            </span>
+          )}
         </div>
         <nav className="delivery-crumbs" aria-label="Current delivery folder">
           {session.capabilities?.deliveryJobsRoot?.enabled ? (
@@ -4405,17 +4421,13 @@ function OperationsMedia({
   if (failed) return <OperationsPreviewPlaceholder item={item} />;
   if (item.kind === "image")
     return (
-      <>
-        {loading && <ViewerSkeleton />}
-        <img
-          src={item.previewUrl}
-          alt={displayName(item)}
-          loading="lazy"
-          decoding="async"
-          onLoad={() => setLoading(false)}
-          onError={() => setFailed(true)}
-        />
-      </>
+      <ZoomableOperationsImage
+        src={item.previewUrl}
+        alt={displayName(item)}
+        loading={loading}
+        loaded={() => setLoading(false)}
+        failed={() => setFailed(true)}
+      />
     );
   if (item.kind === "pdf") {
     if (!item.sourceUrl || pdfReady === false)
@@ -4468,6 +4480,35 @@ function OperationsMedia({
       />
     );
   return <OperationsPreviewPlaceholder item={item} />;
+}
+function ZoomableOperationsImage({ src, alt, loading, loaded, failed }: { src?: string; alt: string; loading: boolean; loaded: () => void; failed: () => void }) {
+  const [scale, setScale] = useState(1), [offset, setOffset] = useState({ x: 0, y: 0 });
+  const pointers = useRef(new Map<number, { x: number; y: number }>()), gesture = useRef<{ distance: number; scale: number } | null>(null);
+  const fit = () => { setScale(1); setOffset({ x: 0, y: 0 }); };
+  useEffect(fit, [src]);
+  const constrain = (value: number) => Math.min(8, Math.max(1, value));
+  const pointDistance = () => {
+    const [first, second] = [...pointers.current.values()];
+    return first && second ? Math.hypot(first.x - second.x, first.y - second.y) : 0;
+  };
+  return <div
+    className={`zoomable-operations-image ${scale > 1 ? "zoomed" : ""}`}
+    onWheel={(event) => { event.preventDefault(); const next = constrain(scale * (event.deltaY < 0 ? 1.18 : 1 / 1.18)); setScale(next); if (next === 1) setOffset({ x: 0, y: 0 }); }}
+    onDoubleClick={fit}
+    onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY }); if (pointers.current.size === 2) gesture.current = { distance: pointDistance(), scale }; }}
+    onPointerMove={(event) => {
+      const previous = pointers.current.get(event.pointerId); if (!previous) return;
+      const current = { x: event.clientX, y: event.clientY }; pointers.current.set(event.pointerId, current);
+      if (pointers.current.size === 2 && gesture.current) { const distance = pointDistance(); if (gesture.current.distance) setScale(constrain(gesture.current.scale * distance / gesture.current.distance)); }
+      else if (scale > 1) setOffset((value) => ({ x: value.x + current.x - previous.x, y: value.y + current.y - previous.y }));
+    }}
+    onPointerUp={(event) => { pointers.current.delete(event.pointerId); if (pointers.current.size < 2) gesture.current = null; }}
+    onPointerCancel={(event) => { pointers.current.delete(event.pointerId); gesture.current = null; }}
+  >
+    {loading && <ViewerSkeleton />}
+    <img src={src} alt={alt} loading="lazy" decoding="async" draggable={false} onLoad={loaded} onError={failed} style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }} />
+    {scale > 1 && <button type="button" className="image-fit-control button-ghost button-small" onPointerDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); fit(); event.currentTarget.closest<HTMLElement>("[role=dialog]")?.focus(); }}>Fit</button>}
+  </div>;
 }
 function OperationsPreviewPlaceholder({ item }: { item: DeliveryItem }) {
   return (

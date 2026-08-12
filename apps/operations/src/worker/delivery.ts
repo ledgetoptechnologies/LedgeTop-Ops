@@ -93,6 +93,21 @@ export async function deliveryBrowseRevision(env:Env,principal:StaffPrincipal):P
   return `dbr_${b64(digest)}`;
 }
 
+/**
+ * Aggregate-only renderer backlog for Operations administrators.  This must
+ * never return source keys, object names, errors, or worker lease details:
+ * the toolbar only needs a compact indication of outstanding work.
+ */
+export async function thumbnailQueueSummary(env:Env,principal:StaffPrincipal):Promise<{pending:number;processing:number;total:number}>{
+  await requirePermission(env,principal,"delivery.browse");
+  const row=await env.DELIVERY_DB.prepare(`SELECT
+    SUM(CASE WHEN status='pending' THEN 1 ELSE 0 END) pending,
+    SUM(CASE WHEN status='processing' THEN 1 ELSE 0 END) processing
+    FROM image_thumbnail_jobs`).first<{pending:number|null;processing:number|null}>();
+  const pending=Number(row?.pending||0),processing=Number(row?.processing||0);
+  return{pending,processing,total:pending+processing};
+}
+
 export function resolveDivisionAssociation(prefix:string,associations:FolderAssociation[]):string|null{const matches=associations.map(row=>({divisionId:row.division_id,prefix:normalizePrefix(row.r2_prefix)})).filter(row=>prefix.startsWith(row.prefix));if(!matches.length)return null;const longest=Math.max(...matches.map(row=>row.prefix.length));const divisions=[...new Set(matches.filter(row=>row.prefix.length===longest).map(row=>row.divisionId))];if(divisions.length!==1)throw new HTTPException(409,{message:"Folder is associated with multiple divisions and requires review"});return divisions[0]!;}
 
 async function inferDivisionId(env:Env,prefix:string):Promise<string|null>{const associations=await env.OPS_DB.prepare("SELECT division_id,r2_prefix FROM project_folders ORDER BY length(r2_prefix) DESC").all<FolderAssociation>();return resolveDivisionAssociation(prefix,associations.results);}

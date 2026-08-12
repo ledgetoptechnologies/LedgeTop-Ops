@@ -48,6 +48,7 @@ import {
   listDeliveryShares,
   mediaKind,
   revokeDeliveryShare,
+  thumbnailQueueSummary,
 } from "./delivery";
 import { syncProjectAlpha } from "./project-alpha";
 import { projectAlphaHealthIsStale } from "./integration-health";
@@ -1705,6 +1706,12 @@ app.get("/api/delivery/search", async (c) =>
 app.get("/api/delivery/access-revision", async (c) =>
   c.json({ revision: await deliveryBrowseRevision(c.env, c.get("principal")) }),
 );
+app.get("/api/delivery/thumbnail-queue", async (c) => {
+  // The aggregate is operational telemetry, so keep it restricted to global
+  // Operations administrators rather than exposing work volume across scopes.
+  if (!c.get("administrator")) throw new HTTPException(404, { message: "Not found" });
+  return c.json(await thumbnailQueueSummary(c.env, c.get("principal")));
+});
 app.get("/api/delivery/folders/locations", async (c) =>
   c.json(await listDeliveryFolderLocations(
     c.env,

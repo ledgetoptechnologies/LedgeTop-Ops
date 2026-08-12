@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 type ViewerRequests = { imageSource: number; videoSource: number; thumbnail: number };
 
-async function mockDeliveryViewer(page: Page): Promise<ViewerRequests> {
+async function mockDeliveryViewer(page: Page, administrator = false): Promise<ViewerRequests> {
   const requests: ViewerRequests = { imageSource: 0, videoSource: 0, thumbnail: 0 };
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -15,7 +15,7 @@ async function mockDeliveryViewer(page: Page): Promise<ViewerRequests> {
           displayName: "Viewer Staff",
           status: "Active",
           profileType: "Employee",
-          isAdministrator: false,
+          isAdministrator: administrator,
           permissions: ["delivery.browse"],
           divisions: [],
         },
@@ -66,6 +66,10 @@ async function mockDeliveryViewer(page: Page): Promise<ViewerRequests> {
       await route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
       return;
     }
+    if (url.pathname === "/api/delivery/thumbnail-queue") {
+      await route.fulfill({ json: { pending: 3, processing: 2, total: 5 } });
+      return;
+    }
     if (url.pathname === "/api/delivery/shares") {
       await route.fulfill({ json: { shares: [] } });
       return;
@@ -101,6 +105,13 @@ test("image original loads only after activation and Escape restores trigger foc
   const viewer = page.getByRole("dialog", { name: "Preview photo.jpg" });
   await expect(viewer).toBeVisible();
   await expect(viewer.getByRole("img", { name: "photo.jpg" })).toBeVisible();
+  const zoomSurface = viewer.locator(".zoomable-operations-image");
+  await zoomSurface.hover();
+  await page.mouse.wheel(0, -320);
+  await expect(viewer.getByRole("button", { name: "Fit" })).toBeVisible();
+  await expect(viewer.getByRole("img", { name: "photo.jpg" })).toHaveAttribute("style", /scale\(1\.[0-9]+\)/);
+  await viewer.getByRole("button", { name: "Fit" }).click();
+  await expect(viewer.getByRole("button", { name: "Fit" })).toHaveCount(0);
   await expect.poll(() => requests.imageSource).toBeGreaterThan(0);
   await expect(viewer).toBeFocused();
   const viewerLayout = await page.locator(".modal-backdrop").evaluate((backdrop) => {
@@ -150,4 +161,10 @@ test("video original loads only on activation and a backdrop pointer closes the 
   });
   await expect(viewer).toHaveCount(0);
   await expect(trigger).toBeFocused();
+});
+
+test("only Operations administrators see the aggregate thumbnail backlog", async ({ page }) => {
+  await mockDeliveryViewer(page, true);
+  await page.goto("/delivery");
+  await expect(page.getByLabel("Thumbnail queue: 5 outstanding")).toHaveText("Thumbnails: 5");
 });
