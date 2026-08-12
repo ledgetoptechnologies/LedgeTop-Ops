@@ -366,7 +366,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
     const base = `/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${id}`;
     const item: DeliveryItem = { id, name: aliases.get(object.key) || relative.split("/").pop() || relative, kind, size: object.size, uploadedAt: object.uploaded.toISOString(), downloadUrl: `${base}/download`, previewStatus: kind === "video" ? "processing" : undefined, ...thumbnailFieldsForObject(object.key, kind, base, object.httpEtag, null, object.size, object.httpMetadata?.contentType) };
     item.sourceUrl = sourceUrlForItem(base, kind);
-    if (kind === "image") item.previewUrl = item.sourceUrl;
+    if (kind === "image") { const e = (object.key.split(".").pop() || "").toLowerCase(); if (!["dng","arw","cr2","cr3","crw","nef","raf","rw2","orf","pef","srw","3fr","rwl","srf","sr2","x3f"].includes(e)) item.previewUrl = item.sourceUrl; }
     else if (kind === "audio" || kind === "text") item.previewUrl = `${base}/preview`;
     if (kind === "video") item.previewUrl = undefined;
     if (kind === "video") videos.push({ index: items.length, key: object.key });

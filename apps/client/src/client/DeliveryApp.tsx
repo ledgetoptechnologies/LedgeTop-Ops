@@ -380,7 +380,10 @@ function DownloadOriginal({ item, compact = false }: { item: DeliveryItem; compa
 }
 
 function PreparedPlaceholder({ item }: { item: DeliveryItem }) {
-  return <div className="prepared-placeholder"><img className="preview-brand-logo" src={BRAND.logoUrl} alt={BRAND.shortName} /><strong>This file could not be displayed</strong><p>Your browser may not support this file format. The original file is still available to download.</p><DownloadOriginal item={item} /></div>;
+  const rawExts = new Set(["dng","arw","cr2","cr3","crw","nef","raf","rw2","orf","pef","srw","3fr","rwl","srf","sr2","x3f"]);
+  const ext = (item.name || "").split(".").pop()?.toLowerCase() || "";
+  const isRaw = rawExts.has(ext);
+  return <div className="prepared-placeholder"><img className="preview-brand-logo" src={BRAND.logoUrl} alt={BRAND.shortName} /><strong>{isRaw ? "This file type cannot be viewed in the browser" : "This file could not be displayed"}</strong><p>{isRaw ? "RAW photo files (DNG, ARW, etc.) require specialized software to view. Please download the file to open it." : "Your browser may not support this file format. The original file is still available to download."}</p><DownloadOriginal item={item} /></div>;
 }
 
 function VideoPreview({ item, publicId }: { item: DeliveryItem; publicId: string }) {
