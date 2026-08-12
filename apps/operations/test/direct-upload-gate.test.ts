@@ -23,16 +23,18 @@ describe("direct delivery upload route gate", () => {
     });
   });
 
-  it("also gates nested part and completion routes", async () => {
+  it("gates ticket issuance but leaves existing-session lifecycle routes available", async () => {
     const app = new Hono();
     registerR2CrudRoutes(app as never);
 
-    for (const path of [
-      "/api/delivery/uploads/session/parts/1/ticket",
-      "/api/delivery/uploads/session/complete",
-    ]) {
-      const response = await app.request(path, { method: "POST" }, { DIRECT_DELIVERY_UPLOADS_ENABLED: "false" });
-      expect(response.status).toBe(503);
-    }
+    const ticket = await app.request("/api/delivery/uploads/session/parts/1/ticket", { method: "POST" }, { DIRECT_DELIVERY_UPLOADS_ENABLED: "false" });
+    expect(ticket.status).toBe(503);
+
+    const missingDatabase = { prepare: () => ({ bind: () => ({ first: async () => null }) }) };
+    const lifecycleEnv = { DIRECT_DELIVERY_UPLOADS_ENABLED: "false", OPS_DB: missingDatabase };
+    const status = await app.request("/api/delivery/uploads/session", { method: "GET" }, lifecycleEnv);
+    const completion = await app.request("/api/delivery/uploads/session/complete", { method: "POST", body: "{}" }, lifecycleEnv);
+    expect(status.status).toBe(500);
+    expect(completion.status).toBe(500);
   });
 });

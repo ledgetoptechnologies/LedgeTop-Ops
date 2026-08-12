@@ -7,13 +7,15 @@ const source = readFileSync(
 ).replaceAll("\r\n", "\n");
 
 describe("authenticated browser upload UI", () => {
-  it("uses the private same-origin intent, checkpoint, part, and completion routes", () => {
+  it("uses private same-origin control routes and sends part bodies directly to signed R2 URLs", () => {
     expect(source).toContain('"/api/delivery/uploads/intents"');
     expect(source).toContain("`/api/delivery/uploads/${encodeURIComponent(created.sessionId)}`");
-    expect(source).toContain("/parts/${partNumber}`");
+    expect(source).toContain("/parts/${partNumber}/ticket`");
+    expect(source).toContain("await fetch(directUrl");
+    expect(source).toContain('credentials: "omit"');
+    expect(source).toContain("JSON.stringify({ etag, size: chunk.size })");
     expect(source).toContain("/complete`");
-    expect(source).not.toContain("/parts/${partNumber}/ticket");
-    expect(source).not.toContain("fetch(ticket.url");
+    expect(source).not.toContain("body: chunk,\n          },\n        );");
   });
 
   it("gates uploads on administrator, permission, and the runtime capability", () => {

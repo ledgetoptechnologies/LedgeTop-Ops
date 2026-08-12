@@ -16,10 +16,13 @@ import {
   assertSafeCrudDestination,
   browserUploadContentType,
   browserUploadObjectKey,
+  normalizeAdministratorDeleteKey,
   normalizeCrudKey,
   operationsMultipartPartSize,
 } from "./r2-crud-validation";
 import { artifactDirectory } from "./artifacts";
+import { canonicalMultipartEtag } from "./multipart-etag";
+import { presignOperationsR2Part } from "./r2-signing";
 import {
   DIRECT_DELIVERY_UPLOADS_DISABLED_CODE,
   DIRECT_DELIVERY_UPLOADS_DISABLED_MESSAGE,
@@ -386,6 +389,18 @@ function sessionResponse(session: BrowserUploadSessionRow, parts: Array<{part_nu
   };
 }
 
+function browserUploadPart(session: BrowserUploadSessionRow, value: unknown): { partNumber: number; size: number } {
+  const partNumber = Number(value);
+  const partCount = Math.ceil(session.expected_size / session.part_size);
+  if (!Number.isSafeInteger(partNumber) || partNumber < 1 || partNumber > partCount || partNumber > 10_000) {
+    throw new HTTPException(400, { message: "Upload part size or number is invalid" });
+  }
+  return {
+    partNumber,
+    size: Math.min(session.part_size, session.expected_size - (partNumber - 1) * session.part_size),
+  };
+}
+
 async function uploadSession(env: Env, sessionId: string, principalId: string): Promise<BrowserUploadSessionRow | null> {
   return env.OPS_DB.prepare(`SELECT id,upload_id,object_key,staging_key,expected_size,content_type,part_size,status,
     created_by,expires_at,intent_id,intent_ordinal,conflict_policy,result_key,result_etag,completion_claimed_at,
@@ -536,8 +551,9 @@ export function registerR2CrudRoutes(app: App): void {
     }
     await next();
   };
+  app.use("/api/delivery/uploads/intents", requireDirectDeliveryUploads);
   app.use("/api/delivery/uploads", requireDirectDeliveryUploads);
-  app.use("/api/delivery/uploads/*", requireDirectDeliveryUploads);
+  app.use("/api/delivery/uploads/:id/parts/:partNumber/ticket", requireDirectDeliveryUploads);
   app.use("/api/delivery/fs/trash/:id/restore", async (c, next) => {
     const tombstone = await c.env.DELIVERY_DB.prepare("SELECT physical_key FROM delivery_tombstones WHERE id=? AND restored_at IS NULL").bind(c.req.param("id")).first<{ physical_key: string }>();
     if (!tombstone) throw new HTTPException(404, { message: "Trash item not found or already restored" });
@@ -560,7 +576,7 @@ export function registerR2CrudRoutes(app: App): void {
     const id=await createJob(c.env,principal,"batch",[{kind,sourceKey:source,targetKey:target,conflict,sharePolicy}],source,target,conflict);await startJob(c,id);await audit(c.env,c.req.raw,principal,`delivery.${kind}.queued`,source,{target,jobId:id,sharePolicy});return c.json({jobId:id,status:"queued"},202);
   });
 
-  app.delete("/api/delivery/fs/items/:itemRef", async c => { const principal = c.get("principal"); const decoded = decodeRef(c.req.param("itemRef")); const folder = decoded.endsWith("/"); const key = normalizeCrudKey(decoded, folder); await requireCrudPermission(c.env, principal, permission("delivery.delete"), key); const body = await jsonBody(c).catch(() => ({})); const confirmation = body.confirmation || leaf(key); const result = await executeSourceDelete(c.env, principal, c.req.param("itemRef"), confirmation); await audit(c.env, c.req.raw, principal, "delivery.r2.delete.queued", key, result); return c.json({ deleted: result }); });
+  app.delete("/api/delivery/fs/items/:itemRef", async c => { const principal = c.get("principal"); const decoded = decodeRef(c.req.param("itemRef")); const folder = decoded.endsWith("/"); const key = c.get("administrator") ? normalizeAdministratorDeleteKey(decoded, folder) : normalizeCrudKey(decoded, folder); await requireCrudPermission(c.env, principal, permission("delivery.delete"), key); const body = await jsonBody(c).catch(() => ({})); const confirmation = body.confirmation || leaf(key); const result = await executeSourceDelete(c.env, principal, c.req.param("itemRef"), confirmation); await audit(c.env, c.req.raw, principal, "delivery.r2.delete.queued", key, result); return c.json({ deleted: result }); });
 
   app.post("/api/delivery/fs/batch", async c => { const principal = c.get("principal"); const body = await jsonBody(c); if (!Array.isArray(body.operations) || body.operations.length < 1 || body.operations.length > MAX_BATCH_OPERATIONS) throw new HTTPException(400, { message: `Batch operations must contain 1-${MAX_BATCH_OPERATIONS} items` }); const operations = body.operations.map((item: any) => ({ kind: item.kind === "move" ? "move" : item.kind === "copy" ? "copy" : (() => { throw new HTTPException(400, { message: "Unsupported batch operation" }); })(), sourceKey: normalizeCrudKey(item.sourceKey, false), targetKey: normalizeCrudKey(item.targetKey, false), conflict: policy(item.conflict),sharePolicy:item.sharePolicy==="keep"?"keep":"revoke" })); for (const operation of operations) { assertSafeCrudDestination(operation.sourceKey,operation.targetKey,false);await requireCrudPermission(c.env, principal, BATCH, operation.sourceKey); await requireCrudPermission(c.env, principal, BATCH, operation.targetKey); } const id = await createJob(c.env, principal, "batch", operations, null, null, "fail");await startJob(c,id);await audit(c.env, c.req.raw, principal, "delivery.batch.queued", id, { count: operations.length }); return c.json({ jobId: id, status: "queued" }, 202); });
 
@@ -792,22 +808,53 @@ export function registerR2CrudRoutes(app: App): void {
     return c.json(sessionResponse(session!), 201);
   });
 
+  app.post("/api/delivery/uploads/:id/parts/:partNumber/ticket", async c => {
+    const principal = c.get("principal");
+    const session = await uploadSession(c.env, c.req.param("id"), principal.id);
+    if (!session || session.status !== "active" || Date.parse(session.expires_at) <= Date.now()) throw new HTTPException(404, { message: "Upload session not found or expired" });
+    await requireCrudPermission(c.env, principal, UPLOAD, session.object_key);
+    const part = browserUploadPart(session, c.req.param("partNumber"));
+    const now = new Date();
+    const remainingSeconds = Math.floor((Date.parse(session.expires_at) - now.getTime()) / 1000);
+    if (remainingSeconds < 1) throw new HTTPException(404, { message: "Upload session not found or expired" });
+    const expiresSeconds = Math.min(300, remainingSeconds);
+    const contentType = "application/octet-stream";
+    const url = await presignOperationsR2Part({
+      accountId: c.env.R2_ACCOUNT_ID,
+      bucket: c.env.R2_BUCKET_NAME,
+      key: session.staging_key,
+      uploadId: session.upload_id,
+      partNumber: part.partNumber,
+      contentLength: part.size,
+      contentType,
+      accessKeyId: c.env.R2_DELIVERY_UPLOAD_ACCESS_KEY_ID || "",
+      secretAccessKey: c.env.R2_DELIVERY_UPLOAD_SECRET_ACCESS_KEY || "",
+      expiresSeconds,
+      now,
+    });
+    return c.json({
+      url,
+      method: "PUT",
+      headers: { "Content-Type": contentType },
+      expiresAt: new Date(now.getTime() + expiresSeconds * 1000).toISOString(),
+      partNumber: part.partNumber,
+      size: part.size,
+    });
+  });
+
   app.put("/api/delivery/uploads/:id/parts/:partNumber", async c => {
     const principal = c.get("principal");
     const session = await uploadSession(c.env, c.req.param("id"), principal.id);
-    const partNumber = Number(c.req.param("partNumber"));
     if (!session || session.status !== "active" || Date.parse(session.expires_at) <= Date.now()) throw new HTTPException(404, { message: "Upload session not found or expired" });
     await requireCrudPermission(c.env, principal, UPLOAD, session.object_key);
-    const offset = (partNumber - 1) * session.part_size;
-    const expectedLength = Math.min(session.part_size, session.expected_size - offset);
-    const suppliedLength = Number(c.req.header("Content-Length") || 0);
-    if (!Number.isSafeInteger(partNumber) || partNumber < 1 || partNumber > 10_000 || expectedLength <= 0 ||
-      suppliedLength !== expectedLength || !c.req.raw.body) throw new HTTPException(400, { message: "Upload part size or number is invalid" });
-    const result = await c.env.DATA_BUCKET.resumeMultipartUpload(session.staging_key, session.upload_id).uploadPart(partNumber, c.req.raw.body);
+    const part = browserUploadPart(session, c.req.param("partNumber"));
+    const body = await jsonBody(c);
+    const etag = canonicalMultipartEtag(body.etag);
+    if (!etag || body.size !== part.size) throw new HTTPException(400, { message: "Invalid part checkpoint" });
     await c.env.OPS_DB.prepare(`INSERT INTO r2_upload_parts(session_id,part_number,etag,size) VALUES(?,?,?,?)
       ON CONFLICT(session_id,part_number) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=datetime('now')`)
-      .bind(session.id, partNumber, result.etag, suppliedLength).run();
-    return c.json({ partNumber: result.partNumber, etag: result.etag, size: suppliedLength });
+      .bind(session.id, part.partNumber, etag, part.size).run();
+    return c.json({ partNumber: part.partNumber, etag, size: part.size });
   });
 
   app.post("/api/delivery/uploads/:id/complete", async c => {
@@ -999,8 +1046,13 @@ export function registerR2CrudRoutes(app: App): void {
   app.delete("/api/delivery/uploads/:id", async c => {
     const principal = c.get("principal");
     const session = await uploadSession(c.env, c.req.param("id"), principal.id);
-    if (!session || session.status !== "active") throw new HTTPException(404, { message: "Upload session not found" });
+    if (!session) throw new HTTPException(404, { message: "Upload session not found" });
     await requireCrudPermission(c.env, principal, UPLOAD, session.object_key);
+    if (session.status === "aborted") {
+      await cleanupBrowserUploadSessions(c.env, 1, session.id);
+      return c.json({ success: true, status: "aborted" });
+    }
+    if (session.status !== "active") throw new HTTPException(409, { message: "Upload session cannot be cancelled" });
     const cancelled = await c.env.OPS_DB.prepare(`UPDATE r2_upload_sessions SET status='aborted',completion_claimed_at=NULL,
       cleanup_status='pending',cleanup_next_attempt_at=datetime('now'),cleanup_claimed_at=NULL,cleanup_error=NULL
       WHERE id=? AND status='active'`)
@@ -1009,6 +1061,7 @@ export function registerR2CrudRoutes(app: App): void {
     await cleanupBrowserUploadSessions(c.env, 1, session.id);
     await c.env.OPS_DB.batch([
       c.env.OPS_DB.prepare("UPDATE browser_upload_intent_files SET status='aborted',error_code='cancelled',updated_at=datetime('now') WHERE intent_id=? AND ordinal=? AND status<>'completed'").bind(session.intent_id, session.intent_ordinal),
+      c.env.OPS_DB.prepare("UPDATE browser_upload_intents SET status='aborted',updated_at=datetime('now') WHERE id=? AND status='active'").bind(session.intent_id),
     ]);
     await audit(c.env, c.req.raw, principal, "delivery.upload.aborted", session.object_key, { sessionId: session.id, intentId: session.intent_id });
     return c.json({ success: true });

@@ -11,6 +11,7 @@ import {
   recoverExpiredThumbnailLeases,
   recoverTransientThumbnailFailures,
   THUMBNAIL_JOB_KIND,
+  THUMBNAIL_MAX_DELIVERY_ATTEMPTS,
   THUMBNAIL_MAX_INPUT_BYTES,
   THUMBNAIL_MAX_RECOVERY_ATTEMPTS,
   PDF_THUMBNAIL_MAX_INPUT_BYTES,
@@ -18,6 +19,7 @@ import {
   thumbnailSourceEligible,
   thumbnailSourceKind,
   thumbnailStateForObject,
+  videoThumbnailSourceDisabled,
   type ThumbnailJobMessage,
   type ThumbnailJobRow,
 } from "../src/worker/image-thumbnails";
@@ -40,6 +42,7 @@ interface StoredJob extends ThumbnailJobRow {
 
 class FakeThumbnailDb {
   job: StoredJob | undefined;
+  claims = 0;
   tombstoneChecks = 0;
   tombstoneOnCheck: number | undefined;
   leaseExpired = true;
@@ -146,6 +149,19 @@ class FakeThumbnailDb {
           }
           return result(0);
         }
+        if (sql.includes("thumbnail.video-disabled")) {
+          const [sourceKey, sourceEtag] = values as [string, string];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag &&
+            (db.job.status === "pending" || db.job.status === "processing")) {
+            db.job.status = "failed";
+            db.job.thumbnail_etag = null;
+            db.job.thumbnail_size = null;
+            db.job.error_code = "video_thumbnail_disabled";
+            db.job.error_message = "Video thumbnail rendering is disabled for this release";
+            return result(1);
+          }
+          return result(0);
+        }
         if (sql.includes("thumbnail.publish-record")) {
           const [sourceKey, sourceEtag] = values as [string, string];
           if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag &&
@@ -243,6 +259,7 @@ class FakeThumbnailDb {
           if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "pending") {
             db.job.status = "processing";
             db.job.attempt_count += 1;
+            db.claims += 1;
             return { attempt_count: db.job.attempt_count } as T;
           }
           return null;
@@ -503,6 +520,10 @@ describe("private server thumbnail pipeline", () => {
     expect(thumbnailSourceKind("Jobs/Internal/report.pdf", "application/pdf")).toBe("pdf");
     expect(thumbnailSourceKind("Jobs/Internal/photo.jpg", "image/jpeg")).toBe("image");
     expect(thumbnailSourceKind("Jobs/Internal/clip.mp4", "video/mp4")).toBeNull();
+    expect(thumbnailSourceKind("Jobs/Internal/disguised.jpg", "video/mp4")).toBeNull();
+    expect(thumbnailSourceKind("Jobs/Internal/disguised.mp4", "image/jpeg")).toBeNull();
+    expect(videoThumbnailSourceDisabled("Jobs/Internal/disguised.jpg", "video/mp4; codecs=avc1")).toBe(true);
+    expect(videoThumbnailSourceDisabled("Jobs/Internal/disguised.mp4", "image/jpeg")).toBe(true);
   });
 
   it("renders an eligible PDF through the same private Container boundary", async () => {
@@ -550,11 +571,48 @@ describe("private server thumbnail pipeline", () => {
     expect(value.db.job).toMatchObject({ status: "failed", error_code: "input_too_large" });
   });
 
-  it("keeps every video on the explicit icon fallback without reading the original", async () => {
+  it("rejects a legacy video row before claim or source-body/renderer access", async () => {
     const value = fixture({ sourceKey: "Jobs/Clients/Synthetic/flight.mp4", contentType: "video/mp4" });
 
-    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({ outcome: "failed", errorCode: "unsupported_file" });
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({ outcome: "failed", errorCode: "video_thumbnail_disabled" });
+    expect(value.db.claims).toBe(0);
+    expect(value.db.job).toMatchObject({ status: "failed", attempt_count: 0, error_code: "video_thumbnail_disabled" });
     expect(value.getKeys).toEqual([]);
+    expect(value.renderThumbnail).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Jobs/Clients/Synthetic/flight.mp4", "image/jpeg"],
+    ["Jobs/Clients/Synthetic/disguised.jpg", "video/mp4"],
+  ])("rejects video identity at enqueue before registration or publish: %s", async (sourceKey, contentType) => {
+    const value = fixture({ sourceKey, contentType });
+    value.db.job = undefined;
+
+    await expect(enqueueThumbnailJob(value.env, {
+      sourceKey,
+      sourceEtag: value.message.sourceEtag,
+      sourceSize: 4096,
+      contentType,
+    })).rejects.toThrow("Video thumbnail jobs are disabled");
+    expect(value.db.job).toBeUndefined();
+    expect(value.send).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["Jobs/Clients/Synthetic/flight.mp4", "image/jpeg"],
+    ["Jobs/Clients/Synthetic/disguised.jpg", "video/mp4"],
+  ])("acks a forged video queue job without claim, retry, body read, or renderer handoff: %s", async (sourceKey, contentType) => {
+    const value = fixture({ sourceKey, contentType });
+    const queue = queueBatch(value.message, THUMBNAIL_MAX_DELIVERY_ATTEMPTS);
+
+    await consumeThumbnailJobs(queue.batch, value.env);
+
+    expect(queue.ack).toHaveBeenCalledOnce();
+    expect(queue.retry).not.toHaveBeenCalled();
+    expect(value.db.claims).toBe(0);
+    expect(value.db.job).toMatchObject({ status: "failed", attempt_count: 0, error_code: "video_thumbnail_disabled" });
+    expect(value.getKeys).toEqual([]);
+    expect(value.renderThumbnail).not.toHaveBeenCalled();
   });
 
   it("publishes a same-version pending job only once after recording queue publication", async () => {

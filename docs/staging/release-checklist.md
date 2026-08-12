@@ -64,6 +64,8 @@ Operations:
 - `PROJECT_ALPHA_API_KEY`
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
+- `R2_DELIVERY_UPLOAD_ACCESS_KEY_ID`
+- `R2_DELIVERY_UPLOAD_SECRET_ACCESS_KEY`
 - `TURNSTILE_SITE_KEY`
 - `TURNSTILE_SECRET`
 - `INCOMING_SESSION_SECRET`
@@ -75,7 +77,7 @@ Ops Sync:
 - `CF_ACCESS_GROUP_API_TOKEN`
 - `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET`
 
-The staging manifest currently requires the complete 12-name Operations set
+The staging manifest currently requires the complete Operations secret set
 even while incoming capability flags remain disabled. This keeps the checked
 configuration, evidence packet, and version upload contract identical and
 fail-closed. Never place secret values in Git, Wrangler `vars`, shell

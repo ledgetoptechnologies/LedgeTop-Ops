@@ -1,11 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 
-type ViewerRequests = { imageSource: number; videoSource: number };
+type ViewerRequests = { imageSource: number; videoSource: number; thumbnail: number };
 
 async function mockDeliveryViewer(page: Page): Promise<ViewerRequests> {
-  const requests: ViewerRequests = { imageSource: 0, videoSource: 0 };
+  const requests: ViewerRequests = { imageSource: 0, videoSource: 0, thumbnail: 0 };
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
+    if (url.pathname.includes("/thumbnail")) requests.thumbnail += 1;
     if (url.pathname === "/api/session") {
       await route.fulfill({ json: {
         user: {
@@ -116,7 +117,12 @@ test("video original loads only on activation and a backdrop pointer closes the 
 
   const trigger = page.getByRole("button", { name: "Open flight.mp4" });
   await expect(trigger).toBeVisible();
+  const icon = page.getByLabel("video preview unavailable");
+  await expect(icon).toBeVisible();
+  await expect(icon.locator(".file-kind")).toHaveText("video");
+  await expect(icon).toContainText("File-type icon");
   expect(requests.videoSource).toBe(0);
+  expect(requests.thumbnail).toBe(0);
 
   await trigger.click();
   const viewer = page.getByRole("dialog", { name: "Preview flight.mp4" });

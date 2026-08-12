@@ -200,12 +200,14 @@ inventory.
 
 ## Authenticated Operations browser uploads
 
-Direct delivery uploads are private same-origin Operations routes, not public
-R2 uploads. Every request requires the expected host, current Access-backed
-staff session, origin/CSRF validation, administrator status, and scoped
-`delivery.files.upload` authority for every destination. Client Portal users,
+Direct delivery uploads use private same-origin Operations control routes plus
+short-lived direct R2 part uploads. Intent, session, ticket, checkpoint,
+completion, abort, and status requests require the expected host, current
+Access-backed staff session, origin/CSRF validation for mutations,
+administrator status, and scoped `delivery.files.upload` authority for every
+destination. Only the part bytes use the R2 S3 endpoint. Client Portal users,
 public shares, Incoming contributor sessions, revoked users and cross-client or
-cross-project requests are denied before an R2 write.
+cross-project requests are denied before a ticket is issued.
 
 The browser creates a 24-hour idempotent intent for at most 100 non-empty files
 with a 500 GiB per-file and aggregate cap and at most ten active multipart
@@ -223,6 +225,17 @@ parts. Completion/cancel/expiry record durable cleanup, and exhausted cleanup
 remains visible. Replacement recovery is private, seven-day and exact-ETag
 guarded.
 
+Each part ticket expires in at most five minutes and never outlives its upload
+session. Its SigV4 signature binds the private staging key, R2 multipart upload
+ID, part number, exact expected `Content-Length`, and
+`Content-Type: application/octet-stream`. The browser sends no cookies,
+Operations bearer material, or CSRF token to R2, reads the CORS-exposed ETag,
+and checkpoints only that ETag and the expected size with Operations. R2
+multipart completion and the final staged-object size verify the recorded part
+set. Signed URLs are never stored for resume; a retry obtains a fresh ticket.
+The bucket remains private and has no `r2.dev` or public custom-domain upload
+surface.
+
 Successful browser, folder, Dropbox, TrueNAS/rclone and authorized server
 uploads converge through the same index, source-event, queue and thumbnail
 lifecycle. Copy/move/browser publication may also index synchronously; the
@@ -230,12 +243,20 @@ later duplicate event is harmless. Server uploaders must preserve useful MIME
 metadata. Incoming-request links retain their separate contributor session,
 Turnstile, quarantine and malware-scan flow and cannot call these routes.
 
-Enable `DIRECT_DELIVERY_UPLOADS_ENABLED` only after staging proves single and
-folder uploads, progress/partial errors, resume/duplicates, all three collision
-choices, malicious paths, limits, Access reauthorization/revocation,
-cross-scope/public denial, staging cleanup, thumbnail readiness, replacement,
-delete/trash/restore/expiry and no original fallback. The selected browser/team
-destination prefix must also pass the rclone ownership gate above.
+Enable `DIRECT_DELIVERY_UPLOADS_ENABLED` only after the dedicated delivery
+signing credential and exact-origin R2 CORS rule are present and isolated
+staging proves: single and folder uploads; direct R2 request origin and absence
+of source bytes on every Worker request; progress, part retry, fresh-ticket
+retry, checkpoint resume and duplicate completion; ticket expiry and
+cross-session/key/part tamper denial; all three collision choices; malicious
+paths and 100-file/500-GiB bounds with synthetic metadata; Access
+reauthorization/revocation; cross-scope/public denial; abort, expiry and staging
+cleanup; still/PDF thumbnail readiness; video icon-only behavior with no video
+job enqueue/claim; replacement, delete/trash/restore and no original fallback.
+The selected browser/team destination prefix must also pass the rclone
+ownership gate above. Keep the production flag `false` until that evidence is
+reviewed; rollback disables new intents and tickets while authenticated cleanup
+of existing sessions remains available.
 
 ## Failure, rollback and cost
 

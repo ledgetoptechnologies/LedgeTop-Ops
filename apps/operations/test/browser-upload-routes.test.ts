@@ -62,7 +62,7 @@ class FakeBucket {
   readonly objects = new Map<string, StoredObject>();
   readonly uploads = new Map<string, MultipartState>();
   readonly calls = { head: [] as string[], get: [] as string[], put: [] as string[], list: [] as string[],
-    create: [] as string[], resume: [] as string[], delete: [] as string[], abort: [] as string[] };
+    create: [] as string[], resume: [] as string[], directPut: [] as string[], delete: [] as string[], abort: [] as string[] };
   private sequence = 0;
   abortFailures = 0;
 
@@ -167,6 +167,21 @@ class FakeBucket {
     };
   }
 
+  async directPut(urlValue: string, bytes: Uint8Array, headers: Record<string, string>) {
+    const url = new URL(urlValue);
+    const uploadId = url.searchParams.get("uploadId") || "";
+    const partNumber = Number(url.searchParams.get("partNumber"));
+    const key = url.pathname.split("/").slice(2).map(decodeURIComponent).join("/");
+    const state = this.uploads.get(uploadId);
+    if (!state || state.key !== key || !Number.isInteger(partNumber) || headers["Content-Type"] !== "application/octet-stream") {
+      throw new Error("Direct R2 ticket was not scoped to this multipart part");
+    }
+    const etag = `${partNumber.toString(16).padStart(8, "0")}${bytes.byteLength.toString(16).padStart(8, "0")}`.padEnd(32, "0");
+    state.parts.set(partNumber, { etag, bytes: Uint8Array.from(bytes) });
+    this.calls.directPut.push(`${uploadId}:${partNumber}:${bytes.byteLength}`);
+    return { etag: `"${etag}"` };
+  }
+
   async createMultipartUpload(key: string, options: R2MultipartOptions = {}) {
     this.calls.create.push(key);
     const httpMetadata = options.httpMetadata instanceof Headers
@@ -237,6 +252,10 @@ describe("authenticated browser delivery uploads", () => {
       OPS_DB: opsDb, DELIVERY_DB: deliveryDb, DATA_BUCKET: bucket as never,
       THUMBNAIL_QUEUE: { send: queueSend } as never,
       DIRECT_DELIVERY_UPLOADS_ENABLED: "true",
+      R2_ACCOUNT_ID: "0123456789abcdef0123456789abcdef",
+      R2_BUCKET_NAME: "client-data",
+      R2_DELIVERY_UPLOAD_ACCESS_KEY_ID: "delivery-upload-key",
+      R2_DELIVERY_UPLOAD_SECRET_ACCESS_KEY: "delivery-upload-secret",
     } as unknown as Env;
     acl.requirePermission.mockReset();
     acl.requirePermission.mockResolvedValue(undefined);
@@ -259,6 +278,20 @@ describe("authenticated browser delivery uploads", () => {
       headers: { "Content-Type": "application/json", ...(idempotencyKey ? { "Idempotency-Key": idempotencyKey } : {}) },
       body: JSON.stringify(body),
     }, env);
+  }
+
+  async function uploadDirectPart(instance: TestApp, sessionId: string, partNumber: number, bytes: Uint8Array) {
+    const ticketResponse = await jsonRequest(instance, `/api/delivery/uploads/${sessionId}/parts/${partNumber}/ticket`, {});
+    expect(ticketResponse.status).toBe(200);
+    const ticket = await ticketResponse.json() as {url:string;method:string;headers:Record<string,string>;expiresAt:string;partNumber:number;size:number};
+    expect(ticket).toMatchObject({ method: "PUT", headers: { "Content-Type": "application/octet-stream" }, partNumber, size: bytes.byteLength });
+    expect(Date.parse(ticket.expiresAt)).toBeGreaterThan(Date.now());
+    const uploaded = await bucket.directPut(ticket.url, bytes, ticket.headers);
+    const checkpoint = await instance.request(`/api/delivery/uploads/${sessionId}/parts/${partNumber}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ etag: uploaded.etag, size: bytes.byteLength }),
+    }, env);
+    expect(checkpoint.status).toBe(200);
+    return { ticket, checkpoint: await checkpoint.json() as {partNumber:number;etag:string;size:number} };
   }
 
   const manifest = (files: unknown[]) => ({
@@ -284,11 +317,7 @@ describe("authenticated browser delivery uploads", () => {
     }
     expect(response.status).toBe(201);
     const session = await response.json() as {sessionId:string};
-    const part = await instance.request(`/api/delivery/uploads/${session.sessionId}/parts/1`, {
-      method: "PUT", headers: { "Content-Length": "4", "Content-Type": "application/octet-stream" },
-      body: Uint8Array.from([1, 2, 3, 4]),
-    }, env);
-    expect(part.status).toBe(200);
+    await uploadDirectPart(instance, session.sessionId, 1, Uint8Array.from([1, 2, 3, 4]));
     return session;
   }
 
@@ -401,7 +430,7 @@ describe("authenticated browser delivery uploads", () => {
     expect((await opsDb.prepare("SELECT COUNT(*) count FROM browser_upload_intents").first<{count:number}>())?.count).toBe(0);
   });
 
-  it("resumes a private multipart upload, validates part size, checkpoints, and enqueues one thumbnail", async () => {
+  it("uploads directly to a private multipart ticket, validates checkpoints, and enqueues one thumbnail", async () => {
     const instance = app();
     const intent = await createIntent(instance, [{ relativePath: "photo.jpg", size: 4, contentType: "image/jpeg" }]);
     const sessionResponse = await jsonRequest(instance, "/api/delivery/uploads", { intentId: intent.body.intentId, ordinal: 0 });
@@ -417,16 +446,15 @@ describe("authenticated browser delivery uploads", () => {
     expect(bucket.calls.create).toHaveLength(1);
 
     const badPart = await instance.request(`/api/delivery/uploads/${session.sessionId}/parts/1`, {
-      method: "PUT", headers: { "Content-Length": "3", "Content-Type": "application/octet-stream" }, body: Uint8Array.from([1, 2, 3]),
+      method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ etag: "a".repeat(32), size: 3 }),
     }, env);
     expect(badPart.status).toBe(400);
     expect(bucket.calls.resume).toEqual([]);
 
-    const part = await instance.request(`/api/delivery/uploads/${session.sessionId}/parts/1`, {
-      method: "PUT", headers: { "Content-Length": "4", "Content-Type": "application/octet-stream" }, body: Uint8Array.from([1, 2, 3, 4]),
-    }, env);
-    expect(part.status).toBe(200);
-    expect(await part.json()).toMatchObject({ partNumber: 1, size: 4 });
+    const part = await uploadDirectPart(instance, session.sessionId, 1, Uint8Array.from([1, 2, 3, 4]));
+    expect(part.checkpoint).toMatchObject({ partNumber: 1, size: 4 });
+    expect(bucket.calls.resume).toEqual([]);
+    expect(bucket.calls.directPut).toEqual([expect.stringMatching(/:1:4$/)]);
 
     const checkpoint = await instance.request(`/api/delivery/uploads/${session.sessionId}`, {}, env);
     expect(checkpoint.status).toBe(200);
@@ -452,6 +480,75 @@ describe("authenticated browser delivery uploads", () => {
     expect(queueSend).toHaveBeenCalledOnce();
   });
 
+  it("binds short-lived tickets to one session, object, part, length, and content type", async () => {
+    const instance = app();
+    const firstIntent = await createIntent(instance, [{ relativePath: "ticket-a.bin", size: 4, contentType: "application/octet-stream" }], "browser_ticket_scope_first_1");
+    const secondIntent = await createIntent(instance, [{ relativePath: "ticket-b.bin", size: 4, contentType: "application/octet-stream" }], "browser_ticket_scope_second1");
+    const first = await (await jsonRequest(instance, "/api/delivery/uploads", { intentId: firstIntent.body.intentId, ordinal: 0 })).json() as {sessionId:string};
+    const second = await (await jsonRequest(instance, "/api/delivery/uploads", { intentId: secondIntent.body.intentId, ordinal: 0 })).json() as {sessionId:string};
+    const firstTicket = await (await jsonRequest(instance, `/api/delivery/uploads/${first.sessionId}/parts/1/ticket`, {})).json() as {url:string;headers:Record<string,string>;size:number;expiresAt:string};
+    const secondTicket = await (await jsonRequest(instance, `/api/delivery/uploads/${second.sessionId}/parts/1/ticket`, {})).json() as typeof firstTicket;
+    const firstUrl = new URL(firstTicket.url);
+    const secondUrl = new URL(secondTicket.url);
+
+    expect(firstTicket).toMatchObject({ headers: { "Content-Type": "application/octet-stream" }, size: 4 });
+    expect(Number(firstUrl.searchParams.get("X-Amz-Expires"))).toBeLessThanOrEqual(300);
+    expect(firstUrl.searchParams.get("X-Amz-SignedHeaders")).toBe("content-length;content-type;host");
+    expect(firstUrl.pathname).not.toBe(secondUrl.pathname);
+    expect(firstUrl.searchParams.get("uploadId")).not.toBe(secondUrl.searchParams.get("uploadId"));
+    expect(firstUrl.searchParams.get("X-Amz-Signature")).not.toBe(secondUrl.searchParams.get("X-Amz-Signature"));
+
+    const tampered = new URL(firstTicket.url);
+    tampered.searchParams.set("uploadId", secondUrl.searchParams.get("uploadId")!);
+    expect(tampered.searchParams.get("X-Amz-Signature")).not.toBe(secondUrl.searchParams.get("X-Amz-Signature"));
+    expect((await jsonRequest(instance, `/api/delivery/uploads/${first.sessionId}/parts/2/ticket`, {})).status).toBe(400);
+    expect(bucket.calls.resume).toEqual([]);
+    expect(bucket.calls.directPut).toEqual([]);
+  });
+
+  it("denies ticket issuance after revocation or expiry before direct R2 access", async () => {
+    const instance = app();
+    const intent = await createIntent(instance, [{ relativePath: "revoked.bin", size: 4, contentType: "application/octet-stream" }], "browser_ticket_revoked_001");
+    const session = await (await jsonRequest(instance, "/api/delivery/uploads", { intentId: intent.body.intentId, ordinal: 0 })).json() as {sessionId:string};
+    acl.requirePermission.mockRejectedValueOnce(new HTTPException(403, { message: "Forbidden" }));
+    expect((await jsonRequest(instance, `/api/delivery/uploads/${session.sessionId}/parts/1/ticket`, {})).status).toBe(403);
+    expect(bucket.calls.directPut).toEqual([]);
+
+    await opsDb.prepare("UPDATE r2_upload_sessions SET expires_at='2000-01-01T00:00:00Z' WHERE id=?").bind(session.sessionId).run();
+    expect((await jsonRequest(instance, `/api/delivery/uploads/${session.sessionId}/parts/1/ticket`, {})).status).toBe(404);
+    expect(bucket.calls.directPut).toEqual([]);
+  });
+
+  it("keeps a synthetic 500 GiB flow off the Worker request-body path", async () => {
+    const instance = app();
+    const size = 500 * 1024 ** 3;
+    const intent = await createIntent(instance, [{ relativePath: "large.bin", size, contentType: "application/octet-stream" }], "browser_large_synthetic_01");
+    expect(intent.response.status).toBe(201);
+    const session = await (await jsonRequest(instance, "/api/delivery/uploads", { intentId: intent.body.intentId, ordinal: 0 })).json() as {sessionId:string;partSize:number};
+    const count = Math.ceil(size / session.partSize);
+    expect(count).toBeLessThanOrEqual(10_000);
+
+    const first = await (await jsonRequest(instance, `/api/delivery/uploads/${session.sessionId}/parts/1/ticket`, {})).json() as {size:number;url:string};
+    const last = await (await jsonRequest(instance, `/api/delivery/uploads/${session.sessionId}/parts/${count}/ticket`, {})).json() as {size:number;url:string};
+    expect(first.size).toBe(session.partSize);
+    expect(last.size).toBe(size - (count - 1) * session.partSize);
+    expect(first.url).toMatch(/^https:\/\/0123456789abcdef0123456789abcdef\.r2\.cloudflarestorage\.com\//);
+    expect(bucket.calls.resume).toEqual([]);
+    expect(bucket.calls.directPut).toEqual([]);
+  });
+
+  it("makes cancellation idempotent and reconciles the parent intent", async () => {
+    const instance = app();
+    const intent = await createIntent(instance, [{ relativePath: "cancel.bin", size: 4, contentType: "application/octet-stream" }], "browser_cancel_idempotent1");
+    const session = await (await jsonRequest(instance, "/api/delivery/uploads", { intentId: intent.body.intentId, ordinal: 0 })).json() as {sessionId:string};
+    const first = await instance.request(`/api/delivery/uploads/${session.sessionId}`, { method: "DELETE" }, env);
+    const replay = await instance.request(`/api/delivery/uploads/${session.sessionId}`, { method: "DELETE" }, env);
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toEqual({ success: true, status: "aborted" });
+    expect(await opsDb.prepare("SELECT status FROM browser_upload_intents WHERE id=?").bind(intent.body.intentId).first()).toEqual({ status: "aborted" });
+  });
+
   it.each([
     ["single file", "moved-source.jpg"],
     ["nested folder file", "Field/Nested/moved-source.jpg"],
@@ -475,11 +572,7 @@ describe("authenticated browser delivery uploads", () => {
         conflict_policy: "replace", destination_baseline: `etag:${marker.httpEtag}`, replacement_recovery_id: null,
       });
 
-    const part = await instance.request(`/api/delivery/uploads/${session.sessionId}/parts/1`, {
-      method: "PUT", headers: { "Content-Length": "4", "Content-Type": "application/octet-stream" },
-      body: Uint8Array.from([1, 2, 3, 4]),
-    }, env);
-    expect(part.status).toBe(200);
+    await uploadDirectPart(instance, session.sessionId, 1, Uint8Array.from([1, 2, 3, 4]));
     const completed = await jsonRequest(instance, `/api/delivery/uploads/${session.sessionId}/complete`, {});
 
     expect(completed.status).toBe(200);
@@ -538,10 +631,7 @@ describe("authenticated browser delivery uploads", () => {
     const intent = await createIntent(instance, [{ relativePath: "completion-race.jpg", size: 4, contentType: "image/jpeg" }], "browser_completion_race_1");
     const sessionResponse = await jsonRequest(instance, "/api/delivery/uploads", { intentId: intent.body.intentId, ordinal: 0 });
     const session = await sessionResponse.json() as {sessionId:string};
-    expect((await instance.request(`/api/delivery/uploads/${session.sessionId}/parts/1`, {
-      method: "PUT", headers: { "Content-Length": "4", "Content-Type": "application/octet-stream" },
-      body: Uint8Array.from([1, 2, 3, 4]),
-    }, env)).status).toBe(200);
+    await uploadDirectPart(instance, session.sessionId, 1, Uint8Array.from([1, 2, 3, 4]));
     const winner = bucket.seed(key, Uint8Array.from([9]), "image/jpeg");
 
     const conflict = await jsonRequest(instance, `/api/delivery/uploads/${session.sessionId}/complete`, {});
@@ -628,11 +718,7 @@ describe("authenticated browser delivery uploads", () => {
       intentId: intent.body.intentId, ordinal: 0, conflictResolution: "replace",
     });
     const session = await sessionResponse.json() as {sessionId:string};
-    const part = await instance.request(`/api/delivery/uploads/${session.sessionId}/parts/1`, {
-      method: "PUT", headers: { "Content-Length": "4", "Content-Type": "application/octet-stream" },
-      body: Uint8Array.from([1, 2, 3, 4]),
-    }, env);
-    expect(part.status).toBe(200);
+    await uploadDirectPart(instance, session.sessionId, 1, Uint8Array.from([1, 2, 3, 4]));
     const completed = await jsonRequest(instance, `/api/delivery/uploads/${session.sessionId}/complete`, {});
     expect(completed.status).toBe(200);
 

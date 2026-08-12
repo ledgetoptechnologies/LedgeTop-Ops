@@ -1495,6 +1495,14 @@ type BrowserUploadSession = {
   status: "active" | "completed" | "skipped" | "aborted" | "expired";
   parts?: Array<{ partNumber: number; etag: string; size: number }>;
 };
+type BrowserUploadPartTicket = {
+  url: string;
+  method: "PUT";
+  headers: Record<string, string>;
+  expiresAt: string;
+  partNumber: number;
+  size: number;
+};
 const MAX_BROWSER_UPLOAD_FILES = 100;
 const MAX_BROWSER_UPLOAD_BYTES = 500 * 1024 ** 3;
 const MAX_BROWSER_UPLOAD_FILE_BYTES = 500 * 1024 ** 3;
@@ -1512,6 +1520,7 @@ const RESERVED_BROWSER_UPLOAD_SEGMENTS = new Set([
 ]);
 
 class UploadAuthorizationError extends Error {}
+class DirectUploadError extends Error {}
 
 function browserUploadRelativePath(file: File) {
   const supplied =
@@ -1560,6 +1569,72 @@ function retryableUploadError(error: unknown) {
     (error.status === 409 &&
       error.message.toLowerCase().includes("already in progress"))
   );
+}
+
+async function uploadDirectR2Part(
+  sessionId: string,
+  partNumber: number,
+  chunk: Blob,
+) {
+  let lastError: Error | undefined;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const ticket = await api<BrowserUploadPartTicket>(
+        `/api/delivery/uploads/${encodeURIComponent(sessionId)}/parts/${partNumber}/ticket`,
+        { method: "POST", body: "{}" },
+      );
+      let directUrl: URL;
+      try {
+        directUrl = new URL(ticket.url);
+      } catch {
+        throw new DirectUploadError("The upload part ticket URL was invalid.");
+      }
+      if (
+        ticket.method !== "PUT" ||
+        ticket.partNumber !== partNumber ||
+        ticket.size !== chunk.size ||
+        !Number.isFinite(Date.parse(ticket.expiresAt)) ||
+        Date.parse(ticket.expiresAt) <= Date.now() + 5_000 ||
+        directUrl.protocol !== "https:" ||
+        !directUrl.hostname.endsWith(".r2.cloudflarestorage.com") ||
+        directUrl.origin === location.origin
+      )
+        throw new DirectUploadError("The upload part ticket was invalid or expired.");
+      const headers = new Headers(ticket.headers);
+      if (headers.get("Content-Type") !== "application/octet-stream")
+        throw new DirectUploadError("The upload part ticket had invalid headers.");
+      let response: Response;
+      try {
+        response = await fetch(directUrl, {
+          method: ticket.method,
+          headers,
+          body: chunk,
+          credentials: "omit",
+        });
+      } catch {
+        throw new DirectUploadError("The browser could not reach R2 for this upload part.");
+      }
+      if (!response.ok)
+        throw new DirectUploadError(`R2 rejected the upload part (${response.status}).`);
+      const etag = response.headers.get("ETag")?.trim();
+      if (!etag) throw new DirectUploadError("R2 did not return an upload part ETag.");
+      await api(
+        `/api/delivery/uploads/${encodeURIComponent(sessionId)}/parts/${partNumber}`,
+        {
+          method: "PUT",
+          body: JSON.stringify({ etag, size: chunk.size }),
+        },
+      );
+      return;
+    } catch (caught) {
+      const error = uploadError(caught);
+      if (error instanceof UploadAuthorizationError) throw error;
+      if (!(error instanceof DirectUploadError) || attempt === 2) throw error;
+      lastError = error;
+      await new Promise((resolve) => setTimeout(resolve, 300 * 2 ** attempt));
+    }
+  }
+  throw lastError || new DirectUploadError("The direct upload part failed.");
 }
 
 async function uploadIntentFile(
@@ -1645,14 +1720,7 @@ async function uploadIntentFile(
           offset,
           Math.min(file.size, offset + created.partSize),
         );
-        await api(
-          `/api/delivery/uploads/${encodeURIComponent(created.sessionId)}/parts/${partNumber}`,
-          {
-            method: "PUT",
-            headers: { "Content-Type": "application/octet-stream" },
-            body: chunk,
-          },
-        );
+        await uploadDirectR2Part(created.sessionId, partNumber, chunk);
         uploadedBytes += chunk.size;
         progress({
           ordinal,

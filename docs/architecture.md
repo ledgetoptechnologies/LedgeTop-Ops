@@ -33,10 +33,15 @@ control what those identities may do after authentication. Delivery
 Coordinators can browse and manage links without receiving R2 mutation
 permissions.
 
-Large authenticated staff uploads use same-origin, Worker-mediated multipart
-transfer into private R2 staging. The Worker validates the complete upload
-intent and every destination, checkpoints parts in D1, and never accepts a
-caller-supplied unrestricted R2 key or returns a public/presigned R2 URL.
+Large authenticated staff uploads use an Operations-authorized control plane
+and direct browser-to-R2 multipart data plane. The Worker validates the complete
+upload intent and every destination, creates a private opaque staging upload,
+issues a short-lived URL signed for exactly one staging object, upload ID, part
+number, length, and content type, checkpoints the returned part ETag in D1, and
+conditionally publishes the completed staging object to the authorized
+destination. Source request bodies never enter the Worker. The signed URL is a
+temporary bearer capability for one part, not a public bucket or an
+unrestricted caller-supplied R2 key.
 Recursive copy, move, rename, replacement, and purge work is represented by
 durable operation records and processed in bounded, idempotent steps. Folder
 copy, move, and rename requests are rejected when the destination is the source

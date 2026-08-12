@@ -1,5 +1,7 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
+const R2_ORIGIN = "https://0123456789abcdef0123456789abcdef.r2.cloudflarestorage.com";
+
 type RequestRecord = {
   method: string;
   path: string;
@@ -14,6 +16,8 @@ type UploadApiOptions = {
   uploadPermission?: boolean;
   uploadCapability?: boolean;
   rejectPartWith?: 401 | 403;
+  rejectR2Attempts?: number;
+  omitR2EtagAttempts?: number;
   conflictOrdinal?: number;
 };
 
@@ -53,6 +57,45 @@ function session(options: UploadApiOptions) {
 async function installUploadApi(page: Page, options: UploadApiOptions = {}) {
   const requests: RequestRecord[] = [];
   let intentSequence = 0;
+  let ticketSequence = 0;
+  let r2Attempts = 0;
+  let intentFiles: Array<{ size: number }> = [];
+
+  await page.route(`${R2_ORIGIN}/**`, async (route: Route) => {
+    const incoming = route.request();
+    const url = new URL(incoming.url());
+    if (incoming.method() === "OPTIONS") {
+      await route.fulfill({
+        status: 204,
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "PUT",
+          "Access-Control-Allow-Headers": "Content-Type",
+        },
+      });
+      return;
+    }
+    const record: RequestRecord = {
+      method: incoming.method(),
+      path: `${url.pathname}${url.search}`,
+      origin: url.origin,
+      headers: incoming.headers(),
+      body: incoming.postDataBuffer() || undefined,
+    };
+    requests.push(record);
+    r2Attempts += 1;
+    if (r2Attempts <= (options.rejectR2Attempts || 0)) {
+      await route.fulfill({ status: 403, body: "expired ticket" });
+      return;
+    }
+    const headers: Record<string, string> = {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Expose-Headers": "ETag",
+    };
+    if (r2Attempts > (options.omitR2EtagAttempts || 0))
+      headers.ETag = `\"r2-etag-${r2Attempts}\"`;
+    await route.fulfill({ status: 200, headers, body: "" });
+  });
 
   await page.route("**/api/**", async (route: Route) => {
     const incoming = route.request();
@@ -85,6 +128,7 @@ async function installUploadApi(page: Page, options: UploadApiOptions = {}) {
     }
     if (incoming.method() === "POST" && path === "/api/delivery/uploads/intents") {
       intentSequence += 1;
+      intentFiles = ((record.json as { files?: Array<{ size: number }> }).files || []);
       await route.fulfill({ status: 201, json: { intentId: `intent-${intentSequence}` } });
       return;
     }
@@ -124,16 +168,34 @@ async function installUploadApi(page: Page, options: UploadApiOptions = {}) {
       });
       return;
     }
-    const part = path.match(/^\/api\/delivery\/uploads\/(session-\d+)\/parts\/(\d+)$/);
-    if (incoming.method() === "PUT" && part) {
+    const ticket = path.match(/^\/api\/delivery\/uploads\/(session-\d+)\/parts\/(\d+)\/ticket$/);
+    if (incoming.method() === "POST" && ticket) {
       if (options.rejectPartWith) {
         await route.fulfill({
           status: options.rejectPartWith,
           json: { error: options.rejectPartWith === 401 ? "Session expired" : "Upload grant revoked" },
         });
-      } else {
-        await route.fulfill({ json: { etag: `etag-${part[1]}-${part[2]}` } });
+        return;
       }
+      ticketSequence += 1;
+      const partNumber = Number(ticket[2]);
+      const ordinal = Number(ticket[1]!.replace("session-", ""));
+      const size = Math.min(3, Math.max(0, (intentFiles[ordinal]?.size || 0) - (partNumber - 1) * 3));
+      await route.fulfill({
+        json: {
+          url: `${R2_ORIGIN}/client-data/staging/${ticket[1]}/${partNumber}?ticket=${ticketSequence}`,
+          method: "PUT",
+          headers: { "Content-Type": "application/octet-stream" },
+          expiresAt: new Date(Date.now() + 300_000).toISOString(),
+          partNumber,
+          size,
+        },
+      });
+      return;
+    }
+    const part = path.match(/^\/api\/delivery\/uploads\/(session-\d+)\/parts\/(\d+)$/);
+    if (incoming.method() === "PUT" && part) {
+      await route.fulfill({ json: { partNumber: Number(part[2]), ...(record.json as object) } });
       return;
     }
     if (
@@ -210,7 +272,45 @@ test("direct upload controls require the runtime capability, administrator role,
   await expect.poll(() => apiMutations(deniedRequests).length).toBe(0);
 });
 
-test("single-file upload uses a same-origin resumable sequence and exposes byte progress", async ({ page }) => {
+test("rejects browser file-count, per-file, and batch bounds before creating an upload intent", async ({ page }) => {
+  const requests = await installUploadApi(page);
+  await page.goto("/delivery");
+  const input = page.locator('input[type="file"]:not([webkitdirectory])');
+
+  await input.evaluate((element) => {
+    const transfer = new DataTransfer();
+    for (let index = 0; index < 101; index += 1)
+      transfer.items.add(new File([new Uint8Array([index])], `item-${index}.jpg`, { type: "image/jpeg" }));
+    (element as HTMLInputElement).files = transfer.files;
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(page.locator(".operation-status.error")).toContainText("Choose no more than 100 files");
+
+  await input.evaluate((element) => {
+    const transfer = new DataTransfer();
+    const file = new File([new Uint8Array([1])], "too-large.jpg", { type: "image/jpeg" });
+    Object.defineProperty(file, "size", { value: 500 * 1024 ** 3 + 1 });
+    transfer.items.add(file);
+    (element as HTMLInputElement).files = transfer.files;
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(page.locator(".operation-status.error")).toContainText("unsupported file size");
+
+  await input.evaluate((element) => {
+    const transfer = new DataTransfer();
+    for (const name of ["large-a.jpg", "large-b.jpg"]) {
+      const file = new File([new Uint8Array([1])], name, { type: "image/jpeg" });
+      Object.defineProperty(file, "size", { value: 300 * 1024 ** 3 });
+      transfer.items.add(file);
+    }
+    (element as HTMLInputElement).files = transfer.files;
+    element.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await expect(page.locator(".operation-status.error")).toContainText("selected batch exceeds the 500 GB limit");
+  expect(apiMutations(requests)).toHaveLength(0);
+});
+
+test("single-file upload sends source bytes only to signed R2 URLs and exposes byte progress", async ({ page }) => {
   const requests = await installUploadApi(page);
   await page.goto("/delivery");
 
@@ -229,7 +329,9 @@ test("single-file upload uses a same-origin resumable sequence and exposes byte 
   expect(mutations.map(({ method, path }) => `${method} ${path}`)).toEqual([
     "POST /api/delivery/uploads/intents",
     "POST /api/delivery/uploads",
+    "POST /api/delivery/uploads/session-0/parts/1/ticket",
     "PUT /api/delivery/uploads/session-0/parts/1",
+    "POST /api/delivery/uploads/session-0/parts/2/ticket",
     "PUT /api/delivery/uploads/session-0/parts/2",
     "POST /api/delivery/uploads/session-0/complete",
   ]);
@@ -249,15 +351,48 @@ test("single-file upload uses a same-origin resumable sequence and exposes byte 
     "POST /api/delivery/uploads/intents",
     "POST /api/delivery/uploads",
     "GET /api/delivery/uploads/session-0",
+    "POST /api/delivery/uploads/session-0/parts/1/ticket",
     "PUT /api/delivery/uploads/session-0/parts/1",
+    "POST /api/delivery/uploads/session-0/parts/2/ticket",
     "PUT /api/delivery/uploads/session-0/parts/2",
     "POST /api/delivery/uploads/session-0/complete",
   ]);
-  expect(mutations.filter((request) => request.method === "PUT").map((request) => request.body)).toEqual([
+  const directRequests = requests.filter((request) => request.origin === R2_ORIGIN);
+  expect(directRequests.map((request) => request.method)).toEqual(["PUT", "PUT"]);
+  expect(directRequests.map((request) => request.body)).toEqual([
     Buffer.from([1, 2, 3]),
     Buffer.from([4, 5, 6]),
   ]);
+  expect(directRequests.every((request) => request.headers["content-type"] === "application/octet-stream")).toBe(true);
+  expect(requests.filter((request) => request.origin !== R2_ORIGIN).every((request) => !request.body)).toBe(true);
+  expect(mutations.filter((request) => request.method === "PUT").map((request) => request.json)).toEqual([
+    { etag: '"r2-etag-1"', size: 3 },
+    { etag: '"r2-etag-2"', size: 3 },
+  ]);
 });
+
+for (const scenario of [
+  { name: "an expired R2 ticket", options: { rejectR2Attempts: 1 } },
+  { name: "a missing R2 ETag", options: { omitR2EtagAttempts: 1 } },
+] as const) {
+  test(`renews the part ticket after ${scenario.name} without treating it as revoked Operations access`, async ({ page }) => {
+    const requests = await installUploadApi(page, scenario.options);
+    await page.goto("/delivery");
+
+    await page.locator('input[type="file"]:not([webkitdirectory])').setInputFiles({
+      name: "retry.jpg",
+      mimeType: "image/jpeg",
+      buffer: Buffer.from([1, 2, 3]),
+    });
+
+    await expect(page.getByText("1/1 files resolved", { exact: true })).toBeVisible();
+    await expect(page.getByText("Uploaded 1 item", { exact: true })).toBeVisible();
+    expect(requests.filter((request) => request.path === "/api/delivery/uploads/session-0/parts/1/ticket")).toHaveLength(2);
+    expect(requests.filter((request) => request.origin === R2_ORIGIN && request.method === "PUT")).toHaveLength(2);
+    expect(requests.filter((request) => request.path === "/api/delivery/uploads/session-0/parts/1" && request.method === "PUT")).toHaveLength(1);
+    await expect(page.getByText("authorization expired or changed", { exact: false })).toHaveCount(0);
+  });
+}
 
 test("folder upload preserves webkit relative paths without a preselected collision policy", async ({ page }) => {
   const requests = await installUploadApi(page);
@@ -289,9 +424,11 @@ test("folder upload preserves webkit relative paths without a preselected collis
   ).toEqual([
     "POST /api/delivery/uploads/intents",
     "POST /api/delivery/uploads",
+    "POST /api/delivery/uploads/session-0/parts/1/ticket",
     "PUT /api/delivery/uploads/session-0/parts/1",
     "POST /api/delivery/uploads/session-0/complete",
     "POST /api/delivery/uploads",
+    "POST /api/delivery/uploads/session-1/parts/1/ticket",
     "PUT /api/delivery/uploads/session-1/parts/1",
     "POST /api/delivery/uploads/session-1/complete",
   ]);
@@ -329,7 +466,7 @@ for (const choice of [
       ordinal: 0,
       conflictResolution: choice.resolution,
     });
-    expect(requests.some((request) => request.method === "PUT")).toBe(choice.uploadsBytes);
+    expect(requests.some((request) => request.origin === R2_ORIGIN && request.method === "PUT")).toBe(choice.uploadsBytes);
     await expect(dialog).toHaveCount(0);
   });
 }
@@ -347,7 +484,7 @@ test("cancelling an actual collision does not create a session or upload bytes",
   await expect(page.locator(".operation-status.error")).toContainText("1 upload failed");
   await expect(page.getByText("failed", { exact: true })).toBeVisible();
   expect(requests.filter((request) => request.method === "POST" && request.path === "/api/delivery/uploads")).toHaveLength(1);
-  expect(requests.some((request) => request.method === "PUT")).toBe(false);
+  expect(requests.some((request) => request.origin === R2_ORIGIN && request.method === "PUT")).toBe(false);
   await expect(dialog).toHaveCount(0);
 });
 
@@ -371,7 +508,8 @@ for (const status of [401, 403] as const) {
     ).toEqual([
       "POST /api/delivery/uploads/intents",
       "POST /api/delivery/uploads",
-      "PUT /api/delivery/uploads/session-0/parts/1",
+      "POST /api/delivery/uploads/session-0/parts/1/ticket",
     ]);
+    expect(requests.some((request) => request.origin === R2_ORIGIN)).toBe(false);
   });
 }

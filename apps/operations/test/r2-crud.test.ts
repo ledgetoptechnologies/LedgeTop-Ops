@@ -1,6 +1,49 @@
 import { describe, expect, it } from "vitest";
-import { assertSafeCrudDestination, browserUploadObjectKey, normalizeCrudKey, operationsMultipartPartSize, requiresAdministratorForMutation } from "../src/worker/r2-crud-validation";
+import { createHash, createHmac } from "node:crypto";
+import { assertSafeCrudDestination, browserUploadObjectKey, normalizeAdministratorDeleteKey, normalizeCrudKey, operationsMultipartPartSize, requiresAdministratorForMutation } from "../src/worker/r2-crud-validation";
 import { presignOperationsR2Part } from "../src/worker/r2-signing";
+
+function awsEncode(value: string): string {
+  return encodeURIComponent(value).replace(/[!'()*]/g, (character) => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function hmac(secret: string | Buffer, value: string): Buffer {
+  return createHmac("sha256", secret).update(value).digest();
+}
+
+function validPartSignature(
+  value: string,
+  headers: { "content-length": string; "content-type": string },
+  secret: string,
+  now: Date,
+): boolean {
+  const url = new URL(value);
+  const supplied = url.searchParams.get("X-Amz-Signature") || "";
+  const timestamp = url.searchParams.get("X-Amz-Date") || "";
+  const expires = Number(url.searchParams.get("X-Amz-Expires"));
+  const issuedAt = Date.UTC(
+    Number(timestamp.slice(0, 4)), Number(timestamp.slice(4, 6)) - 1, Number(timestamp.slice(6, 8)),
+    Number(timestamp.slice(9, 11)), Number(timestamp.slice(11, 13)), Number(timestamp.slice(13, 15)),
+  );
+  if (!Number.isFinite(issuedAt) || !Number.isInteger(expires) || now.getTime() > issuedAt + expires * 1000) return false;
+  const signedHeaders = url.searchParams.get("X-Amz-SignedHeaders") || "";
+  const query = [...url.searchParams.entries()]
+    .filter(([key]) => key !== "X-Amz-Signature")
+    .map(([key, entry]) => [awsEncode(key), awsEncode(entry)] as const)
+    .sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+      leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0)
+    .map(([key, entry]) => `${key}=${entry}`)
+    .join("&");
+  const canonicalHeaders = `content-length:${headers["content-length"]}\ncontent-type:${headers["content-type"]}\nhost:${url.host}\n`;
+  const canonical = `PUT\n${url.pathname}\n${query}\n${canonicalHeaders}\n${signedHeaders}\nUNSIGNED-PAYLOAD`;
+  const scope = (url.searchParams.get("X-Amz-Credential") || "").split("/").slice(1).join("/");
+  const stringToSign = `AWS4-HMAC-SHA256\n${timestamp}\n${scope}\n${createHash("sha256").update(canonical).digest("hex")}`;
+  const dateKey = hmac(`AWS4${secret}`, timestamp.slice(0, 8));
+  const regionKey = hmac(dateKey, "auto");
+  const serviceKey = hmac(regionKey, "s3");
+  const signingKey = hmac(serviceKey, "aws4_request");
+  return createHmac("sha256", signingKey).update(stringToSign).digest("hex") === supplied;
+}
 
 describe("Operations R2 CRUD boundaries", () => {
   it("accepts only canonical Jobs/Clients paths", () => {
@@ -77,10 +120,43 @@ describe("Operations R2 CRUD boundaries", () => {
   });
 
   it("creates a bounded object-specific multipart ticket", async () => {
-    const url=await presignOperationsR2Part({accountId:"0123456789abcdef0123456789abcdef",bucket:"client-data",key:"Jobs/Clients/Acme/photo 1.jpg",uploadId:"upload+id",partNumber:2,accessKeyId:"key",secretAccessKey:"secret",now:new Date("2026-07-24T12:00:00Z")});
+    const input={accountId:"0123456789abcdef0123456789abcdef",bucket:"client-data",key:"_ltds/browser-uploads/intent/session",uploadId:"upload+id",partNumber:2,contentLength:32*1024**2,contentType:"application/octet-stream",accessKeyId:"key",secretAccessKey:"secret",now:new Date("2026-07-24T12:00:00Z")};
+    const url=await presignOperationsR2Part(input);
     expect(url).toContain("partNumber=2");
     expect(url).toContain("uploadId=upload%2Bid");
-    expect(url).toContain("photo%201.jpg");
+    expect(url).toContain("_ltds/browser-uploads/intent/session");
+    expect(url).toContain("X-Amz-Expires=300");
+    expect(url).toContain("X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost");
     expect(url).toMatch(/X-Amz-Signature=[a-f0-9]{64}$/);
+    expect(validPartSignature(url, { "content-length": String(input.contentLength), "content-type": input.contentType }, input.secretAccessKey, input.now)).toBe(true);
+
+    const otherSession=await presignOperationsR2Part({...input,key:"_ltds/browser-uploads/other/session",uploadId:"other",partNumber:1});
+    const otherLength=await presignOperationsR2Part({...input,contentLength:1});
+    expect(new URL(otherSession).searchParams.get("X-Amz-Signature")).not.toBe(new URL(url).searchParams.get("X-Amz-Signature"));
+    expect(new URL(otherLength).searchParams.get("X-Amz-Signature")).not.toBe(new URL(url).searchParams.get("X-Amz-Signature"));
+    const replayed = new URL(url);
+    replayed.pathname = new URL(otherSession).pathname;
+    replayed.searchParams.set("uploadId", "other");
+    expect(validPartSignature(replayed.toString(), { "content-length": String(input.contentLength), "content-type": input.contentType }, input.secretAccessKey, input.now)).toBe(false);
+    expect(validPartSignature(url, { "content-length": "1", "content-type": input.contentType }, input.secretAccessKey, input.now)).toBe(false);
+    expect(validPartSignature(url, { "content-length": String(input.contentLength), "content-type": "text/plain" }, input.secretAccessKey, input.now)).toBe(false);
+    expect(validPartSignature(url, { "content-length": String(input.contentLength), "content-type": input.contentType }, input.secretAccessKey, new Date("2026-07-24T12:05:01Z"))).toBe(false);
+  });
+
+  it("allows administrator deletion under Jobs only without widening ordinary CRUD", () => {
+    expect(normalizeAdministratorDeleteKey("Jobs/.stfolder", true)).toBe("Jobs/.stfolder/");
+    expect(normalizeAdministratorDeleteKey("Jobs/Demo/old-photo.jpg")).toBe("Jobs/Demo/old-photo.jpg");
+    expect(() => normalizeAdministratorDeleteKey("Jobs", true)).toThrow();
+    expect(() => normalizeAdministratorDeleteKey("_ltds/derivatives/x.webp")).toThrow();
+    expect(() => normalizeAdministratorDeleteKey("Jobs/Clients/Acme/_ltds/internal.json")).toThrow();
+    expect(() => normalizeAdministratorDeleteKey("Jobs/Clients/Acme/incoming/raw.jpg")).toThrow();
+    expect(() => normalizeAdministratorDeleteKey("Outside/Jobs/file.jpg")).toThrow();
+    expect(() => normalizeCrudKey("Jobs/.stfolder", true)).toThrow();
+  });
+
+  it("clamps multipart ticket expiry to five minutes and permits a one-second session remainder", async () => {
+    const base={accountId:"0123456789abcdef0123456789abcdef",bucket:"client-data",key:"_ltds/browser-uploads/intent/session",uploadId:"upload",partNumber:1,contentLength:4,contentType:"application/octet-stream",accessKeyId:"key",secretAccessKey:"secret",now:new Date("2026-07-24T12:00:00Z")};
+    expect(new URL(await presignOperationsR2Part({...base,expiresSeconds:999})).searchParams.get("X-Amz-Expires")).toBe("300");
+    expect(new URL(await presignOperationsR2Part({...base,expiresSeconds:1})).searchParams.get("X-Amz-Expires")).toBe("1");
   });
 });

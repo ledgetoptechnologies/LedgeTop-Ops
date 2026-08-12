@@ -18,6 +18,12 @@ export const THUMBNAIL_PREBUILT_GRACE_SECONDS = 15 * 60;
 
 const THUMBNAIL_LEASE_MINUTES = 5;
 const SUPPORTED_IMAGE_EXTENSIONS = new Set(["avif", "gif", "heic", "heif", "jpeg", "jpg", "png", "webp"]);
+// Keep this deliberately limited to unambiguous video extensions. Video
+// thumbnails are disabled for this release, so either a video filename or a
+// declared video MIME type must win over otherwise image-like metadata.
+const DISABLED_VIDEO_EXTENSIONS = new Set([
+  "3g2", "3gp", "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ogv", "vob", "webm", "wmv",
+]);
 const SUPPORTED_IMAGE_CONTENT_TYPES = new Set([
   "image/avif",
   "image/gif",
@@ -45,6 +51,7 @@ export interface ThumbnailEnqueueInput {
   sourceKey: string;
   sourceEtag: string;
   sourceSize: number;
+  contentType?: string;
   eventTime?: string;
   delaySeconds?: number;
 }
@@ -172,9 +179,15 @@ export function supportedThumbnailSource(key: string, contentType?: string): boo
   return thumbnailSourceKind(key, contentType) !== null;
 }
 
+export function videoThumbnailSourceDisabled(key: string, contentType?: string): boolean {
+  const normalizedType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  return normalizedType?.startsWith("video/") === true || DISABLED_VIDEO_EXTENSIONS.has(extension(key));
+}
+
 export function thumbnailSourceKind(key: string, contentType?: string): ThumbnailSourceKind | null {
   const normalizedType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
   const sourceExtension = extension(key);
+  if (videoThumbnailSourceDisabled(key, normalizedType)) return null;
   if (sourceExtension === "pdf" || normalizedType === "application/pdf") return "pdf";
   if ((normalizedType && SUPPORTED_IMAGE_CONTENT_TYPES.has(normalizedType)) || SUPPORTED_IMAGE_EXTENSIONS.has(sourceExtension)) return "image";
   return null;
@@ -399,6 +412,9 @@ export async function enqueueThumbnailJob(
   if (!canonicalThumbnailSourceKey(input.sourceKey) || !sourceEtag || !Number.isSafeInteger(input.sourceSize) || input.sourceSize < 0) {
     throw new Error("Invalid thumbnail enqueue input");
   }
+  if (videoThumbnailSourceDisabled(input.sourceKey, input.contentType)) {
+    throw new Error("Video thumbnail jobs are disabled");
+  }
   const thumbnailKey = await thumbnailObjectKey(input.sourceKey, sourceEtag);
   const eventTime = normalizeThumbnailEventTime(input.eventTime);
   const registration = await registerJob(env, input.sourceKey, sourceEtag, input.sourceSize, thumbnailKey, eventTime);
@@ -468,6 +484,17 @@ async function claimJob(env: Env, sourceKey: string, sourceEtag: string): Promis
     .bind(`+${THUMBNAIL_LEASE_MINUTES} minutes`, sourceKey, sourceEtag)
     .first<{ attempt_count: number }>();
   return claim?.attempt_count ?? null;
+}
+
+async function rejectDisabledVideoJob(env: Env, sourceKey: string, sourceEtag: string): Promise<void> {
+  await env.DELIVERY_DB.prepare(`/* thumbnail.video-disabled */
+    UPDATE image_thumbnail_jobs
+    SET status='failed',thumbnail_etag=NULL,thumbnail_size=NULL,
+      error_code='video_thumbnail_disabled',error_message='Video thumbnail rendering is disabled for this release',
+      lease_until=NULL,failed_at=datetime('now'),updated_at=datetime('now')
+    WHERE source_key=? AND source_etag=? AND status IN ('pending','processing')`)
+    .bind(sourceKey, sourceEtag)
+    .run();
 }
 
 async function failJob(
@@ -576,6 +603,7 @@ export async function enqueueThumbnailsForPath(env: Env, sourceKey: string, isPr
       sourceKey: object.key,
       sourceEtag: object.httpEtag,
       sourceSize: object.size,
+      contentType: object.httpMetadata?.contentType,
       eventTime: object.uploaded.toISOString(),
     });
     if (result.enqueued) queued += 1;
@@ -757,7 +785,12 @@ export async function handleRemovedPrebuiltThumbnail(
   const source = await env.DATA_BUCKET.head(row.source_key);
   if (indexed && source && cleanEtag(indexed.etag) === cleanEtag(source.httpEtag) && indexed.size === source.size &&
     thumbnailSourceEligible(row.source_key, source.size, source.httpMetadata?.contentType) && !await sourceIsTrashed(env, row.source_key)) {
-    await enqueueThumbnailJob(env, { sourceKey: row.source_key, sourceEtag: source.httpEtag, sourceSize: source.size });
+    await enqueueThumbnailJob(env, {
+      sourceKey: row.source_key,
+      sourceEtag: source.httpEtag,
+      sourceSize: source.size,
+      contentType: source.httpMetadata?.contentType,
+    });
   }
   return "removed";
 }
@@ -804,7 +837,12 @@ export async function reconcileThumbnailRegistrations(env: Env, limit = 100): Pr
     const live = await env.DATA_BUCKET.head(row.source_key);
     if (indexed && live && cleanEtag(indexed.etag) === cleanEtag(live.httpEtag) && indexed.size === live.size &&
       thumbnailSourceEligible(row.source_key, live.size, live.httpMetadata?.contentType) && !await sourceIsTrashed(env, row.source_key)) {
-      await enqueueThumbnailJob(env, { sourceKey: row.source_key, sourceEtag: live.httpEtag, sourceSize: live.size });
+      await enqueueThumbnailJob(env, {
+        sourceKey: row.source_key,
+        sourceEtag: live.httpEtag,
+        sourceSize: live.size,
+        contentType: live.httpMetadata?.contentType,
+      });
     }
   }
   const completedCycle = rows.results.length < boundedLimit;
@@ -955,6 +993,12 @@ async function processThumbnailJobAttempt(
     }
     if (currentLocation) await deleteImageLocation(env, message.sourceKey, sourceEtag);
     return { outcome: "obsolete" };
+  }
+
+  if (videoThumbnailSourceDisabled(message.sourceKey, sourceHead.httpMetadata?.contentType)) {
+    if (currentThumbnail) await rejectDisabledVideoJob(env, message.sourceKey, sourceEtag);
+    if (currentLocation) await deleteImageLocation(env, message.sourceKey, sourceEtag);
+    return { outcome: "failed", errorCode: "video_thumbnail_disabled" };
   }
 
   if (currentLocation || thumbnailSourceKind(message.sourceKey, sourceHead.httpMetadata?.contentType) === "image") {
@@ -1133,7 +1177,8 @@ export async function consumeThumbnailJobs(batch: MessageBatch<unknown>, env: En
     try {
       const finalAttempt = queueMessage.attempts >= THUMBNAIL_MAX_DELIVERY_ATTEMPTS;
       const result = await processThumbnailJob(env, queueMessage.body, { finalAttempt });
-      if (result.outcome === "retry" || (result.outcome === "failed" && finalAttempt)) {
+      if (result.outcome === "retry" ||
+        (result.outcome === "failed" && finalAttempt && result.errorCode !== "video_thumbnail_disabled")) {
         queueMessage.retry({ delaySeconds: retryDelay(queueMessage.attempts) });
       } else {
         queueMessage.ack();

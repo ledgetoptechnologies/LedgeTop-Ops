@@ -31,7 +31,7 @@ const server = createServer(async (request, response) => {
   response.writeHead(200, {
     "Cache-Control": "no-store",
     "Content-Type": contentTypes.get(extname(file)) ?? "application/octet-stream",
-    "Content-Security-Policy": "default-src 'self'; img-src 'self' https://ledgetopdroneservices.com https://*.mapbox.com data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://api.mapbox.com https://events.mapbox.com; worker-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+    "Content-Security-Policy": "default-src 'self'; img-src 'self' https://ledgetopdroneservices.com https://*.mapbox.com data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' https://*.r2.cloudflarestorage.com https://api.mapbox.com https://events.mapbox.com; worker-src blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   });
   createReadStream(file).pipe(response);
 });

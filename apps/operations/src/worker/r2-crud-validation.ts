@@ -18,6 +18,21 @@ export function normalizeCrudKey(value:unknown,folder=false):string{
   return result;
 }
 
+/**
+ * Delete-only escape hatch for Operations administrators.  It deliberately does
+ * not change the ordinary CRUD root: create, copy, move, rename and upload stay
+ * confined to Jobs/Clients.  The Jobs root itself and every system-reserved
+ * segment remain forbidden.
+ */
+export function normalizeAdministratorDeleteKey(value:unknown,folder=false):string{
+  if(typeof value!=="string"||value.length>MAX_KEY_LENGTH||/[\0-\x1f\x7f]/.test(value))throw new HTTPException(400,{message:"A valid R2 path is required"});
+  const normalized=value.trim().replace(/\\/g,"/").replace(/^\/+/,"").replace(/\/{2,}/g,"/"),clean=normalized.replace(/\/+$/,""),parts=clean.split("/");
+  if(!clean||clean==="Jobs"||!clean.startsWith("Jobs/")||parts.some(part=>!part||part==="."||part===".."||reservedSegment(part)||part.toLowerCase()==="incoming"))throw new HTTPException(400,{message:"Administrator deletion is limited to non-system content under Jobs/"});
+  const result=folder?`${clean}/`:clean;
+  if(new TextEncoder().encode(result).byteLength>MAX_R2_KEY_BYTES)throw new HTTPException(400,{message:"The R2 path exceeds the 1,024-byte storage limit"});
+  return result;
+}
+
 export function normalizeUploadRelativePath(value: unknown): string {
   if (typeof value !== "string" || !value || value.length > MAX_KEY_LENGTH || value.startsWith("/") ||
     value.includes("\\") || value.endsWith("/") || value.includes("//") || /[\0-\x1f\x7f]/.test(value)) {

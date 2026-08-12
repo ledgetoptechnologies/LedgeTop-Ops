@@ -201,7 +201,7 @@ These credentials sign direct browser download URLs only. Delivery's normal R2 r
 
 Create a separate least-privilege R2 credential for the Operations Worker's
 public Incoming multipart flow. Scope Object Read & Write to `ltds-incoming`;
-do not reuse the TrueNAS or Delivery credential:
+do not reuse the TrueNAS, Delivery, or authenticated staff-upload credential:
 
 ```powershell
 Set-Location apps/operations
@@ -210,21 +210,37 @@ npx.cmd wrangler secret put R2_SECRET_ACCESS_KEY
 ```
 
 These credentials sign only short-lived, object-specific Incoming quarantine
-parts. Authenticated staff delivery uploads do not use them: the browser sends
-parts to same-origin Operations routes and the Worker writes through its private
-`DATA_BUCKET` binding. The staff route never returns a public/presigned R2 URL.
+parts.
 
-Set the account S3 endpoint and Incoming bucket name as non-secret Operations
-variables. Apply CORS only to the private Incoming bucket for its direct
-quarantine-part flow. Permit only the production Incoming origin and dedicated
-staging Incoming origin, allow only the signed headers, and expose `ETag`.
-Never permit `*`. The `client-data` bucket needs no browser-upload CORS rule for
-the same-origin staff flow; do not add one for this feature.
+Create another dedicated R2 credential scoped Object Read & Write only to the
+private `client-data` bucket for authenticated Operations staff-upload part
+tickets. Store it under distinct secret names so compromising or rotating one
+upload surface cannot authorize the other:
+
+```powershell
+Set-Location apps/operations
+npx.cmd wrangler secret put R2_DELIVERY_UPLOAD_ACCESS_KEY_ID
+npx.cmd wrangler secret put R2_DELIVERY_UPLOAD_SECRET_ACCESS_KEY
+```
+
+The Worker hardcodes the configured account, `client-data` bucket, opaque
+staging key, upload ID, part number, exact length, and content type in each
+five-minute SigV4 ticket. It never returns the credential or a bucket-wide
+capability.
+
+Set the account S3 endpoint and both bucket names as non-secret Operations
+variables. Apply separate exact-origin CORS rules to each private bucket. The
+Incoming bucket permits only the production Incoming origin. The `client-data`
+bucket permits only the production Operations origin, `PUT`, and
+`content-type`, and exposes `ETag`; the browser transport supplies the signed
+`Content-Length` automatically. Never permit `*`, never enable `r2.dev`, and do
+not combine production and staging origins or buckets.
 
 Apply the checked-in production policy from the Operations directory:
 
 ```powershell
 npx.cmd wrangler r2 bucket cors set ltds-incoming --file r2-incoming-cors.json
+npx.cmd wrangler r2 bucket cors set client-data --file r2-cors.json
 ```
 
 For isolated staging, use a separately reviewed policy containing only the
@@ -276,19 +292,22 @@ Apply `apps/operations/r2-incoming-cors.json`, expose `ETag`, and configure a 14
 
 ## 7a. Authenticated staff delivery uploads
 
-Authenticated delivery uploads remain on `ltds-ops`; a separate public upload
-Worker or endpoint is neither required nor permitted. Keep
+Authenticated delivery upload authorization remains on `ltds-ops`; part bytes
+go directly from the authorized browser to the private R2 S3 endpoint. A
+separate public upload Worker, public bucket, or public hostname is neither
+required nor permitted. Keep
 `DIRECT_DELIVERY_UPLOADS_ENABLED=false` while applying Operations migration
 `0018_browser_upload_intents.sql` followed by Operations migrations through
-`0022_r2_operation_retries.sql` and validating the same-origin
-route. The
+`0022_r2_operation_retries.sql` and validating the split Operations-control/R2-
+data path. The
 final reviewed production version may set it to `true` only after migration,
 queue/binding verification, and synthetic authorization/lifecycle acceptance;
 rollback first returns it to `false` without removing cleanup-capable code. The
 feature requires the existing Operations Access application and audience,
-`OPS_DB`, private `DATA_BUCKET`, `DELIVERY_DB`, `THUMBNAIL_QUEUE`, and both
-five-minute and 15-minute Cron Triggers. It requires no new R2 API credential,
-CORS rule, public bucket domain, route, hostname, queue, or Worker.
+`OPS_DB`, private `DATA_BUCKET`, `DELIVERY_DB`, `THUMBNAIL_QUEUE`, both
+five-minute and 15-minute Cron Triggers, the two dedicated delivery signing
+secrets above, and the reviewed `client-data` CORS rule. It requires no public
+bucket domain, route, hostname, queue, or additional Worker.
 
 The active access model is deliberately narrow: an Operations staff principal
 must pass the expected-host, Access JWT/session, origin/CSRF, administrator, and
