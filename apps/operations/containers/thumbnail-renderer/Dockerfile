@@ -5,6 +5,7 @@ RUN apt-get update \
     libvips-tools \
     poppler-utils \
     webp \
+    ffmpeg \
     tini \
   && rm -rf /var/lib/apt/lists/* \
   && useradd --system --uid 10001 --create-home --home-dir /home/renderer renderer \

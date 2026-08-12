@@ -9,7 +9,7 @@ export const THUMBNAIL_HEIGHT = 240;
 export const THUMBNAIL_MAX_INPUT_BYTES = 512 * 1024 * 1024;
 export const PDF_THUMBNAIL_MAX_INPUT_BYTES = 256 * 1024 * 1024;
 /** Retained for compatibility only; video rendering is disabled in this release. */
-export const VIDEO_THUMBNAIL_MAX_INPUT_BYTES = 100_000_000;
+export const VIDEO_THUMBNAIL_MAX_INPUT_BYTES = 10 * 1024 * 1024 * 1024;
 export const THUMBNAIL_MAX_OUTPUT_BYTES = 128 * 1024;
 export const THUMBNAIL_MAX_DELIVERY_ATTEMPTS = 6;
 export const THUMBNAIL_MAX_RECOVERY_ATTEMPTS = THUMBNAIL_MAX_DELIVERY_ATTEMPTS * 2;
@@ -39,7 +39,15 @@ SUPPORTED_IMAGE_EXTENSIONS.add("tif");
 SUPPORTED_IMAGE_EXTENSIONS.add("tiff");
 SUPPORTED_IMAGE_EXTENSIONS.add("bmp");
 
-export type ThumbnailSourceKind = "image" | "pdf";
+const SUPPORTED_VIDEO_EXTENSIONS = new Set([
+  "mp4", "mov", "mkv", "avi", "mts", "m2ts", "wmv", "flv", "webm", "mxf", "3gp", "mpg", "mpeg", "ts",
+]);
+const SUPPORTED_VIDEO_CONTENT_TYPES = new Set([
+  "video/mp4", "video/quicktime", "video/x-matroska", "video/x-msvideo",
+  "video/mpeg", "video/webm", "video/x-flv", "video/3gpp",
+]);
+
+export type ThumbnailSourceKind = "image" | "pdf" | "video";
 
 export interface ThumbnailJobMessage {
   kind: typeof THUMBNAIL_JOB_KIND;
@@ -190,13 +198,17 @@ export function thumbnailSourceKind(key: string, contentType?: string): Thumbnai
   if (videoThumbnailSourceDisabled(key, normalizedType)) return null;
   if (sourceExtension === "pdf" || normalizedType === "application/pdf") return "pdf";
   if ((normalizedType && SUPPORTED_IMAGE_CONTENT_TYPES.has(normalizedType)) || SUPPORTED_IMAGE_EXTENSIONS.has(sourceExtension)) return "image";
+  if ((normalizedType && SUPPORTED_VIDEO_CONTENT_TYPES.has(normalizedType)) || SUPPORTED_VIDEO_EXTENSIONS.has(sourceExtension)) return "video";
   return null;
 }
 
 export function thumbnailSourceWithinInputLimit(kind: ThumbnailSourceKind, size: number): boolean {
-  return Number.isSafeInteger(size) && size > 0 && size <= (kind === "pdf"
+  const maximum = kind === "pdf"
     ? PDF_THUMBNAIL_MAX_INPUT_BYTES
-    : THUMBNAIL_MAX_INPUT_BYTES);
+    : kind === "video"
+    ? VIDEO_THUMBNAIL_MAX_INPUT_BYTES
+    : THUMBNAIL_MAX_INPUT_BYTES;
+  return Number.isSafeInteger(size) && size > 0 && size <= maximum;
 }
 
 /**

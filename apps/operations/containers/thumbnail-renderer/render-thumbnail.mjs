@@ -7,6 +7,7 @@ const [kind, source, output, expectedSizeValue] = process.argv.slice(2);
 const expectedSize = Number(expectedSizeValue);
 const MAX_IMAGE_BYTES = 512 * 1024 * 1024;
 const MAX_PDF_BYTES = 256 * 1024 * 1024;
+const MAX_VIDEO_BYTES = 10 * 1024 * 1024 * 1024;
 const MAX_PIXELS = 110_000_000;
 const MAX_DIMENSION = 30_000;
 const MAX_PDF_PAGES = 1_000;
@@ -122,6 +123,63 @@ if (kind === "image") {
   validateRaster(raster);
   renderWebp(raster);
   try { unlinkSync(raster); } catch {}
+} else if (kind === "video") {
+  validateSourceSize(MAX_VIDEO_BYTES);
+
+  // Probe duration to pick a seek point at ~10% in, or 5s for short clips
+  const probeResult = spawnSync("ffprobe", [
+    "-v", "error",
+    "-show_entries", "format=duration",
+    "-of", "default=noprint_wrappers=1:nokey=1",
+    source,
+  ], {
+    encoding: "utf8",
+    timeout: 30_000,
+    maxBuffer: MAX_TOOL_OUTPUT_BYTES,
+    env: { PATH: process.env.PATH, HOME: process.env.HOME, TMPDIR: process.env.TMPDIR },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (probeResult.error || probeResult.status !== 0) fail(20);
+
+  const duration = Number(probeResult.stdout?.trim());
+  if (!Number.isFinite(duration) || duration <= 0) fail(20);
+
+  // Seek to 10% of duration, capped at 5s minimum, 30s maximum
+  let seekTime = duration * 0.1;
+  if (seekTime < 5) seekTime = Math.min(5, duration * 0.5);
+  if (seekTime > 30) seekTime = 30;
+
+  // Extract frame, scale to 320x240 (cover crop), encode as WebP
+  // Input seeking (-ss before -i) reads only bytes near the seek point
+  for (const quality of [78, 68, 58, 48, 38, 28]) {
+    try { unlinkSync(output); } catch {}
+    const result = spawnSync("ffmpeg", [
+      "-y",
+      "-ss", String(seekTime),
+      "-i", source,
+      "-frames:v", "1",
+      "-vf", "scale=320:240:force_original_aspect_ratio=increase,crop=320:240",
+      "-f", "webp",
+      "-q:v", String(quality),
+      output,
+    ], {
+      encoding: "utf8",
+      timeout: COMMAND_TIMEOUT_MS,
+      maxBuffer: MAX_TOOL_OUTPUT_BYTES,
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        TMPDIR: process.env.TMPDIR,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    if (result.error?.code === "ETIMEDOUT" || result.signal === "SIGTERM") fail(124);
+    if (result.error || result.status !== 0) continue;
+
+    stripAndValidateWebp(output);
+    if (statSync(output).size <= MAX_OUTPUT_BYTES) process.exit(0);
+  }
+  fail(23);
 } else {
   fail(24);
 }

@@ -35,6 +35,7 @@ import { processThumbnailBackfills } from "./thumbnail-backfill";
 import { enqueueImageLocationBackfill } from "./image-locations";
 import { listDeliveryFolderLocations, resolveDeliveryLocationAsset } from "./delivery-locations";
 import { dispatchThumbnailIngestRequest } from "./thumbnail-ingest-api";
+import { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";
 import {
   authorizeItem,
   createDeliveryShare,
@@ -2225,6 +2226,8 @@ async function fetch(
 ): Promise<Response> {
   const thumbnailIngest = await dispatchThumbnailIngestRequest(request, env);
   if (thumbnailIngest) return thumbnailIngest;
+  const rendererApi = await dispatchThumbnailRendererApi(request, env);
+  if (rendererApi) return rendererApi;
   const incoming = dispatchIncomingPublicRequest(request, env, ctx);
   if (incoming) return await incoming;
   return app.fetch(request, env, ctx);
@@ -2244,3 +2247,4 @@ export { R2CrudWorkflow } from "./r2-crud";
 export { IncomingUploadLifecycleWorkflow } from "./incoming";
 export { DropboxImportWorkflow } from "./dropbox-import";
 export { ThumbnailRendererContainer } from "./thumbnail-renderer-container";
+export { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";

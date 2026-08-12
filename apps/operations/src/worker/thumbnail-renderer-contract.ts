@@ -6,7 +6,7 @@ export const CONTAINER_RENDER_HEIGHT = 240;
 export const CONTAINER_RENDER_MAX_PIXELS = 110_000_000;
 export const THUMBNAIL_RENDER_PROFILE = "ltds-thumbnail-320x240-webp-v1";
 
-export type ContainerThumbnailKind = "image" | "pdf";
+export type ContainerThumbnailKind = "image" | "pdf" | "video";
 export interface ContainerThumbnailRequest { kind: ContainerThumbnailKind; expectedSize: number }
 export type ContainerThumbnailErrorCode =
   | "encrypted_pdf"
@@ -33,10 +33,12 @@ export class ThumbnailRendererError extends Error {
 }
 
 export function validateContainerThumbnailRequest(value: ContainerThumbnailRequest): void {
-  if (value.kind !== "image" && value.kind !== "pdf") {
+  if (value.kind !== "image" && value.kind !== "pdf" && value.kind !== "video") {
     throw new ThumbnailRendererError("invalid_request", "Unsupported container thumbnail kind");
   }
-  const maximum = value.kind === "pdf" ? CONTAINER_PDF_MAX_INPUT_BYTES : CONTAINER_IMAGE_MAX_INPUT_BYTES;
+  const maximum = value.kind === "pdf" ? CONTAINER_PDF_MAX_INPUT_BYTES
+    : value.kind === "video" ? 10 * 1024 * 1024 * 1024
+    : CONTAINER_IMAGE_MAX_INPUT_BYTES;
   if (!Number.isSafeInteger(value.expectedSize) || value.expectedSize <= 0 || value.expectedSize > maximum) {
     throw new ThumbnailRendererError("invalid_request", "Container thumbnail source size is outside its safe limit");
   }
