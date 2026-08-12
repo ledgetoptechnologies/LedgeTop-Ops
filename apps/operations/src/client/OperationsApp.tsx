@@ -21,6 +21,7 @@ import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
 import { ImageLocationMap } from "./ImageLocationMap";
+import { pointerAnchoredOffset } from "./viewer-zoom";
 import {
   activateDeliveryFolderCache,
   deactivateDeliveryFolderCache,
@@ -4498,8 +4499,15 @@ function ZoomableOperationsImage({ src, alt, loading, loaded, failed }: { src?: 
     return first && second ? Math.hypot(first.x - second.x, first.y - second.y) : 0;
   };
   return <div
-    className={`zoomable-operations-image ${scale > 1 ? "zoomed" : ""}`}
-    onWheel={(event) => { event.preventDefault(); const next = constrain(scale * (event.deltaY < 0 ? 1.18 : 1 / 1.18)); setScale(next); if (next === 1) setOffset({ x: 0, y: 0 }); }}
+    className={`zoomable-operations-image ${scale > 1 ? "zoomed" : ""}${loading ? " loading" : ""}`}
+    onWheel={(event) => {
+      event.preventDefault();
+      const next = constrain(scale * (event.deltaY < 0 ? 1.18 : 1 / 1.18));
+      const bounds = event.currentTarget.getBoundingClientRect();
+      const point = { x: event.clientX - bounds.left - bounds.width / 2, y: event.clientY - bounds.top - bounds.height / 2 };
+      setScale(next);
+      setOffset((value) => pointerAnchoredOffset(scale, next, value, point));
+    }}
     onDoubleClick={fit}
     onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY }); if (pointers.current.size === 2) gesture.current = { distance: pointDistance(), scale }; }}
     onPointerMove={(event) => {

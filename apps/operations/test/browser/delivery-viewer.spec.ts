@@ -106,8 +106,18 @@ test("image original loads only after activation and Escape restores trigger foc
   await expect(viewer).toBeVisible();
   await expect(viewer.getByRole("img", { name: "photo.jpg" })).toBeVisible();
   const zoomSurface = viewer.locator(".zoomable-operations-image");
-  await zoomSurface.hover();
-  await page.mouse.wheel(0, -320);
+  // Wheel zoom preserves the point under the cursor instead of pulling every
+  // image toward the centre of the viewer.
+  await zoomSurface.evaluate((surface) => {
+    const bounds = surface.getBoundingClientRect();
+    surface.dispatchEvent(new WheelEvent("wheel", {
+      bubbles: true,
+      cancelable: true,
+      deltaY: -320,
+      clientX: bounds.left + bounds.width * .25,
+      clientY: bounds.top + bounds.height * .25,
+    }));
+  });
   await expect(viewer.getByRole("button", { name: "Fit" })).toBeVisible();
   await expect(viewer.getByRole("img", { name: "photo.jpg" })).toHaveAttribute("style", /scale\(1\.[0-9]+\)/);
   await viewer.getByRole("button", { name: "Fit" }).click();

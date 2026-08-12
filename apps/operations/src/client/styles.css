@@ -989,6 +989,10 @@ tbody tr:last-child td { border: 0; }
   transform-origin: center;
   will-change: transform;
 }
+/* Do not reveal a partially decoded progressive JPEG as a misleading strip.
+   The viewer skeleton remains visible until the browser has the real image
+   dimensions, then object-fit handles every source aspect ratio naturally. */
+.preview-stage-ops .preview-media > .zoomable-operations-image.loading > img { visibility: hidden; }
 .image-fit-control { position: absolute; right: 1rem; bottom: 1rem; z-index: 3; background: #fff !important; }
 .preview > .preview-filmstrip {
   scrollbar-width: none;
