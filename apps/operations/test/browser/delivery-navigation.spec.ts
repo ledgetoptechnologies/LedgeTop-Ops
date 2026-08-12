@@ -652,3 +652,23 @@ test("scoped staff cannot click the Jobs crumb and a direct Jobs request surface
     page.getByRole("navigation", { name: "Current delivery folder" }).getByRole("button", { name: "Jobs", exact: true }),
   ).toHaveCount(0);
 });
+
+test("delivery search and per-item menu stay discoverable without selection mode", async ({ page }) => {
+  await page.route("**/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/session") return route.fulfill({ json: { user: { id: "staff-search", email: "staff-search@example.test", displayName: "Search Staff", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["delivery.browse", "delivery.files.copy", "delivery.files.move", "delivery.delete", "delivery.share.create"], divisions: [] }, csrfToken: "csrf-search", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: { deliveryJobsRoot: { enabled: true } } } });
+    if (url.pathname === "/api/delivery/folders") return route.fulfill({ json: { prefix: url.searchParams.get("prefix") || "Jobs/Clients/", folders: [{ id: "folder-acme", prefix: "Jobs/Clients/Acme/", physicalKey: "Jobs/Clients/Acme/", name: "Acme", displayName: "Acme", kind: "folder" }], files: [], nextCursor: null } });
+    if (url.pathname === "/api/delivery/search") return route.fulfill({ json: { items: [{ id: "folder-acme", prefix: "Jobs/Clients/Acme/", physicalKey: "Jobs/Clients/Acme/", name: "Acme", displayName: "Acme", kind: "folder" }], nextCursor: null } });
+    if (url.pathname === "/api/delivery/folders/locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
+    if (url.pathname === "/api/delivery/shares") return route.fulfill({ json: { shares: [] } });
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  await page.goto("/delivery");
+  const search = page.getByRole("textbox", { name: "Search files and folders" });
+  await search.fill("Acme");
+  await expect(page.getByRole("button", { name: "Actions for Acme" })).toBeVisible();
+  await page.getByRole("button", { name: "Actions for Acme" }).click();
+  await expect(page.getByRole("menuitem", { name: "Share" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Rename" })).toBeVisible();
+  await expect(page.getByRole("menuitem", { name: "Delete" })).toBeVisible();
+});

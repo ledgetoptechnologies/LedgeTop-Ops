@@ -1,6 +1,6 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { deliveryBrowseRevision, listDeliveryFolder } from "../src/worker/delivery";
+import { deliveryBrowseRevision, listDeliveryFolder, searchDeliveryItems } from "../src/worker/delivery";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const principal:StaffPrincipal={
@@ -215,5 +215,35 @@ describe("Delivery folder-only listing performance",()=>{
     expect(head).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();
     expect(deliveryQueries).toEqual([]);
+  });
+
+  it("searches indexed Jobs content without exposing hidden namespaces or out-of-scope roots",async()=>{
+    await deliveryDb.batch([
+      deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')").bind("Jobs/Clients/Tree-B-Gone/Edited/hero.jpg","etag-tree",123,"2026-08-07T12:00:00.000Z","image/jpeg"),
+      deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')").bind("Jobs/Demo/Tree-B-Gone-demo.jpg","etag-demo",456,"2026-08-07T12:00:00.000Z","image/jpeg"),
+      deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')").bind("_ltds/Tree-B-Gone/hidden.jpg","etag-hidden",999,"2026-08-07T12:00:00.000Z","image/jpeg"),
+    ]);
+    const result=await searchDeliveryItems(environment(),principal,"tree-b-gone");
+    expect(result.items.map(item=>item.physicalKey)).toEqual(expect.arrayContaining(["Jobs/Clients/Tree-B-Gone/","Jobs/Clients/Tree-B-Gone/Edited/hero.jpg","Jobs/Demo/Tree-B-Gone-demo.jpg"]));
+    expect(result.items.some(item=>item.physicalKey?.startsWith("_ltds/"))).toBe(false);
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it("search keeps a division-scoped user inside their associated folder root",async()=>{
+    await opsDb.batch([
+      opsDb.prepare("DELETE FROM staff_role_assignments WHERE staff_id='staff-a'"),
+      opsDb.prepare("INSERT INTO staff_role_assignments(staff_id,role_id,scope,division_id) VALUES('staff-a','delivery-role','division','division-a')"),
+      opsDb.prepare("INSERT INTO pa_projects(id,name) VALUES('project-a','Acme')"),
+      opsDb.prepare("INSERT INTO project_folders(project_id,division_id,r2_prefix) VALUES('project-a','division-a','Jobs/Clients/Acme/')"),
+      opsDb.prepare("INSERT INTO pa_projects(id,name) VALUES('project-b','Elsewhere')"),
+      opsDb.prepare("INSERT INTO project_folders(project_id,division_id,r2_prefix) VALUES('project-b','division-b','Jobs/Clients/Elsewhere/')"),
+    ]);
+    await deliveryDb.batch([
+      deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')").bind("Jobs/Clients/Acme/Needle.jpg","etag-acme",1,"2026-08-07T12:00:00.000Z","image/jpeg"),
+      deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')").bind("Jobs/Clients/Elsewhere/Needle.jpg","etag-other",1,"2026-08-07T12:00:00.000Z","image/jpeg"),
+    ]);
+    const result=await searchDeliveryItems(environment(),principal,"needle");
+    expect(result.items.map(item=>item.physicalKey)).toContain("Jobs/Clients/Acme/Needle.jpg");
+    expect(result.items.map(item=>item.physicalKey)).not.toContain("Jobs/Clients/Elsewhere/Needle.jpg");
   });
 });

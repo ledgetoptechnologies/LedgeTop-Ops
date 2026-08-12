@@ -137,6 +137,63 @@ export async function listDeliveryFolder(env:Env,principal:StaffPrincipal,prefix
   return{prefix,folders:folders.map(value=>{const id=encodeRef(value.slice(0,-1));const name=aliases.get(value)||value.slice(prefix.length).replace(/\/$/,"");return{id,prefix:value,physicalKey:value,name,displayName:name,isShared:shared(value),actions:{rename:`/api/delivery/items/${id}/display-name`,delete:`/api/delivery/items/${id}/source`}};}),files:items,nextCursor:listed.truncated?listed.cursor:null};
 }
 
+/**
+ * Search the indexed delivery tree without turning a staff search box into a
+ * bucket-wide data leak.  The index is populated by the R2 event consumer and
+ * reconciliation job; results are still constrained to the caller's browse
+ * roots before they are returned.
+ */
+export async function searchDeliveryItems(env:Env,principal:StaffPrincipal,queryValue:string,cursorValue?:string){
+  await requirePermission(env,principal,"delivery.browse");
+  const query=queryValue.normalize("NFC").trim();
+  if(!query||query.length>160||/[\0-\x1f\x7f]/.test(query))throw new HTTPException(400,{message:"Search text is invalid"});
+  const access=await browseRoots(env,principal);
+  if(!access.global&&!access.roots.length)return{query,items:[],nextCursor:null};
+  const offset=cursorValue&&/^\d+$/.test(cursorValue)?Number(cursorValue):0;
+  if(!Number.isSafeInteger(offset)||offset<0||offset>10_000)throw new HTTPException(400,{message:"Search cursor is invalid"});
+  // Jobs is the Operations delivery surface.  A global delivery permission is
+  // intentionally not permission to enumerate internal bucket namespaces.
+  const roots=access.global?["Jobs/"]:access.roots.map(root=>root.prefix);
+  const scopeSql=roots.map(()=>"r2_key LIKE ?").join(" OR ");
+  const escaped=query.toLowerCase().replace(/[\\%_]/g,"\\$&");
+  const rows=await env.DELIVERY_DB.prepare(`SELECT r2_key,etag,size,uploaded_at,content_type,media_kind
+    FROM file_index
+    WHERE (${scopeSql})
+      AND lower(r2_key) LIKE ? ESCAPE '\\'
+      AND instr(lower('/'||r2_key||'/'),'/_ltds/')=0
+      AND instr(lower('/'||r2_key||'/'),'/.previews/')=0
+      AND instr(lower('/'||r2_key||'/'),'/dump/')=0
+      AND NOT EXISTS (SELECT 1 FROM delivery_tombstones t WHERE t.restored_at IS NULL AND (
+        (t.tombstone_kind='exact' AND t.physical_key=file_index.r2_key) OR
+        (t.tombstone_kind='prefix' AND substr(file_index.r2_key,1,length(t.physical_key))=t.physical_key)
+      ))
+    ORDER BY r2_key COLLATE NOCASE
+    LIMIT 101 OFFSET ?`).bind(...roots.map(root=>`${root}%`),`%${escaped}%`,offset).all<{r2_key:string;etag:string;size:number;uploaded_at:string;content_type:string|null;media_kind:string|null}>();
+  const page=rows.results.slice(0,100),hasMore=rows.results.length>100;
+  const aliases=await aliasMap(env,page.map(row=>row.r2_key));
+  const folders=new Map<string,any>(),files:any[]=[];
+  for(const row of page){
+    const key=row.r2_key;
+    if(hidden(key))continue;
+    const parts=key.split("/");
+    // Include the matching folder segment so searches like a client name find
+    // the folder rather than every file beneath it.  File-name matches retain
+    // a direct preview/download result.
+    const matchingFolderIndex=parts.slice(0,-1).findIndex(part=>part.toLowerCase().includes(query.toLowerCase()));
+    if(matchingFolderIndex>=0){
+      const folderKey=`${parts.slice(0,matchingFolderIndex+1).join("/")}/`;
+      if(folderKey!=="Jobs/"&&!hidden(folderKey)){
+        const name=folderKey.slice(0,-1).split("/").pop()||"Folder";
+        folders.set(folderKey,{id:encodeRef(folderKey.slice(0,-1)),prefix:folderKey,physicalKey:folderKey,name,displayName:name,kind:"folder",searchPath:folderKey});
+      }
+    }
+    const name=aliases.get(key)||parts.at(-1)||key;
+    const kind=mediaKind(key),id=encodeRef(key),sourceUrl=deliverySourceUrl(kind,id);
+    files.push({id,physicalKey:key,name,displayName:name,kind,size:row.size,uploadedAt:row.uploaded_at,searchPath:key,previewUrl:kind==="image"?sourceUrl:["audio","text"].includes(kind)?`/api/delivery/items/${id}/preview`:undefined,sourceUrl,downloadUrl:`/api/delivery/items/${id}/download`,thumbnailState:"not_applicable",thumbnailFallbackKind:thumbnailFallbackKindForFile(key,kind),previewStatus:kind==="video"?"processing":undefined});
+  }
+  return{query,items:[...folders.values(),...files],nextCursor:hasMore?String(offset+page.length):null};
+}
+
 export async function authorizeItem(env:Env,principal:StaffPrincipal,itemRef:string):Promise<string>{await requirePermission(env,principal,"delivery.browse");const key=decodeRef(itemRef);if(hidden(key))throw new HTTPException(404,{message:"Item not found"});const access=await browseRoots(env,principal);if(!access.global&&!access.roots.some(root=>key.startsWith(root.prefix)))throw new HTTPException(404,{message:"Item not found"});await assertNotTrashed(env,key);return key;}
 
 export interface ShareInput{clientName?:string;projectName?:string;r2Prefix?:string;projectId?:string;externalRef?:string;label?:string;accessCode?:string;generateAccessCode?:boolean;removeAccessCode?:boolean;expiresAt?:string|null;recipientEmail?:string|null;}

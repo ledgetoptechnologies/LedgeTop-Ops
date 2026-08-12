@@ -44,6 +44,7 @@ import {
   encodeRef,
   getActiveDeliveryShare,
   listDeliveryFolder,
+  searchDeliveryItems,
   listDeliveryShares,
   mediaKind,
   revokeDeliveryShare,
@@ -1692,6 +1693,14 @@ app.get("/api/delivery/folders", async (c) =>
       c.req.query("cursor"),
     ),
   ),
+);
+app.get("/api/delivery/search", async (c) =>
+  c.json(await searchDeliveryItems(
+    c.env,
+    c.get("principal"),
+    c.req.query("q") || "",
+    c.req.query("cursor"),
+  )),
 );
 app.get("/api/delivery/access-revision", async (c) =>
   c.json({ revision: await deliveryBrowseRevision(c.env, c.get("principal")) }),

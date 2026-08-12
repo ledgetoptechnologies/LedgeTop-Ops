@@ -1440,6 +1440,7 @@ type DeliveryItem = {
   previewUrl?: string;
   sourceUrl?: string;
   previewStatus?: string;
+  searchPath?: string;
 };
 type DeliveryFolderPage = {
   prefix: string;
@@ -2347,6 +2348,9 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     ),
     [view, setView] = useState<"grid" | "list">("grid"),
     [preview, setPreview] = useState<any>(null);
+  const [searchQuery, setSearchQuery] = useState(""),
+    [searchState, setSearchState] = useState<{ query: string; items: DeliveryItem[]; nextCursor: string | null; loading: boolean; error: string }>({ query: "", items: [], nextCursor: null, loading: false, error: "" });
+  const searchInput = useRef<HTMLInputElement | null>(null);
   const [selected, setSelected] = useState<string[]>([]),
     [selectionMode, setSelectionMode] = useState(false),
     [operation, setOperation] = useState<DeliveryOperation | null>(null),
@@ -2450,6 +2454,36 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
       folderRequest.current?.abort();
     };
   }, [reload]);
+  useEffect(() => {
+    const query = searchQuery.trim();
+    if (!query) {
+      setSearchState({ query: "", items: [], nextCursor: null, loading: false, error: "" });
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      setSearchState((current) => ({ ...current, query, loading: true, error: "" }));
+      void api<{ items: DeliveryItem[]; nextCursor: string | null }>(`/api/delivery/search?q=${encodeURIComponent(query)}`, { signal: controller.signal })
+        .then((value) => {
+          if (!controller.signal.aborted) setSearchState({ query, items: value.items || [], nextCursor: value.nextCursor || null, loading: false, error: "" });
+        })
+        .catch((caught) => {
+          if (!controller.signal.aborted) setSearchState({ query, items: [], nextCursor: null, loading: false, error: (caught as Error).message });
+        });
+    }, 250);
+    return () => { controller.abort(); window.clearTimeout(timer); };
+  }, [searchQuery]);
+  useEffect(() => {
+    const focusSearch = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1 || target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      event.preventDefault();
+      searchInput.current?.focus();
+      setSearchQuery((current) => `${current}${event.key}`);
+    };
+    addEventListener("keydown", focusSearch);
+    return () => removeEventListener("keydown", focusSearch);
+  }, []);
   const data = folderState.prefix === prefix ? folderState.data : null;
   const error = folderState.prefix === prefix ? folderState.error : "";
   const loading = folderState.prefix !== prefix || folderState.loading;
@@ -2494,9 +2528,11 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   }, [reloadLocations]);
   const locations = locationState.prefix === prefix ? locationState.data : null;
   const locationError = locationState.prefix === prefix ? locationState.error : "";
-  const items: DeliveryItem[] = displayData
+  const folderItems: DeliveryItem[] = displayData
     ? [...(displayData.folders || []), ...(displayData.files || [])]
     : [];
+  const searching = Boolean(searchQuery.trim());
+  const items = searching ? searchState.items : folderItems;
   const admin = session.user.isAdministrator;
   const canCreate = admin && allowed(session.user, "delivery.files.create"),
     canUpload =
@@ -2686,6 +2722,23 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     for (const item of selectedItems)
       await run(deliveryOperations.remove(item));
   };
+  const itemAction = (action: "rename" | "copy" | "move" | "delete", item: DeliveryItem) => {
+    if (action === "delete") {
+      if (confirm(`Delete ${displayName(item)}? It can be restored for 7 days.`)) void run(deliveryOperations.remove(item));
+      return;
+    }
+    if (action === "rename") {
+      const next = prompt("New file or folder name", displayName(item));
+      if (!next?.trim() || next.trim() === displayName(item)) return;
+      const sharePolicy = shareChoice([item]);
+      if (sharePolicy) void run(mutationRequest("rename", item, targetFor(item, itemKey(item).replace(/[^/]+\/?$/, ""), next.trim()), sharePolicy));
+      return;
+    }
+    const target = prompt(`Destination folder for ${action}`, prefix);
+    if (target === null) return;
+    const sharePolicy = action === "move" ? shareChoice([item]) : "revoke";
+    if (sharePolicy) void run(mutationRequest(action, item, targetFor(item, target), sharePolicy));
+  };
   const upload = async (files: FileList | File[]) => {
     const list = Array.from(files);
     if (!list.length || !canUpload) return;
@@ -2749,6 +2802,11 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     <>
       <div className="delivery-toolbar">
         <div className="delivery-toolbar-actions">
+          <label className="delivery-search">
+            <span className="sr-only">Search delivery files and folders</span>
+            <input ref={searchInput} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search files and folders" aria-label="Search files and folders" />
+            {searchQuery && <button type="button" className="delivery-search-clear" aria-label="Clear search" onClick={() => setSearchQuery("")}>×</button>}
+          </label>
           <button
             className="button-orange"
             disabled={!canCreate}
@@ -3008,6 +3066,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         </Card>
       )}
       <ErrorLine error={error} />
+      <ErrorLine error={searchState.error} />
       <ErrorLine error={locationError} />
       {locations && locations.points.length > 0 && (
         <ImageLocationMap
@@ -3033,11 +3092,13 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         }}
       >
         <Card className="file-browser">
-          {loading && items.length === 0 ? (
+          {searching && searchState.loading && items.length === 0 ? (
+            <DeliverySkeleton />
+          ) : loading && items.length === 0 ? (
             <DeliverySkeleton />
           ) : !items.length && !loading ? (
             <EmptyState
-              title="This folder is empty"
+              title={searching ? "No matching files or folders" : "This folder is empty"}
               detail={
                 canUpload
                   ? "Drop files here or use Upload to add delivery content."
@@ -3061,6 +3122,8 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
                       ? () => setPreview({ shareFolder: item })
                       : undefined
                   }
+                  actions={{ rename: canMove, copy: canCopy, move: canMove, delete: canDelete }}
+                  act={(action) => itemAction(action, item)}
                 />
               ))}
             </div>
@@ -3076,6 +3139,9 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
                   open={() =>
                     item.prefix ? openFolder(item.prefix) : setPreview(item)
                   }
+                  share={item.prefix && canShare ? () => setPreview({ shareFolder: item }) : undefined}
+                  actions={{ rename: canMove, copy: canCopy, move: canMove, delete: canDelete }}
+                  act={(action) => itemAction(action, item)}
                 />
               ))}
             </div>
@@ -3424,6 +3490,8 @@ function DeliveryGridItem({
   toggle,
   open,
   share,
+  actions,
+  act,
 }: {
   item: DeliveryItem;
   selected: boolean;
@@ -3431,6 +3499,8 @@ function DeliveryGridItem({
   toggle: () => void;
   open: () => void;
   share?: () => void;
+  actions?: Record<"rename" | "copy" | "move" | "delete", boolean>;
+  act?: (action: "rename" | "copy" | "move" | "delete") => void;
 }) {
   const folder = item.kind === "folder" || Boolean(item.prefix);
   return (
@@ -3488,6 +3558,7 @@ function DeliveryGridItem({
           Share
         </button>
       )}
+      {actions && act && <DeliveryItemMenu item={item} share={share} actions={actions} act={act} />}
     </article>
   );
 }
@@ -3497,19 +3568,23 @@ function DeliveryListItem({
   selectionMode,
   toggle,
   open,
+  share,
+  actions,
+  act,
 }: {
   item: DeliveryItem;
   selected: boolean;
   selectionMode: boolean;
   toggle: () => void;
   open: () => void;
+  share?: () => void;
+  actions?: Record<"rename" | "copy" | "move" | "delete", boolean>;
+  act?: (action: "rename" | "copy" | "move" | "delete") => void;
 }) {
   const folder = item.kind === "folder" || Boolean(item.prefix);
   return (
-    <button
-      className={`delivery-list-item ${selected ? "selected" : ""}`}
-      onClick={() => (selectionMode ? toggle() : open())}
-    >
+    <div className={`delivery-list-item ${selected ? "selected" : ""}`}>
+      <button className="delivery-list-open" onClick={() => (selectionMode ? toggle() : open())}>
       {selectionMode && (
         <span className="select-checkbox">{selected ? "✓" : ""}</span>
       )}
@@ -3517,8 +3592,24 @@ function DeliveryListItem({
       <strong>{displayName(item)}</strong>
       {item.isShared && <SharedBadge />}
       <small>{folder ? "Folder" : bytes(item.size || 0)}</small>
-    </button>
+      </button>
+      {actions && act && <DeliveryItemMenu item={item} share={share} actions={actions} act={act} />}
+    </div>
   );
+}
+function DeliveryItemMenu({ item, share, actions, act }: { item: DeliveryItem; share?: () => void; actions: Record<"rename" | "copy" | "move" | "delete", boolean>; act: (action: "rename" | "copy" | "move" | "delete") => void }) {
+  const [open, setOpen] = useState(false);
+  const invoke = (action: "rename" | "copy" | "move" | "delete") => { setOpen(false); act(action); };
+  return <div className="delivery-item-menu" onClick={(event) => event.stopPropagation()}>
+    <button className="delivery-item-menu-trigger" aria-label={`Actions for ${displayName(item)}`} aria-expanded={open} onClick={() => setOpen((value) => !value)}>⋮</button>
+    {open && <div className="delivery-item-menu-popover" role="menu" aria-label={`Actions for ${displayName(item)}`}>
+      {share && <button role="menuitem" onClick={() => { setOpen(false); share(); }}>Share</button>}
+      {actions.rename && <button role="menuitem" onClick={() => invoke("rename")}>Rename</button>}
+      {actions.copy && <button role="menuitem" onClick={() => invoke("copy")}>Copy</button>}
+      {actions.move && <button role="menuitem" onClick={() => invoke("move")}>Move</button>}
+      {actions.delete && <button className="danger" role="menuitem" onClick={() => invoke("delete")}>Delete</button>}
+    </div>}
+  </div>;
 }
 function SharedBadge() {
   return (
