@@ -2556,6 +2556,10 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   }, [admin, session.user]);
   const openFolder = useCallback((nextPrefix: string) => {
     const safePrefix = nextPrefix || DELIVERY_ROOT_PREFIX;
+    // A search result can point outside the folder currently displayed.  Clear
+    // the result set before navigation so the destination listing is rendered
+    // as soon as it loads instead of leaving stale search rows on screen.
+    setSearchQuery("");
     setPrefix(safePrefix);
     setPreview(null);
     const nextPath = deliveryPathFromPrefix(safePrefix);
@@ -2814,8 +2818,8 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
       <div className="delivery-toolbar">
         <div className="delivery-toolbar-actions">
           <label className="delivery-search">
-            <span className="sr-only">Search delivery files and folders</span>
-            <input ref={searchInput} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search files and folders" aria-label="Search files and folders" />
+            <span className="sr-only">Search</span>
+            <input ref={searchInput} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search" aria-label="Search" />
             {searchQuery && <button type="button" className="delivery-search-clear" aria-label="Clear search" onClick={() => setSearchQuery("")}>×</button>}
           </label>
           <button

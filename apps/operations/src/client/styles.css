@@ -604,8 +604,8 @@ tbody tr:last-child td { border: 0; }
   gap: .45rem;
   flex-wrap: wrap;
 }
-.delivery-toolbar-actions { width: 100%; }
-.delivery-search { position: relative; display: inline-flex; align-items: center; min-width: min(100%, 19rem); }
+.delivery-toolbar-actions { width: 100%; min-height: 2.5rem; }
+.delivery-search { position: relative; display: inline-flex; align-items: center; flex: 1 1 15rem; max-width: 24rem; min-width: min(100%, 12rem); }
 .delivery-search input { width: 100%; min-height: 2.25rem; padding: .45rem 2rem .45rem .7rem; border: 1px solid #b8c1c9; border-radius: .45rem; background: #fff; color: #151a20; }
 .delivery-search input:focus { outline: 3px solid #ee500752; outline-offset: 1px; border-color: #e56e25; }
 .delivery-search-clear { position: absolute; right: .25rem; width: 1.75rem; height: 1.75rem; border: 0; border-radius: .3rem; background: transparent; font-size: 1.25rem; line-height: 1; color: #4d5963; }
@@ -619,6 +619,14 @@ tbody tr:last-child td { border: 0; }
   font-size: .8rem;
   font-weight: 700;
   white-space: nowrap;
+}
+/* Keep file actions visually quiet but clearly grouped after the search field. */
+.delivery-toolbar-actions > button { min-height: 2.25rem; }
+.delivery-toolbar-actions > button:nth-of-type(1) { margin-left: .15rem; }
+.delivery-toolbar-actions > button:nth-of-type(6) { margin-left: auto; }
+@media (max-width: 900px) {
+  .delivery-search { flex-basis: 100%; max-width: none; }
+  .delivery-toolbar-actions > button:nth-of-type(6), .thumbnail-queue-indicator { margin-left: 0; }
 }
 .delivery-selection-bar {
   justify-content: flex-start;
