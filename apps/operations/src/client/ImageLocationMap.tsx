@@ -99,17 +99,18 @@ function LocationCanvas({ token, points, expanded, scopeLabel, onPointSelect }: 
   return <div ref={element} className={`image-location-map-canvas${expanded ? " expanded" : ""}`} role={expanded ? "region" : "img"} aria-label={`Image locations for ${scopeLabel}`} />;
 }
 
-function LocationSelection({ asset, loading, error, open, close }: {
+function LocationSelection({ asset, loading, error, open, close, showBackToMap = true }: {
   asset: ImageLocationMapAsset | null;
   loading: boolean;
   error: string;
   open: () => void;
   close: () => void;
+  showBackToMap?: boolean;
 }) {
   const [imageFailed, setImageFailed] = useState(false);
   useEffect(() => setImageFailed(false), [asset?.id]);
   return <aside className="image-location-selection" aria-label="Selected mapped image" aria-live="polite">
-    <button type="button" className="image-location-selection-close" aria-label="Back to map" onClick={close}>Back to map</button>
+    {showBackToMap && <button type="button" className="image-location-selection-close" aria-label="Back to map" onClick={close}>Back to map</button>}
     {loading ? <span role="status">Loading thumbnail\u2026</span>
       : error ? <span className="error">{error}</span>
         : asset ? <button type="button" className="image-location-selection-preview" onClick={open} aria-label="Open selected image">
@@ -216,7 +217,7 @@ export function ImageLocationMap({ token, locations, scopeLabel, loadAsset, open
         <header><div><span>Photo map</span><h2 id={dialogTitleId}>Image locations from available photo metadata</h2><p>{scopeLabel}</p></div><button ref={closeButton} type="button" className="button-ghost" onClick={() => setEnlarged(false)}>Close</button></header>
         <div className="image-location-map-expanded-stage">
           <LocationCanvas token={token} points={points} expanded scopeLabel={scopeLabel} onPointSelect={selectPoint} />
-          {selectedRef && <LocationSelection asset={selectedAsset} loading={selectionLoading} error={selectionError} close={clearSelection} open={() => selectedAsset && openAsset?.(selectedAsset)} />}
+          {selectedRef && <LocationSelection asset={selectedAsset} loading={selectionLoading} error={selectionError} close={clearSelection} showBackToMap={false} open={() => selectedAsset && openAsset?.(selectedAsset)} />}
         </div>
       </section>
     </div>}

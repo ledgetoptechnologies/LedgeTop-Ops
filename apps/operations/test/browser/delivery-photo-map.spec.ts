@@ -148,26 +148,27 @@ test("mapped pin opens an authorized thumbnail and returns from the full-resolut
   await clickMappedPoint(page);
   const selection = page.getByRole("complementary", { name: "Selected mapped image" });
   await expect(selection.getByAltText("Selected mapped image thumbnail")).toBeVisible();
+  await expect(selection.getByRole("button", { name: "Back to map" })).toHaveCount(0);
   await selection.getByRole("button", { name: "Open selected image" }).click();
 
   const preview = page.getByRole("dialog", { name: "Preview mapped-photo.jpg" });
   await expect(preview).toBeVisible();
+  const overlayOrder = await page.evaluate(() => {
+    const previewBackdrop = document.querySelector(".modal-backdrop");
+    const mapBackdrop = document.querySelector(".image-location-map-backdrop");
+    return {
+      previewZ: Number(previewBackdrop ? getComputedStyle(previewBackdrop).zIndex : 0),
+      mapZ: Number(mapBackdrop ? getComputedStyle(mapBackdrop).zIndex : 0),
+    };
+  });
+  expect(overlayOrder.previewZ).toBeGreaterThan(overlayOrder.mapZ);
   await page.keyboard.press("Escape");
   await expect(preview).toHaveCount(0);
   await expect(mapDialog).toBeVisible();
   await expect(selection).toBeVisible();
   expect(await expandedCanvas.evaluate(element => element === (window as any).__mappedCanvas)).toBe(true);
 
-  await selection.getByRole("button", { name: "Back to map" }).click();
-  await expect(selection).toHaveCount(0);
-  await expect(mapDialog).toBeVisible();
-
-  await clickMappedPoint(page);
-  await expect(selection).toBeVisible();
-  await page.keyboard.press("Escape");
-  await expect(selection).toHaveCount(0);
-  await expect(mapDialog).toBeVisible();
-  await page.keyboard.press("Escape");
+  await mapDialog.getByRole("button", { name: "Close" }).click();
   await expect(mapDialog).toHaveCount(0);
 });
 

@@ -103,6 +103,22 @@ test("image original loads only after activation and Escape restores trigger foc
   await expect(viewer.getByRole("img", { name: "photo.jpg" })).toBeVisible();
   await expect.poll(() => requests.imageSource).toBeGreaterThan(0);
   await expect(viewer).toBeFocused();
+  const viewerLayout = await page.locator(".modal-backdrop").evaluate((backdrop) => {
+    const header = document.querySelector(".ops-header");
+    const close = backdrop.querySelector<HTMLButtonElement>(".preview header button");
+    const bounds = backdrop.getBoundingClientRect();
+    return {
+      position: getComputedStyle(backdrop).position,
+      zIndex: Number(getComputedStyle(backdrop).zIndex),
+      appHeaderZIndex: Number(header ? getComputedStyle(header).zIndex : 0),
+      top: bounds.top,
+      closeTop: close?.getBoundingClientRect().top ?? -1,
+    };
+  });
+  expect(viewerLayout.position).toBe("fixed");
+  expect(viewerLayout.zIndex).toBeGreaterThan(viewerLayout.appHeaderZIndex);
+  expect(viewerLayout.top).toBe(0);
+  expect(viewerLayout.closeTop).toBeGreaterThanOrEqual(0);
   expect(await page.evaluate(() => document.body.style.overflow)).toBe("hidden");
 
   await page.keyboard.press("Escape");
