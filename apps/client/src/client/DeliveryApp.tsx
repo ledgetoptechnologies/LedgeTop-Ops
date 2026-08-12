@@ -49,6 +49,10 @@ export function DeliveryApp() {
   const [selectionMode, setSelectionMode] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
   const bulkRequestActive = useRef(false);
+  // Keep recent folder manifests only for this open share session. This makes
+  // back-navigation immediate without persisting any client delivery data.
+  const manifestCache = useRef(new Map<string, DeliveryManifest>());
+  const navigationVersion = useRef(0);
   const [bulkError, setBulkError] = useState("");
   const [bulkProgress, setBulkProgress] = useState<{ status: string; percent: number | null; message?: string } | null>(null);
   const [cloudTransferScope, setCloudTransferScope] = useState<CloudTransferScope | null>(null);
@@ -57,11 +61,28 @@ export function DeliveryApp() {
     return [...(capabilities?.dropbox ? ["dropbox" as const] : []), ...(capabilities?.googleDrive ? ["google-drive" as const] : [])];
   }, [manifest]);
 
-  const loadManifest = useCallback(async (id: string, folderId = "") => {
+  const fetchManifest = useCallback(async (id: string, folderId = "") => {
     const query = folderId ? `?folder=${encodeURIComponent(folderId)}` : "";
-    const data = await requestJson<DeliveryManifest>(`/api/public/shares/${encodeURIComponent(id)}/manifest${query}`);
-    setManifest(data); setFolder(folderId); setGate("ready");
+    return requestJson<DeliveryManifest>(`/api/public/shares/${encodeURIComponent(id)}/manifest${query}`);
   }, []);
+
+  const cacheKey = useCallback((id: string, folderId = "") => `${id}\u0000${folderId}`, []);
+
+  const rememberManifest = useCallback((id: string, folderId: string, data: DeliveryManifest) => {
+    const key = cacheKey(id, folderId);
+    const cache = manifestCache.current;
+    // Bound memory use while retaining enough recently visited folders to make
+    // normal browse/back navigation feel immediate.
+    if (cache.has(key)) cache.delete(key);
+    cache.set(key, data);
+    if (cache.size > 40) cache.delete(cache.keys().next().value as string);
+  }, [cacheKey]);
+
+  const loadManifest = useCallback(async (id: string, folderId = "") => {
+    const data = await fetchManifest(id, folderId);
+    rememberManifest(id, folderId, data);
+    setManifest(data); setFolder(folderId); setGate("ready");
+  }, [fetchManifest, rememberManifest]);
 
   const showRequestError = useCallback((caught: unknown) => {
     const value = caught as RequestError;
@@ -111,12 +132,27 @@ export function DeliveryApp() {
 
   function changeView(next: "grid" | "list") { setView(next); localStorage.setItem("ltds-delivery-view", next); }
   async function navigateToFolder(folderId = "") {
-    setGate("loading");
+    const version = ++navigationVersion.current;
+    const cached = manifestCache.current.get(cacheKey(publicId, folderId));
+    setPreview(null);
+    setSelectedItems(new Set());
+    if (cached) {
+      setManifest(cached); setFolder(folderId); setGate("ready");
+    } else {
+      setGate("loading");
+    }
+    window.scrollTo({ top: 0, behavior: "smooth" });
     try {
-      await loadManifest(publicId, folderId);
-      window.scrollTo({ top: 0, behavior: "smooth" });
+      // Revalidate even cached folders in the background. The current view is
+      // shown right away, then updated if a sync changed the folder contents.
+      const fresh = await fetchManifest(publicId, folderId);
+      rememberManifest(publicId, folderId, fresh);
+      if (version === navigationVersion.current) {
+        setManifest(fresh); setFolder(folderId); setGate("ready");
+      }
     } catch (caught) {
-      showRequestError(caught);
+      // A transient refresh failure should not blank a folder we already have.
+      if (!cached && version === navigationVersion.current) showRequestError(caught);
     }
   }
   async function openFolder(item: DeliveryItem) { await navigateToFolder(item.id); }
