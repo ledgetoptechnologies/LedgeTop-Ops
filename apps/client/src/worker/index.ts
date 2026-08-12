@@ -359,7 +359,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
     items.push({ id: encodeItemRef(relative), name: aliases.get(folderPrefix) || relative.split("/").pop() || relative, kind: "folder", size: null, uploadedAt: null });
   }
   const videos: Array<{ index: number; key: string }> = [];
-  const thumbnails: Array<{ index: number; key: string; etag: string; base: string; kind: "image" | "pdf"; size: number; contentType?: string }> = [];
+  const thumbnails: Array<{ index: number; key: string; etag: string; base: string; kind: "image" | "pdf" | "video"; size: number; contentType?: string }> = [];
   for (const object of listed.objects) {
     if (object.key === prefix || object.key.endsWith("/") || isHiddenKey(object.key) || isTrashed(tombstones, object.key) || isMovedSourceMarker(object)) continue;
     const relative = object.key.slice(root.length); const id = encodeItemRef(relative); const kind = kindForKey(object.key);
@@ -370,7 +370,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
     else if (kind === "audio" || kind === "text") item.previewUrl = `${base}/preview`;
     if (kind === "video") item.previewUrl = undefined;
     if (kind === "video") videos.push({ index: items.length, key: object.key });
-    if ((kind === "image" || kind === "pdf") && item.thumbnailState !== "not_applicable") thumbnails.push({ index: items.length, key: object.key, etag: object.httpEtag, base, kind, size: object.size, contentType: object.httpMetadata?.contentType });
+    if ((kind === "image" || kind === "pdf" || kind === "video") && item.thumbnailState !== "not_applicable") thumbnails.push({ index: items.length, key: object.key, etag: object.httpEtag, base, kind, size: object.size, contentType: object.httpMetadata?.contentType });
     items.push(item);
   }
   if (thumbnails.length) {
