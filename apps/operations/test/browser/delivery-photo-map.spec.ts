@@ -156,8 +156,17 @@ test("mapped pin opens an authorized thumbnail and returns from the full-resolut
     return { labelColor: style?.color, panelBorder: panel.borderColor };
   });
   expect(selectionContrast.labelColor).toBe("rgb(17, 24, 32)");
-  expect(selectionContrast.panelBorder).toBe("rgb(238, 80, 7)");
-  await selection.getByRole("button", { name: "Open selected image" }).click();
+  expect(selectionContrast.panelBorder).not.toBe("rgb(238, 80, 7)");
+  const openSelected = selection.getByRole("button", { name: "Open selected image" });
+  await openSelected.hover();
+  const hoverAccent = await openSelected.evaluate(element => {
+    const style = getComputedStyle(element);
+    return { background: style.backgroundColor, border: style.borderColor, color: style.color };
+  });
+  expect(hoverAccent.background).toBe("rgb(255, 242, 232)");
+  expect(hoverAccent.border).toBe("rgb(238, 80, 7)");
+  expect(hoverAccent.color).toBe("rgb(17, 24, 32)");
+  await openSelected.click();
 
   const preview = page.getByRole("dialog", { name: "Preview mapped-photo.jpg" });
   await expect(preview).toBeVisible();
