@@ -36,9 +36,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build shared package
-        run: npm --prefix packages/shared run build
-
       - name: Build operations
         run: npm --prefix apps/operations run build
 
@@ -66,9 +63,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
-
-      - name: Build shared package
-        run: npm --prefix packages/shared run build
 
       - name: Build client
         run: npm --prefix apps/client run build
