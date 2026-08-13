@@ -4424,7 +4424,8 @@ function OperationsMedia({
     };
   }, [item.kind, item.sourceUrl]);
   if (failed) return <OperationsPreviewPlaceholder item={item} />;
-  if (item.kind === "image")
+  if (item.kind === "image") {
+    if (!item.previewUrl) return <OperationsPreviewPlaceholder item={item} />;
     return (
       <ZoomableOperationsImage
         src={item.previewUrl}
@@ -4434,6 +4435,7 @@ function OperationsMedia({
         failed={() => setFailed(true)}
       />
     );
+  }
   if (item.kind === "pdf") {
     if (!item.sourceUrl || pdfReady === false)
       return <OperationsPreviewPlaceholder item={item} />;
@@ -4533,13 +4535,17 @@ function ZoomableOperationsImage({ src, alt, loading, loaded, failed }: { src?: 
   </div>;
 }
 function OperationsPreviewPlaceholder({ item }: { item: DeliveryItem }) {
+  const rawExts = new Set(["dng","arw","cr2","cr3","crw","nef","raf","rw2","orf","pef","srw","3fr","rwl","srf","sr2","x3f"]);
+  const ext = (item.name || "").split(".").pop()?.toLowerCase() || "";
+  const isRaw = rawExts.has(ext);
   return (
     <div className="ops-preview-empty">
       <img src={BRAND.logoUrl} alt={BRAND.shortName} />
-      <strong>This file could not be displayed</strong>
+      <strong>{isRaw ? "This file type cannot be viewed in the browser" : "This file could not be displayed"}</strong>
       <p>
-        Your browser may not support this file format. The original remains
-        available to download.
+        {isRaw
+          ? "RAW photo files (DNG, ARW, etc.) require specialized software to view. Please download the file to open it."
+          : "Your browser may not support this file format. The original remains available to download."}
       </p>
       <a className="button button-orange button-small" href={item.downloadUrl}>
         Download
