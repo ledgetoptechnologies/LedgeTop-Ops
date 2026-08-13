@@ -72,4 +72,5 @@ export interface ShareRow {
   project_name: string;
   r2_prefix: string;
   recipient_email?: string | null;
+  image_location_map_enabled?: number;
 }

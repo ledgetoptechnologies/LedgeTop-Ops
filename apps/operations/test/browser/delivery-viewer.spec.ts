@@ -104,6 +104,7 @@ test("image original loads only after activation and Escape restores trigger foc
   await trigger.press("Enter");
   const viewer = page.getByRole("dialog", { name: "Preview photo.jpg" });
   await expect(viewer).toBeVisible();
+  await expect(viewer.getByRole("link", { name: "Download photo.jpg" })).toHaveAttribute("href", "/api/delivery/items/opaque-image/download");
   await expect(viewer.getByRole("img", { name: "photo.jpg" })).toBeVisible();
   const zoomSurface = viewer.locator(".zoomable-operations-image");
   // Wheel zoom preserves the point under the cursor instead of pulling every
@@ -164,6 +165,7 @@ test("video original loads only on activation and a backdrop pointer closes the 
   await trigger.click();
   const viewer = page.getByRole("dialog", { name: "Preview flight.mp4" });
   await expect(viewer).toBeVisible();
+  await expect(viewer.getByRole("link", { name: "Download flight.mp4" })).toHaveAttribute("href", "/api/delivery/items/opaque-video/download");
   await expect.poll(() => requests.videoSource).toBeGreaterThan(0);
 
   await page.locator(".modal-backdrop").evaluate((element) => {

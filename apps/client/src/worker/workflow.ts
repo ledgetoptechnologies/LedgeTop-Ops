@@ -4,6 +4,7 @@ import { buildZipLayout, crc32, readZipPart, type ZipManifestEntry } from "./zip
 import { classifyWorkflowFailure } from "./bulk-download-errors";
 import type { Env } from "./types";
 import { isMovedSourceMarker } from "@ltds/shared";
+import { listDownloadableObjects, type DownloadTombstone } from "./downloadable-files";
 export { classifyWorkflowFailure } from "./bulk-download-errors";
 
 const MAX_FILES = 2_000;
@@ -19,7 +20,7 @@ interface Requested { all?: boolean; items?: string[]; }
 interface Source extends ZipManifestEntry { physicalKey: string; etag: string; }
 interface Snapshot { root: string; shareId: string; shareVersion: number; sources: Array<Omit<Source, "crc32">>; }
 interface FinalManifest { root: string; entries: Source[]; fileCount: number; totalBytes: number; }
-interface Tombstone { physical_key: string; tombstone_kind: "exact" | "prefix"; }
+type Tombstone = DownloadTombstone;
 
 export function crcProgressBytes(totalBytes: number, completedBytes: number): number {
   if (totalBytes <= 0) return 0;
@@ -88,7 +89,11 @@ export async function snapshot(env: Env, job: JobRow): Promise<Snapshot> {
   const tombstones = (await db(env).prepare("SELECT physical_key,tombstone_kind FROM delivery_tombstones WHERE restored_at IS NULL").all<Tombstone>()).results;
   const request = JSON.parse(job.request_json) as Requested; const root = normalizeRoot(share.r2_prefix); const folderPrefixes = new Set<string>(); const refs = request.items || [];
   const files = new Map<string, { size: number; etag: string }>();
-  if (request.all === true) folderPrefixes.add(root);
+  if (request.all === true) {
+    for (const object of await listDownloadableObjects(env.DATA_BUCKET, root, tombstones)) {
+      files.set(object.key, { size: object.size, etag: object.etag });
+    }
+  }
   for (const ref of refs) {
     const key = keyWithinRoot(root, decodeItemRef(ref)); if (isTrashed(tombstones, key)) continue; const head = await env.DATA_BUCKET.head(key);
     if (head && !key.endsWith("/") && !isMovedSourceMarker(head)) files.set(key, { size: head.size, etag: head.etag });

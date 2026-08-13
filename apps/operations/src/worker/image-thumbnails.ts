@@ -203,9 +203,9 @@ export function supportedThumbnailSource(key: string, contentType?: string): boo
   return thumbnailSourceKind(key, contentType) !== null;
 }
 
-export function videoThumbnailSourceDisabled(_key: string, _contentType?: string): boolean {
-  // Video thumbnails are now supported via the TrueNAS queue worker.
-  return false;
+export function videoThumbnailSourceDisabled(key: string, contentType?: string): boolean {
+  const normalizedType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
+  return normalizedType?.startsWith("video/") === true || DISABLED_VIDEO_EXTENSIONS.has(extension(key));
 }
 
 export function thumbnailSourceKind(key: string, contentType?: string): ThumbnailSourceKind | null {

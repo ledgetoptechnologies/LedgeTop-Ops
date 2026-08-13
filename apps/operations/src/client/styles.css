@@ -676,7 +676,7 @@ tbody tr:last-child td { border: 0; }
 
 .delivery-list-item {
   display: grid;
-  grid-template-columns: 1.4rem 1.6rem minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: .7rem;
   width: 100%;
@@ -692,11 +692,13 @@ tbody tr:last-child td { border: 0; }
 .delivery-list-item:hover, .delivery-list-item.selected { background: #fff7f1; }
 .delivery-list-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .delivery-list-open { display: grid; grid-template-columns: 1.4rem 1.3rem minmax(0, 1fr) auto auto; align-items: center; gap: .65rem; min-width: 0; flex: 1; padding: .7rem .8rem; color: inherit; background: transparent; border: 0; text-align: left; }
+.file-card > .delivery-item-menu { position: absolute; right: .65rem; bottom: .55rem; }
 .delivery-item-menu { position: relative; flex: 0 0 auto; z-index: 2; }
+.delivery-item-menu.open { z-index: 30; }
 .delivery-item-menu-trigger { width: 2rem; height: 2rem; border: 0; border-radius: .35rem; background: transparent; color: #46515a; font-size: 1.35rem; line-height: 1; opacity: 0; }
 .file-card:hover .delivery-item-menu-trigger, .file-card:focus-within .delivery-item-menu-trigger, .delivery-list-item:hover .delivery-item-menu-trigger, .delivery-list-item:focus-within .delivery-item-menu-trigger { opacity: 1; }
 .delivery-item-menu-trigger:hover, .delivery-item-menu-trigger:focus-visible { background: #fff0e6; color: #151a20; outline: 2px solid #e56e25; outline-offset: 1px; }
-.delivery-item-menu-popover { position: absolute; right: 0; top: calc(100% + .2rem); min-width: 8rem; padding: .25rem; border: 1px solid #cdd4da; border-radius: .4rem; background: #fff; box-shadow: 0 8px 24px #18212b2e; z-index: 20; }
+.delivery-item-menu-popover { position: fixed; min-width: 9rem; padding: .25rem; border: 1px solid #cdd4da; border-radius: .4rem; background: #fff; box-shadow: 0 8px 24px #18212b2e; z-index: 130; }
 .delivery-item-menu-popover button { display: block; width: 100%; padding: .45rem .55rem; border: 0; border-radius: .25rem; background: transparent; color: #151a20; text-align: left; }
 .delivery-item-menu-popover button:hover, .delivery-item-menu-popover button:focus-visible { background: #fff0e6; outline: none; }
 .delivery-item-menu-popover .danger { color: #a52020; }
@@ -1830,9 +1832,11 @@ ul { color: var(--muted); }
   .airspace-counts { grid-template-columns: repeat(2, 1fr); }
   .airspace-counts p { grid-column: 1 / -1; padding-left: 0; border-left: 0; border-top: 2px solid var(--line); padding-top: .65rem; }
   .delivery-toolbar-actions { justify-content: flex-start; }
-  .delivery-list-item { grid-template-columns: 1.4rem 1.3rem minmax(0, 1fr) auto; }
+  .delivery-list-item { grid-template-columns: minmax(0, 1fr) auto; }
   .delivery-list-item small { display: none; }
+  .delivery-item-menu-trigger { opacity: 1; }
 }
+@media (hover: none) { .delivery-item-menu-trigger { opacity: 1; } }
 
 /* ---------------------------------------------------------------------------
    SOP responsive

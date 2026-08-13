@@ -9,6 +9,36 @@ export function parseDeliveryRoute(pathname: string, hash: string): { publicId: 
   return { publicId, secret: fragment || (publicId.length > 30 ? publicId : "") };
 }
 
+export type DeliveryBrowseView = "grid" | "list";
+
+export interface DeliveryBrowseState {
+  folderId: string;
+  fileId: string;
+  view: DeliveryBrowseView;
+}
+
+const opaqueItemRef = /^[A-Za-z0-9_-]{1,4096}$/;
+
+export function parseDeliveryBrowseState(search: string, fallbackView: DeliveryBrowseView = "grid"): DeliveryBrowseState {
+  const params = new URLSearchParams(search);
+  const folder = params.get("folder") || "";
+  const file = params.get("file") || "";
+  const requestedView = params.get("view");
+  return {
+    folderId: opaqueItemRef.test(folder) ? folder : "",
+    fileId: opaqueItemRef.test(file) ? file : "",
+    view: requestedView === "grid" || requestedView === "list" ? requestedView : fallbackView,
+  };
+}
+
+export function deliveryBrowsePath(publicId: string, state: DeliveryBrowseState): string {
+  const params = new URLSearchParams();
+  if (state.folderId) params.set("folder", state.folderId);
+  if (state.fileId) params.set("file", state.fileId);
+  params.set("view", state.view);
+  return `/s/${encodeURIComponent(publicId)}?${params.toString()}`;
+}
+
 export interface DeliverySessionResult {
   publicId: string;
   canonicalPath: string;

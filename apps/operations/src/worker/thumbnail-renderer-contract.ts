@@ -33,12 +33,10 @@ export class ThumbnailRendererError extends Error {
 }
 
 export function validateContainerThumbnailRequest(value: ContainerThumbnailRequest): void {
-  if (value.kind !== "image" && value.kind !== "pdf" && value.kind !== "video") {
+  if (value.kind !== "image" && value.kind !== "pdf") {
     throw new ThumbnailRendererError("invalid_request", "Unsupported container thumbnail kind");
   }
-  const maximum = value.kind === "pdf" ? CONTAINER_PDF_MAX_INPUT_BYTES
-    : value.kind === "video" ? 10 * 1024 * 1024 * 1024
-    : CONTAINER_IMAGE_MAX_INPUT_BYTES;
+  const maximum = value.kind === "pdf" ? CONTAINER_PDF_MAX_INPUT_BYTES : CONTAINER_IMAGE_MAX_INPUT_BYTES;
   if (!Number.isSafeInteger(value.expectedSize) || value.expectedSize <= 0 || value.expectedSize > maximum) {
     throw new ThumbnailRendererError("invalid_request", "Container thumbnail source size is outside its safe limit");
   }

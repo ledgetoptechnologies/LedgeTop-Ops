@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser } from "@ltds/shared";
 import { Brand, Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import { ApiError, api, setCsrf } from "./api";
@@ -61,6 +62,7 @@ interface ActiveDeliveryShare {
   expiresAt: string | null;
   recoverable: boolean;
   recipientEmail?: string | null;
+  imageLocationMapEnabled?: boolean;
 }
 interface DeliveryShareResult {
   id: string;
@@ -2478,7 +2480,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   useEffect(() => {
     const focusSearch = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
-      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1 || target?.closest("input, textarea, select, [contenteditable='true']")) return;
+      if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1 || target?.closest("input, textarea, select, button, a[href], [role='menu'], [role='dialog'], [contenteditable='true']")) return;
       event.preventDefault();
       searchInput.current?.focus();
       setSearchQuery((current) => `${current}${event.key}`);
@@ -3620,16 +3622,48 @@ function DeliveryListItem({
 }
 function DeliveryItemMenu({ item, share, actions, act }: { item: DeliveryItem; share?: () => void; actions: Record<"rename" | "copy" | "move" | "delete", boolean>; act: (action: "rename" | "copy" | "move" | "delete") => void }) {
   const [open, setOpen] = useState(false);
-  const invoke = (action: "rename" | "copy" | "move" | "delete") => { setOpen(false); act(action); };
-  return <div className="delivery-item-menu" onClick={(event) => event.stopPropagation()}>
-    <button className="delivery-item-menu-trigger" aria-label={`Actions for ${displayName(item)}`} aria-expanded={open} onClick={() => setOpen((value) => !value)}>⋮</button>
-    {open && <div className="delivery-item-menu-popover" role="menu" aria-label={`Actions for ${displayName(item)}`}>
+  const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
+  const trigger = useRef<HTMLButtonElement | null>(null), menu = useRef<HTMLDivElement | null>(null);
+  const menuId = useMemo(() => `delivery-actions-${(item.id || item.name || "item").replace(/[^A-Za-z0-9_-]/g, "-")}`, [item.id, item.name]);
+  const closeMenu = (restore = false) => { setOpen(false); if (restore) requestAnimationFrame(() => trigger.current?.focus()); };
+  const invoke = (action: "rename" | "copy" | "move" | "delete") => { closeMenu(); act(action); };
+  useEffect(() => {
+    if (!open) return;
+    const pointer = (event: PointerEvent) => { if (!menu.current?.contains(event.target as Node) && !trigger.current?.contains(event.target as Node)) closeMenu(); };
+    const key = (event: KeyboardEvent) => {
+      const items = [...(menu.current?.querySelectorAll<HTMLButtonElement>('[role="menuitem"]') || [])]; if (!items.length) return;
+      const index = items.indexOf(document.activeElement as HTMLButtonElement);
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); closeMenu(true); return; }
+      if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+      event.preventDefault(); event.stopPropagation();
+      const next = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : event.key === "ArrowDown" ? (index + 1 + items.length) % items.length : (index - 1 + items.length) % items.length;
+      items[next]?.focus();
+    };
+    const closeOnViewportChange = () => closeMenu();
+    document.addEventListener("pointerdown", pointer, true); document.addEventListener("keydown", key, true); addEventListener("resize", closeOnViewportChange);
+    requestAnimationFrame(() => {
+      const anchor = trigger.current?.getBoundingClientRect(), bounds = menu.current?.getBoundingClientRect();
+      if (anchor && bounds) {
+        const below = anchor.bottom + 4; const top = below + bounds.height <= innerHeight - 4 ? below : Math.max(4, anchor.top - bounds.height - 4);
+        setPosition({ top, left: Math.max(4, Math.min(innerWidth - bounds.width - 4, anchor.right - bounds.width)) });
+      }
+    });
+    return () => { document.removeEventListener("pointerdown", pointer, true); document.removeEventListener("keydown", key, true); removeEventListener("resize", closeOnViewportChange); };
+  }, [open]);
+  useEffect(() => {
+    if (!open || !position) return;
+    requestAnimationFrame(() => menu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus());
+  }, [open, position]);
+  if (!share && !Object.values(actions).some(Boolean)) return null;
+  return <div className={`delivery-item-menu${open ? " open" : ""}`} onClick={(event) => event.stopPropagation()}>
+    <button ref={trigger} type="button" className="delivery-item-menu-trigger" aria-label={`Actions for ${displayName(item)}`} aria-haspopup="menu" aria-controls={open ? menuId : undefined} aria-expanded={open} onClick={() => setOpen((value) => { if (!value) setPosition(null); return !value; })}>⋮</button>
+    {open && createPortal(<div ref={menu} id={menuId} className="delivery-item-menu-popover" role="menu" aria-label={`Actions for ${displayName(item)}`} style={{ top: position?.top ?? 0, left: position?.left ?? 0, visibility: position ? "visible" : "hidden" }}>
       {share && <button role="menuitem" onClick={() => { setOpen(false); share(); }}>Share</button>}
       {actions.rename && <button role="menuitem" onClick={() => invoke("rename")}>Rename</button>}
       {actions.copy && <button role="menuitem" onClick={() => invoke("copy")}>Copy</button>}
       {actions.move && <button role="menuitem" onClick={() => invoke("move")}>Move</button>}
       {actions.delete && <button className="danger" role="menuitem" onClick={() => invoke("delete")}>Delete</button>}
-    </div>}
+    </div>, document.body)}
   </div>;
 }
 function SharedBadge() {
@@ -3840,6 +3874,7 @@ function ShareDialog({
   const [generated, setGenerated] = useState(false);
   const [removeCode, setRemoveCode] = useState(false);
   const [recipientEmail, setRecipientEmail] = useState("");
+  const [imageLocationMapEnabled, setImageLocationMapEnabled] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -3850,6 +3885,7 @@ function ShareDialog({
         if (!mounted) return;
         setActive(value.share);
         setRecipientEmail(value.share?.recipientEmail || "");
+        setImageLocationMapEnabled(Boolean(value.share?.imageLocationMapEnabled));
         if (value.share?.expiresAt) {
           setExpirationMode("custom");
           const valueDate = new Date(value.share.expiresAt);
@@ -3991,6 +4027,7 @@ function ShareDialog({
                         ? new Date(expiresAt).toISOString()
                         : null,
                     recipientEmail: recipientEmail.trim() || null,
+                    imageLocationMapEnabled,
                   };
                   if (removeCode) body.removeAccessCode = true;
                   else if (accessCode.trim())
@@ -4012,6 +4049,7 @@ function ShareDialog({
                     passwordProtected: value.passwordProtected,
                     expiresAt: value.expiresAt,
                     recoverable: true,
+                    imageLocationMapEnabled,
                   });
                   setRemoveCode(false);
                   changed();
@@ -4067,6 +4105,16 @@ function ShareDialog({
                   Delivery and access notifications will be sent here. Access
                   codes are never emailed.
                 </small>
+              </label>
+              <label className="check full">
+                <input
+                  type="checkbox"
+                  checked={imageLocationMapEnabled}
+                  disabled={busy}
+                  onChange={(event) => { setImageLocationMapEnabled(event.target.checked); markDirty(); }}
+                />{" "}
+                Show photo locations on this client share
+                <small>Off by default. When enabled, clients can see validated GPS coordinates for photos inside the shared folder.</small>
               </label>
               <label className="full">
                 Access code
@@ -4321,12 +4369,13 @@ function FilePreview({
               {index + 1} of {items.length}
             </span>
           )}
-          <a
-            className="button button-orange button-small"
+          {item.downloadUrl && <a
+            className="button button-orange button-small viewer-download-action"
             href={item.downloadUrl}
+            aria-label={`Download ${displayName(item)}`}
           >
-            Download
-          </a>
+            Download original
+          </a>}
           <button className="button-ghost button-small" onClick={close}>
             Close
           </button>

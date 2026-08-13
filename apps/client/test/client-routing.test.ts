@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { openDeliveryRoute, parseDeliveryRoute } from "../src/client/route";
+import { deliveryBrowsePath, openDeliveryRoute, parseDeliveryBrowseState, parseDeliveryRoute } from "../src/client/route";
 
 describe("delivery client routing", () => {
   it("treats the public root as an informational landing page", () => {
@@ -34,6 +34,18 @@ describe("delivery client routing", () => {
   it("does not interpret unrelated paths or malformed fragments as share credentials", () => {
     expect(parseDeliveryRoute("/unrelated/path", "#%zz")).toEqual({ publicId: "", secret: "" });
     expect(parseDeliveryRoute("/s/public-id/extra", "#private-secret")).toEqual({ publicId: "", secret: "" });
+  });
+
+  it("round-trips only opaque folder/file references and the selected view", () => {
+    const path = deliveryBrowsePath("public-id", { folderId: "folder_ref-1", fileId: "file_ref-2", view: "list" });
+    expect(path).toBe("/s/public-id?folder=folder_ref-1&file=file_ref-2&view=list");
+    expect(parseDeliveryBrowseState("?folder=folder_ref-1&file=file_ref-2&view=list")).toEqual({ folderId: "folder_ref-1", fileId: "file_ref-2", view: "list" });
+    expect(path).not.toContain("#");
+  });
+
+  it("fails closed for malformed browse state without carrying unrelated query data", () => {
+    expect(parseDeliveryBrowseState("?folder=../secret&file=raw/path&view=table&redirect=https://example.com", "grid"))
+      .toEqual({ folderId: "", fileId: "", view: "grid" });
   });
 
   it("does not canonicalize a fragment link until its manifest loads", async () => {

@@ -19,6 +19,8 @@ import { buildDropboxAuthorizationUrl, buildGoogleAuthorizationUrl, createOAuthS
 import type { CloudCredential } from "./cloud-transfer/types";
 import { createCloudProviderAdapter } from "./cloud-transfer/providers";
 import type { CloudProvider, CloudTransferEnv } from "./cloud-transfer/types";
+import { listDownloadableObjects, summarizeDownloadableObjects } from "./downloadable-files";
+import { listPublicShareLocations, resolvePublicShareLocation } from "./public-locations";
 import { createClientPortalRouter } from "./client-portal/routes";
 export { friendlyBulkFailure } from "./bulk-download-errors";
 
@@ -114,13 +116,13 @@ app.use("*", async (c, next) => {
 });
 
 function activeShareSql(extra: string): string {
-  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,s.recipient_email,
+  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,s.recipient_email,s.image_location_map_enabled,
     p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) AS r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id
     WHERE ${extra} AND s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`;
 }
 
 function unavailableShareSql(extra: string): string {
-  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,
+  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,s.image_location_map_enabled,
     p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) AS r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id
     WHERE ${extra} AND s.revoked_at IS NOT NULL AND s.revoked_reason='folder_unavailable'`;
 }
@@ -222,6 +224,9 @@ export function classifyPublicRateLimit(method: string, path: string): PublicRat
   if (method === "GET" && new RegExp(`^${bulkBase}/[^/]+$`).test(path)) {
     return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "bulk-status" };
   }
+  if (method === "GET" && path.endsWith("/download-summary")) return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "download-summary" };
+  if (method === "GET" && path.endsWith("/locations")) return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "locations" };
+  if (method === "GET" && path.endsWith("/manifest/media")) return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "manifest-media" };
   if (path.endsWith("/manifest")) return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "manifest" };
   if (path.endsWith("/thumbnail")) return { binding: "PUBLIC_THUMBNAIL_RATE_LIMITER", scope: "thumbnail" };
   if (path.endsWith("/stream-ticket")) return { binding: "PUBLIC_STREAM_RATE_LIMITER", scope: "stream" };
@@ -358,8 +363,6 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
     const relative = folderPrefix.slice(root.length).replace(/\/$/, ""); if (!relative) continue;
     items.push({ id: encodeItemRef(relative), name: aliases.get(folderPrefix) || relative.split("/").pop() || relative, kind: "folder", size: null, uploadedAt: null });
   }
-  const videos: Array<{ index: number; key: string }> = [];
-  const thumbnails: Array<{ index: number; key: string; etag: string; base: string; kind: "image" | "pdf" | "video"; size: number; contentType?: string }> = [];
   for (const object of listed.objects) {
     if (object.key === prefix || object.key.endsWith("/") || isHiddenKey(object.key) || isTrashed(tombstones, object.key) || isMovedSourceMarker(object)) continue;
     const relative = object.key.slice(root.length); const id = encodeItemRef(relative); const kind = kindForKey(object.key);
@@ -369,24 +372,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
     if (kind === "image") { const e = (object.key.split(".").pop() || "").toLowerCase(); if (!["dng","arw","cr2","cr3","crw","nef","raf","rw2","orf","pef","srw","3fr","rwl","srf","sr2","x3f"].includes(e)) item.previewUrl = item.sourceUrl; }
     else if (kind === "audio" || kind === "text") item.previewUrl = `${base}/preview`;
     if (kind === "video") item.previewUrl = undefined;
-    if (kind === "video") videos.push({ index: items.length, key: object.key });
-    if ((kind === "image" || kind === "pdf" || kind === "video") && item.thumbnailState !== "not_applicable") thumbnails.push({ index: items.length, key: object.key, etag: object.httpEtag, base, kind, size: object.size, contentType: object.httpMetadata?.contentType });
     items.push(item);
-  }
-  if (thumbnails.length) {
-    const db = primaryDb(c.env); const records = await db.batch(thumbnails.map(thumbnail => db.prepare("SELECT source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status FROM image_thumbnail_jobs WHERE source_key=?").bind(thumbnail.key)));
-    records.forEach((result, index) => {
-      const row = result.results[0] as ThumbnailJobRow | undefined; const thumbnail = thumbnails[index]!; const item = items[thumbnail.index];
-      if (!item) return;
-      Object.assign(item, thumbnailFieldsForObject(thumbnail.key, thumbnail.kind, thumbnail.base, thumbnail.etag, row, thumbnail.size, thumbnail.contentType));
-    });
-  }
-  if (videos.length) {
-    const db = primaryDb(c.env); const records = await db.batch(videos.map(video => db.prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(video.key)));
-    await Promise.all(records.map(async (result, index) => {
-      const row = result.results[0] as { stream_uid?: string; stream_status?: string } | undefined; const item = items[videos[index]!.index];
-      if (item && row?.stream_status === "ready" && row.stream_uid) item.previewStatus = "ready";
-    }));
   }
   const breadcrumbs: Array<{ id: string; name: string }> = []; let built = "";
   let physicalBreadcrumb = root;
@@ -395,6 +381,54 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   const dropbox=cloudProviderEnabled(c.env,"dropbox"),google=cloudProviderEnabled(c.env,"google"); const manifest: DeliveryManifest = { share: { publicId: share.public_id!, label: share.label, clientName: share.client_name, projectName: aliases.get(root) || share.project_name, expiresAt: share.expires_at }, folder: { id: folderRef, name: aliases.get(currentPhysical) || relativeFolder.split("/").pop() || share.project_name, breadcrumbs }, items, nextCursor: listed.truncated ? listed.cursor : null, capabilities: { cloudTransfer: { dropbox, googleDrive: google, googlePicker: google } } };
   c.executionCtx.waitUntil(Promise.all([audit(c.env, c.req.raw, share.id, "manifest.viewed", folderRef), primaryDb(c.env).prepare("UPDATE shares SET access_count=access_count+1,last_accessed_at=datetime('now') WHERE id=?").bind(share.id).run()]));
   return c.json(manifest);
+});
+
+app.get("/api/public/shares/:publicId/manifest/media", async c => {
+  const share = c.get("share"); await requireAvailableFolder(c.env, share); const root = normalizeRoot(share.r2_prefix); const tombstones = await loadTombstones(c.env);
+  const folderRef = c.req.query("folder") || ""; const relativeFolder = folderRef ? decodeItemRef(folderRef) : "";
+  const prefix = relativeFolder ? `${keyWithinRoot(root, relativeFolder).replace(/\/$/, "")}/` : root;
+  const listed = await c.env.DATA_BUCKET.list({ prefix, delimiter: "/", limit: 500, cursor: c.req.query("cursor"), include: ["httpMetadata", "customMetadata"] });
+  const candidates = listed.objects.flatMap(object => {
+    if (!object.key.startsWith(prefix) || object.key === prefix || object.key.endsWith("/") || isHiddenKey(object.key) || isTrashed(tombstones, object.key) || isMovedSourceMarker(object)) return [];
+    const relative = object.key.slice(root.length); const id = encodeItemRef(relative); const kind = kindForKey(object.key);
+    if (kind !== "image" && kind !== "pdf" && kind !== "video") return [];
+    const base = `/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${id}`;
+    return [{ id, key: object.key, kind, etag: object.httpEtag, size: object.size, contentType: object.httpMetadata?.contentType, base }];
+  });
+  const db = primaryDb(c.env); const thumbnailCandidates = candidates.filter(candidate => candidate.kind !== "video"); const videoCandidates = candidates.filter(candidate => candidate.kind === "video");
+  const [thumbnailRecords, videoRecords] = await Promise.all([
+    thumbnailCandidates.length ? db.batch(thumbnailCandidates.map(candidate => db.prepare("SELECT source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status FROM image_thumbnail_jobs WHERE source_key=?").bind(candidate.key))) : [],
+    videoCandidates.length ? db.batch(videoCandidates.map(candidate => db.prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(candidate.key))) : [],
+  ]);
+  const thumbnails = new Map(thumbnailCandidates.map((candidate, index) => [candidate.id, thumbnailRecords[index]?.results[0] as ThumbnailJobRow | undefined]));
+  const videos = new Map(videoCandidates.map((candidate, index) => [candidate.id, videoRecords[index]?.results[0] as { stream_uid?: string; stream_status?: string } | undefined]));
+  return c.json({ items: candidates.map(candidate => {
+    const thumbnail = thumbnails.get(candidate.id); const video = videos.get(candidate.id);
+    return {
+      id: candidate.id,
+      ...thumbnailFieldsForObject(candidate.key, candidate.kind, candidate.base, candidate.etag, thumbnail, candidate.size, candidate.contentType),
+      ...(candidate.kind === "video" ? { previewStatus: video?.stream_status === "ready" && video.stream_uid ? "ready" : "processing" } : {}),
+    };
+  }) });
+});
+
+app.get("/api/public/shares/:publicId/download-summary", async c => {
+  const share = c.get("share"); await requireAvailableFolder(c.env, share); const tombstones = await loadTombstones(c.env);
+  const objects = await listDownloadableObjects(c.env.DATA_BUCKET, share.r2_prefix, tombstones);
+  return c.json(summarizeDownloadableObjects(objects));
+});
+
+app.get("/api/public/shares/:publicId/locations", async c => {
+  const share = c.get("share"); await requireAvailableFolder(c.env, share);
+  if (share.image_location_map_enabled !== 1) return c.json({ locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null });
+  const locations = await listPublicShareLocations(c.env, share, c.req.query("folder") || "");
+  return c.json({ locations, mapboxPublicToken: locations.points.length ? c.env.MAPBOX_PUBLIC_TOKEN || null : null });
+});
+
+app.get("/api/public/shares/:publicId/locations/:assetRef", async c => {
+  const share = c.get("share"); await requireAvailableFolder(c.env, share);
+  if (share.image_location_map_enabled !== 1) throw new HTTPException(404, { message: "Mapped image not found" });
+  return c.json({ item: await resolvePublicShareLocation(c.env, share, c.req.param("assetRef"), c.req.query("folder") || "") });
 });
 
 export async function streamItem(c: any, disposition: "inline" | "attachment", raw = false, requiredKind?: "pdf"): Promise<Response> {
