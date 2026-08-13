@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "./crypto";
+import { presignR2Get } from "./r2-signing";
 import {
   THUMBNAIL_HEIGHT,
   THUMBNAIL_MAX_OUTPUT_BYTES,
@@ -23,6 +24,7 @@ interface ClaimResponse {
   mediaKind?: string;
   thumbnailKey?: string;
   r2SourceUrl?: string;
+  r2PresignedUrl?: string;
   r2UploadUrl?: string;
   status: string;
 }
@@ -205,6 +207,25 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
   // The Worker proxies R2 through its binding - no S3 credentials needed on TrueNAS.
   const thumbnailKey = job.thumbnail_key;
 
+  // For videos: generate a presigned R2 GET URL so ffmpeg can read directly
+  // from R2 with HTTP Range (only pulls ~10-40MB, not the full file).
+  // For images/PDFs: use the Worker proxy URL (full download to tmpfs).
+  let r2PresignedUrl: string | undefined;
+  if (kind === "video" && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY) {
+    try {
+      r2PresignedUrl = await presignR2Get({
+        accountId: env.R2_ACCOUNT_ID,
+        bucket: env.R2_BUCKET_NAME,
+        key: job.source_key,
+        accessKeyId: env.R2_ACCESS_KEY_ID,
+        secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+        expiresSeconds: 900,
+      });
+    } catch {
+      // If signing fails, fall back to proxy download
+    }
+  }
+
   const response: ClaimResponse = {
     status: "claimed",
     leaseId,
@@ -214,6 +235,7 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
     mediaKind: kind,
     thumbnailKey,
     r2SourceUrl: `${RENDERER_API_PREFIX}/source/${leaseId}?key=${encodeURIComponent(job.source_key)}`,
+    r2PresignedUrl,
     r2UploadUrl: `${RENDERER_API_PREFIX}/thumbnail/${leaseId}?key=${encodeURIComponent(thumbnailKey)}`,
   };
 
