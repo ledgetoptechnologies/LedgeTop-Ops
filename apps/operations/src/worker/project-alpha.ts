@@ -495,6 +495,33 @@ function reconciliationStatements(db: D1Database, data: SnapshotCollections, syn
     });
 
   const authorizationChanged = changed.has("users") || changed.has("business_units") || changed.has("application_entitlements");
+  // Reconcile a legacy PA-managed staff row by its verified PA email on every
+  // snapshot.  A historical PA identity may have been retired and replaced
+  // while retaining the same sign-in email; limiting the association repair to
+  // changed snapshot collections leaves that row permanently inactive once the
+  // snapshots have stabilized.  Never replace an identity that still has an
+  // active entitlement for this application, and never touch protected staff.
+  statements.push(db.prepare(`UPDATE staff_users AS s
+    SET project_alpha_user_id=(
+      SELECT u.id FROM pa_users u
+      JOIN pa_application_entitlements e ON e.user_id=u.id
+      WHERE lower(u.email)=lower(s.email)
+        AND u.active=1 AND e.active=1 AND e.enabled=1 AND e.application_key=?
+      ORDER BY u.id LIMIT 1
+    ), status='active', provisioning_source='project-alpha', updated_at=datetime('now')
+    WHERE s.provisioning_source='project-alpha' AND s.sync_protected=0
+      AND EXISTS (
+        SELECT 1 FROM pa_users u
+        JOIN pa_application_entitlements e ON e.user_id=u.id
+        WHERE lower(u.email)=lower(s.email)
+          AND u.active=1 AND e.active=1 AND e.enabled=1 AND e.application_key=?
+      )
+      AND (s.project_alpha_user_id IS NULL OR NOT EXISTS (
+        SELECT 1 FROM pa_application_entitlements current_entitlement
+        WHERE current_entitlement.user_id=s.project_alpha_user_id
+          AND current_entitlement.active=1 AND current_entitlement.enabled=1
+          AND current_entitlement.application_key=?
+      ))`).bind(applicationKey, applicationKey, applicationKey));
   if (!authorizationChanged) return statements;
 
   statements.push(

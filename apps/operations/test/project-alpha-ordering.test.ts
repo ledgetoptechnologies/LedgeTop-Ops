@@ -12,6 +12,37 @@ const collections=["users","business_units","worker_business_units","clients","o
 afterEach(()=>vi.unstubAllGlobals());
 
 describe("Project Alpha snapshot/webhook ordering",()=>{
+  it("repairs a retired PA identity by the active entitled email after snapshots stabilize",async()=>{
+    const miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB","DELIVERY_DB"]});
+    try{
+      const ops=await miniflare.getD1Database("OPS_DB") as D1Database;
+      const delivery=await miniflare.getD1Database("DELIVERY_DB") as D1Database;
+      for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql","0007_pa_projection_fingerprints.sql","0008_project_units_task_assignments.sql","0009_project_managers.sql","0016_projection_entity_leases.sql","0021_project_alpha_sync_hardening.sql"]){
+        const sql=await readFile(resolve(import.meta.dirname,"../migrations",migration),"utf8");
+        for(const statement of sql.replace(/\r\n/g,"\n").split(";").map((part)=>part.trim()).filter((part)=>part&&!part.startsWith("PRAGMA foreign_keys")))await ops.prepare(statement).run();
+      }
+      for(const statement of [
+        "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,display_name TEXT,project_alpha_client_id TEXT,project_alpha_organization_id TEXT,updated_at TEXT)",
+        "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,project_name TEXT,client_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT)",
+        "CREATE TABLE client_project_grants(account_id TEXT,project_id TEXT,can_request_service INTEGER NOT NULL,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
+        "CREATE TABLE client_folder_associations(id TEXT PRIMARY KEY,scope_type TEXT,account_id TEXT,project_id TEXT,revoked_at TEXT)",
+        "CREATE TABLE client_delivery_grants(account_id TEXT,project_id TEXT,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
+        "CREATE TABLE client_member_project_grants(account_id TEXT,project_id TEXT,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
+      ])await delivery.prepare(statement).run();
+      await ops.prepare("INSERT INTO staff_users(id,email,display_name,project_alpha_user_id,status,provisioning_source) VALUES('legacy','kstirn@example.com','Kollins','retired-pa-user','inactive','project-alpha')").run();
+
+      vi.stubGlobal("fetch",vi.fn(async()=>Response.json({
+        generated_at:"2026-08-13T01:55:16.744842Z",
+        ...Object.fromEntries(collections.map((name)=>[name,name==="users"?[{id:"current-pa-user",email:"kstirn@example.com",display_name:"Kollins",active:true,updated_at:"2026-08-13T01:55:16.744842Z"}]:name==="application_entitlements"?[{id:"entitlement-current",user_id:"current-pa-user",application_key:"ltds_ops",enabled:true,role_key:"role-operator",updated_at:"2026-08-13T01:55:16.744842Z"}]:[]])),
+        has_more:false,next_page:null,
+      })));
+      await syncProjectAlpha({OPS_DB:ops,DELIVERY_DB:delivery,PROJECT_ALPHA_BASE_URL:"https://pa.example.test",PROJECT_ALPHA_API_KEY:"read-only",APPLICATION_KEY:"ltds_ops"} as Env);
+
+      expect(await ops.prepare("SELECT project_alpha_user_id FROM staff_users WHERE id='legacy'").first("project_alpha_user_id")).toBe("current-pa-user");
+      expect(await ops.prepare("SELECT status FROM staff_users WHERE id='legacy'").first("status")).toBe("active");
+    }finally{await miniflare.dispose();}
+  },30_000);
+
   it("preserves a newer webhook projection when an older snapshot runs afterward",async()=>{
     const miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB","DELIVERY_DB"]});
     try{
