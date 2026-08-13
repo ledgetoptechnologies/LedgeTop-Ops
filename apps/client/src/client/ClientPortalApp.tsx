@@ -1,6 +1,7 @@
 import {
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
   type ReactNode,
@@ -16,12 +17,15 @@ import {
   loadPortalPastDeliveryLocations,
   loadPortalProjectFileLocations,
   loadPortalProjectFiles,
+  loadPortalNotifications,
   respondToPortalEstimate,
+  updatePortalNotification,
   updatePortalServiceRequest,
   type PortalBootstrap,
   type PortalFile,
   type PortalFilePage,
   type PortalPoi,
+  type PortalNotification,
   type PortalProject,
   type PortalServiceRequest,
   type PortalServiceRequestInput,
@@ -36,6 +40,64 @@ import {
 } from "./portal-route";
 import { MapAreaSelector } from "./MapAreaSelector";
 import { ImageLocationMap } from "./ImageLocationMap";
+
+function PortalNotificationCenter() {
+  const [open, setOpen] = useState(false);
+  const [items, setItems] = useState<PortalNotification[]>([]);
+  const [unread, setUnread] = useState(0);
+  const [error, setError] = useState("");
+  const root = useRef<HTMLDivElement>(null);
+
+  const reload = () => loadPortalNotifications().then(page => {
+    setItems(page.notifications);
+    setUnread(page.unreadCount);
+    setError("");
+  }).catch(caught => setError((caught as Error).message));
+
+  useEffect(() => { void reload(); }, []);
+  useEffect(() => {
+    if (!open) return;
+    const close = (event: MouseEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent && event.key === "Escape") {
+        setOpen(false);
+        (root.current?.querySelector("button") as HTMLButtonElement | null)?.focus();
+      } else if (event instanceof MouseEvent && root.current && !root.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => { document.removeEventListener("mousedown", close); document.removeEventListener("keydown", close); };
+  }, [open]);
+
+  const mutate = async (item: PortalNotification, action: "read" | "dismiss") => {
+    await updatePortalNotification(item.id, action);
+    if (action === "dismiss") setItems(current => current.filter(candidate => candidate.id !== item.id));
+    else setItems(current => current.map(candidate => candidate.id === item.id ? { ...candidate, readAt: new Date().toISOString() } : candidate));
+    if (!item.readAt) setUnread(value => Math.max(0, value - 1));
+  };
+
+  return <div className="portal-notification-center" ref={root}>
+    <button className="portal-notification-bell" aria-label={`Notifications${unread ? `, ${unread} unread` : ""}`} aria-expanded={open}
+      aria-controls="portal-notification-panel" onClick={() => setOpen(value => !value)}>
+      <span aria-hidden="true">🔔</span>{unread > 0 && <span className="portal-notification-count">{unread > 99 ? "99+" : unread}</span>}
+    </button>
+    {open && <section id="portal-notification-panel" className="portal-notification-panel" aria-label="Notifications">
+      <header><strong>Notifications</strong><button className="button-ghost button-small" onClick={() => setOpen(false)} aria-label="Close notifications">Close</button></header>
+      {error && <p role="alert">{error}</p>}
+      {!error && !items.length && <p className="portal-notification-empty">You’re all caught up.</p>}
+      <div className="portal-notification-list">
+        {items.map(item => <article key={item.id} className={item.readAt ? "" : "is-unread"}>
+          {item.actionPath ? <a href={item.actionPath} onClick={event => {
+            event.preventDefault(); void mutate(item, "read"); setOpen(false);
+            window.history.pushState({}, "", item.actionPath!); window.dispatchEvent(new PopStateEvent("popstate"));
+          }}><strong>{item.title}</strong></a> : <strong>{item.title}</strong>}
+          <p>{item.body}</p><small>{new Date(item.createdAt).toLocaleString()}</small>
+          <div>{!item.readAt && <button className="button-ghost button-small" onClick={() => void mutate(item, "read")}>Mark read</button>}
+            <button className="button-ghost button-small" onClick={() => void mutate(item, "dismiss")}>Dismiss</button></div>
+        </article>)}
+      </div>
+    </section>}
+  </div>;
+}
 
 type TopPage = "dashboard" | "projects" | "deliveries" | "requests" | "account";
 type WorkspaceTab = "overview" | "files" | "requests";
@@ -1372,6 +1434,7 @@ export function ClientPortalApp({
             </a>
           ))}
         </nav>
+        <PortalNotificationCenter />
         <button
           className="portal-account-button"
           onClick={() => navigate("account")}

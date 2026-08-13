@@ -139,6 +139,7 @@ test("administrator authors, previews, publishes, inspects history, restores, an
     if (request.method() === "POST" && url.pathname === "/api/admin/sops") {
       const body = request.postDataJSON() as { title: string; slug: string; purpose: string; markdownBody: string };
       expect(request.headers()["x-csrf-token"]).toBe("csrf-test");
+      expect(body.markdownBody).toContain("# Imported field procedure");
       const first: Revision = {
         ...published,
         id: "revision-1",
@@ -182,13 +183,22 @@ test("administrator authors, previews, publishes, inspects history, restores, an
     await route.fulfill({ status: 404, json: { error: "Not found" } });
   });
 
-  page.on("dialog", dialog => void dialog.accept());
+  const dialogs: string[] = [];
+  page.on("dialog", dialog => { dialogs.push(dialog.message()); void dialog.accept(); });
   await page.goto("/sops");
   await page.getByRole("tab", { name: "Admin workspace" }).click();
   await page.getByRole("button", { name: "Create SOP" }).click();
   await page.getByLabel("Template").selectOption("mapping");
   await page.getByRole("button", { name: "Apply template" }).click();
   await expect(page.locator(".sop-live-preview").getByRole("heading", { name: "Mapping Mission" })).toBeVisible();
+  await page.getByLabel("Import Markdown file").setInputFiles({
+    name: "field-procedure.md",
+    mimeType: "text/markdown",
+    buffer: Buffer.from("\uFEFF# Imported field procedure\n\n## Before launch\n\n- Verify airspace\n"),
+  });
+  await expect(page.getByText("Imported field-procedure.md.")).toBeVisible();
+  await expect(page.locator(".sop-live-preview").getByRole("heading", { name: "Imported field procedure" })).toBeVisible();
+  expect(dialogs).toContain("Replace the current unsaved Markdown with this file?");
   await page.getByRole("button", { name: "Create draft" }).click();
   await expect(page.getByText("Draft created.")).toBeVisible();
   await page.getByRole("button", { name: "Publish draft" }).click();

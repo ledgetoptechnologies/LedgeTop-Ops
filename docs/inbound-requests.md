@@ -14,7 +14,7 @@ Protect the request form with Turnstile, per-request and per-IP rate limits, max
 
 ## Large uploads
 
-Use direct multipart uploads to the private incoming bucket so the browser and R2 handle the large body without buffering it in a Worker. The Worker issues five-minute SigV4 part URLs only after validating the request, contributor session, Turnstile, and quota. Part size starts at 32 MiB and increases as needed to remain below R2's 10,000-part ceiling. D1 checkpoints and browser IndexedDB allow a contributor to reselect the same file after a reload and continue. The Worker verifies completed size and rejects basic executable/active-content signatures; TrueNAS performs authoritative checksum and ClamAV checks. Incomplete uploads expire after 24 hours.
+Use direct multipart uploads to the private incoming bucket so the browser and R2 handle the large body without buffering it in a Worker. The Worker issues five-minute SigV4 part URLs only after validating the request, contributor session, Turnstile, and quota. Every ticket signs the exact expected `Content-Length` and declared `Content-Type` for one upload object and part; the browser must use those values, and an oversized or cross-part PUT cannot reuse the capability. Part size starts at 32 MiB and increases as needed to remain below R2's 10,000-part ceiling. D1 checkpoints and browser IndexedDB allow a contributor to reselect the same file after a reload and continue. Resume requires a SHA-256 fingerprint over stable metadata plus bounded first/last samples, so another file with the same name, size, MIME type, and timestamp cannot inherit checkpoints. Signed URLs are never persisted. The browser uses direct XHR-to-R2 transfer for within-part byte progress, obtains a fresh five-minute ticket for each bounded retry, and sends no source bytes to the Worker. A contributor may cancel only their own in-progress upload; cancellation aborts the private multipart upload, clears checkpoints, and releases reserved quota exactly once. The Worker verifies completed size and rejects basic executable/active-content signatures; TrueNAS performs authoritative checksum and ClamAV checks. Incomplete uploads expire after 24 hours.
 
 The bucket must allow CORS only from `https://incoming.ledgetopdroneservices.com`:
 
@@ -35,6 +35,10 @@ The bucket must allow CORS only from `https://incoming.ledgetopdroneservices.com
 ```
 
 Provision `TURNSTILE_SECRET`, `INCOMING_SESSION_SECRET`, `INCOMING_ACCESS_CODE_PEPPER`, `AUDIT_IP_SECRET`, and `INCOMING_PICKUP_SECRET` on `ltds-ops`. The Operations `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY` credential is scoped to object read/write on `client-data` and `ltds-incoming`; the signer hardcodes the Incoming bucket. Register separate staging and production Turnstile widgets and set `TURNSTILE_SITE_KEY` in the matching environment.
+
+Apply Delivery migration `0116_incoming_upload_hardening.sql` before deploying the dependent Worker. It adds the resume fingerprint and a rolling-deploy-safe trigger for exactly-once quota release; it does not grant access or alter existing upload status. `/health` fails closed with HTTP 503 and lists only missing configuration names when the D1/R2/Turnstile/signer/Workflow prerequisites are incomplete. Do not enable or advertise incoming uploads from an unhealthy environment.
+
+The Operations Incoming uploads workspace exposes the request title, maximum file count, and maximum total bytes already enforced by the server. Editing these settings never reduces a limit below currently reserved usage.
 
 ## Pickup and promotion
 

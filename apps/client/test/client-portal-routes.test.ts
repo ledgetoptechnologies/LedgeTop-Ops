@@ -44,6 +44,8 @@ function repository(overrides: Partial<ClientPortalRepository> = {}): ClientPort
     getAuthorizedFile: vi.fn(async () => null),
     listDeliveries: vi.fn(async () => []),
     getDeliveryHandoff: vi.fn(async () => null),
+    listNotifications: vi.fn(async () => ({ notifications: [], unreadCount: 0, cursor: null })),
+    updateNotification: vi.fn(async () => false),
     listServiceRequests: vi.fn(async () => []),
     getServiceRequest: vi.fn(async () => null),
     createServiceRequest: vi.fn(async () => ({ kind: "created" as const, request: serviceRequest })),
@@ -506,6 +508,23 @@ describe("client portal activation hardening", () => {
       body,
     }, env("true", "https://client.example"));
     expect(conflict.status).toBe(409);
+  });
+
+  it("lists only repository-authorized notifications and origin-protects read/dismiss mutations", async () => {
+    const listNotifications = vi.fn(async () => ({ notifications: [{ id: "notice-1", eventType: "files_added" as const, title: "New files", body: "Files are available.", actionPath: "/portal/deliveries", readAt: null, createdAt: "2026-08-13 12:00:00" }], unreadCount: 1, cursor: null }));
+    const updateNotification = vi.fn(async () => true);
+    const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ listNotifications, updateNotification }) });
+    const listed = await app.request("https://client.example/notifications", {}, env("true", "https://client.example"));
+    expect(listed.status).toBe(200);
+    expect((await listed.json() as any).notifications[0]).not.toHaveProperty("r2Key");
+    expect(listNotifications).toHaveBeenCalledWith(expect.anything(), session, null);
+
+    const denied = await app.request("https://client.example/notifications/notice-1", { method: "PATCH", headers: { Origin: "https://other.example", "Content-Type": "application/json" }, body: JSON.stringify({ action: "read" }) }, env("true", "https://client.example"));
+    expect(denied.status).toBe(403);
+    expect(updateNotification).not.toHaveBeenCalled();
+    const allowed = await app.request("https://client.example/notifications/notice-1", { method: "PATCH", headers: { Origin: "https://client.example", "Content-Type": "application/json" }, body: JSON.stringify({ action: "dismiss" }) }, env("true", "https://client.example"));
+    expect(allowed.status).toBe(200);
+    expect(updateNotification).toHaveBeenCalledWith(expect.anything(), session, "notice-1", "dismiss");
   });
 
   it("reaches the null identity-provider boundary only after origin configuration is valid", async () => {

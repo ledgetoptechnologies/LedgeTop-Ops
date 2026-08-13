@@ -29,6 +29,16 @@ export interface ClientPortalInvitation {
   expiresAt: string;
 }
 
+export interface ClientPortalNotification {
+  id: string;
+  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed";
+  title: string;
+  body: string;
+  actionPath: string | null;
+  readAt: string | null;
+  createdAt: string;
+}
+
 export interface ClientProject {
   id: string;
   externalRef: string | null;
@@ -161,6 +171,8 @@ export interface ClientPortalRepository {
   getAuthorizedFile(env: Env, session: ClientPortalSession, fileId: string, projectId?: string | null): Promise<ClientPortalFile | null>;
   listDeliveries(env: Env, session: ClientPortalSession, projectId: string): Promise<ClientDelivery[]>;
   getDeliveryHandoff(env: Env, session: ClientPortalSession, projectId: string, shareId: string): Promise<{ publicId: string } | null>;
+  listNotifications(env: Env, session: ClientPortalSession, cursor?: string | null): Promise<{ notifications: ClientPortalNotification[]; unreadCount: number; cursor: string | null }>;
+  updateNotification(env: Env, session: ClientPortalSession, notificationId: string, action: "read" | "dismiss"): Promise<boolean>;
   listServiceRequests(env: Env, session: ClientPortalSession): Promise<ClientServiceRequest[]>;
   getServiceRequest(env: Env, session: ClientPortalSession, requestId: string): Promise<ClientServiceRequest | null>;
   createServiceRequest(env: Env, session: ClientPortalSession, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;

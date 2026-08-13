@@ -64,6 +64,7 @@ interface UploadRow {
   declared_size: number;
   content_type: string;
   declared_sha256: string | null;
+  resume_fingerprint: string | null;
   client_upload_id: string | null;
   completion_claimed_at?: string | null;
   quota_released_at?: string | null;
@@ -218,15 +219,10 @@ async function releaseReservedQuota(
   upload: Pick<UploadRow, "id" | "request_id" | "declared_size">,
 ): Promise<boolean> {
   const changed = await env.DELIVERY_DB.prepare(
-    `UPDATE file_request_uploads SET quota_released_at=datetime('now'),updated_at=datetime('now')
+    `UPDATE file_request_uploads SET quota_released_at=datetime('now'),quota_release_managed=1,updated_at=datetime('now')
      WHERE id=? AND quota_released_at IS NULL RETURNING id`,
   ).bind(upload.id).first<{ id: string }>();
-  if (!changed) return false;
-  await env.DELIVERY_DB.prepare(
-    `UPDATE file_requests SET reserved_files=MAX(0,reserved_files-1),
-     reserved_bytes=MAX(0,reserved_bytes-?),updated_at=datetime('now') WHERE id=?`,
-  ).bind(upload.declared_size, upload.request_id).run();
-  return true;
+  return Boolean(changed);
 }
 
 const publicApp = new Hono<{ Bindings: IncomingEnv }>();
@@ -240,7 +236,10 @@ publicApp.use("*", async (c, next) => {
   if (c.req.path.startsWith("/api/")) c.header("Cache-Control", "no-store");
 });
 
-publicApp.get("/health", (c) => c.json({ ok: true, service: "ltds-ops-incoming" }));
+publicApp.get("/health", (c) => {
+  const capability = incomingUploadsCapability(c.env);
+  return c.json({ ok: capability.enabled, service: "ltds-ops-incoming", incomingUploads: capability }, capability.enabled ? 200 : 503);
+});
 
 publicApp.get("/r/:publicId", async (c) => {
   const row = await activeRequest(c.env, c.req.param("publicId"));
@@ -263,9 +262,11 @@ publicApp.post("/api/public/requests/:publicId/authorize", async (c) => {
     message: z.string().trim().max(2000).optional().default(""),
     accessCode: z.string().max(128).optional().default(""),
     turnstileToken: z.string().max(4096),
+    website: z.string().max(200).optional().default(""),
   }));
   const address = await addressHash(c.env, c.req.raw);
   await exactLimit(c.env, `incoming:authorize:${row.id}:${address}`, 10, 60);
+  if (input.website.trim()) throw new HTTPException(400, { message: "Invalid request" });
   await validateTurnstile(c.env, c.req.raw, input.turnstileToken);
   if (row.access_code_hash) {
     const supplied = await hmac(c.env.INCOMING_ACCESS_CODE_PEPPER, `incoming-code:v1:${row.id}:${input.accessCode}`);
@@ -308,12 +309,13 @@ publicApp.post("/api/public/requests/:publicId/files/init", async (c) => {
     contentType: z.string().min(1).max(255),
     lastModified: z.number().int().nonnegative().optional(),
     sha256: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
+    resumeFingerprint: z.string().regex(/^[a-f0-9]{64}$/i).optional(),
   }));
   const originalName = validateIncomingFile(input.name, input.contentType, input.size);
   const fileId = await deterministicFileId(c.env, row.id, current.contributorId, input.clientUploadId);
   const existing = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
     `SELECT id,request_id,contributor_id,object_key,upload_id,original_name,declared_size,content_type,
-      declared_sha256,client_upload_id,completion_claimed_at,quota_released_at,status
+      declared_sha256,resume_fingerprint,client_upload_id,completion_claimed_at,quota_released_at,status
      FROM file_request_uploads WHERE id=?`,
   ).bind(fileId).first<UploadRow>();
   if (existing) {
@@ -325,6 +327,7 @@ publicApp.post("/api/public/requests/:publicId/files/init", async (c) => {
       || existing.declared_size !== input.size
       || existing.content_type !== input.contentType
       || (existing.declared_sha256 || null) !== (input.sha256?.toLowerCase() || null)
+      || (existing.resume_fingerprint || null) !== (input.resumeFingerprint?.toLowerCase() || null)
     ) {
       throw new HTTPException(409, { message: "This client upload ID belongs to a different file" });
     }
@@ -358,8 +361,8 @@ publicApp.post("/api/public/requests/:publicId/files/init", async (c) => {
       await c.env.DELIVERY_DB.prepare(
         `INSERT INTO file_request_uploads
          (id,request_id,contributor_id,object_key,upload_id,original_name,declared_size,content_type,
-          declared_sha256,client_upload_id,status)
-         VALUES (?,?,?,?,?,?,?,?,?,?,'uploading')`,
+          declared_sha256,resume_fingerprint,client_upload_id,status)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,'uploading')`,
       ).bind(
         fileId,
         row.id,
@@ -370,6 +373,7 @@ publicApp.post("/api/public/requests/:publicId/files/init", async (c) => {
         input.size,
         input.contentType,
         input.sha256?.toLowerCase() || null,
+        input.resumeFingerprint?.toLowerCase() || null,
         input.clientUploadId,
       ).run();
     } catch (insertError) {
@@ -380,7 +384,7 @@ publicApp.post("/api/public/requests/:publicId/files/init", async (c) => {
       reservationReleased = true;
       const raced = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
         `SELECT id,request_id,contributor_id,object_key,upload_id,original_name,declared_size,content_type,
-          declared_sha256,client_upload_id,completion_claimed_at,quota_released_at,status
+          declared_sha256,resume_fingerprint,client_upload_id,completion_claimed_at,quota_released_at,status
          FROM file_request_uploads WHERE id=?`,
       ).bind(fileId).first<UploadRow>();
       if (!raced) throw insertError;
@@ -392,6 +396,7 @@ publicApp.post("/api/public/requests/:publicId/files/init", async (c) => {
         || raced.declared_size !== input.size
         || raced.content_type !== input.contentType
         || (raced.declared_sha256 || null) !== (input.sha256?.toLowerCase() || null)
+        || (raced.resume_fingerprint || null) !== (input.resumeFingerprint?.toLowerCase() || null)
       ) {
         throw new HTTPException(409, { message: "This client upload ID belongs to a different file" });
       }
@@ -455,21 +460,25 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/part-ticket", async
   if (upload.status !== "uploading") throw new HTTPException(409, { message: "Upload is not accepting parts" });
   const input = await jsonBody(c.req.raw, z.object({ partNumber: z.number().int().min(1).max(10_000) }));
   const partSize = incomingMultipartPartSize(upload.declared_size);
-  if (input.partNumber > Math.ceil(upload.declared_size / partSize)) {
+  const partCount = Math.ceil(upload.declared_size / partSize);
+  if (input.partNumber > partCount) {
     throw new HTTPException(400, { message: "Part number exceeds the file size" });
   }
-  await exactLimit(c.env, `incoming:parts:${upload.id}`, Math.ceil(upload.declared_size / partSize) * 4 + 20, 3600);
+  const contentLength = input.partNumber === partCount ? upload.declared_size - partSize * (partCount - 1) : partSize;
+  await exactLimit(c.env, `incoming:parts:${upload.id}`, partCount * 4 + 20, 3600);
   const url = await presignIncomingPart({
     accountId: c.env.R2_ACCOUNT_ID,
     bucket: c.env.R2_INCOMING_BUCKET_NAME,
     key: upload.object_key,
     uploadId: upload.upload_id,
     partNumber: input.partNumber,
+    contentLength,
+    contentType: upload.content_type,
     accessKeyId: c.env.R2_ACCESS_KEY_ID || "",
     secretAccessKey: c.env.R2_SECRET_ACCESS_KEY || "",
     expiresSeconds: 300,
   });
-  return c.json({ url, expiresIn: 300, partNumber: input.partNumber });
+  return c.json({ url, expiresIn: 300, partNumber: input.partNumber, contentLength, contentType: upload.content_type });
 });
 
 publicApp.put("/api/public/requests/:publicId/files/:fileId/parts/:partNumber", async (c) => {
@@ -514,6 +523,31 @@ publicApp.get("/api/public/requests/:publicId/files/:fileId/resume", async (c) =
     partSize: incomingMultipartPartSize(upload.declared_size),
     completedParts: await checkpoints(c.env, upload.id),
   });
+});
+
+publicApp.delete("/api/public/requests/:publicId/files/:fileId", async (c) => {
+  requirePublicOrigin(c.req.raw, c.env);
+  const row = await activeRequest(c.env, c.req.param("publicId"));
+  const current = await session(c.env, row, c.req.raw);
+  c.header("Set-Cookie", current.cookie);
+  const upload = await ownedUpload(c.env, row.id, current.contributorId, c.req.param("fileId"));
+  if (upload.status === "expired" && upload.quota_released_at) {
+    return c.json({ ok: true, status: "cancelled", idempotent: true });
+  }
+  if (upload.status !== "uploading") {
+    throw new HTTPException(409, { message: "Only an in-progress upload can be cancelled" });
+  }
+  if (!upload.upload_id.startsWith("pending:")) {
+    try {
+      await c.env.INCOMING_BUCKET.resumeMultipartUpload(upload.object_key, upload.upload_id).abort();
+    } catch (error) {
+      console.error(JSON.stringify({ event: "incoming_cancel_abort_failed", uploadId: upload.id, message: error instanceof Error ? error.message : "unknown" }));
+      throw new HTTPException(503, { message: "The upload could not be cancelled yet. Please retry." });
+    }
+  }
+  const cancelled = await releaseQuota(c.env, upload, ["uploading"]);
+  await c.env.DELIVERY_DB.prepare("DELETE FROM file_request_upload_parts WHERE upload_id=?").bind(upload.id).run();
+  return c.json({ ok: true, status: "cancelled", idempotent: !cancelled });
 });
 
 publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c) => {
@@ -573,6 +607,7 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
        completed_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND status='uploading'`,
     ).bind(upload.id).run();
     await releaseReservedQuota(c.env, upload);
+    await c.env.DELIVERY_DB.prepare("DELETE FROM file_request_upload_parts WHERE upload_id=?").bind(upload.id).run();
     throw new HTTPException(422, { message: "Uploaded size did not match the selected file" });
   }
   const probe = await c.env.INCOMING_BUCKET.get(upload.object_key, {
@@ -585,6 +620,7 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
        completed_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND status='uploading'`,
     ).bind(upload.id).run();
     await releaseReservedQuota(c.env, upload);
+    await c.env.DELIVERY_DB.prepare("DELETE FROM file_request_upload_parts WHERE upload_id=?").bind(upload.id).run();
     throw new HTTPException(415, { message: "The uploaded content type is not accepted" });
   }
   const transitioned = await c.env.DELIVERY_DB.prepare(
@@ -600,6 +636,7 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
     await releaseQuota(c.env, upload, ["uploading"]);
     throw new HTTPException(410, { message: "This file request is no longer accepting uploads" });
   }
+  await c.env.DELIVERY_DB.prepare("DELETE FROM file_request_upload_parts WHERE upload_id=?").bind(upload.id).run();
   return c.json({ ok: true, status: "quarantined", idempotent: false });
 });
 
@@ -629,6 +666,7 @@ publicApp.post("/api/internal/uploads/:uploadId/accepted", async (c) => {
   ).bind(input.sha256.toLowerCase(), upload.id).run();
   if (result.meta.changes !== 1) throw new HTTPException(409, { message: "Upload status changed" });
   await releaseReservedQuota(c.env, upload);
+  await c.env.DELIVERY_DB.prepare("DELETE FROM file_request_upload_parts WHERE upload_id=?").bind(upload.id).run();
   return c.json({ ok: true, status: "accepted", idempotent: false });
 });
 
@@ -658,10 +696,14 @@ export function dispatchIncomingPublicRequest(
   if (!isIncomingPublicRequest(request, env)) return null;
   const decision = incomingPublicRequestDecision(env, request.method, new URL(request.url).pathname);
   if (decision === "health") {
+    const capability = incomingUploadsCapability(env);
     return Response.json(
-      { status: "ok", service: "ltds-ops-incoming", incomingUploads: incomingUploadsCapability(env) },
-      { headers: { "Cache-Control": "no-store" } },
+      { status: capability.enabled ? "ok" : "degraded", service: "ltds-ops-incoming", incomingUploads: capability },
+      { status: capability.enabled ? 200 : 503, headers: { "Cache-Control": "no-store" } },
     );
+  }
+  if (decision === "disabled") {
+    return Response.json({ error: "incoming_uploads_unavailable" }, { status: 503, headers: { "Cache-Control": "no-store" } });
   }
   return publicApp.fetch(request, env, context);
 }
@@ -765,6 +807,9 @@ staffApp.get("/", async (c) => {
       ? {
           id:String(link.id),
           url:`${c.env.INCOMING_BASE_URL}/r/${String(link.publicId)}`,
+          title:String(link.title),
+          maxFiles:Number(link.maxFiles),
+          maxBytes:Number(link.maxBytes),
           accessCodeProtected:Boolean(link.hasAccessCode),
           createdAt:String(link.createdAt),
           outstandingFiles:Number(link.reservedFiles||0),

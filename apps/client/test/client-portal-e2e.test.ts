@@ -37,7 +37,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const migrationsDirectory = fileURLToPath(new URL("../migrations/", import.meta.url));
     for (const migration of readdirSync(migrationsDirectory).filter(name => name.endsWith(".sql")).sort()) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
-      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql"].includes(migration)) {
+      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql"].includes(migration)) {
         await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
         continue;
       }
@@ -361,6 +361,28 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const visibleRequest = (await visible.json() as { requests: Array<{ id: string; acceptedQuote: { documentNumber: string; total: number } | null }> }).requests.find(request => request.id === "billing-request");
     expect(visibleRequest?.acceptedQuote).toMatchObject({ documentNumber: "Q-0042", total: 1250 });
     await db.prepare("UPDATE client_account_members SET can_view_billing=0 WHERE account_id='account-a' AND identity_id='identity-a'").run();
+  });
+
+  it("hides stored service-request notifications after project access is revoked", async () => {
+    await db.batch([
+      db.prepare("UPDATE client_account_members SET role='member' WHERE account_id='account-a' AND identity_id='identity-a'"),
+      db.prepare("INSERT INTO client_member_project_grants(account_id,identity_id,project_id,granted_by_identity_id) VALUES('account-a','identity-a','project-a','identity-a')"),
+      db.prepare(`INSERT INTO client_portal_notifications
+        (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
+        VALUES ('project-notice','account-a','identity-a','request_status','service_request','billing-request','project-notice-key','Project update','A request changed.','/portal/requests')`),
+    ]);
+    const visible = await portal().request(`${portalOrigin}/notifications`, {}, env);
+    expect((await visible.json() as any).notifications.map((item: any) => item.id)).toContain("project-notice");
+
+    await db.prepare("UPDATE client_member_project_grants SET revoked_at=datetime('now') WHERE account_id='account-a' AND identity_id='identity-a' AND project_id='project-a'").run();
+    const hidden = await portal().request(`${portalOrigin}/notifications`, {}, env);
+    expect((await hidden.json() as any).notifications.map((item: any) => item.id)).not.toContain("project-notice");
+
+    await db.batch([
+      db.prepare("DELETE FROM client_portal_notifications WHERE id='project-notice'"),
+      db.prepare("DELETE FROM client_member_project_grants WHERE account_id='account-a' AND identity_id='identity-a' AND project_id='project-a'"),
+      db.prepare("UPDATE client_account_members SET role='manager' WHERE account_id='account-a' AND identity_id='identity-a'"),
+    ]);
   });
 
   it("keeps the incomplete invitation workflow unavailable in the pilot", async () => {

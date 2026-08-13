@@ -29,6 +29,8 @@ describe("incoming upload security", () => {
       key: "quarantine/request/file/object",
       uploadId: "upload+id",
       partNumber: 2,
+      contentLength: 1024,
+      contentType: "image/jpeg",
       accessKeyId: "access-key",
       secretAccessKey: "secret-key",
       now: new Date("2026-07-23T12:00:00Z"),
@@ -36,6 +38,7 @@ describe("incoming upload security", () => {
     expect(url).toContain("X-Amz-Expires=300");
     expect(url).toContain("partNumber=2");
     expect(url).toContain("uploadId=upload%2Bid");
+    expect(url).toContain("X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost");
     expect(url).toMatch(/X-Amz-Signature=[a-f0-9]{64}$/);
   });
 

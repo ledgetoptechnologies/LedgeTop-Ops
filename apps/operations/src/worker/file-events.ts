@@ -6,6 +6,7 @@ import { notificationStatement } from "./notifications";
 import { canonicalThumbnailSourceKey, enqueueThumbnailJob, handleRemovedPrebuiltThumbnail, prebuiltThumbnailArtifactKey, removeThumbnailStateForPath, THUMBNAIL_PREBUILT_GRACE_SECONDS, THUMBNAIL_SIDECAR_GRACE_SECONDS, thumbnailSourceEligible } from "./image-thumbnails";
 import { deleteImageLocation, enqueueImageLocationJob } from "./image-locations";
 import { isMovedSourceMarker } from "@ltds/shared";
+import { recordClientFolderFileChange } from "./client-folder-grants";
 
 export interface R2Notification {
   action: string;
@@ -288,7 +289,10 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
         message.ack(); continue;
       }
       if (removed(event.action)) {
-        if (!hidden(key)) await handleRemovedSource(env, key, event.object?.eTag);
+        if (!hidden(key)) {
+          const removal = await handleRemovedSource(env, key, event.object?.eTag);
+          if (removal === "removed") await recordClientFolderFileChange(env, key, false);
+        }
         else await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run();
         message.ack(); continue;
       }
@@ -323,6 +327,7 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
         env.DELIVERY_DB.prepare(`INSERT INTO file_index (r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status,stream_error) VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(r2_key) DO UPDATE SET etag=excluded.etag,size=excluded.size,uploaded_at=excluded.uploaded_at,content_type=excluded.content_type,media_kind=excluded.media_kind,stream_uid=excluded.stream_uid,stream_status=excluded.stream_status,stream_error=excluded.stream_error,updated_at=datetime('now')`).bind(key, head.httpEtag, head.size, head.uploaded.toISOString(), mime(key), kind, stream.uid, stream.status, stream.error),
         env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,last_success_at,status,details_json) VALUES ('truenas',datetime('now'),datetime('now'),'healthy',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=datetime('now'),status='healthy',details_json=excluded.details_json,updated_at=datetime('now')`).bind(JSON.stringify({ lastKey: key })),
       ]);
+      await recordClientFolderFileChange(env, key, true);
       const thumbnailJob = thumbnailJobForCreatedObject(event.action, key, kind, head, event.eventTime);
       if (thumbnailJob) await enqueueThumbnailJob(env, thumbnailJob);
       else if (canonicalThumbnailSourceKey(key)) {

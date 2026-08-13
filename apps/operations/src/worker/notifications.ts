@@ -31,6 +31,8 @@ interface ClientPortalRequestNotificationRow {
   longitude: number | null;
   project_name: string | null;
   requester_email: string | null;
+  account_id: string;
+  requester_identity_id: string;
 }
 
 export function normalizeRecipientEmail(value: unknown): string | null {
@@ -234,12 +236,25 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
   let processed = 0;
   for (; processed < 25; processed += 1) {
     const row = await env.DELIVERY_DB.prepare(`SELECT n.id,n.request_id,n.event_type,n.status_value,n.recipient_kind,n.payload_json,n.attempt_count,
-      r.title,r.project_id,r.service_category,r.location_text,r.latitude,r.longitude,p.project_name,
+      r.title,r.project_id,r.service_category,r.location_text,r.latitude,r.longitude,p.project_name,r.account_id,r.created_by_identity_id requester_identity_id,
       CASE WHEN n.recipient_kind='client_requester' THEN i.email ELSE NULL END requester_email
       FROM client_portal_notification_outbox n
       JOIN client_service_requests r ON r.id=n.request_id
       LEFT JOIN projects p ON p.id=r.project_id
-      LEFT JOIN client_identity_links i ON i.id=r.created_by_identity_id AND i.revoked_at IS NULL
+      LEFT JOIN client_accounts account ON account.id=r.account_id AND account.status='active'
+      LEFT JOIN client_identity_links i ON i.id=r.created_by_identity_id AND i.account_id=account.id AND i.revoked_at IS NULL
+        AND EXISTS (SELECT 1 FROM client_account_members member WHERE member.account_id=account.id AND member.identity_id=i.id AND member.revoked_at IS NULL)
+        AND ((r.project_id IS NULL) OR EXISTS (
+          SELECT 1 FROM client_project_grants request_grant
+          JOIN projects request_project ON request_project.id=request_grant.project_id AND request_project.active=1
+          JOIN client_account_members request_member ON request_member.account_id=account.id AND request_member.identity_id=i.id AND request_member.revoked_at IS NULL
+          WHERE request_grant.account_id=account.id AND request_grant.project_id=r.project_id AND request_grant.revoked_at IS NULL
+            AND (request_member.role='manager' OR EXISTS (
+              SELECT 1 FROM client_member_project_grants member_grant
+              WHERE member_grant.account_id=account.id AND member_grant.identity_id=i.id
+                AND member_grant.project_id=r.project_id AND member_grant.revoked_at IS NULL
+            ))
+        ))
       WHERE ((n.status='pending' AND datetime(n.next_attempt_at)<=datetime('now')) OR (n.status='processing' AND datetime(n.lease_expires_at)<=datetime('now')))
         AND n.attempt_count < ? ORDER BY n.created_at LIMIT 1`).bind(MAX_ATTEMPTS).first<ClientPortalRequestNotificationRow>();
     if (!row) break;
@@ -261,6 +276,15 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
     try {
       const snapshot = notificationSnapshot(row);
       const rendered = renderClientRequestNotification(snapshot, actionUrl(env, row, snapshot));
+      if (row.recipient_kind === "client_requester") {
+        const completed = snapshot.lifecycle === "completed";
+        const estimate = snapshot.lifecycle === "estimate_ready";
+        await env.DELIVERY_DB.prepare(`INSERT OR IGNORE INTO client_portal_notifications
+          (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
+          VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), row.account_id, row.requester_identity_id,
+            completed ? "request_completed" : estimate ? "estimate_ready" : "request_status", "service_request", row.request_id,
+            `service-request:${row.id}`, rendered.subject.slice(0, 160), lifecyclePresentation[snapshot.lifecycle].introduction.slice(0, 500), "/portal/requests").run();
+      }
       await sendNotificationMail(env, { to: recipient, fromName: "LTDS Client Portal", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
       await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing'").bind(row.id).run();
       await auditClientRequestNotification(env, "client_request_notification.sent", row, { attempt });

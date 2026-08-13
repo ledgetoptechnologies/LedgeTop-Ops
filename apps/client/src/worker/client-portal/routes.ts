@@ -106,6 +106,7 @@ const estimateResponseBody = z
         message: "Describe the requested change",
       });
   });
+const notificationActionBody = z.object({ action: z.enum(["read", "dismiss"]) }).strict();
 
 const cloudflareClientIdentityProvider: ResolveClientPrincipal =
   resolveCloudflareClientPrincipal;
@@ -247,6 +248,24 @@ export function createClientPortalRouter(
   router.get("/map-config", (c) =>
     c.json({ mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null }),
   );
+
+  router.get("/notifications", async (c) => {
+    const cursor = c.req.query("cursor") || null;
+    if (cursor && !opaqueId.safeParse(cursor).success)
+      throw new HTTPException(400, { message: "Cursor is invalid" });
+    return c.json(await repository.listNotifications(c.env, c.get("clientSession"), cursor));
+  });
+
+  router.patch("/notifications/:notificationId", async (c) => {
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const notificationId = opaqueId.safeParse(c.req.param("notificationId"));
+    const value = notificationActionBody.safeParse(await readBoundedJson(c.req.raw));
+    if (!notificationId.success || !value.success)
+      throw new HTTPException(400, { message: "Notification update is invalid" });
+    if (!(await repository.updateNotification(c.env, c.get("clientSession"), notificationId.data, value.data.action)))
+      throw new HTTPException(404, { message: "Notification not found" });
+    return c.json({ success: true });
+  });
 
   router.get("/projects", async (c) =>
     c.json({

@@ -81,6 +81,8 @@ export async function presignIncomingPart(input: {
   key: string;
   uploadId: string;
   partNumber: number;
+  contentLength: number;
+  contentType: string;
   accessKeyId: string;
   secretAccessKey: string;
   expiresSeconds?: number;
@@ -92,6 +94,9 @@ export async function presignIncomingPart(input: {
   if (!Number.isInteger(input.partNumber) || input.partNumber < 1 || input.partNumber > 10_000) {
     throw new HTTPException(400, { message: "Invalid multipart part number" });
   }
+  if (!Number.isSafeInteger(input.contentLength) || input.contentLength <= 0 || !input.contentType.trim()) {
+    throw new HTTPException(400, { message: "Invalid multipart part headers" });
+  }
   const expires = Math.min(900, Math.max(30, input.expiresSeconds ?? 300));
   const now = input.now ?? new Date();
   const timestamp = now.toISOString().replace(/[:-]|\.\d{3}/g, "");
@@ -99,13 +104,14 @@ export async function presignIncomingPart(input: {
   const host = `${input.accountId}.r2.cloudflarestorage.com`;
   const path = `/${awsEncode(input.bucket)}/${input.key.split("/").map(awsEncode).join("/")}`;
   const scope = `${date}/auto/s3/aws4_request`;
+  const signedHeaders = "content-length;content-type;host";
   const parameters = new Map<string, string>([
     ["X-Amz-Algorithm", "AWS4-HMAC-SHA256"],
     ["X-Amz-Content-Sha256", "UNSIGNED-PAYLOAD"],
     ["X-Amz-Credential", `${input.accessKeyId}/${scope}`],
     ["X-Amz-Date", timestamp],
     ["X-Amz-Expires", String(expires)],
-    ["X-Amz-SignedHeaders", "host"],
+    ["X-Amz-SignedHeaders", signedHeaders],
     ["partNumber", String(input.partNumber)],
     ["uploadId", input.uploadId],
   ]);
@@ -115,7 +121,8 @@ export async function presignIncomingPart(input: {
       leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : leftValue < rightValue ? -1 : leftValue > rightValue ? 1 : 0)
     .map(([key, value]) => `${key}=${value}`)
     .join("&");
-  const canonical = `PUT\n${path}\n${query}\nhost:${host}\n\nhost\nUNSIGNED-PAYLOAD`;
+  const canonicalHeaders = `content-length:${input.contentLength}\ncontent-type:${input.contentType.trim()}\nhost:${host}\n`;
+  const canonical = `PUT\n${path}\n${query}\n${canonicalHeaders}\n${signedHeaders}\nUNSIGNED-PAYLOAD`;
   const stringToSign = `AWS4-HMAC-SHA256\n${timestamp}\n${scope}\n${await digest(canonical)}`;
   const signature = hex(await hmacBytes(await signingKey(input.secretAccessKey, date), stringToSign));
   return `https://${host}${path}?${query}&X-Amz-Signature=${signature}`;

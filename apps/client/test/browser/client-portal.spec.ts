@@ -39,6 +39,11 @@ async function mockAuthorizedPortal(
       await route.fulfill({ json: { projects } });
     } else if (request.method() === "GET" && path === "/api/client/service-requests") {
       await route.fulfill({ json: { requests: fixtureRequests } });
+    } else if (request.method() === "GET" && path === "/api/client/notifications") {
+      await route.fulfill({ json: { notifications: [{ id: "notice-a", eventType: "files_added", title: "New files available", body: "Files were added to your LTDS client workspace.", actionPath: "/portal/deliveries", readAt: null, createdAt: "2026-08-13T12:00:00.000Z" }], unreadCount: 1, cursor: null } });
+    } else if (request.method() === "PATCH" && path === "/api/client/notifications/notice-a") {
+      expect(request.postDataJSON()).toMatchObject({ action: expect.stringMatching(/read|dismiss/) });
+      await route.fulfill({ json: { success: true } });
     } else if (request.method() === "GET" && path === "/api/client/projects/project-a/files") {
       await route.fulfill({ json: filePage });
     } else if (request.method() === "GET" && path === "/api/client/projects/project-a/file-locations") {
@@ -127,6 +132,21 @@ test("authorized portal supports project, delivery, and request workflows", asyn
   await expect(page.getByText("North Site spring imagery")).toBeVisible();
 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("notification bell is keyboard accessible and supports read, dismiss, outside click, and Escape", async ({ page }) => {
+  await mockAuthorizedPortal(page);
+  await page.goto("/portal");
+  const bell = page.getByRole("button", { name: /^Notifications/ });
+  await bell.focus(); await page.keyboard.press("Enter");
+  await expect(page.getByRole("region", { name: "Notifications" })).toBeVisible();
+  await page.getByRole("button", { name: "Mark read" }).click();
+  await expect(page.getByRole("button", { name: "Dismiss" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("region", { name: "Notifications" })).toBeHidden();
+  await expect(bell).toBeFocused();
+  await bell.click(); await page.mouse.click(2, 2);
+  await expect(page.getByRole("region", { name: "Notifications" })).toBeHidden();
 });
 
 test("authorized photo map supports compact, enlarged, and empty states", async ({ page }) => {

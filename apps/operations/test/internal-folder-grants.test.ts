@@ -23,7 +23,9 @@ vi.mock("../src/worker/alerts", () => ({ sendAdminAlert: mocks.sendAdminAlert })
 
 import {
   createClientFolderGrant,
+  processClientFolderChangeNotifications,
   processClientFolderGrantNotifications,
+  recordClientFolderFileChange,
   revokeClientFolderGrant,
 } from "../src/worker/client-folder-grants";
 import { d1ClientPortalRepository } from "../../client/src/worker/client-portal/repository";
@@ -53,7 +55,7 @@ describe("direct authenticated client folder grants", () => {
     const migrationsDirectory = fileURLToPath(new URL("../../client/migrations/", import.meta.url));
     for (const migration of readdirSync(migrationsDirectory).filter(name => name.endsWith(".sql")).sort()) {
       const sql = readFileSync(new URL(`../../client/migrations/${migration}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
-      if (migration === "0107_thumbnail_cleanup_jobs.sql" || migration === "0111_thumbnail_render_provenance.sql") { await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " ")); continue; }
+      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql"].includes(migration)) { await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " ")); continue; }
       const statements = sql.split(/;\s*(?:\n|$)/)
         .map(statement => statement.replace(/^\s*--.*$/gm, "").trim())
         .filter(statement => statement && !/^PRAGMA\s+foreign_keys\s*=\s*ON$/i.test(statement))
@@ -86,7 +88,7 @@ describe("direct authenticated client folder grants", () => {
       DELIVERY_BASE_URL: "https://client.example.test",
       OPS_DB: opsDb,
     };
-  });
+  }, 30_000);
 
   beforeEach(() => {
     folderAssociations = [
@@ -244,5 +246,19 @@ describe("direct authenticated client folder grants", () => {
     expect(await db.prepare("SELECT status FROM client_folder_grant_notifications WHERE association_id=?").bind(revokedRecipient.id).first("status")).toBe("suppressed");
     expect(mocks.sendNotificationMail).not.toHaveBeenCalled();
     await db.prepare("UPDATE client_account_members SET revoked_at=NULL WHERE account_id='account-a' AND identity_id='identity-a'").run();
+  });
+
+  it("suppresses a debounced file change when authoritative folder ownership changes", async () => {
+    const created = await createClientFolderGrant(env, request, principal, {
+      accountId: "account-a", divisionId: "division-a", r2Prefix: "Jobs/Clients/Acme/OwnerCheck/",
+      recipientIdentityIds: ["identity-a"], notificationMode: "both",
+    }, "folder-grant-owner-change-0001");
+    await db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES('Jobs/Clients/Acme/OwnerCheck/photo.jpg','etag-owner',8,'2026-08-13T12:00:00Z','image/jpeg','image')").run();
+    expect(await recordClientFolderFileChange(env, "Jobs/Clients/Acme/OwnerCheck/photo.jpg", true)).toBe(1);
+    await db.prepare("UPDATE client_folder_change_notifications SET next_attempt_at=datetime('now','-1 minute') WHERE logical_grant_id=?").bind(created.grantId).run();
+    folderAssociations = [{ division_id: "division-a", r2_prefix: "Jobs/Clients/Acme/", project_alpha_client_id: "pa-client-b", project_alpha_organization_id: null }];
+    await processClientFolderChangeNotifications(env);
+    expect(await db.prepare("SELECT status FROM client_folder_change_notifications WHERE logical_grant_id=?").bind(created.grantId).first("status")).toBe("suppressed");
+    expect(mocks.sendNotificationMail).not.toHaveBeenCalled();
   });
 });

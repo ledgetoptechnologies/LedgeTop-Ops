@@ -15,7 +15,11 @@ export interface ClientFolderGrantInput {
   r2Prefix: string;
   grantId?: string;
   recipientIdentityId?: string | null;
+  recipientIdentityIds?: string[];
+  notificationMode?: "off" | "added" | "removed" | "both";
 }
+
+export type ClientFolderNotificationMode = "off" | "added" | "removed" | "both";
 
 interface GrantRow {
   id: string;
@@ -32,7 +36,7 @@ interface MutationRow extends GrantRow {
 
 interface ClientAccountMapping {
   id: string;
-  project_alpha_client_id: string;
+  project_alpha_client_id: string | null;
   project_alpha_organization_id: string | null;
 }
 
@@ -41,6 +45,12 @@ interface AuthoritativeFolderAssociation {
   r2_prefix: string;
   project_alpha_client_id: string | null;
   project_alpha_organization_id: string | null;
+}
+
+interface AuthoritativeGrantScope {
+  divisionId: string;
+  ownerType: "client" | "organization";
+  ownerId: string;
 }
 
 interface NotificationRow {
@@ -58,6 +68,8 @@ interface NotificationContext {
   r2_prefix: string;
   account_name: string;
   recipient_email: string;
+  project_alpha_client_id: string | null;
+  project_alpha_organization_id: string | null;
 }
 
 function stableInput(input: ClientFolderGrantInput, prefix: string): string {
@@ -67,6 +79,8 @@ function stableInput(input: ClientFolderGrantInput, prefix: string): string {
     grantId: input.grantId || null,
     r2Prefix: prefix,
     recipientIdentityId: input.recipientIdentityId || null,
+    recipientIdentityIds: [...(input.recipientIdentityIds || [])].sort(),
+    notificationMode: input.notificationMode || (input.recipientIdentityId ? "added" : "off"),
   });
 }
 
@@ -93,7 +107,7 @@ async function activeRecipient(env: Env, accountId: string, identityId: string):
     FROM client_accounts a
     JOIN client_identity_links i ON i.account_id=a.id AND i.id=? AND i.revoked_at IS NULL AND i.email IS NOT NULL
     JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
-    WHERE a.id=? AND a.status='active' AND a.project_alpha_client_id IS NOT NULL`).bind(identityId, accountId).first<{ ok: number }>();
+    WHERE a.id=? AND a.status='active' AND (a.project_alpha_client_id IS NOT NULL OR a.project_alpha_organization_id IS NOT NULL)`).bind(identityId, accountId).first<{ ok: number }>();
   return Boolean(row?.ok);
 }
 
@@ -107,7 +121,7 @@ async function mutationReplay(env: Env, accountId: string, mutationKey: string, 
   return row;
 }
 
-async function authoritativeFolderGrantDivision(env: Env, prefix: string, account: ClientAccountMapping): Promise<string> {
+async function authoritativeFolderGrantScope(env: Env, prefix: string, account?: ClientAccountMapping): Promise<AuthoritativeGrantScope> {
   const associations = await env.OPS_DB.withSession("first-primary").prepare(`SELECT pf.division_id,pf.r2_prefix,
       p.client_id project_alpha_client_id,p.organization_id project_alpha_organization_id
     FROM project_folders pf JOIN pa_projects p ON p.id=pf.project_id
@@ -129,11 +143,82 @@ async function authoritativeFolderGrantDivision(env: Env, prefix: string, accoun
       : "unmapped"));
   if (owners.size !== 1 || owners.has("unmapped"))
     throw new HTTPException(409, { message: "Folder is associated with multiple clients and requires review" });
-  const [owner] = owners;
-  const accountOwner = owner === `client:${account.project_alpha_client_id}`
-    || Boolean(account.project_alpha_organization_id && owner === `organization:${account.project_alpha_organization_id}`);
-  if (!accountOwner) throw new HTTPException(404, { message: "Folder not found" });
-  return divisionId;
+  const owner = [...owners][0];
+  if (!owner) throw new HTTPException(404, { message: "Folder not found" });
+  const [ownerType, ownerId] = owner.split(":") as ["client" | "organization", string];
+  if (account) {
+    const accountOwner = Boolean(account.project_alpha_client_id && owner === `client:${account.project_alpha_client_id}`)
+      || Boolean(account.project_alpha_organization_id && owner === `organization:${account.project_alpha_organization_id}`);
+    if (!accountOwner) throw new HTTPException(404, { message: "Folder not found" });
+  }
+  return { divisionId, ownerType, ownerId };
+}
+
+async function activeRecipients(env: Env, accountId: string, identityIds: string[]): Promise<string[]> {
+  const unique = [...new Set(identityIds)];
+  if (!unique.length) return [];
+  const placeholders = unique.map(() => "?").join(",");
+  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT i.id
+    FROM client_identity_links i JOIN client_accounts a ON a.id=i.account_id AND a.status='active'
+    JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
+    WHERE a.id=? AND i.revoked_at IS NULL AND i.email IS NOT NULL AND i.id IN (${placeholders})`)
+    .bind(accountId, ...unique).all<{ id: string }>();
+  if (rows.results.length !== unique.length) throw new HTTPException(409, { message: "Every notification recipient must be an active member of this client workspace" });
+  return unique;
+}
+
+function preferenceStatements(env: Env, input: { grantId: string; accountId: string; mode: ClientFolderNotificationMode; recipientIds: string[]; actorId: string }): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = [
+    env.DELIVERY_DB.prepare("DELETE FROM client_folder_notification_preferences WHERE logical_grant_id=? AND account_id=?").bind(input.grantId, input.accountId),
+  ];
+  if (input.mode !== "off") for (const identityId of input.recipientIds) statements.push(env.DELIVERY_DB.prepare(`INSERT INTO client_folder_notification_preferences
+    (logical_grant_id,account_id,recipient_identity_id,mode,updated_by) VALUES (?,?,?,?,?)`)
+    .bind(input.grantId, input.accountId, identityId, input.mode, input.actorId));
+  return statements;
+}
+
+export async function findClientFolderGrantTargets(
+  env: Env,
+  principal: StaffPrincipal,
+  input: { divisionId: string; r2Prefix: string; query: string },
+) {
+  if (!env.DELIVERY_DB) throw new Error("delivery-db-binding-required");
+  const prefix = normalizeCrudKey(input.r2Prefix, true);
+  const scope = await authoritativeFolderGrantScope(env, prefix);
+  if (input.divisionId && scope.divisionId !== input.divisionId)
+    throw new HTTPException(409, { message: "Folder division does not match the authoritative association" });
+  await requirePermission(env, principal, "delivery.share.create", { divisionId: scope.divisionId }, true);
+  const query = input.query.trim();
+  if (query.length < 2) return { accounts: [] };
+  const ownerColumn = scope.ownerType === "client" ? "project_alpha_client_id" : "project_alpha_organization_id";
+  const accounts = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,display_name
+    FROM client_accounts WHERE status='active' AND ${ownerColumn}=? AND display_name LIKE ? ESCAPE '\\'
+    ORDER BY display_name COLLATE NOCASE LIMIT 20`)
+    .bind(scope.ownerId, `%${query.replace(/[\\%_]/g, value => `\\${value}`)}%`).all<{ id: string; display_name: string }>();
+  const result = [];
+  for (const account of accounts.results) {
+    const [members, grant] = await Promise.all([
+      env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT i.id identity_id,i.email,m.role
+        FROM client_identity_links i JOIN client_account_members m ON m.account_id=i.account_id AND m.identity_id=i.id
+        WHERE i.account_id=? AND i.revoked_at IS NULL AND m.revoked_at IS NULL AND i.email IS NOT NULL
+        ORDER BY CASE m.role WHEN 'manager' THEN 0 ELSE 1 END,lower(i.email)`).bind(account.id).all<{ identity_id: string; email: string; role: string }>(),
+      env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,logical_grant_id,grant_version
+        FROM client_folder_associations WHERE account_id=? AND scope_type='client' AND project_id IS NULL
+          AND r2_prefix=? AND revoked_at IS NULL ORDER BY grant_version DESC LIMIT 1`).bind(account.id, prefix)
+        .first<{ id: string; logical_grant_id: string; grant_version: number }>(),
+    ]);
+    let preferences: Array<{ recipient_identity_id: string; mode: ClientFolderNotificationMode }> = [];
+    if (grant) preferences = (await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT recipient_identity_id,mode
+      FROM client_folder_notification_preferences WHERE logical_grant_id=? AND account_id=? AND mode<>'off'`)
+      .bind(grant.logical_grant_id, account.id).all<{ recipient_identity_id: string; mode: ClientFolderNotificationMode }>()).results;
+    result.push({
+      id: account.id,
+      displayName: account.display_name,
+      members: members.results.map(member => ({ identityId: member.identity_id, email: member.email, role: member.role })),
+      grant: grant ? { id: grant.id, grantId: grant.logical_grant_id, version: grant.grant_version, preferences } : null,
+    });
+  }
+  return { accounts: result, divisionId: scope.divisionId };
 }
 
 export async function createClientFolderGrant(env: Env, request: Request, principal: StaffPrincipal, input: ClientFolderGrantInput, mutationKey: string) {
@@ -142,10 +227,10 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
     throw new HTTPException(400, { message: "Idempotency-Key must contain 16-128 characters" });
   const prefix = normalizeCrudKey(input.r2Prefix, true);
   const account = await env.DELIVERY_DB.withSession("first-primary").prepare(
-    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND status='active' AND project_alpha_client_id IS NOT NULL",
+    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND status='active' AND (project_alpha_client_id IS NOT NULL OR project_alpha_organization_id IS NOT NULL)",
   ).bind(input.accountId).first<ClientAccountMapping>();
   if (!account) throw new HTTPException(404, { message: "Active client workspace not found" });
-  const divisionId = await authoritativeFolderGrantDivision(env, prefix, account);
+  const { divisionId } = await authoritativeFolderGrantScope(env, prefix, account);
   if (input.divisionId !== divisionId)
     throw new HTTPException(409, { message: "Folder division does not match the authoritative association" });
   await requirePermission(env, principal, "delivery.share.create", { divisionId }, true);
@@ -153,8 +238,10 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
   const replay = await mutationReplay(env, input.accountId, mutationKey, mutationFingerprint);
   if (replay) return { ...mapGrant(replay), idempotentReplay: true, unchanged: false };
 
-  if (input.recipientIdentityId && !(await activeRecipient(env, input.accountId, input.recipientIdentityId)))
-    throw new HTTPException(409, { message: "Notification recipient is not an active member of this client workspace" });
+  const notificationMode = input.notificationMode || (input.recipientIdentityId ? "added" : "off");
+  const recipientIds = await activeRecipients(env, input.accountId, input.recipientIdentityIds || (input.recipientIdentityId ? [input.recipientIdentityId] : []));
+  if (notificationMode !== "off" && !recipientIds.length)
+    throw new HTTPException(400, { message: "Select at least one notification recipient" });
 
   const db = env.DELIVERY_DB.withSession("first-primary");
   let previous: GrantRow | null = null;
@@ -174,6 +261,7 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
     if (covered) {
       await db.batch([
         mutationStatement(env, { accountId: input.accountId, mutationKey, fingerprint: mutationFingerprint, grantId: covered.logical_grant_id, version: covered.grant_version, associationId: covered.id }),
+        ...preferenceStatements(env, { grantId: covered.logical_grant_id, accountId: input.accountId, mode: notificationMode, recipientIds, actorId: principal.id }),
       ]);
       return { ...mapGrant(covered), idempotentReplay: false, unchanged: true };
     }
@@ -182,6 +270,7 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
   if (previous?.r2_prefix === prefix && previous.division_id === divisionId) {
     await db.batch([
       mutationStatement(env, { accountId: input.accountId, mutationKey, fingerprint: mutationFingerprint, grantId: previous.logical_grant_id, version: previous.grant_version, associationId: previous.id }),
+      ...preferenceStatements(env, { grantId: previous.logical_grant_id, accountId: input.accountId, mode: notificationMode, recipientIds, actorId: principal.id }),
     ]);
     return { ...mapGrant(previous), idempotentReplay: false, unchanged: true };
   }
@@ -194,14 +283,9 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
     ORDER BY length(r2_prefix),r2_prefix`).bind(input.accountId).all<{ r2_prefix: string }>();
   const priorCoverage = [...new Set(priorCoverageRows.results.map(row => row.r2_prefix))];
   const exposesNewScope = !priorCoverage.some(covered => prefix.startsWith(covered));
-  const notification = exposesNewScope ? notificationStatement(env, {
-    grantId,
-    version,
-    associationId,
-    accountId: input.accountId,
-    recipientIdentityId: input.recipientIdentityId,
-    priorCoverage,
-  }) : null;
+  const notifications = exposesNewScope ? recipientIds
+    .map(recipientIdentityId => notificationStatement(env, { grantId, version, associationId, accountId: input.accountId, recipientIdentityId, priorCoverage }))
+    .filter((statement): statement is D1PreparedStatement => Boolean(statement)) : [];
   const statements: D1PreparedStatement[] = [];
   if (previous) statements.push(db.prepare("UPDATE client_folder_associations SET revoked_at=datetime('now'),superseded_by_id=? WHERE id=? AND revoked_at IS NULL").bind(associationId, previous.id));
   statements.push(
@@ -210,9 +294,10 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
       VALUES (?,'client',NULL,?,?,?,?,?,?)`).bind(associationId, input.accountId, prefix, principal.id, grantId, version, divisionId),
     mutationStatement(env, { accountId: input.accountId, mutationKey, fingerprint: mutationFingerprint, grantId, version, associationId }),
     db.prepare("INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES('staff',?,'client.folder.granted','client_folder_grant',?,?)")
-      .bind(principal.id, grantId, JSON.stringify({ accountId: input.accountId, associationId, version, r2Prefix: prefix, previousAssociationId: previous?.id || null })),
+      .bind(principal.id, grantId, JSON.stringify({ accountId: input.accountId, associationId, version, r2Prefix: prefix, previousAssociationId: previous?.id || null, notificationMode, recipientCount: recipientIds.length })),
+    ...preferenceStatements(env, { grantId, accountId: input.accountId, mode: notificationMode, recipientIds, actorId: principal.id }),
   );
-  if (notification) statements.push(notification);
+  statements.push(...notifications);
   try {
     const results = await db.batch(statements);
     if (previous && !results[0]?.meta.changes)
@@ -236,10 +321,10 @@ export async function revokeClientFolderGrant(env: Env, request: Request, princi
     FROM client_folder_associations WHERE logical_grant_id=? AND account_id=? AND scope_type='client' AND project_id IS NULL AND revoked_at IS NULL`).bind(grantId, accountId).first<GrantRow>();
   if (!row) throw new HTTPException(404, { message: "Active client folder grant not found" });
   const account = await env.DELIVERY_DB.withSession("first-primary").prepare(
-    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND project_alpha_client_id IS NOT NULL",
+    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND (project_alpha_client_id IS NOT NULL OR project_alpha_organization_id IS NOT NULL)",
   ).bind(accountId).first<ClientAccountMapping>();
   if (!account) throw new HTTPException(404, { message: "Active client folder grant not found" });
-  const divisionId = await authoritativeFolderGrantDivision(env, row.r2_prefix, account);
+  const { divisionId } = await authoritativeFolderGrantScope(env, row.r2_prefix, account);
   await requirePermission(env, principal, "delivery.share.revoke", { divisionId }, true);
   const result = await env.DELIVERY_DB.batch([
     env.DELIVERY_DB.prepare("UPDATE client_folder_associations SET revoked_at=datetime('now') WHERE id=? AND revoked_at IS NULL").bind(row.id),
@@ -298,9 +383,11 @@ export async function processClientFolderGrantNotifications(env: Env): Promise<n
       .bind(row.id, MAX_ATTEMPTS).run();
     if (!claimed.meta.changes) { processed -= 1; continue; }
     const attempt = row.attempt_count + 1;
-    const context = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT association.r2_prefix,a.display_name account_name,i.email recipient_email
+    const context = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT association.r2_prefix,a.display_name account_name,i.email recipient_email,
+        a.project_alpha_client_id,a.project_alpha_organization_id
       FROM client_folder_associations association
-      JOIN client_accounts a ON a.id=association.account_id AND a.status='active' AND a.project_alpha_client_id IS NOT NULL
+      JOIN client_accounts a ON a.id=association.account_id AND a.status='active'
+        AND (a.project_alpha_client_id IS NOT NULL OR a.project_alpha_organization_id IS NOT NULL)
       JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL AND i.email IS NOT NULL
       JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
       WHERE association.id=? AND association.logical_grant_id=? AND association.grant_version=?
@@ -308,6 +395,16 @@ export async function processClientFolderGrantNotifications(env: Env): Promise<n
         AND association.revoked_at IS NULL AND association.superseded_by_id IS NULL`)
       .bind(row.recipient_identity_id, row.association_id, row.logical_grant_id, row.grant_version, row.account_id).first<NotificationContext>();
     if (!context) { await suppress(env, row, "grant-or-recipient-no-longer-authorized"); continue; }
+    try {
+      await authoritativeFolderGrantScope(env, context.r2_prefix, {
+        id: row.account_id,
+        project_alpha_client_id: context.project_alpha_client_id,
+        project_alpha_organization_id: context.project_alpha_organization_id,
+      });
+    } catch {
+      await suppress(env, row, "authoritative-folder-owner-changed");
+      continue;
+    }
     if (!(await hasNewVisibleContent(env, { prefix: context.r2_prefix, priorCoverageJson: row.prior_coverage_json, accountId: row.account_id, associationId: row.association_id }))) { await suppress(env, row, "no-new-visible-content"); continue; }
     try {
       const actionUrl = new URL("/portal/deliveries", env.DELIVERY_BASE_URL).toString();
@@ -324,6 +421,122 @@ export async function processClientFolderGrantNotifications(env: Env): Promise<n
       await env.DELIVERY_DB.prepare("UPDATE client_folder_grant_notifications SET status=?,next_attempt_at=datetime('now',?),lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing'")
         .bind(terminal ? "failed" : "pending", terminal ? "+0 seconds" : `+${2 ** attempt * 5} minutes`, message, row.id).run();
       if (terminal) await sendAdminAlert(env, "Client folder grant notification failed", `Notification ${row.id} for grant ${row.logical_grant_id}: ${message}`);
+    }
+  }
+  return processed;
+}
+
+async function objectFingerprint(key: string): Promise<string> {
+  return fingerprint(`client-folder-object:${key}`);
+}
+
+/** Record only an authorization-relative net change. Source bytes never pass
+ * through this path; the R2 event consumer has already verified object state. */
+export async function recordClientFolderFileChange(env: Env, key: string, present: boolean): Promise<number> {
+  if (!env.DELIVERY_DB) throw new Error("delivery-db-binding-required");
+  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT association.id association_id,
+      association.logical_grant_id,association.account_id,preference.recipient_identity_id
+    FROM client_folder_associations association
+    JOIN client_folder_notification_preferences preference
+      ON preference.logical_grant_id=association.logical_grant_id AND preference.account_id=association.account_id
+    WHERE association.scope_type='client' AND association.project_id IS NULL AND association.revoked_at IS NULL
+      AND association.logical_grant_id IS NOT NULL AND substr(?,1,length(association.r2_prefix))=association.r2_prefix
+      AND preference.mode IN (?, 'both')`)
+    .bind(key, present ? "added" : "removed").all<{ association_id: string; logical_grant_id: string; account_id: string; recipient_identity_id: string }>();
+  if (!rows.results.length) return 0;
+  const keyFingerprint = await objectFingerprint(key);
+  for (const row of rows.results) {
+    const baseline = present ? 0 : 1;
+    await env.DELIVERY_DB.prepare(`INSERT INTO client_folder_change_notifications
+      (id,logical_grant_id,association_id,account_id,recipient_identity_id,object_fingerprint,r2_key,baseline_present,current_present,status)
+      VALUES (?,?,?,?,?,?,?,?,?,'pending')
+      ON CONFLICT(logical_grant_id,recipient_identity_id,object_fingerprint) WHERE status IN ('pending','cancelled','processing')
+      DO UPDATE SET association_id=excluded.association_id,r2_key=excluded.r2_key,current_present=excluded.current_present,
+        status=CASE WHEN client_folder_change_notifications.baseline_present=excluded.current_present THEN 'cancelled' ELSE 'pending' END,
+        attempt_count=0,next_attempt_at=datetime('now','+5 minutes'),lease_expires_at=NULL,last_error=NULL,updated_at=datetime('now')`)
+      .bind(crypto.randomUUID(), row.logical_grant_id, row.association_id, row.account_id, row.recipient_identity_id, keyFingerprint, key, baseline, present ? 1 : 0).run();
+  }
+  return rows.results.length;
+}
+
+interface FolderChangeRow {
+  id: string;
+  logical_grant_id: string;
+  account_id: string;
+  recipient_identity_id: string;
+  r2_key: string;
+  current_present: number;
+  attempt_count: number;
+}
+
+export async function processClientFolderChangeNotifications(env: Env): Promise<number> {
+  if (!env.DELIVERY_DB) throw new Error("delivery-db-binding-required");
+  let processed = 0;
+  for (; processed < 50; processed += 1) {
+    const row = await env.DELIVERY_DB.prepare(`SELECT id,logical_grant_id,account_id,recipient_identity_id,r2_key,current_present,attempt_count
+      FROM client_folder_change_notifications
+      WHERE ((status='pending' AND datetime(next_attempt_at)<=datetime('now')) OR (status='processing' AND datetime(lease_expires_at)<=datetime('now')))
+        AND attempt_count<? ORDER BY created_at LIMIT 1`).bind(MAX_ATTEMPTS).first<FolderChangeRow>();
+    if (!row) break;
+    const claimed = await env.DELIVERY_DB.prepare(`UPDATE client_folder_change_notifications SET status='processing',attempt_count=attempt_count+1,
+      lease_expires_at=datetime('now','+15 minutes'),updated_at=datetime('now') WHERE id=? AND attempt_count<?
+      AND ((status='pending' AND datetime(next_attempt_at)<=datetime('now')) OR (status='processing' AND datetime(lease_expires_at)<=datetime('now')))`)
+      .bind(row.id, MAX_ATTEMPTS).run();
+    if (!claimed.meta.changes) { processed -= 1; continue; }
+    const context = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT a.display_name account_name,i.email recipient_email,
+        preference.mode,association.r2_prefix,a.project_alpha_client_id,a.project_alpha_organization_id,
+        EXISTS(SELECT 1 FROM file_index f WHERE f.r2_key=?) object_present
+      FROM client_folder_associations association
+      JOIN client_folder_notification_preferences preference
+        ON preference.logical_grant_id=association.logical_grant_id AND preference.account_id=association.account_id
+        AND preference.recipient_identity_id=? AND preference.mode<>'off'
+      JOIN client_accounts a ON a.id=association.account_id AND a.status='active'
+        AND (a.project_alpha_client_id IS NOT NULL OR a.project_alpha_organization_id IS NOT NULL)
+      JOIN client_identity_links i ON i.id=preference.recipient_identity_id AND i.account_id=a.id AND i.revoked_at IS NULL AND i.email IS NOT NULL
+      JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
+      WHERE association.logical_grant_id=? AND association.account_id=? AND association.scope_type='client'
+        AND association.project_id IS NULL AND association.revoked_at IS NULL AND substr(?,1,length(association.r2_prefix))=association.r2_prefix
+      LIMIT 1`).bind(row.r2_key, row.recipient_identity_id, row.logical_grant_id, row.account_id, row.r2_key)
+      .first<{ account_name: string; recipient_email: string; mode: ClientFolderNotificationMode; r2_prefix: string; object_present: number; project_alpha_client_id: string | null; project_alpha_organization_id: string | null }>();
+    const wanted = row.current_present === 1 ? "added" : "removed";
+    if (!context || ![wanted, "both"].includes(context.mode) || Boolean(context.object_present) !== Boolean(row.current_present)) {
+      await env.DELIVERY_DB.prepare("UPDATE client_folder_change_notifications SET status='suppressed',lease_expires_at=NULL,last_error='authorization-or-object-state-changed',updated_at=datetime('now') WHERE id=? AND status='processing'").bind(row.id).run();
+      continue;
+    }
+    try {
+      await authoritativeFolderGrantScope(env, context.r2_prefix, {
+        id: row.account_id,
+        project_alpha_client_id: context.project_alpha_client_id,
+        project_alpha_organization_id: context.project_alpha_organization_id,
+      });
+    } catch {
+      await env.DELIVERY_DB.prepare("UPDATE client_folder_change_notifications SET status='suppressed',lease_expires_at=NULL,last_error='authoritative-folder-owner-changed',updated_at=datetime('now') WHERE id=? AND status='processing'").bind(row.id).run();
+      continue;
+    }
+    const title = wanted === "added" ? "New files available" : "Files removed";
+    const body = wanted === "added" ? "Files were added to your LTDS client workspace." : "Files were removed from your LTDS client workspace.";
+    const actionPath = "/portal/deliveries";
+    try {
+      const rendered = {
+        subject: `${title} — ${context.account_name}`,
+        text: `${body}\n\nOpen client deliveries: ${new URL(actionPath, env.DELIVERY_BASE_URL).toString()}`,
+        html: `<p>${body}</p><p><a href="${new URL(actionPath, env.DELIVERY_BASE_URL).toString()}">Open client deliveries</a></p>`,
+      };
+      await env.DELIVERY_DB.prepare(`INSERT OR IGNORE INTO client_portal_notifications
+        (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), row.account_id, row.recipient_identity_id,
+          wanted === "added" ? "files_added" : "files_removed", "folder_grant", row.logical_grant_id, `folder-change:${row.id}`, title, body, actionPath).run();
+      await sendNotificationMail(env, { to: context.recipient_email, fromName: "LTDS Client Portal", ...rendered, messageIdKey: row.id });
+      await env.DELIVERY_DB.batch([
+        env.DELIVERY_DB.prepare("UPDATE client_folder_change_notifications SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing'").bind(row.id),
+      ]);
+    } catch (error) {
+      const attempt = row.attempt_count + 1;
+      const terminal = attempt >= MAX_ATTEMPTS;
+      const message = (error instanceof Error ? error.message : "email-send-failed").slice(0, 240);
+      await env.DELIVERY_DB.prepare("UPDATE client_folder_change_notifications SET status=?,next_attempt_at=datetime('now',?),lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing'")
+        .bind(terminal ? "failed" : "pending", terminal ? "+0 seconds" : `+${2 ** attempt * 5} minutes`, message, row.id).run();
+      if (terminal) await sendAdminAlert(env, "Client workspace notification failed", `Notification ${row.id}: ${message}`);
     }
   }
   return processed;

@@ -10,10 +10,15 @@ portal derives its scope from current active project or direct-folder grants;
 revoked memberships and grants stop contributing immediately.
 
 Public shares expose image locations only when an authorized Operations user
-explicitly enables **Show photo locations on this client share**. The database
-default is off for existing and new shares. Changing the setting increments the
-share version, invalidates earlier sessions, and is audited without coordinates
-or object identifiers. Disabled, expired, revoked, unauthenticated, stale, and
+saves **Show photo locations on this client share** as enabled. After the
+Operations active-share lookup confirms that a folder is not currently shared,
+the new-share form checks this option by default and clearly discloses that it
+can be turned off. Existing shares always load their stored setting unchanged.
+The API does not infer an omitted value, and the database default remains off,
+so non-Operations callers and older records do not silently opt in. Changing
+the setting increments the share version, invalidates earlier sessions, and is
+audited without coordinates or object identifiers. Disabled, expired, revoked,
+unauthenticated, stale, and
 cross-share requests receive no map data. Public queries are restricted to the
 currently authorized opaque folder and only current, valid, non-trashed images.
 Map responses contain only grouped latitude, longitude, image counts, and a
@@ -102,7 +107,9 @@ repository configuration does not prove account entitlements or quotas.
 - EXIF located after the first 512 KiB is treated as unavailable.
 - There is no camera orientation/direction, raw EXIF inspector, capture-time
   display, clustering beyond identical coordinates, reverse geocoding, route
-  planning, or offline map. Public-share maps are explicitly opt-in per share.
+  planning, or offline map. The Operations new-share form defaults the setting
+  on after confirming that no share exists; operators can turn it off before
+  creation, and every public-share map still requires a stored enabled value.
 - Coordinates reflect available image metadata and can be missing, stale, or
   inaccurate. They are not evidence of flight path, launch location, property
   access, or regulatory compliance.

@@ -107,6 +107,8 @@ import {
 } from "./staff-access-controls";
 import {
   createClientFolderGrant,
+  findClientFolderGrantTargets,
+  processClientFolderChangeNotifications,
   processClientFolderGrantNotifications,
   revokeClientFolderGrant,
 } from "./client-folder-grants";
@@ -333,6 +335,8 @@ const clientFolderGrantSchema = z
     r2Prefix: z.string().trim().min(1).max(1000),
     grantId: z.string().trim().min(1).max(128).optional(),
     recipientIdentityId: z.string().trim().min(1).max(128).nullable().optional(),
+    recipientIdentityIds: z.array(z.string().trim().min(1).max(128)).max(100).optional(),
+    notificationMode: z.enum(["off", "added", "removed", "both"]).optional(),
   })
   .strict();
 const paQuoteLinkSchema = z
@@ -784,6 +788,14 @@ app.post("/api/client-portal/accounts/:accountId/folder-grants", async (c) => {
     c.req.header("Idempotency-Key") || "",
   );
   return c.json({ grant }, grant.idempotentReplay || grant.unchanged ? 200 : 201);
+});
+app.get("/api/client-portal/folder-grant-targets", async (c) => {
+  const divisionId = c.req.query("divisionId") || "";
+  const r2Prefix = c.req.query("r2Prefix") || "";
+  const query = c.req.query("q") || "";
+  if (!r2Prefix || divisionId.length > 128 || r2Prefix.length > 1000 || query.length > 200)
+    throw new HTTPException(400, { message: "Folder and search query are required" });
+  return c.json(await findClientFolderGrantTargets(c.env, c.get("principal"), { divisionId, r2Prefix, query }));
 });
 app.delete("/api/client-portal/accounts/:accountId/folder-grants/:grantId", async (c) => {
   await revokeClientFolderGrant(c.env, c.req.raw, c.get("principal"), c.req.param("accountId"), c.req.param("grantId"));
@@ -2167,6 +2179,7 @@ async function scheduled(
       await Promise.all([
         processClientPortalRequestNotifications(env),
         processClientFolderGrantNotifications(env),
+        processClientFolderChangeNotifications(env),
       ]);
     } catch (error) {
       console.error(

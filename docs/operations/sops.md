@@ -18,6 +18,8 @@ The document owns a stable unique slug, lifecycle status (`draft`, `published`, 
 
 Every create, draft save, publish, archive, and restore inserts a new immutable revision with a monotonic number, author snapshot, Markdown, server-rendered HTML, table of contents, sanitizer version, and parent. Publishing creates a new published revision rather than marking a draft row. Editing a published document creates a separate draft while the old published revision remains visible. Restoring copies an old revision into a new draft; it never rewrites history. Documents and revisions cannot be deleted through the product, and database triggers reject revision update/delete and slug mutation.
 
+Administrators author the same canonical Markdown through a Markdown-native rich-text editor with an optional source view. A local `.md` or `.markdown` file may be imported as strict UTF-8 text after a replacement confirmation when the editor is dirty. Import only replaces the unsaved browser value: it never writes, publishes, or bypasses the sanitized preview. The normal explicit draft-save and publish lifecycle remains required.
+
 Archiving is the deliberate unpublish operation. It removes the SOP from the general staff library and prevents new job links without deleting revisions. Publishing a restored draft makes it visible again.
 
 ## Markdown and reference policy

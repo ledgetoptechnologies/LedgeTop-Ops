@@ -201,6 +201,23 @@ make retries idempotent. Controlled D1 tests verify share-then-revoke produces
 no access and no mail, while a valid due grant sends once; no real message was
 sent during this validation.
 
+Migration `0115` extends that internal-only contract with an Operations folder
+Share-dialog section for authenticated client workspace access. Staff search by
+folder-scoped typeahead; the server first derives the authoritative longest-
+prefix PA client/organization owner and returns only matching explicit LTDS
+accounts. The browser never downloads the full PA directory. Notification modes
+are off, files added, files removed, or both, with active managers selected by
+default and exact active identities stored as recipients.
+
+Folder visibility changes immediately. File-change email and the client portal
+bell wait for a five-minute net-change grace window, cancel add/remove pairs,
+and reauthorize the grant, PA-backed account, identity, membership, preference,
+prefix, and indexed object state at dispatch. The bell supports keyboard use,
+Escape/outside-click close, read, and dismiss. Its API returns bounded titles,
+body text, timestamps, and same-origin portal actions only; no R2 keys, absolute
+paths, raw bucket URLs, public-share data, or unrelated organization records are
+exposed.
+
 The requested final post-fix diff rescan workspace
 `039e35dd-7458-4707-98d8-9af6f3a67225` remained at setup awaiting **Start
 scan**, so it produced no scan ID or report. On 2026-08-01 the user explicitly

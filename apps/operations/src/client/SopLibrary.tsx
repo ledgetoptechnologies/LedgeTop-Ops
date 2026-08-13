@@ -1,7 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import { renderSopMarkdown, type SopTocItem } from "../sop-markdown";
 import { api, ApiError } from "./api";
+import { readSopMarkdownFile } from "./sop-markdown-import";
+
+const SopMarkdownEditor = lazy(() => import("./SopMarkdownEditor").then(module => ({
+  default: module.SopMarkdownEditor,
+})));
 
 type SopStatus = "draft" | "published" | "archived";
 
@@ -511,6 +516,7 @@ function SopAdminWorkspace() {
 }
 
 function SopAdminEditor({ sopId, close }: { sopId: string | null; close(): void }) {
+  const importInput = useRef<HTMLInputElement>(null);
   const [sop, setSop] = useState<SopDocument | null>(null);
   const [revisions, setRevisions] = useState<SopRevision[]>([]);
   const [value, setValue] = useState<EditorValue>(EMPTY_EDITOR);
@@ -656,7 +662,7 @@ function SopAdminEditor({ sopId, close }: { sopId: string | null; close(): void 
         </div>
       </Card>
       <div className="sop-editor-grid">
-        <Card title="Markdown draft" className="sop-editor-fields">
+        <Card title="Markdown editor" className="sop-editor-fields">
           <div className="form-grid">
             <label>
               Title
@@ -677,17 +683,50 @@ function SopAdminEditor({ sopId, close }: { sopId: string | null; close(): void 
               Short purpose
               <textarea value={value.purpose} maxLength={500} rows={3} onChange={(event) => setField("purpose", event.target.value)} />
             </label>
-            <label className="full">
-              Markdown body
-              <textarea
-                className="sop-markdown-input"
-                value={value.markdownBody}
-                maxLength={100_000}
-                rows={24}
-                spellCheck
-                onChange={(event) => setField("markdownBody", event.target.value)}
+            <div className="full sop-markdown-field">
+              <strong>Markdown body</strong>
+              <span className="sop-editor-hint">Use the toolbar for rich-text editing or switch to Source for canonical Markdown.</span>
+              <Suspense fallback={<Loading />}>
+                <SopMarkdownEditor
+                  value={value.markdownBody}
+                  disabled={busy}
+                  onChange={(markdown) => setField("markdownBody", markdown)}
+                  onError={setError}
+                />
+              </Suspense>
+            </div>
+            <div className="full sop-markdown-import">
+              <input
+                ref={importInput}
+                className="visually-hidden"
+                type="file"
+                accept=".md,.markdown,text/markdown,text/plain"
+                aria-label="Import Markdown file"
+                onChange={async (event) => {
+                  const file = event.currentTarget.files?.[0];
+                  event.currentTarget.value = "";
+                  if (!file) return;
+                  if (dirty && !window.confirm("Replace the current unsaved Markdown with this file?")) return;
+                  setError("");
+                  try {
+                    const markdown = await readSopMarkdownFile(file);
+                    setField("markdownBody", markdown);
+                    setNotice(`Imported ${file.name}. Review the sanitized preview before saving.`);
+                  } catch (caught) {
+                    setError((caught as Error).message);
+                  }
+                }}
               />
-            </label>
+              <button
+                type="button"
+                className="button-ghost"
+                disabled={busy}
+                onClick={() => importInput.current?.click()}
+              >
+                Import .md file
+              </button>
+              <small>Valid UTF-8 Markdown only, up to 100 KB. Import replaces this unsaved editor value; it never saves or publishes automatically.</small>
+            </div>
           </div>
         </Card>
         <Card title="Sanitized live preview" className="sop-live-preview">

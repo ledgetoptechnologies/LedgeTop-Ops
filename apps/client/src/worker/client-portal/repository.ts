@@ -11,6 +11,7 @@ import type {
   ClientPortalFile,
   ClientPortalInvitation,
   ClientPortalMember,
+  ClientPortalNotification,
   ClientPortalRepository,
   ClientPortalSession,
   ClientProject,
@@ -776,6 +777,74 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       .bind(session.accountId, session.identityId, projectId, shareId)
       .first<{ public_id: string }>();
     return row ? { publicId: row.public_id } : null;
+  },
+
+  async listNotifications(
+    env: Env,
+    session: ClientPortalSession,
+    cursor?: string | null,
+  ): Promise<{ notifications: ClientPortalNotification[]; unreadCount: number; cursor: string | null }> {
+    const rows = await portalDb(env).prepare(`SELECT n.id,n.event_type,n.title,n.body,n.action_path,n.read_at,n.created_at
+      FROM client_portal_notifications n ${sessionJoin}
+      WHERE n.account_id=a.id AND n.recipient_identity_id=i.id AND n.dismissed_at IS NULL
+        AND (n.source_type<>'service_request' OR EXISTS (
+          SELECT 1 FROM client_service_requests authorized_notification
+          WHERE authorized_notification.id=n.source_id AND authorized_notification.account_id=a.id
+            AND ((authorized_notification.project_id IS NULL AND (m.role='manager' OR authorized_notification.created_by_identity_id=i.id)) OR
+              (authorized_notification.project_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM client_project_grants notification_grant
+                JOIN projects notification_project ON notification_project.id=notification_grant.project_id AND notification_project.active=1
+                WHERE notification_grant.account_id=a.id AND notification_grant.project_id=authorized_notification.project_id
+                  AND notification_grant.revoked_at IS NULL AND (m.role='manager' OR EXISTS (
+                    SELECT 1 FROM client_member_project_grants notification_member_grant
+                    WHERE notification_member_grant.account_id=a.id AND notification_member_grant.identity_id=i.id
+                      AND notification_member_grant.project_id=authorized_notification.project_id AND notification_member_grant.revoked_at IS NULL
+                  ))
+              )))
+        ))
+        AND (?='' OR (n.created_at,n.id)<(
+          SELECT cursor.created_at,cursor.id FROM client_portal_notifications cursor
+          WHERE cursor.id=? AND cursor.account_id=a.id AND cursor.recipient_identity_id=i.id))
+      ORDER BY n.created_at DESC,n.id DESC LIMIT 51`)
+      .bind(session.accountId, session.identityId, cursor || "", cursor || "")
+      .all<{ id: string; event_type: ClientPortalNotification["eventType"]; title: string; body: string; action_path: string | null; read_at: string | null; created_at: string }>();
+    const unread = await portalDb(env).prepare(`SELECT COUNT(*) count FROM client_portal_notifications n ${sessionJoin}
+      WHERE n.account_id=a.id AND n.recipient_identity_id=i.id AND n.dismissed_at IS NULL AND n.read_at IS NULL
+        AND (n.source_type<>'service_request' OR EXISTS (
+          SELECT 1 FROM client_service_requests authorized_notification
+          WHERE authorized_notification.id=n.source_id AND authorized_notification.account_id=a.id
+            AND ((authorized_notification.project_id IS NULL AND (m.role='manager' OR authorized_notification.created_by_identity_id=i.id)) OR
+              (authorized_notification.project_id IS NOT NULL AND EXISTS (
+                SELECT 1 FROM client_project_grants notification_grant
+                JOIN projects notification_project ON notification_project.id=notification_grant.project_id AND notification_project.active=1
+                WHERE notification_grant.account_id=a.id AND notification_grant.project_id=authorized_notification.project_id
+                  AND notification_grant.revoked_at IS NULL AND (m.role='manager' OR EXISTS (
+                    SELECT 1 FROM client_member_project_grants notification_member_grant
+                    WHERE notification_member_grant.account_id=a.id AND notification_member_grant.identity_id=i.id
+                      AND notification_member_grant.project_id=authorized_notification.project_id AND notification_member_grant.revoked_at IS NULL
+                  ))
+              )))
+        ))`)
+      .bind(session.accountId, session.identityId).first<{ count: number }>();
+    const page = rows.results.slice(0, 50);
+    return {
+      notifications: page.map(row => ({ id: row.id, eventType: row.event_type, title: row.title, body: row.body,
+        actionPath: row.action_path?.startsWith("/portal/") ? row.action_path : null, readAt: row.read_at, createdAt: row.created_at })),
+      unreadCount: unread?.count || 0,
+      cursor: rows.results.length > 50 ? page.at(-1)!.id : null,
+    };
+  },
+
+  async updateNotification(env: Env, session: ClientPortalSession, notificationId: string, action: "read" | "dismiss"): Promise<boolean> {
+    const result = await portalDb(env).prepare(action === "read"
+      ? `UPDATE client_portal_notifications SET read_at=COALESCE(read_at,datetime('now')) WHERE id=? AND account_id=? AND recipient_identity_id=? AND dismissed_at IS NULL
+          AND EXISTS (SELECT 1 FROM client_accounts a JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
+            JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL WHERE a.id=? AND a.status='active')`
+      : `UPDATE client_portal_notifications SET dismissed_at=COALESCE(dismissed_at,datetime('now')) WHERE id=? AND account_id=? AND recipient_identity_id=? AND dismissed_at IS NULL
+          AND EXISTS (SELECT 1 FROM client_accounts a JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
+            JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL WHERE a.id=? AND a.status='active')`)
+      .bind(notificationId, session.accountId, session.identityId, session.identityId, session.accountId).run();
+    return Boolean(result.meta.changes);
   },
 
   async listServiceRequests(

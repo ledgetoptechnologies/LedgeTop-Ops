@@ -119,6 +119,22 @@ export interface PortalBootstrap {
   mapboxPublicToken: string | null;
 }
 
+export interface PortalNotification {
+  id: string;
+  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed";
+  title: string;
+  body: string;
+  actionPath: string | null;
+  readAt: string | null;
+  createdAt: string;
+}
+
+export interface PortalNotificationPage {
+  notifications: PortalNotification[];
+  unreadCount: number;
+  cursor: string | null;
+}
+
 export interface PortalServiceRequestInput {
   projectId: string | null;
   parentRequestId?: string | null;
@@ -199,6 +215,25 @@ export async function loadPortalPastDeliveryLocations(
   request: PortalRequest = requestJson,
 ): Promise<DeliveryLocationCollection> {
   return request<DeliveryLocationCollection>("/api/client/past-delivery-locations");
+}
+
+export async function loadPortalNotifications(
+  cursor: string | null = null,
+  request: PortalRequest = requestJson,
+): Promise<PortalNotificationPage> {
+  return request<PortalNotificationPage>(`/api/client/notifications${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`);
+}
+
+export async function updatePortalNotification(
+  notificationId: string,
+  action: "read" | "dismiss",
+  request: PortalRequest = requestJson,
+): Promise<void> {
+  await request(`/api/client/notifications/${encodeURIComponent(notificationId)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action }),
+  });
 }
 
 export async function createPortalServiceRequest(

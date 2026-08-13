@@ -19,6 +19,32 @@ narrowing, supersession, recipient deauthorization, redundant coverage, or an
 empty/stale file index suppresses the row without calling the mail transport.
 The action is the authenticated `/portal/deliveries` route and contains no
 public share ID, token, signature, or expiry parameter.
+
+Migration `0115` adds change subscriptions and a same-origin notification
+center for authenticated client workspaces. Staff choose `off`, `added`,
+`removed`, or `both` for exact active portal identities; managers are selected
+by default in the Operations form. R2 create/delete events update one net-change
+row per logical grant, recipient, and object fingerprint. Eligibility is reset
+to five minutes after the newest event, and an opposite event during that grace
+window cancels the row. The dispatcher rechecks the current immutable grant,
+the authoritative Project Alpha folder owner, PA-backed active account,
+identity, membership, preference, prefix coverage, and current file-index state
+before either email or in-app publication. A reassigned folder therefore cannot
+notify its former client even when a delayed event and stale association remain.
+
+The portal notification list is scoped by `(account_id,recipient_identity_id)`.
+Read and dismiss mutations require the authenticated portal origin and current
+membership. Browser/API responses and mail contain bounded presentation text
+and a same-origin portal action only—never an R2 key, absolute folder path,
+public share ID/token, raw bucket URL, or recipient email snapshot. Request
+status, estimate-ready, and completion messages are fanned into the same
+per-identity center from the existing idempotent request outbox only while the
+recipient retains the request's current account/project entitlement. Inbox
+reads apply the same current-entitlement predicate, so a stored notice is no
+longer visible after project access is revoked. In-app publication is committed
+independently of email delivery, allowing the bell to remain the fallback when
+mail is disabled or temporarily fails. Public-share delivery notifications
+remain unchanged and use none of these tables or routes.
 `DELIVERY_BASE_URL` on Operations must be the authenticated client portal
 origin (production `client.ledgetopdroneservices.com`, or its isolated staging
 equivalent), not the delivery rollback/admin host.

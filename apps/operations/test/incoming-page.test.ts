@@ -14,6 +14,7 @@ describe("incoming request page", () => {
     expect(page).toContain('id="files" type="file" multiple');
     expect(page).toContain(".drop:focus-within");
     expect(page).toContain("Your files are quarantined for LTDS processing");
+    expect(page).toContain('id="website" type="text" tabindex="-1" autocomplete="off"');
   });
 
   it("never reports zero successful uploads as success", () => {
@@ -27,5 +28,11 @@ describe("incoming request page", () => {
     expect(page).toContain("You can select the file again to retry.");
     expect(page).toContain("Empty files cannot be uploaded");
     expect(page).toContain("etag:checkpoint.etag");
+    expect(page).toContain('crypto.subtle.digest("SHA-256",bytes)');
+    expect(page).toContain("resumeFingerprint");
+    expect(page).toContain("new XMLHttpRequest()");
+    expect(page).toContain("250*2**(attempt-1)");
+    expect(page).toContain('undefined,"DELETE"');
+    expect(page).toContain("deleteSaved(key)");
   });
 });

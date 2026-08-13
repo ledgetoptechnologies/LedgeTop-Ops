@@ -87,6 +87,9 @@ interface IncomingUploadSummary {
 interface IncomingLink {
   id: string;
   url: string;
+  title: string;
+  maxFiles: number;
+  maxBytes: number;
   accessCodeProtected: boolean;
   createdAt: string;
   outstandingFiles: number;
@@ -1140,7 +1143,7 @@ function Tasks() {
 }
 
 function Airspace() {
-  const { data, error, reload } = useLoad(
+  const { data, error, reload, loading } = useLoad(
     () => api<any>("/api/airspace/tfrs"),
     [],
   );
@@ -1154,25 +1157,36 @@ function Airspace() {
     upcoming: 1,
     not_listed: 2,
   };
-  data?.sua?.sort(
+  const sortedSua = [...(data?.sua || [])].sort(
     (a: any, b: any) =>
       (suaStatusRank[a.status] ?? 3) - (suaStatusRank[b.status] ?? 3),
   );
+  const banner = <div className="safety-banner airspace-safety-banner">
+    <div>
+      <strong>Situational awareness only</strong>
+      <p>
+        {data?.disclaimer ||
+          "Verify current FAA sources and NOTAMs before flight. This screen never represents a clearance."}
+      </p>
+    </div>
+    <button
+      className="button-ghost airspace-refresh"
+      disabled={loading}
+      aria-busy={loading}
+      onClick={() => void reload()}
+    >
+      {loading ? "Refreshing…" : "Refresh"}
+    </button>
+  </div>;
+  if (!data) return <>
+    {banner}
+    <ErrorLine error={error} />
+    {loading && <Loading />}
+  </>;
   return (
     <>
-      <div className="safety-banner">
-        <strong>Situational awareness only</strong>
-        <p>
-          {data?.disclaimer ||
-            "Verify current FAA sources and NOTAMs before flight. This screen never represents a clearance."}
-        </p>
-      </div>
-      <div className="section-actions">
-        <button className="button-ghost" onClick={() => void reload()}>
-          Refresh view
-        </button>
-      </div>
-      <ErrorLine error={error} />
+      {banner}
+      <ErrorLine error={error ? `Refresh failed. Showing the last loaded airspace data. ${error}` : ""} />
       <div className="airspace-counts">
         <div>
           <strong>{activeTfrs}</strong>
@@ -1185,7 +1199,7 @@ function Airspace() {
         <p>This feed lists TFR-related NOTAMs, not every FAA NOTAM.</p>
       </div>
       <div className="source-strip">
-        {data?.sources.map((source: any) => (
+        {data.sources.map((source: any) => (
           <div key={source.source}>
             <strong>{source.source}</strong>
             <StatusPill
@@ -1229,7 +1243,7 @@ function Airspace() {
           </Card>
         ) : null}
         <Card title="Temporary Flight Restrictions">
-          {data?.tfrs.length ? (
+          {data.tfrs.length ? (
             data.tfrs.map((item: any) => (
               <article className="airspace-row" key={item.id}>
                 <div>
@@ -1270,8 +1284,8 @@ function Airspace() {
           )}
         </Card>
         <Card title="MOA & special-use airspace">
-          {data?.sua.length ? (
-            data.sua.map((item: any) => (
+          {sortedSua.length ? (
+            sortedSua.map((item: any) => (
               <article className="airspace-row" key={item.id}>
                 <div>
                   <strong>{item.name}</strong>
@@ -3254,8 +3268,25 @@ function IncomingUploads() {
   const [busy, setBusy] = useState(false),
     [actionError, setActionError] = useState(""),
     [message, setMessage] = useState(""),
-    [accessCode, setAccessCode] = useState("");
+    [accessCode, setAccessCode] = useState(""),
+    [requestTitle, setRequestTitle] = useState("Send files to Ledge Top Drone Services"),
+    [maxFiles, setMaxFiles] = useState("500"),
+    [maxBytesGiB, setMaxBytesGiB] = useState("2048");
   const link = data?.link;
+  useEffect(() => {
+    if (!link) return;
+    setRequestTitle(link.title);
+    setMaxFiles(String(link.maxFiles));
+    setMaxBytesGiB(String(Math.max(1, Math.round(link.maxBytes / 1024 ** 3))));
+  }, [link?.id, link?.title, link?.maxFiles, link?.maxBytes]);
+  const settings = () => ({
+    title: requestTitle.trim(),
+    maxFiles: Number(maxFiles),
+    maxBytes: Math.round(Number(maxBytesGiB) * 1024 ** 3),
+  });
+  const settingsValid = requestTitle.trim().length > 0
+    && Number.isInteger(Number(maxFiles)) && Number(maxFiles) >= 1 && Number(maxFiles) <= 500
+    && Number(maxBytesGiB) > 0 && Number(maxBytesGiB) <= 2048;
   const run = async (action: () => Promise<unknown>, success: string) => {
     setBusy(true);
     setActionError("");
@@ -3308,15 +3339,20 @@ function IncomingUploads() {
               title="No incoming upload link"
               detail="Create one reusable link for contributors to send files to the private incoming bucket."
             />
+            <div className="incoming-request-settings">
+              <label>Request title<input value={requestTitle} maxLength={160} onChange={(event) => setRequestTitle(event.target.value)} disabled={busy} /></label>
+              <label>Maximum files<input type="number" min="1" max="500" value={maxFiles} onChange={(event) => setMaxFiles(event.target.value)} disabled={busy} /></label>
+              <label>Maximum total GiB<input type="number" min="1" max="2048" value={maxBytesGiB} onChange={(event) => setMaxBytesGiB(event.target.value)} disabled={busy} /></label>
+            </div>
             <button
               className="button-orange"
-              disabled={busy}
+              disabled={busy || !settingsValid}
               onClick={() =>
                 void run(
                   () =>
                     api("/api/delivery/incoming-link", {
                       method: "POST",
-                      body: "{}",
+                      body: JSON.stringify(settings()),
                     }),
                   "Incoming upload link created.",
                 )
@@ -3359,6 +3395,12 @@ function IncomingUploads() {
               </span>
             </div>
             <div className="incoming-actions">
+              <div className="incoming-request-settings full">
+                <label>Request title<input value={requestTitle} maxLength={160} onChange={(event) => setRequestTitle(event.target.value)} disabled={busy} /></label>
+                <label>Maximum files<input type="number" min="1" max="500" value={maxFiles} onChange={(event) => setMaxFiles(event.target.value)} disabled={busy} /></label>
+                <label>Maximum total GiB<input type="number" min="1" max="2048" value={maxBytesGiB} onChange={(event) => setMaxBytesGiB(event.target.value)} disabled={busy} /></label>
+                <button className="button-ghost" type="button" disabled={busy || !settingsValid} onClick={() => void run(() => api("/api/delivery/incoming-link", { method: "PATCH", body: JSON.stringify(settings()) }), "Incoming request settings updated.")}>Save request settings</button>
+              </div>
               <label>
                 <span>Access code</span>
                 <input
@@ -3393,7 +3435,7 @@ function IncomingUploads() {
                       () =>
                         api("/api/delivery/incoming-link/rotate", {
                           method: "POST",
-                          body: "{}",
+                          body: JSON.stringify(settings()),
                         }),
                       "Incoming upload link replaced.",
                     );
@@ -3560,11 +3602,11 @@ function DeliveryGridItem({
           <span className="folder-shape" />
         ) : (
           <OperationsThumbnail item={item} />
-        )}{" "}
-        {item.isShared && <SharedBadge />}
+        )}
       </div>
       <div className="file-card-title">
         <strong title={displayName(item)}>{displayName(item)}</strong>
+        {item.isShared && <SharedBadge />}
       </div>
       <small>
         {folder
@@ -3625,6 +3667,7 @@ function DeliveryItemMenu({ item, share, actions, act }: { item: DeliveryItem; s
   const [open, setOpen] = useState(false);
   const [position, setPosition] = useState<{ top: number; left: number } | null>(null);
   const trigger = useRef<HTMLButtonElement | null>(null), menu = useRef<HTMLDivElement | null>(null);
+  const currentItemRef = itemRef(item);
   const menuId = useMemo(() => `delivery-actions-${(item.id || item.name || "item").replace(/[^A-Za-z0-9_-]/g, "-")}`, [item.id, item.name]);
   const closeMenu = (restore = false) => { setOpen(false); if (restore) requestAnimationFrame(() => trigger.current?.focus()); };
   const invoke = (action: "rename" | "copy" | "move" | "delete") => { closeMenu(); act(action); };
@@ -3641,7 +3684,7 @@ function DeliveryItemMenu({ item, share, actions, act }: { item: DeliveryItem; s
       items[next]?.focus();
     };
     const closeOnViewportChange = () => closeMenu();
-    document.addEventListener("pointerdown", pointer, true); document.addEventListener("keydown", key, true); addEventListener("resize", closeOnViewportChange);
+    document.addEventListener("pointerdown", pointer, true); document.addEventListener("keydown", key, true); document.addEventListener("scroll", closeOnViewportChange, true); addEventListener("resize", closeOnViewportChange);
     requestAnimationFrame(() => {
       const anchor = trigger.current?.getBoundingClientRect(), bounds = menu.current?.getBoundingClientRect();
       if (anchor && bounds) {
@@ -3649,8 +3692,9 @@ function DeliveryItemMenu({ item, share, actions, act }: { item: DeliveryItem; s
         setPosition({ top, left: Math.max(4, Math.min(innerWidth - bounds.width - 4, anchor.right - bounds.width)) });
       }
     });
-    return () => { document.removeEventListener("pointerdown", pointer, true); document.removeEventListener("keydown", key, true); removeEventListener("resize", closeOnViewportChange); };
+    return () => { document.removeEventListener("pointerdown", pointer, true); document.removeEventListener("keydown", key, true); document.removeEventListener("scroll", closeOnViewportChange, true); removeEventListener("resize", closeOnViewportChange); };
   }, [open]);
+  useEffect(() => { setOpen(false); setPosition(null); }, [currentItemRef]);
   useEffect(() => {
     if (!open || !position) return;
     requestAnimationFrame(() => menu.current?.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus());
@@ -3764,10 +3808,10 @@ function FolderCardV2({
     <article className="file-card">
       <button className="file-visual" onClick={open}>
         <span className="folder-shape" />
-        {item.isShared && <SharedBadge />}
       </button>
       <div className="file-card-title">
         <strong title={displayName(item)}>{displayName(item)}</strong>
+        {item.isShared && <SharedBadge />}
       </div>
       <small>Folder</small>
       {share && (
@@ -3788,10 +3832,10 @@ function FileCardV2({ item, preview }: { item: any; preview: () => void }) {
         {item.kind === "video" && item.previewStatus === "processing" && (
           <span className="media-status">Preparing preview…</span>
         )}
-        {item.isShared && <SharedBadge />}
       </button>
       <div className="file-card-title">
         <strong title={displayName(item)}>{displayName(item)}</strong>
+        {item.isShared && <SharedBadge />}
       </div>
       <small>
         {bytes(item.size)} · {item.kind}
@@ -3850,6 +3894,87 @@ function FolderCard({
 function FileCard({ item, preview }: { item: any; preview: () => void }) {
   return <FileCardV2 item={item} preview={preview} />;
 }
+
+type WorkspaceGrantTarget = {
+  id: string;
+  displayName: string;
+  members: Array<{ identityId: string; email: string; role: "manager" | "member" }>;
+  grant: null | { grantId: string; version: number; preferences: Array<{ recipient_identity_id: string; mode: string }> };
+};
+
+function ClientWorkspaceGrant({ prefix }: { prefix: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [query, setQuery] = useState("");
+  const [targets, setTargets] = useState<WorkspaceGrantTarget[]>([]);
+  const [divisionId, setDivisionId] = useState("");
+  const [selected, setSelected] = useState<WorkspaceGrantTarget | null>(null);
+  const [recipientIds, setRecipientIds] = useState<string[]>([]);
+  const [mode, setMode] = useState<"off" | "added" | "removed" | "both">("both");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    if (!expanded || query.trim().length < 2) { setTargets([]); return; }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api<{ accounts: WorkspaceGrantTarget[]; divisionId: string }>(`/api/client-portal/folder-grant-targets?r2Prefix=${encodeURIComponent(prefix)}&q=${encodeURIComponent(query.trim())}`, { signal: controller.signal })
+        .then(value => { setTargets(value.accounts); setDivisionId(value.divisionId); setMessage(""); })
+        .catch(caught => { if ((caught as Error).name !== "AbortError") setMessage((caught as Error).message); });
+    }, 250);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [expanded, prefix, query]);
+
+  const choose = (target: WorkspaceGrantTarget) => {
+    setSelected(target); setTargets([]); setQuery(target.displayName);
+    const saved = target.grant?.preferences || [];
+    setRecipientIds(saved.length ? saved.map(value => value.recipient_identity_id) : target.members.filter(member => member.role === "manager").map(member => member.identityId));
+    setMode((saved[0]?.mode as typeof mode) || "both");
+  };
+
+  const save = async () => {
+    if (!selected || busy) return;
+    setBusy(true); setMessage("");
+    try {
+      await api(`/api/client-portal/accounts/${encodeURIComponent(selected.id)}/folder-grants`, {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({
+          divisionId, r2Prefix: prefix, grantId: selected.grant?.grantId,
+          notificationMode: mode, recipientIdentityIds: mode === "off" ? [] : recipientIds,
+        }),
+      });
+      setMessage("Authenticated client workspace access saved. File visibility is immediate; notifications wait five minutes.");
+    } catch (caught) { setMessage((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  return <section className="client-workspace-grant">
+    <button type="button" className="button-ghost button-small" onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>
+      {expanded ? "Close client workspace access" : "Grant to client workspace"}
+    </button>
+    {expanded && <div className="client-workspace-grant-panel">
+      <strong>Authenticated client workspace</strong>
+      <small>This does not create or change a public delivery link.</small>
+      <label>Client organization or account
+        <input value={query} onChange={event => { setQuery(event.target.value); setSelected(null); }} placeholder="Type at least 2 characters" autoComplete="off" />
+      </label>
+      {targets.length > 0 && <div className="client-workspace-typeahead" role="listbox">
+        {targets.map(target => <button type="button" role="option" key={target.id} onClick={() => choose(target)}>{target.displayName}</button>)}
+      </div>}
+      {selected && <>
+        <label>Notifications
+          <select value={mode} onChange={event => setMode(event.target.value as typeof mode)}>
+            <option value="off">Off</option><option value="added">Files added</option><option value="removed">Files removed</option><option value="both">Added and removed</option>
+          </select>
+        </label>
+        {mode !== "off" && <fieldset><legend>Recipients</legend>{selected.members.map(member => <label className="check" key={member.identityId}>
+          <input type="checkbox" checked={recipientIds.includes(member.identityId)} onChange={event => setRecipientIds(current => event.target.checked ? [...current, member.identityId] : current.filter(id => id !== member.identityId))} />
+          {member.email} {member.role === "manager" ? "(manager)" : ""}
+        </label>)}</fieldset>}
+        <button type="button" className="button-orange button-small" disabled={busy || (mode !== "off" && !recipientIds.length)} onClick={() => void save()}>Save workspace access</button>
+      </>}
+      {message && <small role="status">{message}</small>}
+    </div>}
+  </section>;
+}
 function ShareDialog({
   folder,
   canRevoke,
@@ -3892,7 +4017,12 @@ function ShareDialog({
         if (!mounted) return;
         setActive(value.share);
         setRecipientEmail(value.share?.recipientEmail || "");
-        setImageLocationMapEnabled(Boolean(value.share?.imageLocationMapEnabled));
+        // Wait for the authoritative active-share lookup before choosing a
+        // default. New shares start with the map visible in the form, while an
+        // existing share always preserves its stored value (including false).
+        setImageLocationMapEnabled(
+          value.share === null ? true : value.share.imageLocationMapEnabled === true,
+        );
         if (value.share?.expiresAt) {
           setExpirationMode("custom");
           const valueDate = new Date(value.share.expiresAt);
@@ -3990,6 +4120,7 @@ function ShareDialog({
               <span>Folder</span>
               <code>{folder.prefix}</code>
             </div>
+            <ClientWorkspaceGrant prefix={folder.prefix} />
             {shown && (
               <div className="current-share">
                 <div>
@@ -4130,7 +4261,7 @@ function ShareDialog({
                   onChange={(event) => { setImageLocationMapEnabled(event.target.checked); markDirty(); }}
                 />{" "}
                 Show photo locations on this client share
-                <small>Off by default. When enabled, clients can see validated GPS coordinates for photos inside the shared folder.</small>
+                <small>On by default for a new share. Turn this off to hide validated GPS coordinates for photos inside the shared folder. Existing shares keep their current setting.</small>
               </label>
               <label className="full">
                 Access code
