@@ -32,12 +32,15 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: apps/operations/package-lock.json
 
       - name: Install dependencies
+        working-directory: apps/operations
         run: npm ci
 
       - name: Build operations
-        run: npm --prefix apps/operations run build
+        working-directory: apps/operations
+        run: npm run build
 
       - name: Deploy ltds-ops
         working-directory: apps/operations
@@ -60,12 +63,15 @@ jobs:
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: apps/client/package-lock.json
 
       - name: Install dependencies
+        working-directory: apps/client
         run: npm ci
 
       - name: Build client
-        run: npm --prefix apps/client run build
+        working-directory: apps/client
+        run: npm run build
 
       - name: Deploy ltds-clients
         working-directory: apps/client
