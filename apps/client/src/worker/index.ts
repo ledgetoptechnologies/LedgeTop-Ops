@@ -414,7 +414,9 @@ app.get("/api/public/shares/:publicId/manifest/media", async c => {
 
 app.get("/api/public/shares/:publicId/download-summary", async c => {
   const share = c.get("share"); await requireAvailableFolder(c.env, share); const tombstones = await loadTombstones(c.env);
-  const objects = await listDownloadableObjects(c.env.DATA_BUCKET, share.r2_prefix, tombstones);
+  const folderRef = c.req.query("folder") || "";
+  const prefix = folderRef ? `${keyWithinRoot(share.r2_prefix, decodeItemRef(folderRef))}/` : normalizeRoot(share.r2_prefix);
+  const objects = await listDownloadableObjects(c.env.DATA_BUCKET, prefix, tombstones);
   return c.json(summarizeDownloadableObjects(objects));
 });
 

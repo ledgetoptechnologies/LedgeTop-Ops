@@ -226,11 +226,12 @@ export function DeliveryApp() {
   useEffect(() => {
     if (gate !== "ready" || !publicId) return;
     const controller = new AbortController(); setDownloadSummary({ status: "loading" });
-    requestJson<{ fileCount: number; totalBytes: number | null; knownBytes: number; unknownSizeCount: number }>(`/api/public/shares/${encodeURIComponent(publicId)}/download-summary`, { signal: controller.signal })
+    const params = manifest?.folder.id ? `?folder=${encodeURIComponent(manifest.folder.id)}` : "";
+    requestJson<{ fileCount: number; totalBytes: number | null; knownBytes: number; unknownSizeCount: number }>(`/api/public/shares/${encodeURIComponent(publicId)}/download-summary${params}`, { signal: controller.signal })
       .then(summary => setDownloadSummary({ status: "ready", ...summary }))
       .catch(error => { if (!(error instanceof DOMException && error.name === "AbortError")) setDownloadSummary({ status: "unavailable" }); });
     return () => controller.abort();
-  }, [gate, publicId]);
+  }, [gate, manifest?.folder.id, publicId]);
 
   useEffect(() => {
     if (gate !== "ready" || !publicId) return;
@@ -291,7 +292,7 @@ export function DeliveryApp() {
       let body = await requestJson<BulkDownloadResponse>(`/api/public/shares/${encodeURIComponent(publicId)}/bulk-download`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json" },
-        body: JSON.stringify(all ? { all: true } : { items: [...selectedItems] }),
+        body: JSON.stringify(all ? (manifest?.folder.id ? { items: [manifest.folder.id] } : { all: true }) : { items: [...selectedItems] }),
       });
       const statusUrl = body.statusUrl || body.progressUrl;
       if (!body.downloadUrl && statusUrl) {
@@ -418,12 +419,12 @@ function ItemCard({ item, selectionMode, selected, onToggle, onFolder, onPreview
     {item.thumbnailUrl ? <Thumbnail item={item} /> : item.kind === "folder" ? <span className="folder-shape" /> : <span className="file-kind">{iconFor(item)}</span>}
     {item.kind === "video" && <span className="play">▶</span>}{item.kind === "video" && item.previewStatus === "processing" && <span className="media-status">Preparing preview…</span>}
   </button><div className="item-info"><strong title={item.name}>{item.name}</strong><span>{formatBytes(item.size)}{item.uploadedAt ? ` · ${new Date(item.uploadedAt).toLocaleDateString()}` : ""}</span></div>
-    {!selectionMode && item.downloadUrl && <a className="download-chip" href={item.downloadUrl}>Download</a>}
+    {!selectionMode && item.downloadUrl && <a className="download-chip" href={item.downloadUrl} aria-label={`Download ${item.name}`}>Download</a>}
   </article>;
 }
 
 function ItemRow({ item, selectionMode, selected, onToggle, onFolder, onPreview }: { item: DeliveryItem; selectionMode: boolean; selected: boolean; onToggle: (itemId: string) => void; onFolder: (item: DeliveryItem) => void; onPreview: (item: DeliveryItem) => void }) {
-  return <div className={`item-row${selected ? " selected" : ""}${selectionMode ? " selectable" : ""}`} onClick={selectionMode ? () => onToggle(item.id) : undefined}><button className="row-name" onClick={event => { event.stopPropagation(); selectionMode ? onToggle(item.id) : item.kind === "folder" ? void onFolder(item) : onPreview(item); }}><span>{item.kind === "folder" ? "▰" : "▧"}</span><strong>{item.name}</strong></button><span>{formatBytes(item.size)}</span><span>{item.uploadedAt ? new Date(item.uploadedAt).toLocaleDateString() : "—"}</span>{!selectionMode && item.downloadUrl ? <a href={item.downloadUrl}>Download</a> : <span />}</div>;
+  return <div className={`item-row${selected ? " selected" : ""}${selectionMode ? " selectable" : ""}`} onClick={selectionMode ? () => onToggle(item.id) : undefined}><button className="row-name" onClick={event => { event.stopPropagation(); selectionMode ? onToggle(item.id) : item.kind === "folder" ? void onFolder(item) : onPreview(item); }}><span>{item.kind === "folder" ? "▰" : "▧"}</span><strong>{item.name}</strong></button><span>{formatBytes(item.size)}</span><span>{item.uploadedAt ? new Date(item.uploadedAt).toLocaleDateString() : "—"}</span>{!selectionMode && item.downloadUrl ? <a href={item.downloadUrl} aria-label={`Download ${item.name}`}>Download</a> : <span />}</div>;
 }
 
 function Preview({ item, items, publicId, onSelect, onClose }: { item: DeliveryItem; items: DeliveryItem[]; publicId: string; onSelect: (item: DeliveryItem) => void; onClose: () => void }) {

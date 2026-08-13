@@ -21,7 +21,12 @@ async function mockShare(page: Page, mediaGate?: Promise<void>, locationResponse
     const folder = new URL(route.request().url()).searchParams.get("folder"); const item = folder ? folderImage : rootImage;
     await route.fulfill({ json: { items: [{ id: item.id, thumbnailUrl: `/thumb/${item.id}.svg`, thumbnailState: "ready", thumbnailFallbackKind: "image" }] } });
   });
-  await page.route("**/api/public/shares/public/download-summary", route => route.fulfill({ json: { fileCount: 2, totalBytes: 1536, knownBytes: 1536, unknownSizeCount: 0 } }));
+  await page.route("**/api/public/shares/public/download-summary**", route => {
+    const inFolder = new URL(route.request().url()).searchParams.get("folder") === folderId;
+    return route.fulfill({ json: inFolder
+      ? { fileCount: 1, totalBytes: 1024, knownBytes: 1024, unknownSizeCount: 0 }
+      : { fileCount: 2, totalBytes: 1536, knownBytes: 1536, unknownSizeCount: 0 } });
+  });
   await page.route("**/api/public/shares/public/locations**", route => route.fulfill({ json: locationResponse }));
   await page.route("**/media/*.svg", route => route.fulfill({ contentType: "image/svg+xml", body: svg }));
   await page.route("**/media/report.pdf", route => route.fulfill({ contentType: "application/pdf", body: "%PDF-1.4\n%%EOF" }));
@@ -50,6 +55,53 @@ test("folder and file history restore without a document reload", async ({ page 
   await page.goForward(); await expect(page.getByText("Folder photo.jpg")).toBeVisible();
   expect(await page.evaluate(() => Boolean((window as unknown as { historySentinel?: string }).historySentinel))).toBe(true);
   expect(await page.evaluate(() => performance.getEntriesByType("navigation").length)).toBe(1);
+});
+
+test("Download all follows the authoritative folder and returns to root scope", async ({ page }) => {
+  const requests: unknown[] = [];
+  await mockShare(page);
+  await page.route("**/api/public/shares/public/bulk-download", async route => {
+    requests.push(route.request().postDataJSON());
+    await route.fulfill({ json: { downloadUrl: "/downloads/current-folder.zip" } });
+  });
+  await page.route("**/downloads/current-folder.zip", route => route.fulfill({
+    status: 200,
+    headers: { "Content-Type": "application/zip", "Content-Disposition": "attachment; filename=current-folder.zip" },
+    body: "zip",
+  }));
+  await page.goto("/s/public?view=grid");
+  await page.getByRole("button", { name: "Open Folder" }).click();
+  await expect(page.getByText("Folder photo.jpg")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Download all/ })).toContainText(/1 file .* 1\.0 KB/);
+  const folderRequest = page.waitForRequest(request => request.url().endsWith("/api/public/shares/public/bulk-download"));
+  await page.getByRole("button", { name: /Download all/ }).click(); await folderRequest;
+  await expect.poll(() => requests.length).toBe(1);
+  expect(requests[0]).toEqual({ items: [folderId] });
+
+  await page.goBack(); await expect(page.getByText("Root photo.jpg")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Download all/ })).toContainText(/2 files .* 1\.5 KB/);
+  const rootRequest = page.waitForRequest(request => request.url().endsWith("/api/public/shares/public/bulk-download"));
+  await page.getByRole("button", { name: /Download all/ }).click(); await rootRequest;
+  await expect.poll(() => requests.length).toBe(2);
+  expect(requests[1]).toEqual({ all: true });
+});
+
+test("single-file Download is discoverable by hover and keyboard without exposing storage URLs", async ({ page }) => {
+  await mockShare(page); await page.goto("/s/public?view=grid");
+  const card = page.locator(".item-card").filter({ hasText: "Root photo.jpg" });
+  const preview = card.getByRole("button", { name: "Preview Root photo.jpg" });
+  const download = card.getByRole("link", { name: "Download Root photo.jpg" });
+  await expect(download).toHaveAttribute("href", rootImage.downloadUrl);
+  expect(await download.getAttribute("href")).not.toMatch(/r2\.cloudflarestorage\.com|storage\.cloudflareapi\.com/);
+  if (page.viewportSize()!.width > 720) {
+    await expect(download).toHaveCSS("opacity", "0");
+    await card.hover(); await expect(download).toHaveCSS("opacity", "1");
+  } else {
+    await expect(download).toHaveCSS("opacity", "1");
+  }
+  await preview.focus(); await expect(download).toHaveCSS("opacity", "1");
+  await page.keyboard.press("Tab"); await expect(download).toBeFocused();
+  await expect(download).toHaveCSS("outline-style", "solid");
 });
 
 test("authoritative names paint before media metadata and aggregate independently", async ({ page }) => {

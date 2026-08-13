@@ -177,6 +177,10 @@
 }
 .item-card:hover .download-chip,
 .item-card:focus-within .download-chip { opacity: 1; }
+.download-chip:focus-visible {
+  outline: 3px solid var(--orange);
+  outline-offset: 2px;
+}
 
 .item-list { display: grid; }
 .item-row {

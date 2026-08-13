@@ -253,10 +253,19 @@ async function authorizeSharePrefix(env:Env,principal:StaffPrincipal,prefix:stri
   return{project,divisionId};
 }
 
-async function activeShareForPrefix(env:Env,prefix:string):Promise<ActiveShareRow|null>{
+export async function activeShareForPrefix(env:Env,prefix:string):Promise<ActiveShareRow|null>{
+  const current=await env.DELIVERY_DB.prepare(`SELECT s.id,s.project_id,s.public_id,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.idempotency_key,s.share_version,s.secret_ciphertext,s.secret_iv,s.recipient_email,s.image_location_map_enabled,COALESCE(s.division_id,p.division_id) AS division_id
+    FROM shares s JOIN projects p ON p.id=s.project_id
+    WHERE s.r2_prefix=? AND s.revoked_at IS NULL AND p.active=1
+      AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))
+    ORDER BY s.created_at DESC LIMIT 1`).bind(prefix).first<ActiveShareRow>();
+  if(current)return current;
+  // Shares created before r2_prefix was backfilled may still rely on their project.
+  // Keep that compatibility lookup explicit and bounded instead of applying
+  // COALESCE to every active share row in the normal path.
   return env.DELIVERY_DB.prepare(`SELECT s.id,s.project_id,s.public_id,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.idempotency_key,s.share_version,s.secret_ciphertext,s.secret_iv,s.recipient_email,s.image_location_map_enabled,COALESCE(s.division_id,p.division_id) AS division_id
     FROM shares s JOIN projects p ON p.id=s.project_id
-    WHERE COALESCE(s.r2_prefix,p.r2_prefix)=? AND s.revoked_at IS NULL AND p.active=1
+    WHERE s.r2_prefix IS NULL AND p.r2_prefix=? AND s.revoked_at IS NULL AND p.active=1
       AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))
     ORDER BY s.created_at DESC LIMIT 1`).bind(prefix).first<ActiveShareRow>();
 }

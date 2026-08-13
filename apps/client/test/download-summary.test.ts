@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
 import worker, { classifyPublicRateLimit } from "../src/worker/index";
 import { listDownloadableObjects, summarizeDownloadableObjects } from "../src/worker/downloadable-files";
+import { encodeItemRef } from "../src/worker/files";
 import { createSessionCookie } from "../src/worker/security";
 
 describe("authorized download-all summary", () => {
@@ -16,7 +17,7 @@ describe("authorized download-all summary", () => {
 
   it("binds the aggregate to the active cookie share and never accepts a browser-supplied root", async () => {
     const share = { id: "share-a", public_id: "public-a", project_id: "project-a", token_hash: "hash", label: null, password_hash: null, password_salt: null, password_iterations: null, password_algorithm: null, expires_at: null, revoked_at: null, revoked_reason: null, unavailable_since: null, share_version: 3, client_name: "Acme", project_name: "North", r2_prefix: "Jobs/Clients/Acme/" };
-    let summaryLists = 0;
+    const summaryPrefixes: string[] = [];
     const statementFor = (query: string) => {
       let values: unknown[] = [];
       const statement = { bind(...bound: unknown[]) { values = bound; return statement; }, async first<T>() {
@@ -27,18 +28,26 @@ describe("authorized download-all summary", () => {
     };
     const database = { prepare: statementFor, withSession() { return database; } };
     const bucket = { async list(options: { prefix: string; delimiter?: string }) {
-      expect(options.prefix).toBe(share.r2_prefix);
-      if (options.delimiter) return { objects: [{ key: `${share.r2_prefix}photo.jpg`, size: 25, etag: "a", customMetadata: {} }], delimitedPrefixes: [], truncated: false };
-      summaryLists += 1;
-      return { objects: [{ key: `${share.r2_prefix}photo.jpg`, size: 25, etag: "a", customMetadata: {} }], truncated: false };
+      if (options.delimiter) {
+        expect(options.prefix).toBe(share.r2_prefix);
+        return { objects: [{ key: `${share.r2_prefix}photo.jpg`, size: 25, etag: "a", customMetadata: {} }], delimitedPrefixes: [], truncated: false };
+      }
+      summaryPrefixes.push(options.prefix);
+      return { objects: [{ key: `${options.prefix}photo.jpg`, size: 25, etag: "a", customMetadata: {} }], truncated: false };
     } };
     const secret = "s".repeat(48); const cookie = (await createSessionCookie(secret, "v1", share.id, share.share_version, Date.now() + 60_000)).split(";")[0]!;
     const env = { ENVIRONMENT: "development", DELIVERY_SESSION_SECRET: secret, SESSION_KEY_ID: "v1", AUDIT_IP_SECRET: "a".repeat(48), DELIVERY_DB: database, DATA_BUCKET: bucket, PUBLIC_MANIFEST_RATE_LIMITER: { async limit() { return { success: true }; } } } as never;
     const ctx = { waitUntil() {}, passThroughOnException() {} } as never;
     const valid = await worker.fetch(new Request("https://client.example/api/public/shares/public-a/download-summary?root=Jobs/Other/", { headers: { Cookie: cookie } }), env, ctx);
-    expect(valid.status).toBe(200); expect(await valid.json()).toEqual({ fileCount: 1, totalBytes: 25, knownBytes: 25, unknownSizeCount: 0 }); expect(summaryLists).toBe(1);
+    expect(valid.status).toBe(200); expect(await valid.json()).toEqual({ fileCount: 1, totalBytes: 25, knownBytes: 25, unknownSizeCount: 0 }); expect(summaryPrefixes).toEqual([share.r2_prefix]);
+    const folder = encodeItemRef("Field/Edited");
+    const nested = await worker.fetch(new Request(`https://client.example/api/public/shares/public-a/download-summary?folder=${folder}`, { headers: { Cookie: cookie } }), env, ctx);
+    expect(nested.status).toBe(200); expect(await nested.json()).toEqual({ fileCount: 1, totalBytes: 25, knownBytes: 25, unknownSizeCount: 0 });
+    expect(summaryPrefixes).toEqual([share.r2_prefix, `${share.r2_prefix}Field/Edited/`]);
+    const invalid = await worker.fetch(new Request(`https://client.example/api/public/shares/public-a/download-summary?folder=${encodeItemRef("../Other")}`, { headers: { Cookie: cookie } }), env, ctx);
+    expect(invalid.status).toBe(404); expect(summaryPrefixes).toHaveLength(2);
     const crossShare = await worker.fetch(new Request("https://client.example/api/public/shares/public-b/download-summary", { headers: { Cookie: cookie } }), env, ctx);
-    expect(crossShare.status).toBe(404); expect(summaryLists).toBe(1);
+    expect(crossShare.status).toBe(404); expect(summaryPrefixes).toHaveLength(2);
   });
 
   it("paginates only the authorized root and excludes hidden, moved, marker, tombstoned, and out-of-scope objects", async () => {

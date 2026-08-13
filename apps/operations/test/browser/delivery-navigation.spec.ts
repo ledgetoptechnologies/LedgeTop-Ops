@@ -697,3 +697,36 @@ test("delivery search and per-item menu stay discoverable without selection mode
   const rowOpen = row.locator(".delivery-list-open");
   expect((await rowOpen.boundingBox())!.width).toBeGreaterThan((await row.getByRole("button", { name: "Actions for arrival.jpg" }).boundingBox())!.width * 4);
 });
+
+test("Share dialog replaces a failed lookup with an explicit retry state", async ({ page }) => {
+  let activeRequests = 0; let shareWrites = 0;
+  await page.route("**/api/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/session") return route.fulfill({ json: { user: { id: "staff-share", email: "staff-share@example.test", displayName: "Share Staff", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["delivery.browse", "delivery.share.create"], divisions: [] }, csrfToken: "csrf-share", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: { deliveryJobsRoot: { enabled: true } } } });
+    if (url.pathname === "/api/delivery/folders") {
+      const prefix = url.searchParams.get("prefix") || "Jobs/Clients/";
+      return route.fulfill({ json: { prefix, folders: [{ id: "folder-acme", prefix: "Jobs/Clients/Acme/", physicalKey: "Jobs/Clients/Acme/", name: "Acme", displayName: "Acme", kind: "folder" }], files: [], nextCursor: null } });
+    }
+    if (url.pathname === "/api/delivery/folders/locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
+    if (url.pathname === "/api/delivery/shares/active") {
+      activeRequests += 1;
+      return activeRequests === 1
+        ? route.fulfill({ status: 503, json: { error: "Share lookup temporarily unavailable" } })
+        : route.fulfill({ json: { share: null } });
+    }
+    if (url.pathname === "/api/delivery/shares") {
+      if (route.request().method() !== "GET") shareWrites += 1;
+      return route.fulfill({ json: { shares: [] } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  await page.goto("/delivery");
+  await page.getByRole("button", { name: "Actions for Acme" }).click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  await expect(page.getByRole("alert")).toContainText("Share status unavailable");
+  await expect(page.getByRole("alert")).toContainText("No link was created or changed");
+  await expect(page.getByRole("button", { name: "Create link" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByRole("button", { name: "Create link" })).toBeVisible();
+  expect(activeRequests).toBe(2); expect(shareWrites).toBe(0);
+});

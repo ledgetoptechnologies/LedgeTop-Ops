@@ -23,6 +23,7 @@ import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
 import { ImageLocationMap } from "./ImageLocationMap";
 import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
+import { activeShareLoadError, createShareLoadDeadline } from "./share-load-deadline";
 import {
   activateDeliveryFolderCache,
   deactivateDeliveryFolderCache,
@@ -3863,6 +3864,8 @@ function ShareDialog({
   const [active, setActive] = useState<ActiveDeliveryShare | null | undefined>(
     undefined,
   );
+  const [activeLoadError, setActiveLoadError] = useState("");
+  const [activeLoadAttempt, setActiveLoadAttempt] = useState(0);
   const [result, setResult] = useState<DeliveryShareResult | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -3878,8 +3881,12 @@ function ShareDialog({
 
   useEffect(() => {
     let mounted = true;
+    const deadline = createShareLoadDeadline();
+    setActive(undefined);
+    setActiveLoadError("");
     api<{ share: ActiveDeliveryShare | null }>(
       "/api/delivery/shares/active?prefix=" + encodeURIComponent(folder.prefix),
+      { signal: deadline.signal },
     )
       .then((value) => {
         if (!mounted) return;
@@ -3899,16 +3906,16 @@ function ShareDialog({
         }
       })
       .catch((caught) => {
-        if (mounted) setError((caught as Error).message);
+        if (mounted) setActiveLoadError(activeShareLoadError(caught, deadline.didTimeOut()));
       })
       .finally(() => {
-        if (mounted)
-          setActive((current) => (current === undefined ? null : current));
+        deadline.clear();
       });
     return () => {
       mounted = false;
+      deadline.cancel();
     };
-  }, [folder.prefix]);
+  }, [folder.prefix, activeLoadAttempt]);
 
   const shown = result
     ? {
@@ -3966,7 +3973,16 @@ function ShareDialog({
           </button>
         }
       >
-        {active === undefined ? (
+        {activeLoadError ? (
+          <div className="notice error" role="alert">
+            <strong>Share status unavailable.</strong> {activeLoadError}
+            <div className="actions">
+              <button className="button-ghost button-small" type="button" onClick={() => setActiveLoadAttempt(value => value + 1)}>
+                Retry
+              </button>
+            </div>
+          </div>
+        ) : active === undefined ? (
           <Loading />
         ) : (
           <>
