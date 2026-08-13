@@ -357,7 +357,11 @@ Worker is needed. Repository configuration does not prove remote resources or
 Container entitlement exist.
 
 The authenticated photo-location map reuses the private thumbnail queue and
-adds no public R2 route or Cloudflare binding. Its minimal, version-bound
+adds no public R2 route or Cloudflare binding. Apply Delivery migration `0112`
+before Workers that expose the Operations share-map opt-in. Keep
+`MAPBOX_PUBLIC_TOKEN` restricted to the exact delivery/client origins. Public
+share maps are default-off per share; enabling them discloses validated photo
+coordinates to the client and sends the authorized viewport to Mapbox. Its minimal, version-bound
 metadata lifecycle is documented in [Delivery image-location maps](delivery-image-location-maps.md).
 
 Delivery deployment creates/updates the `ltds-bulk-download` Workflow binding,

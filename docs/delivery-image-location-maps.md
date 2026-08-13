@@ -9,18 +9,26 @@ view. Operations authorizes the exact requested folder prefix. The client
 portal derives its scope from current active project or direct-folder grants;
 revoked memberships and grants stop contributing immediately.
 
-No `/api/public/*` route exposes image locations. Public shares, generic
-delivery sessions, expired/revoked shares, unauthenticated requests, and
-cross-client selectors receive no map data in this release. Introducing public
-coordinates later requires a separate, deliberate policy and security review.
-Map responses contain only grouped latitude, longitude, and image counts. They
+Public shares expose image locations only when an authorized Operations user
+explicitly enables **Show photo locations on this client share**. The database
+default is off for existing and new shares. Changing the setting increments the
+share version, invalidates earlier sessions, and is audited without coordinates
+or object identifiers. Disabled, expired, revoked, unauthenticated, stale, and
+cross-share requests receive no map data. Public queries are restricted to the
+currently authorized opaque folder and only current, valid, non-trashed images.
+Map responses contain only grouped latitude, longitude, image counts, and a
+share/version/folder-bound opaque representative. They
 never contain R2 keys, ETags, raw EXIF, device data, camera direction, file
-names, or original-file URLs. Existing original/private and thumbnail-only
-access behavior is unchanged.
+names, or original-file URLs. Resolving a representative repeats the same
+authorization and returns only the shared photo's leaf name and same-origin
+viewer/download routes; it never returns a bucket URL or absolute path.
+Existing original/private and thumbnail-only access behavior is unchanged.
 
 The browser sends the authorized point viewport to the configured Mapbox map
 service to fetch tiles. Operators must treat that third-party request as part
 of the privacy review and use the existing restricted public Mapbox token.
+If Mapbox is not configured or the current folder has no authorized GPS points,
+the public share renders no map and file browsing remains fully available.
 
 ## Extraction and version lifecycle
 
@@ -94,7 +102,7 @@ repository configuration does not prove account entitlements or quotas.
 - EXIF located after the first 512 KiB is treated as unavailable.
 - There is no camera orientation/direction, raw EXIF inspector, capture-time
   display, clustering beyond identical coordinates, reverse geocoding, route
-  planning, offline map, or public-share map.
+  planning, or offline map. Public-share maps are explicitly opt-in per share.
 - Coordinates reflect available image metadata and can be missing, stale, or
   inaccurate. They are not evidence of flight path, launch location, property
   access, or regulatory compliance.

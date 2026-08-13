@@ -673,12 +673,27 @@ test("delivery search and per-item menu stay discoverable without selection mode
   await search.fill("Acme");
   await expect(page.getByRole("button", { name: "Actions for Acme" })).toBeVisible();
   await page.getByRole("button", { name: "Actions for Acme" }).click();
+  const actionTrigger = page.getByRole("button", { name: "Actions for Acme" });
+  const menu = page.getByRole("menu", { name: "Actions for Acme" });
   await expect(page.getByRole("menuitem", { name: "Share" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Rename" })).toBeVisible();
   await expect(page.getByRole("menuitem", { name: "Delete" })).toBeVisible();
-  await page.getByRole("menu").press("Escape");
+  const layout = await menu.evaluate(element => {
+    const bounds = element.getBoundingClientRect(); const items = [...element.querySelectorAll("button")].map(item => item.getBoundingClientRect());
+    return { left: bounds.left, right: bounds.right, top: bounds.top, bottom: bounds.bottom, viewportWidth: innerWidth, viewportHeight: innerHeight, overlaps: items.some((item, index) => items.slice(index + 1).some(other => item.bottom > other.top && other.bottom > item.top)) };
+  });
+  expect(layout.left).toBeGreaterThanOrEqual(0); expect(layout.right).toBeLessThanOrEqual(layout.viewportWidth);
+  expect(layout.top).toBeGreaterThanOrEqual(0); expect(layout.bottom).toBeLessThanOrEqual(layout.viewportHeight); expect(layout.overlaps).toBe(false);
+  await expect(page.getByRole("menuitem", { name: "Share" })).toBeFocused();
+  await page.keyboard.press("ArrowDown"); await expect(page.getByRole("menuitem", { name: "Rename" })).toBeFocused();
+  await page.keyboard.press("Escape"); await expect(menu).toHaveCount(0); await expect(actionTrigger).toBeFocused();
+  await actionTrigger.click(); await search.click(); await expect(menu).toHaveCount(0);
   await page.getByRole("button", { name: "Open Acme" }).click();
   await expect(page).toHaveURL(/\/delivery\/Acme$/);
   await expect(search).toHaveValue("");
   await expect(page.getByRole("button", { name: "Open arrival.jpg" })).toBeVisible();
+  await page.getByRole("button", { name: "List" }).click();
+  const row = page.locator(".delivery-list-item").filter({ hasText: "arrival.jpg" });
+  const rowOpen = row.locator(".delivery-list-open");
+  expect((await rowOpen.boundingBox())!.width).toBeGreaterThan((await row.getByRole("button", { name: "Actions for arrival.jpg" }).boundingBox())!.width * 4);
 });

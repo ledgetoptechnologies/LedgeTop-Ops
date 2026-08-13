@@ -104,7 +104,7 @@ describe("thumbnail route authorization", () => {
     expect(staleSession.reads).toEqual([]);
   });
 
-  it("publishes a ready PDF thumbnail while keeping video icon-only in the authorized manifest", async () => {
+  it("returns the authoritative listing before separately hydrating authorized media state", async () => {
     const pdfKey = `${share.r2_prefix}Edited/report.pdf`;
     const videoKey = `${share.r2_prefix}Edited/flight.mov`;
     const thumbnailQueries: string[] = [];
@@ -190,10 +190,24 @@ describe("thumbnail route authorization", () => {
     const manifest = await response.json() as { items: Array<Record<string, unknown>> };
     const pdf = manifest.items.find(item => item.name === "report.pdf");
     const video = manifest.items.find(item => item.name === "flight.mov");
-    expect(pdf).toMatchObject({ kind: "pdf", thumbnailState: "ready", thumbnailFallbackKind: "pdf" });
-    expect(pdf?.thumbnailUrl).toMatch(/\/items\/.+\/thumbnail$/);
+    expect(pdf).toMatchObject({ kind: "pdf", thumbnailState: "pending", thumbnailFallbackKind: "pdf" });
+    expect(pdf).not.toHaveProperty("thumbnailUrl");
     expect(video).toMatchObject({ kind: "video", thumbnailState: "not_applicable", thumbnailFallbackKind: "video" });
     expect(video).not.toHaveProperty("thumbnailUrl");
+    expect(thumbnailQueries).toEqual([]);
+
+    const mediaResponse = await worker.fetch(new Request(
+      `https://client.example/api/public/shares/${share.public_id}/manifest/media`,
+      { headers: { Cookie: cookie } },
+    ), env, ctx);
+    expect(mediaResponse.status).toBe(200);
+    const media = await mediaResponse.json() as { items: Array<Record<string, unknown>> };
+    const pdfPatch = media.items.find(item => item.id === pdf?.id);
+    const videoPatch = media.items.find(item => item.id === video?.id);
+    expect(pdfPatch).toMatchObject({ thumbnailState: "ready", thumbnailFallbackKind: "pdf" });
+    expect(pdfPatch?.thumbnailUrl).toMatch(/\/items\/.+\/thumbnail$/);
+    expect(videoPatch).toMatchObject({ previewStatus: "processing", thumbnailState: "not_applicable", thumbnailFallbackKind: "video" });
+    expect(videoPatch).not.toHaveProperty("thumbnailUrl");
     expect(thumbnailQueries).toEqual([pdfKey]);
   });
 });

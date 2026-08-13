@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BRAND, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
+import { BRAND, type DeliveryItem, type DeliveryLocationCollection, type DeliveryManifest } from "@ltds/shared";
 import { Brand, EmptyState, Loading } from "@ltds/ui";
 import {
   pollBulkDownload,
@@ -7,12 +7,16 @@ import {
   type BulkDownloadResponse,
   type RequestError,
 } from "./bulk-download";
-import { openDeliveryRoute, parseDeliveryRoute } from "./route";
+import { deliveryBrowsePath, openDeliveryRoute, parseDeliveryBrowseState, parseDeliveryRoute, type DeliveryBrowseView } from "./route";
 import { CloudTransferDialog } from "./CloudTransferDialog";
 import { notifyCloudTransferOpener, parseCloudTransferCallback, type CloudTransferProvider, type CloudTransferScope } from "./cloud-transfer";
+import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
+import { ImageLocationMap, type ImageLocationMapAsset } from "./ImageLocationMap";
 
 type Gate = "landing" | "loading" | "code" | "ready" | "error";
 type ErrorView = "unavailable" | "invalid-link";
+type DownloadSummaryState = { status: "loading" | "ready" | "unavailable"; fileCount?: number; totalBytes?: number | null; knownBytes?: number; unknownSizeCount?: number };
+type MediaPatch = Partial<Pick<DeliveryItem, "thumbnailUrl" | "thumbnailState" | "thumbnailFallbackKind" | "previewStatus">> & { id: string };
 
 const invalidLinkDetail = "This folder has been moved, removed, or is no longer being shared. Contact your Ledge Top Drone Services representative for a current delivery link.";
 
@@ -26,6 +30,15 @@ function formatBytes(size: number | null): string {
   return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[index]}`;
 }
 
+function downloadSummaryText(summary: DownloadSummaryState): string {
+  if (summary.status === "loading") return "Calculating file count and size…";
+  if (summary.status === "unavailable" || typeof summary.fileCount !== "number") return "File count and size unavailable";
+  const count = `${summary.fileCount} file${summary.fileCount === 1 ? "" : "s"}`;
+  if (typeof summary.totalBytes === "number") return `${count} · ${formatBytes(summary.totalBytes)}`;
+  const unknown = summary.unknownSizeCount || 0;
+  return `${count} · Total size unavailable${unknown ? ` (${unknown} unknown)` : ""}`;
+}
+
 function iconFor(item: DeliveryItem): string {
   if (item.kind === "folder") return "Folder";
   if (item.kind === "image") return "Image";
@@ -36,15 +49,21 @@ function iconFor(item: DeliveryItem): string {
 
 export function DeliveryApp() {
   const initialRoute = useMemo(() => parseDeliveryRoute(location.pathname, location.hash), []);
+  const initialBrowse = useMemo(() => parseDeliveryBrowseState(location.search, localStorage.getItem("ltds-delivery-view") === "list" ? "list" : "grid"), []);
   const [publicId, setPublicId] = useState(initialRoute.publicId);
   const [secret, setSecret] = useState(initialRoute.secret);
   const [gate, setGate] = useState<Gate>(initialRoute.publicId ? "loading" : "landing");
   const [error, setError] = useState("");
   const [errorView, setErrorView] = useState<ErrorView>("unavailable");
   const [manifest, setManifest] = useState<DeliveryManifest | null>(null);
-  const [folder, setFolder] = useState("");
-  const [view, setView] = useState<"grid" | "list">(() => localStorage.getItem("ltds-delivery-view") === "list" ? "list" : "grid");
+  const [folder, setFolder] = useState(initialBrowse.folderId);
+  const [view, setView] = useState<DeliveryBrowseView>(initialBrowse.view);
   const [preview, setPreview] = useState<DeliveryItem | null>(null);
+  const [folderLoading, setFolderLoading] = useState(false);
+  const [navigationError, setNavigationError] = useState("");
+  const [downloadSummary, setDownloadSummary] = useState<DownloadSummaryState>({ status: "loading" });
+  const [locationData, setLocationData] = useState<{ locations: DeliveryLocationCollection; mapboxPublicToken: string | null } | null>(null);
+  const [locationLoaded, setLocationLoaded] = useState(false);
   const [selectedItems, setSelectedItems] = useState<Set<string>>(() => new Set());
   const [selectionMode, setSelectionMode] = useState(false);
   const [bulkBusy, setBulkBusy] = useState(false);
@@ -52,6 +71,7 @@ export function DeliveryApp() {
   // Keep recent folder manifests only for this open share session. This makes
   // back-navigation immediate without persisting any client delivery data.
   const manifestCache = useRef(new Map<string, DeliveryManifest>());
+  const authorizedItems = useRef(new Map<string, DeliveryItem>());
   const navigationVersion = useRef(0);
   const [bulkError, setBulkError] = useState("");
   const [bulkProgress, setBulkProgress] = useState<{ status: string; percent: number | null; message?: string } | null>(null);
@@ -75,14 +95,36 @@ export function DeliveryApp() {
     // normal browse/back navigation feel immediate.
     if (cache.has(key)) cache.delete(key);
     cache.set(key, data);
+    data.items.forEach(item => { if (item.kind !== "folder") authorizedItems.current.set(item.id, item); });
     if (cache.size > 40) cache.delete(cache.keys().next().value as string);
   }, [cacheKey]);
 
-  const loadManifest = useCallback(async (id: string, folderId = "") => {
+  const hydrateMedia = useCallback(async (id: string, folderId: string, cursor: string | null, version: number) => {
+    const params = new URLSearchParams(); if (folderId) params.set("folder", folderId); if (cursor) params.set("cursor", cursor);
+    try {
+      const result = await requestJson<{ items: MediaPatch[] }>(`/api/public/shares/${encodeURIComponent(id)}/manifest/media?${params.toString()}`);
+      if (version !== navigationVersion.current) return;
+      setManifest(current => {
+        if (!current || current.folder.id !== folderId) return current;
+        const patches = new Map(result.items.map(item => [item.id, item]));
+        const next = { ...current, items: current.items.map(item => patches.has(item.id) ? { ...item, ...patches.get(item.id) } : item) };
+        rememberManifest(id, folderId, next);
+        setPreview(active => active ? next.items.find(item => item.id === active.id) || null : null);
+        return next;
+      });
+    } catch {
+      // Thumbnail and stream readiness are advisory; the authoritative listing remains usable.
+    }
+  }, [rememberManifest]);
+
+  const loadManifest = useCallback(async (id: string, folderId = "", fileId = "") => {
+    const version = ++navigationVersion.current;
     const data = await fetchManifest(id, folderId);
     rememberManifest(id, folderId, data);
-    setManifest(data); setFolder(folderId); setGate("ready");
-  }, [fetchManifest, rememberManifest]);
+    setManifest(data); setFolder(folderId); setPreview(data.items.find(item => item.id === fileId && item.kind !== "folder") || null); setGate("ready");
+    history.replaceState({ ltdsDelivery: true }, "", deliveryBrowsePath(id, { folderId, fileId: data.items.some(item => item.id === fileId && item.kind !== "folder") ? fileId : "", view: initialBrowse.view }));
+    void hydrateMedia(id, folderId, null, version);
+  }, [fetchManifest, hydrateMedia, initialBrowse.fileId, initialBrowse.view, rememberManifest]);
 
   const showRequestError = useCallback((caught: unknown) => {
     const value = caught as RequestError;
@@ -106,11 +148,10 @@ export function DeliveryApp() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ secret: route.secret, accessCode: route.accessCode }),
         }),
-        loadManifest,
+        loadManifest: id => loadManifest(id, initialBrowse.folderId, initialBrowse.fileId),
       });
       if (!result) return;
       setPublicId(result.publicId); setSecret("");
-      history.replaceState(null, "", result.canonicalPath);
     } catch (caught) {
       const value = caught as RequestError;
       if (value.status === 401 && (value.body?.code === "ACCESS_CODE_REQUIRED" || value.body?.code === "ACCESS_CODE_INVALID")) {
@@ -120,7 +161,7 @@ export function DeliveryApp() {
       }
       showRequestError(caught);
     }
-  }, [loadManifest, publicId, secret, showRequestError]);
+  }, [initialBrowse.fileId, initialBrowse.folderId, initialBrowse.view, loadManifest, publicId, secret, showRequestError]);
 
   useEffect(() => {
     if (parseCloudTransferCallback(location.href)) {
@@ -130,32 +171,92 @@ export function DeliveryApp() {
     if (publicId) void exchange();
   }, []); // Exchange the URL fragment once on first load, or complete an OAuth popup.
 
-  function changeView(next: "grid" | "list") { setView(next); localStorage.setItem("ltds-delivery-view", next); }
-  async function navigateToFolder(folderId = "") {
+  const navigateToFolder = useCallback(async (folderId = "", options: { history?: "push" | "none"; fileId?: string; scroll?: boolean } = {}) => {
     const version = ++navigationVersion.current;
     const cached = manifestCache.current.get(cacheKey(publicId, folderId));
+    const historyMode = options.history ?? "push";
+    const commitHistory = (data: DeliveryManifest) => {
+      const authorized = data.items.find(item => item.id === options.fileId && item.kind !== "folder") || (options.fileId ? authorizedItems.current.get(options.fileId) : undefined);
+      const fileId = authorized ? options.fileId || "" : "";
+      if (historyMode === "push") history.pushState({ ltdsDelivery: true }, "", deliveryBrowsePath(publicId, { folderId, fileId, view }));
+      setPreview(authorized || null);
+    };
     setPreview(null);
     setSelectedItems(new Set());
+    setNavigationError("");
     if (cached) {
       setManifest(cached); setFolder(folderId); setGate("ready");
+      setFolderLoading(false); commitHistory(cached);
     } else {
-      setGate("loading");
+      setFolderLoading(true);
     }
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    if (options.scroll !== false) window.scrollTo({ top: 0, behavior: "smooth" });
     try {
       // Revalidate even cached folders in the background. The current view is
       // shown right away, then updated if a sync changed the folder contents.
       const fresh = await fetchManifest(publicId, folderId);
       rememberManifest(publicId, folderId, fresh);
       if (version === navigationVersion.current) {
-        setManifest(fresh); setFolder(folderId); setGate("ready");
+        setManifest(fresh); setFolder(folderId); setGate("ready"); setFolderLoading(false);
+        if (!cached) commitHistory(fresh);
+        else setPreview(fresh.items.find(item => item.id === options.fileId && item.kind !== "folder") || (options.fileId ? authorizedItems.current.get(options.fileId) : undefined) || null);
+        void hydrateMedia(publicId, folderId, null, version);
       }
     } catch (caught) {
       // A transient refresh failure should not blank a folder we already have.
-      if (!cached && version === navigationVersion.current) showRequestError(caught);
+      if (!cached && version === navigationVersion.current) {
+        setFolderLoading(false);
+        if (manifest) setNavigationError("That folder could not be opened. Please try again."); else showRequestError(caught);
+      }
     }
+  }, [cacheKey, fetchManifest, hydrateMedia, manifest, publicId, rememberManifest, showRequestError, view]);
+
+  useEffect(() => {
+    const pop = () => {
+      const route = parseDeliveryRoute(location.pathname, location.hash);
+      if (!publicId || route.publicId !== publicId) return;
+      const next = parseDeliveryBrowseState(location.search, view);
+      setView(next.view); localStorage.setItem("ltds-delivery-view", next.view);
+      void navigateToFolder(next.folderId, { history: "none", fileId: next.fileId, scroll: false });
+    };
+    addEventListener("popstate", pop);
+    return () => removeEventListener("popstate", pop);
+  }, [navigateToFolder, publicId, view]);
+
+  useEffect(() => {
+    if (gate !== "ready" || !publicId) return;
+    const controller = new AbortController(); setDownloadSummary({ status: "loading" });
+    requestJson<{ fileCount: number; totalBytes: number | null; knownBytes: number; unknownSizeCount: number }>(`/api/public/shares/${encodeURIComponent(publicId)}/download-summary`, { signal: controller.signal })
+      .then(summary => setDownloadSummary({ status: "ready", ...summary }))
+      .catch(error => { if (!(error instanceof DOMException && error.name === "AbortError")) setDownloadSummary({ status: "unavailable" }); });
+    return () => controller.abort();
+  }, [gate, publicId]);
+
+  useEffect(() => {
+    if (gate !== "ready" || !publicId) return;
+    const controller = new AbortController(); setLocationData(null); setLocationLoaded(false);
+    const params = folder ? `?folder=${encodeURIComponent(folder)}` : "";
+    requestJson<{ locations: DeliveryLocationCollection; mapboxPublicToken: string | null }>(`/api/public/shares/${encodeURIComponent(publicId)}/locations${params}`, { signal: controller.signal })
+      .then(setLocationData)
+      .catch(() => { if (!controller.signal.aborted) setLocationData({ locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null }); })
+      .finally(() => { if (!controller.signal.aborted) setLocationLoaded(true); });
+    return () => controller.abort();
+  }, [folder, gate, publicId]);
+
+  function changeView(next: DeliveryBrowseView) {
+    setView(next); localStorage.setItem("ltds-delivery-view", next);
+    history.pushState({ ltdsDelivery: true }, "", deliveryBrowsePath(publicId, { folderId: folder, fileId: preview?.id || "", view: next }));
   }
   async function openFolder(item: DeliveryItem) { await navigateToFolder(item.id); }
+  function openPreview(item: DeliveryItem) {
+    authorizedItems.current.set(item.id, item);
+    setPreview(item);
+    history.pushState({ ltdsDelivery: true }, "", deliveryBrowsePath(publicId, { folderId: folder, fileId: item.id, view }));
+  }
+  function closePreview() {
+    setPreview(null);
+    history.pushState({ ltdsDelivery: true }, "", deliveryBrowsePath(publicId, { folderId: folder, fileId: "", view }));
+  }
 
   function toggleSelected(itemId: string) {
     setSelectedItems(current => {
@@ -232,7 +333,20 @@ export function DeliveryApp() {
       <div><span className="eyebrow">Secure client delivery</span><h1>{manifest.share.projectName}</h1><p>{manifest.share.clientName}</p></div>
       {manifest.share.expiresAt && <div className="expiry">Available through {new Date(manifest.share.expiresAt).toLocaleDateString()}</div>}
     </section>
+    {locationData && locationData.locations.points.length > 0 && <ImageLocationMap
+      token={locationData?.mapboxPublicToken || null}
+      locations={locationLoaded ? locationData?.locations || { points: [], imageCount: 0, truncated: false } : null}
+      scopeLabel="this shared delivery"
+      loadAsset={async assetRef => {
+        const params = folder ? `?folder=${encodeURIComponent(folder)}` : "";
+        const result = await requestJson<{ item: ImageLocationMapAsset }>(`/api/public/shares/${encodeURIComponent(publicId)}/locations/${encodeURIComponent(assetRef)}${params}`);
+        authorizedItems.current.set(result.item.id, result.item);
+        return result.item;
+      }}
+      openAsset={asset => openPreview(asset)}
+    />}
     <section className="delivery-browser">
+      {folderLoading && <div className="folder-loading" role="status" aria-live="polite">Opening folder…</div>}
       <div className="browser-toolbar">
         <nav className="breadcrumbs" aria-label="Folder path">
           <button onClick={() => void navigateToFolder()}>All files</button>
@@ -248,18 +362,19 @@ export function DeliveryApp() {
           {selectionMode && cloudProviders.length > 0 && <button className="button-ghost button-small" disabled={selectedItems.size === 0} onClick={() => setCloudTransferScope({ items: [...selectedItems] })}>Copy selected to cloud</button>}
           {!selectionMode && cloudProviders.length > 0 && <button className="button-ghost button-small" onClick={() => setCloudTransferScope({ all: true })}>Copy all to cloud</button>}
           {selectionMode && <button className="button-ghost button-small" disabled={bulkBusy || selectedItems.size === 0} onClick={() => void downloadBulk()}> {bulkBusy ? "Preparing…" : "Download selected"}</button>}
-          <button className="button-orange button-small" disabled={bulkBusy} onClick={() => void downloadBulk(true)}>{bulkBusy ? "Preparing…" : "Download all"}</button>
+          <button className="button-orange button-small download-all-control" disabled={bulkBusy} onClick={() => void downloadBulk(true)}><span>{bulkBusy ? "Preparing…" : "Download all"}</span><small>{downloadSummaryText(downloadSummary)}</small></button>
         </div>
       </div>
+      {navigationError && <p className="bulk-error" role="alert">{navigationError}</p>}
       {bulkError && <p className="bulk-error" role="alert">{bulkError}</p>}
       {bulkProgress && <BulkProgress progress={bulkProgress} />}
       {manifest.items.length === 0 ? <EmptyState title="This folder is empty" detail="New synced files will appear here automatically." /> : view === "grid" ?
-        <div className="item-grid">{manifest.items.map(item => <ItemCard key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div> :
-        <div className="item-list">{manifest.items.map(item => <ItemRow key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={setPreview} />)}</div>}
+        <div className="item-grid">{manifest.items.map(item => <ItemCard key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={openPreview} />)}</div> :
+        <div className="item-list">{manifest.items.map(item => <ItemRow key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={openPreview} />)}</div>}
       <footer>{manifest.items.length} item{manifest.items.length === 1 ? "" : "s"}{manifest.nextCursor ? " · More items are available" : ""}</footer>
     </section>
     {cloudTransferScope && <CloudTransferDialog publicId={publicId} scope={cloudTransferScope} enabledProviders={cloudProviders} onClose={() => setCloudTransferScope(null)} />}
-    {preview && <Preview item={preview} items={manifest.items.filter(item => item.kind !== "folder")} publicId={publicId} onSelect={setPreview} onClose={() => setPreview(null)} />}
+    {preview && <Preview item={preview} items={manifest.items.filter(item => item.kind !== "folder")} publicId={publicId} onSelect={openPreview} onClose={closePreview} />}
   </PublicFrame>;
 }
 
@@ -336,7 +451,7 @@ function Preview({ item, items, publicId, onSelect, onClose }: { item: DeliveryI
     document.addEventListener("keydown", onKeyDown);
     return () => document.removeEventListener("keydown", onKeyDown);
   }, [next, onClose, onSelect, previous]);
-  return <div className="preview-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) onClose(); }}><section ref={dialog} tabIndex={-1} className="preview-dialog" role="dialog" aria-modal="true" aria-label={`Preview ${item.name}`} onKeyDown={event => {
+  return <div className="preview-backdrop" onPointerDown={event => { if (event.currentTarget === event.target) onClose(); }}><section ref={dialog} tabIndex={-1} className="preview-dialog" role="dialog" aria-modal="true" aria-label={`Preview ${item.name}`} onKeyDown={event => {
     if (event.key !== "Tab") return;
     const focusable = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),audio[controls],video[controls],[tabindex]:not([tabindex="-1"])'));
     if (!focusable.length) { event.preventDefault(); return; }
@@ -353,7 +468,43 @@ function Preview({ item, items, publicId, onSelect, onClose }: { item: DeliveryI
 function ImagePreview({ item }: { item: DeliveryItem }) {
   const [failed, setFailed] = useState(!item.previewUrl); const [loaded, setLoaded] = useState(false);
   if (failed) return <PreparedPlaceholder item={item} />;
-  return <div className="image-preview" aria-busy={!loaded}>{!loaded && <SkeletonViewer />}<img src={item.previewUrl} alt={item.name} loading="lazy" decoding="async" onLoad={() => setLoaded(true)} onError={() => setFailed(true)} /></div>;
+  return <ZoomableDeliveryImage src={item.previewUrl} alt={item.name} loading={!loaded} loaded={() => setLoaded(true)} failed={() => setFailed(true)} />;
+}
+
+function ZoomableDeliveryImage({ src, alt, loading, loaded, failed }: { src?: string; alt: string; loading: boolean; loaded: () => void; failed: () => void }) {
+  const [scale, setScale] = useState(1); const [offset, setOffset] = useState({ x: 0, y: 0 });
+  const pointers = useRef(new Map<number, { x: number; y: number }>()); const gesture = useRef<{ distance: number; scale: number } | null>(null);
+  const fit = () => { setScale(1); setOffset({ x: 0, y: 0 }); };
+  useEffect(fit, [src]);
+  const constrain = (value: number) => Math.min(20, Math.max(1, value));
+  const pointDistance = () => {
+    const [first, second] = [...pointers.current.values()];
+    return first && second ? Math.hypot(first.x - second.x, first.y - second.y) : 0;
+  };
+  return <div className={`zoomable-delivery-image ${scale > 1 ? "zoomed" : ""}${loading ? " loading" : ""}`} aria-busy={loading}
+    onWheel={event => {
+      event.preventDefault();
+      const next = constrain(scale * (event.deltaY < 0 ? 1.18 : 1 / 1.18)); const bounds = event.currentTarget.getBoundingClientRect();
+      const point = { x: event.clientX - bounds.left - bounds.width / 2, y: event.clientY - bounds.top - bounds.height / 2 };
+      setScale(next); setOffset(value => constrainViewerOffset(next, pointerAnchoredOffset(scale, next, value, point), bounds));
+    }}
+    onDoubleClick={fit}
+    onPointerDown={event => { event.currentTarget.setPointerCapture(event.pointerId); pointers.current.set(event.pointerId, { x: event.clientX, y: event.clientY }); if (pointers.current.size === 2) gesture.current = { distance: pointDistance(), scale }; }}
+    onPointerMove={event => {
+      const previous = pointers.current.get(event.pointerId); if (!previous) return;
+      const current = { x: event.clientX, y: event.clientY }; pointers.current.set(event.pointerId, current);
+      if (pointers.current.size === 2 && gesture.current) {
+        const distance = pointDistance(); if (gesture.current.distance) { const next = constrain(gesture.current.scale * distance / gesture.current.distance); setScale(next); setOffset(value => constrainViewerOffset(next, value, event.currentTarget.getBoundingClientRect())); }
+      } else if (scale > 1) {
+        setOffset(value => constrainViewerOffset(scale, { x: value.x + current.x - previous.x, y: value.y + current.y - previous.y }, event.currentTarget.getBoundingClientRect()));
+      }
+    }}
+    onPointerUp={event => { pointers.current.delete(event.pointerId); if (pointers.current.size < 2) gesture.current = null; }}
+    onPointerCancel={event => { pointers.current.delete(event.pointerId); gesture.current = null; }}>
+    {loading && <SkeletonViewer />}
+    <img src={src} alt={alt} loading="lazy" decoding="async" draggable={false} onLoad={loaded} onError={failed} style={{ transform: `translate(${offset.x}px, ${offset.y}px) scale(${scale})` }} />
+    {scale > 1 && <button type="button" className="image-fit-control button-ghost button-small" onPointerDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); fit(); event.currentTarget.closest<HTMLElement>("[role=dialog]")?.focus(); }}>Fit</button>}
+  </div>;
 }
 
 function PdfPreview({ item }: { item: DeliveryItem }) {
@@ -376,7 +527,7 @@ function SkeletonViewer() { return <span className="skeleton-viewer" role="statu
 
 function DownloadOriginal({ item, compact = false }: { item: DeliveryItem; compact?: boolean }) {
   if (!item.downloadUrl) return null;
-  return <a className={compact ? "button button-orange button-small" : "viewer-download"} href={item.downloadUrl}>Download</a>;
+  return <a className={compact ? "button button-orange button-small viewer-download-action" : "viewer-download"} href={item.downloadUrl} aria-label={`Download ${item.name}`}>Download original</a>;
 }
 
 function PreparedPlaceholder({ item }: { item: DeliveryItem }) {

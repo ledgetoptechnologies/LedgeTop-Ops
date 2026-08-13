@@ -237,7 +237,10 @@
 .select-current { font-weight: 750; }
 .selection-count { color: var(--muted); flex: 1; }
 .download-actions { display: flex; gap: .5rem; }
+.download-all-control { display: grid; justify-items: center; gap: .1rem; min-width: 10rem; }
+.download-all-control small { color: currentColor; font-size: .68rem; font-weight: 650; opacity: .85; white-space: nowrap; }
 .bulk-error { margin: 0; padding: .7rem 1rem; color: #a72d39; background: #fff4f4; border-bottom: 1px solid #f0c8c8; }
+.folder-loading { padding: .55rem 1rem; border-bottom: 1px solid #f2d7c7; background: #fff7f1; color: #8b3d17; font-size: .8rem; font-weight: 760; }
 
 .item-select {
   position: absolute;
@@ -407,11 +410,11 @@
 .preview-backdrop {
   position: fixed;
   inset: 0;
-  background: #0c131ccc;
+  background: #0c131cdd;
   display: grid;
   place-items: center;
-  padding: 1rem;
-  z-index: 40;
+  padding: clamp(.25rem, 1vw, 1rem);
+  z-index: 100;
   overflow: hidden;
   overscroll-behavior: contain;
 }
@@ -459,8 +462,9 @@
   place-items: center;
   overflow: hidden;
 }
-.image-preview { position: absolute; inset: 0; width: auto; height: auto; display: block; }
-.image-preview > img {
+.zoomable-delivery-image { position: absolute; inset: 0; overflow: hidden; touch-action: none; cursor: zoom-in; }
+.zoomable-delivery-image.zoomed { cursor: grab; }
+.zoomable-delivery-image > img {
   position: absolute;
   inset: 0;
   display: block;
@@ -470,6 +474,20 @@
   max-height: none;
   object-fit: contain;
   object-position: center;
+  transform-origin: center;
+  will-change: transform;
+}
+.zoomable-delivery-image.loading > img { visibility: hidden; }
+.image-fit-control { position: absolute; right: 1rem; bottom: 1rem; z-index: 3; background: #fff !important; }
+.skeleton-viewer {
+  position: absolute;
+  z-index: 0;
+  inset: 1rem;
+  display: block;
+  border-radius: 10px;
+  background: linear-gradient(100deg, #18242e 25%, #263946 37%, #18242e 63%);
+  background-size: 400% 100%;
+  animation: skeleton-shimmer 1.35s ease infinite;
 }
 .pdf-preview { position: relative; width: 100%; height: 100%; min-width: 0; min-height: 0; }
 .pdf-preview > iframe { display: block; width: 100%; height: 100%; border: 0; background: #fff; }
@@ -1343,6 +1361,14 @@
 }
 .image-location-map-dialog > header { padding: 1rem 1.15rem; border-bottom: 1px solid var(--line); }
 .image-location-map-dialog > header button { flex: 0 0 auto; }
+.image-location-map-expanded-stage { position: relative; min-height: 0; overflow: hidden; }
+.image-location-selection { display: flex; align-items: center; gap: .65rem; padding: .65rem; border: 1px solid var(--line); border-radius: 9px; background: #fff; box-shadow: 0 8px 28px #0c131c22; }
+.image-location-map-expanded-stage > .image-location-selection { position: absolute; z-index: 2; left: 1rem; bottom: 1rem; max-width: min(360px, calc(100% - 2rem)); }
+.image-location-selection-close { align-self: stretch; border: 0; border-right: 1px solid var(--line); padding: 0 .65rem 0 0; background: transparent; color: var(--muted); font-weight: 750; cursor: pointer; }
+.image-location-selection-preview { display: grid; grid-template-columns: 92px minmax(0, 1fr); align-items: center; gap: .65rem; min-width: 0; padding: .3rem; border: 1px solid transparent; border-radius: 7px; background: transparent; color: #111820; text-align: left; cursor: pointer; }
+.image-location-selection-preview:hover, .image-location-selection-preview:focus-visible { border-color: var(--orange); background: #fff2e8; outline: none; }
+.image-location-selection-preview img, .image-location-selection-preview .file-type-placeholder { width: 92px; height: 68px; object-fit: cover; border-radius: 7px; }
+.image-location-selection-preview strong { min-width: 0; overflow-wrap: anywhere; color: #111820; font-size: .8rem; font-weight: 900; line-height: 1.35; }
 @media (max-width: 680px) {
   .image-location-map { padding: .8rem; }
   .image-location-map-header { align-items: stretch; flex-direction: column; }
@@ -1438,7 +1464,11 @@
   .breadcrumbs { width: 100%; }
   .view-switch { align-self: flex-end; }
   .public-footer { text-align: center; }
-  .preview-dialog > header strong { max-width: 45%; }
+  .preview-dialog > header { flex-wrap: wrap; }
+  .preview-dialog > header strong { flex: 1 1 70%; max-width: none; }
+  .preview-position { order: 2; }
+  .viewer-download-action { margin-left: auto; }
+  .download-all-control { width: 100%; }
 }
 
 @media (max-width: 680px) {
