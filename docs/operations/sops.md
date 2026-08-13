@@ -34,7 +34,9 @@ An allowed attachment URL is still only a reference: its existing handler reauth
 
 Staff who already have scoped `operations.manage` access may replace the set of published SOP revisions linked to an operational job brief. The route first applies the existing Project Alpha projection/assignment visibility and job-brief authorization. New links must match each document's current published revision; the database repeats that rule in an insert trigger.
 
-The job brief stores the exact revision snapshot in its immutable revision JSON and keeps foreign keys to the immutable SOP revision. Later SOP drafts or publications cannot silently change field guidance. An assigned pilot receives the linked sanitized revision only inside the existing authorized job-brief response. An unrelated pilot receives `404` before any linked SOP is resolved. Archiving a document blocks new links but preserves an already linked exact revision for that job; removing the link in a later brief version does not alter historical brief snapshots.
+The job brief stores the exact revision snapshot in its immutable revision JSON and keeps foreign keys to the immutable SOP revision. Later SOP drafts or publications cannot silently change field guidance. An assigned pilot receives linked sanitized revisions only when the same request also has effective `sops.view`; an explicit deny leaves the rest of the authorized job brief readable but returns no linked SOP content. An unrelated pilot receives `404` before any linked SOP is resolved. Archiving a document blocks new links but preserves an already linked exact revision for that job; removing the link in a later brief version does not alter historical brief snapshots.
+
+The operation job-brief header shows a **Quick SOPs** count and keyboard-accessible revision chips for the exact revisions already linked to that job. A chip opens and anchors to its pinned content inside the brief; it does not redirect to a mutable library document. This is operation-level guidance, not a staff-profile attachment. Project/task-level SOP assignment remains a separate future schema and authorization decision.
 
 ## Release sequence
 

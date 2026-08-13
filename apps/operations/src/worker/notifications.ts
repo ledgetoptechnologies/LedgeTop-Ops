@@ -13,7 +13,7 @@ export interface NotificationPayload { publicId?: string | null; shareUrl?: stri
 interface NotificationRow { id: string; share_id: string; kind: NotificationKind; recipient_email: string; payload_json: string; attempts: number; }
 const MAX_ATTEMPTS = 3;
 
-type ClientPortalRequestEvent = "request_submitted" | "request_status_changed" | "request_confirmation_requested" | "request_client_response";
+type ClientPortalRequestEvent = "request_submitted" | "request_status_changed" | "request_confirmation_requested" | "request_client_response" | "request_work_area_changed";
 type ClientPortalRequestRecipient = "staff_triage" | "client_requester";
 interface ClientPortalRequestNotificationRow {
   id: string;
@@ -74,14 +74,19 @@ async function auditNotification(env: Env, action: string, row: NotificationRow,
 }
 
 export async function enqueueExpiringNotifications(env: Env): Promise<number> {
-  const rows = await env.DELIVERY_DB.prepare(`SELECT s.id,s.recipient_email,s.public_id,p.client_name,p.project_name,
+  const rows = await env.DELIVERY_DB.prepare(`SELECT s.id,COALESCE(member.recipient_normalized_email,s.recipient_email) recipient_email,
+    member.recipient_principal_public_id,s.public_id,p.client_name,p.project_name,
     COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.expires_at FROM shares s
     JOIN projects p ON p.id=s.project_id
-    WHERE s.revoked_at IS NULL AND p.active=1 AND s.recipient_email IS NOT NULL AND s.expires_at IS NOT NULL
+    LEFT JOIN delivery_share_audience_snapshots audience
+      ON audience.share_id=s.id AND audience.share_version=s.share_version
+    LEFT JOIN delivery_share_recipient_members member
+      ON member.share_id=audience.share_id AND member.share_version=audience.share_version
+    WHERE s.revoked_at IS NULL AND p.active=1 AND COALESCE(member.recipient_normalized_email,s.recipient_email) IS NOT NULL AND s.expires_at IS NOT NULL
     AND datetime(s.expires_at)>datetime('now') AND datetime(s.expires_at)<=datetime('now','+72 hours')`)
-    .all<{ id: string; recipient_email: string; public_id: string | null; client_name: string; project_name: string; r2_prefix: string; expires_at: string }>();
+    .all<{ id: string; recipient_email: string; recipient_principal_public_id: string | null; public_id: string | null; client_name: string; project_name: string; r2_prefix: string; expires_at: string }>();
   const statements = rows.results.map(row => notificationStatement(env, { shareId: row.id, kind: "expiring_72h", recipientEmail: row.recipient_email,
-    dedupeKey: notificationDedupeKey("expiring_72h", row.id, row.expires_at), payload: { publicId: row.public_id, clientName: row.client_name, projectName: row.project_name, r2Prefix: row.r2_prefix, expiresAt: row.expires_at } }))
+    dedupeKey: notificationDedupeKey("expiring_72h", row.id, `${row.expires_at}${row.recipient_principal_public_id ? `:${row.recipient_principal_public_id}` : ""}`), payload: { publicId: row.public_id, clientName: row.client_name, projectName: row.project_name, r2Prefix: row.r2_prefix, expiresAt: row.expires_at } }))
     .filter((statement): statement is D1PreparedStatement => Boolean(statement));
   if (statements.length) await env.DELIVERY_DB.batch(statements);
   return statements.length;
@@ -165,6 +170,11 @@ const lifecyclePresentation: Record<
     status: "Client response received",
     introduction: "A client responded to the operational estimate.",
   },
+  work_area_changed: {
+    subject: "Service request work area updated",
+    status: "Work area updated",
+    introduction: "LTDS updated the work area after staff review.",
+  },
 };
 
 export function renderClientRequestNotification(
@@ -184,8 +194,10 @@ export function renderClientRequestNotification(
     snapshot.lifecycle === "submitted" && snapshot.action === "review_in_operations"
       ? "New service request"
       : presentation.subject;
-  const text = `${presentation.introduction}\n\nTitle: ${snapshot.title}\nContext: ${context}\nScope: ${snapshot.scopeLabel}\nLocation: ${snapshot.locationLabel}\nStatus: ${presentation.status}\n\n${actionLabel}: ${actionUrl}`;
-  const html = `<p>${escapeHtml(presentation.introduction)}</p><p><strong>Title:</strong> ${escapeHtml(snapshot.title)}<br><strong>Context:</strong> ${escapeHtml(context)}<br><strong>Scope:</strong> ${escapeHtml(snapshot.scopeLabel)}<br><strong>Location:</strong> ${escapeHtml(snapshot.locationLabel)}<br><strong>Status:</strong> ${escapeHtml(presentation.status)}</p><p><a href="${escapeHtml(actionUrl)}">${escapeHtml(actionLabel)}</a></p>`;
+  const changeText = snapshot.changeSummary ? `\nChange: ${snapshot.changeSummary}` : "";
+  const changeHtml = snapshot.changeSummary ? `<br><strong>Change:</strong> ${escapeHtml(snapshot.changeSummary)}` : "";
+  const text = `${presentation.introduction}\n\nTitle: ${snapshot.title}\nContext: ${context}\nScope: ${snapshot.scopeLabel}\nLocation: ${snapshot.locationLabel}\nStatus: ${presentation.status}${changeText}\n\n${actionLabel}: ${actionUrl}`;
+  const html = `<p>${escapeHtml(presentation.introduction)}</p><p><strong>Title:</strong> ${escapeHtml(snapshot.title)}<br><strong>Context:</strong> ${escapeHtml(context)}<br><strong>Scope:</strong> ${escapeHtml(snapshot.scopeLabel)}<br><strong>Location:</strong> ${escapeHtml(snapshot.locationLabel)}<br><strong>Status:</strong> ${escapeHtml(presentation.status)}${changeHtml}</p><p><a href="${escapeHtml(actionUrl)}">${escapeHtml(actionLabel)}</a></p>`;
   return { subject: `${subjectPrefix}: ${snapshot.title}`, text, html };
 }
 
@@ -197,7 +209,9 @@ function notificationSnapshot(row: ClientPortalRequestNotificationRow): ServiceR
     // Legacy payloads are rebuilt from the same request-scoped, nonfinancial fields below.
   }
   const lifecycle: ServiceRequestNotificationLifecycle =
-    row.event_type === "request_confirmation_requested"
+    row.event_type === "request_work_area_changed"
+      ? "work_area_changed"
+      : row.event_type === "request_confirmation_requested"
       ? "estimate_ready"
       : row.event_type === "request_client_response"
         ? "client_response_received"
@@ -279,11 +293,14 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
       if (row.recipient_kind === "client_requester") {
         const completed = snapshot.lifecycle === "completed";
         const estimate = snapshot.lifecycle === "estimate_ready";
+        const workArea = snapshot.lifecycle === "work_area_changed";
         await env.DELIVERY_DB.prepare(`INSERT OR IGNORE INTO client_portal_notifications
           (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body,action_path)
           VALUES (?,?,?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), row.account_id, row.requester_identity_id,
-            completed ? "request_completed" : estimate ? "estimate_ready" : "request_status", "service_request", row.request_id,
-            `service-request:${row.id}`, rendered.subject.slice(0, 160), lifecyclePresentation[snapshot.lifecycle].introduction.slice(0, 500), "/portal/requests").run();
+            completed ? "request_completed" : estimate ? "estimate_ready" : workArea ? "work_area_changed" : "request_status", "service_request", row.request_id,
+            `service-request:${row.id}`, rendered.subject.slice(0, 160),
+            (workArea && snapshot.changeSummary ? snapshot.changeSummary : lifecyclePresentation[snapshot.lifecycle].introduction).slice(0, 500),
+            "/portal/requests").run();
       }
       await sendNotificationMail(env, { to: recipient, fromName: "LTDS Client Portal", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
       await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing'").bind(row.id).run();

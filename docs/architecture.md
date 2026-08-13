@@ -1,5 +1,10 @@
 # Architecture and security boundaries
 
+The current boundaries below remain authoritative for production. The approved
+but not-yet-enabled Project Alpha/client-portal v2 boundary is defined in
+[the locked compatibility contract](client-portal-v2-architecture.md), including
+its server-to-server API, KML, pricing, security, rollout, and test gates.
+
 ## Request boundaries
 
 ```text

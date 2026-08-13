@@ -1,5 +1,11 @@
 # LTDS client request and staff review pilot
 
+This file records the currently deployed pilot. The approved replacement
+architecture, including dynamic multi-service selection from Project Alpha,
+server-computed acreage, non-binding pricing hints, Operations-only KML export,
+and idempotent PA draft creation, is locked separately in
+[the client portal v2 compatibility contract](client-portal-v2-architecture.md).
+
 Status: deployed to the LTDS production Workers on 2026-08-01 and validated as
 described below. Project Alpha source and data were not mutated. Staging was not
 used for this release.
@@ -59,6 +65,48 @@ Request states are `submitted`, `under_review`,
 `staff_proposal`, `client_response`, `status_changed`, and `pa_quote_linked`.
 
 ## API, data, and security contracts
+
+### Request attachments (v2, default-off)
+
+The v2 request wizard may attach up to 10 JPEG, PNG, WebP, HEIC, HEIF, or PDF
+files. Each file is capped at 25 MiB and the request aggregate is capped at
+100 MiB. ZIP files, archives, SVG/HTML/script content, mismatched MIME types and
+file extensions, and mismatched file signatures are rejected. Clients create
+the work area only in Mapbox; attachments never accept KML/KMZ.
+
+Attachment bytes never traverse the Client Worker. After an authenticated
+client creates an upload intent for an authorized draft, the browser requests a
+five-minute ticket for each 8 MiB multipart part and uploads the part directly
+to the private R2 S3 endpoint. Each SigV4 ticket binds the private quarantine
+object, R2 upload ID, part number, exact `Content-Length`, and declared
+`Content-Type`. The Worker stores only upload coordination data and verified
+ETag/size checkpoints, verifies the completed R2 size and file signature, and
+then leaves the object quarantined.
+
+This feature is fail-closed. Keep `CLIENT_PORTAL_REQUEST_V2_ENABLED` and
+`CLIENT_REQUEST_ATTACHMENTS_ENABLED` false until a real scanner consumes
+quarantine objects and authenticates scan receipts with the 32+ character
+`CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET`. Apply
+`apps/client/r2-request-attachments-cors.json`, use least-privilege R2
+credentials, configure an R2 lifecycle backstop for
+`_ltds/quarantine/request-attachments/`, and alert on cleanup/scanner failures.
+
+There is no simulated clean verdict: without scanner configuration upload
+initialization returns 503, and drafts containing uploading, quarantined, or
+scanning attachments cannot submit. Accepted attachments link immutably to the
+submitted request. Authorized client downloads stream through a same-origin
+Worker route and never disclose R2 keys or bearer URLs. The hourly scheduled
+handler aborts/deletes expired unsubmitted uploads; the R2 lifecycle remains a
+recovery backstop. Staging must prove cross-account denial, ticket scope/expiry,
+retry/abort/completion, clean and rejected scan receipts, submit gating, and
+post-submit download before either flag is enabled.
+
+Project Alpha pricing guidance has a third independent flag,
+`PROJECT_ALPHA_PRICING_HINTS_ENABLED`, which also defaults to false. When it is
+unavailable or invalid, the review page keeps the authoritative coverage and
+shows pricing after review; it never blocks saving or submitting a request and
+never calculates or reuses a price locally. See `docs/project-alpha.md` for the
+server-to-server contract and credential separation.
 
 Client routes are implemented under `/api/client` in
 [`routes.ts`](../apps/client/src/worker/client-portal/routes.ts):
@@ -440,6 +488,108 @@ and the four source-layout invariants passed. The full monorepo production build
 passed with only the previously documented large JavaScript chunk warnings.
 The unchanged Operations desktop/mobile request-review browser suite also
 passed 2/2.
+
+## Workspace hierarchy v2 shadow foundation
+
+Migration `0121_client_workspace_hierarchy_v2.sql` is an additive, disabled
+shadow model for the hierarchy contract. It separates a globally verified
+identity from any one client account, permits independent membership in
+multiple workspaces, requires each workspace to have exactly one Project Alpha
+organization or standalone-client public ID, and stores versioned scoped
+allow/deny entitlements. Complete PA directory generations, opaque folder
+bindings, and hashed/expiring/revocable invitation records are separate from
+the legacy account and project-grant tables.
+
+`CLIENT_PORTAL_HIERARCHY_V2_ENABLED` is explicitly `false` in the checked-in
+Worker configuration. With the flag off, all existing pilot routes continue to
+use the legacy account/session/grant path. With it on, the new endpoints remain
+fail-closed: they require a verified Access issuer/subject, active global
+identity, active workspace membership, a complete active directory generation,
+an active source entity, and an explicit capability. A matching deny wins.
+Email and `primary_contact` are presentation data and never grant access.
+
+Invitation and member mutations have a second independent gate,
+`CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED`, also checked in as `false`.
+
+Migration `0126_delivery_share_recipient_snapshots.sql` adds the disabled
+Operations public-share recipient seam. When
+`DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED` is exactly `true`, the Share
+dialog replaces free-text email with a bounded server-backed typeahead. The
+server first authorizes the exact folder, resolves one unambiguous longest-
+prefix `portal_v2_folder_binding`, requires a complete active directory
+generation, and returns only active PA principals whose live `delivery.view`
+allow covers that binding owner and has no covering deny. It never returns the
+full directory or uses an email/primary-contact flag as access authority.
+
+The selected organization, department, client/project, or individual opaque
+public ID plus the deduplicated active recipient-member set, display labels,
+workspace, binding, owner, and directory generation are snapshotted for the
+new share version. Later PA membership changes therefore do not silently
+relabel or expand an existing audience. The snapshot is notification/audit context
+only: `/s/` remains a bearer link, and the UI says explicitly that selecting a
+recipient does not restrict who can use the complete URL. Clearing the field
+still creates an unaddressed link. Legacy shares and the free-text form remain
+unchanged while the flag is false. Do not enable this flag before the signed PA
+portal projection, Operations folder bindings, and staged migration `0126`
+have all been verified together.
+Turning on the read-only hierarchy must not implicitly enable an unfinished
+email-delivery or Access-enrollment workflow.
+
+The shadow APIs include listing an identity's authorized workspaces,
+stateless workspace activation, a bounded authorized hierarchy/typeahead read,
+and client-manager invitation/member management. Activation stores no ambient
+server-side selection; every later resource request must name and reauthorize
+its workspace. A live workspace-scoped `member.manage` entitlement is required
+for every team read or mutation. Invitations default to one exact active PA
+project; workspace-wide access requires a separate danger confirmation.
+Invitees can receive only `workspace.view`, `delivery.view`, and
+`request.create`—never manager or delegated-share authority. Migration `0123`
+adds hashed one-time tokens, seven-day expiry, durable idempotency/rate limits,
+an email delivery outbox, and membership audit. Acceptance binds the exact
+normalized invitation email to a cryptographically verified Access
+issuer/subject; email alone never authorizes. Member removal is a recoverable
+suspension that leaves child grants available for reassignment and refuses to
+orphan the last active manager. The staff transfer/recovery function is not
+exposed until an Operations caller enforces `client.accounts.manage`.
+
+Migration `0124_client_delegated_public_shares.sql` adds the disabled delegation
+foundation without touching staff `shares`. It models staff-provisioned opaque
+folder targets, exact-identity/versioned delegations, independent client bearer
+records, audit events, idempotency and durable rate windows. Client routes can
+list owned records and revoke them, while creation returns unavailable even if
+an environment flag is set. `/client-share/:publicId` renders a dedicated
+unavailable screen and does not start the staff DeliveryApp.
+
+Future enablement requires a real internal Operations service binding/RPC that
+resolves the server-only folder target, mints an independently signed bearer
+and returns an auditable receipt. The client Worker must not receive the
+Operations `DELIVERY_TOKEN_SECRET`. Every bearer request must continue to
+recheck live workspace membership, `delegated_share.create`, delegation,
+binding version, strict target containment, expiry and revocation.
+The link is workspace-owned: `created_by_identity_id` is immutable provenance,
+while runtime authority follows the delegation's current exact identity and
+entitlement version. Operations can therefore adopt the same delegation to a
+reviewed replacement manager without orphaning or silently broadening links.
+
+Do not enable the flag until all of these gates have evidence:
+
+- Project Alpha supplies stable public IDs plus complete, ordered, signed
+  portal-v2 directory and entitlement generations; LTDS has a transactional
+  ingestion job with replay/out-of-order handling and parity monitoring.
+- Operations has deliberately bound every workspace root and delivery prefix;
+  accounts without exactly one PA root remain on the legacy path.
+- A transactional email adapter claims the invitation outbox, sends the
+  one-time link without logging it, and scrubs the sent payload. The checked-in
+  code queues delivery only and sends no real email.
+- Operations exposes the transfer/recovery seam only behind
+  `client.accounts.manage`/administrator authorization, with a reviewed restore
+  workflow. The client Worker cannot call that seam.
+- Cross-workspace IDOR, revoked/expired grants, deny precedence, incomplete and
+  out-of-order generations, invitation replay, legacy-route isolation, mobile
+  account switching, migration upgrade, and foreign-key tests all pass in
+  staging.
+- A separate security review approves any future `/client-share/` delegation
+  chain. The existing Operations `/s/` authority cannot be reused.
 
 ## Provider-neutral future integration
 

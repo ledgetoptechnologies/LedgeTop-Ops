@@ -66,6 +66,14 @@ function deferred() {
   return { promise, release };
 }
 
+async function deliveryNavigationLink(page: Page) {
+  if ((page.viewportSize()?.width || 0) <= 960) {
+    await page.getByRole("button", { name: "Open navigation" }).click();
+    return page.getByRole("dialog", { name: "Navigation" }).getByRole("link", { name: "Delivery" });
+  }
+  return page.locator(".ops-header").getByRole("link", { name: "Delivery" });
+}
+
 async function mockDeliveryNavigationRace(page: Page) {
   const firstRoot = deferred();
   const nested = deferred();
@@ -443,7 +451,7 @@ test("Delivery navigation defaults to the Jobs/Clients workspace", async ({ page
   await page.goto("/jobs/Archive");
   await expect.poll(() => prefixes.includes("Jobs/Archive/")).toBe(true);
 
-  await page.locator(".ops-header").getByRole("button", { name: "Delivery" }).click();
+  await (await deliveryNavigationLink(page)).click();
 
   await expect(page).toHaveURL(/\/delivery$/);
   await expect.poll(() => prefixes.includes("Jobs/Clients/")).toBe(true);
@@ -484,7 +492,7 @@ test("direct /jobs routes render Delivery at the true Jobs root", async ({ page 
 
   await page.goto("/jobs");
 
-  await expect(page.locator(".ops-header").getByRole("button", { name: "Delivery" })).toHaveClass(/active/);
+  await expect(await deliveryNavigationLink(page)).toHaveAttribute("aria-current", "page");
   await expect.poll(() => prefixes.includes("Jobs/")).toBe(true);
   await expect(page.getByRole("navigation", { name: "Current delivery folder" })).toHaveText("Jobs");
 });
@@ -540,10 +548,17 @@ test("an operation completed in an old prefix cannot abort or replace the curren
   await expect(page).toHaveURL(/\/delivery$/);
 });
 
-test("folder pagination loads every page and deduplicates repeated item identities", async ({ page }) => {
+test("folder pagination paints page one, loads on demand, and deduplicates repeated item identities", async ({ page }) => {
   const cursors = await mockDeliveryPagination(page);
   await page.goto("/delivery/Acme/Current");
 
+  await expect(page.locator(".file-card-title", { hasText: "Alpha" })).toBeVisible();
+  expect(cursors).toEqual([null]);
+  await expect(page.getByText("Charlie", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("Bravo", { exact: true })).toBeVisible();
+  expect(cursors).toEqual([null, "page-2"]);
+  await page.getByRole("button", { name: "Load more" }).click();
   await expect(page.locator(".file-card-title", { hasText: "Charlie" })).toBeVisible();
   expect(cursors).toEqual([null, "page-2", "page-3"]);
   await expect(page.locator(".file-card-title", { hasText: "Alpha" })).toHaveCount(1);
@@ -558,6 +573,7 @@ test("navigation during page two aborts the old cursor chain without contaminati
   const race = await mockPaginationNavigationRace(page);
   await page.goto("/delivery/Acme/Current");
   await expect(page.locator(".file-card-title", { hasText: "Old first" })).toBeVisible();
+  await page.getByRole("button", { name: "Load more" }).click();
   await race.secondPageRequested.promise;
 
   await page
@@ -664,6 +680,7 @@ test("delivery search and per-item menu stay discoverable without selection mode
         : { prefix, folders: [{ id: "folder-acme", prefix: "Jobs/Clients/Acme/", physicalKey: "Jobs/Clients/Acme/", name: "Acme", displayName: "Acme", kind: "folder", isShared: true }], files: [], nextCursor: null } });
     }
     if (url.pathname === "/api/delivery/search") return route.fulfill({ json: { items: [{ id: "folder-acme", prefix: "Jobs/Clients/Acme/", physicalKey: "Jobs/Clients/Acme/", name: "Acme", displayName: "Acme", kind: "folder", isShared: true }], nextCursor: null } });
+    if (url.pathname === "/api/delivery/folders/media") return route.fulfill({ json: { items: [] } });
     if (url.pathname === "/api/delivery/folders/locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
     if (url.pathname === "/api/delivery/shares") return route.fulfill({ json: { shares: [] } });
     return route.fulfill({ status: 404, json: { error: "Not found" } });
@@ -674,22 +691,36 @@ test("delivery search and per-item menu stay discoverable without selection mode
   const gridCard = page.locator(".file-card").filter({ hasText: "Acme" });
   const gridChrome = await gridCard.evaluate(element => {
     const card = element.getBoundingClientRect();
-    const visual = element.querySelector(".file-visual")!.getBoundingClientRect();
+    const visualElement = element.querySelector<HTMLElement>(".file-visual")!;
+    const actionElement = element.querySelector<HTMLElement>(".delivery-item-menu-trigger")!;
+    const visual = visualElement.getBoundingClientRect();
     const share = element.querySelector(".share-chip")!.getBoundingClientRect();
-    const actions = element.querySelector(".delivery-item-menu-trigger")!.getBoundingClientRect();
+    const actions = actionElement.getBoundingClientRect();
     const badge = element.querySelector(".file-card-title .shared-badge")!.getBoundingClientRect();
+    const visualStyle = getComputedStyle(visualElement);
+    const actionStyle = getComputedStyle(actionElement);
     const overlaps = (a: DOMRect, b: DOMRect) => a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
     return {
       shareAtLeft: share.left - card.left,
       actionsAtRight: card.right - actions.right,
       badgeBelowVisual: badge.top >= visual.bottom,
       chromeOverlaps: overlaps(share, actions) || overlaps(share, badge) || overlaps(actions, badge),
+      visualRadius: visualStyle.borderRadius,
+      visualOverflow: visualStyle.overflow,
+      actionBackground: actionStyle.backgroundColor,
+      actionBorderStyle: actionStyle.borderStyle,
+      actionShadow: actionStyle.boxShadow,
     };
   });
   expect(gridChrome.shareAtLeft).toBeLessThan(16);
   expect(gridChrome.actionsAtRight).toBeLessThan(16);
   expect(gridChrome.badgeBelowVisual).toBe(true);
   expect(gridChrome.chromeOverlaps).toBe(false);
+  expect(gridChrome.visualRadius).toBe("11px");
+  expect(gridChrome.visualOverflow).toBe("hidden");
+  expect(gridChrome.actionBackground).toBe("rgb(255, 255, 255)");
+  expect(gridChrome.actionBorderStyle).toBe("solid");
+  expect(gridChrome.actionShadow).not.toBe("none");
   await expect(page.getByRole("button", { name: "Actions for Acme" })).toBeVisible();
   await page.getByRole("button", { name: "Actions for Acme" }).click();
   const actionTrigger = page.getByRole("button", { name: "Actions for Acme" });
@@ -782,4 +813,37 @@ test("Share dialog preserves the stored map setting for an existing share", asyn
   await expect(page.getByText("Already shared", { exact: true })).toBeVisible();
   await expect(page.getByRole("checkbox", { name: /Show photo locations on this client share/ })).not.toBeChecked();
   await expect(page.getByText(/On by default for a new share/)).toBeVisible();
+});
+
+test("Share dialog selects a scoped directory recipient without presenting it as link authorization", async ({ page }) => {
+  let posted: Record<string, unknown> | null = null;
+  await page.route("**/api/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/session") return route.fulfill({ json: { user: { id: "staff-directory-share", email: "staff@example.test", displayName: "Share Staff", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["delivery.browse", "delivery.share.create"], divisions: [] }, csrfToken: "csrf-share", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: { deliveryJobsRoot: { enabled: true }, shareDirectoryRecipients: { enabled: true } } } });
+    if (url.pathname === "/api/delivery/folders") {
+      const prefix = url.searchParams.get("prefix") || "Jobs/Clients/";
+      return route.fulfill({ json: { prefix, folders: [{ id: "folder-acme", prefix: "Jobs/Clients/Acme/", physicalKey: "Jobs/Clients/Acme/", name: "Acme", displayName: "Acme", kind: "folder" }], files: [], nextCursor: null } });
+    }
+    if (url.pathname === "/api/delivery/folders/locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
+    if (url.pathname === "/api/delivery/shares/active") return route.fulfill({ json: { share: null } });
+    if (url.pathname === "/api/delivery/share-recipients") return route.fulfill({ json: { audiences: [{ audienceType: "principal", publicId: "pa-principal-acme", displayName: "Acme Project Lead", email: "lead@acme.example", recipientCount: 1 }] } });
+    if (url.pathname === "/api/delivery/shares" && route.request().method() === "POST") {
+      posted = route.request().postDataJSON();
+      return route.fulfill({ status: 201, json: { share: { id: "share-new", shareUrl: "https://client.example.test/s/new#secret", accessCode: null, passwordProtected: false, expiresAt: null, lifecycle: "created", idempotentReplay: false } } });
+    }
+    if (url.pathname === "/api/delivery/shares") return route.fulfill({ json: { shares: [] } });
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  await page.goto("/delivery");
+  await page.getByRole("button", { name: "Actions for Acme" }).click();
+  await page.getByRole("menuitem", { name: "Share" }).click();
+  const recipient = page.getByRole("combobox", { name: "Notification recipient" });
+  await recipient.fill("Acme");
+  await page.getByRole("option", { name: /Acme Project Lead/ }).click();
+  await expect(page.getByText(/does not restrict who can use the complete bearer link/)).toBeVisible();
+  await page.getByRole("button", { name: "Create link" }).click();
+  await expect.poll(() => posted).not.toBeNull();
+  expect(posted).toMatchObject({ r2Prefix: "Jobs/Clients/Acme/", recipientAudience: { type: "principal", publicId: "pa-principal-acme" } });
+  expect(posted).not.toHaveProperty("recipientEmail");
 });

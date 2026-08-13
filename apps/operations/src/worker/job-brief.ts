@@ -354,6 +354,15 @@ async function loadBrief(
   operation: OperationRow,
 ) {
   const session = env.OPS_DB.withSession("first-primary");
+  const [canEdit, canViewSops] = await Promise.all([
+    hasPermission(
+      env,
+      principal,
+      "operations.manage",
+      resourceContext(operation),
+    ),
+    hasPermission(env, principal, "sops.view"),
+  ]);
   const results = await session.batch<BriefRow | AttachmentRow | RevisionRow | SopLinkRow>([
     session.prepare(
         `SELECT b.operation_id,b.version,b.snapshot_json,b.created_at,b.updated_at,b.updated_by,s.display_name updated_by_name,s.email updated_by_email
@@ -372,7 +381,7 @@ async function loadBrief(
          FROM operational_job_brief_revisions WHERE operation_id=? ORDER BY version DESC LIMIT 100`,
       )
       .bind(operation.id),
-    session.prepare(
+    ...(canViewSops ? [session.prepare(
         `SELECT l.sop_id,l.revision_id,l.linked_at,r.revision_number,d.slug,r.title,r.purpose,
           r.rendered_html,r.toc_json,r.author_id,r.author_display_name,r.published_at
          FROM operational_job_brief_sop_links l
@@ -380,19 +389,13 @@ async function loadBrief(
          JOIN sop_revisions r ON r.id=l.revision_id AND r.sop_id=l.sop_id
          WHERE l.operation_id=? ORDER BY r.title COLLATE NOCASE,r.id`,
       )
-      .bind(operation.id),
+      .bind(operation.id)] : []),
   ]);
-  const briefResult = results[0]!, attachments = results[1]!, revisions = results[2]!, sops = results[3]!;
+  const briefResult = results[0]!, attachments = results[1]!, revisions = results[2]!, sops = results[3];
   const row = briefResult.results.find((value): value is BriefRow => "snapshot_json" in value);
   const attachmentRows = attachments.results.filter((value): value is AttachmentRow => "object_key" in value);
   const revisionRows = revisions.results.filter((value): value is RevisionRow => "change_kind" in value);
-  const sopRows = sops.results.filter((value): value is SopLinkRow => "revision_id" in value);
-  const canEdit = await hasPermission(
-    env,
-    principal,
-    "operations.manage",
-    resourceContext(operation),
-  );
+  const sopRows = sops?.results.filter((value): value is SopLinkRow => "revision_id" in value) || [];
   const navigation = buildNavigationDestination({
     latitude: operation.service_latitude,
     longitude: operation.service_longitude,
@@ -432,6 +435,7 @@ async function loadBrief(
       createdAt: revision.created_at,
     })),
     canEdit,
+    canViewSops,
   };
 }
 

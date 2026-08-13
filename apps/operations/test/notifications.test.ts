@@ -110,4 +110,23 @@ describe("client notifications", () => {
     expect(rendered.html).toContain("Inspection &amp; documentation");
     expect(rendered.html).toContain("id=1&amp;next=2");
   });
+
+  it("renders a bounded client-safe staff work-area change summary", () => {
+    const snapshot = buildServiceRequestNotificationSnapshot({
+      title: "North site mapping",
+      projectId: "project-a",
+      projectName: "North Site",
+      serviceCategory: "2D mapping",
+      locationLabel: "North parcel",
+      lifecycle: "work_area_changed",
+      action: "open_client_portal",
+      changeSummary: "Service-area boundary adjusted; 1 point added",
+    });
+    const rendered = renderClientRequestNotification(snapshot, "https://client.example/portal/requests");
+    expect(rendered.subject).toBe("Service request work area updated: North site mapping");
+    expect(rendered.text).toContain("Status: Work area updated");
+    expect(rendered.text).toContain("Change: Service-area boundary adjusted; 1 point added");
+    expect(rendered.html).toContain("<strong>Change:</strong>");
+    expect(JSON.stringify(rendered)).not.toMatch(/longitude|latitude|geojson|staff-area/i);
+  });
 });

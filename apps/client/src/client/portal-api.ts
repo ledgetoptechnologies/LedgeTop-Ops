@@ -4,6 +4,10 @@ import type { DeliveryLocationCollection } from "@ltds/shared";
 export interface PortalCapabilities {
   manageTeam: boolean;
   viewBilling: boolean;
+  requestV2: boolean;
+  requestAttachments: boolean;
+  workspaceHierarchyV2: boolean;
+  workspaceMembershipManagement: boolean;
 }
 
 export interface PortalAccount {
@@ -104,6 +108,11 @@ export interface PortalServiceRequest {
   longitude?: number | null;
   areaGeoJson?: PortalAreaGeoJson | null;
   poiPoints?: PortalPoi[];
+  workAreaRevision?: {
+    revisionNumber: number;
+    changeSummary: string;
+    updatedAt: string;
+  } | null;
   acceptedQuote?: PortalAcceptedQuote | null;
   operationalEstimate?: PortalOperationalEstimate | null;
   status: PortalServiceRequestStatus;
@@ -121,7 +130,7 @@ export interface PortalBootstrap {
 
 export interface PortalNotification {
   id: string;
-  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed";
+  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed" | "work_area_changed";
   title: string;
   body: string;
   actionPath: string | null;
@@ -176,6 +185,10 @@ export async function loadPortalBootstrap(
     capabilities: {
       manageTeam: session.capabilities?.manageTeam === true,
       viewBilling: session.capabilities?.viewBilling === true,
+      requestV2: session.capabilities?.requestV2 === true,
+      requestAttachments: session.capabilities?.requestAttachments === true,
+      workspaceHierarchyV2: session.capabilities?.workspaceHierarchyV2 === true,
+      workspaceMembershipManagement: session.capabilities?.workspaceMembershipManagement === true,
     },
     projects: projects.projects,
     requests: requests.requests,
@@ -217,6 +230,100 @@ export async function loadPortalPastDeliveryLocations(
   return request<DeliveryLocationCollection>("/api/client/past-delivery-locations");
 }
 
+export interface PortalWorkspace { id: string; rootType: "organization" | "standalone_client"; rootPublicId: string; displayName: string }
+export interface PortalWorkspaceEntry { type: string; publicId: string; parentPublicId: string | null; displayName: string; sourceVersion: string }
+export interface PortalWorkspaceMember { identityId: string; email: string | null; status: "active" | "suspended" | "revoked"; manager: boolean; source: string }
+export interface PortalWorkspaceInvitation { id: string; email: string; status: "pending" | "accepted" | "revoked" | "expired"; scope: { type: "project" | "workspace"; publicId: string | null }; capabilities: string[]; expiresAt: string }
+
+export async function loadPortalWorkspaces(request: PortalRequest = requestJson): Promise<PortalWorkspace[]> {
+  return (await request<{ workspaces: PortalWorkspace[] }>("/api/client/v2/workspaces")).workspaces;
+}
+
+export async function loadPortalWorkspaceHierarchy(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalWorkspaceEntry[]> {
+  return (await request<{ entries: PortalWorkspaceEntry[] }>(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/hierarchy`)).entries;
+}
+
+export async function loadPortalWorkspaceAccess(workspaceId: string, request: PortalRequest = requestJson): Promise<{ members: PortalWorkspaceMember[]; invitations: PortalWorkspaceInvitation[] }> {
+  return request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/access`);
+}
+
+export async function invitePortalWorkspaceMember(workspaceId: string, input: { email: string; projectPublicId?: string; organizationWide?: boolean; confirmOrganizationWide?: boolean; capabilities: Array<"delivery.view" | "request.create"> }, request: PortalRequest = requestJson): Promise<void> {
+  await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/invitations`, {
+    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify(input),
+  });
+}
+
+export async function revokePortalWorkspaceInvitation(workspaceId: string, invitationId: string, request: PortalRequest = requestJson): Promise<void> {
+  await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}`, { method: "DELETE" });
+}
+
+export async function suspendPortalWorkspaceMember(workspaceId: string, identityId: string, request: PortalRequest = requestJson): Promise<void> {
+  await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(identityId)}`, { method: "DELETE" });
+}
+
+export type PortalServiceQuestion =
+  | { id: string; label: string; type: "text"; required: boolean; helpText: string | null; maxLength: number }
+  | { id: string; label: string; type: "number"; required: boolean; helpText: string | null; minimum: number | null; maximum: number | null }
+  | { id: string; label: string; type: "boolean"; required: boolean; helpText: string | null }
+  | { id: string; label: string; type: "select" | "multi_select"; required: boolean; helpText: string | null; options: Array<{ value: string; label: string }> };
+
+export interface PortalServiceCatalogItem {
+  publicId: string;
+  sourceVersion: string;
+  name: string;
+  summary: string | null;
+  questions: PortalServiceQuestion[];
+}
+
+export interface PortalServiceDraftInput {
+  projectId: string | null;
+  requestType: "flight" | "service";
+  title: string;
+  details: string;
+  location: string | null;
+  preferredStartAt: string | null;
+  deliverables: string | null;
+  siteContactName: string | null;
+  siteContactEmail: string | null;
+  siteContactPhone: string | null;
+  desiredCompletionAt: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  areaGeoJson: PortalAreaGeoJson | null;
+  poiPoints: Array<{ longitude: number; latitude: number; label: string | null }>;
+  services: Array<{ publicId: string; answers: Record<string, unknown> }>;
+}
+
+export interface PortalServiceDraft extends Omit<PortalServiceDraftInput, "services"> {
+  id: string;
+  state: "draft" | "submitted";
+  version: number;
+  areaSquareMeters: number | null;
+  areaAcres: number | null;
+  services: Array<PortalServiceCatalogItem & { answers: Record<string, unknown> }>;
+  submittedRequestId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type PortalPricingHint =
+  | { kind: "starting_at"; currency: string; startingAtMinor: number; disclaimer: string; basisVersion: string; validUntil: string }
+  | { kind: "typical_range"; currency: string; minimumMinor: number; maximumMinor: number; disclaimer: string; basisVersion: string; validUntil: string };
+
+export type PortalRequestAttachmentStatus = "uploading" | "quarantined" | "scanning" | "accepted" | "rejected" | "aborted" | "expired";
+export interface PortalRequestAttachment { id: string; name: string; contentType: string; size: number; status: PortalRequestAttachmentStatus }
+export interface PortalRequestAttachmentPart { partNumber: number; etag: string; size: number }
+export interface PortalRequestAttachmentUpload extends PortalRequestAttachment {
+  attachmentId: string;
+  partSize: number;
+  completedParts: PortalRequestAttachmentPart[];
+  resumed?: boolean;
+}
+export interface PortalRequestAttachmentTicket {
+  url: string; expiresAt: string; method: "PUT"; partNumber: number;
+  contentLength: number; contentType: string; headers: Record<string, string>;
+}
+
 export async function loadPortalNotifications(
   cursor: string | null = null,
   request: PortalRequest = requestJson,
@@ -253,6 +360,116 @@ export async function createPortalServiceRequest(
     },
   );
   return response.request;
+}
+
+export async function loadPortalServiceCatalog(
+  request: PortalRequest = requestJson,
+): Promise<PortalServiceCatalogItem[]> {
+  const response = await request<{ services: PortalServiceCatalogItem[] }>("/api/client/service-catalog");
+  return response.services;
+}
+
+export async function createPortalServiceDraft(
+  input: PortalServiceDraftInput,
+  idempotencyKey: string,
+  request: PortalRequest = requestJson,
+): Promise<PortalServiceDraft> {
+  const response = await request<{ draft: PortalServiceDraft }>("/api/client/service-request-drafts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
+    body: JSON.stringify(input),
+  });
+  return response.draft;
+}
+
+export async function savePortalServiceDraft(
+  draftId: string,
+  expectedVersion: number,
+  input: PortalServiceDraftInput,
+  idempotencyKey: string,
+  request: PortalRequest = requestJson,
+): Promise<PortalServiceDraft> {
+  const response = await request<{ draft: PortalServiceDraft }>(`/api/client/service-request-drafts/${encodeURIComponent(draftId)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey, "If-Match": String(expectedVersion) },
+    body: JSON.stringify(input),
+  });
+  return response.draft;
+}
+
+export async function loadPortalPricingHint(
+  draftId: string,
+  request: PortalRequest = requestJson,
+): Promise<PortalPricingHint | null> {
+  const response = await request<{ available: boolean; hint: PortalPricingHint | null }>(`/api/client/service-request-drafts/${encodeURIComponent(draftId)}/pricing-hint`);
+  return response.available ? response.hint : null;
+}
+
+export async function submitPortalServiceDraft(
+  draftId: string,
+  expectedVersion: number,
+  idempotencyKey: string,
+  request: PortalRequest = requestJson,
+): Promise<PortalServiceRequest> {
+  const response = await request<{ request: PortalServiceRequest }>(`/api/client/service-request-drafts/${encodeURIComponent(draftId)}/submit`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey, "If-Match": String(expectedVersion) },
+  });
+  return response.request;
+}
+
+function attachmentPath(draftId: string, attachmentId?: string): string {
+  const base = `/api/client/service-request-drafts/${encodeURIComponent(draftId)}/attachments`;
+  return attachmentId ? `${base}/${encodeURIComponent(attachmentId)}` : base;
+}
+
+export async function listPortalRequestAttachments(draftId: string, request: PortalRequest = requestJson): Promise<PortalRequestAttachment[]> {
+  return (await request<{ attachments: PortalRequestAttachment[] }>(attachmentPath(draftId))).attachments;
+}
+
+export async function initializePortalRequestAttachment(draftId: string, input: { clientUploadId: string; name: string; contentType: string; size: number }, request: PortalRequest = requestJson): Promise<PortalRequestAttachmentUpload> {
+  return request<PortalRequestAttachmentUpload>(attachmentPath(draftId), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(input) });
+}
+
+export async function requestPortalAttachmentPartTicket(draftId: string, attachmentId: string, partNumber: number, request: PortalRequest = requestJson): Promise<PortalRequestAttachmentTicket> {
+  return request<PortalRequestAttachmentTicket>(`${attachmentPath(draftId, attachmentId)}/part-ticket`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ partNumber }) });
+}
+
+export function uploadPortalAttachmentPart(ticket: PortalRequestAttachmentTicket, body: Blob, onProgress: (loaded: number) => void): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", ticket.url, true);
+    xhr.withCredentials = false;
+    for (const [name, value] of Object.entries(ticket.headers)) {
+      if (name.toLowerCase() !== "content-length") xhr.setRequestHeader(name, value);
+    }
+    xhr.upload.onprogress = event => onProgress(event.loaded);
+    xhr.onerror = () => reject(new Error("The direct upload connection failed."));
+    xhr.onabort = () => reject(new Error("The direct upload was cancelled."));
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) return reject(new Error(`The storage upload failed (${xhr.status}).`));
+      const etag = xhr.getResponseHeader("ETag")?.trim();
+      if (!etag) return reject(new Error("Storage did not return the required ETag. Check the R2 CORS exposeHeaders setting."));
+      resolve(etag);
+    };
+    xhr.send(body);
+  });
+}
+
+export async function checkpointPortalAttachmentPart(draftId: string, attachmentId: string, part: PortalRequestAttachmentPart, request: PortalRequest = requestJson): Promise<PortalRequestAttachmentPart> {
+  return request<PortalRequestAttachmentPart>(`${attachmentPath(draftId, attachmentId)}/parts/${part.partNumber}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ etag: part.etag, size: part.size }) });
+}
+
+export async function completePortalRequestAttachment(draftId: string, attachmentId: string, parts: PortalRequestAttachmentPart[], request: PortalRequest = requestJson): Promise<{ status: PortalRequestAttachmentStatus }> {
+  return request(`${attachmentPath(draftId, attachmentId)}/complete`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ parts: parts.map(({ partNumber, etag }) => ({ partNumber, etag })) }) });
+}
+
+export async function loadPortalRequestAttachment(draftId: string, attachmentId: string, request: PortalRequest = requestJson): Promise<PortalRequestAttachmentUpload> {
+  return request<PortalRequestAttachmentUpload>(attachmentPath(draftId, attachmentId));
+}
+
+export async function removePortalRequestAttachment(draftId: string, attachmentId: string, request: PortalRequest = requestJson): Promise<void> {
+  await request(attachmentPath(draftId, attachmentId), { method: "DELETE" });
 }
 
 export async function updatePortalServiceRequest(

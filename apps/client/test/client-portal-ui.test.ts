@@ -2,9 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createPortalChangeRequest,
   createPortalServiceRequest,
+  createPortalServiceDraft,
+  checkpointPortalAttachmentPart,
+  completePortalRequestAttachment,
+  initializePortalRequestAttachment,
   loadPortalBootstrap,
   loadPortalPastDeliveries,
   loadPortalProjectFiles,
+  savePortalServiceDraft,
+  submitPortalServiceDraft,
+  requestPortalAttachmentPartTicket,
   updatePortalServiceRequest,
   type PortalRequest,
   type PortalServiceRequestInput,
@@ -56,7 +63,7 @@ describe("client portal browser API boundary", () => {
     await Promise.resolve();
     expect(calls).toEqual(["/api/client/session"]);
     resolveSession({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false } });
-    await expect(bootstrap).resolves.toEqual({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false, viewBilling: false }, projects: [], requests: [], mapboxPublicToken: null });
+    await expect(bootstrap).resolves.toEqual({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false, workspaceHierarchyV2: false, workspaceMembershipManagement: false }, projects: [], requests: [], mapboxPublicToken: null });
     expect(calls).toEqual(["/api/client/session", "/api/client/projects", "/api/client/service-requests", "/api/client/map-config"]);
   });
 
@@ -107,6 +114,47 @@ describe("client portal browser API boundary", () => {
     expect(request).toHaveBeenLastCalledWith("/api/client/service-requests/request%20a/change-request", expect.objectContaining({ method: "POST", headers: expect.objectContaining({ "Idempotency-Key": "change-key-0001" }) }));
     const body = JSON.parse((vi.mocked(request).mock.calls.at(-1)?.[1] as RequestInit).body as string);
     expect(body.parentRequestId).toBe("request a");
+  });
+
+  it("uses versioned, idempotent draft writes and submission without browser pricing fields", async () => {
+    const draftInput = {
+      projectId: "project-a", requestType: "service" as const, title: "Map the site", details: "Create an orthomosaic.", location: null,
+      preferredStartAt: null, deliverables: null, siteContactName: null, siteContactEmail: null, siteContactPhone: null,
+      desiredCompletionAt: null, latitude: null, longitude: null, areaGeoJson: null, poiPoints: [],
+      services: [{ publicId: "svc-map", answers: { resolution: "standard" } }],
+    };
+    const request = vi.fn(async <T>(url: string): Promise<T> => url.endsWith("/submit")
+      ? { request: { id: "request-a", status: "submitted" } } as T
+      : { draft: { ...draftInput, id: "draft-a", state: "draft", version: 4, areaSquareMeters: null, areaAcres: null, services: [], submittedRequestId: null, createdAt: "", updatedAt: "" } } as T) as PortalRequest;
+    await createPortalServiceDraft(draftInput, "create-key", request);
+    await savePortalServiceDraft("draft a", 4, draftInput, "save-key", request);
+    await submitPortalServiceDraft("draft a", 5, "submit-key", request);
+    expect(request).toHaveBeenNthCalledWith(1, "/api/client/service-request-drafts", expect.objectContaining({ headers: expect.objectContaining({ "Idempotency-Key": "create-key" }) }));
+    expect(request).toHaveBeenNthCalledWith(2, "/api/client/service-request-drafts/draft%20a", expect.objectContaining({ method: "PUT", headers: expect.objectContaining({ "If-Match": "4", "Idempotency-Key": "save-key" }) }));
+    expect(request).toHaveBeenNthCalledWith(3, "/api/client/service-request-drafts/draft%20a/submit", expect.objectContaining({ method: "POST", headers: expect.objectContaining({ "If-Match": "5", "Idempotency-Key": "submit-key" }) }));
+    const createBody = JSON.parse((vi.mocked(request).mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(createBody).not.toHaveProperty("areaAcres");
+    expect(createBody).not.toHaveProperty("price");
+  });
+
+  it("keeps attachment source bytes out of the portal API and checkpoints only ETags and sizes", async () => {
+    const request = vi.fn(async <T>(url: string): Promise<T> => {
+      if (url.endsWith("/part-ticket")) return { url: "https://bucket.r2.cloudflarestorage.com/object", method: "PUT", partNumber: 1, contentLength: 8, contentType: "application/pdf", headers: { "Content-Type": "application/pdf" } } as T;
+      if (url.endsWith("/complete")) return { status: "quarantined" } as T;
+      if (url.includes("/parts/")) return { partNumber: 1, etag: "a".repeat(32), size: 8 } as T;
+      return { attachmentId: "attachment-a", id: "attachment-a", name: "authorization.pdf", contentType: "application/pdf", size: 8, status: "uploading", partSize: 8, completedParts: [] } as T;
+    }) as PortalRequest;
+    await initializePortalRequestAttachment("draft a", { clientUploadId: "upload-a", name: "authorization.pdf", contentType: "application/pdf", size: 8 }, request);
+    await requestPortalAttachmentPartTicket("draft a", "attachment a", 1, request);
+    await checkpointPortalAttachmentPart("draft a", "attachment a", { partNumber: 1, etag: "a".repeat(32), size: 8 }, request);
+    await completePortalRequestAttachment("draft a", "attachment a", [{ partNumber: 1, etag: "a".repeat(32), size: 8 }], request);
+    const bodies = vi.mocked(request).mock.calls.map(call => call[1]?.body).filter(Boolean).map(body => JSON.parse(body as string));
+    expect(bodies).toEqual([
+      { clientUploadId: "upload-a", name: "authorization.pdf", contentType: "application/pdf", size: 8 },
+      { partNumber: 1 },
+      { etag: "a".repeat(32), size: 8 },
+      { parts: [{ partNumber: 1, etag: "a".repeat(32) }] },
+    ]);
   });
 });
 

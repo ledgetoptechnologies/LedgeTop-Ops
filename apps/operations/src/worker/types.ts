@@ -3,6 +3,14 @@ import type { ThumbnailRendererContainer } from "./thumbnail-renderer-container"
 
 export type Env = Omit<Cloudflare.Env, "DIRECT_DELIVERY_UPLOADS_ENABLED" | "R2_PURGE_ENABLED" | "THUMBNAIL_RENDERER"> & {
   PROJECT_ALPHA_API_KEY?: string;
+  /** Enables the separately scoped, staff-triggered private draft command. */
+  PROJECT_ALPHA_DRAFT_QUOTES_ENABLED?: string;
+  /** Dedicated PA credential with only portal.quote-draft.create. */
+  PROJECT_ALPHA_DRAFT_QUOTE_API_KEY?: string;
+  /** HMAC secret for timestamped, replay-protected PA draft commands. */
+  PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET?: string;
+  /** Enables staff public-share recipient lookup from the PA portal projection. */
+  DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED?: string;
   OPERATIONS_SESSION_SECRET: string;
   DELIVERY_TOKEN_SECRET: string;
   DELIVERY_PREVIOUS_TOKEN_SECRET?: string;

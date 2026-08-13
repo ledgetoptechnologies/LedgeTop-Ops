@@ -1,5 +1,14 @@
 # Cloudflare production setup
 
+`DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED` is checked in as `false` for the
+Operations Worker. Keep it false until client D1 migration
+`0126_delivery_share_recipient_snapshots.sql` is applied in staging and the
+signed Project Alpha portal-v2 projection plus exact Operations folder
+bindings pass scope/deny tests. Enabling it requires no new browser secret or
+CORS rule; Operations reads its existing `DELIVERY_DB` binding server-side.
+Rollback is the flag back to `false`, which restores the legacy form without
+deleting recipient snapshots.
+
 ## 1. Worker Builds
 
 Configure the Git repository `ledgetoptechnologies/LTDS-Ops` three times:
@@ -258,6 +267,21 @@ npx.cmd wrangler secret put PROJECT_ALPHA_API_KEY --name ltds-ops
 
 Set `PROJECT_ALPHA_BASE_URL` to the production Project Alpha origin. The key must have only `ops.sync.read`.
 
+The optional private draft-quote caller uses two different secrets and remains
+disabled until Project Alpha implements and passes the contract in
+`docs/project-alpha.md`:
+
+```powershell
+npx.cmd wrangler secret put PROJECT_ALPHA_DRAFT_QUOTE_API_KEY --name ltds-ops
+npx.cmd wrangler secret put PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET --name ltds-ops
+```
+
+The first key must have only `portal.quote-draft.create`; the HMAC secret must
+be at least 32 random bytes. Keep `PROJECT_ALPHA_DRAFT_QUOTES_ENABLED=false`
+through migration and staging verification. Setting a secret with Wrangler can
+create a Worker version, so follow the reviewed release procedure rather than
+running these commands during a read-only validation.
+
 Create a separate self-hosted Access application named **LTDS Ops Sync** for `ops-sync.ledgetopdroneservices.com/*`. Add a Service Auth policy whose include rule is the Project Alpha service token. Copy that application's AUD into `CF_ACCESS_AUD` on `ltds-ops-sync`. Its service-token client ID and secret belong only in Project Alpha.
 
 Set `CF_ACCOUNT_ID`, `CF_ACCESS_GROUP_ID`, the exact deployment-specific `CF_ACCESS_GROUP_NAME`, and a deployment-specific `APPLICATION_KEY` (for example, `field_operations`) on the provisioning Worker. Configure the same application key on the Operations snapshot importer and in Project Alpha. The group name lets reconciliation safely recover when a configured group identifier has been replaced. Bind `OPS_DB` to the deployment's Operations D1 database and add these Worker secrets:
@@ -270,6 +294,70 @@ npx.cmd wrangler secret put PROJECT_ALPHA_WEBHOOK_HMAC_SECRET --name ltds-ops-sy
 ```
 
 The current Project Alpha contract is HMAC-only, so production explicitly sets `PROJECT_ALPHA_ALLOW_LEGACY_HMAC=true`. LTDS verifies `sha256=<hex>` over the exact `${timestamp}.${rawBody}` bytes. Ed25519 remains preferred if its header and public key are introduced later; an invalid Ed25519 signature never falls back to HMAC. Use `PROJECT_ALPHA_WEBHOOK_ED25519_PREVIOUS_PUBLIC_KEY` only during a coordinated future rotation. The Access Groups API token belongs only on the sync Worker, never in Project Alpha.
+
+The sanitized Service Library projection uses another dedicated Access service
+application targeting only
+`client.ledgetopdroneservices.com/api/internal/project-alpha/catalog-v2`.
+Copy its issuer and audience to
+`PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN` and
+`PROJECT_ALPHA_CATALOG_ACCESS_AUD` on `ltds-clients`. Configure the same bounded
+application key in Project Alpha and `PROJECT_ALPHA_CATALOG_APPLICATION_KEY`,
+then add the dedicated receiver secret:
+
+```powershell
+npx.cmd wrangler secret put PROJECT_ALPHA_CATALOG_HMAC_SECRET --name ltds-clients
+```
+
+Do not reuse an Access audience, service token, or HMAC secret from Ops Sync or
+the draft-quote caller. Keep `PROJECT_ALPHA_CATALOG_SYNC_ENABLED=false` until
+migration 0122 is applied in isolated staging and snapshot, replay, sequence
+gap, stale-draft, leakage, and Access-denial tests pass. Project Alpha keeps the
+service-token client ID/secret; LTDS receives only the Access assertion and
+signed request. See `docs/project-alpha.md` for the exact producer envelope.
+
+The portal hierarchy projection uses a third path-specific Access service
+application targeting only
+`client.ledgetopdroneservices.com/api/internal/project-alpha/portal-v2`.
+Configure its exact issuer/audience as
+`PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN` and
+`PROJECT_ALPHA_PORTAL_ACCESS_AUD`, and agree on the bounded
+`PROJECT_ALPHA_PORTAL_APPLICATION_KEY`. Add a unique receiver secret:
+
+```powershell
+npx.cmd wrangler secret put PROJECT_ALPHA_PORTAL_HMAC_SECRET --name ltds-clients
+```
+
+Keep `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false` until additive migration 0125
+and snapshot/activation/replay/gap/tombstone/Access-denial tests pass in
+isolated staging. Opening this inbox does not enable portal-v2 client reads;
+keep `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=false` through shadow parity and the
+separate authorization cutover. Never reuse the catalog Access application,
+service token, application key, audience, or HMAC secret. Project Alpha keeps
+the service-token credentials; LTDS stores only the receiver configuration.
+
+Keep `CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED=false` until the invitation
+email outbox has a transactional sender/scrubber, Access enrollment is proven,
+and Operations has tested manager-recovery controls. This gate is deliberately
+independent from read-only hierarchy activation.
+
+The Project Alpha pricing preview is a separate outbound Client Worker
+integration. Set `PROJECT_ALPHA_PRICING_HINT_URL` to the exact HTTPS endpoint,
+`PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN` to that endpoint's origin,
+`PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY` to the agreed deployment ID, and
+`PROJECT_ALPHA_PRICING_HINT_CURRENCIES` to the accepted comma-separated ISO
+currency codes (normally `USD`). Provision two dedicated secrets:
+
+```powershell
+npx.cmd wrangler secret put PROJECT_ALPHA_PRICING_HINT_API_KEY --name ltds-clients
+npx.cmd wrangler secret put PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET --name ltds-clients
+```
+
+The API key must have only `portal.pricing.preview`; the HMAC secret must be at
+least 32 random bytes and neither credential may be reused by catalog sync,
+Ops Sync, or draft creation. Keep
+`PROJECT_ALPHA_PRICING_HINTS_ENABLED=false` until the PA endpoint passes exact
+body signature/timestamp/scope, canonical coverage, response schema, timeout,
+currency, expiry, and no-price-degradation contract tests in isolated staging.
 
 ## 6. Staging before rollout
 

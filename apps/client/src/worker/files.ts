@@ -89,17 +89,69 @@ export async function prefixHasVisibleContent(bucket: VisibleContentBucket, root
 }
 
 /** Scans each descendant directory at most once and avoids per-folder fan-out. */
-export async function visibleImmediateChildPrefixes(bucket:VisibleContentBucket,rootValue:string,candidates:readonly string[]):Promise<Set<string>>{
+export async function visibleImmediateChildPrefixes(bucket:VisibleContentBucket,rootValue:string,candidates:readonly string[],objectAllowed:(object:{key:string;customMetadata?:Record<string,string>})=>boolean=()=>true):Promise<Set<string>>{
   const root=normalizeRoot(rootValue),allowed=new Set(candidates),visible=new Set<string>();
   const pending=candidates.filter(value=>value.startsWith(root)).map(value=>({directory:value,child:value}));
   const visited=new Set<string>();
   while(pending.length){const item=pending.shift()!;if(visible.has(item.child)||visited.has(item.directory)||isHiddenKey(item.directory))continue;visited.add(item.directory);let cursor:string|undefined;do{
     const listed=await bucket.list({prefix:item.directory,delimiter:"/",limit:1000,cursor,include:["customMetadata"]});
-    if(listed.objects.some(object=>object.key!==item.directory&&!object.key.endsWith("/")&&!isHiddenKey(object.key)&&!isMovedSourceMarker(object))){visible.add(item.child);break;}
+    if(listed.objects.some(object=>object.key!==item.directory&&!object.key.endsWith("/")&&!isHiddenKey(object.key)&&!isMovedSourceMarker(object)&&objectAllowed(object))){visible.add(item.child);break;}
     for(const child of listed.delimitedPrefixes)if(!isHiddenKey(child))pending.push({directory:child,child:item.child});
     cursor=listed.truncated?listed.cursor:undefined;
   }while(cursor);}
   return new Set([...visible].filter(value=>allowed.has(value)));
+}
+
+const INDEX_VISIBILITY_BATCH = 40;
+
+function prefixUpperBound(prefix:string):string{return`${prefix.slice(0,-1)}0`;}
+
+/**
+ * Determines which immediate R2 folder candidates have any indexed descendants
+ * and which have at least one authorized visible descendant. Callers only need
+ * an R2 fallback for candidates absent from `indexed`, which bounds index-lag
+ * work without weakening tombstone or reserved-path filtering.
+ */
+export async function indexedImmediateChildVisibility(db:D1Database,candidates:readonly string[]):Promise<{indexed:Set<string>;visible:Set<string>}>{
+  const indexed=new Set<string>(),visible=new Set<string>();
+  for(let offset=0;offset<candidates.length;offset+=INDEX_VISIBILITY_BATCH){
+    const batch=candidates.slice(offset,offset+INDEX_VISIBILITY_BATCH);
+    if(!batch.length)continue;
+    const valuesSql=batch.map(()=>"(?,?)").join(",");
+    const bindings=batch.flatMap(prefix=>[prefix,prefixUpperBound(prefix)]);
+    const result=await db.prepare(`WITH candidates(prefix,upper_bound) AS (VALUES ${valuesSql})
+      SELECT c.prefix,
+        EXISTS (
+          SELECT 1 FROM file_index indexed_file
+          WHERE indexed_file.r2_key>=c.prefix AND indexed_file.r2_key<c.upper_bound
+            AND indexed_file.r2_key<>c.prefix AND substr(indexed_file.r2_key,-1,1)<>'/'
+            AND instr(lower('/'||indexed_file.r2_key||'/'),'/_ltds/')=0
+            AND instr(lower('/'||indexed_file.r2_key||'/'),'/.previews/')=0
+            AND instr(lower('/'||indexed_file.r2_key||'/'),'/dump/')=0
+          LIMIT 1
+        ) has_index,
+        EXISTS (
+          SELECT 1 FROM file_index file
+          WHERE file.r2_key>=c.prefix AND file.r2_key<c.upper_bound
+            AND file.r2_key<>c.prefix AND substr(file.r2_key,-1,1)<>'/'
+            AND instr(lower('/'||file.r2_key||'/'),'/_ltds/')=0
+            AND instr(lower('/'||file.r2_key||'/'),'/.previews/')=0
+            AND instr(lower('/'||file.r2_key||'/'),'/dump/')=0
+            AND NOT EXISTS (
+              SELECT 1 FROM delivery_tombstones tombstone WHERE tombstone.restored_at IS NULL AND (
+                (tombstone.tombstone_kind='exact' AND tombstone.physical_key=file.r2_key) OR
+                (tombstone.tombstone_kind='prefix' AND substr(file.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key)
+              )
+            )
+          LIMIT 1
+        ) is_visible
+      FROM candidates c`).bind(...bindings).all<{prefix:string;has_index:number;is_visible:number}>();
+    for(const row of result.results)if(batch.includes(row.prefix)){
+      if(row.has_index)indexed.add(row.prefix);
+      if(row.is_visible)visible.add(row.prefix);
+    }
+  }
+  return{indexed,visible};
 }
 
 function extension(key: string): string { const name = key.split("/").pop() || ""; return name.includes(".") ? (name.split(".").pop() || "").toLowerCase() : ""; }

@@ -31,7 +31,7 @@ export interface ClientPortalInvitation {
 
 export interface ClientPortalNotification {
   id: string;
-  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed";
+  eventType: "files_added" | "files_removed" | "request_status" | "request_reply" | "estimate_ready" | "request_completed" | "work_area_changed";
   title: string;
   body: string;
   actionPath: string | null;
@@ -108,6 +108,111 @@ export interface ClientServiceRequestInput {
   poiPoints?: Array<{ longitude: number; latitude: number; label?: string | null }>;
 }
 
+export type ClientServiceQuestion =
+  | { id: string; label: string; type: "text"; required: boolean; helpText: string | null; maxLength: number }
+  | { id: string; label: string; type: "number"; required: boolean; helpText: string | null; minimum: number | null; maximum: number | null }
+  | { id: string; label: string; type: "boolean"; required: boolean; helpText: string | null }
+  | { id: string; label: string; type: "select" | "multi_select"; required: boolean; helpText: string | null; options: Array<{ value: string; label: string }> };
+
+export interface ClientServiceCatalogItem {
+  publicId: string;
+  sourceVersion: string;
+  name: string;
+  summary: string | null;
+  questions: ClientServiceQuestion[];
+}
+
+export interface ClientServiceDraftSelectionInput {
+  publicId: string;
+  answers: Record<string, unknown>;
+}
+
+export interface ClientServiceRequestDraftInput {
+  projectId: string | null;
+  requestType: ClientServiceRequestType;
+  title: string;
+  details: string;
+  location: string | null;
+  preferredStartAt: string | null;
+  deliverables: string | null;
+  siteContactName: string | null;
+  siteContactEmail: string | null;
+  siteContactPhone: string | null;
+  desiredCompletionAt: string | null;
+  latitude: number | null;
+  longitude: number | null;
+  areaGeoJson: { type: "Polygon"; coordinates: [number, number][][] } | null;
+  poiPoints: Array<{ longitude: number; latitude: number; label: string | null }>;
+  services: ClientServiceDraftSelectionInput[];
+}
+
+export interface ClientServiceDraftSelection {
+  publicId: string;
+  sourceVersion: string;
+  name: string;
+  summary: string | null;
+  questions: ClientServiceQuestion[];
+  answers: Record<string, unknown>;
+}
+
+export interface ClientServiceRequestDraft extends Omit<ClientServiceRequestDraftInput, "services"> {
+  id: string;
+  state: "draft" | "submitted";
+  version: number;
+  areaSquareMeters: number | null;
+  areaAcres: number | null;
+  services: ClientServiceDraftSelection[];
+  submittedRequestId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ClientRequestAttachmentStatus =
+  | "uploading"
+  | "quarantined"
+  | "scanning"
+  | "accepted"
+  | "rejected"
+  | "aborted"
+  | "expired";
+
+export interface ClientRequestAttachment {
+  id: string;
+  name: string;
+  contentType: "image/jpeg" | "image/png" | "image/webp" | "image/heic" | "image/heif" | "application/pdf";
+  size: number;
+  status: ClientRequestAttachmentStatus;
+  downloadPath?: string;
+}
+
+export type ClientServiceDraftMutationResult =
+  | { kind: "created" | "updated" | "replayed"; draft: ClientServiceRequestDraft }
+  | { kind: "conflict" };
+
+export type ClientServiceDraftSubmitResult =
+  | { kind: "submitted" | "replayed"; request: ClientServiceRequest }
+  | { kind: "conflict" }
+  | { kind: "incomplete" };
+
+export interface ClientPricingHint {
+  kind: "starting_at" | "typical_range";
+  currency: string;
+  startingAtMinor?: number;
+  minimumMinor?: number;
+  maximumMinor?: number;
+  disclaimer: string;
+  basisVersion: string;
+  validUntil: string;
+}
+
+export interface ClientPricingHintInput {
+  services: ClientServiceDraftSelection[];
+  areaSquareMeters: number | null;
+  areaAcres: number | null;
+}
+
+export type ClientPricingHintProvider = (input: ClientPricingHintInput, env: Env) => Promise<ClientPricingHint | null>;
+
 export interface ClientAcceptedQuote {
   documentNumber: string | null;
   status: string;
@@ -147,6 +252,11 @@ export interface ClientServiceRequest {
   longitude: number | null;
   areaGeoJson?: { type: "Polygon"; coordinates: [number, number][][] } | null;
   poiPoints?: Array<{ longitude: number; latitude: number; label: string | null }>;
+  workAreaRevision?: {
+    revisionNumber: number;
+    changeSummary: string;
+    updatedAt: string;
+  } | null;
   status: "submitted" | "under_review" | "accepted_pending_pa_linkage" | "accepted_linked" | "declined" | "cancelled" | "completed";
   acceptedQuote?: ClientAcceptedQuote | null;
   operationalEstimate?: ClientOperationalEstimate | null;
@@ -178,6 +288,11 @@ export interface ClientPortalRepository {
   createServiceRequest(env: Env, session: ClientPortalSession, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;
   updateServiceRequest(env: Env, session: ClientPortalSession, requestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequest | null>;
   createChangeRequest(env: Env, session: ClientPortalSession, parentRequestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;
+  listServiceCatalog?(env: Env, session: ClientPortalSession): Promise<ClientServiceCatalogItem[]>;
+  getServiceRequestDraft?(env: Env, session: ClientPortalSession, draftId: string): Promise<ClientServiceRequestDraft | null>;
+  createServiceRequestDraft?(env: Env, session: ClientPortalSession, input: ClientServiceRequestDraftInput, mutationKey: string): Promise<ClientServiceDraftMutationResult | null>;
+  saveServiceRequestDraft?(env: Env, session: ClientPortalSession, draftId: string, expectedVersion: number, input: ClientServiceRequestDraftInput, mutationKey: string): Promise<ClientServiceDraftMutationResult | null>;
+  submitServiceRequestDraft?(env: Env, session: ClientPortalSession, draftId: string, expectedVersion: number, mutationKey: string): Promise<ClientServiceDraftSubmitResult | null>;
   respondToOperationalEstimate?(env: Env, session: ClientPortalSession, requestId: string, estimateId: string, response: "accept" | "request_change", note: string | null, mutationKey: string): Promise<ClientServiceRequest | null>;
   listMembers(env: Env, session: ClientPortalSession): Promise<ClientPortalMember[] | null>;
   listInvitations(env: Env, session: ClientPortalSession): Promise<ClientPortalInvitation[] | null>;

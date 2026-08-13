@@ -50,7 +50,7 @@ test("staff deep-link review shows all request evidence and sends an idempotent 
       await route.fulfill({ json: { request: requestRecord, revisions: [{ revision_number: 1, author_type: "client", author_id: "client-a", action: "submitted", snapshot_json: "{}", note: null, created_at: requestRecord.created_at }], estimates: estimateReady ? [{ id: "estimate-a", version: 1, scope_text: "Progress capture and orthomosaic", estimate_amount_minor: 125000, currency: "USD", status: "ready", client_response_note: null, updated_at: requestRecord.updated_at }] : [], history: [{ actor_id: "staff-a", action: "review_opened", details_json: null, created_at: requestRecord.created_at }], children: [{ id: "request-child", title: "Add east parcel", status: "submitted", created_at: requestRecord.created_at }] } });
     } else if (incoming.method() === "POST" && path === "/api/client-service-requests/request-a/estimate") {
       expect(incoming.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
-      expect(incoming.postDataJSON()).toMatchObject({ scope: "Progress capture and orthomosaic", status: "ready" });
+      expect(incoming.postDataJSON()).toMatchObject({ scope: "Progress capture and orthomosaic", amount: null, currency: null, status: "ready" });
       estimateReady = true;
       await route.fulfill({ status: 201, json: { id: "estimate-a", version: 1, status: "ready", idempotentReplay: false } });
     } else if (incoming.method() === "GET" && path === "/api/client-service-requests/request-child") {
@@ -69,6 +69,16 @@ test("staff deep-link review shows all request evidence and sends an idempotent 
   await expect(page.getByRole("link", { name: "Google Maps" })).toHaveAttribute("href", /^https:\/\/www\.google\.com\/maps\/search/);
   await expect(page.getByRole("link", { name: "Apple Maps" })).toHaveAttribute("href", /^https:\/\/maps\.apple\.com\//);
   await expect(page.getByText(/not a guaranteed road or safe launch location/i)).toBeVisible();
+  await expect(page.getByRole("link", { name: "Download original KML" })).toHaveAttribute(
+    "href",
+    "/api/client-service-requests/request-a/area.kml?revision=original",
+  );
+  await expect(page.getByRole("link", { name: "Download current KML" })).toHaveAttribute(
+    "href",
+    "/api/client-service-requests/request-a/area.kml?revision=effective",
+  );
+  await expect(page.getByText(/Pricing is created and reviewed in Project Alpha/i)).toBeVisible();
+  await expect(page.getByLabel("Optional non-binding estimate")).toHaveCount(0);
   await expect(page.getByText("Revision 1 · submitted")).toBeVisible();
   await expect(page.getByText("review opened")).toBeVisible();
   await expect(page.getByRole("button", { name: "Add east parcel" })).toBeVisible();

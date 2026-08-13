@@ -33,6 +33,7 @@ const expectedPublicRoutes = [
   "GET /api/public/shares/:publicId/locations/:assetRef",
   "GET /api/public/shares/:publicId/manifest",
   "GET /api/public/shares/:publicId/manifest/media",
+  "GET /client-share/:publicId",
   "GET /health",
   "GET /s/:publicId",
   "GET|HEAD /api/public/cloud-transfers/source/:grant",
@@ -42,6 +43,10 @@ const expectedPublicRoutes = [
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/preview",
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/source",
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/thumbnail",
+  "POST /api/client-public/shares/:publicId/session",
+  "POST /api/internal/client-request-attachments/:attachmentId/scanned",
+  "POST /api/internal/project-alpha/catalog-v2",
+  "POST /api/internal/project-alpha/portal-v2",
   "POST /api/public/shares/:publicId/bulk-download",
   "POST /api/public/shares/:publicId/cloud-transfers",
   "POST /api/public/shares/:publicId/cloud-transfers/:jobId/cancel",
@@ -77,7 +82,7 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "eeb2e7c56cf45f5f57a4f960f3b75d4ea575291a92fd2e05f19cd36098019f94");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "d1c93787dd73b20c95ff9753c8b60fb932d1f14f302793e6b05869466a48560f");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -89,13 +94,20 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     binding: "ASSETS",
     directory: "./dist/client",
     not_found_handling: "single-page-application",
-    run_worker_first: ["/", "/api/*", "/s/*", "/health"],
+    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/health"],
   });
   assert.equal(config.vars.PUBLIC_BASE_URL, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.EXPECTED_HOST, "client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
   assert.equal(config.vars.CLIENT_PORTAL_TEAM_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_REQUEST_V2_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_REQUEST_ATTACHMENTS_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_V2_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_CATALOG_SYNC_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_PRICING_HINTS_ENABLED, "false");
   assert.equal(config.vars.R2_BUCKET_NAME, "client-data");
   assert.deepEqual(config.r2_buckets, [{ binding: "DATA_BUCKET", bucket_name: "client-data" }]);
   assert.deepEqual(config.d1_databases, [{

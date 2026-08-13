@@ -20,6 +20,11 @@ type MediaPatch = Partial<Pick<DeliveryItem, "thumbnailUrl" | "thumbnailState" |
 
 const invalidLinkDetail = "This folder has been moved, removed, or is no longer being shared. Contact your Ledge Top Drone Services representative for a current delivery link.";
 
+function isProtectedDeliveryFailure(caught: unknown): boolean {
+  const status = (caught as RequestError).status;
+  return status === 401 || status === 403 || status === 404 || status === 410;
+}
+
 function formatBytes(size: number | null): string {
   if (size === null) return "Folder";
   if (size < 1024) return `${size} B`;
@@ -60,6 +65,7 @@ export function DeliveryApp() {
   const [view, setView] = useState<DeliveryBrowseView>(initialBrowse.view);
   const [preview, setPreview] = useState<DeliveryItem | null>(null);
   const [folderLoading, setFolderLoading] = useState(false);
+  const [pageLoading, setPageLoading] = useState(false);
   const [navigationError, setNavigationError] = useState("");
   const [downloadSummary, setDownloadSummary] = useState<DownloadSummaryState>({ status: "loading" });
   const [locationData, setLocationData] = useState<{ locations: DeliveryLocationCollection; mapboxPublicToken: string | null } | null>(null);
@@ -73,6 +79,9 @@ export function DeliveryApp() {
   const manifestCache = useRef(new Map<string, DeliveryManifest>());
   const authorizedItems = useRef(new Map<string, DeliveryItem>());
   const navigationVersion = useRef(0);
+  const navigationRequest = useRef<AbortController | null>(null);
+  const pageRequest = useRef<AbortController | null>(null);
+  const mediaRequests = useRef(new Set<AbortController>());
   const [bulkError, setBulkError] = useState("");
   const [bulkProgress, setBulkProgress] = useState<{ status: string; percent: number | null; message?: string } | null>(null);
   const [cloudTransferScope, setCloudTransferScope] = useState<CloudTransferScope | null>(null);
@@ -81,10 +90,43 @@ export function DeliveryApp() {
     return [...(capabilities?.dropbox ? ["dropbox" as const] : []), ...(capabilities?.googleDrive ? ["google-drive" as const] : [])];
   }, [manifest]);
 
-  const fetchManifest = useCallback(async (id: string, folderId = "") => {
-    const query = folderId ? `?folder=${encodeURIComponent(folderId)}` : "";
-    return requestJson<DeliveryManifest>(`/api/public/shares/${encodeURIComponent(id)}/manifest${query}`);
+  const fetchManifest = useCallback(async (id: string, folderId = "", cursor: string | null = null, signal?: AbortSignal) => {
+    const params = new URLSearchParams();
+    if (folderId) params.set("folder", folderId);
+    if (cursor) params.set("cursor", cursor);
+    const query = params.size ? `?${params.toString()}` : "";
+    return requestJson<DeliveryManifest>(`/api/public/shares/${encodeURIComponent(id)}/manifest${query}`, { signal });
   }, []);
+
+  const showRequestError = useCallback((caught: unknown) => {
+    const value = caught as RequestError;
+    if (value.status === 410 || value.body?.code === "SHARED_FOLDER_UNAVAILABLE") {
+      setErrorView("invalid-link");
+      setError(invalidLinkDetail);
+    } else {
+      setErrorView("unavailable");
+      setError(value.message || "This delivery could not be opened.");
+    }
+    setGate("error");
+  }, []);
+
+  const clearProtectedDelivery = useCallback((caught: unknown) => {
+    navigationVersion.current += 1;
+    navigationRequest.current?.abort();
+    pageRequest.current?.abort();
+    for (const request of mediaRequests.current) request.abort();
+    mediaRequests.current.clear();
+    manifestCache.current.clear();
+    authorizedItems.current.clear();
+    setManifest(null);
+    setPreview(null);
+    setLocationData(null);
+    setLocationLoaded(false);
+    setDownloadSummary({ status: "unavailable" });
+    setFolderLoading(false);
+    setPageLoading(false);
+    showRequestError(caught);
+  }, [showRequestError]);
 
   const cacheKey = useCallback((id: string, folderId = "") => `${id}\u0000${folderId}`, []);
 
@@ -101,8 +143,10 @@ export function DeliveryApp() {
 
   const hydrateMedia = useCallback(async (id: string, folderId: string, cursor: string | null, version: number) => {
     const params = new URLSearchParams(); if (folderId) params.set("folder", folderId); if (cursor) params.set("cursor", cursor);
+    const controller = new AbortController();
+    mediaRequests.current.add(controller);
     try {
-      const result = await requestJson<{ items: MediaPatch[] }>(`/api/public/shares/${encodeURIComponent(id)}/manifest/media?${params.toString()}`);
+      const result = await requestJson<{ items: MediaPatch[] }>(`/api/public/shares/${encodeURIComponent(id)}/manifest/media?${params.toString()}`, { signal: controller.signal });
       if (version !== navigationVersion.current) return;
       setManifest(current => {
         if (!current || current.folder.id !== folderId) return current;
@@ -112,10 +156,13 @@ export function DeliveryApp() {
         setPreview(active => active ? next.items.find(item => item.id === active.id) || null : null);
         return next;
       });
-    } catch {
+    } catch (caught) {
+      if (!controller.signal.aborted && isProtectedDeliveryFailure(caught)) clearProtectedDelivery(caught);
       // Thumbnail and stream readiness are advisory; the authoritative listing remains usable.
+    } finally {
+      mediaRequests.current.delete(controller);
     }
-  }, [rememberManifest]);
+  }, [clearProtectedDelivery, rememberManifest]);
 
   const loadManifest = useCallback(async (id: string, folderId = "", fileId = "") => {
     const version = ++navigationVersion.current;
@@ -125,18 +172,6 @@ export function DeliveryApp() {
     history.replaceState({ ltdsDelivery: true }, "", deliveryBrowsePath(id, { folderId, fileId: data.items.some(item => item.id === fileId && item.kind !== "folder") ? fileId : "", view: initialBrowse.view }));
     void hydrateMedia(id, folderId, null, version);
   }, [fetchManifest, hydrateMedia, initialBrowse.fileId, initialBrowse.view, rememberManifest]);
-
-  const showRequestError = useCallback((caught: unknown) => {
-    const value = caught as RequestError;
-    if (value.status === 410 || value.body?.code === "SHARED_FOLDER_UNAVAILABLE") {
-      setErrorView("invalid-link");
-      setError(invalidLinkDetail);
-    } else {
-      setErrorView("unavailable");
-      setError(value.message || "This delivery could not be opened.");
-    }
-    setGate("error");
-  }, []);
 
   const exchange = useCallback(async (accessCode?: string) => {
     if (accessCode === undefined) setGate("loading");
@@ -173,6 +208,13 @@ export function DeliveryApp() {
 
   const navigateToFolder = useCallback(async (folderId = "", options: { history?: "push" | "none"; fileId?: string; scroll?: boolean } = {}) => {
     const version = ++navigationVersion.current;
+    navigationRequest.current?.abort();
+    pageRequest.current?.abort();
+    setPageLoading(false);
+    for (const request of mediaRequests.current) request.abort();
+    mediaRequests.current.clear();
+    const controller = new AbortController();
+    navigationRequest.current = controller;
     const cached = manifestCache.current.get(cacheKey(publicId, folderId));
     const historyMode = options.history ?? "push";
     const commitHistory = (data: DeliveryManifest) => {
@@ -194,7 +236,7 @@ export function DeliveryApp() {
     try {
       // Revalidate even cached folders in the background. The current view is
       // shown right away, then updated if a sync changed the folder contents.
-      const fresh = await fetchManifest(publicId, folderId);
+      const fresh = await fetchManifest(publicId, folderId, null, controller.signal);
       rememberManifest(publicId, folderId, fresh);
       if (version === navigationVersion.current) {
         setManifest(fresh); setFolder(folderId); setGate("ready"); setFolderLoading(false);
@@ -203,13 +245,49 @@ export function DeliveryApp() {
         void hydrateMedia(publicId, folderId, null, version);
       }
     } catch (caught) {
+      if (controller.signal.aborted) return;
       // A transient refresh failure should not blank a folder we already have.
-      if (!cached && version === navigationVersion.current) {
+      if (isProtectedDeliveryFailure(caught) && version === navigationVersion.current) {
+        clearProtectedDelivery(caught);
+      } else if (!cached && version === navigationVersion.current) {
         setFolderLoading(false);
         if (manifest) setNavigationError("That folder could not be opened. Please try again."); else showRequestError(caught);
       }
+    } finally {
+      if (navigationRequest.current === controller) navigationRequest.current = null;
     }
-  }, [cacheKey, fetchManifest, hydrateMedia, manifest, publicId, rememberManifest, showRequestError, view]);
+  }, [cacheKey, clearProtectedDelivery, fetchManifest, hydrateMedia, manifest, publicId, rememberManifest, showRequestError, view]);
+
+  const loadMore = useCallback(async () => {
+    const cursor = manifest?.nextCursor;
+    if (!cursor || pageLoading || pageRequest.current) return;
+    const folderId = manifest.folder.id;
+    const version = navigationVersion.current;
+    const controller = new AbortController();
+    pageRequest.current = controller;
+    setPageLoading(true);
+    setNavigationError("");
+    try {
+      const page = await fetchManifest(publicId, folderId, cursor, controller.signal);
+      if (controller.signal.aborted || version !== navigationVersion.current) return;
+      setManifest(current => {
+        if (!current || current.folder.id !== folderId || current.nextCursor !== cursor) return current;
+        const ids = new Set(current.items.map(item => item.id));
+        const next = { ...current, items: [...current.items, ...page.items.filter(item => !ids.has(item.id))], nextCursor: page.nextCursor };
+        rememberManifest(publicId, folderId, next);
+        next.items.forEach(item => { if (item.kind !== "folder") authorizedItems.current.set(item.id, item); });
+        return next;
+      });
+      void hydrateMedia(publicId, folderId, cursor, version);
+    } catch (caught) {
+      if (controller.signal.aborted || version !== navigationVersion.current) return;
+      if (isProtectedDeliveryFailure(caught)) clearProtectedDelivery(caught);
+      else setNavigationError("More items could not be loaded. Please try again.");
+    } finally {
+      if (pageRequest.current === controller) pageRequest.current = null;
+      if (!controller.signal.aborted && version === navigationVersion.current) setPageLoading(false);
+    }
+  }, [clearProtectedDelivery, fetchManifest, hydrateMedia, manifest, pageLoading, publicId, rememberManifest]);
 
   useEffect(() => {
     const pop = () => {
@@ -229,9 +307,13 @@ export function DeliveryApp() {
     const params = manifest?.folder.id ? `?folder=${encodeURIComponent(manifest.folder.id)}` : "";
     requestJson<{ fileCount: number; totalBytes: number | null; knownBytes: number; unknownSizeCount: number }>(`/api/public/shares/${encodeURIComponent(publicId)}/download-summary${params}`, { signal: controller.signal })
       .then(summary => setDownloadSummary({ status: "ready", ...summary }))
-      .catch(error => { if (!(error instanceof DOMException && error.name === "AbortError")) setDownloadSummary({ status: "unavailable" }); });
+      .catch(error => {
+        if (controller.signal.aborted) return;
+        if (isProtectedDeliveryFailure(error)) clearProtectedDelivery(error);
+        else setDownloadSummary({ status: "unavailable" });
+      });
     return () => controller.abort();
-  }, [gate, manifest?.folder.id, publicId]);
+  }, [clearProtectedDelivery, gate, manifest?.folder.id, publicId]);
 
   useEffect(() => {
     if (gate !== "ready" || !publicId) return;
@@ -239,10 +321,14 @@ export function DeliveryApp() {
     const params = folder ? `?folder=${encodeURIComponent(folder)}` : "";
     requestJson<{ locations: DeliveryLocationCollection; mapboxPublicToken: string | null }>(`/api/public/shares/${encodeURIComponent(publicId)}/locations${params}`, { signal: controller.signal })
       .then(setLocationData)
-      .catch(() => { if (!controller.signal.aborted) setLocationData({ locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null }); })
+      .catch(error => {
+        if (controller.signal.aborted) return;
+        if (isProtectedDeliveryFailure(error)) clearProtectedDelivery(error);
+        else setLocationData({ locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null });
+      })
       .finally(() => { if (!controller.signal.aborted) setLocationLoaded(true); });
     return () => controller.abort();
-  }, [folder, gate, publicId]);
+  }, [clearProtectedDelivery, folder, gate, publicId]);
 
   function changeView(next: DeliveryBrowseView) {
     setView(next); localStorage.setItem("ltds-delivery-view", next);
@@ -372,6 +458,7 @@ export function DeliveryApp() {
       {manifest.items.length === 0 ? <EmptyState title="This folder is empty" detail="New synced files will appear here automatically." /> : view === "grid" ?
         <div className="item-grid">{manifest.items.map(item => <ItemCard key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={openPreview} />)}</div> :
         <div className="item-list">{manifest.items.map(item => <ItemRow key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={openPreview} />)}</div>}
+      {manifest.nextCursor && <div className="public-delivery-pagination"><button type="button" className="button-ghost" disabled={pageLoading} onClick={() => void loadMore()}>{pageLoading ? "Loading more..." : "Load more"}</button></div>}
       <footer>{manifest.items.length} item{manifest.items.length === 1 ? "" : "s"}{manifest.nextCursor ? " · More items are available" : ""}</footer>
     </section>
     {cloudTransferScope && <CloudTransferDialog publicId={publicId} scope={cloudTransferScope} enabledProviders={cloudProviders} onClose={() => setCloudTransferScope(null)} />}

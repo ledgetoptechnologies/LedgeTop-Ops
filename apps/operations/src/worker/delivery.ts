@@ -8,6 +8,14 @@ import { aliasMap } from "./aliases";
 import { activeTombstones, assertNotTrashed, tombstoneMatches } from "./trash";
 import { normalizeRecipientEmail, notificationDedupeKey, notificationStatement } from "./notifications";
 import { thumbnailSourceEligible, thumbnailStateForObject, type ThumbnailJobRow } from "./image-thumbnails";
+import {
+  latestShareAudienceSnapshot,
+  resolveShareAudience,
+  shareAudienceSnapshotStatements,
+  shareDirectoryRecipientsEnabled,
+  type AudienceType,
+  type ShareAudienceSnapshot,
+} from "./share-recipients";
 
 const encoder = new TextEncoder(); const decoder = new TextDecoder("utf-8", { fatal: true });
 const MIME: Record<string,string> = { avif:"image/avif",bmp:"image/bmp",gif:"image/gif",heic:"image/heic",heif:"image/heif",jpeg:"image/jpeg",jpg:"image/jpeg",png:"image/png",tif:"image/tiff",tiff:"image/tiff",webp:"image/webp",dng:"image/x-adobe-dng",arw:"image/x-sony-arw",cr2:"image/x-canon-cr2",cr3:"image/x-canon-cr3",crw:"image/x-canon-crw",nef:"image/x-nikon-nef",raf:"image/x-fuji-raf",rw2:"image/x-panasonic-rw2",orf:"image/x-olympus-orf",pef:"image/x-pentax-pef",srw:"image/x-samsung-srw","3fr":"image/x-hasselblad-3fr",rwl:"image/x-leica-rwl",srf:"image/x-sony-srf",sr2:"image/x-sony-sr2",x3f:"image/x-sigma-x3f",mp4:"video/mp4",m4v:"video/x-m4v",webm:"video/webm",mov:"video/quicktime",mp3:"audio/mpeg",m4a:"audio/mp4",wav:"audio/wav",ogg:"audio/ogg",pdf:"application/pdf",kml:"application/vnd.google-earth.kml+xml",kmz:"application/vnd.google-earth.kmz",txt:"text/plain; charset=utf-8",csv:"text/csv; charset=utf-8",json:"application/json; charset=utf-8" };
@@ -37,14 +45,24 @@ function prefixUpperBound(prefix:string):string{
   return `${prefix.slice(0,-1)}0`;
 }
 
-async function indexedVisibleDeliveryFolders(env:Env,candidates:readonly string[]):Promise<Set<string>>{
-  const visible=new Set<string>();
+async function indexedDeliveryFolderVisibility(env:Env,candidates:readonly string[]):Promise<{indexed:Set<string>;visible:Set<string>}>{
+  const indexed=new Set<string>(),visible=new Set<string>();
   for(let offset=0;offset<candidates.length;offset+=FOLDER_VISIBILITY_CANDIDATE_BATCH){
     const batch=candidates.slice(offset,offset+FOLDER_VISIBILITY_CANDIDATE_BATCH);
     const valuesSql=batch.map(()=>"(?,?)").join(",");
     const bindings=batch.flatMap(prefix=>[prefix,prefixUpperBound(prefix)]);
     const result=await env.DELIVERY_DB.prepare(`WITH candidates(prefix,upper_bound) AS (VALUES ${valuesSql})
-      SELECT c.prefix FROM candidates c WHERE EXISTS (
+      SELECT c.prefix,
+        EXISTS (
+          SELECT 1 FROM file_index indexed_file
+          WHERE indexed_file.r2_key>=c.prefix AND indexed_file.r2_key<c.upper_bound
+            AND indexed_file.r2_key<>c.prefix AND substr(indexed_file.r2_key,-1,1)<>'/'
+            AND instr(lower('/'||indexed_file.r2_key||'/'),'/_ltds/')=0
+            AND instr(lower('/'||indexed_file.r2_key||'/'),'/.previews/')=0
+            AND instr(lower('/'||indexed_file.r2_key||'/'),'/dump/')=0
+          LIMIT 1
+        ) has_index,
+        EXISTS (
         SELECT 1 FROM file_index fi
         WHERE fi.r2_key>=c.prefix AND fi.r2_key<c.upper_bound
           AND fi.r2_key<>c.prefix AND substr(fi.r2_key,-1,1)<>'/'
@@ -58,18 +76,26 @@ async function indexedVisibleDeliveryFolders(env:Env,candidates:readonly string[
             )
           )
         LIMIT 1
-      )`).bind(...bindings).all<{prefix:string}>();
-    for(const row of result.results)if(batch.includes(row.prefix))visible.add(row.prefix);
+      ) is_visible
+      FROM candidates c`).bind(...bindings).all<{prefix:string;has_index:number;is_visible:number}>();
+    for(const row of result.results)if(batch.includes(row.prefix)){
+      if(row.has_index)indexed.add(row.prefix);
+      if(row.is_visible)visible.add(row.prefix);
+    }
   }
-  return visible;
+  return{indexed,visible};
 }
 
 async function visibleDeliveryFolders(env:Env,candidates:readonly string[],trashed:(key:string)=>boolean):Promise<Set<string>>{
-  const allowed=new Set(candidates),visible=await indexedVisibleDeliveryFolders(env,candidates).catch(error=>{
+  const allowed=new Set(candidates),visibility=await indexedDeliveryFolderVisibility(env,candidates).catch(error=>{
     console.warn(JSON.stringify({event:"delivery.folder-index-visibility-fallback",candidateCount:candidates.length,message:error instanceof Error?error.message:"unknown"}));
-    return new Set<string>();
+    return{indexed:new Set<string>(),visible:new Set<string>()};
   });
-  const pending=candidates.filter(value=>!visible.has(value)).map(value=>({directory:value,child:value})),visited=new Set<string>();
+  const {indexed,visible}=visibility;
+  // A candidate with any indexed descendants is authoritative even when every
+  // descendant is hidden or tombstoned. Only genuinely unindexed candidates
+  // need the bounded R2 fallback while the event index catches up.
+  const pending=candidates.filter(value=>!indexed.has(value)).map(value=>({directory:value,child:value})),visited=new Set<string>();
   while(pending.length){const item=pending.shift()!;if(visible.has(item.child)||visited.has(item.directory)||hidden(item.directory)||trashed(item.directory))continue;visited.add(item.directory);let cursor:string|undefined;do{
     const page=await env.DATA_BUCKET.list({prefix:item.directory,delimiter:"/",limit:500,cursor,include:["customMetadata"]});
     if(page.objects.some(object=>object.key!==item.directory&&!object.key.endsWith("/")&&!hidden(object.key)&&!trashed(object.key)&&!isMovedSourceMarker(object))){visible.add(item.child);break;}
@@ -141,17 +167,44 @@ export async function listDeliveryFolder(env:Env,principal:StaffPrincipal,prefix
   const folders=folderCandidates.filter(value=>visibleFolders.has(value));
   const files=listed.objects.filter(object=>object.key!==prefix&&!object.key.endsWith("/")&&!hidden(object.key)&&!trashed(object.key)&&!isMovedSourceMarker(object));
   const aliases=await aliasMap(env,[...folders,...files.map(object=>object.key)]); const items=files.map(object=>{const id=encodeRef(object.key);const kind=mediaKind(object.key);const name=aliases.get(object.key)||object.key.slice(prefix.length);const sourceUrl=deliverySourceUrl(kind,id);return{id,name,displayName:name,physicalKey:object.key,kind,size:object.size,uploadedAt:object.uploaded.toISOString(),isShared:shared(object.key),previewUrl:kind==="image"?(isBrowserPreviewableImage(object.key)?sourceUrl:undefined):["audio","text"].includes(kind)?`/api/delivery/items/${id}/preview`:undefined,sourceUrl,thumbnailUrl:undefined as string|undefined,thumbnailState:(thumbnailEligible(object)?"pending":"not_applicable") as DeliveryItem["thumbnailState"],thumbnailErrorCode:undefined as string|undefined,thumbnailFallbackKind:thumbnailFallbackKindForFile(object.key,kind),downloadUrl:`/api/delivery/items/${id}/download`,previewStatus:kind==="video"?"processing":undefined,actions:{rename:`/api/delivery/items/${id}/display-name`,delete:`/api/delivery/items/${id}/source`}};});
-  const thumbnails=files.map((object,index)=>({object,index})).filter(value=>thumbnailEligible(value.object));
-  if(thumbnails.length){
-    const rows=await env.DELIVERY_DB.batch(thumbnails.map(thumbnail=>env.DELIVERY_DB.prepare("SELECT source_etag,thumbnail_key,status,error_code FROM image_thumbnail_jobs WHERE source_key=?").bind(thumbnail.object.key)));
-    rows.forEach((result,index)=>{const thumbnail=thumbnails[index]!,row=result.results[0] as ThumbnailJobRow|undefined,state=thumbnailStateForObject(thumbnail.object.httpEtag,row),item=items[thumbnail.index]!;item.thumbnailState=state.state;item.thumbnailErrorCode=state.errorCode;if(state.state==="ready")item.thumbnailUrl=`/api/delivery/items/${item.id}/thumbnail`;});
-  }
-  const videos=files.map((object,index)=>({object,index})).filter(value=>mediaKind(value.object.key)==="video");
-  if(videos.length){
-    const rows=await env.DELIVERY_DB.batch(videos.map(video=>env.DELIVERY_DB.prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(video.object.key)));
-    rows.forEach((result,index)=>{const row=result.results[0] as {stream_uid?:string;stream_status?:string}|undefined;const item=items[videos[index]!.index]!;item.previewStatus=row?.stream_status==="ready"&&row.stream_uid?"ready":row?.stream_status==="error"?"unavailable":"processing";});
-  }
   return{prefix,folders:folders.map(value=>{const id=encodeRef(value.slice(0,-1));const name=aliases.get(value)||value.slice(prefix.length).replace(/\/$/,"");return{id,prefix:value,physicalKey:value,name,displayName:name,isShared:shared(value),actions:{rename:`/api/delivery/items/${id}/display-name`,delete:`/api/delivery/items/${id}/source`}};}),files:items,nextCursor:listed.truncated?listed.cursor:null};
+}
+
+/**
+ * Advisory thumbnail/video state for exactly one already-authorized folder
+ * page. It never adds names or paths to the listing; clients may only patch
+ * matching ids from the authoritative page they already rendered.
+ */
+export async function listDeliveryFolderMedia(env:Env,principal:StaffPrincipal,prefixValue:string,cursor?:string){
+  await requirePermission(env,principal,"delivery.browse");
+  const access=await browseRoots(env,principal);
+  const prefix=prefixValue?normalizePrefix(prefixValue):"";
+  if(prefix&&!access.global&&!access.roots.some(root=>prefix.startsWith(root.prefix)))throw new HTTPException(404,{message:"Folder not found"});
+  if(!access.global&&!prefixValue)return{items:[]};
+  if(prefix)await assertNotTrashed(env,prefix);
+  const tombstones=await activeTombstones(env),trashed=(key:string)=>tombstones.some(tombstone=>tombstoneMatches(tombstone,key));
+  const listed=await env.DATA_BUCKET.list({prefix,delimiter:"/",limit:500,cursor,include:["httpMetadata","customMetadata"]});
+  const files=listed.objects.filter(object=>object.key!==prefix&&!object.key.endsWith("/")&&!hidden(object.key)&&!trashed(object.key)&&!isMovedSourceMarker(object));
+  const candidates=files.flatMap(object=>{
+    const kind=mediaKind(object.key);
+    if(!thumbnailEligible(object)&&kind!=="video")return[];
+    return[{id:encodeRef(object.key),key:object.key,kind,etag:object.httpEtag}];
+  });
+  const thumbnails=candidates.filter(candidate=>candidate.kind!=="video"),videos=candidates.filter(candidate=>candidate.kind==="video");
+  const [thumbnailRows,videoRows]=await Promise.all([
+    thumbnails.length?env.DELIVERY_DB.batch(thumbnails.map(candidate=>env.DELIVERY_DB.prepare("SELECT source_etag,thumbnail_key,status,error_code FROM image_thumbnail_jobs WHERE source_key=?").bind(candidate.key))):[],
+    videos.length?env.DELIVERY_DB.batch(videos.map(candidate=>env.DELIVERY_DB.prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(candidate.key))):[],
+  ]);
+  const thumbnailById=new Map(thumbnails.map((candidate,index)=>[candidate.id,thumbnailRows[index]?.results[0] as ThumbnailJobRow|undefined]));
+  const videoById=new Map(videos.map((candidate,index)=>[candidate.id,videoRows[index]?.results[0] as {stream_uid?:string;stream_status?:string}|undefined]));
+  return{items:candidates.map(candidate=>{
+    if(candidate.kind==="video"){
+      const row=videoById.get(candidate.id);
+      return{id:candidate.id,previewStatus:row?.stream_status==="ready"&&row.stream_uid?"ready":row?.stream_status==="error"?"unavailable":"processing"};
+    }
+    const state=thumbnailStateForObject(candidate.etag,thumbnailById.get(candidate.id));
+    return{id:candidate.id,thumbnailState:state.state,thumbnailErrorCode:state.errorCode,...(state.state==="ready"?{thumbnailUrl:`/api/delivery/items/${candidate.id}/thumbnail`}:{})};
+  })};
 }
 
 /**
@@ -213,7 +266,7 @@ export async function searchDeliveryItems(env:Env,principal:StaffPrincipal,query
 
 export async function authorizeItem(env:Env,principal:StaffPrincipal,itemRef:string):Promise<string>{await requirePermission(env,principal,"delivery.browse");const key=decodeRef(itemRef);if(hidden(key))throw new HTTPException(404,{message:"Item not found"});const access=await browseRoots(env,principal);if(!access.global&&!access.roots.some(root=>key.startsWith(root.prefix)))throw new HTTPException(404,{message:"Item not found"});await assertNotTrashed(env,key);return key;}
 
-export interface ShareInput{clientName?:string;projectName?:string;r2Prefix?:string;projectId?:string;externalRef?:string;label?:string;accessCode?:string;generateAccessCode?:boolean;removeAccessCode?:boolean;expiresAt?:string|null;recipientEmail?:string|null;imageLocationMapEnabled?:boolean;}
+export interface ShareInput{clientName?:string;projectName?:string;r2Prefix?:string;projectId?:string;externalRef?:string;label?:string;accessCode?:string;generateAccessCode?:boolean;removeAccessCode?:boolean;expiresAt?:string|null;recipientEmail?:string|null;recipientAudience?:{type:AudienceType;publicId:string}|null;imageLocationMapEnabled?:boolean;}
 export function deriveShareMetadata(prefix:string,input:Pick<ShareInput,"clientName"|"projectName">={}):{clientName:string;projectName:string}{const folderName=normalizePrefix(prefix).slice(0,-1).split("/").pop()||"Shared folder";return{clientName:input.clientName?.trim()||folderName,projectName:input.projectName?.trim()||folderName};}
 
 interface ProjectRow { id:string;division_id:string|null;r2_prefix:string }
@@ -237,7 +290,7 @@ export function resolveAccessCodeChange(input:Pick<ShareInput,"accessCode"|"gene
   return accessCode?{kind:"set",accessCode}:{kind:"preserve",accessCode:null};
 }
 
-async function authorizeSharePrefix(env:Env,principal:StaffPrincipal,prefix:string,projectId?:string):Promise<{project:ProjectRow|null;divisionId:string|null}>{
+export async function authorizeSharePrefix(env:Env,principal:StaffPrincipal,prefix:string,projectId?:string):Promise<{project:ProjectRow|null;divisionId:string|null}>{
   const access=await browseRoots(env,principal);
   if(!access.global&&!access.roots.some(root=>prefix.startsWith(root.prefix)))throw new HTTPException(404,{message:"Folder not found"});
   const project=projectId
@@ -288,7 +341,7 @@ function shareUrl(env:Env,publicId:string,secret:string):string{return`${env.DEL
 export async function getActiveDeliveryShare(env:Env,principal:StaffPrincipal,prefixValue:string){
   const prefix=normalizePrefix(prefixValue);await authorizeSharePrefix(env,principal,prefix);const share=await activeShareForPrefix(env,prefix);
   if(!share)return null;await requirePermission(env,principal,"delivery.share.create",{divisionId:share.division_id},true);const secret=await recoverShareSecret(env,share);
-  const aliases=await aliasMap(env,[prefix]);return{id:share.id,shareUrl:secret&&share.public_id?shareUrl(env,share.public_id,secret):null,passwordProtected:Boolean(share.password_hash),expiresAt:share.expires_at,recoverable:Boolean(secret&&share.public_id),recipientEmail:share.recipient_email,imageLocationMapEnabled:share.image_location_map_enabled===1,displayName:aliases.get(prefix)||prefix.slice(0,-1).split("/").pop()};
+  const [aliases,audience]=await Promise.all([aliasMap(env,[prefix]),shareDirectoryRecipientsEnabled(env)?latestShareAudienceSnapshot(env,share.id):Promise.resolve(null)]);return{id:share.id,shareUrl:secret&&share.public_id?shareUrl(env,share.public_id,secret):null,passwordProtected:Boolean(share.password_hash),expiresAt:share.expires_at,recoverable:Boolean(secret&&share.public_id),recipientEmail:share.recipient_email,audience:audience?{audienceType:audience.audienceType,publicId:audience.audiencePublicId,displayName:audience.audienceDisplayName,recipientCount:audience.recipients.length,email:audience.audienceType==="principal"?audience.recipients[0]?.email:null}:null,imageLocationMapEnabled:share.image_location_map_enabled===1,displayName:aliases.get(prefix)||prefix.slice(0,-1).split("/").pop()};
 }
 
 export async function createDeliveryShare(env:Env,request:Request,principal:StaffPrincipal,input:ShareInput,idempotencyKey:string):Promise<ShareLifecycleResult>{
@@ -298,8 +351,14 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
   const{project,divisionId}=await authorizeSharePrefix(env,principal,prefix,input.projectId);
   const owner=Boolean(await env.OPS_DB.prepare("SELECT 1 ok FROM staff_role_assignments WHERE staff_id=? AND role_id='role-owner' AND scope='global'").bind(principal.id).first());
   const requestedExpiration=input.expiresAt===undefined?undefined:resolveShareExpiration(input.expiresAt,owner?365:90);
-  let recipientEmail: string | null;
-  try { recipientEmail = normalizeRecipientEmail(input.recipientEmail); } catch (error) { throw new HTTPException(400, { message: error instanceof Error ? error.message : "Recipient email is invalid" }); }
+  const directoryRecipients=shareDirectoryRecipientsEnabled(env);
+  if(directoryRecipients&&input.recipientEmail!==undefined)throw new HTTPException(400,{message:"Choose a recipient from the client directory"});
+  if(!directoryRecipients&&input.recipientAudience!==undefined)throw new HTTPException(404,{message:"Client directory recipients are unavailable"});
+  let recipientEmail: string | null= null;
+  if(!directoryRecipients){try { recipientEmail = normalizeRecipientEmail(input.recipientEmail); } catch (error) { throw new HTTPException(400, { message: error instanceof Error ? error.message : "Recipient email is invalid" }); }}
+  const requestedRecipient:ShareAudienceSnapshot|null|undefined=directoryRecipients&&input.recipientAudience!==undefined
+    ?(input.recipientAudience===null?null:await resolveShareAudience(env,prefix,input.recipientAudience.type,input.recipientAudience.publicId))
+    :undefined;
   const codeChange=resolveAccessCodeChange(input);
 
   await env.DELIVERY_DB.prepare(`UPDATE shares SET revoked_at=datetime('now'),revoked_reason='expired' WHERE revoked_at IS NULL AND expires_at IS NOT NULL
@@ -311,6 +370,10 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
   if(active){
     for(let attempt=0;attempt<2;attempt+=1){
       await requirePermission(env,principal,"delivery.share.create",{divisionId:active.division_id},true);
+      const currentRecipient=directoryRecipients?await latestShareAudienceSnapshot(env,active.id):null;
+      const refreshedCurrentRecipient=currentRecipient
+        ?await resolveShareAudience(env,prefix,currentRecipient.audienceType,currentRecipient.audiencePublicId)
+        :null;
       const previousSecret=await recoverShareSecret(env,active),replay=active.idempotency_key===idempotencyKey;
       if(attempt===0&&replay&&previousSecret&&active.public_id)return{id:active.id,shareUrl:shareUrl(env,active.public_id,previousSecret),accessCode:null,passwordProtected:Boolean(active.password_hash),expiresAt:active.expires_at,lifecycle:"reused",idempotentReplay:true};
 
@@ -323,7 +386,14 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
 
       const effectiveCodeChange=securityEquivalent?{kind:"preserve" as const,accessCode:null}:codeChange;
       const securityChanged=effectiveCodeChange.kind!=="preserve",expiresAt=requestedExpiration===undefined?active.expires_at:requestedExpiration;
-      const expirationChanged=expiresAt!==active.expires_at,recipientChanged=input.recipientEmail!==undefined&&recipientEmail!==active.recipient_email,mapChanged=input.imageLocationMapEnabled!==undefined&&Number(input.imageLocationMapEnabled)!==active.image_location_map_enabled,mustRotate=securityChanged||!previousSecret,publicIdChanged=!active.public_id;
+      const effectiveDirectoryRecipient=requestedRecipient===undefined?refreshedCurrentRecipient:requestedRecipient;
+      const effectiveRecipient = directoryRecipients
+        ?(requestedRecipient===undefined?active.recipient_email:effectiveDirectoryRecipient?.recipients[0]?.email||null)
+        :(input.recipientEmail===undefined ? active.recipient_email : recipientEmail);
+      const recipientChanged=directoryRecipients
+        ?input.recipientAudience!==undefined&&`${effectiveDirectoryRecipient?.audienceType||""}:${effectiveDirectoryRecipient?.audiencePublicId||""}`!==`${currentRecipient?.audienceType||""}:${currentRecipient?.audiencePublicId||""}`
+        :input.recipientEmail!==undefined&&recipientEmail!==active.recipient_email;
+      const expirationChanged=expiresAt!==active.expires_at,mapChanged=input.imageLocationMapEnabled!==undefined&&Number(input.imageLocationMapEnabled)!==active.image_location_map_enabled,mustRotate=securityChanged||!previousSecret,publicIdChanged=!active.public_id;
       if(!mustRotate&&!expirationChanged&&!publicIdChanged&&!recipientChanged&&!mapChanged)return{id:active.id,shareUrl:shareUrl(env,active.public_id!,previousSecret!),accessCode:sameCode?codeChange.accessCode:null,passwordProtected:Boolean(active.password_hash),expiresAt:active.expires_at,lifecycle:"reused",idempotentReplay:replay};
 
       const nextPublicId=active.public_id||randomToken(16),nextSecret=mustRotate?randomToken(32):previousSecret!;
@@ -334,13 +404,14 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
       const passwordIterations=effectiveCodeChange.kind==="preserve"?active.password_iterations:password?.iterations||null;
       const passwordAlgorithm=effectiveCodeChange.kind==="preserve"?active.password_algorithm:password?.algorithm||null;
       const lifecycle:ShareLifecycleResult["lifecycle"]=mustRotate?"rotated":"updated",tokenHash=mustRotate?await sha256(nextSecret):null;
-      const effectiveRecipient = input.recipientEmail===undefined ? active.recipient_email : recipientEmail;
       const effectiveMapEnabled=input.imageLocationMapEnabled===undefined?active.image_location_map_enabled:Number(input.imageLocationMapEnabled);
-      const updated=await env.DELIVERY_DB.prepare(`UPDATE shares SET token_hash=COALESCE(?,token_hash),public_id=COALESCE(public_id,?),secret_ciphertext=?,secret_iv=?,password_hash=?,password_salt=?,password_iterations=?,password_algorithm=?,expires_at=?,recipient_email=?,image_location_map_enabled=?,idempotency_key=?,r2_prefix=?,division_id=COALESCE(division_id,?),share_version=share_version+1 WHERE id=? AND share_version=? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=1)`).bind(tokenHash,nextPublicId,encrypted.ciphertext,encrypted.iv,passwordHash,passwordSalt,passwordIterations,passwordAlgorithm,expiresAt,effectiveRecipient,effectiveMapEnabled,idempotencyKey,prefix,divisionId,active.id,active.share_version).run();
-      if(!updated.meta.changes){const latest=await activeShareForPrefix(env,prefix);if(!latest)throw new HTTPException(409,{message:"This share changed while you were editing it. Reopen the share and try again."});active=latest;continue;}
+      const updateStatement=env.DELIVERY_DB.prepare(`UPDATE shares SET token_hash=COALESCE(?,token_hash),public_id=COALESCE(public_id,?),secret_ciphertext=?,secret_iv=?,password_hash=?,password_salt=?,password_iterations=?,password_algorithm=?,expires_at=?,recipient_email=?,image_location_map_enabled=?,idempotency_key=?,r2_prefix=?,division_id=COALESCE(division_id,?),share_version=share_version+1 WHERE id=? AND share_version=? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=1)`).bind(tokenHash,nextPublicId,encrypted.ciphertext,encrypted.iv,passwordHash,passwordSalt,passwordIterations,passwordAlgorithm,expiresAt,effectiveRecipient,effectiveMapEnabled,idempotencyKey,prefix,divisionId,active.id,active.share_version);
+      const updated=await env.DELIVERY_DB.batch([updateStatement,...(directoryRecipients&&effectiveDirectoryRecipient?shareAudienceSnapshotStatements(env,active.id,active.share_version+1,effectiveDirectoryRecipient,principal.id,true):[])]);
+      if(!updated[0]?.meta.changes){const latest=await activeShareForPrefix(env,prefix);if(!latest)throw new HTTPException(409,{message:"This share changed while you were editing it. Reopen the share and try again."});active=latest;continue;}
 
-      const notification = notificationStatement(env, { shareId: active.id, kind: "share_updated", recipientEmail: effectiveRecipient, dedupeKey: notificationDedupeKey("share_updated", active.id, String(active.share_version + 1)), payload: { shareUrl: shareUrl(env, nextPublicId, nextSecret), r2Prefix: prefix, expiresAt } });
-      await env.DELIVERY_DB.batch([env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('staff',?,?,?,?,?)").bind(principal.id,`share.${lifecycle}`,'share',active.id,JSON.stringify({divisionId,r2Prefix:prefix,securityChanged,expiresAt,effectiveRecipient,imageLocationMapEnabled:Boolean(effectiveMapEnabled)})), ...(notification ? [notification] : [])]);
+      const notificationShareId=active.id,notificationShareVersion=active.share_version+1;
+      const notifications = effectiveDirectoryRecipient ? effectiveDirectoryRecipient.recipients.map(member=>notificationStatement(env,{shareId:notificationShareId,kind:"share_updated",recipientEmail:member.email,dedupeKey:notificationDedupeKey("share_updated",notificationShareId,`${notificationShareVersion}:${member.principalPublicId}`),payload:{shareUrl:shareUrl(env,nextPublicId,nextSecret),r2Prefix:prefix,expiresAt}})!) : [notificationStatement(env, { shareId: notificationShareId, kind: "share_updated", recipientEmail: effectiveRecipient, dedupeKey: notificationDedupeKey("share_updated", notificationShareId, String(notificationShareVersion)), payload: { shareUrl: shareUrl(env, nextPublicId, nextSecret), r2Prefix: prefix, expiresAt } })].filter((value):value is D1PreparedStatement=>Boolean(value));
+      await env.DELIVERY_DB.batch([env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('staff',?,?,?,?,?)").bind(principal.id,`share.${lifecycle}`,'share',active.id,JSON.stringify({divisionId,r2Prefix:prefix,securityChanged,expiresAt,effectiveRecipient,imageLocationMapEnabled:Boolean(effectiveMapEnabled)})), ...notifications]);
       await env.OPS_DB.batch([await auditStatement(env,request,principal,`delivery.share.${lifecycle}`,"share",active.id,divisionId,{r2Prefix:prefix,securityChanged,expiresAt,imageLocationMapEnabled:Boolean(effectiveMapEnabled)})]);
       return{id:active.id,shareUrl:shareUrl(env,nextPublicId,nextSecret),accessCode:effectiveCodeChange.kind==="set"?effectiveCodeChange.accessCode:null,passwordProtected:Boolean(passwordHash),expiresAt,lifecycle,idempotentReplay:false};
     }
@@ -350,14 +421,17 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
   const accessCode=codeChange.kind==="set"?codeChange.accessCode:null,password=accessCode?await hashAccessCode(accessCode,env.DELIVERY_ACCESS_CODE_PEPPER):null;
   const expiresAt=requestedExpiration===undefined?null:requestedExpiration;
   const projectId=project?.id||input.projectId||crypto.randomUUID(),shareId=crypto.randomUUID(),publicId=randomToken(16),secret=randomToken(32);
+  const selectedRecipient=directoryRecipients?requestedRecipient||null:null;
+  if(selectedRecipient)recipientEmail=selectedRecipient.recipients[0]?.email||null;
   const encrypted=await encryptDeliveryToken(secret,env.DELIVERY_TOKEN_SECRET,shareId);
-  const createdNotification = notificationStatement(env, { shareId, kind: "share_created", recipientEmail, payload: { shareUrl: shareUrl(env, publicId, secret), clientName, projectName, r2Prefix: prefix, expiresAt } });
+  const createdNotifications = selectedRecipient?selectedRecipient.recipients.map(member=>notificationStatement(env,{shareId,kind:"share_created",recipientEmail:member.email,dedupeKey:notificationDedupeKey("share_created",shareId,member.principalPublicId),payload:{shareUrl:shareUrl(env,publicId,secret),clientName,projectName,r2Prefix:prefix,expiresAt}})!):[notificationStatement(env, { shareId, kind: "share_created", recipientEmail, payload: { shareUrl: shareUrl(env, publicId, secret), clientName, projectName, r2Prefix: prefix, expiresAt } })].filter((value):value is D1PreparedStatement=>Boolean(value));
   const statements:D1PreparedStatement[]=[];
   if(!project)statements.push(env.DELIVERY_DB.prepare("INSERT INTO projects (id,external_ref,client_name,project_name,r2_prefix,division_id,created_by) VALUES (?,?,?,?,?,?,NULL)").bind(projectId,input.externalRef?.trim()||null,clientName,projectName,prefix,divisionId));
   statements.push(
     env.DELIVERY_DB.prepare(`INSERT INTO shares (id,project_id,token_hash,public_id,label,password_hash,password_salt,password_iterations,password_algorithm,expires_at,recipient_email,image_location_map_enabled,created_by_type,created_by_id,idempotency_key,share_version,secret_ciphertext,secret_iv,r2_prefix,division_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'staff',?,?,2,?,?,?,?)`).bind(shareId,projectId,await sha256(secret),publicId,input.label?.trim()||null,password?.hash||null,password?.salt||null,password?.iterations||null,password?.algorithm||null,expiresAt,recipientEmail,Number(Boolean(input.imageLocationMapEnabled)),principal.id,idempotencyKey,encrypted.ciphertext,encrypted.iv,prefix,divisionId),
+    ...(selectedRecipient?shareAudienceSnapshotStatements(env,shareId,2,selectedRecipient,principal.id):[]),
     env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('staff',?,'share.created','share',?,?)").bind(principal.id,shareId,JSON.stringify({divisionId,r2Prefix:prefix,projectId,expiresAt,imageLocationMapEnabled:Boolean(input.imageLocationMapEnabled)})),
-    ...(createdNotification ? [createdNotification] : []),
+    ...createdNotifications,
   );
   await env.DELIVERY_DB.batch(statements);
   await env.OPS_DB.batch([await auditStatement(env,request,principal,"delivery.share.created","share",shareId,divisionId,{projectId,r2Prefix:prefix,expiresAt,imageLocationMapEnabled:Boolean(input.imageLocationMapEnabled)})]);
@@ -366,4 +440,4 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
 
 export async function listDeliveryShares(env:Env,principal:StaffPrincipal){await requirePermission(env,principal,"delivery.share.audit");const scope=await sqlScope(env,principal,"delivery.share.audit");if(scope.deniedGlobal)return[];let where="1=1",values:unknown[]=[];if(!scope.global){if(!scope.divisions.length)return[];where=`COALESCE(s.division_id,p.division_id) IN (${scope.divisions.map(()=>"?").join(",")})`;values=scope.divisions;}const result=await env.DELIVERY_DB.prepare(`SELECT s.id,s.public_id,s.label,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.created_at,s.last_accessed_at,s.access_count,(s.password_hash IS NOT NULL) password_protected,p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) AS r2_prefix,COALESCE(s.division_id,p.division_id) AS division_id FROM shares s JOIN projects p ON p.id=s.project_id WHERE ${where} ORDER BY s.created_at DESC LIMIT 200`).bind(...values).all<any>();const aliases=await aliasMap(env,result.results.map(row=>row.r2_prefix));return result.results.map(row=>({...row,display_name:aliases.get(row.r2_prefix)||row.r2_prefix.replace(/\/$/,"").split("/").pop()}));}
 
-export async function revokeDeliveryShare(env:Env,request:Request,principal:StaffPrincipal,shareId:string){const share=await env.DELIVERY_DB.prepare("SELECT s.id,COALESCE(s.division_id,p.division_id) AS division_id,s.recipient_email,p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.id=?").bind(shareId).first<{id:string;division_id:string|null;recipient_email:string|null;client_name:string;project_name:string;r2_prefix:string}>();if(!share)throw new HTTPException(404,{message:"Share not found"});await requirePermission(env,principal,"delivery.share.revoke",{divisionId:share.division_id},true);const notification=notificationStatement(env,{shareId,kind:"share_revoked",recipientEmail:share.recipient_email,payload:{clientName:share.client_name,projectName:share.project_name,r2Prefix:share.r2_prefix}});const result=await env.DELIVERY_DB.batch([env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='manual',share_version=share_version+1 WHERE id=? AND revoked_at IS NULL").bind(shareId),env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id) VALUES ('staff',?,'share.revoked','share',?)").bind(principal.id,shareId),...(notification?[notification]:[])]);if(!result[0]?.meta.changes)throw new HTTPException(404,{message:"Share not found or already revoked"});await env.OPS_DB.batch([await auditStatement(env,request,principal,"delivery.share.revoked","share",shareId,share.division_id)]);}
+export async function revokeDeliveryShare(env:Env,request:Request,principal:StaffPrincipal,shareId:string){const share=await env.DELIVERY_DB.prepare("SELECT s.id,COALESCE(s.division_id,p.division_id) AS division_id,s.recipient_email,p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.id=?").bind(shareId).first<{id:string;division_id:string|null;recipient_email:string|null;client_name:string;project_name:string;r2_prefix:string}>();if(!share)throw new HTTPException(404,{message:"Share not found"});await requirePermission(env,principal,"delivery.share.revoke",{divisionId:share.division_id},true);const audience=shareDirectoryRecipientsEnabled(env)?await latestShareAudienceSnapshot(env,shareId):null;const notifications=audience?audience.recipients.map(member=>notificationStatement(env,{shareId,kind:"share_revoked",recipientEmail:member.email,dedupeKey:notificationDedupeKey("share_revoked",shareId,member.principalPublicId),payload:{clientName:share.client_name,projectName:share.project_name,r2Prefix:share.r2_prefix}})!):[notificationStatement(env,{shareId,kind:"share_revoked",recipientEmail:share.recipient_email,payload:{clientName:share.client_name,projectName:share.project_name,r2Prefix:share.r2_prefix}})].filter((value):value is D1PreparedStatement=>Boolean(value));const result=await env.DELIVERY_DB.batch([env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='manual',share_version=share_version+1 WHERE id=? AND revoked_at IS NULL").bind(shareId),env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id) VALUES ('staff',?,'share.revoked','share',?)").bind(principal.id,shareId),...notifications]);if(!result[0]?.meta.changes)throw new HTTPException(404,{message:"Share not found or already revoked"});await env.OPS_DB.batch([await auditStatement(env,request,principal,"delivery.share.revoked","share",shareId,share.division_id)]);}

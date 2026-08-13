@@ -9,9 +9,15 @@ const scope: SqlScope = { global: false, divisions: ["division-30"], assigned: f
 
 describe("operations visibility", () => {
   it("limits the employee session to read-only operational permissions", () => {
-    const permissions: Permission[] = ["dashboard.view", "operations.view", "tasks.create", "delivery.browse", "team.view"];
-    expect(employeePermissions(permissions, false)).toEqual(["dashboard.view", "operations.view", "delivery.browse", "team.view"]);
+    const permissions: Permission[] = ["dashboard.view", "operations.view", "tasks.create", "sops.view", "delivery.browse", "team.view"];
+    expect(employeePermissions(permissions, false)).toEqual(["dashboard.view", "operations.view", "sops.view", "delivery.browse", "team.view"]);
     expect(employeePermissions(permissions, true)).toEqual(permissions);
+  });
+
+  it("does not resurrect an explicitly denied SOP permission removed from the effective grant list", () => {
+    const effectiveAfterDeny: Permission[] = ["dashboard.view", "operations.view"];
+    expect(employeePermissions(effectiveAfterDeny, false)).toEqual(effectiveAfterDeny);
+    expect(employeePermissions(effectiveAfterDeny, false)).not.toContain("sops.view");
   });
 
   it("allows only direct operation assignment", () => {

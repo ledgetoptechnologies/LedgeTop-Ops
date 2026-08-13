@@ -2,11 +2,12 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
 import { isMovedSourceMarker, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
-import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName, visibleImmediateChildPrefixes } from "./files";
+import { decodeItemRef, encodeItemRef, indexedImmediateChildVisibility, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName, visibleImmediateChildPrefixes } from "./files";
 import { createSessionCookie, hmac, parseCookie, randomSecret, sha256, verifyAccessCode, verifyRotatingSessionCookie } from "./security";
 import { matchesEtag } from "./prepared-images";
 import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import { recordFirstAccessNotification } from "./notifications";
+import { handleProjectAlphaPortalProjectionRequest } from "./project-alpha-portal";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
@@ -22,6 +23,10 @@ import type { CloudProvider, CloudTransferEnv } from "./cloud-transfer/types";
 import { listDownloadableObjects, summarizeDownloadableObjects } from "./downloadable-files";
 import { listPublicShareLocations, resolvePublicShareLocation } from "./public-locations";
 import { createClientPortalRouter } from "./client-portal/routes";
+import { acceptRequestAttachmentScanReceipt, cleanupExpiredRequestAttachments, readRequestAttachmentScanReceipt } from "./client-portal/request-attachments";
+import { clientDelegatedShareCreationCapability } from "./client-portal/delegated-shares";
+import { handleProjectAlphaCatalogRequest } from "./project-alpha-catalog";
+import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
 export { friendlyBulkFailure } from "./bulk-download-errors";
 
 type Variables = { share: ShareRow };
@@ -81,7 +86,7 @@ function primaryDb(env: Pick<Env, "DELIVERY_DB">): D1Database {
 const lockedSecurityHeaders = secureHeaders({
   contentSecurityPolicy: {
     defaultSrc: ["'self'"], imgSrc: ["'self'", "https://ledgetopdroneservices.com", "https://*.cloudflarestream.com", "data:", "blob:"], styleSrc: ["'self'", "'unsafe-inline'"],
-    scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com", "https://api.mapbox.com", "https://events.mapbox.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com"], workerSrc: ["blob:"], frameAncestors: ["'none'"],
+    scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com", "https://*.r2.cloudflarestorage.com", "https://api.mapbox.com", "https://events.mapbox.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com"], workerSrc: ["blob:"], frameAncestors: ["'none'"],
     baseUri: ["'none'"], objectSrc: ["'none'"], formAction: ["'self'"],
   },
   referrerPolicy: "no-referrer",
@@ -92,7 +97,7 @@ const lockedSecurityHeaders = secureHeaders({
 const frameablePdfSecurityHeaders = secureHeaders({
   contentSecurityPolicy: {
     defaultSrc: ["'self'"], imgSrc: ["'self'", "https://ledgetopdroneservices.com", "https://*.cloudflarestream.com", "data:", "blob:"], styleSrc: ["'self'", "'unsafe-inline'"],
-    scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com", "https://api.mapbox.com", "https://events.mapbox.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com"], workerSrc: ["blob:"], frameAncestors: ["'self'"],
+    scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com", "https://*.r2.cloudflarestorage.com", "https://api.mapbox.com", "https://events.mapbox.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com"], workerSrc: ["blob:"], frameAncestors: ["'self'"],
     baseUri: ["'none'"], objectSrc: ["'none'"], formAction: ["'self'"],
   },
   referrerPolicy: "no-referrer",
@@ -262,6 +267,22 @@ function isTrashed(tombstones: Tombstone[], key: string): boolean {
   return tombstones.some(tombstone => tombstone.tombstone_kind === "exact" ? tombstone.physical_key === key : key.startsWith(tombstone.physical_key));
 }
 
+async function visiblePublicChildPrefixes(env:Env,prefix:string,candidates:readonly string[],tombstones:Tombstone[]):Promise<Set<string>>{
+  let indexed=new Set<string>(),visible=new Set<string>();
+  try{
+    const state=await indexedImmediateChildVisibility(primaryDb(env),candidates);
+    indexed=state.indexed;visible=state.visible;
+  }catch(error){
+    console.warn(JSON.stringify({event:"public-manifest.folder-index-visibility-fallback",candidateCount:candidates.length,message:error instanceof Error?error.message:"unknown"}));
+  }
+  const unindexed=candidates.filter(candidate=>!indexed.has(candidate));
+  if(unindexed.length){
+    const fallback=await visibleImmediateChildPrefixes(env.DATA_BUCKET,prefix,unindexed,object=>!isTrashed(tombstones,object.key));
+    for(const candidate of fallback)visible.add(candidate);
+  }
+  return visible;
+}
+
 async function assertNotTrashed(env: Env, key: string): Promise<void> {
   if (isTrashed(await loadTombstones(env), key)) throw new HTTPException(404, { message: "File not found" });
 }
@@ -281,6 +302,16 @@ export async function serveAppShell(request: Request, assets: Pick<Fetcher, "fet
 }
 
 app.get("/s/:publicId", c => serveAppShell(c.req.raw, c.env.ASSETS));
+
+// Client-delegated bearer links have a deliberately separate visible and API
+// namespace. Creation/session exchange stays unavailable until the internal
+// Operations signer binding is implemented; staff `/s` credentials are never
+// accepted here.
+app.get("/client-share/:publicId", c => serveAppShell(c.req.raw, c.env.ASSETS));
+app.post("/api/client-public/shares/:publicId/session", c => {
+  const capability = clientDelegatedShareCreationCapability(c.env);
+  return c.json({ error: "Client share links are not available", code: capability.reason }, 503);
+});
 
 app.post("/api/public/shares/:routeId/session", async c => {
   await enforceRateLimit(c, c.env.PUBLIC_SESSION_RATE_LIMITER, "session");
@@ -348,6 +379,7 @@ app.use("/api/public/shares/:publicId/*", async (c, next) => {
 });
 
 app.get("/api/public/shares/:publicId/manifest", async c => {
+  const started=Date.now();
   const share = c.get("share"); await requireAvailableFolder(c.env,share); const root = normalizeRoot(share.r2_prefix); const tombstones = await loadTombstones(c.env);
   const folderRef = c.req.query("folder") || ""; const relativeFolder = folderRef ? decodeItemRef(folderRef) : "";
   const prefix = relativeFolder ? `${keyWithinRoot(root, relativeFolder).replace(/\/$/, "")}/` : root;
@@ -357,7 +389,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   const aliases = await loadAliases(c.env, aliasKeys);
   const items: DeliveryItem[] = [];
   const candidateFolders=listed.delimitedPrefixes.filter(folderPrefix=>!isHiddenKey(folderPrefix)&&!isTrashed(tombstones,folderPrefix));
-  const visibleFolders=await visibleImmediateChildPrefixes(c.env.DATA_BUCKET,prefix,candidateFolders);
+  const visibleFolders=await visiblePublicChildPrefixes(c.env,prefix,candidateFolders,tombstones);
   for (const folderPrefix of listed.delimitedPrefixes) {
     if (!visibleFolders.has(folderPrefix)) continue;
     const relative = folderPrefix.slice(root.length).replace(/\/$/, ""); if (!relative) continue;
@@ -380,10 +412,12 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   const currentPhysical = relativeFolder ? prefix : root;
   const dropbox=cloudProviderEnabled(c.env,"dropbox"),google=cloudProviderEnabled(c.env,"google"); const manifest: DeliveryManifest = { share: { publicId: share.public_id!, label: share.label, clientName: share.client_name, projectName: aliases.get(root) || share.project_name, expiresAt: share.expires_at }, folder: { id: folderRef, name: aliases.get(currentPhysical) || relativeFolder.split("/").pop() || share.project_name, breadcrumbs }, items, nextCursor: listed.truncated ? listed.cursor : null, capabilities: { cloudTransfer: { dropbox, googleDrive: google, googlePicker: google } } };
   c.executionCtx.waitUntil(Promise.all([audit(c.env, c.req.raw, share.id, "manifest.viewed", folderRef), primaryDb(c.env).prepare("UPDATE shares SET access_count=access_count+1,last_accessed_at=datetime('now') WHERE id=?").bind(share.id).run()]));
+  c.header("Server-Timing",`manifest;dur=${Math.max(0,Date.now()-started)}`);
   return c.json(manifest);
 });
 
 app.get("/api/public/shares/:publicId/manifest/media", async c => {
+  const started=Date.now();
   const share = c.get("share"); await requireAvailableFolder(c.env, share); const root = normalizeRoot(share.r2_prefix); const tombstones = await loadTombstones(c.env);
   const folderRef = c.req.query("folder") || ""; const relativeFolder = folderRef ? decodeItemRef(folderRef) : "";
   const prefix = relativeFolder ? `${keyWithinRoot(root, relativeFolder).replace(/\/$/, "")}/` : root;
@@ -402,14 +436,16 @@ app.get("/api/public/shares/:publicId/manifest/media", async c => {
   ]);
   const thumbnails = new Map(thumbnailCandidates.map((candidate, index) => [candidate.id, thumbnailRecords[index]?.results[0] as ThumbnailJobRow | undefined]));
   const videos = new Map(videoCandidates.map((candidate, index) => [candidate.id, videoRecords[index]?.results[0] as { stream_uid?: string; stream_status?: string } | undefined]));
-  return c.json({ items: candidates.map(candidate => {
+  const response={ items: candidates.map(candidate => {
     const thumbnail = thumbnails.get(candidate.id); const video = videos.get(candidate.id);
     return {
       id: candidate.id,
       ...thumbnailFieldsForObject(candidate.key, candidate.kind, candidate.base, candidate.etag, thumbnail, candidate.size, candidate.contentType),
       ...(candidate.kind === "video" ? { previewStatus: video?.stream_status === "ready" && video.stream_uid ? "ready" : "processing" } : {}),
     };
-  }) });
+  }) };
+  c.header("Server-Timing",`media;dur=${Math.max(0,Date.now()-started)}`);
+  return c.json(response);
 });
 
 app.get("/api/public/shares/:publicId/download-summary", async c => {
@@ -740,7 +776,20 @@ export async function cleanupTemporaryZips(env: Env, now = Date.now()): Promise<
   await primaryDb(env).prepare("DELETE FROM bulk_download_quota WHERE window_start<?").bind(currentWindow - 48).run();
 }
 
-app.route("/api/client", createClientPortalRouter());
+app.post("/api/internal/client-request-attachments/:attachmentId/scanned", async c => {
+  const attachmentId = c.req.param("attachmentId");
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(attachmentId)) throw new HTTPException(404, { message: "Quarantined attachment not found" });
+  const receipt = await readRequestAttachmentScanReceipt(c.req.raw);
+  const status = await acceptRequestAttachmentScanReceipt(c.env, c.req.header("Authorization") || null, attachmentId, receipt);
+  return c.json({ ok: true, status });
+});
+
+// This path is not part of the browser API. It requires the dedicated
+// Project Alpha Access audience plus a timestamped signature over exact bytes.
+app.post("/api/internal/project-alpha/catalog-v2", c => handleProjectAlphaCatalogRequest(c.req.raw, c.env));
+app.post("/api/internal/project-alpha/portal-v2", c => handleProjectAlphaPortalProjectionRequest(c.req.raw, c.env));
+
+app.route("/api/client", createClientPortalRouter({ pricingHintProvider: projectAlphaPricingHintProvider }));
 app.get("/", c => c.redirect("/portal", 302));
 
 app.notFound(c => c.json({ error: "Not found" }, 404));
@@ -751,4 +800,4 @@ app.onError((error, c) => {
   return c.json({ error: status >= 500 ? "An unexpected error occurred" : error.message,...(code?{code}:{}) }, status);
 });
 
-export default { fetch: app.fetch, scheduled: (_event, env, ctx) => ctx.waitUntil(Promise.all([cleanupTemporaryZips(env),env.CLOUD_TRANSFER_TOKEN_SECRET?cleanupCloudTransfers(cloudEnv(env),{dropbox:createCloudProviderAdapter("dropbox",cloudEnv(env)),google:createCloudProviderAdapter("google",cloudEnv(env))}):Promise.resolve()]).then(()=>undefined)) } satisfies ExportedHandler<Env>;
+export default { fetch: app.fetch, scheduled: (_event, env, ctx) => ctx.waitUntil(Promise.all([cleanupTemporaryZips(env),cleanupExpiredRequestAttachments(env),env.CLOUD_TRANSFER_TOKEN_SECRET?cleanupCloudTransfers(cloudEnv(env),{dropbox:createCloudProviderAdapter("dropbox",cloudEnv(env)),google:createCloudProviderAdapter("google",cloudEnv(env))}):Promise.resolve()]).then(()=>undefined)) } satisfies ExportedHandler<Env>;

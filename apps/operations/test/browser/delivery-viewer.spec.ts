@@ -27,6 +27,10 @@ async function mockDeliveryViewer(page: Page, administrator = false): Promise<Vi
       } });
       return;
     }
+    if (url.pathname === "/api/delivery/access-revision") {
+      await route.fulfill({ json: { revision: "viewer-access-v1" } });
+      return;
+    }
     if (url.pathname === "/api/delivery/folders") {
       const prefix = url.searchParams.get("prefix") || "";
       await route.fulfill({ json: {
@@ -60,6 +64,10 @@ async function mockDeliveryViewer(page: Page, administrator = false): Promise<Vi
         ],
         nextCursor: null,
       } });
+      return;
+    }
+    if (url.pathname === "/api/delivery/folders/media") {
+      await route.fulfill({ json: { items: [] } });
       return;
     }
     if (url.pathname === "/api/delivery/folders/locations") {

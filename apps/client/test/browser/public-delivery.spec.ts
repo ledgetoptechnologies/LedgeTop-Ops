@@ -91,6 +91,12 @@ test("single-file Download is discoverable by hover and keyboard without exposin
   const card = page.locator(".item-card").filter({ hasText: "Root photo.jpg" });
   const preview = card.getByRole("button", { name: "Preview Root photo.jpg" });
   const download = card.getByRole("link", { name: "Download Root photo.jpg" });
+  const thumbnail = card.locator(`img[src="/thumb/${rootImage.id}.svg"]`);
+  await expect(thumbnail).toBeVisible();
+  await expect.poll(() => thumbnail.evaluate(image => {
+    const loaded = image as HTMLImageElement;
+    return loaded.complete && loaded.naturalWidth > 0;
+  })).toBe(true);
   await expect(download).toHaveAttribute("href", rootImage.downloadUrl);
   expect(await download.getAttribute("href")).not.toMatch(/r2\.cloudflarestorage\.com|storage\.cloudflareapi\.com/);
   if (page.viewportSize()!.width > 720) {
@@ -99,6 +105,12 @@ test("single-file Download is discoverable by hover and keyboard without exposin
   } else {
     await expect(download).toHaveCSS("opacity", "1");
   }
+  expect(await download.evaluate(element => {
+    const bounds = element.getBoundingClientRect();
+    const hit = document.elementFromPoint(bounds.left + bounds.width / 2, bounds.top + bounds.height / 2);
+    return hit === element || element.contains(hit);
+  })).toBe(true);
+  await expect(download).toHaveCSS("z-index", "2");
   await preview.focus(); await expect(download).toHaveCSS("opacity", "1");
   await page.keyboard.press("Tab"); await expect(download).toBeFocused();
   await expect(download).toHaveCSS("outline-style", "solid");
@@ -111,6 +123,66 @@ test("authoritative names paint before media metadata and aggregate independentl
   await expect(page.getByRole("button", { name: /Download all/ })).toContainText("2 files · 1.5 KB");
   await expect(page.locator(".thumbnail-skeleton")).toHaveCount(0);
   release(); await expect(page.locator(`img[src="/thumb/${rootImage.id}.svg"]`)).toBeVisible();
+});
+
+test("public pagination paints the first 500 items while page two is delayed and appends 1200 items on demand", async ({ page }) => {
+  let releasePageTwo!: () => void;
+  const pageTwoGate = new Promise<void>(resolve => { releasePageTwo = resolve; });
+  const pages = [500, 500, 200].map((count, pageIndex) => Array.from({ length: count }, (_, index) => ({
+    id: `file-${pageIndex}-${index}`,
+    name: `Photo ${pageIndex * 500 + index + 1}.jpg`,
+    kind: "image",
+    size: 1024,
+    uploadedAt: "2026-08-01T12:00:00Z",
+    sourceUrl: "/media/root.svg",
+    downloadUrl: `/api/public/shares/public/items/file-${pageIndex}-${index}/download`,
+    thumbnailState: "pending",
+    thumbnailFallbackKind: "image",
+  })));
+  const requested: Array<string | null> = [];
+  await page.route("**/api/public/shares/public/manifest**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/manifest/media")) return route.fulfill({ json: { items: [] } });
+    const cursor = url.searchParams.get("cursor");
+    requested.push(cursor);
+    if (cursor === "page-2") await pageTwoGate;
+    const pageIndex = cursor === "page-2" ? 1 : cursor === "page-3" ? 2 : 0;
+    await route.fulfill({ json: { share, folder: { id: "", name: "North Site", breadcrumbs: [] }, items: pages[pageIndex], nextCursor: pageIndex === 0 ? "page-2" : pageIndex === 1 ? "page-3" : null } });
+  });
+  await page.route("**/api/public/shares/public/download-summary**", route => route.fulfill({ json: { fileCount: 1200, totalBytes: 1200 * 1024, knownBytes: 1200 * 1024, unknownSizeCount: 0 } }));
+  await page.route("**/api/public/shares/public/locations**", route => route.fulfill({ json: { locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null } }));
+  await page.route("**/media/root.svg", route => route.fulfill({ contentType: "image/svg+xml", body: svg }));
+
+  await page.goto("/s/public?view=list");
+  await expect(page.getByText("Photo 1.jpg", { exact: true })).toBeVisible();
+  expect(requested).toEqual([null]);
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("Photo 1.jpg", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Loading more..." })).toBeDisabled();
+  releasePageTwo();
+  await expect(page.getByText("Photo 1000.jpg", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("Photo 1200.jpg", { exact: true })).toBeVisible();
+  await expect(page.locator(".item-row")).toHaveCount(1200);
+  expect(requested).toEqual([null, "page-2", "page-3"]);
+});
+
+test("protected revalidation failure clears cached share content", async ({ page }) => {
+  let manifestRequests = 0;
+  await page.route("**/api/public/shares/public/manifest**", async route => {
+    if (new URL(route.request().url()).pathname.endsWith("/manifest/media")) return route.fulfill({ json: { items: [] } });
+    manifestRequests += 1;
+    if (manifestRequests === 1) return fulfillManifest(route);
+    return route.fulfill({ status: 410, json: { error: "Share expired", code: "SHARED_FOLDER_UNAVAILABLE" } });
+  });
+  await page.route("**/api/public/shares/public/download-summary**", route => route.fulfill({ json: { fileCount: 1, totalBytes: 1024, knownBytes: 1024, unknownSizeCount: 0 } }));
+  await page.route("**/api/public/shares/public/locations**", route => route.fulfill({ json: { locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null } }));
+  await page.route("**/media/*.svg", route => route.fulfill({ contentType: "image/svg+xml", body: svg }));
+  await page.goto("/s/public?view=grid");
+  await expect(page.getByText("Root photo.jpg", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Open Folder" }).click();
+  await expect(page.getByText("This link is no longer valid", { exact: true })).toBeVisible();
+  await expect(page.getByText("Root photo.jpg", { exact: true })).toHaveCount(0);
 });
 
 test("public photo map is progressive, responsive, and absent without opted-in GPS", async ({ page }) => {
@@ -143,4 +215,18 @@ test("image viewer matches Operations interaction and keeps PDF/video controls u
   await page.keyboard.press("ArrowRight"); await expect(page.getByRole("dialog", { name: "Preview Flight.mp4" })).toBeVisible();
   await expect(page.locator(".zoomable-delivery-image")).toHaveCount(0); await expect(page.getByRole("button", { name: "Fit" })).toHaveCount(0);
   await page.keyboard.press("Escape"); await expect(page.getByRole("dialog")).toHaveCount(0); await expect(trigger).toBeFocused();
+});
+
+test("client-share namespace never boots the staff public delivery application", async ({ page }) => {
+  let staffPublicRequests = 0;
+  await page.route("**/api/public/**", async route => {
+    staffPublicRequests += 1;
+    await route.fulfill({ status: 418, body: "staff route must not be called" });
+  });
+  await page.goto("/client-share/clientpublicid0000000001#fragment-secret-must-not-be-read");
+  await expect(page.getByRole("heading", { name: "This client share link is not available yet" })).toBeVisible();
+  await expect(page.locator("[data-client-share-unavailable]")).toBeVisible();
+  await page.goto("/client-share/malformed");
+  await expect(page.locator("[data-client-share-unavailable]")).toBeVisible();
+  expect(staffPublicRequests).toBe(0);
 });

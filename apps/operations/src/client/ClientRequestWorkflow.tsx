@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import { api } from "./api";
 import { RequestMapViewer } from "./RequestMapViewer";
+import { RequestMapEditor, type EditableRequestArea, type EditableRequestPoi } from "./RequestMapEditor";
+import { ClientRequestAttachments } from "./ClientRequestAttachments";
 
 type RequestStatus =
   | "submitted"
@@ -36,6 +38,7 @@ export interface ClientRequestRecord {
   quote_document_number?: string | null;
   quote_total_minor?: number | null;
   quote_currency?: string | null;
+  quote_scope_stale_at?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -71,6 +74,41 @@ interface DetailResponse {
     status: string;
     created_at: string;
   }>;
+  areaRevisions: Array<{
+    id: string;
+    revision_number: number;
+    reason: string;
+    change_summary: string;
+    created_by: string;
+    created_at: string;
+  }>;
+  effectiveWorkArea: {
+    revisionNumber: number;
+    areaGeoJson: string | null;
+    poiPointsJson: string | null;
+    reason: string | null;
+    changeSummary: string | null;
+    createdBy: string | null;
+    createdAt: string | null;
+  };
+}
+
+interface ProjectAlphaDraftState {
+  capability: { enabled: boolean; reason: string | null };
+  receipt: {
+    requestRevision: number;
+    areaRevision: number;
+    createdAt: string;
+    editorUrl: string | null;
+    receiptId: string;
+    draftQuote: {
+      publicId: string;
+      documentNumber: string | null;
+      status: "draft";
+      version: number;
+      editorPath: string;
+    };
+  } | null;
 }
 
 function date(value: string | null | undefined) {
@@ -223,29 +261,33 @@ function ClientRequestDetail({
   const [data, setData] = useState<DetailResponse | null>(null),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false),
-    [scope, setScope] = useState(""),
-    [amount, setAmount] = useState(""),
-    [currency, setCurrency] = useState("USD");
+    [editingWorkArea, setEditingWorkArea] = useState(false),
+    [paDraft, setPaDraft] = useState<ProjectAlphaDraftState | null>(null),
+    [scope, setScope] = useState("");
   const load = () =>
     api<DetailResponse>(
       `/api/client-service-requests/${encodeURIComponent(requestId)}`,
     )
       .then((value) => {
         setData(value);
+        setEditingWorkArea(false);
         const draft = value.estimates.find((item) => ["draft", "change_requested"].includes(item.status));
         if (draft) {
           setScope(draft.scope_text);
-          setAmount(
-            draft.estimate_amount_minor === null
-              ? ""
-              : String(draft.estimate_amount_minor / 100),
-          );
-          setCurrency(draft.currency || "USD");
         }
       })
       .catch((caught) => setError(caught.message));
   useEffect(() => {
     void load();
+    void api<ProjectAlphaDraftState>(
+      `/api/client-service-requests/${encodeURIComponent(requestId)}/pa-draft`,
+    ).then(setPaDraft).catch(() => setPaDraft({
+      capability: {
+        enabled: false,
+        reason: "Project Alpha draft integration status is unavailable",
+      },
+      receipt: null,
+    }));
   }, [requestId]);
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -271,6 +313,15 @@ function ClientRequestDetail({
       </>
     );
   const request = data.request,
+    effectiveWorkArea = data.effectiveWorkArea || {
+      revisionNumber: 0,
+      areaGeoJson: request.area_geojson,
+      poiPointsJson: request.poi_points_json,
+      reason: null,
+      changeSummary: null,
+      createdBy: null,
+      createdAt: null,
+    },
     currentEstimate = data.estimates.find((item) =>
       ["draft", "ready", "accepted", "change_requested"].includes(item.status),
     );
@@ -297,8 +348,8 @@ function ClientRequestDetail({
                 ? currentEstimate.version
                 : undefined,
             scope,
-            amount: amount.trim() ? Number(amount) : null,
-            currency: amount.trim() ? currency : null,
+            amount: null,
+            currency: null,
             proposedFields: null,
             status,
           }),
@@ -315,6 +366,32 @@ function ClientRequestDetail({
       ),
     );
   };
+  const createProjectAlphaDraft = () => run(async () => {
+    const receipt = await api<ProjectAlphaDraftState["receipt"] & { idempotentReplay: boolean }>(
+      `/api/client-service-requests/${encodeURIComponent(requestId)}/pa-draft`,
+      { method: "POST" },
+    );
+    setPaDraft(current => ({
+      capability: current?.capability || { enabled: true, reason: null },
+      receipt,
+    }));
+  });
+  const saveWorkArea = (next: {
+    areaGeoJson: EditableRequestArea | null;
+    poiPoints: EditableRequestPoi[];
+    reason: string;
+  }) => run(() => api(
+    `/api/client-service-requests/${encodeURIComponent(requestId)}/work-area`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({
+        expectedUpdatedAt: request.updated_at,
+        expectedRevision: effectiveWorkArea.revisionNumber,
+        ...next,
+      }),
+    },
+  ));
   return (
     <section className="client-request-detail">
       <button className="portal-back" onClick={back}>
@@ -400,17 +477,69 @@ function ClientRequestDetail({
             </div>
           )}
         </Card>
-        <Card title="Submitted map">
-          <RequestMapViewer
-            token={mapToken}
-            areaJson={request.area_geojson}
-            poiJson={request.poi_points_json}
-            latitude={request.latitude}
-            longitude={request.longitude}
-            locationLabel={request.location_text}
-          />
+        <Card title="Work area">
+          {editingWorkArea ? (
+            <RequestMapEditor
+              token={mapToken}
+              areaJson={effectiveWorkArea.areaGeoJson}
+              poiJson={effectiveWorkArea.poiPointsJson}
+              busy={busy}
+              onCancel={() => setEditingWorkArea(false)}
+              onSave={(next) => void saveWorkArea(next)}
+            />
+          ) : (
+            <>
+              {effectiveWorkArea.revisionNumber > 0 && (
+                <div className="notice request-work-area-revision-notice">
+                  <strong>Staff revision {effectiveWorkArea.revisionNumber} is effective</strong>
+                  <span>{effectiveWorkArea.changeSummary}</span>
+                </div>
+              )}
+              <RequestMapViewer
+                token={mapToken}
+                areaJson={effectiveWorkArea.areaGeoJson}
+                poiJson={effectiveWorkArea.poiPointsJson}
+                latitude={request.latitude}
+                longitude={request.longitude}
+                locationLabel={request.location_text}
+              />
+              <button
+                type="button"
+                className="button-orange button-small"
+                disabled={busy || ["declined", "cancelled", "completed"].includes(request.status)}
+                onClick={() => setEditingWorkArea(true)}
+              >
+                Edit work area
+              </button>
+            </>
+          )}
+          {(effectiveWorkArea.areaGeoJson || effectiveWorkArea.poiPointsJson) && (
+            <div className="client-request-actions">
+              <a
+                className="button-ghost button-small"
+                href={`/api/client-service-requests/${encodeURIComponent(requestId)}/area.kml?revision=original`}
+                download
+              >
+                Download original KML
+              </a>
+              <a
+                className="button-ghost button-small"
+                href={`/api/client-service-requests/${encodeURIComponent(requestId)}/area.kml?revision=effective`}
+                download
+              >
+                Download current KML
+              </a>
+            </div>
+          )}
         </Card>
       </div>
+      <ClientRequestAttachments requestId={requestId} />
+      {request.quote_scope_stale_at && (
+        <div className="notice stale-notice" role="status">
+          <strong>Project Alpha scope needs review</strong>
+          <span>The linked commercial artifact predates the effective work-area revision and is no longer treated as current.</span>
+        </div>
+      )}
       <Card title="Operational estimate / scope proposal">
         <p className="muted">
           This is a non-binding planning estimate, not a Project Alpha quote,
@@ -450,26 +579,10 @@ function ClientRequestDetail({
                 onChange={(event) => setScope(event.target.value)}
               />
             </label>
-            <label>
-              Optional non-binding estimate
-              <input
-                type="number"
-                min="0"
-                step="0.01"
-                value={amount}
-                onChange={(event) => setAmount(event.target.value)}
-              />
-            </label>
-            <label>
-              Currency
-              <input
-                maxLength={3}
-                value={currency}
-                onChange={(event) =>
-                  setCurrency(event.target.value.toUpperCase())
-                }
-              />
-            </label>
+            <p className="muted">
+              Pricing is created and reviewed in Project Alpha. This proposal
+              covers scope, timing, assumptions, and deliverables only.
+            </p>
             <div>
               <button
                 className="button-ghost"
@@ -512,10 +625,28 @@ function ClientRequestDetail({
           {request.status === "accepted_pending_pa_linkage" && (
             <button
               className="button-orange"
+              disabled={busy || !paDraft?.capability.enabled}
+              onClick={() => void createProjectAlphaDraft()}
+            >
+              Create Project Alpha draft
+            </button>
+          )}
+          {request.status === "under_review" && (
+            <button
+              className="button-orange"
+              disabled={busy || !paDraft?.capability.enabled}
+              onClick={() => void createProjectAlphaDraft()}
+            >
+              Create Project Alpha draft
+            </button>
+          )}
+          {request.status === "accepted_pending_pa_linkage" && (
+            <button
+              className="button-ghost"
               disabled={busy}
               onClick={() => void linkQuote()}
             >
-              Verify manual PA quote
+              Link approved Project Alpha quote manually
             </button>
           )}
           {["submitted", "under_review"].includes(request.status) && (
@@ -537,6 +668,37 @@ function ClientRequestDetail({
             </button>
           )}
         </div>
+        {(["under_review", "accepted_pending_pa_linkage"] as string[]).includes(request.status) &&
+          paDraft && !paDraft.capability.enabled && (
+            <p className="muted">{paDraft.capability.reason}</p>
+          )}
+        {paDraft?.receipt && (
+          <div className="notice" role="status">
+            <strong>
+              Private Project Alpha draft {paDraft.receipt.draftQuote.documentNumber || paDraft.receipt.draftQuote.publicId}
+            </strong>
+            <span>
+              Project Alpha owns pricing, approval, sending, invoicing, and payment.
+            </span>
+            {paDraft.receipt.editorUrl ? (
+              <a
+                className="button-ghost button-small"
+                href={paDraft.receipt.editorUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open draft in Project Alpha
+              </a>
+            ) : (
+              <span className="muted">Project Alpha editor link unavailable</span>
+            )}
+          </div>
+        )}
+        {request.status === "accepted_pending_pa_linkage" && (
+          <p className="muted">
+            Manual fallback verifies an already approved Project Alpha quote; it does not create or price one in LTDS.
+          </p>
+        )}
         {request.quote_document_number && (
           <p>
             <strong>Verified Project Alpha quote:</strong>{" "}
@@ -597,6 +759,21 @@ function ClientRequestDetail({
               title="No revisions"
               detail="Revision records will appear here."
             />
+          )}
+        </Card>
+        <Card title="Work-area revisions">
+          {(data.areaRevisions || []).length ? (
+            <ol className="request-history">
+              {(data.areaRevisions || []).map((revision) => (
+                <li key={revision.id}>
+                  <strong>Staff revision {revision.revision_number}</strong>
+                  <span>{revision.change_summary}</span>
+                  <small>{revision.reason} · {date(revision.created_at)}</small>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="muted">No staff work-area revisions. The client submission is effective.</p>
           )}
         </Card>
         <Card title="Status & audit history">

@@ -7,7 +7,9 @@ import { d1ClientPortalRepository } from "./repository";
 import type {
   ClientPortalRepository,
   ClientPortalSession,
+  ClientPricingHintProvider,
   ResolveClientPrincipal,
+  VerifiedClientPrincipal,
 } from "./types";
 import {
   ClientAccessConfigurationError,
@@ -15,15 +17,56 @@ import {
   resolveCloudflareClientPrincipal,
 } from "./access-identity";
 import { validateRequestArea } from "./request-area";
+import {
+  abortRequestAttachment,
+  canonicalRequestAttachmentEtag,
+  checkpointRequestAttachment,
+  completeRequestAttachment,
+  getAuthorizedRequestAttachment,
+  getSubmittedRequestAttachment,
+  initializeRequestAttachment,
+  listRequestAttachments,
+  listSubmittedRequestAttachments,
+  presignRequestAttachmentPart,
+  requestAttachmentCheckpoints,
+  requestAttachmentPartLength,
+  requestAttachmentsAvailable,
+  REQUEST_ATTACHMENT_PART_BYTES,
+} from "./request-attachments";
+import {
+  acceptPortalWorkspaceInvitation,
+  listPortalWorkspaceHierarchy,
+  listPortalWorkspaces,
+  portalHierarchyV2Enabled,
+} from "./workspace-v2";
+import {
+  authorizeClientShareDelegation,
+  clientDelegatedShareCreationCapability,
+  consumeClientDelegatedShareRate,
+  listClientDelegatedShares,
+  revokeClientDelegatedShare,
+} from "./delegated-shares";
+import {
+  createWorkspaceInvitation,
+  listWorkspaceAccess,
+  revokeWorkspaceInvitation,
+  suspendWorkspaceMember,
+  workspaceMembershipManagementEnabled,
+} from "./workspace-memberships";
 
 interface ClientPortalDependencies {
   resolvePrincipal?: ResolveClientPrincipal;
   repository?: ClientPortalRepository;
+  pricingHintProvider?: ClientPricingHintProvider;
 }
 
-type ClientPortalVariables = { clientSession: ClientPortalSession };
+type ClientPortalVariables = {
+  clientSession: ClientPortalSession;
+  clientPrincipal: VerifiedClientPrincipal;
+};
 
 const MAX_SERVICE_REQUEST_BYTES = 16 * 1024;
+const MAX_SERVICE_REQUEST_DRAFT_BYTES = 48 * 1024;
 const SERVICE_REQUEST_RATE_LIMIT_SECONDS = 60;
 const opaqueId = z
   .string()
@@ -106,7 +149,84 @@ const estimateResponseBody = z
         message: "Describe the requested change",
       });
   });
+const serviceRequestDraftBody = z
+  .object({
+    projectId: opaqueId.nullable(),
+    requestType: z.enum(["flight", "service"]),
+    title: z.string().trim().max(160),
+    details: z.string().trim().max(5000),
+    location: z.string().trim().min(1).max(240).nullable(),
+    preferredStartAt: z.iso.datetime({ offset: true }).nullable(),
+    deliverables: z.string().trim().min(1).max(2000).nullable(),
+    siteContactName: z.string().trim().min(1).max(160).nullable(),
+    siteContactEmail: z.string().trim().email().max(320).nullable(),
+    siteContactPhone: z.string().trim().min(3).max(64).nullable(),
+    desiredCompletionAt: z.iso.datetime({ offset: true }).nullable(),
+    latitude: z.number().finite().min(-90).max(90).nullable(),
+    longitude: z.number().finite().min(-180).max(180).nullable(),
+    areaGeoJson: z.unknown().nullable(),
+    poiPoints: z.array(z.object({
+      longitude: z.number().finite().min(-180).max(180),
+      latitude: z.number().finite().min(-90).max(90),
+      label: z.string().trim().min(1).max(100).nullable(),
+    }).strict()).max(20),
+    services: z.array(z.object({
+      publicId: opaqueId,
+      answers: z.record(z.string().max(64), z.unknown()),
+    }).strict()).max(10),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    if ((value.latitude === null) !== (value.longitude === null))
+      context.addIssue({ code: "custom", message: "Latitude and longitude must be provided together" });
+    if (new Set(value.services.map(service => service.publicId)).size !== value.services.length)
+      context.addIssue({ code: "custom", message: "Each service can be selected only once" });
+    try { validateRequestArea(value.areaGeoJson); }
+    catch { context.addIssue({ code: "custom", message: "The selected map area is invalid" }); }
+  });
+const draftVersionHeader = z.coerce.number().int().positive();
+const delegatedShareCreateBody = z.object({
+  delegationId: opaqueId,
+  folderTargetId: opaqueId,
+  label: z.string().trim().min(1).max(160).nullable().optional(),
+  expiresAt: z.iso.datetime({ offset: true }),
+  accessCode: z.string().min(8).max(128).optional(),
+}).strict();
+const pricingHint = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("starting_at"), currency: z.string().regex(/^[A-Z]{3}$/),
+    startingAtMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    disclaimer: z.string().trim().min(1).max(500), basisVersion: z.string().trim().min(1).max(128), validUntil: z.iso.datetime({ offset: true }),
+  }).strict(),
+  z.object({
+    kind: z.literal("typical_range"), currency: z.string().regex(/^[A-Z]{3}$/),
+    minimumMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    maximumMinor: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+    disclaimer: z.string().trim().min(1).max(500), basisVersion: z.string().trim().min(1).max(128), validUntil: z.iso.datetime({ offset: true }),
+  }).strict().refine(value => value.maximumMinor >= value.minimumMinor),
+]);
 const notificationActionBody = z.object({ action: z.enum(["read", "dismiss"]) }).strict();
+const attachmentInitBody = z.object({
+  clientUploadId: idempotencyKey,
+  name: z.string().min(1).max(255),
+  contentType: z.string().min(1).max(100),
+  size: z.number().int().positive(),
+}).strict();
+const attachmentPartTicketBody = z.object({ partNumber: z.number().int().min(1).max(4) }).strict();
+const attachmentCheckpointBody = z.object({ etag: z.string().min(1).max(128), size: z.number().int().positive() }).strict();
+const attachmentCompleteBody = z.object({ parts: z.array(z.object({
+  partNumber: z.number().int().min(1).max(4), etag: z.string().min(1).max(128),
+}).strict()).min(1).max(4) }).strict();
+const workspaceInvitationAcceptanceBody = z.object({
+  token: z.string().min(32).max(256).regex(/^[A-Za-z0-9_-]+$/),
+}).strict();
+const workspaceInvitationBody = z.object({
+  email: z.string().trim().email().max(320),
+  projectPublicId: opaqueId.optional(),
+  organizationWide: z.boolean().optional(),
+  confirmOrganizationWide: z.boolean().optional(),
+  capabilities: z.array(z.enum(["workspace.view", "delivery.view", "request.create"])).min(1).max(3),
+}).strict();
 
 const cloudflareClientIdentityProvider: ResolveClientPrincipal =
   resolveCloudflareClientPrincipal;
@@ -144,13 +264,13 @@ function requireSameRequestOrigin(
   }
 }
 
-async function readBoundedJson(request: Request): Promise<unknown> {
+async function readBoundedJson(request: Request, maximumBytes = MAX_SERVICE_REQUEST_BYTES): Promise<unknown> {
   const declaredLength = request.headers.get("Content-Length");
   if (declaredLength !== null) {
     const length = Number(declaredLength);
     if (!Number.isSafeInteger(length) || length < 0)
       throw new HTTPException(400, { message: "Content-Length is invalid" });
-    if (length > MAX_SERVICE_REQUEST_BYTES)
+    if (length > maximumBytes)
       throw new HTTPException(413, {
         message: "The service request is too large",
       });
@@ -167,7 +287,7 @@ async function readBoundedJson(request: Request): Promise<unknown> {
     const { done, value } = await reader.read();
     if (done) break;
     total += value.byteLength;
-    if (total > MAX_SERVICE_REQUEST_BYTES) {
+    if (total > maximumBytes) {
       await reader.cancel();
       throw new HTTPException(413, {
         message: "The service request is too large",
@@ -225,11 +345,21 @@ export function createClientPortalRouter(
         message: "Client authentication is required",
       });
     const session = await repository.resolveSession(c.env, principal);
-    if (!session)
+    const workspaceV2Request = /\/v2\/(?:workspaces|invitations)(?:\/|$)/.test(c.req.path);
+    if (!session && !(portalHierarchyV2Enabled(c.env) && workspaceV2Request))
       throw new HTTPException(403, {
         message: "Client access is not provisioned",
       });
-    c.set("clientSession", session);
+    // Workspace-v2 can resolve a global identity that deliberately has no
+    // single legacy account. The sentinel is unreachable from legacy routes.
+    c.set("clientSession", session ?? {
+      accountId: "",
+      identityId: "",
+      displayName: "",
+      role: "member",
+      canViewBilling: false,
+    });
+    c.set("clientPrincipal", principal);
     await next();
   });
 
@@ -241,6 +371,13 @@ export function createClientPortalRouter(
         manageTeam:
           c.env.CLIENT_PORTAL_TEAM_ENABLED === "true" &&
           session.role === "manager",
+        requestV2: c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED === "true",
+        requestAttachments:
+          c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED === "true" &&
+          requestAttachmentsAvailable(c.env),
+        workspaceHierarchyV2: portalHierarchyV2Enabled(c.env),
+        workspaceMembershipManagement: workspaceMembershipManagementEnabled(c.env),
+        delegatedShares: clientDelegatedShareCreationCapability(c.env).enabled,
         viewBilling: session.canViewBilling,
       },
     });
@@ -248,6 +385,146 @@ export function createClientPortalRouter(
   router.get("/map-config", (c) =>
     c.json({ mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null }),
   );
+
+  router.get("/v2/workspaces", async (c) => {
+    if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    return c.json({ workspaces: await listPortalWorkspaces(c.env, c.get("clientPrincipal")) });
+  });
+
+  router.post("/v2/workspaces/:workspaceId/activate", async (c) => {
+    if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
+    if (!workspaceId.success) throw new HTTPException(404, { message: "Workspace not found" });
+    const workspace = (await listPortalWorkspaces(c.env, c.get("clientPrincipal")))
+      .find(candidate => candidate.id === workspaceId.data);
+    if (!workspace) throw new HTTPException(404, { message: "Workspace not found" });
+    // Selection is client-held; every later request still reauthorizes the
+    // workspace. This endpoint intentionally creates no durable ambient scope.
+    return c.json({ workspace });
+  });
+
+  router.get("/v2/workspaces/:workspaceId/hierarchy", async (c) => {
+    if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
+    const search = c.req.query("q") ?? null;
+    if (!workspaceId.success || (search !== null && search.length > 100))
+      throw new HTTPException(400, { message: "Hierarchy query is invalid" });
+    const entries = await listPortalWorkspaceHierarchy(
+      c.env,
+      c.get("clientPrincipal"),
+      workspaceId.data,
+      search,
+    );
+    if (!entries) throw new HTTPException(404, { message: "Workspace not found" });
+    return c.json({ entries });
+  });
+
+  router.get("/v2/workspaces/:workspaceId/delegated-shares", async (c) => {
+    if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
+    if (!workspaceId.success) throw new HTTPException(404, { message: "Workspace not found" });
+    const shares = await listClientDelegatedShares(c.env, c.get("clientPrincipal"), workspaceId.data);
+    if (!shares) throw new HTTPException(404, { message: "Workspace not found" });
+    return c.json({ shares, creation: clientDelegatedShareCreationCapability(c.env) });
+  });
+
+  router.post("/v2/workspaces/:workspaceId/delegated-shares", async (c) => {
+    if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
+    const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    const input = delegatedShareCreateBody.safeParse(await readBoundedJson(c.req.raw, 4096));
+    if (!workspaceId.success || !key.success || !input.success)
+      throw new HTTPException(400, { message: "Delegated share request is invalid" });
+    // Capability is intentionally hard-disabled. Check it before delegation
+    // authorization or durable rate accounting so unavailable creation has no
+    // D1 mutation and cannot be mistaken for a partially queued share.
+    if (!clientDelegatedShareCreationCapability(c.env).enabled)
+      throw new HTTPException(503, { message: "Client share creation is not configured" });
+    const delegation = await authorizeClientShareDelegation(
+      c.env, c.get("clientPrincipal"), workspaceId.data,
+      input.data.delegationId, input.data.folderTargetId,
+    );
+    if (!delegation) throw new HTTPException(404, { message: "Share delegation not found" });
+    if (!(await consumeClientDelegatedShareRate(c.env, workspaceId.data, delegation.identityId, "create")))
+      throw new HTTPException(429, { message: "Too many share requests" });
+    // Unreachable while the capability is disabled. The future implementation
+    // must call the internal Operations signer and persist its receipt here.
+    throw new HTTPException(503, { message: "Client share creation is not configured" });
+  });
+
+  router.delete("/v2/workspaces/:workspaceId/delegated-shares/:shareId", async (c) => {
+    if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
+    const shareId = opaqueId.safeParse(c.req.param("shareId"));
+    const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    if (!workspaceId.success || !shareId.success || !key.success)
+      throw new HTTPException(400, { message: "Share revocation is invalid" });
+    const outcome = await revokeClientDelegatedShare(
+      c.env, c.get("clientPrincipal"), workspaceId.data, shareId.data, key.data,
+    );
+    if (outcome === "denied") throw new HTTPException(404, { message: "Share not found" });
+    return c.json({ revoked: true, replayed: outcome === "replayed" });
+  });
+
+  router.get("/v2/workspaces/:workspaceId/access", async (c) => {
+    if (!workspaceMembershipManagementEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
+    if (!workspaceId.success) throw new HTTPException(404, { message: "Workspace not found" });
+    const access = await listWorkspaceAccess(c.env, c.get("clientPrincipal"), workspaceId.data);
+    if (!access) throw new HTTPException(404, { message: "Workspace not found" });
+    return c.json(access);
+  });
+
+  router.post("/v2/workspaces/:workspaceId/invitations", async (c) => {
+    if (!workspaceMembershipManagementEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
+    const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    const input = workspaceInvitationBody.safeParse(await readBoundedJson(c.req.raw, 4096));
+    if (!workspaceId.success || !key.success || !input.success) throw new HTTPException(400, { message: "Invitation is invalid" });
+    const result = await createWorkspaceInvitation(c.env, c.get("clientPrincipal"), workspaceId.data, input.data, key.data);
+    if (result.outcome === "denied") throw new HTTPException(404, { message: "Workspace not found" });
+    if (result.outcome === "invalid") throw new HTTPException(400, { message: "Invitation is invalid" });
+    if (result.outcome === "conflict") throw new HTTPException(409, { message: "Idempotency key was already used" });
+    if (result.outcome === "rate_limited") throw new HTTPException(429, { message: "Too many invitations. Try again later." });
+    return c.json(result, result.outcome === "created" ? 201 : 200);
+  });
+
+  router.delete("/v2/workspaces/:workspaceId/invitations/:invitationId", async (c) => {
+    if (!workspaceMembershipManagementEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
+    const invitationId = opaqueId.safeParse(c.req.param("invitationId"));
+    if (!workspaceId.success || !invitationId.success || !(await revokeWorkspaceInvitation(c.env, c.get("clientPrincipal"), workspaceId.data, invitationId.data)))
+      throw new HTTPException(404, { message: "Invitation not found" });
+    return c.body(null, 204);
+  });
+
+  router.delete("/v2/workspaces/:workspaceId/members/:identityId", async (c) => {
+    if (!workspaceMembershipManagementEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
+    const identityId = opaqueId.safeParse(c.req.param("identityId"));
+    if (!workspaceId.success || !identityId.success) throw new HTTPException(404, { message: "Member not found" });
+    const outcome = await suspendWorkspaceMember(c.env, c.get("clientPrincipal"), workspaceId.data, identityId.data);
+    if (outcome === "last_manager") throw new HTTPException(409, { message: "Transfer manager access before suspending the last manager" });
+    if (outcome === "managed_source") throw new HTTPException(409, { message: "This member is managed in Project Alpha and must be removed there" });
+    if (outcome !== "suspended") throw new HTTPException(404, { message: "Member not found" });
+    return c.body(null, 204);
+  });
+
+  router.post("/v2/invitations/accept", async (c) => {
+    if (!workspaceMembershipManagementEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const input = workspaceInvitationAcceptanceBody.safeParse(await readBoundedJson(c.req.raw, 1024));
+    if (!input.success) throw new HTTPException(400, { message: "Invitation is invalid" });
+    const outcome = await acceptPortalWorkspaceInvitation(c.env, c.get("clientPrincipal"), input.data.token);
+    if (outcome === "denied") throw new HTTPException(404, { message: "Invitation not found" });
+    return c.json({ accepted: true, replayed: outcome === "replayed" });
+  });
 
   router.get("/notifications", async (c) => {
     const cursor = c.req.query("cursor") || null;
@@ -445,6 +722,246 @@ export function createClientPortalRouter(
     if (!request)
       throw new HTTPException(404, { message: "Service request not found" });
     return c.json({ request });
+  });
+
+  router.get("/service-requests/:requestId/attachments", async (c) => {
+    if (c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
+    const requestId = opaqueId.safeParse(c.req.param("requestId"));
+    if (!requestId.success) throw new HTTPException(404, { message: "Service request not found" });
+    const rows = await listSubmittedRequestAttachments(c.env, c.get("clientSession"), requestId.data);
+    if (!rows) throw new HTTPException(404, { message: "Service request not found" });
+    return c.json({ attachments: rows.map(row => ({ id: row.id, name: row.original_name,
+      contentType: row.content_type, size: row.actual_size ?? row.declared_size,
+      downloadPath: `/api/client/service-requests/${encodeURIComponent(requestId.data)}/attachments/${encodeURIComponent(row.id)}/download`,
+    })) });
+  });
+
+  router.get("/service-requests/:requestId/attachments/:attachmentId/download", async (c) => {
+    if (c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
+    const requestId = opaqueId.safeParse(c.req.param("requestId"));
+    const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
+    if (!requestId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
+    const row = await getSubmittedRequestAttachment(c.env, c.get("clientSession"), requestId.data, attachmentId.data);
+    if (!row) throw new HTTPException(404, { message: "Attachment not found" });
+    const object = await c.env.DATA_BUCKET.get(row.object_key);
+    if (!object || object.size !== row.actual_size) throw new HTTPException(404, { message: "Attachment not found" });
+    const safeName = row.original_name.replace(/[\r\n"\\]/g, "_").slice(0, 200) || "attachment";
+    const headers = new Headers({
+      "Content-Type": row.content_type,
+      "Content-Length": String(object.size),
+      "Content-Disposition": `attachment; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(row.original_name)}`,
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+      "ETag": object.httpEtag,
+    });
+    return new Response(object.body, { headers });
+  });
+
+  router.use("/service-catalog", async (c, next) => {
+    if (c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
+    await next();
+  });
+  router.use("/service-request-drafts", async (c, next) => {
+    if (c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
+    await next();
+  });
+  router.use("/service-request-drafts/*", async (c, next) => {
+    if (c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
+    await next();
+  });
+
+  router.get("/service-catalog", async (c) => {
+    if (!repository.listServiceCatalog)
+      throw new HTTPException(503, { message: "The service catalog is not configured" });
+    return c.json({ services: await repository.listServiceCatalog(c.env, c.get("clientSession")) });
+  });
+
+  router.post("/service-request-drafts", async (c) => {
+    const portalOrigin = configuredPortalOrigin(c.env);
+    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    const parsed = serviceRequestDraftBody.safeParse(await readBoundedJson(c.req.raw, MAX_SERVICE_REQUEST_DRAFT_BYTES));
+    if (!key.success || !parsed.success)
+      throw new HTTPException(400, { message: "A valid draft and Idempotency-Key header are required" });
+    if (!repository.createServiceRequestDraft)
+      throw new HTTPException(503, { message: "Service request drafts are not configured" });
+    const result = await repository.createServiceRequestDraft(c.env, c.get("clientSession"), {
+      ...parsed.data,
+      areaGeoJson: validateRequestArea(parsed.data.areaGeoJson),
+    }, key.data);
+    if (!result)
+      throw new HTTPException(404, { message: "Project or service catalog item not found" });
+    if (result.kind === "conflict")
+      throw new HTTPException(409, { message: "This Idempotency-Key was already used for different draft content" });
+    return c.json({ draft: result.draft }, result.kind === "created" ? 201 : 200);
+  });
+
+  router.get("/service-request-drafts/:draftId", async (c) => {
+    const draftId = opaqueId.safeParse(c.req.param("draftId"));
+    if (!draftId.success || !repository.getServiceRequestDraft)
+      throw new HTTPException(404, { message: "Service request draft not found" });
+    const draft = await repository.getServiceRequestDraft(c.env, c.get("clientSession"), draftId.data);
+    if (!draft) throw new HTTPException(404, { message: "Service request draft not found" });
+    return c.json({ draft });
+  });
+
+  router.get("/service-request-drafts/:draftId/attachments", async (c) => {
+    const draftId = opaqueId.safeParse(c.req.param("draftId"));
+    if (!draftId.success) throw new HTTPException(404, { message: "Service request draft not found" });
+    const rows = await listRequestAttachments(c.env, c.get("clientSession"), draftId.data);
+    if (!rows) throw new HTTPException(404, { message: "Service request draft not found" });
+    return c.json({ attachments: rows.map(row => ({
+      id: row.id, name: row.original_name, contentType: row.content_type, size: row.declared_size,
+      status: row.status, submitted: row.submitted_request_id !== null,
+    })) });
+  });
+
+  router.post("/service-request-drafts/:draftId/attachments", async (c) => {
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const draftId = opaqueId.safeParse(c.req.param("draftId"));
+    const input = attachmentInitBody.safeParse(await readBoundedJson(c.req.raw));
+    if (!draftId.success) throw new HTTPException(404, { message: "Service request draft not found" });
+    if (!input.success) throw new HTTPException(400, { message: "The attachment upload is invalid" });
+    const initialized = await initializeRequestAttachment(c.env, c.get("clientSession"), draftId.data, input.data);
+    return c.json({ attachmentId: initialized.row.id, name: initialized.row.original_name,
+      contentType: initialized.row.content_type, size: initialized.row.declared_size,
+      status: initialized.row.status, partSize: REQUEST_ATTACHMENT_PART_BYTES,
+      completedParts: await requestAttachmentCheckpoints(c.env, initialized.row.id), resumed: initialized.resumed }, initialized.resumed ? 200 : 201);
+  });
+
+  router.get("/service-request-drafts/:draftId/attachments/:attachmentId", async (c) => {
+    const draftId = opaqueId.safeParse(c.req.param("draftId"));
+    const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
+    if (!draftId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
+    const row = await getAuthorizedRequestAttachment(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    if (!row) throw new HTTPException(404, { message: "Attachment not found" });
+    return c.json({ attachmentId: row.id, name: row.original_name, contentType: row.content_type,
+      size: row.declared_size, status: row.status, partSize: REQUEST_ATTACHMENT_PART_BYTES,
+      completedParts: await requestAttachmentCheckpoints(c.env, row.id) });
+  });
+
+  router.post("/service-request-drafts/:draftId/attachments/:attachmentId/part-ticket", async (c) => {
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const draftId = opaqueId.safeParse(c.req.param("draftId"));
+    const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
+    const input = attachmentPartTicketBody.safeParse(await readBoundedJson(c.req.raw));
+    if (!draftId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
+    if (!input.success) throw new HTTPException(400, { message: "The attachment part is invalid" });
+    const row = await getAuthorizedRequestAttachment(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    if (!row) throw new HTTPException(404, { message: "Attachment not found" });
+    if (Date.parse(row.expires_at) <= Date.now()) throw new HTTPException(410, { message: "The attachment upload expired" });
+    if (row.status !== "uploading" || row.multipart_upload_id.startsWith("pending:")) throw new HTTPException(409, { message: "The attachment is not accepting parts" });
+    const contentLength = requestAttachmentPartLength(row.declared_size, input.data.partNumber);
+    const ticket = await presignRequestAttachmentPart({ env: c.env, key: row.object_key, uploadId: row.multipart_upload_id,
+      partNumber: input.data.partNumber, contentLength, contentType: row.content_type });
+    return c.json({ ...ticket, method: "PUT", partNumber: input.data.partNumber, contentLength,
+      headers: { "Content-Type": row.content_type }, contentType: row.content_type });
+  });
+
+  router.put("/service-request-drafts/:draftId/attachments/:attachmentId/parts/:partNumber", async (c) => {
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const draftId = opaqueId.safeParse(c.req.param("draftId"));
+    const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
+    const partNumber = z.coerce.number().int().min(1).max(4).safeParse(c.req.param("partNumber"));
+    const input = attachmentCheckpointBody.safeParse(await readBoundedJson(c.req.raw));
+    if (!draftId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
+    if (!partNumber.success || !input.success) throw new HTTPException(400, { message: "The attachment checkpoint is invalid" });
+    const row = await getAuthorizedRequestAttachment(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    if (!row) throw new HTTPException(404, { message: "Attachment not found" });
+    if (Date.parse(row.expires_at) <= Date.now()) throw new HTTPException(410, { message: "The attachment upload expired" });
+    return c.json(await checkpointRequestAttachment(c.env, row, partNumber.data, input.data.etag, input.data.size));
+  });
+
+  router.post("/service-request-drafts/:draftId/attachments/:attachmentId/complete", async (c) => {
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const draftId = opaqueId.safeParse(c.req.param("draftId"));
+    const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
+    const input = attachmentCompleteBody.safeParse(await readBoundedJson(c.req.raw));
+    if (!draftId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
+    if (!input.success) throw new HTTPException(400, { message: "The attachment completion request is invalid" });
+    const row = await getAuthorizedRequestAttachment(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    if (!row) throw new HTTPException(404, { message: "Attachment not found" });
+    if (Date.parse(row.expires_at) <= Date.now()) throw new HTTPException(410, { message: "The attachment upload expired" });
+    const parts = input.data.parts.map(part => ({ partNumber: part.partNumber, etag: canonicalRequestAttachmentEtag(part.etag) }))
+      .map(part => { if (!part.etag) throw new HTTPException(400, { message: "The attachment ETag is invalid" }); return { partNumber: part.partNumber, etag: part.etag }; })
+      .sort((left, right) => left.partNumber - right.partNumber);
+    return c.json(await completeRequestAttachment(c.env, row, parts));
+  });
+
+  router.delete("/service-request-drafts/:draftId/attachments/:attachmentId", async (c) => {
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const draftId = opaqueId.safeParse(c.req.param("draftId"));
+    const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
+    if (!draftId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
+    const row = await getAuthorizedRequestAttachment(c.env, c.get("clientSession"), draftId.data, attachmentId.data);
+    if (!row) throw new HTTPException(404, { message: "Attachment not found" });
+    return c.json({ ok: true, status: "aborted", ...await abortRequestAttachment(c.env, row) });
+  });
+
+  router.put("/service-request-drafts/:draftId", async (c) => {
+    const portalOrigin = configuredPortalOrigin(c.env);
+    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    const draftId = opaqueId.safeParse(c.req.param("draftId"));
+    const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    const version = draftVersionHeader.safeParse(c.req.header("If-Match"));
+    const parsed = serviceRequestDraftBody.safeParse(await readBoundedJson(c.req.raw, MAX_SERVICE_REQUEST_DRAFT_BYTES));
+    if (!draftId.success)
+      throw new HTTPException(404, { message: "Service request draft not found" });
+    if (!key.success || !version.success || !parsed.success)
+      throw new HTTPException(400, { message: "A valid draft, Idempotency-Key, and numeric If-Match header are required" });
+    if (!repository.saveServiceRequestDraft)
+      throw new HTTPException(503, { message: "Service request drafts are not configured" });
+    const result = await repository.saveServiceRequestDraft(c.env, c.get("clientSession"), draftId.data, version.data, {
+      ...parsed.data,
+      areaGeoJson: validateRequestArea(parsed.data.areaGeoJson),
+    }, key.data);
+    if (!result)
+      throw new HTTPException(404, { message: "Service request draft not found" });
+    if (result.kind === "conflict")
+      throw new HTTPException(409, { message: "The draft changed or this Idempotency-Key was reused" });
+    return c.json({ draft: result.draft });
+  });
+
+  // Pricing hints never accept browser-supplied area or money. A provider sees
+  // only the authorized stored draft and failures deliberately do not block a
+  // client from continuing to review or submit the request.
+  router.get("/service-request-drafts/:draftId/pricing-hint", async (c) => {
+    const draftId = opaqueId.safeParse(c.req.param("draftId"));
+    if (!draftId.success || !repository.getServiceRequestDraft)
+      throw new HTTPException(404, { message: "Service request draft not found" });
+    const draft = await repository.getServiceRequestDraft(c.env, c.get("clientSession"), draftId.data);
+    if (!draft) throw new HTTPException(404, { message: "Service request draft not found" });
+    if (!dependencies.pricingHintProvider)
+      return c.json({ available: false, hint: null });
+    try {
+      const provided = await dependencies.pricingHintProvider({ services: draft.services, areaSquareMeters: draft.areaSquareMeters, areaAcres: draft.areaAcres }, c.env);
+      const validated = pricingHint.safeParse(provided);
+      if (!validated.success) return c.json({ available: false, hint: null });
+      return c.json({ available: true, hint: validated.data });
+    } catch {
+      return c.json({ available: false, hint: null });
+    }
+  });
+
+  router.post("/service-request-drafts/:draftId/submit", async (c) => {
+    const portalOrigin = configuredPortalOrigin(c.env);
+    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    const draftId = opaqueId.safeParse(c.req.param("draftId"));
+    const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    const version = draftVersionHeader.safeParse(c.req.header("If-Match"));
+    if (!draftId.success)
+      throw new HTTPException(404, { message: "Service request draft not found" });
+    if (!key.success || !version.success)
+      throw new HTTPException(400, { message: "Valid Idempotency-Key and numeric If-Match headers are required" });
+    if (!repository.submitServiceRequestDraft)
+      throw new HTTPException(503, { message: "Service request drafts are not configured" });
+    const result = await repository.submitServiceRequestDraft(c.env, c.get("clientSession"), draftId.data, version.data, key.data);
+    if (!result) throw new HTTPException(404, { message: "Service request draft not found" });
+    if (result.kind === "incomplete")
+      throw new HTTPException(422, { message: "Complete the required request and service fields before submitting" });
+    if (result.kind === "conflict")
+      throw new HTTPException(409, { message: "The draft changed or was already submitted" });
+    return c.json({ request: result.request }, result.kind === "submitted" ? 201 : 200);
   });
 
   router.get("/team", async (c) => {

@@ -55,7 +55,17 @@ describe("direct authenticated client folder grants", () => {
     const migrationsDirectory = fileURLToPath(new URL("../../client/migrations/", import.meta.url));
     for (const migration of readdirSync(migrationsDirectory).filter(name => name.endsWith(".sql")).sort()) {
       const sql = readFileSync(new URL(`../../client/migrations/${migration}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
-      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql"].includes(migration)) { await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " ")); continue; }
+      // Trigger bodies contain semicolons, so the generic statement splitter
+      // below cannot preserve them. Execute every trigger-bearing migration as
+      // one D1 script; this keeps the harness compatible with future additive
+      // migrations instead of maintaining a fragile filename allowlist.
+      if (/\bCREATE\s+TRIGGER\b/i.test(sql)) {
+        await db.exec(sql
+          .replace(/^\s*--.*$/gm, "")
+          .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
+          .replace(/\s*\n\s*/g, " "));
+        continue;
+      }
       const statements = sql.split(/;\s*(?:\n|$)/)
         .map(statement => statement.replace(/^\s*--.*$/gm, "").trim())
         .filter(statement => statement && !/^PRAGMA\s+foreign_keys\s*=\s*ON$/i.test(statement))

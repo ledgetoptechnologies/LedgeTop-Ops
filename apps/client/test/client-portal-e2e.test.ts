@@ -37,7 +37,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const migrationsDirectory = fileURLToPath(new URL("../migrations/", import.meta.url));
     for (const migration of readdirSync(migrationsDirectory).filter(name => name.endsWith(".sql")).sort()) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
-      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql"].includes(migration)) {
+      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql"].includes(migration)) {
         await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
         continue;
       }
@@ -103,6 +103,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     env = {
       DELIVERY_DB: db,
       CLIENT_PORTAL_ENABLED: "true",
+      CLIENT_PORTAL_REQUEST_V2_ENABLED: "true",
       CLIENT_PORTAL_ORIGIN: portalOrigin,
       ENVIRONMENT: "development",
       PUBLIC_BULK_RATE_LIMITER: { limit: async () => ({ success: true }) } as RateLimit,
@@ -138,22 +139,79 @@ describe("client portal migrated-D1 end-to-end contract", () => {
   }
 
   it("applies the complete migration chain without granting implicit access", async () => {
-    const migrationTables = await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('client_accounts','client_account_members','client_access_sync_outbox','client_portal_notification_outbox','client_folder_grant_mutations','client_folder_grant_notifications') ORDER BY name").all<{ name: string }>();
+    const migrationTables = await db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN (
+      'client_accounts','client_account_members','client_access_sync_outbox','client_portal_notification_outbox',
+      'client_folder_grant_mutations','client_folder_grant_notifications','client_service_request_drafts',
+      'client_service_request_area_revisions','client_service_request_attachments','request_pa_draft_quote_receipts',
+      'portal_v2_workspaces','pa_service_catalog_generations','portal_v2_invitation_commands',
+      'client_delegated_shares','pa_portal_projection_generations','delivery_share_audience_snapshots',
+      'delivery_share_recipient_members'
+    ) ORDER BY name`).all<{ name: string }>();
     expect(migrationTables.results.map(row => row.name)).toEqual([
       "client_access_sync_outbox",
       "client_account_members",
       "client_accounts",
+      "client_delegated_shares",
       "client_folder_grant_mutations",
       "client_folder_grant_notifications",
       "client_portal_notification_outbox",
+      "client_service_request_area_revisions",
+      "client_service_request_attachments",
+      "client_service_request_drafts",
+      "delivery_share_audience_snapshots",
+      "delivery_share_recipient_members",
+      "pa_portal_projection_generations",
+      "pa_service_catalog_generations",
+      "portal_v2_invitation_commands",
+      "portal_v2_workspaces",
+      "request_pa_draft_quote_receipts",
     ]);
     expect(await d1ClientPortalRepository.resolveSession(env, { ...principal, subject: "not-provisioned" })).toBeNull();
     expect(await db.prepare("SELECT status FROM client_service_requests WHERE id='migration-request'").first("status")).toBe("accepted_pending_pa_linkage");
     expect(await db.prepare("SELECT status_value FROM client_portal_notification_outbox WHERE id='migration-notification'").first("status_value")).toBe("accepted_pending_pa_linkage");
     expect(await db.prepare("SELECT json_extract(snapshot_json,'$.areaGeoJson') area,json_array_length(json_extract(snapshot_json,'$.poiPoints')) points FROM request_revisions WHERE request_id='migration-invalid-json'").first()).toMatchObject({ area: null, points: 0 });
     expect(await db.prepare("SELECT json_extract(payload_json,'$.legacyPayloadDiscarded') discarded FROM client_portal_notification_outbox WHERE id='migration-invalid-payload'").first("discarded")).toBe(1);
+    expect(await db.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE type='table' AND name='client_service_request_area_revisions'").first("count")).toBe(1);
+    expect((await db.prepare("PRAGMA table_info(request_pa_artifacts)").all<{ name: string }>()).results.map(column => column.name))
+      .toEqual(expect.arrayContaining(["scope_stale_at", "scope_stale_area_revision_id"]));
+    expect((await db.prepare("PRAGMA table_info(request_pa_draft_quote_receipts)").all<{ name: string }>()).results.map(column => column.name))
+      .toContain("scope_stale_at");
+    await db.prepare(`INSERT INTO client_service_request_area_revisions
+      (id,request_id,revision_number,base_request_updated_at,area_geojson,poi_points_json,reason,change_summary,created_by,mutation_key,mutation_fingerprint)
+      VALUES ('migration-area-revision','migration-request',1,'2026-08-01T12:00:00Z',NULL,'[]','Boundary reviewed','service-area boundary removed','staff-test','migration-area-key-0001',?)`)
+      .bind("a".repeat(64)).run();
+    await expect(db.prepare("UPDATE client_service_request_area_revisions SET reason='Changed in place' WHERE id='migration-area-revision'").run())
+      .rejects.toThrow(/immutable/);
+    await expect(db.prepare("DELETE FROM client_service_request_area_revisions WHERE id='migration-area-revision'").run())
+      .rejects.toThrow(/immutable/);
+    await db.prepare(`INSERT INTO request_pa_draft_quote_receipts
+      (id,request_id,request_revision,area_revision,idempotency_key,payload_hash,
+       project_alpha_receipt_id,project_alpha_artifact_public_id,artifact_status,
+       artifact_version,editor_path,created_by)
+      VALUES ('migration-pa-receipt','migration-request',1,0,'migration-pa-receipt-key-0001',?,
+        'pa-receipt-public','pa-artifact-public','draft',1,'/drafts/pa-artifact-public','staff-test')`)
+      .bind("b".repeat(64)).run();
+    await expect(db.prepare("UPDATE request_pa_draft_quote_receipts SET editor_path='/changed' WHERE id='migration-pa-receipt'").run())
+      .rejects.toThrow(/immutable/);
+    await expect(db.prepare("DELETE FROM request_pa_draft_quote_receipts WHERE id='migration-pa-receipt'").run())
+      .rejects.toThrow(/immutable/);
+    const triggerNames = (await db.prepare(`SELECT name FROM sqlite_master WHERE type='trigger' AND name IN (
+      'client_request_area_revisions_no_update','client_request_area_revisions_no_delete',
+      'trg_client_request_attachment_submit_guard','trg_client_request_attachment_link_submission',
+      'trg_client_request_attachment_linked_update_guard','trg_client_request_attachment_linked_delete_guard',
+      'trg_request_pa_draft_quote_receipts_no_update','trg_request_pa_draft_quote_receipts_no_delete',
+      'portal_v2_checkpoint_requires_complete_generation_insert',
+      'portal_v2_checkpoint_requires_complete_generation_update',
+      'portal_v2_checkpoint_prevents_out_of_order_update',
+      'trg_delivery_share_audience_snapshots_no_update',
+      'trg_delivery_share_audience_snapshots_no_delete',
+      'trg_delivery_share_recipient_members_no_update',
+      'trg_delivery_share_recipient_members_no_delete'
+    ) ORDER BY name`).all<{ name: string }>()).results.map(row => row.name);
+    expect(triggerNames).toHaveLength(15);
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     await expect(db.prepare("INSERT INTO client_portal_notification_outbox (id,request_id,event_type,status_value,recipient_kind,dedupe_key,payload_json) VALUES ('migration-linked','migration-request','request_status_changed','accepted_linked','client_requester','request_status_changed:accepted_linked:client_requester','{}')").run()).resolves.toBeTruthy();
+    await expect(db.prepare("INSERT INTO client_portal_notification_outbox (id,request_id,event_type,status_value,recipient_kind,dedupe_key,payload_json) VALUES ('migration-area-notice','migration-request','request_work_area_changed','under_review','client_requester','request_work_area_changed:migration-area-revision:client_requester','{}')").run()).resolves.toBeTruthy();
     await expect(db.prepare("INSERT INTO client_portal_notification_outbox (id,request_id,event_type,status_value,recipient_kind,dedupe_key,payload_json) VALUES ('migration-orphan','missing-request','request_status_changed','completed','client_requester','request_status_changed:completed:client_requester','{}')").run()).rejects.toThrow();
   });
 
@@ -361,6 +419,45 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const visibleRequest = (await visible.json() as { requests: Array<{ id: string; acceptedQuote: { documentNumber: string; total: number } | null }> }).requests.find(request => request.id === "billing-request");
     expect(visibleRequest?.acceptedQuote).toMatchObject({ documentNumber: "Q-0042", total: 1250 });
     await db.prepare("UPDATE client_account_members SET can_view_billing=0 WHERE account_id='account-a' AND identity_id='identity-a'").run();
+  });
+
+  it("autosaves and idempotently submits a versioned multi-service draft with immutable catalog snapshots", async () => {
+    await db.prepare(`INSERT INTO pa_service_catalog_items(public_id,source_version,name,summary,question_schema_json,source_updated_at)
+      VALUES ('svc-2d-map','pa-v4','2D Mapping','Orthomosaic and map products',?, '2026-08-13T12:00:00Z')`)
+      .bind(JSON.stringify([{ id: "resolution", label: "Resolution", type: "select", required: true, options: [{ value: "standard", label: "Standard" }] }])).run();
+    const areaGeoJson = { type: "Polygon", coordinates: [[[-88, 44], [-87.99, 44], [-87.99, 44.01], [-88, 44.01], [-88, 44]]] };
+    const input = {
+      projectId: "project-a", requestType: "service", title: "Map the site", details: "Capture the current construction area.",
+      location: null, preferredStartAt: null, deliverables: null, siteContactName: null, siteContactEmail: null,
+      siteContactPhone: null, desiredCompletionAt: null, latitude: null, longitude: null, areaGeoJson, poiPoints: [],
+      services: [{ publicId: "svc-2d-map", answers: { resolution: "standard" } }],
+    };
+    const create = () => portal().request(`${portalOrigin}/service-request-drafts`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "portal-draft-create-0001", Origin: portalOrigin }, body: JSON.stringify(input),
+    }, env);
+    const created = await create();
+    expect(created.status).toBe(201);
+    const createdDraft = (await created.json() as { draft: { id: string; version: number; areaSquareMeters: number; areaAcres: number } }).draft;
+    expect(createdDraft.areaSquareMeters).toBeGreaterThan(880_000);
+    expect(createdDraft.areaAcres).toBeGreaterThan(217);
+    expect((await create()).status).toBe(200);
+
+    await db.prepare("UPDATE pa_service_catalog_items SET source_version='pa-v5',name='Renamed mapping' WHERE public_id='svc-2d-map'").run();
+    const storedDraftService = await db.prepare("SELECT service_source_version,json_extract(service_snapshot_json,'$.name') name FROM client_service_request_draft_services WHERE draft_id=?").bind(createdDraft.id).first<{ service_source_version: string; name: string }>();
+    expect(storedDraftService).toEqual({ service_source_version: "pa-v4", name: "2D Mapping" });
+
+    const submit = () => portal().request(`${portalOrigin}/service-request-drafts/${createdDraft.id}/submit`, {
+      method: "POST", headers: { "Idempotency-Key": "portal-draft-submit-0001", "If-Match": String(createdDraft.version), Origin: portalOrigin },
+    }, env);
+    expect((await submit()).status).toBe(422);
+    await db.prepare("UPDATE pa_service_catalog_items SET source_version='pa-v4',name='2D Mapping' WHERE public_id='svc-2d-map'").run();
+    const submitted = await submit();
+    expect(submitted.status).toBe(201);
+    const requestId = (await submitted.json() as { request: { id: string } }).request.id;
+    expect((await submit()).status).toBe(200);
+    expect(await db.prepare("SELECT COUNT(*) count FROM client_service_requests WHERE id=?").bind(requestId).first("count")).toBe(1);
+    expect(await db.prepare("SELECT COUNT(*) count FROM client_service_request_services WHERE request_id=? AND service_public_id='svc-2d-map' AND service_source_version='pa-v4'").bind(requestId).first("count")).toBe(1);
+    expect(await db.prepare("SELECT COUNT(*) count FROM request_revisions WHERE request_id=? AND action='submitted'").bind(requestId).first("count")).toBe(1);
   });
 
   it("hides stored service-request notifications after project access is revoked", async () => {

@@ -17,6 +17,13 @@ The complete request/revision/estimate/Project Alpha boundary, local evidence,
 known limitations, Todd's App UX decision record, and engineering handoff are
 in [the client request pilot contract](docs/client-portal.md).
 
+The approved target for the Project Alpha hierarchy, dynamic Service Library,
+multi-service requests, Mapbox acreage, non-binding pricing guidance, and
+idempotent draft-quote handoff is in the
+[client portal v2 compatibility contract](docs/client-portal-v2-architecture.md).
+That document is a staged implementation contract and does not supersede the
+current production pilot until its release gates pass.
+
 LTDS Ops is the operating and client-delivery platform for Ledge Top Drone Services. It contains three independently deployed Cloudflare Workers in one repository:
 
 - `ltds-ops` at `ops.ledgetopdroneservices.com` — private staff operations, projects, tasks, airspace awareness, ACL, delivery administration, and Dropbox import.

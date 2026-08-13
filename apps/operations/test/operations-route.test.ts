@@ -11,6 +11,12 @@ describe("consolidated Operations routes", () => {
     expect(pathOperationsSection(pathname)).toBe(section);
   });
 
+  it("keeps client requests at its canonical top-level navigation destination", () => {
+    expect(pathPage("/operations/client-requests")).toBe("client-requests");
+    expect(pathPage("/operations/client-requests/request-a")).toBe("client-requests");
+    expect(pathOperationsSection("/operations/client-requests/request-a")).toBe("client-requests");
+  });
+
   it.each([
     ["/projects", "projects"],
     ["/tasks", "tasks"],

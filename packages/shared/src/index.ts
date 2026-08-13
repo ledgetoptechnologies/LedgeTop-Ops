@@ -155,7 +155,8 @@ export type ServiceRequestNotificationLifecycle =
   | "cancelled"
   | "completed"
   | "estimate_ready"
-  | "client_response_received";
+  | "client_response_received"
+  | "work_area_changed";
 
 export interface ServiceRequestNotificationSnapshot {
   presentationVersion: 1;
@@ -168,6 +169,7 @@ export interface ServiceRequestNotificationSnapshot {
   locationLabel: string;
   lifecycle: ServiceRequestNotificationLifecycle;
   action: "review_in_operations" | "open_client_portal";
+  changeSummary?: string;
 }
 
 function boundedPresentationText(value: unknown, fallback: string, maxLength: number): string {
@@ -198,6 +200,7 @@ export function buildServiceRequestNotificationSnapshot(input: {
   longitude?: number | null;
   lifecycle: ServiceRequestNotificationLifecycle;
   action: ServiceRequestNotificationSnapshot["action"];
+  changeSummary?: string | null;
 }): ServiceRequestNotificationSnapshot {
   const existingProject = Boolean(input.projectId);
   return {
@@ -217,6 +220,9 @@ export function buildServiceRequestNotificationSnapshot(input: {
     ),
     lifecycle: input.lifecycle,
     action: input.action,
+    ...(input.changeSummary
+      ? { changeSummary: boundedPresentationText(input.changeSummary, "Work area updated", 500) }
+      : {}),
   };
 }
 
@@ -230,6 +236,7 @@ const serviceRequestNotificationLifecycles = new Set<ServiceRequestNotificationL
   "completed",
   "estimate_ready",
   "client_response_received",
+  "work_area_changed",
 ]);
 
 export function parseServiceRequestNotificationSnapshot(
@@ -246,6 +253,7 @@ export function parseServiceRequestNotificationSnapshot(
     typeof candidate.projectContext.label !== "string" ||
     typeof candidate.scopeLabel !== "string" ||
     typeof candidate.locationLabel !== "string" ||
+    (candidate.changeSummary !== undefined && typeof candidate.changeSummary !== "string") ||
     !serviceRequestNotificationLifecycles.has(candidate.lifecycle as ServiceRequestNotificationLifecycle) ||
     !["review_in_operations", "open_client_portal"].includes(candidate.action as string)
   )
@@ -258,6 +266,7 @@ export function parseServiceRequestNotificationSnapshot(
     locationLabel: candidate.locationLabel,
     lifecycle: candidate.lifecycle as ServiceRequestNotificationLifecycle,
     action: candidate.action as ServiceRequestNotificationSnapshot["action"],
+    changeSummary: candidate.changeSummary,
   });
 }
 

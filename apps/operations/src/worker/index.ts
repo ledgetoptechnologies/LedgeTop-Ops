@@ -38,18 +38,22 @@ import { dispatchThumbnailIngestRequest } from "./thumbnail-ingest-api";
 import { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";
 import {
   authorizeItem,
+  authorizeSharePrefix,
   createDeliveryShare,
   decodeRef,
   deliveryBrowseRevision,
   encodeRef,
   getActiveDeliveryShare,
   listDeliveryFolder,
+  listDeliveryFolderMedia,
   searchDeliveryItems,
   listDeliveryShares,
   mediaKind,
   revokeDeliveryShare,
   thumbnailQueueSummary,
+  normalizePrefix,
 } from "./delivery";
+import { searchShareRecipients, shareDirectoryRecipientsEnabled } from "./share-recipients";
 import { syncProjectAlpha } from "./project-alpha";
 import { projectAlphaHealthIsStale } from "./integration-health";
 import {
@@ -114,6 +118,15 @@ import {
 } from "./client-folder-grants";
 import { registerJobBriefRoutes } from "./job-brief";
 import { registerSopRoutes } from "./sop";
+import { registerClientRequestAttachmentRoutes } from "./client-request-attachments";
+import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quote";
+import { requestAreaKml, requestAreaKmlFilename } from "./request-area-kml";
+import {
+  parseStoredWorkArea,
+  summarizeWorkAreaChange,
+  validateStaffRequestArea,
+  validateStaffRequestPois,
+} from "./request-area-revision";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -365,6 +378,27 @@ const operationalEstimateSchema = z
   })
   .strict();
 const workflowIdempotencyKey = z.string().trim().min(16).max(128);
+const staffWorkAreaSchema = z
+  .object({
+    expectedUpdatedAt: z.string().trim().min(1).max(64),
+    expectedRevision: z.number().int().min(0),
+    areaGeoJson: z.unknown().nullable(),
+    poiPoints: z.array(z.object({
+      longitude: z.number().finite().min(-180).max(180),
+      latitude: z.number().finite().min(-90).max(90),
+      label: z.string().trim().min(1).max(100).nullable().optional(),
+    }).strict()).max(20),
+    reason: z.string().trim().min(3).max(2000),
+  })
+  .strict()
+  .superRefine((value, context) => {
+    try {
+      validateStaffRequestArea(value.areaGeoJson);
+      validateStaffRequestPois(value.poiPoints);
+    } catch {
+      context.addIssue({ code: "custom", message: "The work-area geometry is invalid" });
+    }
+  });
 const paVerifiedArtifactSchema = z
   .object({
     artifact: z
@@ -494,6 +528,9 @@ app.get("/api/session", async (c) => {
       directDeliveryUploads: directDeliveryUploadsCapability(c.env),
       deliveryJobsRoot: {
         enabled: !deliveryBrowseScope.deniedGlobal && deliveryBrowseScope.global && deliveryBrowseScope.deniedDivisions.length === 0,
+      },
+      shareDirectoryRecipients: {
+        enabled: shareDirectoryRecipientsEnabled(c.env),
       },
     },
   });
@@ -1000,6 +1037,8 @@ app.post("/api/operations", () => managedInProjectAlpha());
 app.patch("/api/operations/:id", () => managedInProjectAlpha());
 registerJobBriefRoutes(app);
 registerSopRoutes(app);
+registerClientRequestAttachmentRoutes(app);
+registerProjectAlphaDraftQuoteRoutes(app);
 
 app.get("/api/tasks", async (c) => {
   const principal = c.get("principal");
@@ -1049,13 +1088,21 @@ app.get("/api/client-service-requests/:id", async (c) => {
     id = c.req.param("id"),
     request = await db
       .prepare(
-        `SELECT r.*,a.display_name account_name,p.project_name,p.client_name,quote.document_number quote_document_number,quote.artifact_status quote_status,quote.total_minor quote_total_minor,quote.currency quote_currency,quote.verified_at quote_verified_at FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id LEFT JOIN projects p ON p.id=r.project_id LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id AND quote.artifact_type='quote' AND quote.superseded_at IS NULL WHERE r.id=? AND a.status='active'`,
+        `SELECT r.*,a.display_name account_name,p.project_name,p.client_name,
+          quote.document_number quote_document_number,quote.artifact_status quote_status,
+          quote.total_minor quote_total_minor,quote.currency quote_currency,
+          quote.verified_at quote_verified_at,quote.scope_stale_at quote_scope_stale_at
+         FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id
+         LEFT JOIN projects p ON p.id=r.project_id
+         LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id
+           AND quote.artifact_type='quote' AND quote.superseded_at IS NULL
+         WHERE r.id=? AND a.status='active'`,
       )
       .bind(id)
       .first();
   if (!request)
     throw new HTTPException(404, { message: "Client request not found" });
-  const [revisions, estimates, history, children] = await Promise.all([
+  const [revisions, estimates, history, children, areaRevisions] = await Promise.all([
     db
       .prepare(
         "SELECT revision_number,author_type,author_id,action,snapshot_json,note,created_at FROM request_revisions WHERE request_id=? ORDER BY revision_number DESC",
@@ -1080,13 +1127,287 @@ app.get("/api/client-service-requests/:id", async (c) => {
       )
       .bind(id)
       .all(),
+    db
+      .prepare(
+        `SELECT id,revision_number,base_request_updated_at,area_geojson,poi_points_json,
+          reason,change_summary,created_by,created_at
+         FROM client_service_request_area_revisions WHERE request_id=?
+         ORDER BY revision_number DESC`,
+      )
+      .bind(id)
+      .all(),
   ]);
+  const effectiveArea = areaRevisions.results[0] as {
+    revision_number: number;
+    area_geojson: string | null;
+    poi_points_json: string;
+    reason: string;
+    change_summary: string;
+    created_by: string;
+    created_at: string;
+  } | undefined;
   return c.json({
     request,
     revisions: revisions.results,
     estimates: estimates.results,
     history: history.results,
     children: children.results,
+    areaRevisions: areaRevisions.results,
+    effectiveWorkArea: effectiveArea
+      ? {
+          revisionNumber: effectiveArea.revision_number,
+          areaGeoJson: effectiveArea.area_geojson,
+          poiPointsJson: effectiveArea.poi_points_json,
+          reason: effectiveArea.reason,
+          changeSummary: effectiveArea.change_summary,
+          createdBy: effectiveArea.created_by,
+          createdAt: effectiveArea.created_at,
+        }
+      : {
+          revisionNumber: 0,
+          areaGeoJson: (request as { area_geojson: string | null }).area_geojson,
+          poiPointsJson: (request as { poi_points_json: string | null }).poi_points_json,
+          reason: null,
+          changeSummary: null,
+          createdBy: null,
+          createdAt: null,
+        },
+  });
+});
+app.post("/api/client-service-requests/:id/work-area", async (c) => {
+  const principal = c.get("principal");
+  await requireGlobal(c.env, principal, "operations.manage");
+  const parsedMutationKey = workflowIdempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+  if (!parsedMutationKey.success)
+    throw new HTTPException(400, { message: "A valid Idempotency-Key header is required" });
+  const value = await body(c, staffWorkAreaSchema), id = c.req.param("id"),
+    mutationKey = parsedMutationKey.data,
+    areaGeoJson = validateStaffRequestArea(value.areaGeoJson),
+    poiPoints = validateStaffRequestPois(value.poiPoints),
+    areaJson = areaGeoJson ? JSON.stringify(areaGeoJson) : null,
+    poiJson = JSON.stringify(poiPoints),
+    mutationFingerprint = await sha256Hex(JSON.stringify({
+      requestId: id,
+      expectedUpdatedAt: value.expectedUpdatedAt,
+      expectedRevision: value.expectedRevision,
+      areaGeoJson,
+      poiPoints,
+      reason: value.reason,
+    })),
+    db = c.env.DELIVERY_DB.withSession("first-primary");
+  const replay = await db.prepare(
+    `SELECT id,revision_number,mutation_fingerprint,change_summary,created_at
+     FROM client_service_request_area_revisions WHERE request_id=? AND mutation_key=?`,
+  ).bind(id, mutationKey).first<{
+    id: string;
+    revision_number: number;
+    mutation_fingerprint: string;
+    change_summary: string;
+    created_at: string;
+  }>();
+  if (replay) {
+    if (replay.mutation_fingerprint !== mutationFingerprint)
+      throw new HTTPException(409, { message: "This Idempotency-Key was already used for another work-area revision" });
+    return c.json({
+      revision: {
+        id: replay.id,
+        revisionNumber: replay.revision_number,
+        changeSummary: replay.change_summary,
+        createdAt: replay.created_at,
+      },
+      idempotentReplay: true,
+    });
+  }
+  const current = await db.prepare(
+    `SELECT r.id,r.title,r.project_id,r.service_category,r.location_text,r.latitude,r.longitude,
+      r.area_geojson,r.poi_points_json,r.status,r.updated_at,p.project_name,
+      effective.revision_number effective_revision,effective.area_geojson effective_area_geojson,
+      effective.poi_points_json effective_poi_points_json,
+      EXISTS(SELECT 1 FROM request_pa_artifacts artifact WHERE artifact.request_id=r.id
+        AND artifact.superseded_at IS NULL AND artifact.scope_stale_at IS NULL) has_current_pa_artifact
+     FROM client_service_requests r
+     JOIN client_accounts account ON account.id=r.account_id AND account.status='active'
+     LEFT JOIN projects p ON p.id=r.project_id
+     LEFT JOIN client_service_request_area_revisions effective ON effective.request_id=r.id
+       AND effective.revision_number=(SELECT MAX(candidate.revision_number)
+         FROM client_service_request_area_revisions candidate WHERE candidate.request_id=r.id)
+     WHERE r.id=?`,
+  ).bind(id).first<{
+    id: string;
+    title: string;
+    project_id: string | null;
+    project_name: string | null;
+    service_category: string | null;
+    location_text: string | null;
+    latitude: number | null;
+    longitude: number | null;
+    area_geojson: string | null;
+    poi_points_json: string | null;
+    status: string;
+    updated_at: string;
+    effective_revision: number | null;
+    effective_area_geojson: string | null;
+    effective_poi_points_json: string | null;
+    has_current_pa_artifact: number;
+  }>();
+  if (!current) throw new HTTPException(404, { message: "Client request not found" });
+  if (!["submitted", "under_review", "accepted_pending_pa_linkage", "accepted_linked"].includes(current.status))
+    throw new HTTPException(409, { message: "A terminal client request work area cannot be changed" });
+  if (current.updated_at !== value.expectedUpdatedAt || (current.effective_revision || 0) !== value.expectedRevision)
+    throw new HTTPException(409, { message: "This request changed. Refresh before editing the work area." });
+  let previous;
+  try {
+    previous = parseStoredWorkArea(
+      current.effective_revision === null ? current.area_geojson : current.effective_area_geojson,
+      current.effective_revision === null ? current.poi_points_json : current.effective_poi_points_json,
+    );
+  } catch {
+    throw new HTTPException(409, { message: "The current work area is invalid and cannot be edited safely" });
+  }
+  const next = { areaGeoJson, poiPoints }, changeSummary = summarizeWorkAreaChange(previous, next),
+    revisionId = crypto.randomUUID(), revisionNumber = value.expectedRevision + 1,
+    notificationPayload = buildServiceRequestNotificationSnapshot({
+      title: current.title,
+      projectId: current.project_id,
+      projectName: current.project_name,
+      serviceCategory: current.service_category,
+      locationLabel: current.location_text,
+      latitude: current.latitude,
+      longitude: current.longitude,
+      lifecycle: "work_area_changed",
+      action: "open_client_portal",
+      changeSummary,
+    });
+  const results = await db.batch([
+    db.prepare(
+      `INSERT INTO client_service_request_area_revisions
+        (id,request_id,revision_number,base_request_updated_at,area_geojson,poi_points_json,
+         reason,change_summary,created_by,mutation_key,mutation_fingerprint)
+       SELECT ?,?,?,?,?,?,?,?,?,?,? FROM client_service_requests guarded
+       WHERE guarded.id=? AND guarded.updated_at=?
+         AND guarded.status IN ('submitted','under_review','accepted_pending_pa_linkage','accepted_linked')
+         AND COALESCE((SELECT MAX(existing.revision_number)
+           FROM client_service_request_area_revisions existing WHERE existing.request_id=guarded.id),0)=?`,
+    ).bind(revisionId, id, revisionNumber, current.updated_at, areaJson, poiJson, value.reason,
+      changeSummary, principal.id, mutationKey, mutationFingerprint,
+      id, current.updated_at, value.expectedRevision),
+    db.prepare(
+      `UPDATE client_service_requests SET status='under_review',updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
+       WHERE id=? AND EXISTS(SELECT 1 FROM client_service_request_area_revisions WHERE id=?)`,
+    ).bind(id, revisionId),
+    db.prepare(
+      `UPDATE request_operational_estimates SET status='superseded',updated_at=datetime('now')
+       WHERE request_id=? AND status IN ('draft','ready','accepted','change_requested')
+         AND EXISTS(SELECT 1 FROM client_service_request_area_revisions WHERE id=?)`,
+    ).bind(id, revisionId),
+    db.prepare(
+      `UPDATE request_pa_artifacts SET scope_stale_at=datetime('now'),scope_stale_area_revision_id=?
+       WHERE request_id=? AND superseded_at IS NULL AND scope_stale_at IS NULL
+         AND EXISTS(SELECT 1 FROM client_service_request_area_revisions WHERE id=?)`,
+    ).bind(revisionId, id, revisionId),
+    db.prepare(
+      `INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
+       SELECT 'staff',?,'client.service_request.work_area_revised','client_service_request',?,?
+       WHERE EXISTS(SELECT 1 FROM client_service_request_area_revisions WHERE id=?)`,
+    ).bind(principal.id, id, JSON.stringify({ revisionId, revisionNumber, changeSummary,
+      projectAlphaScopeMarkedStale: Boolean(current.has_current_pa_artifact) }), revisionId),
+    db.prepare(
+      `INSERT INTO request_admin_audit(request_id,actor_id,action,details_json)
+       SELECT ?,?,'work_area_revised',? WHERE EXISTS(
+         SELECT 1 FROM client_service_request_area_revisions WHERE id=?)`,
+    ).bind(id, principal.id, JSON.stringify({ revisionId, revisionNumber, reason: value.reason,
+      changeSummary, projectAlphaScopeMarkedStale: Boolean(current.has_current_pa_artifact) }), revisionId),
+    db.prepare(
+      `INSERT OR IGNORE INTO client_portal_notification_outbox
+        (id,request_id,event_type,status_value,recipient_kind,dedupe_key,payload_json)
+       SELECT ?,?,'request_work_area_changed','under_review','client_requester',?,?
+       WHERE EXISTS(SELECT 1 FROM client_service_request_area_revisions WHERE id=?)`,
+    ).bind(crypto.randomUUID(), id, `request_work_area_changed:${revisionId}:client_requester`,
+      JSON.stringify(notificationPayload), revisionId),
+  ]);
+  if (!results[0]?.meta.changes)
+    throw new HTTPException(409, { message: "This request changed. Refresh before editing the work area." });
+  const persisted = await db.prepare(
+    "SELECT updated_at FROM client_service_requests WHERE id=?",
+  ).bind(id).first<{ updated_at: string }>();
+  c.executionCtx.waitUntil(
+    (async () => c.env.OPS_DB.batch([
+      await auditStatement(c.env, c.req.raw, principal,
+        "client.service_request.work_area_revised", "client_service_request", id, null,
+        { revisionNumber, changeSummary, projectAlphaScopeMarkedStale: Boolean(current.has_current_pa_artifact) }),
+    ]))().catch(error => console.error(JSON.stringify({
+      event: "secondary_ops_audit_failed",
+      requestId: id,
+      action: "client.service_request.work_area_revised",
+      error: error instanceof Error ? error.message : "unknown",
+    }))),
+  );
+  return c.json({
+    revision: { id: revisionId, revisionNumber, changeSummary, createdAt: new Date().toISOString() },
+    requestUpdatedAt: persisted?.updated_at || current.updated_at,
+    projectAlphaScopeMarkedStale: Boolean(current.has_current_pa_artifact),
+    idempotentReplay: false,
+  }, 201);
+});
+app.get("/api/client-service-requests/:id/area.kml", async (c) => {
+  const principal = c.get("principal");
+  await requireGlobal(c.env, principal, "operations.manage");
+  const revision = c.req.query("revision") || "effective";
+  if (revision !== "original" && revision !== "effective")
+    throw new HTTPException(400, { message: "Choose the original or effective work-area revision" });
+  const db = c.env.DELIVERY_DB.withSession("first-primary"),
+    id = c.req.param("id"),
+    request = await db.prepare(
+      `SELECT r.title,
+        CASE WHEN effective.id IS NULL THEN r.area_geojson ELSE effective.area_geojson END area_geojson,
+        CASE WHEN effective.id IS NULL THEN r.poi_points_json ELSE effective.poi_points_json END poi_points_json
+       FROM client_service_requests r
+       JOIN client_accounts a ON a.id=r.account_id AND a.status='active'
+       LEFT JOIN client_service_request_area_revisions effective ON effective.request_id=r.id
+         AND effective.revision_number=(SELECT MAX(candidate.revision_number)
+           FROM client_service_request_area_revisions candidate WHERE candidate.request_id=r.id)
+       WHERE r.id=?`,
+    ).bind(id).first<{ title: string; area_geojson: string | null; poi_points_json: string | null }>();
+  if (!request)
+    throw new HTTPException(404, { message: "Client request not found" });
+  let areaGeoJson = request.area_geojson,
+    poiPointsJson = request.poi_points_json;
+  if (revision === "original") {
+    const original = await db.prepare(
+      `SELECT snapshot_json FROM request_revisions
+       WHERE request_id=? AND author_type='client'
+         AND action IN ('submitted','change_request')
+       ORDER BY revision_number ASC LIMIT 1`,
+    ).bind(id).first<{ snapshot_json: string }>();
+    if (!original)
+      throw new HTTPException(404, { message: "The original client work area is unavailable" });
+    try {
+      const snapshot = JSON.parse(original.snapshot_json) as { areaGeoJson?: unknown; poiPoints?: unknown };
+      areaGeoJson = snapshot.areaGeoJson == null ? null : JSON.stringify(snapshot.areaGeoJson);
+      poiPointsJson = snapshot.poiPoints == null ? "[]" : JSON.stringify(snapshot.poiPoints);
+    } catch {
+      throw new HTTPException(409, { message: "The original client work area is invalid" });
+    }
+  }
+  const kml = requestAreaKml({
+    title: request.title,
+    revisionLabel: revision === "original" ? "Original client submission" : "Current effective work area",
+    areaGeoJson,
+    poiPointsJson,
+  });
+  if (!kml)
+    throw new HTTPException(404, { message: "This request does not have an exportable work area" });
+  c.executionCtx.waitUntil(c.env.DELIVERY_DB.prepare(
+    `INSERT INTO request_admin_audit(request_id,actor_id,action,details_json)
+     VALUES(?,?,'work_area_kml_exported',?)`,
+  ).bind(id, principal.id, JSON.stringify({ revision })).run().then(() => undefined));
+  return new Response(kml, {
+    headers: {
+      "Content-Type": "application/vnd.google-earth.kml+xml; charset=utf-8",
+      "Content-Disposition": `attachment; filename="${requestAreaKmlFilename(request.title, revision)}"`,
+      "Cache-Control": "private, no-store",
+      "X-Content-Type-Options": "nosniff",
+    },
   });
 });
 app.post("/api/client-service-requests/:id/estimate", async (c) => {
@@ -1707,6 +2028,16 @@ app.get("/api/delivery/folders", async (c) =>
     ),
   ),
 );
+app.get("/api/delivery/folders/media", async (c) =>
+  c.json(
+    await listDeliveryFolderMedia(
+      c.env,
+      c.get("principal"),
+      c.req.query("prefix") || "",
+      c.req.query("cursor"),
+    ),
+  ),
+);
 app.get("/api/delivery/search", async (c) =>
   c.json(await searchDeliveryItems(
     c.env,
@@ -1759,6 +2090,14 @@ app.get("/api/delivery/shares/active", async (c) => {
   return c.json({
     share: await getActiveDeliveryShare(c.env, c.get("principal"), prefix),
   });
+});
+app.get("/api/delivery/share-recipients", async (c) => {
+  const prefixValue = c.req.query("prefix") || "";
+  const query = c.req.query("q") || "";
+  if (!prefixValue) throw new HTTPException(400, { message: "prefix is required" });
+  const prefix = normalizePrefix(prefixValue);
+  await authorizeSharePrefix(c.env, c.get("principal"), prefix);
+  return c.json(await searchShareRecipients(c.env, prefix, query));
 });
 app.post("/api/delivery/shares", async (c) => {
   const value = await c.req.json();

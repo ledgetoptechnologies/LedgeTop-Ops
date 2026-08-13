@@ -73,6 +73,7 @@ interface JobBriefResponse {
     createdAt: string;
   }>;
   canEdit: boolean;
+  canViewSops: boolean;
 }
 
 function date(value: string | null | undefined) {
@@ -96,6 +97,10 @@ function bytes(value: number) {
 
 function editableItems(value: JobBriefResponse): ScopeItem[] {
   return value.brief?.items.map(item => ({ ...item })) || [];
+}
+
+function sopAnchorId(revisionId: string) {
+  return `job-brief-sop-${revisionId.replace(/[^A-Za-z0-9_-]/g, "-")}`;
 }
 
 export function JobBriefPanel({
@@ -149,11 +154,11 @@ export function JobBriefPanel({
   }, [operationId, dirty, sopDirty]);
 
   useEffect(() => {
-    if (!data?.canEdit) return;
+    if (!data?.canEdit || !data.canViewSops) return;
     void api<{ sops: PublishedSopSummary[] }>("/api/sops")
       .then(value => setPublishedSops(value.sops))
       .catch(caught => setError((caught as Error).message));
-  }, [data?.canEdit]);
+  }, [data?.canEdit, data?.canViewSops]);
 
   useEffect(() => {
     onDirtyChange?.(dirty || sopDirty);
@@ -225,6 +230,33 @@ export function JobBriefPanel({
         <StatusPill>{data.operation.status.replaceAll("_", " ")}</StatusPill>
         <span className="managed-badge">LTDS brief v{version}</span>
       </div>
+      {!!data.brief?.sops?.length && (
+        <nav className="job-brief-quick-sops" aria-label="Quick SOPs">
+          <div>
+            <strong>Quick SOPs</strong>
+            <span className="managed-badge">{data.brief.sops.length}</span>
+          </div>
+          <p>Open the exact SOP revisions pinned to this job brief.</p>
+          <div className="job-brief-quick-sop-links">
+            {data.brief.sops.map(sop => {
+              const id = sopAnchorId(sop.revisionId);
+              return (
+                <a
+                  key={sop.revisionId}
+                  href={`#${id}`}
+                  onClick={() => {
+                    const target = document.getElementById(id);
+                    if (target instanceof HTMLDetailsElement) target.open = true;
+                  }}
+                >
+                  {sop.title}
+                  <span>Revision {sop.revisionNumber}</span>
+                </a>
+              );
+            })}
+          </div>
+        </nav>
+      )}
       <p className="muted">
         Schedule and assignment remain managed in Project Alpha. This versioned brief is the LTDS execution source of truth.
       </p>
@@ -370,7 +402,7 @@ export function JobBriefPanel({
         )}
       </section>
 
-      <section className="job-brief-section" aria-labelledby="job-brief-sops-heading">
+      {data.canViewSops && <section className="job-brief-section" aria-labelledby="job-brief-sops-heading">
         <div className="job-brief-section-heading">
           <div>
             <h3 id="job-brief-sops-heading">Linked standard operating procedures</h3>
@@ -380,7 +412,12 @@ export function JobBriefPanel({
         {data.brief?.sops?.length ? (
           <div className="job-brief-sops">
             {data.brief.sops.map(sop => (
-              <details key={sop.revisionId} className="job-brief-sop">
+              <details
+                key={sop.revisionId}
+                id={sopAnchorId(sop.revisionId)}
+                className="job-brief-sop"
+                tabIndex={-1}
+              >
                 <summary>
                   <span><strong>{sop.title}</strong><small>Revision {sop.revisionNumber} · published {date(sop.publishedAt)}</small></span>
                   <span>{sop.purpose}</span>
@@ -435,7 +472,7 @@ export function JobBriefPanel({
             {dirty && <small>Save or refresh the scope draft before changing SOP links.</small>}
           </div>
         )}
-      </section>
+      </section>}
 
       <section className="job-brief-section" aria-labelledby="job-brief-files-heading">
         <div className="job-brief-section-heading">

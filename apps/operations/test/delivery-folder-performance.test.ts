@@ -167,7 +167,7 @@ describe("Delivery folder-only listing performance",()=>{
     expect(get).not.toHaveBeenCalled();
   });
 
-  it("falls back only for unindexed candidates and keeps hidden or trashed-only folders out",async()=>{
+  it("falls back only for unindexed candidates and trusts indexed tombstone state without recursive R2 scans",async()=>{
     const indexed="Jobs/Clients/Indexed/",fresh="Jobs/Clients/Fresh/",trashedOnly="Jobs/Clients/Trashed/";
     await deliveryDb.batch([
       deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')")
@@ -187,8 +187,8 @@ describe("Delivery folder-only listing performance",()=>{
     const result=await listDeliveryFolder(environment(),principal,"Jobs/Clients/");
 
     expect(result.folders.map(folder=>folder.prefix)).toEqual([indexed,fresh]);
-    expect(list).toHaveBeenCalledTimes(3);
-    expect(list.mock.calls.map(call=>(call[0] as R2ListOptions).prefix)).toEqual(["Jobs/Clients/",fresh,trashedOnly]);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(list.mock.calls.map(call=>(call[0] as R2ListOptions).prefix)).toEqual(["Jobs/Clients/",fresh]);
     expect(head).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();
   });

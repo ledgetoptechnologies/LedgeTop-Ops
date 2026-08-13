@@ -203,7 +203,11 @@ describe("operational job brief routes", () => {
     });
     mocks.sqlScope.mockReset().mockResolvedValue({ global: true, divisions: [], assigned: true, own: false, deniedDivisions: [], deniedGlobal: false });
     mocks.hasLocalGlobalAllow.mockReset().mockResolvedValue(false);
-    mocks.hasPermission.mockReset().mockImplementation(async (_env: unknown, principal: { id: string }, permission: string) => permission === "operations.manage" && principal.id === principals.admin.id);
+    mocks.hasPermission.mockReset().mockImplementation(async (_env: unknown, principal: { id: string }, permission: string) => {
+      if (permission === "operations.manage") return principal.id === principals.admin.id;
+      if (permission === "sops.view") return principal.id === principals.admin.id || principal.id === principals.pilot.id;
+      return false;
+    });
     mocks.requireMutationSecurity.mockReset().mockResolvedValue(undefined);
     mocks.auditAddress.mockReset().mockResolvedValue("hashed-address");
   });
@@ -447,5 +451,45 @@ describe("operational job brief routes", () => {
     }), state.env, executionCtx);
     expect(archivedLink.status).toBe(409);
     expect(state.ops.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("omits pinned SOP content when an assigned pilot has an explicit effective deny", async () => {
+    const state = setup();
+    const sopId = "00000000-0000-4000-8000-000000000020";
+    const revisionId = "00000000-0000-4000-8000-000000000021";
+    state.ops.prepare(`INSERT INTO sop_documents
+      (id,slug,status,version,created_by,updated_by) VALUES (?,?,'published',1,?,?)`)
+      .run(sopId, "denied-flight", principals.admin.id, principals.admin.id);
+    state.ops.prepare(`INSERT INTO sop_revisions
+      (id,sop_id,revision_number,parent_revision_id,change_kind,title,purpose,markdown_body,
+        rendered_html,toc_json,sanitizer_version,author_id,author_email,author_display_name,published_at)
+      VALUES (?,?,1,NULL,'published','Restricted flight','Pinned restricted guidance','Private text',
+        '<p>DENIED SOP CONTENT</p>','[]',1,?,?,?,datetime('now'))`)
+      .run(revisionId, sopId, principals.admin.id, principals.admin.email, principals.admin.displayName);
+    state.ops.prepare("UPDATE sop_documents SET published_revision_id=? WHERE id=?").run(revisionId, sopId);
+    expect((await worker.fetch(request("/api/operations/operation-1/job-brief", "admin", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 0, items: [] }),
+    }), state.env, executionCtx)).status).toBe(200);
+    expect((await worker.fetch(request("/api/operations/operation-1/job-brief/sops", "admin", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 1, revisionIds: [revisionId] }),
+    }), state.env, executionCtx)).status).toBe(200);
+
+    mocks.hasPermission.mockImplementation(async (_env: unknown, principal: { id: string }, permission: string) => {
+      if (permission === "operations.manage") return principal.id === principals.admin.id;
+      if (permission === "sops.view") return principal.id === principals.admin.id;
+      return false;
+    });
+    const denied = await worker.fetch(
+      request("/api/operations/operation-1/job-brief", "pilot"),
+      state.env,
+      executionCtx,
+    );
+    expect(denied.status).toBe(200);
+    const text = await denied.text();
+    expect(JSON.parse(text).canViewSops).toBe(false);
+    expect(JSON.parse(text).brief.sops).toEqual([]);
+    expect(text).not.toContain("DENIED SOP CONTENT");
   });
 });

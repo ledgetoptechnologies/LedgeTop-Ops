@@ -187,6 +187,7 @@ describe("thumbnail route authorization", () => {
     ), env, ctx);
 
     expect(response.status).toBe(200);
+    expect(response.headers.get("Server-Timing")).toMatch(/^manifest;dur=\d+$/);
     const manifest = await response.json() as { items: Array<Record<string, unknown>> };
     const pdf = manifest.items.find(item => item.name === "report.pdf");
     const video = manifest.items.find(item => item.name === "flight.mov");
@@ -201,6 +202,7 @@ describe("thumbnail route authorization", () => {
       { headers: { Cookie: cookie } },
     ), env, ctx);
     expect(mediaResponse.status).toBe(200);
+    expect(mediaResponse.headers.get("Server-Timing")).toMatch(/^media;dur=\d+$/);
     const media = await mediaResponse.json() as { items: Array<Record<string, unknown>> };
     const pdfPatch = media.items.find(item => item.id === pdf?.id);
     const videoPatch = media.items.find(item => item.id === video?.id);

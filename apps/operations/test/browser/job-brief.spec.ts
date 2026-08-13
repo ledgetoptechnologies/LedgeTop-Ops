@@ -63,6 +63,7 @@ function brief(canEdit: boolean, version = 1, items = [
     },
     history: [{ version, changeKind: "scope_saved", author: { id: "staff-a", displayName: "Staff Planner", email: "staff@example.com" }, createdAt: "2026-08-02T12:00:00.000Z" }],
     canEdit,
+    canViewSops: true,
   };
 }
 
@@ -80,7 +81,7 @@ async function mock(page: Page, canEdit: boolean) {
           status: "Active",
           profileType: canEdit ? "Administrator" : "Employee",
           isAdministrator: canEdit,
-          permissions: canEdit ? ["operations.view", "operations.manage", "delivery.browse"] : ["operations.view"],
+          permissions: canEdit ? ["operations.view", "operations.manage", "delivery.browse", "sops.view"] : ["operations.view", "sops.view"],
           divisions: [],
         },
         csrfToken: "csrf-test",
@@ -150,6 +151,11 @@ test("staff edits a multi-item brief and gets mobile-friendly private KML and ma
 test("assigned pilot sees the current brief without edit or delivery-browse controls", async ({ page }) => {
   await mock(page, false);
   await page.goto("/operations");
+  if ((page.viewportSize()?.width || 0) <= 960)
+    await page.getByRole("button", { name: "Open navigation" }).click();
+  await expect(page.getByRole("link", { name: "SOP Library" })).toBeVisible();
+  if ((page.viewportSize()?.width || 0) <= 960)
+    await page.getByRole("link", { name: "Operations" }).click();
   await page.getByRole("button", { name: "View brief" }).click();
 
   await expect(page.getByText("Fly 300 ft AGL with 80/75 overlap.")).toBeVisible();
@@ -158,8 +164,19 @@ test("assigned pilot sees the current brief without edit or delivery-browse cont
   await expect(page.getByRole("button", { name: "Add scope item" })).toHaveCount(0);
   await expect(page.getByText("Authorized client project file")).toBeVisible();
   await expect(page.getByLabel("Authorized client project file path")).toHaveCount(0);
-  await page.getByText("Mapping Flight SOP").click();
+  const quickSops = page.getByRole("navigation", { name: "Quick SOPs" });
+  await expect(quickSops).toContainText("1");
+  const quickLink = quickSops.getByRole("link", { name: /Mapping Flight SOP Revision 3/ });
+  await quickLink.focus();
+  await expect(quickLink).toBeFocused();
+  await quickLink.press("Enter");
+  await expect(page).toHaveURL(/#job-brief-sop-revision-mapping-3$/);
+  await expect(page.locator("#job-brief-sop-revision-mapping-3")).toHaveAttribute("open", "");
   await expect(page.getByText("Confirm exact overlap from this job brief.")).toBeVisible();
+  if ((page.viewportSize()?.width || 0) <= 640) {
+    const box = await quickLink.boundingBox();
+    expect(box?.height).toBeGreaterThanOrEqual(44);
+  }
 });
 
 test("background refresh preserves a dirty draft and explicit refresh adopts the newer version", async ({ page }) => {

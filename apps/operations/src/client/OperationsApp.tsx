@@ -54,6 +54,7 @@ interface Session {
       reason: "available" | "disabled";
     };
     deliveryJobsRoot?: { enabled: boolean };
+    shareDirectoryRecipients?: { enabled: boolean };
   };
 }
 interface ActiveDeliveryShare {
@@ -63,6 +64,7 @@ interface ActiveDeliveryShare {
   expiresAt: string | null;
   recoverable: boolean;
   recipientEmail?: string | null;
+  audience?: ShareDirectoryAudience | null;
   imageLocationMapEnabled?: boolean;
 }
 interface DeliveryShareResult {
@@ -102,6 +104,7 @@ interface IncomingLinkResponse {
 const NAV: Array<{
   page: Page;
   label: string;
+  href?: string;
   permissions: Permission[];
   administrator?: boolean;
 }> = [
@@ -111,9 +114,12 @@ const NAV: Array<{
     label: "Operations",
     permissions: ["operations.view", "projects.view", "tasks.view"],
   },
+  { page: "client-requests", label: "Client Requests", href: "/operations/client-requests", permissions: ["operations.manage"] },
   { page: "sops", label: "SOP Library", permissions: ["sops.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
   { page: "delivery", label: "Delivery", permissions: ["delivery.browse"] },
+];
+const MANAGE_NAV: typeof NAV = [
   { page: "team", label: "Team", permissions: ["team.view"] },
   {
     page: "administration",
@@ -151,7 +157,13 @@ function bytes(value: number) {
 export function OperationsApp() {
   const [session, setSession] = useState<Session | null>(null),
     [error, setError] = useState(""),
-    [page, setPage] = useState<Page>(pathPage(location.pathname));
+    [page, setPage] = useState<Page>(pathPage(location.pathname)),
+    [mobileNavOpen, setMobileNavOpen] = useState(false),
+    [manageOpen, setManageOpen] = useState(false);
+  const mobileNavTrigger = useRef<HTMLButtonElement>(null),
+    mobileNavPanel = useRef<HTMLDivElement>(null),
+    manageMenu = useRef<HTMLDivElement>(null),
+    manageTrigger = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     api<Session>("/api/session")
       .then((value) => {
@@ -164,11 +176,12 @@ export function OperationsApp() {
           jobsRoot: value.capabilities?.deliveryJobsRoot?.enabled === true,
         }));
         setSession(value);
-        const current = NAV.find((item) => item.page === page),
+        const allNavigation = [...NAV, ...MANAGE_NAV];
+        const current = allNavigation.find((item) => item.page === page),
           visible = current && navAllowed(value.user, current);
         if (!visible) {
-          const first = NAV.find((item) => navAllowed(value.user, item));
-          if (first) navigate(first.page);
+          const first = allNavigation.find((item) => navAllowed(value.user, item));
+          if (first) navigate(first.page, first.href);
         }
       })
       .catch((caught) => setError(caught.message));
@@ -178,11 +191,51 @@ export function OperationsApp() {
     addEventListener("popstate", pop);
     return () => removeEventListener("popstate", pop);
   }, []);
-  function navigate(next: Page) {
+  useEffect(() => {
+    if (!mobileNavOpen) return;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    mobileNavPanel.current?.querySelector<HTMLElement>("a")?.focus();
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setMobileNavOpen(false);
+        mobileNavTrigger.current?.focus();
+      } else if (event.key === "Tab") {
+        const focusable = [...(mobileNavPanel.current?.querySelectorAll<HTMLElement>('a, button:not([disabled])') || [])];
+        const first = focusable[0], last = focusable.at(-1);
+        if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+        else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+      }
+    };
+    const resize = () => { if (window.innerWidth > 960) setMobileNavOpen(false); };
+    document.addEventListener("keydown", keydown);
+    window.addEventListener("resize", resize);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener("keydown", keydown);
+      window.removeEventListener("resize", resize);
+    };
+  }, [mobileNavOpen]);
+  useEffect(() => {
+    if (!manageOpen) return;
+    const close = (event: MouseEvent | KeyboardEvent) => {
+      if (event instanceof KeyboardEvent && event.key === "Escape") { setManageOpen(false); manageTrigger.current?.focus(); }
+      else if (event instanceof MouseEvent && manageMenu.current && !manageMenu.current.contains(event.target as Node)) setManageOpen(false);
+    };
+    document.addEventListener("mousedown", close);
+    document.addEventListener("keydown", close);
+    return () => {
+      document.removeEventListener("mousedown", close);
+      document.removeEventListener("keydown", close);
+    };
+  }, [manageOpen]);
+  function navigate(next: Page, href?: string) {
     setPage(next);
-    history.pushState(null, "", next === "dashboard" ? "/" : `/${next}`);
+    history.pushState(null, "", href || (next === "dashboard" ? "/" : `/${next}`));
     if (next === "operations" || next === "delivery")
       dispatchEvent(new PopStateEvent("popstate"));
+    setMobileNavOpen(false);
+    setManageOpen(false);
     window.scrollTo(0, 0);
   }
   if (error)
@@ -198,21 +251,29 @@ export function OperationsApp() {
       </main>
     );
   const props = { session };
+  const primaryNavigation = NAV.filter((item) => navAllowed(session.user, item));
+  const manageNavigation = MANAGE_NAV.filter((item) => navAllowed(session.user, item));
+  const navigationLink = (item: (typeof NAV)[number], mobile = false) => {
+    const href = item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
+    return <a
+      key={`${mobile ? "mobile" : "desktop"}-${item.page}`}
+      href={href}
+      aria-current={page === item.page ? "page" : undefined}
+      onClick={(event) => { event.preventDefault(); navigate(item.page, href); }}
+    >{item.label}</a>;
+  };
   return (
     <div className="ops-shell">
       <header className="ops-header">
         <Brand product="Operations" />
-        <nav>
-          {NAV.filter((item) => navAllowed(session.user, item)).map((item) => (
-            <button
-              key={item.page}
-              className={page === item.page ? "active" : ""}
-              onClick={() => navigate(item.page)}
-            >
-              {item.label}
-            </button>
-          ))}
+        <nav className="ops-desktop-nav" aria-label="Primary navigation">
+          {primaryNavigation.map((item) => navigationLink(item))}
+          {!!manageNavigation.length && <div className="ops-manage-menu" ref={manageMenu}>
+            <button ref={manageTrigger} type="button" aria-expanded={manageOpen} aria-controls="ops-manage-menu" className={manageNavigation.some((item) => item.page === page) ? "active" : ""} onClick={() => setManageOpen((open) => !open)}>Manage</button>
+            {manageOpen && <div id="ops-manage-menu" className="ops-manage-popover">{manageNavigation.map((item) => navigationLink(item))}</div>}
+          </div>}
         </nav>
+        <button ref={mobileNavTrigger} className="ops-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="ops-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
         <div className="profile">
           <span>{session.user.displayName.slice(0, 1).toUpperCase()}</span>
           <div>
@@ -224,10 +285,17 @@ export function OperationsApp() {
           </div>
         </div>
       </header>
+      {mobileNavOpen && <div className="ops-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
+        <div ref={mobileNavPanel} id="ops-mobile-navigation" className="ops-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">
+          <header><strong>Navigation</strong><button type="button" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); }}>Close</button></header>
+          <nav aria-label="Mobile primary navigation">{primaryNavigation.map((item) => navigationLink(item, true))}{!!manageNavigation.length && <span className="ops-mobile-nav-label">Manage</span>}{manageNavigation.map((item) => navigationLink(item, true))}</nav>
+        </div>
+      </div>}
       <main className="ops-main">
         <PageHeading page={page} />
         {page === "dashboard" && <Dashboard {...props} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
+        {page === "client-requests" && allowed(session.user, "operations.manage") && <ClientRequestWorkflow mapToken={session.mapboxPublicToken} />}{" "}
         {page === "sops" && allowed(session.user, "sops.view") && (
           <SopLibrary user={session.user} />
         )}{" "}
@@ -256,6 +324,10 @@ function PageHeading({ page }: { page: Page }) {
     operations: [
       "Operations",
       "Detailed operational schedules, projects, and task queues managed in Project Alpha.",
+    ],
+    "client-requests": [
+      "Client requests",
+      "Review client-submitted work areas, scope, files, and request status.",
     ],
     sops: [
       "Internal SOP library",
@@ -298,11 +370,18 @@ function cachedFolderData(prefix: string): any | null {
 }
 
 function invalidateDeliveryCacheOnAccessError(error: unknown, prefix: string): boolean {
-  if (!(error instanceof ApiError) || ![401, 403, 404].includes(error.status)) return false;
+  if (!(error instanceof ApiError) || ![401, 403, 404, 410].includes(error.status)) return false;
   if (error.status === 401 || error.status === 403) invalidateDeliveryFolderCache();
   else invalidateDeliveryFolderCache(prefix);
   return true;
 }
+type ShareDirectoryAudience = {
+  audienceType: "organization" | "department" | "client" | "project" | "principal";
+  publicId: string;
+  displayName: string;
+  email?: string;
+  recipientCount?: number;
+};
 
 function useLoad<T>(loader: () => Promise<T>, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null),
@@ -553,11 +632,6 @@ function OperationsHub({ session }: { session: Session }) {
     { id: "operations", label: "Operations", permission: "operations.view" },
     { id: "projects", label: "Projects", permission: "projects.view" },
     { id: "tasks", label: "Tasks", permission: "tasks.view" },
-    {
-      id: "client-requests",
-      label: "Client requests",
-      permission: "operations.manage",
-    },
   ];
   const visible = sections.filter((item) =>
     allowed(session.user, item.permission),
@@ -618,8 +692,6 @@ function OperationsHub({ session }: { session: Session }) {
         <Projects session={session} />
       )}{" "}
       {section === "tasks" && allowed(session.user, "tasks.view") && <Tasks />}
-      {section === "client-requests" &&
-        allowed(session.user, "operations.manage") && <ClientRequestWorkflow mapToken={session.mapboxPublicToken} />}
     </>
   );
 }
@@ -1430,6 +1502,7 @@ function Delivery({ session }: { session: Session }) {
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
           close={() => setPreview(null)}
+          directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           changed={() => setShareRevision((value) => value + 1)}
         />
       )}{" "}
@@ -1466,7 +1539,9 @@ type DeliveryFolderPage = {
   files?: DeliveryItem[];
   nextCursor?: string | null;
 };
-const MAX_DELIVERY_FOLDER_PAGES = 100;
+function needsDeliveryMediaHydration(files: readonly DeliveryItem[]): boolean {
+  return files.some(item => item.kind === "image" || item.kind === "pdf" || item.kind === "video");
+}
 type DeliveryOperation = {
   id?: string;
   operationId?: string;
@@ -2350,6 +2425,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
           close={() => setPreview(null)}
+          directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           changed={() => {}}
         />
       )}
@@ -2393,6 +2469,39 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   }>({ prefix: "", data: null, error: "", loading: true });
   const folderRequestId = useRef(0);
   const folderRequest = useRef<AbortController | null>(null);
+  const folderMediaRequests = useRef(new Set<AbortController>());
+  const loadMoreRequest = useRef<AbortController | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const hydrateFolderMedia = useCallback(async (requestedPrefix: string, cursor: string | null, requestId: number) => {
+    const controller = new AbortController();
+    folderMediaRequests.current.add(controller);
+    try {
+      const query = new URLSearchParams({ prefix: requestedPrefix });
+      if (cursor) query.set("cursor", cursor);
+      const result = await api<{ items: Array<Partial<DeliveryItem> & { id: string }> }>(
+        `/api/delivery/folders/media?${query.toString()}`,
+        { signal: controller.signal },
+      );
+      if (controller.signal.aborted || requestedPrefix !== currentPrefixRef.current || requestId !== folderRequestId.current) return;
+      const patches = new Map(result.items.map(item => [item.id, item]));
+      setFolderState(current => {
+        if (current.prefix !== requestedPrefix || !current.data) return current;
+        const nextData = {
+          ...current.data,
+          files: (current.data.files || []).map(item => item.id && patches.has(item.id) ? { ...item, ...patches.get(item.id) } : item),
+        };
+        writeDeliveryFolderCache(requestedPrefix, nextData);
+        return { ...current, data: nextData };
+      });
+    } catch (caught) {
+      if (!controller.signal.aborted && invalidateDeliveryCacheOnAccessError(caught, requestedPrefix)) {
+        setFolderState(current => current.prefix === requestedPrefix ? { prefix: requestedPrefix, data: null, error: (caught as Error).message, loading: false } : current);
+      }
+      // Media state is advisory. Transient failures must not hide the listing.
+    } finally {
+      folderMediaRequests.current.delete(controller);
+    }
+  }, []);
   const reload = useCallback(async () => {
     const requestedPrefix = prefix;
     if (requestedPrefix !== currentPrefixRef.current) return;
@@ -2400,8 +2509,11 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     folderRequest.current?.abort();
     const controller = new AbortController();
     folderRequest.current = controller;
+    loadMoreRequest.current?.abort();
+    setLoadingMore(false);
+    for (const mediaRequest of folderMediaRequests.current) mediaRequest.abort();
+    folderMediaRequests.current.clear();
     setFolderState({ prefix: requestedPrefix, data: null, error: "", loading: true });
-    let accumulated: DeliveryFolderPage | null = null;
     try {
       try {
         const access = await api<{ revision: string }>("/api/delivery/access-revision", { signal: controller.signal });
@@ -2413,64 +2525,65 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         if (requestedPrefix !== currentPrefixRef.current || requestId !== folderRequestId.current || controller.signal.aborted) return;
         deactivateDeliveryFolderCache();
       }
-      const folders = new Map<string, DeliveryItem>();
-      const files = new Map<string, DeliveryItem>();
-      const seenCursors = new Set<string>();
-      let cursor: string | null = null;
-      let completed = false;
-      for (let pageNumber = 0; pageNumber < MAX_DELIVERY_FOLDER_PAGES; pageNumber += 1) {
-        if (requestedPrefix !== currentPrefixRef.current || requestId !== folderRequestId.current || controller.signal.aborted) return;
-        const query = new URLSearchParams({ prefix: requestedPrefix });
-        if (cursor) query.set("cursor", cursor);
-        const page = await api<DeliveryFolderPage>(
-          `/api/delivery/folders?${query.toString()}`,
-          { signal: controller.signal },
-        );
-        if (requestedPrefix !== currentPrefixRef.current || requestId !== folderRequestId.current || controller.signal.aborted) return;
-        for (const [index, item] of (page.folders || []).entries()) {
-          const key = itemRef(item) || `folder:${pageNumber}:${index}`;
-          if (!folders.has(key)) folders.set(key, item);
-        }
-        for (const [index, item] of (page.files || []).entries()) {
-          const key = itemRef(item) || `file:${pageNumber}:${index}`;
-          if (!files.has(key)) files.set(key, item);
-        }
-        const nextCursor = typeof page.nextCursor === "string" && page.nextCursor.trim()
-          ? page.nextCursor
-          : null;
-         accumulated = {
-           prefix: requestedPrefix,
-           folders: [...folders.values()],
-           files: [...files.values()],
-           nextCursor,
-         };
-         writeDeliveryFolderCache(requestedPrefix, accumulated);
-         setFolderState({ prefix: requestedPrefix, data: accumulated, error: "", loading: Boolean(nextCursor) });
-        if (!nextCursor) {
-          completed = true;
-          break;
-        }
-        if (seenCursors.has(nextCursor)) throw new Error("Folder listing returned a repeated cursor.");
-        seenCursors.add(nextCursor);
-        cursor = nextCursor;
-      }
-      if (!completed) throw new Error(`Folder listing exceeded ${MAX_DELIVERY_FOLDER_PAGES} pages. Narrow the folder or refresh to try again.`);
+      if (requestedPrefix !== currentPrefixRef.current || requestId !== folderRequestId.current || controller.signal.aborted) return;
+      const query = new URLSearchParams({ prefix: requestedPrefix });
+      const page = await api<DeliveryFolderPage>(`/api/delivery/folders?${query.toString()}`, { signal: controller.signal });
+      if (requestedPrefix !== currentPrefixRef.current || requestId !== folderRequestId.current || controller.signal.aborted) return;
+      const firstPage = { prefix: requestedPrefix, folders: page.folders || [], files: page.files || [], nextCursor: page.nextCursor || null };
+      writeDeliveryFolderCache(requestedPrefix, firstPage);
+      setFolderState({ prefix: requestedPrefix, data: firstPage, error: "", loading: false });
+      if (needsDeliveryMediaHydration(firstPage.files)) void hydrateFolderMedia(requestedPrefix, null, requestId);
     } catch (caught) {
       if (requestId !== folderRequestId.current || controller.signal.aborted) return;
       const accessDenied = invalidateDeliveryCacheOnAccessError(caught, requestedPrefix);
        setFolderState({
          prefix: requestedPrefix,
-         data: accessDenied ? null : accumulated,
+         data: accessDenied ? null : cachedFolderData(requestedPrefix),
          error: (caught as Error).message,
          loading: false,
        });
     }
-  }, [prefix, session.user.id]);
+  }, [hydrateFolderMedia, prefix, session.user.id]);
+  const loadMore = useCallback(async () => {
+    const requestedPrefix = prefix;
+    const cursor = folderState.prefix === requestedPrefix ? folderState.data?.nextCursor : null;
+    if (!cursor || loadingMore || loadMoreRequest.current) return;
+    const requestId = folderRequestId.current;
+    const controller = new AbortController();
+    loadMoreRequest.current = controller;
+    setLoadingMore(true);
+    try {
+      const query = new URLSearchParams({ prefix: requestedPrefix, cursor });
+      const page = await api<DeliveryFolderPage>(`/api/delivery/folders?${query.toString()}`, { signal: controller.signal });
+      if (controller.signal.aborted || requestId !== folderRequestId.current || requestedPrefix !== currentPrefixRef.current) return;
+      setFolderState(current => {
+        if (current.prefix !== requestedPrefix || !current.data || current.data.nextCursor !== cursor) return current;
+        const folders = new Map((current.data.folders || []).map(item => [itemRef(item), item]));
+        const files = new Map((current.data.files || []).map(item => [itemRef(item), item]));
+        for (const item of page.folders || []) if (!folders.has(itemRef(item))) folders.set(itemRef(item), item);
+        for (const item of page.files || []) if (!files.has(itemRef(item))) files.set(itemRef(item), item);
+        const nextData = { prefix: requestedPrefix, folders: [...folders.values()], files: [...files.values()], nextCursor: page.nextCursor || null };
+        writeDeliveryFolderCache(requestedPrefix, nextData);
+        return { prefix: requestedPrefix, data: nextData, error: "", loading: false };
+      });
+      if (needsDeliveryMediaHydration(page.files || [])) void hydrateFolderMedia(requestedPrefix, cursor, requestId);
+    } catch (caught) {
+      if (controller.signal.aborted || requestId !== folderRequestId.current) return;
+      const accessDenied = invalidateDeliveryCacheOnAccessError(caught, requestedPrefix);
+      setFolderState(current => current.prefix === requestedPrefix ? { ...current, data: accessDenied ? null : current.data, error: (caught as Error).message, loading: false } : current);
+    } finally {
+      if (loadMoreRequest.current === controller) loadMoreRequest.current = null;
+      if (!controller.signal.aborted && requestId === folderRequestId.current) setLoadingMore(false);
+    }
+  }, [folderState.data?.nextCursor, folderState.prefix, hydrateFolderMedia, loadingMore, prefix]);
   useEffect(() => {
     void reload();
     return () => {
       folderRequestId.current += 1;
       folderRequest.current?.abort();
+      loadMoreRequest.current?.abort();
+      for (const mediaRequest of folderMediaRequests.current) mediaRequest.abort();
+      folderMediaRequests.current.clear();
     };
   }, [reload]);
   useEffect(() => {
@@ -3185,11 +3298,20 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
             </div>
           )}
         </Card>
+        {!searching && displayData?.nextCursor && (
+          <div className="delivery-pagination">
+            <button className="button-ghost" type="button" disabled={loadingMore} onClick={() => void loadMore()}>
+              {loadingMore ? "Loading more..." : "Load more"}
+            </button>
+            <small>{folderItems.length} items loaded</small>
+          </div>
+        )}
       </div>
       {preview?.shareFolder && (
         <ShareDialog
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
+          directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           close={() => setPreview(null)}
           changed={() => {
             invalidateDeliveryFolderCache(prefix);
@@ -3978,11 +4100,13 @@ function ClientWorkspaceGrant({ prefix }: { prefix: string }) {
 function ShareDialog({
   folder,
   canRevoke,
+  directoryRecipientsEnabled,
   close,
   changed,
 }: {
   folder: any;
   canRevoke: boolean;
+  directoryRecipientsEnabled: boolean;
   close: () => void;
   changed: () => void;
 }) {
@@ -4002,6 +4126,10 @@ function ShareDialog({
   const [generated, setGenerated] = useState(false);
   const [removeCode, setRemoveCode] = useState(false);
   const [recipientEmail, setRecipientEmail] = useState("");
+  const [recipientQuery, setRecipientQuery] = useState("");
+  const [selectedRecipient, setSelectedRecipient] = useState<ShareDirectoryAudience | null>(null);
+  const [recipientOptions, setRecipientOptions] = useState<ShareDirectoryAudience[]>([]);
+  const [recipientSearchError, setRecipientSearchError] = useState("");
   const [imageLocationMapEnabled, setImageLocationMapEnabled] = useState(false);
 
   useEffect(() => {
@@ -4017,6 +4145,10 @@ function ShareDialog({
         if (!mounted) return;
         setActive(value.share);
         setRecipientEmail(value.share?.recipientEmail || "");
+        setSelectedRecipient(value.share?.audience || null);
+        setRecipientQuery(value.share?.audience
+          ? `${value.share.audience.displayName}${value.share.audience.email ? ` (${value.share.audience.email})` : ""}`
+          : value.share?.recipientEmail || "");
         // Wait for the authoritative active-share lookup before choosing a
         // default. New shares start with the map visible in the form, while an
         // existing share always preserves its stored value (including false).
@@ -4046,6 +4178,27 @@ function ShareDialog({
       deadline.cancel();
     };
   }, [folder.prefix, activeLoadAttempt]);
+
+  useEffect(() => {
+    if (!directoryRecipientsEnabled || selectedRecipient || recipientQuery.trim().length < 2) {
+      setRecipientOptions([]);
+      setRecipientSearchError("");
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api<{ audiences: ShareDirectoryAudience[] }>(
+        `/api/delivery/share-recipients?prefix=${encodeURIComponent(folder.prefix)}&q=${encodeURIComponent(recipientQuery.trim())}`,
+        { signal: controller.signal },
+      ).then(value => {
+        setRecipientOptions(value.audiences);
+        setRecipientSearchError(value.audiences.length ? "" : "No authorized client audiences match this folder.");
+      }).catch(caught => {
+        if ((caught as Error).name !== "AbortError") setRecipientSearchError((caught as Error).message);
+      });
+    }, 250);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [directoryRecipientsEnabled, folder.prefix, recipientQuery, selectedRecipient]);
 
   const shown = result
     ? {
@@ -4173,9 +4326,13 @@ function ShareDialog({
                       expirationMode === "custom" && expiresAt
                         ? new Date(expiresAt).toISOString()
                         : null,
-                    recipientEmail: recipientEmail.trim() || null,
                     imageLocationMapEnabled,
                   };
+                  if (directoryRecipientsEnabled) {
+                    if (recipientQuery.trim() && !selectedRecipient)
+                      throw new Error("Choose a recipient from the authorized client directory, or clear the field for an unaddressed bearer link.");
+                    body.recipientAudience = selectedRecipient ? { type: selectedRecipient.audienceType, publicId: selectedRecipient.publicId } : null;
+                  } else body.recipientEmail = recipientEmail.trim() || null;
                   if (removeCode) body.removeAccessCode = true;
                   else if (accessCode.trim())
                     body.accessCode = accessCode.trim();
@@ -4236,7 +4393,45 @@ function ShareDialog({
                   />
                 </label>
               )}
-              <label className="full">
+              {directoryRecipientsEnabled ? <div className="full share-recipient-field">
+                <label htmlFor="share-recipient-search">Notification recipient</label>
+                <input
+                  id="share-recipient-search"
+                  type="search"
+                  role="combobox"
+                  aria-autocomplete="list"
+                  aria-expanded={recipientOptions.length > 0}
+                  aria-controls="share-recipient-options"
+                  value={recipientQuery}
+                  onChange={(event) => {
+                    setRecipientQuery(event.target.value);
+                    setSelectedRecipient(null);
+                    markDirty();
+                  }}
+                  placeholder="Type a client name or email"
+                  autoComplete="off"
+                  disabled={busy}
+                />
+                {recipientOptions.length > 0 && <div id="share-recipient-options" className="client-workspace-typeahead" role="listbox">
+                  {recipientOptions.map(option => <button
+                    type="button"
+                    role="option"
+                    aria-selected={selectedRecipient?.publicId === option.publicId && selectedRecipient?.audienceType === option.audienceType}
+                    key={`${option.audienceType}:${option.publicId}`}
+                    onClick={() => {
+                      setSelectedRecipient(option);
+                      setRecipientQuery(`${option.displayName}${option.email ? ` (${option.email})` : ""}`);
+                      setRecipientOptions([]);
+                      setRecipientSearchError("");
+                      markDirty();
+                    }}
+                  ><strong>{option.displayName}</strong><small>{option.audienceType === "principal" ? option.email : `${option.audienceType} audience`}</small></button>)}
+                </div>}
+                {recipientSearchError && <small role="status">{recipientSearchError}</small>}
+                <small>
+                  Optional. This selects a notification recipient from the client directory; it does not restrict who can use the complete bearer link. Clear the field for an unaddressed link. Access codes are never emailed.
+                </small>
+              </div> : <label className="full">
                 Recipient email
                 <input
                   type="email"
@@ -4252,7 +4447,7 @@ function ShareDialog({
                   Delivery and access notifications will be sent here. Access
                   codes are never emailed.
                 </small>
-              </label>
+              </label>}
               <label className="check full">
                 <input
                   type="checkbox"

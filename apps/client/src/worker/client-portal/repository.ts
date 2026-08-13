@@ -20,6 +20,13 @@ import type {
   ClientServiceRequestType,
   VerifiedClientPrincipal,
 } from "./types";
+import {
+  createServiceRequestDraft,
+  getServiceRequestDraft,
+  listServiceCatalog,
+  saveServiceRequestDraft,
+  submitServiceRequestDraft,
+} from "./request-v2";
 
 interface ProjectRow {
   id: string;
@@ -84,6 +91,9 @@ interface ServiceRequestRow {
   longitude: number | null;
   area_geojson: string | null;
   poi_points_json: string | null;
+  work_area_revision_number: number | null;
+  work_area_change_summary: string | null;
+  work_area_updated_at: string | null;
   status: ClientServiceRequest["status"];
   created_at: string;
   updated_at: string;
@@ -276,6 +286,13 @@ function mapServiceRequest(
     longitude: row.longitude ?? null,
     areaGeoJson,
     poiPoints,
+    ...(row.work_area_revision_number == null
+      ? {}
+      : { workAreaRevision: {
+            revisionNumber: row.work_area_revision_number,
+            changeSummary: row.work_area_change_summary!,
+            updatedAt: row.work_area_updated_at!,
+          } }),
     status: row.status,
     acceptedQuote:
       includeBilling && row.quote_status
@@ -358,7 +375,12 @@ const memberProjectConstraint = `
 
 const serviceRequestColumns = `r.id,r.project_id,r.parent_request_id,r.request_type,r.title,r.details,r.location_text,r.preferred_start_at,
    r.service_category,r.deliverables_text,r.site_contact_name,r.site_contact_email,r.site_contact_phone,
-   r.desired_completion_at,r.latitude,r.longitude,r.area_geojson,r.poi_points_json,r.status,r.created_at,r.updated_at,
+   r.desired_completion_at,r.latitude,r.longitude,
+   CASE WHEN effective_area.id IS NULL THEN r.area_geojson ELSE effective_area.area_geojson END area_geojson,
+   CASE WHEN effective_area.id IS NULL THEN r.poi_points_json ELSE effective_area.poi_points_json END poi_points_json,
+   effective_area.revision_number work_area_revision_number,
+   effective_area.change_summary work_area_change_summary,effective_area.created_at work_area_updated_at,
+   r.status,r.created_at,r.updated_at,
    quote.document_number quote_document_number,quote.artifact_status quote_status,
    quote.total_minor quote_total_minor,quote.currency quote_currency,quote.verified_at quote_verified_at,
    estimate.id estimate_id,estimate.version estimate_version,estimate.scope_text estimate_scope,
@@ -367,7 +389,12 @@ const serviceRequestColumns = `r.id,r.project_id,r.parent_request_id,r.request_t
    estimate.updated_at estimate_updated_at`;
 
 const acceptedQuoteJoin = `LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id
-  AND quote.artifact_type='quote' AND quote.superseded_at IS NULL AND quote.artifact_status IN ('approved','accepted')`;
+  AND quote.artifact_type='quote' AND quote.superseded_at IS NULL AND quote.scope_stale_at IS NULL
+  AND quote.artifact_status IN ('approved','accepted')`;
+
+const effectiveAreaJoin = `LEFT JOIN client_service_request_area_revisions effective_area ON effective_area.request_id=r.id
+  AND effective_area.revision_number=(SELECT MAX(area_revision.revision_number)
+    FROM client_service_request_area_revisions area_revision WHERE area_revision.request_id=r.id)`;
 
 const operationalEstimateJoin = `LEFT JOIN request_operational_estimates estimate ON estimate.request_id=r.id
   AND estimate.status IN ('ready','accepted','change_requested')`;
@@ -458,6 +485,7 @@ async function getServiceRequestByIdempotency(
     ${sessionJoin}
     ${acceptedQuoteJoin}
     ${operationalEstimateJoin}
+    ${effectiveAreaJoin}
     WHERE r.idempotency_key=? AND r.account_id=a.id ${requestAccessConstraint}`,
     )
     .bind(session.accountId, session.identityId, idempotency)
@@ -465,6 +493,26 @@ async function getServiceRequestByIdempotency(
 }
 
 export const d1ClientPortalRepository: ClientPortalRepository = {
+  async listServiceCatalog(env) {
+    return listServiceCatalog(env);
+  },
+
+  async getServiceRequestDraft(env, session, draftId) {
+    return getServiceRequestDraft(env, session, draftId);
+  },
+
+  async createServiceRequestDraft(env, session, input, mutationKey) {
+    return createServiceRequestDraft(env, session, input, mutationKey);
+  },
+
+  async saveServiceRequestDraft(env, session, draftId, expectedVersion, input, mutationKey) {
+    return saveServiceRequestDraft(env, session, draftId, expectedVersion, input, mutationKey);
+  },
+
+  async submitServiceRequestDraft(env, session, draftId, expectedVersion, mutationKey) {
+    return submitServiceRequestDraft(env, session, draftId, expectedVersion, mutationKey);
+  },
+
   async resolveSession(
     env: Env,
     principal: VerifiedClientPrincipal,
@@ -859,6 +907,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       ${sessionJoin}
       ${acceptedQuoteJoin}
       ${operationalEstimateJoin}
+      ${effectiveAreaJoin}
       WHERE r.account_id=a.id ${requestAccessConstraint}
       ORDER BY r.created_at DESC,r.id DESC
       LIMIT 100`,
@@ -883,6 +932,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       ${sessionJoin}
       ${acceptedQuoteJoin}
       ${operationalEstimateJoin}
+      ${effectiveAreaJoin}
       WHERE r.id=? AND r.account_id=a.id ${requestAccessConstraint}`,
       )
       .bind(session.accountId, session.identityId, requestId)

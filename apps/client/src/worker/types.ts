@@ -15,7 +15,41 @@ export interface Env {
   EXPECTED_HOST: string;
   CLIENT_PORTAL_ENABLED?: string;
   CLIENT_PORTAL_ORIGIN?: string;
+  CLIENT_PORTAL_REQUEST_V2_ENABLED?: string;
+  /** Server-only Project Alpha catalog projection. Default-off and never browser writable. */
+  PROJECT_ALPHA_CATALOG_SYNC_ENABLED?: string;
+  PROJECT_ALPHA_CATALOG_APPLICATION_KEY?: string;
+  PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN?: string;
+  PROJECT_ALPHA_CATALOG_ACCESS_AUD?: string;
+  PROJECT_ALPHA_CATALOG_HMAC_SECRET?: string;
+  /** Server-only PA portal hierarchy/entitlement projection. Independent and default-off. */
+  PROJECT_ALPHA_PORTAL_SYNC_ENABLED?: string;
+  PROJECT_ALPHA_PORTAL_APPLICATION_KEY?: string;
+  PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN?: string;
+  PROJECT_ALPHA_PORTAL_ACCESS_AUD?: string;
+  PROJECT_ALPHA_PORTAL_HMAC_SECRET?: string;
+  /** Default-off, read-only Project Alpha planning guidance integration. */
+  PROJECT_ALPHA_PRICING_HINTS_ENABLED?: string;
+  PROJECT_ALPHA_PRICING_HINT_URL?: string;
+  PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN?: string;
+  PROJECT_ALPHA_PRICING_HINT_API_KEY?: string;
+  PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET?: string;
+  PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY?: string;
+  PROJECT_ALPHA_PRICING_HINT_CURRENCIES?: string;
   CLIENT_PORTAL_TEAM_ENABLED?: string;
+  /** Additive PA-backed workspace hierarchy. Default-off until shadow parity is proven. */
+  CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
+  /** Client invitation/member mutations. Independent from read-only hierarchy rollout. */
+  CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED?: string;
+  /**
+   * Client-delegated public links remain unavailable until an internal
+   * Operations signer service binding is contract-tested. Never bind the
+   * Operations DELIVERY_TOKEN_SECRET into this Worker.
+   */
+  CLIENT_DELEGATED_SHARES_ENABLED?: string;
+  CLIENT_DELEGATED_SHARE_SIGNER?: Fetcher;
+  CLIENT_DELEGATED_SHARE_SESSION_SECRET?: string;
+  CLIENT_DELEGATED_SHARE_KEY_ID?: string;
   /**
    * Dedicated Client Portal Access application values. These deliberately do
    * not reuse the staff Operations or Ops Sync audience.
@@ -35,6 +69,9 @@ export interface Env {
   R2_BUCKET_NAME: string;
   R2_ACCESS_KEY_ID: string;
   R2_SECRET_ACCESS_KEY: string;
+  /** Default-off until a real scanner consumes quarantine objects and signs receipts. */
+  CLIENT_REQUEST_ATTACHMENTS_ENABLED?: string;
+  CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET?: string;
   BULK_DOWNLOAD_WORKFLOW: Workflow;
   CLOUD_TRANSFER_WORKFLOW: Workflow;
   CLOUD_TRANSFER_DROPBOX_ENABLED?: string;
