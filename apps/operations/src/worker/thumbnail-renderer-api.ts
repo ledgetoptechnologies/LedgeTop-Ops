@@ -138,13 +138,22 @@ async function boundedJson(request: Request, maxBytes = 8 * 1024): Promise<Recor
  * Finds a job that's pending or has an expired lease, atomically claims it,
  * and returns the source details plus presigned URLs for download and upload.
  */
-async function handleClaim(_request: Request, env: Env): Promise<Response> {
+async function handleClaim(request: Request, env: Env): Promise<Response> {
+  // Allow excluding a media kind (e.g. excludeKind=video to only claim photos)
+  const excludeKind = new URL(request.url).searchParams.get("excludeKind") || "";
+  const excludeClause = excludeKind === "video"
+    ? "AND source_key NOT LIKE '%.MP4' AND source_key NOT LIKE '%.mp4' AND source_key NOT LIKE '%.MOV' AND source_key NOT LIKE '%.mov' AND source_key NOT LIKE '%.MKV' AND source_key NOT LIKE '%.mkv'"
+    : excludeKind === "image"
+    ? "AND (source_key LIKE '%.MP4' OR source_key LIKE '%.mp4' OR source_key LIKE '%.MOV' OR source_key LIKE '%.mov' OR source_key LIKE '%.MKV' OR source_key LIKE '%.mkv')"
+    : "";
+
   // Find the next pending job
   const job = await env.DELIVERY_DB.prepare(
     `SELECT source_key, source_etag, source_size, thumbnail_key, attempt_count
      FROM image_thumbnail_jobs
      WHERE status = 'pending'
        AND (lease_until IS NULL OR lease_until < datetime('now'))
+       ${excludeClause}
      ORDER BY queue_published_at ASC
      LIMIT 1`
   ).first<{ source_key: string; source_etag: string; source_size: number; thumbnail_key: string; attempt_count: number }>();
