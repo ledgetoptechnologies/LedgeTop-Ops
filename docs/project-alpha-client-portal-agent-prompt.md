@@ -9,8 +9,9 @@ deployment, production migration, real email, or production data mutation.
 Work only in the current Project Alpha repository. The reviewed compatibility
 baseline is Project Alpha commit `60e735265e0d50ef880fde33e058d213a8b70c4b` on
 `codex/dev-recurring-expenses`/`origin/dev`; do not silently replace it with
-the older `origin/main`. If the checkout has moved, first compare it to that
-commit and report the exact delta. Inspect the full schema/migration ledger,
+the divergent, non-baseline `origin/main`. If the checkout has moved, first
+compare it to that commit and report the exact delta. Inspect the full
+schema/migration ledger,
 authorization middleware,
 Service Library, quote creation, organization/department/contact screens,
 portal foundation, sync v1/v2 services, audit/outbox conventions, and tests
@@ -21,7 +22,7 @@ the user separately authorizes it.
 Your objective is to implement Project Alpha's half of the LTDS Client Portal
 v2 contract. The exact reviewed LTDS compatibility source is
 `https://github.com/ledgetoptechnologies/LTDS-Ops.git` commit
-`7b7fdce1ccfbdbaa018af7ebbc3000132eda5bff`; do not substitute a branch tip or
+`bc16d053ba78f838e3dd97d17d114321233ac50b`; do not substitute a branch tip or
 another checkout. Treat that commit's repository-relative
 `docs/client-portal-v2-architecture.md`, `docs/project-alpha.md`, and the five
 fixture files below as normative. Verify these SHA-256 values before editing:
@@ -71,11 +72,13 @@ Implement this as additive, default-off, independently gated capabilities:
      must grant nothing.
    - PA staff, through the audited PA authority screen, appoint or replace
      organization administrators, department heads, and project managers.
-     Portal managers may invite ordinary LTDS-local guests only within a scope
-     where their PA entitlement already grants `member.manage`; an invitation
-     can never grant `member.manage` or create a PA-backed manager. Project
-     scope is always the safe default. Organization-wide guest scope requires
-     an explicit warning and confirmation.
+     PA publishes the `member.manage` entitlement intent; LTDS owns the guest
+     invitation and warning UX. Portal managers may invite ordinary LTDS-local
+     guests only within a scope where their PA entitlement already grants
+     `member.manage`; an invitation can never grant `member.manage` or create a
+     PA-backed manager. Project scope is always the safe default.
+     Organization-wide guest scope requires an explicit LTDS warning and
+     confirmation.
    - Removing/reparenting/deactivating a source entity or entitlement must emit
      authoritative state that immediately removes the affected authorization
      intent. Changing a contact's email must not silently bind a different
@@ -199,7 +202,8 @@ Implement this as additive, default-off, independently gated capabilities:
    - Import or copy byte-for-byte
      `packages/shared/fixtures/project-alpha-draft-quote-v1.json` from LTDS.
      Run its valid request/response and every invalid request/response through
-     the PA receiver tests. Reject extra keys, numeric legacy authorization
+     the PA receiver tests, and exercise every `errorResponses` specimen with
+     its exact status and body. Reject extra keys, numeric legacy authorization
      IDs, mismatched area nullability, non-draft results, and editor paths that
      do not identify the returned quote public ID exactly as the shared corpus
      requires.
