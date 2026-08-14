@@ -112,7 +112,8 @@ const principals = {
 const revisionOne = "11111111-1111-4111-8111-111111111111";
 const revisionTwo = "22222222-2222-4222-8222-222222222222";
 
-function setup() {
+function setup(options: { withLinkSchema?: boolean } = {}) {
+  const withLinkSchema = options.withLinkSchema ?? true;
   const database = new DatabaseSync(":memory:");
   database.exec(`
     PRAGMA foreign_keys=ON;
@@ -134,7 +135,8 @@ function setup() {
     CREATE TABLE audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT,actor_type TEXT,actor_id TEXT,actor_email TEXT,actor_display_name TEXT,action TEXT,entity_type TEXT,entity_id TEXT,division_id TEXT,details_json TEXT,client_address_hash TEXT,created_at TEXT DEFAULT(datetime('now')));
   `);
   database.exec(readFileSync(new URL("../migrations/0020_internal_sop_library.sql", import.meta.url), "utf8"));
-  database.exec(readFileSync(new URL("../migrations/0023_project_task_sop_links.sql", import.meta.url), "utf8"));
+  if (withLinkSchema)
+    database.exec(readFileSync(new URL("../migrations/0023_project_task_sop_links.sql", import.meta.url), "utf8"));
   const addStaff = database.prepare("INSERT INTO staff_users VALUES (?,?,?,?)");
   for (const principal of Object.values(principals))
     addStaff.run(principal.id, principal.email, principal.displayName, principal.projectAlphaUserId);
@@ -227,6 +229,46 @@ describe("Project and Task direct SOP links", () => {
     ) => permission === "sops.view"
       ? principal.id !== principals.noSop.id
       : principal.id === principals.admin.id);
+  });
+
+  it("degrades list decoration and returns a stable capability response before migration 0023", async () => {
+    const state = setup({ withLinkSchema: false });
+    await expect(decorateWorkContextsWithSops(
+      state.env,
+      principals.admin,
+      "project",
+      [{ id: "project-1", name: "North site" }],
+    )).resolves.toEqual([{
+      id: "project-1",
+      name: "North site",
+      sopLinks: [],
+      sopLinkVersion: 0,
+      canManageSops: false,
+    }]);
+
+    const read = await state.app.fetch(request(
+      "/api/work-contexts/project/project-1/sops",
+      "admin",
+    ), state.env);
+    expect(read.status).toBe(503);
+    expect(await read.json()).toEqual({
+      error: "Work-context SOP links are temporarily unavailable",
+      code: "capability_unavailable",
+    });
+
+    const write = await state.app.fetch(request("/api/work-contexts/task/task-1/sops", "admin", {
+      method: "PUT",
+      body: JSON.stringify({ expectedVersion: 0, revisionIds: [] }),
+    }), state.env);
+    expect(write.status).toBe(503);
+    await expect(readAuthorizedWorkContextSopRevision(
+      state.env,
+      principals.admin,
+      "project",
+      "project-1",
+      "lidar-capture",
+      revisionOne,
+    )).rejects.toMatchObject({ status: 404 });
   });
 
   it("pins exact revisions without Project-to-Task inheritance and rejects stale replacement", async () => {

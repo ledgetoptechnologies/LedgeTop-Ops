@@ -537,6 +537,39 @@ describe("client portal activation hardening", () => {
     expect(updateNotification).toHaveBeenCalledWith(expect.anything(), session, "notice-1", "dismiss");
   });
 
+  it("keeps the portal usable before the additive notification schema is migrated", async () => {
+    const listNotifications = vi.fn();
+    const updateNotification = vi.fn();
+    const notificationSchemaAvailable = vi.fn(async () => false);
+    const app = createClientPortalRouter({
+      resolvePrincipal: principal,
+      repository: repository({ listNotifications, updateNotification }),
+      notificationSchemaAvailable,
+    });
+
+    const listed = await app.request(
+      "https://client.example/notifications",
+      {},
+      env("true", "https://client.example"),
+    );
+    expect(listed.status).toBe(200);
+    expect(await listed.json()).toEqual({ notifications: [], unreadCount: 0, cursor: null });
+    expect(listNotifications).not.toHaveBeenCalled();
+
+    const updated = await app.request("https://client.example/notifications/notice-1", {
+      method: "PATCH",
+      headers: { Origin: "https://client.example", "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "read" }),
+    }, env("true", "https://client.example"));
+    expect(updated.status).toBe(503);
+    expect(await updated.json()).toEqual({
+      error: "Client notifications are temporarily unavailable",
+      code: "capability_unavailable",
+    });
+    expect(updateNotification).not.toHaveBeenCalled();
+    expect(notificationSchemaAvailable).toHaveBeenCalledTimes(2);
+  });
+
   it("reaches the null identity-provider boundary only after origin configuration is valid", async () => {
     const response = await deliveryWorker.fetch(
       new Request("https://delivery.example/api/client/session"),

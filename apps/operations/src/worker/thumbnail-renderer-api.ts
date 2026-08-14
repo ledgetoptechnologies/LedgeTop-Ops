@@ -15,6 +15,8 @@ import type { Env } from "./types";
 const RENDERER_API_PREFIX = "/api/internal/thumbnail-renderer/v1";
 const MANAGED_PREFIX = "_ltds/derivatives/thumbnails/v1/managed/";
 const RENDERER_LEASE_TOKEN_MAX_MS = 24 * 60 * 60 * 1000;
+const RENDERER_DEFAULT_LEASE_MS = 5 * 60 * 1000;
+const RENDERER_VIDEO_INITIAL_LEASE_MS = 15 * 60 * 1000;
 // This API writes directly to the managed-key contract (rather than the
 // manifest-backed prebuilt TrueNAS contract), so retain the managed provider
 // value used by authorized thumbnail reads even though TrueNAS performs the
@@ -161,6 +163,17 @@ async function boundedJson(request: Request, maxBytes = 8 * 1024): Promise<Recor
  * and returns the source details plus presigned URLs for download and upload.
  */
 async function handleClaim(request: Request, env: Env): Promise<Response> {
+  // The external TrueNAS queue worker is video-only. Keep the legacy
+  // excludeKind filter for older callers, but provide an authoritative filter
+  // backed by the indexed media classification so it cannot consume image/PDF
+  // work intended for the Cloudflare queue consumer.
+  const includeKind = new URL(request.url).searchParams.get("includeKind") || "";
+  if (includeKind && includeKind !== "video") return json({ error: "invalid_request" }, 400);
+  const includeClause = includeKind === "video"
+    ? `AND EXISTS (SELECT 1 FROM file_index f WHERE f.r2_key=image_thumbnail_jobs.source_key
+        AND trim(f.etag,'"')=image_thumbnail_jobs.source_etag
+        AND f.size=image_thumbnail_jobs.source_size AND f.media_kind='video')`
+    : "";
   // Allow excluding a media kind (e.g. excludeKind=video to only claim photos)
   const excludeKind = new URL(request.url).searchParams.get("excludeKind") || "";
   const excludeClause = excludeKind === "video"
@@ -175,6 +188,7 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
      FROM image_thumbnail_jobs
      WHERE status = 'pending'
        AND (lease_until IS NULL OR lease_until < datetime('now'))
+       ${includeClause}
        ${excludeClause}
      ORDER BY queue_published_at ASC
      LIMIT 1`
@@ -205,8 +219,12 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
     return json({ status: "idle" }, 200);
   }
 
-  // Atomically claim the job (set to processing, lease for 5 minutes)
-  const leaseUntil = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  // Video renderers may need time to seek a large source before their first
+  // heartbeat. Keep the initial video lease aligned with the 15-minute signed
+  // R2 read URL while retaining the shorter default for other media. Longer
+  // work must still extend the attempt through the heartbeat endpoint.
+  const initialLeaseMs = kind === "video" ? RENDERER_VIDEO_INITIAL_LEASE_MS : RENDERER_DEFAULT_LEASE_MS;
+  const leaseUntil = new Date(Date.now() + initialLeaseMs).toISOString();
   const attemptCount = job.attempt_count + 1;
 
   const claimResult = await env.DELIVERY_DB.prepare(
@@ -232,9 +250,9 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
     sourceSize: job.source_size,
     thumbnailKey,
     attemptCount,
-    // The database lease remains five minutes and must be extended by
-    // heartbeat. The attempt-bound token lasts longer so a heartbeat does not
-    // invalidate the source/upload URLs during a large video render.
+    // The database lease is bounded and must be extended by heartbeat. The
+    // attempt-bound token lasts longer so a heartbeat does not invalidate the
+    // source/upload URLs during a large video render.
     expiresAt: Date.now() + RENDERER_LEASE_TOKEN_MAX_MS,
   });
 
@@ -512,7 +530,12 @@ async function handleHeartbeat(request: Request, env: Env): Promise<Response> {
   const job = await currentRendererAttempt(env, sourceKey, leaseId);
   if (!job) return json({ error: "job_not_found" }, 404);
 
-  const leaseUntil = new Date(Date.now() + 5 * 60 * 1000).toISOString();
+  // An early heartbeat must not shorten the longer initial video lease. Once
+  // the initial horizon is within five minutes, heartbeats extend it as a
+  // rolling five-minute lease.
+  const currentLeaseMs = Date.parse(job.lease_until || "");
+  const renewedLeaseMs = Date.now() + RENDERER_DEFAULT_LEASE_MS;
+  const leaseUntil = new Date(Math.max(currentLeaseMs, renewedLeaseMs)).toISOString();
   const heartbeat = await env.DELIVERY_DB.prepare(
     `UPDATE image_thumbnail_jobs SET lease_until=?, updated_at=datetime('now')
      WHERE source_key=? AND source_etag=? AND thumbnail_key=? AND status='processing'

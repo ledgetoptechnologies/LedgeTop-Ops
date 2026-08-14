@@ -41,6 +41,7 @@ function object(key: string, etag: string, contentType: string, size = 4096,
 describe("legacy TrueNAS video thumbnail recovery", () => {
   let miniflare: Miniflare;
   let db: D1Database;
+  let preMigrationDb: D1Database;
   let objects: Map<string, StoredObject>;
   let env: Env;
 
@@ -49,9 +50,13 @@ describe("legacy TrueNAS video thumbnail recovery", () => {
       compatibilityDate: "2026-08-04",
       modules: true,
       script: "export default { fetch() { return new Response('ok'); } };",
-      d1Databases: { DELIVERY_DB: "video-thumbnail-recovery" },
+      d1Databases: {
+        DELIVERY_DB: "video-thumbnail-recovery",
+        PRE_MIGRATION: "video-thumbnail-recovery-pre-migration",
+      },
     });
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
+    preMigrationDb = await miniflare.getD1Database("PRE_MIGRATION") as unknown as D1Database;
     await db.exec("CREATE TABLE file_index (r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,uploaded_at TEXT NOT NULL,content_type TEXT,media_kind TEXT NOT NULL);");
     await db.exec("CREATE TABLE delivery_tombstones (id TEXT PRIMARY KEY,physical_key TEXT NOT NULL,tombstone_kind TEXT NOT NULL,restored_at TEXT);");
     for (const name of [
@@ -113,6 +118,13 @@ describe("legacy TrueNAS video thumbnail recovery", () => {
     ).run();
     return thumbnailKey;
   }
+
+  it("is a quiet no-op before the one-time recovery migration is applied", async () => {
+    await expect(processLegacyVideoThumbnailRecovery({
+      DELIVERY_DB: preMigrationDb,
+      DATA_BUCKET: { head: async () => null },
+    } as unknown as Env)).resolves.toBe(0);
+  });
 
   it("seeds independently of generic backfills and remains idempotent", async () => {
     await db.prepare(`INSERT INTO image_thumbnail_backfill_runs(id,mode,scope_prefix,status)

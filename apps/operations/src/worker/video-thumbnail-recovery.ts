@@ -7,6 +7,7 @@ import {
   thumbnailSourceWithinInputLimit,
 } from "./image-thumbnails";
 import { THUMBNAIL_RENDER_PROFILE } from "./thumbnail-renderer-contract";
+import { d1TablesPresent } from "./schema-readiness";
 import type { Env } from "./types";
 
 const PAGE_LIMIT = 25;
@@ -110,6 +111,7 @@ async function resetCandidate(env: Env, row: RecoveryCandidate, thumbnailKey: st
  * is published, so the image/PDF Container consumer never receives them.
  */
 export async function processLegacyVideoThumbnailRecovery(env: Env, limit = PAGE_LIMIT): Promise<number> {
+  if (!(await d1TablesPresent(env.DELIVERY_DB, ["legacy_video_thumbnail_recovery"]))) return 0;
   const run = await env.DELIVERY_DB.prepare(`SELECT cursor,cutoff_at,attempt_count
     FROM legacy_video_thumbnail_recovery
     WHERE singleton=1 AND (status='queued' OR (status='running' AND

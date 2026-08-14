@@ -2,6 +2,7 @@ import sql from "../migrations/0096_client_portal_foundation.sql?raw";
 import { sha256 } from "../src/worker/security";
 import { describe, expect, it } from "vitest";
 import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
+import { clientPortalNotificationsAvailable } from "../src/worker/client-portal/schema-readiness";
 import type { ClientPortalSession } from "../src/worker/client-portal/types";
 import type { Env } from "../src/worker/types";
 
@@ -49,6 +50,19 @@ function recordingEnv(options: {
 }
 
 const session: ClientPortalSession = { accountId: "account-a", identityId: "identity-a", displayName: "Acme", role: "manager", canViewBilling: false };
+
+describe("client portal additive schema readiness", () => {
+  it.each([[0, false], [1, true]] as const)(
+    "reports notification table count %s as available=%s",
+    async (count, expected) => {
+      const value = recordingEnv({ first: () => ({ count }) });
+      await expect(clientPortalNotificationsAvailable(value.env)).resolves.toBe(expected);
+      expect(value.calls).toHaveLength(1);
+      expect(value.calls[0]?.sql).toContain("sqlite_master");
+      expect(value.calls[0]?.binds).toEqual(["client_portal_notifications"]);
+    },
+  );
+});
 
 describe("client portal identity resolution", () => {
   it("resolves only the exact verified issuer and subject into an active account", async () => {

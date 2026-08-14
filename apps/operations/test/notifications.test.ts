@@ -1,12 +1,125 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildServiceRequestNotificationSnapshot,
   parseServiceRequestNotificationSnapshot,
 } from "@ltds/shared";
-import { normalizeRecipientEmail, notificationDedupeKey, renderClientRequestNotification, renderNotification } from "../src/worker/notifications";
+import {
+  enqueueExpiringNotifications,
+  normalizeRecipientEmail,
+  notificationDedupeKey,
+  processClientPortalRequestNotifications,
+  renderClientRequestNotification,
+  renderNotification,
+} from "../src/worker/notifications";
 import { buildSmtpMessage, smtpNotificationsEnabled } from "../src/worker/mailer";
+import type { Env } from "../src/worker/types";
+
+interface D1Call { sql: string; binds: unknown[] }
+
+function recordingDatabase(callbacks: {
+  first?: (call: D1Call) => unknown;
+  all?: (call: D1Call) => unknown[];
+  changes?: (call: D1Call) => number;
+}) {
+  const calls: D1Call[] = [];
+  const database = {
+    withSession() { return database; },
+    prepare(sql: string) {
+      const call: D1Call = { sql, binds: [] };
+      calls.push(call);
+      const statement = {
+        bind(...binds: unknown[]) { call.binds = binds; return statement; },
+        async first<T>() { return (callbacks.first?.(call) ?? null) as T | null; },
+        async all<T>() { return { results: (callbacks.all?.(call) ?? []) as T[] }; },
+        async run<T>() {
+          return { results: [] as T[], meta: { changes: callbacks.changes?.(call) ?? 1 } };
+        },
+      };
+      return statement;
+    },
+    async batch(statements: Array<{ run(): Promise<unknown> }>) {
+      return Promise.all(statements.map(statement => statement.run()));
+    },
+  };
+  return { database: database as unknown as D1Database, calls };
+}
 
 describe("client notifications", () => {
+  it("keeps legacy expiring-share notifications active before recipient snapshots", async () => {
+    const value = recordingDatabase({
+      first: call => call.sql.includes("sqlite_master") ? { count: 0 } : null,
+      all: call => call.sql.includes("FROM shares s JOIN projects p") ? [{
+        id: "share-legacy",
+        recipient_email: "legacy@example.test",
+        recipient_principal_public_id: null,
+        public_id: "public-legacy",
+        client_name: "Acme",
+        project_name: "North site",
+        r2_prefix: "Jobs/Clients/Acme/North/",
+        expires_at: "2026-08-16 12:00:00",
+      }] : [],
+    });
+    await expect(enqueueExpiringNotifications({
+      DELIVERY_DB: value.database,
+    } as unknown as Env)).resolves.toBe(1);
+    expect(value.calls.some(call => call.sql.includes("JOIN delivery_share_audience_snapshots"))).toBe(false);
+    const insert = value.calls.find(call => call.sql.includes("INSERT OR IGNORE INTO delivery_notifications"));
+    expect(insert?.binds[1]).toBe("expiring_72h:share-legacy:2026-08-16 12:00:00");
+    expect(insert?.binds[4]).toBe("legacy@example.test");
+  });
+
+  it("delivers request email without retrying when the additive portal inbox is absent", async () => {
+    let outboxReads = 0;
+    const snapshot = buildServiceRequestNotificationSnapshot({
+      title: "North site imagery",
+      projectId: null,
+      serviceCategory: "Progress mapping",
+      locationLabel: "North site",
+      lifecycle: "under_review",
+      action: "open_client_portal",
+    });
+    const value = recordingDatabase({
+      first: call => {
+        if (call.sql.includes("sqlite_master")) return { count: 0 };
+        if (call.sql.includes("FROM client_portal_notification_outbox")) {
+          outboxReads += 1;
+          return outboxReads === 1 ? {
+            id: "notice-legacy",
+            request_id: "request-legacy",
+            event_type: "request_status_changed",
+            status_value: "under_review",
+            recipient_kind: "client_requester",
+            payload_json: JSON.stringify(snapshot),
+            attempt_count: 0,
+            title: "North site imagery",
+            project_id: null,
+            service_category: "Progress mapping",
+            location_text: "North site",
+            latitude: null,
+            longitude: null,
+            project_name: null,
+            requester_email: "client@example.test",
+            account_id: "account-legacy",
+            requester_identity_id: "identity-legacy",
+          } : null;
+        }
+        return null;
+      },
+    });
+    const send = async () => undefined;
+    const emailSend = vi.fn(send);
+    await expect(processClientPortalRequestNotifications({
+      DELIVERY_DB: value.database,
+      DELIVERY_BASE_URL: "https://client.example",
+      PUBLIC_BASE_URL: "https://ops.example",
+      NOTIFICATION_FROM: "notifications@example.test",
+      NOTIFICATION_EMAIL: { send: emailSend },
+    } as unknown as Env)).resolves.toBe(1);
+    expect(emailSend).toHaveBeenCalledTimes(1);
+    expect(value.calls.some(call => call.sql.includes("INSERT OR IGNORE INTO client_portal_notifications"))).toBe(false);
+    expect(value.calls.some(call => call.sql.includes("SET status='sent'"))).toBe(true);
+  });
+
   it("normalizes optional recipient email and rejects malformed values", () => {
     expect(normalizeRecipientEmail("  Client@Example.com ")).toBe("client@example.com");
     expect(normalizeRecipientEmail(null)).toBeNull();

@@ -7,6 +7,7 @@ import {
 import type { Env } from "./types";
 import { sendAdminAlert } from "./alerts";
 import { sendNotificationMail } from "./mailer";
+import { d1TablesPresent } from "./schema-readiness";
 
 export type NotificationKind = "share_created" | "share_updated" | "share_revoked" | "first_access" | "expiring_72h";
 export interface NotificationPayload { publicId?: string | null; shareUrl?: string; clientName?: string; projectName?: string; r2Prefix?: string; expiresAt?: string | null; }
@@ -74,16 +75,26 @@ async function auditNotification(env: Env, action: string, row: NotificationRow,
 }
 
 export async function enqueueExpiringNotifications(env: Env): Promise<number> {
-  const rows = await env.DELIVERY_DB.prepare(`SELECT s.id,COALESCE(member.recipient_normalized_email,s.recipient_email) recipient_email,
-    member.recipient_principal_public_id,s.public_id,p.client_name,p.project_name,
-    COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.expires_at FROM shares s
-    JOIN projects p ON p.id=s.project_id
-    LEFT JOIN delivery_share_audience_snapshots audience
-      ON audience.share_id=s.id AND audience.share_version=s.share_version
-    LEFT JOIN delivery_share_recipient_members member
-      ON member.share_id=audience.share_id AND member.share_version=audience.share_version
-    WHERE s.revoked_at IS NULL AND p.active=1 AND COALESCE(member.recipient_normalized_email,s.recipient_email) IS NOT NULL AND s.expires_at IS NOT NULL
-    AND datetime(s.expires_at)>datetime('now') AND datetime(s.expires_at)<=datetime('now','+72 hours')`)
+  const recipientSnapshotsAvailable = await d1TablesPresent(env.DELIVERY_DB, [
+    "delivery_share_audience_snapshots",
+    "delivery_share_recipient_members",
+  ]);
+  const rows = await env.DELIVERY_DB.prepare(recipientSnapshotsAvailable
+    ? `SELECT s.id,COALESCE(member.recipient_normalized_email,s.recipient_email) recipient_email,
+        member.recipient_principal_public_id,s.public_id,p.client_name,p.project_name,
+        COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.expires_at FROM shares s
+       JOIN projects p ON p.id=s.project_id
+       LEFT JOIN delivery_share_audience_snapshots audience
+         ON audience.share_id=s.id AND audience.share_version=s.share_version
+       LEFT JOIN delivery_share_recipient_members member
+         ON member.share_id=audience.share_id AND member.share_version=audience.share_version
+       WHERE s.revoked_at IS NULL AND p.active=1 AND COALESCE(member.recipient_normalized_email,s.recipient_email) IS NOT NULL AND s.expires_at IS NOT NULL
+         AND datetime(s.expires_at)>datetime('now') AND datetime(s.expires_at)<=datetime('now','+72 hours')`
+    : `SELECT s.id,s.recipient_email,NULL recipient_principal_public_id,s.public_id,
+        p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.expires_at
+       FROM shares s JOIN projects p ON p.id=s.project_id
+       WHERE s.revoked_at IS NULL AND p.active=1 AND s.recipient_email IS NOT NULL AND s.expires_at IS NOT NULL
+         AND datetime(s.expires_at)>datetime('now') AND datetime(s.expires_at)<=datetime('now','+72 hours')`)
     .all<{ id: string; recipient_email: string; recipient_principal_public_id: string | null; public_id: string | null; client_name: string; project_name: string; r2_prefix: string; expires_at: string }>();
   const statements = rows.results.map(row => notificationStatement(env, { shareId: row.id, kind: "expiring_72h", recipientEmail: row.recipient_email,
     dedupeKey: notificationDedupeKey("expiring_72h", row.id, `${row.expires_at}${row.recipient_principal_public_id ? `:${row.recipient_principal_public_id}` : ""}`), payload: { publicId: row.public_id, clientName: row.client_name, projectName: row.project_name, r2Prefix: row.r2_prefix, expiresAt: row.expires_at } }))
@@ -247,6 +258,7 @@ async function auditClientRequestNotification(env: Env, action: string, row: Cli
 
 /** Delivers the durable client-request intent ledger. A missing recipient is deliberately suppressed, never retried forever. */
 export async function processClientPortalRequestNotifications(env: Env): Promise<number> {
+  const portalInboxAvailable = await d1TablesPresent(env.DELIVERY_DB, ["client_portal_notifications"]);
   let processed = 0;
   for (; processed < 25; processed += 1) {
     const row = await env.DELIVERY_DB.prepare(`SELECT n.id,n.request_id,n.event_type,n.status_value,n.recipient_kind,n.payload_json,n.attempt_count,
@@ -290,7 +302,7 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
     try {
       const snapshot = notificationSnapshot(row);
       const rendered = renderClientRequestNotification(snapshot, actionUrl(env, row, snapshot));
-      if (row.recipient_kind === "client_requester") {
+      if (row.recipient_kind === "client_requester" && portalInboxAvailable) {
         const completed = snapshot.lifecycle === "completed";
         const estimate = snapshot.lifecycle === "estimate_ready";
         const workArea = snapshot.lifecycle === "work_area_changed";

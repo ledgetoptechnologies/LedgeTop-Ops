@@ -1,17 +1,23 @@
 import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { recordClientFolderFileChange } from "../src/worker/client-folder-grants";
+import {
+  processClientFolderChangeNotifications,
+  recordClientFolderFileChange,
+} from "../src/worker/client-folder-grants";
 
 describe("client folder change notification debounce", () => {
   let miniflare: Miniflare;
   let db: D1Database;
+  let preMigrationDb: D1Database;
   let env: any;
 
   beforeAll(async () => {
     miniflare = new Miniflare({ compatibilityDate: "2026-07-22", modules: true,
-      script: "export default { fetch() { return new Response('ok'); } };", d1Databases: { DB: "folder-change" } });
+      script: "export default { fetch() { return new Response('ok'); } };",
+      d1Databases: { DB: "folder-change", PRE_MIGRATION: "folder-change-pre-migration" } });
     db = await miniflare.getD1Database("DB") as unknown as D1Database;
+    preMigrationDb = await miniflare.getD1Database("PRE_MIGRATION") as unknown as D1Database;
     await db.exec(`CREATE TABLE client_accounts(id TEXT PRIMARY KEY);
       CREATE TABLE client_identity_links(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,UNIQUE(id,account_id));
       CREATE TABLE client_folder_associations(id TEXT PRIMARY KEY,scope_type TEXT,project_id TEXT,account_id TEXT,r2_prefix TEXT,logical_grant_id TEXT,revoked_at TEXT);`);
@@ -41,5 +47,15 @@ describe("client folder change notification debounce", () => {
 
   it("does not enqueue an event outside the granted prefix", async () => {
     expect(await recordClientFolderFileChange(env, "Jobs/Clients/Other/private.jpg", true)).toBe(0);
+  });
+
+  it("is a quiet no-op before migration 0115 instead of failing file events or cron", async () => {
+    const preMigrationEnv = { DELIVERY_DB: preMigrationDb } as any;
+    await expect(recordClientFolderFileChange(
+      preMigrationEnv,
+      "Jobs/Clients/Acme/photo.jpg",
+      true,
+    )).resolves.toBe(0);
+    await expect(processClientFolderChangeNotifications(preMigrationEnv)).resolves.toBe(0);
   });
 });

@@ -162,37 +162,59 @@ Operations waits 15 minutes for an optional TrueNAS prebuilt registration on
 raw server/rclone R2 events; direct browser/staff enqueue keeps a 30-second
 grace. It then uses the Container fallback. Prebuilt artifacts live only under
 `_ltds/derivatives/thumbnails/v1/prebuilt/`; Cloudflare fallback objects live
-only under the sibling `managed/` namespace. Configure the TrueNAS Custom App,
-outbound Access service token, application secret and prebuilt-only rclone sync
-exactly as documented in the [thumbnail runbook](media-thumbnail-pipeline.md).
+only under the sibling `managed/` namespace. The repository-owned pre-generation
+app handles still images and PDFs only. A separate TrueNAS queue worker handles
+pending video jobs. Configure the two components and keep their contracts
+separate exactly as documented in the [thumbnail runbook](media-thumbnail-pipeline.md).
 Current rclone multipart objects do not expose the full-object SHA-256 proof
 required for prebuilt registration, so they fail closed to the private Container
 fallback. Do not enable an undocumented S3 checksum-mode HEAD header, accept a
 composite checksum, or weaken source ETag checks to make prebuilt registration
 succeed.
-The internal endpoint requires both Cloudflare Access service-token headers and
-`THUMBNAIL_INGEST_SECRET`; it never accepts a browser/user session as renderer
-authority.
+Both internal thumbnail prefixes require the Cloudflare Access service-token
+headers `CF-Access-Client-Id` and `CF-Access-Client-Secret` at the edge and
+`THUMBNAIL_INGEST_SECRET` at the Worker. Neither a browser/user session nor
+either credential by itself is renderer authority.
 
 The TrueNAS queue worker uses the sibling
-`/api/internal/thumbnail-renderer/v1` API to claim pending video rows, proxy an
-exact ETag-bound source through the Worker, upload a bounded WebP, and complete
-the row. Its heartbeat, failure, and completion calls must echo the opaque
-`leaseId` returned by `/claim`; stale attempt tokens are rejected. Include this
-path in the same narrowly scoped TrueNAS Service Auth application and validate
-the exact client contract in staging before routing a new Worker version.
+`/api/internal/thumbnail-renderer/v1` API on the exact Operations hostname to
+claim pending video rows, download one exact ETag-bound source into isolated
+scratch, upload a bounded WebP, and complete the row. Its heartbeat, failure, and completion calls must
+echo the opaque `leaseId` returned by `/claim`; stale attempt tokens are
+rejected. It starts the renderer heartbeat immediately after a claim and sends
+it every 60 seconds throughout capacity waits, source reads, FFmpeg work, upload,
+and completion. A video claim starts with a 15-minute D1 lease. An early
+heartbeat never shortens that horizon; once fewer than five minutes remain,
+each heartbeat extends it to five minutes from the heartbeat. Those leases are distinct from the longer-lived
+signed lease token. See the [authoritative queue-worker protocol](media-thumbnail-pipeline.md#truenas-queue-worker-protocol)
+for the payloads and large-video behavior. Give the worker at least 12 GiB of
+private scratch so the 10 GiB upper bound plus derivative and safety margin fit.
 
-Create a path-specific self-hosted Access application for
-`https://ops.ledgetopdroneservices.com/api/internal/thumbnail-ingest/v1` with a
-Service Auth policy that includes only a dedicated TrueNAS service token. Enter
-that token's client ID/secret only in the TrueNAS broker UI as
-`CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET`. Set a separate random
-Operations runtime secret named `THUMBNAIL_INGEST_SECRET` and enter the same
-value only in the broker. Keep `THUMBNAIL_INGEST_EXPECTED_HOST` equal to the
-exact Operations hostname. Do not reuse staff Access, Worker/Wrangler, rclone,
-Project Alpha, or Incoming credentials. Give the broker a separate
-bucket-scoped R2 Object Read credential for HEAD requests; rclone alone owns
-prebuilt writes.
+Create path-specific self-hosted Access coverage for both exact prefixes on
+`ops.ledgetopdroneservices.com`:
+
+- `/api/internal/thumbnail-ingest/v1*`
+- `/api/internal/thumbnail-renderer/v1*`
+
+Use a Service Auth policy that includes only one dedicated TrueNAS service
+token. If the dashboard cannot express both exact prefixes in one application,
+create two path-specific applications with the same dedicated Service Auth
+policy; do not broaden coverage to all Operations routes. Enter that token's
+client ID/secret only in the two TrueNAS clients as `CF_ACCESS_CLIENT_ID` and
+`CF_ACCESS_CLIENT_SECRET`. Set a separate random Operations runtime secret named
+`THUMBNAIL_INGEST_SECRET` and enter the same value only in those clients. Keep
+`THUMBNAIL_INGEST_EXPECTED_HOST` equal to
+`ops.ledgetopdroneservices.com`.
+
+The shared Worker also serves the public Incoming hostname. Explicitly block or
+Access-protect both internal thumbnail prefixes on
+`incoming.ledgetopdroneservices.com`; never configure a TrueNAS client to use
+that hostname. This edge rule is required because the application dispatcher
+recognizes configured Operations and Incoming hosts before normal route
+handling. Do not reuse staff Access, Worker/Wrangler, rclone, Project Alpha, or
+Incoming credentials. Give only the prebuilt broker a separate bucket-scoped R2
+Object Read credential for HEAD requests; rclone alone owns prebuilt writes. The
+video queue worker receives no R2 S3 credential.
 
 Stream remains available for private playback of existing Stream assets, but
 the thumbnail path never sends a source to Stream. The TrueNAS renderer

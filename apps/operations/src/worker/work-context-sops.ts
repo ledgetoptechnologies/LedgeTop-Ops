@@ -10,6 +10,7 @@ import {
   sqlScope,
 } from "./acl";
 import { auditAddress } from "./request-security";
+import { d1TablesPresent } from "./schema-readiness";
 import type { Env, ResourceContext, StaffPrincipal } from "./types";
 import { paProjectFilter, paResourceFilter } from "./visibility";
 
@@ -86,6 +87,11 @@ interface LinkRow {
 }
 
 const kindSchema = z.enum(["project", "task"]);
+const WORK_CONTEXT_SOP_TABLES = [
+  "work_context_sop_link_sets",
+  "work_context_sop_links",
+  "work_context_sop_mutation_guards",
+] as const;
 const replacementSchema = z.object({
   expectedVersion: z.number().int().min(0),
   revisionIds: z.array(z.string().uuid()).max(20),
@@ -93,6 +99,10 @@ const replacementSchema = z.object({
   if (new Set(value.revisionIds).size !== value.revisionIds.length)
     context.addIssue({ code: "custom", message: "SOP revision IDs must be unique" });
 });
+
+export async function workContextSopsAvailable(env: Env): Promise<boolean> {
+  return d1TablesPresent(env.OPS_DB, WORK_CONTEXT_SOP_TABLES);
+}
 
 function viewPermission(kind: WorkContextKind): Permission {
   return kind === "project" ? "projects.view" : "tasks.view";
@@ -381,6 +391,8 @@ export async function decorateWorkContextsWithSops<T extends { id: string }>(
 }>> {
   const ids = [...new Set(rows.map(row => row.id))];
   if (!ids.length) return [];
+  if (!(await workContextSopsAvailable(env)))
+    return rows.map(row => ({ ...row, sopLinks: [], sopLinkVersion: 0, canManageSops: false }));
   const [contexts, grants] = await Promise.all([
     contextRows(env, kind, ids),
     loadGrants(env, principal.id),
@@ -460,6 +472,8 @@ export async function readAuthorizedWorkContextSopRevision(
 ): Promise<AuthorizedWorkContextSopRevisionRow> {
   const parsed = kindSchema.safeParse(rawKind);
   if (!parsed.success || !contextId || contextId.length > 128)
+    throw new HTTPException(404, { message: "Pinned SOP revision not found" });
+  if (!(await workContextSopsAvailable(env)))
     throw new HTTPException(404, { message: "Pinned SOP revision not found" });
   const authorization = authoritativeContextSql(parsed.data);
   const row = await env.OPS_DB.withSession("first-primary").prepare(
@@ -625,6 +639,11 @@ export function registerWorkContextSopRoutes(app: App): void {
   app.get("/api/work-contexts/:kind/:id/sops", async c => {
     const kind = kindSchema.safeParse(c.req.param("kind"));
     if (!kind.success) throw new HTTPException(404, { message: "Work context not found" });
+    if (!(await workContextSopsAvailable(c.env)))
+      return c.json({
+        error: "Work-context SOP links are temporarily unavailable",
+        code: "capability_unavailable",
+      }, 503);
     const principal = c.get("principal");
     const context = await visibleContext(
       c.env,
@@ -639,6 +658,11 @@ export function registerWorkContextSopRoutes(app: App): void {
   app.put("/api/work-contexts/:kind/:id/sops", async c => {
     const kind = kindSchema.safeParse(c.req.param("kind"));
     if (!kind.success) throw new HTTPException(404, { message: "Work context not found" });
+    if (!(await workContextSopsAvailable(c.env)))
+      return c.json({
+        error: "Work-context SOP links are temporarily unavailable",
+        code: "capability_unavailable",
+      }, 503);
     const principal = c.get("principal");
     const context = await visibleContext(
       c.env,

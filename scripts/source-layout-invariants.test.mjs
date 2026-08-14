@@ -156,3 +156,47 @@ test("Operations and staging find the canonical client migration history", () =>
   assert(read("scripts/staging-requirements.mjs").includes('migrations_dir: "../client/migrations"'));
   assert(read("docs/staging/operations.wrangler.json.example").includes('"migrations_dir": "../client/migrations"'));
 });
+
+test("the TrueNAS thumbnail runbooks retain the production edge and lease contract", () => {
+  const config = readJson("apps/operations/wrangler.jsonc");
+  const renderer = read("apps/operations/src/worker/thumbnail-renderer-api.ts");
+  const runbook = read("docs/media-thumbnail-pipeline.md");
+  const setup = read("docs/cloudflare-setup.md");
+  const flatRunbook = runbook.replace(/\s+/g, " ");
+  const flatSetup = setup.replace(/\s+/g, " ");
+
+  assert.equal(config.vars.THUMBNAIL_INGEST_EXPECTED_HOST, "ops.ledgetopdroneservices.com");
+  assert.equal(fs.existsSync(path.join(root, ".github", "workflows", "deploy-workers.yml")), false);
+  assert.equal(fs.existsSync(path.join(root, ".github", "workflows", "publish-thumbnail-renderer.yml")), true);
+
+  assert(renderer.includes('const RENDERER_API_PREFIX = "/api/internal/thumbnail-renderer/v1"'));
+  assert(renderer.includes("const RENDERER_LEASE_TOKEN_MAX_MS = 24 * 60 * 60 * 1000"));
+  assert(renderer.includes("const RENDERER_DEFAULT_LEASE_MS = 5 * 60 * 1000"));
+  assert(renderer.includes("const RENDERER_VIDEO_INITIAL_LEASE_MS = 15 * 60 * 1000"));
+  assert(renderer.includes('const initialLeaseMs = kind === "video" ? RENDERER_VIDEO_INITIAL_LEASE_MS : RENDERER_DEFAULT_LEASE_MS'));
+  assert(renderer.includes("const renewedLeaseMs = Date.now() + RENDERER_DEFAULT_LEASE_MS"));
+  assert(renderer.includes("expiresSeconds: 900"));
+  assert(renderer.includes("typeof body.leaseId === \"string\""));
+
+  for (const document of [runbook, setup]) {
+    assert(document.includes("ops.ledgetopdroneservices.com"));
+    assert(document.includes("/api/internal/thumbnail-ingest/v1"));
+    assert(document.includes("/api/internal/thumbnail-renderer/v1"));
+    assert(document.includes("CF-Access-Client-Id"));
+    assert(document.includes("CF-Access-Client-Secret"));
+    assert(document.includes("THUMBNAIL_INGEST_SECRET"));
+    assert(/every\s+\*\*?60 seconds\*\*?|every\s+60 seconds/.test(document));
+    assert(document.includes("15-minute D1") || document.includes("15-minute initial lease"));
+    assert(document.includes("five minutes") || document.includes("five-minute"));
+  }
+
+  assert(flatRunbook.includes("Never rely on the application bearer alone there"));
+  assert(flatRunbook.includes("A stale or reclaimed attempt receives `404`"));
+  assert(flatRunbook.includes("Video eligibility is at most `10 * 1024 * 1024 * 1024` bytes"));
+  assert(flatRunbook.includes("`r2PresignedUrl` valid for 900 seconds"));
+  assert(flatRunbook.includes("Do not pass either network URL or any authentication header to FFmpeg"));
+  assert(flatRunbook.includes("`file,pipe` protocols enabled"));
+  assert(flatRunbook.includes("This repository has no `.github/workflows/deploy-workers.yml`"));
+  assert(!runbook.includes("`.github/workflows/deploy-workers.yml` auto-deploys"));
+  assert(flatSetup.includes("Explicitly block or Access-protect both internal thumbnail prefixes on `incoming.ledgetopdroneservices.com`"));
+});

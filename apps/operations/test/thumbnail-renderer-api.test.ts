@@ -91,7 +91,8 @@ function validWebpBytes(): Uint8Array {
 describe("private TrueNAS thumbnail renderer API", () => {
   it("keeps the authenticated claim endpoint and leases video to TrueNAS", async () => {
     const value = videoClaimFixture();
-    const request = new Request(`https://${HOST}/api/internal/thumbnail-renderer/v1/claim`, {
+    const claimStartedAt = Date.now();
+    const request = new Request(`https://${HOST}/api/internal/thumbnail-renderer/v1/claim?includeKind=video`, {
       method: "POST",
       headers: { Authorization: `Bearer ${SECRET}` },
     });
@@ -115,6 +116,10 @@ describe("private TrueNAS thumbnail renderer API", () => {
     expect(body.leaseId).toEqual(expect.any(String));
     expect(body.r2SourceUrl).toContain("/api/internal/thumbnail-renderer/v1/source/");
     expect(value.job).toMatchObject({ status: "processing", attempt_count: 1 });
+    const initialLeaseMs = Date.parse(value.job.lease_until!) - claimStartedAt;
+    expect(initialLeaseMs).toBeGreaterThanOrEqual(15 * 60 * 1000);
+    expect(initialLeaseMs).toBeLessThan(15 * 60 * 1000 + 2_000);
+    expect(value.queries.some(sql => sql.includes("f.media_kind='video'"))).toBe(true);
   });
 
   it("rejects claim access before D1 or R2 without the renderer secret", async () => {
@@ -219,6 +224,7 @@ describe("private TrueNAS thumbnail renderer API", () => {
       { method: "POST", headers: { Authorization: `Bearer ${SECRET}` } },
     ), apiEnv);
     const claim = await claimed!.json() as { leaseId: string; sourceKey: string };
+    const initialLeaseUntil = value.job.lease_until;
 
     const heartbeat = await dispatchThumbnailRendererApi(new Request(
       `https://${HOST}/api/internal/thumbnail-renderer/v1/heartbeat`, {
@@ -228,6 +234,7 @@ describe("private TrueNAS thumbnail renderer API", () => {
       },
     ), apiEnv);
     expect(heartbeat?.status).toBe(200);
+    expect(value.job.lease_until).toBe(initialLeaseUntil);
 
     value.job.attempt_count += 1;
     const staleFailure = await dispatchThumbnailRendererApi(new Request(

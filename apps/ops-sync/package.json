@@ -8,8 +8,8 @@
     "check": "tsc --noEmit",
     "deploy": "wrangler deploy --keep-vars",
     "test": "vitest run --config vitest.config.ts",
-    "cf-typegen": "wrangler types worker-configuration.d.ts --strict-vars=false",
-    "cf-typegen:check": "wrangler types worker-configuration.d.ts --strict-vars=false --check"
+    "cf-typegen": "wrangler types --strict-vars=false",
+    "cf-typegen:check": "wrangler types --strict-vars=false --check"
   },
   "dependencies": {
     "jose": "^6.2.3",

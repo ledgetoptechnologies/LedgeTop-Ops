@@ -71,12 +71,14 @@ import {
   resolveProjectAlphaPricingAuthorizationContext,
   type ProjectAlphaPricingAuthorizationContextResolver,
 } from "./project-alpha-pricing-hint";
+import { clientPortalNotificationsAvailable } from "./schema-readiness";
 
 interface ClientPortalDependencies {
   resolvePrincipal?: ResolveClientPrincipal;
   repository?: ClientPortalRepository;
   pricingHintProvider?: ClientPricingHintProvider;
   pricingAuthorizationContextResolver?: ProjectAlphaPricingAuthorizationContextResolver;
+  notificationSchemaAvailable?: (env: Env) => Promise<boolean>;
 }
 
 type ClientPortalVariables = {
@@ -356,6 +358,8 @@ export function createClientPortalRouter(
   const resolvePrincipal =
     dependencies.resolvePrincipal ?? cloudflareClientIdentityProvider;
   const repository = dependencies.repository ?? d1ClientPortalRepository;
+  const notificationSchemaAvailable = dependencies.notificationSchemaAvailable ??
+    (dependencies.repository ? async () => true : clientPortalNotificationsAvailable);
   const router = new Hono<{
     Bindings: Env;
     Variables: ClientPortalVariables;
@@ -678,6 +682,8 @@ export function createClientPortalRouter(
     const cursor = c.req.query("cursor") || null;
     if (cursor && !opaqueId.safeParse(cursor).success)
       throw new HTTPException(400, { message: "Cursor is invalid" });
+    if (!(await notificationSchemaAvailable(c.env)))
+      return c.json({ notifications: [], unreadCount: 0, cursor: null });
     const page = await repository.listNotifications(c.env, c.get("clientSession"), cursor);
     const workspace = selectedWorkspace(c);
     if (!workspace) return c.json(page);
@@ -699,6 +705,11 @@ export function createClientPortalRouter(
     const value = notificationActionBody.safeParse(await readBoundedJson(c.req.raw));
     if (!notificationId.success || !value.success)
       throw new HTTPException(400, { message: "Notification update is invalid" });
+    if (!(await notificationSchemaAvailable(c.env)))
+      return c.json({
+        error: "Client notifications are temporarily unavailable",
+        code: "capability_unavailable",
+      }, 503);
     const workspace = selectedWorkspace(c);
     if (workspace && !(await authorizeEffectiveWorkspaceNotification(
       c.env, c.get("clientPrincipal"), workspace, notificationId.data,
