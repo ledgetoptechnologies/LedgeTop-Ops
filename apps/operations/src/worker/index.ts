@@ -121,6 +121,10 @@ import {
 import { registerJobBriefRoutes } from "./job-brief";
 import { registerSopRoutes } from "./sop";
 import { registerClientRequestAttachmentRoutes } from "./client-request-attachments";
+import {
+  clientRequestServiceReview,
+  type ClientRequestServiceReviewRow,
+} from "./client-request-service-review";
 import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quote";
 import {
   decorateWorkContextsWithSops,
@@ -1222,7 +1226,7 @@ app.get("/api/client-service-requests/:id", async (c) => {
       .first();
   if (!request)
     throw new HTTPException(404, { message: "Client request not found" });
-  const [revisions, estimates, history, children, areaRevisions] = await Promise.all([
+  const [revisions, estimates, history, children, areaRevisions, serviceRows] = await Promise.all([
     db
       .prepare(
         "SELECT revision_number,author_type,author_id,action,snapshot_json,note,created_at FROM request_revisions WHERE request_id=? ORDER BY revision_number DESC",
@@ -1256,6 +1260,13 @@ app.get("/api/client-service-requests/:id", async (c) => {
       )
       .bind(id)
       .all(),
+    db
+      .prepare(
+        `SELECT service_public_id,service_source_version,service_snapshot_json,answers_json
+         FROM client_service_request_services WHERE request_id=? ORDER BY ordinal`,
+      )
+      .bind(id)
+      .all<ClientRequestServiceReviewRow>(),
   ]);
   const effectiveArea = areaRevisions.results[0] as {
     revision_number: number;
@@ -1273,6 +1284,7 @@ app.get("/api/client-service-requests/:id", async (c) => {
     history: history.results,
     children: children.results,
     areaRevisions: areaRevisions.results,
+    services: serviceRows.results.map(clientRequestServiceReview),
     effectiveWorkArea: effectiveArea
       ? {
           revisionNumber: effectiveArea.revision_number,

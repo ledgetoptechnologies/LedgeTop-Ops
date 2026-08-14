@@ -7,7 +7,7 @@ deployment, production migration, real email, or production data mutation.
 ---
 
 Work only in the current Project Alpha repository. The reviewed compatibility
-baseline is Project Alpha commit `60e73526` on
+baseline is Project Alpha commit `60e735265e0d50ef880fde33e058d213a8b70c4b` on
 `codex/dev-recurring-expenses`/`origin/dev`; do not silently replace it with
 the older `origin/main`. If the checkout has moved, first compare it to that
 commit and report the exact delta. Inspect the full schema/migration ledger,
@@ -56,8 +56,10 @@ Implement this as additive, default-off, independently gated capabilities:
 1. **Stable hierarchy and explicit portal authority**
    - Ensure organization, department, department-contact assignment, client,
      project, portal principal, portal entitlement, and portal-safe Service
-     Library resources have immutable opaque public IDs and monotonic source
-     versions. Numeric database IDs must never cross the integration boundary.
+     Library resources have immutable opaque public IDs and opaque immutable
+     source versions that change whenever portal-visible content changes.
+     `sourceSequence`, not `sourceVersion`, is the contiguous monotonic field.
+     Numeric database IDs must never cross the integration boundary.
    - Build on the existing default-off portal foundation instead of using
      employee roles, billing recipients, `entity_links`, email equality, or a
      department `is_primary` flag as authorization.
@@ -100,10 +102,12 @@ Implement this as additive, default-off, independently gated capabilities:
      PA-derived authorization atomically.
    - Map PA project lifecycle exactly: `not_started`, `active`, and `overdue`
      publish `active` with `completedAt: null`; `completed` publishes
-     `completed` with an immutable authoritative `completed_at`; `cancelled`
+     `completed` with an authoritative `completed_at` that is immutable for
+     that completed source version/event; `cancelled`
      publishes the project inactive/tombstoned and immediately closes its
      dependent authorization graph. Add `completed_at` rather than deriving it
-     from `updated_at`. Reopening clears `completed_at` and publishes `active`.
+     from `updated_at`. A higher-version reopening event clears `completed_at`
+     and publishes `active`.
    - Persist mutation plus outbox event in the same database transaction.
      Delivery must be idempotent and retryable; per-workspace sequences are
      contiguous and monotonic. Interrupted snapshots must be resumable without
@@ -133,7 +137,7 @@ Implement this as additive, default-off, independently gated capabilities:
      `required`), and 0–10 declarative client questions. The only question types
      are the contract's text, bounded number, boolean, select, and multi-select
      forms with stable field IDs.
-   - Never publish unit prices by default, private formulas, margins, costs,
+   - Never publish unit prices, private formulas, margins, costs,
      tax rules, fulfillment notes, work activities, compensation, credentials,
      raw HTML/JavaScript, arbitrary regexes, or numeric database IDs.
    - Implement the separately authenticated catalog-v2 complete snapshot and
@@ -175,11 +179,15 @@ Implement this as additive, default-off, independently gated capabilities:
    - Reauthorize every organization/client/project/service public ID and their
      relationships. Recalculate actual draft pricing only in PA from current
      business rules, then snapshot the catalog/request source into the draft.
-   - Store a durable unique key scoped to integration principal plus canonical
-     payload hash. Equal replay returns the same draft; changed reuse is 409;
-     concurrent delivery creates exactly one draft. Add a stable quote public
-     ID and return only draft status/version, receipt/correlation ID, and a
-     exact public-ID editor path `/quotes/{encodeURIComponent(quotePublicId)}/edit`.
+   - Store a durable unique constraint on `(integration principal,
+     Idempotency-Key)` and store the canonical payload hash/fingerprint as a
+     separate comparison field. The same key plus the same hash returns the
+     same draft; the same key plus a different hash is 409; concurrent delivery
+     creates exactly one draft. Add a stable quote public ID. The exact success
+     response contains top-level `receiptId` and `draftQuote` with `publicId`,
+     nullable string `documentNumber`, `status: "draft"`, numeric `version`, and
+     the exact public-ID editor path
+     `/quotes/{encodeURIComponent(quotePublicId)}/edit`.
      Add that PA route and resolve it server-side to the internal row. Numeric query-string
      routes such as `?id=42`, absolute URLs, and paths for a different quote
      public ID are invalid.
@@ -198,8 +206,12 @@ Implement this as additive, default-off, independently gated capabilities:
 
 6. **Integration security and operations**
    - Use separate credentials/scopes/secrets for portal projection, catalog
-     projection, pricing preview, and draft creation. A broad/full key must not
-     implicitly inherit the write scope.
+     projection, pricing preview, and draft creation. Portal projection uses
+     its own Access service application/token, application key, and HMAC
+     secret. The exact PA API scopes are `portal.catalog.publish`,
+     `portal.pricing.preview`, and `portal.quote-draft.create`; do not invent a
+     shared replacement scope. A broad/full key must not implicitly inherit a
+     write scope.
    - Enforce exact method/path/body signatures, current timestamps, replay
      protection, constant-time comparison, TLS, bounded request/response sizes,
      timeouts, rate limits, and redacted structured logs. Never accept a browser

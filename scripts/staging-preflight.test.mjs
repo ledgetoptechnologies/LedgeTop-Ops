@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { validateApp, validateCrossApp, validateFiles, validateRequestAttachmentCors } from "./staging-preflight.mjs";
-import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { validateApp, validateCrossApp, validateFiles, validateRequestAttachmentCors, validateSecretManifest } from "./staging-preflight.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -13,18 +13,20 @@ function stagingConfig(app) {
   return {
     account_id: STAGING_ACCOUNT_ID,
     name: inventory.name,
+    main: inventory.main,
+    compatibility_date: inventory.compatibility_date,
+    compatibility_flags: inventory.compatibility_flags,
     workers_dev: false,
     preview_urls: false,
     routes: inventory.routes,
     vars: {
+      ...Object.fromEntries(STAGING_ALLOWED_VAR_NAMES[app].map((key) => [key, ""])),
       ...STAGING_STATIC_VARS[app],
       ENVIRONMENT: "staging",
       EXPECTED_HOST: inventory.routes[0].pattern,
-      POLICY_AUD: STAGING_ACCESS_AUDS.delivery,
-      OPERATIONS_AUD: STAGING_ACCESS_AUDS.operations,
-      CF_ACCESS_AUD: STAGING_ACCESS_AUDS["ops-sync"],
-      PUBLIC_BASE_URL: app === "delivery" ? `https://${STAGING_HOSTS.client}` : `https://${inventory.routes[0].pattern}`,
       ...(app === "delivery" ? {
+        POLICY_AUD: STAGING_ACCESS_AUDS.delivery,
+        PUBLIC_BASE_URL: `https://${STAGING_HOSTS.client}`,
         CLIENT_PORTAL_ENABLED: "false",
         CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
         CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN,
@@ -34,13 +36,9 @@ function stagingConfig(app) {
         MAPBOX_PUBLIC_TOKEN: "pk.staging-client-mapbox-token",
         CLIENT_PORTAL_INVITATION_FROM: "portal@staging.example.test",
       } : {}),
-      CLOUD_TRANSFER_DROPBOX_ENABLED: "false",
-      CLOUD_TRANSFER_GOOGLE_ENABLED: "false",
-      CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED: "false",
-      DROPBOX_IMPORT_ENABLED: "false",
-      DIRECT_DELIVERY_UPLOADS_ENABLED: "false",
-      R2_PURGE_ENABLED: "false",
       ...(app === "operations" ? {
+        OPERATIONS_AUD: STAGING_ACCESS_AUDS.operations,
+        PUBLIC_BASE_URL: `https://${inventory.routes[0].pattern}`,
         PROJECT_ALPHA_BASE_URL: STAGING_STATIC_VARS.operations.PROJECT_ALPHA_BASE_URL,
         INCOMING_EXPECTED_HOST: "incoming-staging.ledgetopdroneservices.com",
         INCOMING_BASE_URL: "https://incoming-staging.ledgetopdroneservices.com",
@@ -48,9 +46,8 @@ function stagingConfig(app) {
         CLIENT_REQUEST_TRIAGE_TO: "triage@staging.example.test",
         NOTIFICATION_FROM: "delivery@staging.example.test",
       } : {}),
-      ...(app === "ops-sync" ? { CF_ACCESS_GROUP_ID: "staging-group", CF_ACCESS_GROUP_NAME: "Staging Testers" } : {}),
+      ...(app === "ops-sync" ? { CF_ACCESS_AUD: STAGING_ACCESS_AUDS["ops-sync"], CF_ACCESS_GROUP_ID: "staging-group", CF_ACCESS_GROUP_NAME: "Staging Testers" } : {}),
     },
-    secrets: { required: [...REQUIRED_STAGING_SECRETS[app]] },
     d1_databases: inventory.d1_databases,
     r2_buckets: inventory.r2_buckets,
     workflows: inventory.workflows,
@@ -63,6 +60,13 @@ function stagingConfig(app) {
       producers: inventory.queueProducers ?? [],
     } } : {}),
     ...(inventory.images ? { images: inventory.images } : {}),
+    ...(inventory.limits ? { limits: inventory.limits } : {}),
+    ...(inventory.assets ? { assets: inventory.assets } : {}),
+    ...(inventory.observability ? { observability: inventory.observability } : {}),
+    ...(inventory.stream ? { stream: inventory.stream } : {}),
+    ...(inventory.durable_objects ? { durable_objects: inventory.durable_objects } : {}),
+    ...(inventory.exports ? { exports: inventory.exports } : {}),
+    ...(inventory.containers ? { containers: inventory.containers } : {}),
     ...(inventory.crons ? { triggers: { crons: inventory.crons } } : {}),
   };
 }
@@ -95,10 +99,10 @@ test("rejects account, route, resource, secret, and capability drift", () => {
   staging.account_id = "wrong";
   staging.routes[0].pattern = "other-staging.test";
   staging.d1_databases[0].database_id = "wrong";
-  staging.secrets.required = ["UNEXPECTED"];
   staging.vars.CLOUD_TRANSFER_DROPBOX_ENABLED = "true";
   const errors = validateApp("delivery", staging, production);
-  for (const expected of ["account_id", "routes", "d1_databases", "secrets.required", "CLOUD_TRANSFER_DROPBOX_ENABLED"]) assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
+  for (const expected of ["account_id", "routes", "d1_databases", "CLOUD_TRANSFER_DROPBOX_ENABLED"]) assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
+  assert(validateSecretManifest({ delivery: ["UNEXPECTED"], operations: [...REQUIRED_STAGING_SECRETS.operations], "ops-sync": [...REQUIRED_STAGING_SECRETS["ops-sync"]] }).length > 0);
 });
 test("rejects unresolved Ops Sync authority", () => {
   const staging = stagingConfig("ops-sync");
@@ -158,6 +162,7 @@ test("resolves logical delivery staging files from apps/client", () => {
   const corsDirectory = path.join(base, "docs", "staging");
   fs.mkdirSync(corsDirectory, { recursive: true });
   fs.writeFileSync(path.join(corsDirectory, "request-attachments-r2-cors.json"), JSON.stringify(STAGING_REQUEST_ATTACHMENT_R2_CORS));
+  fs.writeFileSync(path.join(corsDirectory, "staging-secret-manifest.json"), JSON.stringify(REQUIRED_STAGING_SECRETS));
   assert.deepEqual(validateFiles(base), []);
   fs.renameSync(path.join(base, "apps", "client"), path.join(base, "apps", "delivery"));
   assert(validateFiles(base).some((error) => error.includes(path.join("apps", "client", "wrangler.staging.json"))));
@@ -194,11 +199,34 @@ test("requires every portal-v2 and Operations capability to be explicitly false"
     }
   }
 });
-test("checked-in staging examples enumerate the same flags and secret manifests as the gate", () => {
+test("checked-in staging examples exactly match every approved deployment-critical inventory field", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  for (const [app, example] of [["delivery", "delivery.wrangler.json.example"], ["operations", "operations.wrangler.json.example"]]) {
+  const critical = ["name", "main", "compatibility_date", "compatibility_flags", "routes", "d1_databases", "r2_buckets", "workflows", "services", "ratelimits", "limits", "assets", "observability", "stream", "durable_objects", "exports", "containers"];
+  for (const [app, example] of [["delivery", "delivery.wrangler.json.example"], ["operations", "operations.wrangler.json.example"], ["ops-sync", "ops-sync.wrangler.json.example"]]) {
     const config = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", example), "utf8"));
-    assert.deepEqual(new Set(config.secrets.required), new Set(REQUIRED_STAGING_SECRETS[app]));
+    assert.equal(Object.hasOwn(config, "secrets"), false, `${example} must remain valid Wrangler configuration`);
+    for (const key of critical) {
+      const expected = STAGING_INVENTORY[app][key];
+      const actual = config[key] ?? (Array.isArray(expected) ? [] : undefined);
+      assert.deepEqual(actual, expected, `${example}.${key}`);
+    }
+    for (const [key, expected] of Object.entries(STAGING_STATIC_VARS[app])) assert.equal(config.vars[key], expected, `${example}.vars.${key}`);
+    assert.deepEqual(new Set(Object.keys(config.vars)), new Set(STAGING_ALLOWED_VAR_NAMES[app]), `${example}.vars`);
     for (const flag of REQUIRED_DISABLED_FEATURE_FLAGS[app]) assert.equal(config.vars[flag], "false", `${example}.${flag}`);
+  }
+  const secretManifest = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "staging-secret-manifest.json"), "utf8"));
+  assert.deepEqual(validateSecretManifest(secretManifest), []);
+});
+
+test("rejects missing renderer structure, observability drift, extra email bindings, and pseudo secret fields", () => {
+  const operations = stagingConfig("operations");
+  delete operations.durable_objects;
+  operations.observability = { enabled: false };
+  operations.vars.SMTP_NOTIFICATIONS_ENABLED = "true";
+  operations.send_email.push({ name: "UNREVIEWED_EMAIL", allowed_sender_addresses: ["other@staging.example.test"] });
+  operations.secrets = { required: [] };
+  const errors = validateApp("operations", operations, productionFrom(stagingConfig("operations")));
+  for (const expected of ["durable_objects", "observability", "SMTP_NOTIFICATIONS_ENABLED", "notification email binding", "release-only secret manifest"]) {
+    assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });

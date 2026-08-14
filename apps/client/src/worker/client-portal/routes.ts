@@ -983,6 +983,19 @@ export function createClientPortalRouter(
     return c.json({ services: await repository.listServiceCatalog(c.env, c.get("clientSession")) });
   });
 
+  router.get("/service-request-drafts", async (c) => {
+    if (!repository.listServiceRequestDrafts)
+      throw new HTTPException(503, { message: "Service request drafts are not configured" });
+    const drafts = await repository.listServiceRequestDrafts(c.env, c.get("clientSession"));
+    const workspace = selectedWorkspace(c);
+    if (!workspace) return c.json({ drafts });
+    const authorized: typeof drafts = [];
+    for (const draft of drafts) {
+      if (await authorizeEffectiveWorkspaceDraft(c.env, c.get("clientPrincipal"), workspace, draft.id)) authorized.push(draft);
+    }
+    return c.json({ drafts: authorized });
+  });
+
   router.post("/service-request-drafts", async (c) => {
     const portalOrigin = configuredPortalOrigin(c.env);
     requireSameRequestOrigin(c.req.raw, portalOrigin);

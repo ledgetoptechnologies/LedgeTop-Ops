@@ -294,15 +294,16 @@ export async function checkpointRequestAttachment(env: Env, row: RequestAttachme
 
 export async function abortRequestAttachment(env: Env, row: RequestAttachmentRow): Promise<{ idempotent: boolean }> {
   if (["aborted", "expired"].includes(row.status)) return { idempotent: true };
-  if (row.status !== "uploading") throw new HTTPException(409, { message: "Only an in-progress attachment can be removed" });
-  if (!row.multipart_upload_id.startsWith("pending:")) {
+  if (row.status !== "uploading" && row.status !== "rejected")
+    throw new HTTPException(409, { message: "Only an in-progress or rejected attachment can be removed" });
+  if (row.status === "uploading" && !row.multipart_upload_id.startsWith("pending:")) {
     try { await env.DATA_BUCKET.resumeMultipartUpload(row.object_key, row.multipart_upload_id).abort(); }
     catch (error) {
       console.error(JSON.stringify({ event: "client-request-attachment.abort-failed", attachmentId: row.id, message: error instanceof Error ? error.message : "unknown" }));
       throw new HTTPException(503, { message: "The attachment could not be removed yet. Please retry." });
     }
   }
-  const result = await database(env).prepare("UPDATE client_service_request_attachments SET status='aborted',updated_at=datetime('now') WHERE id=? AND status='uploading'").bind(row.id).run();
+  const result = await database(env).prepare("UPDATE client_service_request_attachments SET status='aborted',updated_at=datetime('now') WHERE id=? AND status IN ('uploading','rejected')").bind(row.id).run();
   await database(env).prepare("DELETE FROM client_service_request_attachment_parts WHERE attachment_id=?").bind(row.id).run();
   return { idempotent: result.meta.changes !== 1 };
 }

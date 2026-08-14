@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { DeliveryLocationCollection } from "@ltds/shared";
-import type { PortalFilePage, PortalServiceRequest } from "../../src/client/portal-api";
+import type { PortalFilePage, PortalServiceDraft, PortalServiceRequest } from "../../src/client/portal-api";
 
 const account = { id: "account-a", displayName: "Acme Surveying" };
 const projects = [{ id: "project-a", externalRef: "ALPHA-1", clientName: "Acme", projectName: "North Site", canRequestService: true, status: "in_progress", summary: "Aerial progress documentation", siteAddress: null, serviceAddress: "100 Main St", projectContactName: "LTDS Operations", projectContactEmail: "ops@example.com", projectContactPhone: null, nextMilestone: "Spring progress imagery", lastUpdateAt: "2026-08-01T12:00:00.000Z" }];
@@ -39,7 +39,7 @@ async function mockAuthorizedPortal(
   },
   requestV2 = true,
   requestAttachments = false,
-  attachmentEvents?: { workerBinaryBytes: number; directBytes: number; completed: boolean; scanAccepted: boolean },
+  attachmentEvents?: { workerBinaryBytes: number; directBytes: number; completed: boolean; scanAccepted: boolean; scanRejected?: boolean; removed?: boolean },
   projectFileFixture?: (url: URL) => PortalFilePage | Promise<PortalFilePage>,
 ) {
   let draftVersion = 1;
@@ -58,6 +58,8 @@ async function mockAuthorizedPortal(
       await route.fulfill({ json: { requests: fixtureRequests } });
     } else if (request.method() === "GET" && path === "/api/client/service-catalog") {
       await route.fulfill({ json: { services: serviceCatalog } });
+    } else if (request.method() === "GET" && path === "/api/client/service-request-drafts") {
+      await route.fulfill({ json: { drafts: [] } });
     } else if (request.method() === "POST" && path === "/api/client/service-request-drafts") {
       expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
       draftBody = request.postDataJSON();
@@ -88,7 +90,10 @@ async function mockAuthorizedPortal(
       if (attachmentEvents) attachmentEvents.completed = true;
       await route.fulfill({ json: { status: "quarantined", idempotent: false } });
     } else if (requestAttachments && request.method() === "GET" && path === "/api/client/service-request-drafts/draft-a/attachments/attachment-a") {
-      await route.fulfill({ json: { attachmentId: "attachment-a", id: "attachment-a", name: "authorization.pdf", contentType: "application/pdf", size: 18, status: attachmentEvents?.scanAccepted ? "accepted" : "scanning", partSize: 8 * 1024 * 1024, completedParts: [] } });
+      await route.fulfill({ json: { attachmentId: "attachment-a", id: "attachment-a", name: "authorization.pdf", contentType: "application/pdf", size: 18, status: attachmentEvents?.scanRejected ? "rejected" : attachmentEvents?.scanAccepted ? "accepted" : "scanning", partSize: 8 * 1024 * 1024, completedParts: [] } });
+    } else if (requestAttachments && request.method() === "DELETE" && path === "/api/client/service-request-drafts/draft-a/attachments/attachment-a") {
+      if (attachmentEvents) attachmentEvents.removed = true;
+      await route.fulfill({ json: { ok: true, status: "aborted", idempotent: false } });
     } else if (request.method() === "GET" && path === "/api/client/notifications") {
       await route.fulfill({ json: { notifications: [{ id: "notice-a", eventType: "files_added", title: "New files available", body: "Files were added to your LTDS client workspace.", actionPath: "/portal/deliveries", readAt: null, createdAt: "2026-08-13T12:00:00.000Z" }], unreadCount: 1, cursor: null } });
     } else if (request.method() === "PATCH" && path === "/api/client/notifications/notice-a") {
@@ -313,6 +318,84 @@ test("authorized portal supports project, delivery, and request workflows", asyn
   await expect(page).toHaveURL(/\/portal\/requests$/);
   await expect(page.getByText("North Site spring imagery")).toBeVisible();
 
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("autosaved service-request drafts resume after navigation and reload", async ({ page }) => {
+  await mockAuthorizedPortal(page);
+  const draftService: PortalServiceDraft["services"][number] = {
+    ...serviceCatalog[0]!,
+    questions: serviceCatalog[0]!.questions.map(question => ({ ...question, type: "select" as const })),
+    answers: { resolution: "standard" },
+  };
+  let resumed: PortalServiceDraft = {
+    id: "draft-resume",
+    state: "draft",
+    version: 3,
+    projectId: "project-a",
+    requestType: "service",
+    title: "North Site resumed mapping",
+    details: "Resume this saved mapping request after checking the work area.",
+    location: "North Site",
+    preferredStartAt: "2026-09-01T15:30:00.000Z",
+    deliverables: "Orthomosaic and overview imagery",
+    siteContactName: "Jordan Client",
+    siteContactEmail: "jordan@example.com",
+    siteContactPhone: "555-0100",
+    desiredCompletionAt: "2026-09-05T20:00:00.000Z",
+    latitude: 41.88,
+    longitude: -87.63,
+    areaGeoJson: null,
+    poiPoints: [{ longitude: -87.63, latitude: 41.88, label: "North gate" }],
+    areaSquareMeters: null,
+    areaAcres: null,
+    services: [draftService],
+    submittedRequestId: null,
+    createdAt: "2026-08-13T12:00:00.000Z",
+    updatedAt: "2026-08-14T12:00:00.000Z",
+  };
+  await page.route("**/api/client/service-request-drafts**", async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (request.method() === "GET" && path === "/api/client/service-request-drafts") {
+      return route.fulfill({ json: { drafts: [{ id: resumed.id, projectId: resumed.projectId, title: resumed.title, serviceNames: ["2D Mapping"], areaAcres: resumed.areaAcres, updatedAt: resumed.updatedAt }] } });
+    }
+    if (request.method() === "GET" && path === `/api/client/service-request-drafts/${resumed.id}`) {
+      return route.fulfill({ json: { draft: resumed } });
+    }
+    if (request.method() === "PUT" && path === `/api/client/service-request-drafts/${resumed.id}`) {
+      expect(request.headers()["if-match"]).toBe(String(resumed.version));
+      const body = request.postDataJSON();
+      resumed = {
+        ...resumed,
+        ...body,
+        version: resumed.version + 1,
+        updatedAt: "2026-08-14T12:05:00.000Z",
+        services: resumed.services.filter(service => (body.services as Array<{ publicId: string }>).some(selected => selected.publicId === service.publicId)).map(service => ({ ...service, answers: (body.services as Array<{ publicId: string; answers: Record<string, unknown> }>).find(selected => selected.publicId === service.publicId)?.answers ?? {} })),
+      };
+      return route.fulfill({ json: { draft: resumed } });
+    }
+    if (request.method() === "GET" && path === `/api/client/service-request-drafts/${resumed.id}/pricing-hint`) {
+      return route.fulfill({ json: { available: false, hint: null } });
+    }
+    return route.fallback();
+  });
+
+  await page.goto("/portal/requests");
+  await expect(page.getByRole("heading", { name: "Saved drafts" })).toBeVisible();
+  await expect(page.getByText("North Site resumed mapping")).toBeVisible();
+  await page.getByRole("button", { name: "Continue draft" }).click();
+  await expect(page).toHaveURL(/\/portal\/requests\/new\?draft=draft-resume/);
+  await expect(page.getByLabel("Preferred resolution")).toHaveValue("standard");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByLabel("Service request title")).toHaveValue("North Site resumed mapping");
+  const saved = page.waitForResponse(response => response.request().method() === "PUT" && new URL(response.url()).pathname === "/api/client/service-request-drafts/draft-resume");
+  await page.getByLabel("Service request title").fill("North Site resumed mapping - updated");
+  await saved;
+  await page.reload();
+  await expect(page).toHaveURL(/draft=draft-resume.*step=details|step=details.*draft=draft-resume/);
+  await expect(page.getByLabel("Service request title")).toHaveValue("North Site resumed mapping - updated");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
@@ -619,6 +702,40 @@ test("request attachment uploads bytes only to signed storage and blocks submit 
   await expect(page).toHaveURL(/\/portal\/requests$/);
 });
 
+test("rejected request attachments block submission and provide remove-and-replace recovery", async ({ page }) => {
+  const attachmentEvents = { workerBinaryBytes: 0, directBytes: 0, completed: false, scanAccepted: false, scanRejected: true, removed: false };
+  await mockAuthorizedPortal(page, null, requests, undefined, undefined, true, true, attachmentEvents);
+  await page.route("https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.r2.cloudflarestorage.com/**", async route => {
+    const request = route.request();
+    if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: { "Access-Control-Allow-Origin": "http://127.0.0.1:4173", "Access-Control-Allow-Methods": "PUT", "Access-Control-Allow-Headers": "content-type" } });
+    attachmentEvents.directBytes += request.postDataBuffer()?.byteLength ?? 0;
+    await route.fulfill({ status: 200, headers: { ETag: '"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"', "Access-Control-Allow-Origin": "http://127.0.0.1:4173", "Access-Control-Expose-Headers": "ETag" } });
+  });
+  await page.goto("/portal/requests/new");
+  await openRequestWorkArea(page);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Service request title").fill("Replacement attachment test");
+  await page.getByLabel("What do you need?").fill("Verify rejected supporting-file recovery.");
+  await page.getByRole("button", { name: "Continue" }).click();
+  const picker = page.locator(".portal-file-picker input");
+  await picker.setInputFiles({ name: "authorization.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7\nreference") });
+  await expect(page.getByText(/\/ Rejected$/)).toBeVisible();
+  await expect(page.getByText(/security scan rejected this file/i)).toBeVisible();
+  await page.getByRole("button", { name: "Continue" }).click();
+  const submit = page.getByRole("button", { name: "Submit request" });
+  await expect(submit).toBeDisabled();
+  await expect(page.getByText(/remove each rejected file/i)).toBeVisible();
+  await page.getByRole("button", { name: "Edit files" }).click();
+  await page.getByRole("button", { name: "Remove" }).click();
+  expect(attachmentEvents.removed).toBe(true);
+  attachmentEvents.scanRejected = false;
+  attachmentEvents.scanAccepted = true;
+  await picker.setInputFiles({ name: "authorization.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7\nreference") });
+  await expect(page.getByText(/\/ Accepted$/)).toBeVisible();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("button", { name: "Submit request" })).toBeEnabled();
+});
+
 test("request attachment picker enforces file-count and size bounds before initialization", async ({ page }) => {
   await mockAuthorizedPortal(page, null, requests, undefined, undefined, true, true);
   await page.goto("/portal/requests/new");
@@ -821,6 +938,48 @@ test("current location reports loading, failure, and success without blocking th
   await expect(page.getByRole("button", { name: "Remove Current location" })).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByLabel(/Location/)).toHaveValue("Broadway, Green Bay, Wisconsin");
+});
+
+test("final review shows timing, POI coordinates, and a responsive read-only boundary preview", async ({ page }) => {
+  await mockMapbox(page);
+  await mockAuthorizedPortal(page, "pk.local-browser-test");
+  await page.goto("/portal/requests/new");
+  await openRequestWorkArea(page);
+  const canvas = page.locator(".mapboxgl-canvas");
+  await expect(canvas).toBeVisible();
+  const box = await canvas.boundingBox();
+  expect(box).not.toBeNull();
+  await canvas.click({ position: { x: box!.width * .5, y: box!.height * .5 } });
+  await page.getByRole("button", { name: "Draw area" }).click();
+  await canvas.click({ position: { x: box!.width * .22, y: box!.height * .28 } });
+  await canvas.click({ position: { x: box!.width * .72, y: box!.height * .32 } });
+  await canvas.click({ position: { x: box!.width * .58, y: box!.height * .72 } });
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Service request title").fill("Review map details");
+  await page.getByLabel("What do you need?").fill("Confirm the boundary and timing before submission.");
+  await page.getByLabel(/Preferred start/).fill("2026-09-01T09:30");
+  await page.getByLabel(/Desired completion/).fill("2026-09-03T16:00");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+
+  const preview = page.getByRole("img", { name: /read-only preview of the requested work boundary/i });
+  await expect(preview).toBeVisible();
+  await expect(preview.locator(".portal-review-boundary")).toHaveAttribute("d", /^M/);
+  await expect(page.getByRole("list", { name: "Points of interest" })).toContainText(/Broadway|Point 1/);
+  await expect(page.getByRole("list", { name: "Points of interest" })).toContainText(/-?\d+\.\d{6}, -?\d+\.\d{6}/);
+  await expect(page.locator(".portal-review-timing")).toContainText("Preferred start");
+  await expect(page.locator(".portal-review-timing")).toContainText("Desired completion");
+  await expect(page.locator(".portal-review-timing")).not.toContainText("Not specified");
+
+  for (const viewport of [{ width: 844, height: 390 }, { width: 640, height: 900 }]) {
+    await page.setViewportSize(viewport);
+    await preview.scrollIntoViewIfNeeded();
+    const previewBox = await preview.boundingBox();
+    expect(previewBox).not.toBeNull();
+    expect(previewBox!.x).toBeGreaterThanOrEqual(0);
+    expect(previewBox!.x + previewBox!.width).toBeLessThanOrEqual(viewport.width);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
 });
 
 test("client can edit before review, create a child change, and answer an estimate", async ({ page }) => {

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_ALLOWED_VAR_NAMES, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
@@ -10,6 +10,12 @@ const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const mapped = (entries = [], key) => new Map(entries.map((item) => [item.binding, item[key]]));
 const routeHosts = (config) => (config.routes ?? []).map((route) => typeof route === "string" ? route : route.pattern);
 const email = (value) => typeof value === "string" && value.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
+const reviewedTopLevelKeys = new Set([
+  "$schema", "name", "account_id", "main", "compatibility_date", "compatibility_flags",
+  "workers_dev", "preview_urls", "routes", "limits", "triggers", "assets", "vars",
+  "observability", "send_email", "ratelimits", "r2_buckets", "d1_databases", "services",
+  "stream", "workflows", "queues", "durable_objects", "exports", "containers", "images",
+]);
 
 function complete(value, label, errors) {
   if (typeof value !== "string" || !value || markers.test(value)) errors.push(`${label} is empty or contains a placeholder`);
@@ -28,7 +34,12 @@ export function validateApp(app, staging, production) {
   const errors = [];
   const inventory = STAGING_INVENTORY[app];
   if (staging.account_id !== STAGING_ACCOUNT_ID) errors.push(`${app} account_id must equal the approved LTDS staging account`);
-  for (const key of ["name", "routes", "d1_databases", "r2_buckets", "workflows", "services", "ratelimits", "images"]) {
+  for (const key of [
+    "name", "main", "compatibility_date", "compatibility_flags", "routes",
+    "d1_databases", "r2_buckets", "workflows", "services", "ratelimits",
+    "limits", "assets", "observability", "stream", "durable_objects",
+    "exports", "containers", "images",
+  ]) {
     const actual = staging[key] ?? (Array.isArray(inventory[key]) ? [] : undefined);
     if (JSON.stringify(actual) !== JSON.stringify(inventory[key])) errors.push(`${app} ${key} does not match the approved staging inventory`);
   }
@@ -43,8 +54,13 @@ export function validateApp(app, staging, production) {
   if (!staging.name?.endsWith("-staging")) errors.push(`${app} worker name must end in -staging`);
   if (staging.workers_dev !== false) errors.push(`${app} must set workers_dev=false`);
   if (staging.preview_urls !== false) errors.push(`${app} must set preview_urls=false`);
+  if (Object.hasOwn(staging, "secrets")) errors.push(`${app} must not place the release-only secret manifest in Wrangler configuration`);
+  for (const key of Object.keys(staging)) if (!reviewedTopLevelKeys.has(key)) errors.push(`${app} contains unreviewed Wrangler field ${key}`);
 
   const vars = staging.vars ?? {};
+  const allowedVars = STAGING_ALLOWED_VAR_NAMES[app] ?? [];
+  for (const key of allowedVars) if (!Object.hasOwn(vars, key)) errors.push(`${app} vars is missing reviewed field ${key}`);
+  for (const key of Object.keys(vars)) if (!allowedVars.includes(key)) errors.push(`${app} vars contains unreviewed field ${key}`);
   for (const [key, expected] of Object.entries(STAGING_STATIC_VARS[app])) {
     if (vars[key] !== expected) errors.push(`${app} ${key} must match the approved staging value`);
   }
@@ -68,8 +84,9 @@ export function validateApp(app, staging, production) {
     }
     complete(vars.MAPBOX_PUBLIC_TOKEN, "delivery vars.MAPBOX_PUBLIC_TOKEN", errors);
     if (!email(vars.CLIENT_PORTAL_INVITATION_FROM)) errors.push("delivery CLIENT_PORTAL_INVITATION_FROM must be a valid staging sender");
-    const invitationEmail = (staging.send_email ?? []).find((binding) => binding.name === "CLIENT_PORTAL_INVITATION_EMAIL");
-    if (!invitationEmail || JSON.stringify(invitationEmail.allowed_sender_addresses) !== JSON.stringify([vars.CLIENT_PORTAL_INVITATION_FROM])) {
+    const emailBindings = staging.send_email ?? [];
+    const invitationEmail = emailBindings.find((binding) => binding.name === "CLIENT_PORTAL_INVITATION_EMAIL");
+    if (emailBindings.length !== 1 || !invitationEmail || JSON.stringify(invitationEmail.allowed_sender_addresses) !== JSON.stringify([vars.CLIENT_PORTAL_INVITATION_FROM])) {
       errors.push("delivery invitation email binding must allow exactly CLIENT_PORTAL_INVITATION_FROM");
     }
   }
@@ -78,18 +95,11 @@ export function validateApp(app, staging, production) {
     complete(vars.MAPBOX_PUBLIC_TOKEN, "operations vars.MAPBOX_PUBLIC_TOKEN", errors);
     if (!email(vars.CLIENT_REQUEST_TRIAGE_TO)) errors.push("operations CLIENT_REQUEST_TRIAGE_TO must be a valid staging recipient");
     if (!email(vars.NOTIFICATION_FROM)) errors.push("operations NOTIFICATION_FROM must be a valid staging sender");
-    const notificationEmail = (staging.send_email ?? []).find((binding) => binding.name === "NOTIFICATION_EMAIL");
-    if (!notificationEmail || JSON.stringify(notificationEmail.allowed_sender_addresses) !== JSON.stringify([vars.NOTIFICATION_FROM])) {
+    const emailBindings = staging.send_email ?? [];
+    const notificationEmail = emailBindings.find((binding) => binding.name === "NOTIFICATION_EMAIL");
+    if (emailBindings.length !== 1 || !notificationEmail || JSON.stringify(notificationEmail.allowed_sender_addresses) !== JSON.stringify([vars.NOTIFICATION_FROM])) {
       errors.push("operations notification email binding must allow exactly NOTIFICATION_FROM");
     }
-  }
-  const declaredSecrets = staging.secrets?.required ?? [];
-  if (!Array.isArray(declaredSecrets)) errors.push(`${app} secrets.required must be an array`);
-  else {
-    const expectedSecrets = REQUIRED_STAGING_SECRETS[app] ?? [];
-    for (const secret of expectedSecrets) if (!declaredSecrets.includes(secret)) errors.push(`${app} secrets.required is missing ${secret}`);
-    for (const secret of declaredSecrets) if (!expectedSecrets.includes(secret)) errors.push(`${app} secrets.required contains unexpected ${secret}`);
-    if (new Set(declaredSecrets).size !== declaredSecrets.length) errors.push(`${app} secrets.required contains duplicates`);
   }
   if (vars.ENVIRONMENT !== "staging") errors.push(`${app} must set ENVIRONMENT=staging`);
   for (const flag of REQUIRED_DISABLED_FEATURE_FLAGS[app] ?? []) {
@@ -171,6 +181,21 @@ export function validateCrossApp(configs) {
   return errors;
 }
 
+export function validateSecretManifest(manifest) {
+  const errors = [];
+  if (!manifest || typeof manifest !== "object" || Array.isArray(manifest)) return ["staging secret manifest must be an object"];
+  for (const app of apps) {
+    const declared = manifest[app];
+    const expected = REQUIRED_STAGING_SECRETS[app] ?? [];
+    if (!Array.isArray(declared)) { errors.push(`staging secret manifest ${app} must be an array`); continue; }
+    if (new Set(declared).size !== declared.length) errors.push(`staging secret manifest ${app} contains duplicates`);
+    for (const secret of expected) if (!declared.includes(secret)) errors.push(`staging secret manifest ${app} is missing ${secret}`);
+    for (const secret of declared) if (!expected.includes(secret)) errors.push(`staging secret manifest ${app} contains unexpected ${secret}`);
+  }
+  for (const app of Object.keys(manifest)) if (!apps.includes(app)) errors.push(`staging secret manifest contains unexpected app ${app}`);
+  return errors;
+}
+
 export function validateRequestAttachmentCors(config) {
   return JSON.stringify(config) === JSON.stringify(STAGING_REQUEST_ATTACHMENT_R2_CORS)
     ? []
@@ -194,6 +219,12 @@ export function validateFiles(base = root) {
   else {
     try { errors.push(...validateRequestAttachmentCors(readJson(corsFile))); }
     catch (error) { errors.push(`${path.relative(base, corsFile)} is invalid JSON: ${error.message}`); }
+  }
+  const secretManifestFile = path.join(base, "docs", "staging", "staging-secret-manifest.json");
+  if (!fs.existsSync(secretManifestFile)) errors.push(`${path.relative(base, secretManifestFile)} is missing`);
+  else {
+    try { errors.push(...validateSecretManifest(readJson(secretManifestFile))); }
+    catch (error) { errors.push(`${path.relative(base, secretManifestFile)} is invalid JSON: ${error.message}`); }
   }
   if (apps.every((app) => configs[app])) errors.push(...validateCrossApp(configs));
   return errors;

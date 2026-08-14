@@ -89,6 +89,73 @@ describe("verified Project Alpha quote linkage", () => {
   });
   afterEach(() => vi.unstubAllGlobals());
 
+  it("returns only allowlisted immutable service review fields and labeled answers", async () => {
+    const state: DbState = {
+      batches: [],
+      first(kind, sql) {
+        if (kind === "delivery" && sql.includes("FROM client_service_requests r JOIN client_accounts")) {
+          return {
+            id: "request-a",
+            account_id: "account-a",
+            title: "North site mapping",
+            status: "submitted",
+            area_geojson: null,
+            poi_points_json: null,
+            account_name: "Acme Surveying",
+          };
+        }
+        return null;
+      },
+      all(kind, sql) {
+        if (kind === "delivery" && sql.includes("FROM client_service_request_services")) {
+          return [{
+            service_public_id: "svc-2d-mapping",
+            service_source_version: "catalog-item-v3",
+            service_snapshot_json: JSON.stringify({
+              publicId: "svc-2d-mapping",
+              sourceVersion: "catalog-item-v3",
+              name: "2D Mapping",
+              summary: "Orthomosaic mapping for a client-drawn work area.",
+              category: "Mapping",
+              displayOrder: 10,
+              geometryRequirement: "required",
+              questions: [{
+                id: "deliverable_format",
+                label: "Preferred deliverable",
+                type: "select",
+                required: true,
+                options: [{ value: "orthomosaic", label: "Orthomosaic" }],
+              }],
+              unitPrice: "1000.00",
+              privateFormula: "never-forward-this",
+            }),
+            answers_json: JSON.stringify({ deliverable_format: "orthomosaic" }),
+          }];
+        }
+        return [];
+      },
+    };
+
+    const response = await worker.fetch(
+      new Request("https://ops.example/api/client-service-requests/request-a"),
+      environment(state) as any,
+      executionCtx,
+    );
+    expect(response.status).toBe(200);
+    const payload = await response.json() as any;
+    expect(payload.services).toEqual([{
+      publicId: "svc-2d-mapping",
+      sourceVersion: "catalog-item-v3",
+      name: "2D Mapping",
+      summary: "Orthomosaic mapping for a client-drawn work area.",
+      category: "Mapping",
+      geometryRequirement: "required",
+      answers: [{ questionId: "deliverable_format", label: "Preferred deliverable", displayValue: "Orthomosaic" }],
+      integrity: "verified",
+    }]);
+    expect(JSON.stringify(payload)).not.toMatch(/unitPrice|privateFormula|never-forward-this|1000\.00/);
+  });
+
   it("verifies exact client/project ownership before atomically linking an approved quote", async () => {
     const state: DbState = { batches: [] };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

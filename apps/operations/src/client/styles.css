@@ -1273,6 +1273,15 @@ tbody tr:last-child td { border: 0; }
 .request-review-fields dd { margin: .25rem 0 0; white-space: pre-wrap; }
 .request-review-fields > div:nth-child(3),
 .request-review-fields > div:nth-child(4) { grid-column: 1 / -1; }
+.request-services-card { grid-column: 1 / -1; }
+.request-service-review-list { display: grid; gap: .75rem; }
+.request-service-review-list > article { padding: .85rem; border: 1px solid var(--border); border-radius: 10px; background: #f7f8fa; }
+.request-service-review-list > article > header { display: flex; align-items: flex-start; justify-content: space-between; gap: .75rem; }
+.request-service-review-list h3 { margin: .2rem 0 0; overflow-wrap: anywhere; }
+.request-service-answers { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; margin: .75rem 0 0; }
+.request-service-answers > div { min-width: 0; padding: .6rem; border-radius: 8px; background: #fff; }
+.request-service-answers dt { color: var(--muted); font-size: .75rem; font-weight: 800; }
+.request-service-answers dd { margin: .2rem 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
 .request-review-map { min-height: 430px; border-radius: 12px; overflow: hidden; }
 .request-work-area-revision-notice { display: grid; gap: .2rem; margin-bottom: .75rem; }
 .request-map-editor { display: grid; gap: .8rem; }
@@ -1324,7 +1333,7 @@ tbody tr:last-child td { border: 0; }
   .ops-shell * { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
 @media (max-width: 760px) {
-  .request-review-grid, .request-review-fields { grid-template-columns: 1fr; }
+  .request-review-grid, .request-review-fields, .request-service-answers { grid-template-columns: 1fr; }
   .request-review-fields > div:nth-child(3),
   .request-review-fields > div:nth-child(4) { grid-column: auto; }
   .client-request-review-list > article { flex-direction: column; }
@@ -1336,6 +1345,7 @@ tbody tr:last-child td { border: 0; }
   .request-map-editor-mode button { flex: 1; min-height: 44px; }
   .request-map-editor-footer > button { flex: 1 1 100%; min-height: 44px; }
   .request-map-editor-pois li { align-items: stretch; flex-direction: column; }
+  .request-service-review-list > article > header { align-items: stretch; flex-direction: column; }
   .request-attachments article,
   .request-attachment-error { align-items: stretch; flex-direction: column; }
   .request-attachments article a,

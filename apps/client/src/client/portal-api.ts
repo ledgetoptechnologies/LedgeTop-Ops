@@ -421,6 +421,15 @@ export interface PortalServiceDraft extends Omit<PortalServiceDraftInput, "servi
   updatedAt: string;
 }
 
+export interface PortalServiceDraftSummary {
+  id: string;
+  projectId: string | null;
+  title: string;
+  serviceNames: string[];
+  areaAcres: number | null;
+  updatedAt: string;
+}
+
 export type PortalPricingHint =
   | { kind: "starting_at"; currency: string; startingAtMinor: number; disclaimer: string; basisVersion: string; validUntil: string }
   | { kind: "typical_range"; currency: string; minimumMinor: number; maximumMinor: number; disclaimer: string; basisVersion: string; validUntil: string };
@@ -494,6 +503,21 @@ export async function createPortalServiceDraft(
     headers: { "Content-Type": "application/json", "Idempotency-Key": idempotencyKey },
     body: JSON.stringify(input),
   });
+  return response.draft;
+}
+
+export async function loadPortalServiceDrafts(
+  request: PortalRequest = requestJson,
+): Promise<PortalServiceDraftSummary[]> {
+  const response = await request<{ drafts: PortalServiceDraftSummary[] }>("/api/client/service-request-drafts");
+  return response.drafts;
+}
+
+export async function loadPortalServiceDraft(
+  draftId: string,
+  request: PortalRequest = requestJson,
+): Promise<PortalServiceDraft> {
+  const response = await request<{ draft: PortalServiceDraft }>(`/api/client/service-request-drafts/${encodeURIComponent(draftId)}`);
   return response.draft;
 }
 

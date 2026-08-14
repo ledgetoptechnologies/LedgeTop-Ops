@@ -24,8 +24,11 @@ import {
   loadPortalNotifications,
   setPortalWorkspaceSelection,
   loadPortalPricingHint,
+  listPortalRequestAttachments,
   loadPortalRequestAttachment,
   loadPortalServiceCatalog,
+  loadPortalServiceDraft,
+  loadPortalServiceDrafts,
   loadPortalWorkspaceAccess,
   loadPortalWorkspaceHierarchy,
   loadPortalWorkspaces,
@@ -58,6 +61,7 @@ import {
   type PortalServiceRequest,
   type PortalServiceCatalogItem,
   type PortalServiceDraft,
+  type PortalServiceDraftSummary,
   type PortalServiceDraftInput,
   type PortalServiceQuestion,
   type PortalServiceRequestInput,
@@ -648,6 +652,14 @@ function requestStepFromLocation(): RequestStep {
   return REQUEST_STEPS.includes(requested as RequestStep) ? requested as RequestStep : "services";
 }
 
+function dateTimeLocalValue(value: string | null): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
 function questionIsAnswered(question: PortalServiceQuestion, value: unknown): boolean {
   if (!question.required) return true;
   if (question.type === "boolean") return typeof value === "boolean";
@@ -696,7 +708,7 @@ const requestAttachmentTypes: Record<string, string> = {
   heic: "image/heic", heif: "image/heif", pdf: "application/pdf",
 };
 type RequestAttachmentUi = {
-  key: string; id?: string; clientUploadId: string; file: File; name: string; size: number;
+  key: string; id?: string; clientUploadId: string; file?: File; name: string; size: number;
   status: PortalRequestAttachmentStatus | "queued" | "error"; uploadedBytes: number;
   completedParts: number; totalParts: number; error?: string;
 };
@@ -720,6 +732,57 @@ function attachmentStatusLabel(status: RequestAttachmentUi["status"]): string {
   return "Needs attention";
 }
 
+function RequestReviewMap({ area, points }: { area: PortalAreaGeoJson | null; points: PortalPoi[] }) {
+  const width = 640;
+  const height = 280;
+  const padding = 24;
+  const rings = area?.coordinates ?? [];
+  const coordinates = [
+    ...rings.flat(),
+    ...points.map(point => [point.longitude, point.latitude] as [number, number]),
+  ];
+  if (!coordinates.length) {
+    return <div className="portal-review-map-empty">No boundary or points were added.</div>;
+  }
+  const longitudes = coordinates.map(point => point[0]);
+  const latitudes = coordinates.map(point => point[1]);
+  const minimumLongitude = Math.min(...longitudes);
+  const maximumLongitude = Math.max(...longitudes);
+  const minimumLatitude = Math.min(...latitudes);
+  const maximumLatitude = Math.max(...latitudes);
+  const longitudeSpan = Math.max(maximumLongitude - minimumLongitude, 0.000001);
+  const latitudeSpan = Math.max(maximumLatitude - minimumLatitude, 0.000001);
+  const scale = Math.min((width - padding * 2) / longitudeSpan, (height - padding * 2) / latitudeSpan);
+  const renderedWidth = longitudeSpan * scale;
+  const renderedHeight = latitudeSpan * scale;
+  const offsetX = (width - renderedWidth) / 2;
+  const offsetY = (height - renderedHeight) / 2;
+  const project = ([longitude, latitude]: [number, number]) => ({
+    x: offsetX + (longitude - minimumLongitude) * scale,
+    y: offsetY + (maximumLatitude - latitude) * scale,
+  });
+  const boundaryPath = rings.map(ring => ring.map((point, index) => {
+    const projected = project(point);
+    return `${index === 0 ? "M" : "L"}${projected.x.toFixed(2)} ${projected.y.toFixed(2)}`;
+  }).join(" ") + " Z").join(" ");
+
+  return <figure className="portal-review-map-summary">
+    <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Read-only preview of the requested work boundary and points of interest">
+      <rect className="portal-review-map-background" x="0" y="0" width={width} height={height} rx="12" />
+      <path className="portal-review-map-grid" d={`M0 ${height / 3}H${width} M0 ${(height / 3) * 2}H${width} M${width / 3} 0V${height} M${(width / 3) * 2} 0V${height}`} />
+      {boundaryPath && <path className="portal-review-boundary" d={boundaryPath} fillRule="evenodd" />}
+      {points.map((point, index) => {
+        const projected = project([point.longitude, point.latitude]);
+        return <g key={`${point.longitude}:${point.latitude}:${index}`}>
+          <circle className="portal-review-poi-marker" cx={projected.x} cy={projected.y} r="8" />
+          <text className="portal-review-poi-number" x={projected.x} y={projected.y + 3}>{index + 1}</text>
+        </g>;
+      })}
+    </svg>
+    <figcaption>Read-only boundary preview for confirmation. Use Edit work area to make changes.</figcaption>
+  </figure>;
+}
+
 function NewServiceRequestWizard({
   projects,
   projectId: fixedProjectId,
@@ -727,6 +790,7 @@ function NewServiceRequestWizard({
   onCancel,
   mapboxPublicToken,
   attachmentsEnabled = false,
+  initialDraftId,
 }: {
   projects: PortalProject[];
   projectId?: string;
@@ -734,6 +798,7 @@ function NewServiceRequestWizard({
   onCancel?: () => void;
   mapboxPublicToken: string | null;
   attachmentsEnabled?: boolean;
+  initialDraftId?: string | null;
 }) {
   const eligibleProjects = projects.filter(project => project.canRequestService);
   const [step, setStepState] = useState<RequestStep>(requestStepFromLocation);
@@ -761,6 +826,8 @@ function NewServiceRequestWizard({
   const [submitting, setSubmitting] = useState(false);
   const [attachments, setAttachments] = useState<RequestAttachmentUi[]>([]);
   const [attachmentMessage, setAttachmentMessage] = useState("");
+  const [loadingDraft, setLoadingDraft] = useState(Boolean(initialDraftId));
+  const [draftLoadFailed, setDraftLoadFailed] = useState(false);
   const mounted = useRef(true);
   const draftRef = useRef<PortalServiceDraft | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
@@ -771,7 +838,9 @@ function NewServiceRequestWizard({
     setCatalogState("loading");
     loadPortalServiceCatalog().then(items => {
       if (!mounted.current) return;
-      setCatalog(items);
+      const selectedSnapshot = draftRef.current?.services ?? [];
+      const present = new Set(items.map(item => item.publicId));
+      setCatalog([...items, ...selectedSnapshot.filter(item => !present.has(item.publicId))]);
       setCatalogState("ready");
     }).catch(() => {
       if (mounted.current) setCatalogState("error");
@@ -785,6 +854,87 @@ function NewServiceRequestWizard({
     window.addEventListener("popstate", onPopState);
     return () => { mounted.current = false; window.removeEventListener("popstate", onPopState); };
   }, []);
+
+  useEffect(() => {
+    if (!initialDraftId) return;
+    let active = true;
+    Promise.all([
+      loadPortalServiceDraft(initialDraftId),
+      attachmentsEnabled ? listPortalRequestAttachments(initialDraftId) : Promise.resolve([]),
+    ]).then(([saved, savedAttachments]) => {
+      if (!active) return;
+      if (saved.state !== "draft") {
+        setDraftLoadFailed(true);
+        setMessage("This saved request is no longer available as a draft.");
+        return;
+      }
+      const restoredInput: PortalServiceDraftInput = {
+        projectId: saved.projectId,
+        requestType: saved.requestType,
+        title: saved.title,
+        details: saved.details,
+        location: saved.location,
+        preferredStartAt: saved.preferredStartAt,
+        deliverables: saved.deliverables,
+        siteContactName: saved.siteContactName,
+        siteContactEmail: saved.siteContactEmail,
+        siteContactPhone: saved.siteContactPhone,
+        desiredCompletionAt: saved.desiredCompletionAt,
+        latitude: saved.latitude,
+        longitude: saved.longitude,
+        areaGeoJson: saved.areaGeoJson,
+        poiPoints: saved.poiPoints,
+        services: saved.services.map(service => ({ publicId: service.publicId, answers: service.answers })),
+      };
+      draftRef.current = saved;
+      lastSaved.current = JSON.stringify(restoredInput);
+      setDraft(saved);
+      setProjectId(fixedProjectId ?? saved.projectId ?? "");
+      setTitle(saved.title);
+      setDetails(saved.details);
+      setLocation(saved.location ?? "");
+      setPreferredStartAt(dateTimeLocalValue(saved.preferredStartAt));
+      setDeliverables(saved.deliverables ?? "");
+      setSiteContactName(saved.siteContactName ?? "");
+      setSiteContactEmail(saved.siteContactEmail ?? "");
+      setSiteContactPhone(saved.siteContactPhone ?? "");
+      setDesiredCompletionAt(dateTimeLocalValue(saved.desiredCompletionAt));
+      setPoints(saved.poiPoints);
+      setAreaGeoJson(saved.areaGeoJson);
+      setSelectedServices(saved.services.map(service => service.publicId));
+      setAnswers(Object.fromEntries(saved.services.map(service => [service.publicId, service.answers])));
+      setCatalog(current => {
+        const present = new Set(current.map(item => item.publicId));
+        return [...current, ...saved.services.filter(item => !present.has(item.publicId))];
+      });
+      setAttachments(savedAttachments.filter(item => item.status !== "aborted").map(item => ({
+        key: item.id,
+        id: item.id,
+        clientUploadId: crypto.randomUUID(),
+        name: item.name,
+        size: item.size,
+        status: item.status,
+        uploadedBytes: item.status === "accepted" ? item.size : 0,
+        completedParts: 0,
+        totalParts: 0,
+        error: item.status === "rejected" ? "The security scan rejected this file. Remove it and upload a safe replacement before submitting." : undefined,
+      })));
+      setSaveState("saved");
+      setDirty(false);
+      setMessage("");
+      for (const item of savedAttachments) {
+        if (["quarantined", "scanning"].includes(item.status)) void pollAttachment(item.id, saved.id, item.id);
+      }
+    }).catch((caught) => {
+      if (active) {
+        setDraftLoadFailed(true);
+        setMessage((caught as Error).message || "This draft could not be loaded.");
+      }
+    }).finally(() => {
+      if (active) setLoadingDraft(false);
+    });
+    return () => { active = false; };
+  }, [initialDraftId, attachmentsEnabled, fixedProjectId]);
 
   useEffect(() => {
     if (!pricingHint) return;
@@ -827,6 +977,11 @@ function NewServiceRequestWizard({
           ? await savePortalServiceDraft(current.id, current.version, snapshot, crypto.randomUUID())
           : await createPortalServiceDraft(snapshot, createKey.current);
         draftRef.current = saved;
+        if (!current) {
+          const url = new URL(window.location.href);
+          url.searchParams.set("draft", saved.id);
+          window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
+        }
         lastSaved.current = serialized;
         if (mounted.current) {
           setDraft(saved);
@@ -852,7 +1007,12 @@ function NewServiceRequestWizard({
   async function pollAttachment(key: string, draftId: string, attachmentId: string) {
     for (let attempt = 0; attempt < 120 && mounted.current; attempt += 1) {
       const current = await loadPortalRequestAttachment(draftId, attachmentId);
-      updateAttachment(key, { status: current.status });
+      updateAttachment(key, {
+        status: current.status,
+        error: current.status === "rejected"
+          ? "The security scan rejected this file. Remove it and upload a safe replacement before submitting."
+          : undefined,
+      });
       if (["accepted", "rejected", "expired", "aborted"].includes(current.status)) return;
       await new Promise(resolve => window.setTimeout(resolve, 1000));
     }
@@ -861,10 +1021,12 @@ function NewServiceRequestWizard({
   async function uploadAttachment(item: RequestAttachmentUi) {
     updateAttachment(item.key, { status: "uploading", error: undefined });
     try {
+      const file = item.file;
+      if (!file) throw new Error("Choose the file again to retry this upload.");
       await persist(input, inputJson);
       const currentDraft = draftRef.current;
       if (!currentDraft) throw new Error("Save the request draft before adding files.");
-      const contentType = normalizedAttachmentType(item.file);
+      const contentType = normalizedAttachmentType(file);
       if (!contentType) throw new Error("Choose a JPEG, PNG, WebP, HEIC, HEIF, or PDF whose extension matches its file type.");
       const initialized = await initializePortalRequestAttachment(currentDraft.id, {
         clientUploadId: item.clientUploadId, name: item.name, contentType, size: item.size,
@@ -880,7 +1042,7 @@ function NewServiceRequestWizard({
       for (let partNumber = 1; partNumber <= count; partNumber += 1) {
         if (completed.has(partNumber)) continue;
         const start = (partNumber - 1) * initialized.partSize;
-        const blob = item.file.slice(start, Math.min(item.size, start + initialized.partSize), contentType);
+        const blob = file.slice(start, Math.min(item.size, start + initialized.partSize), contentType);
         const priorBytes = [...completed.values()].reduce((sum, part) => sum + part.size, 0);
         const ticket = await requestPortalAttachmentPartTicket(currentDraft.id, initialized.attachmentId, partNumber);
         if (ticket.contentLength !== blob.size || ticket.contentType !== contentType) throw new Error("The upload ticket does not match this file part.");
@@ -917,7 +1079,7 @@ function NewServiceRequestWizard({
   async function removeAttachment(item: RequestAttachmentUi) {
     try {
       const currentDraft = draftRef.current;
-      if (currentDraft && item.id && item.status === "uploading") await removePortalRequestAttachment(currentDraft.id, item.id);
+      if (currentDraft && item.id && ["uploading", "rejected"].includes(item.status)) await removePortalRequestAttachment(currentDraft.id, item.id);
       setAttachments(current => current.filter(candidate => candidate.key !== item.key));
     } catch (caught) { updateAttachment(item.key, { error: (caught as Error).message || "The file could not be removed." }); }
   }
@@ -954,9 +1116,11 @@ function NewServiceRequestWizard({
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const rejectedAttachments = attachments.some(item => item.status === "rejected");
     const pendingAttachments = attachments.some(item => ["queued", "uploading", "quarantined", "scanning", "error"].includes(item.status));
-    if (step !== "review" || submitting || pendingAttachments || !servicesComplete || !geometryComplete || !title.trim() || !details.trim()) {
-      if (pendingAttachments) setMessage("Wait for every attachment to be accepted or rejected before submitting.");
+    if (step !== "review" || submitting || rejectedAttachments || pendingAttachments || !servicesComplete || !geometryComplete || !title.trim() || !details.trim()) {
+      if (rejectedAttachments) setMessage("Remove every rejected attachment and upload a safe replacement before submitting.");
+      else if (pendingAttachments) setMessage("Wait for every attachment to finish its security scan before submitting.");
       else if (!geometryComplete) setMessage("Return to Work area and draw the area required by the selected service.");
       return;
     }
@@ -974,6 +1138,9 @@ function NewServiceRequestWizard({
     } finally { setSubmitting(false); }
   }
 
+  if (loadingDraft) return <div className="portal-request-draft-loading" aria-label="Loading saved request"><Loading /></div>;
+  if (draftLoadFailed) return <div className="portal-request-draft-error"><EmptyState title="Saved draft unavailable" detail={message || "This draft could not be opened in the selected workspace."} />{onCancel && <button type="button" className="button-ghost" onClick={onCancel}>Back to request history</button>}</div>;
+
   return <form className="portal-request-form portal-request-wizard" onSubmit={submit}>
     <nav className="portal-request-stepper" aria-label="Service request progress"><ol>{REQUEST_STEPS.map((item, index) => <li key={item} className={item === step ? "is-current" : REQUEST_STEPS.indexOf(step) > index ? "is-complete" : ""}><button type="button" onClick={() => index <= REQUEST_STEPS.indexOf(step) && goTo(item)} aria-current={item === step ? "step" : undefined}><span>{index + 1}</span>{item === "services" ? "Services" : item === "location" ? "Work area" : item === "details" ? "Details" : item === "contact" ? "Contact" : "Review"}</button></li>)}</ol></nav>
     <div className="portal-autosave-status" role="status" aria-live="polite"><span className={`save-dot ${saveState}`} aria-hidden="true" />{saveState === "saving" ? "Saving draft..." : saveState === "saved" ? "Draft saved" : saveState === "error" ? "Draft not saved" : saveState === "conflict" ? "Draft conflict" : dirty ? "Changes waiting to save" : "Your progress will save automatically"}</div>
@@ -985,11 +1152,11 @@ function NewServiceRequestWizard({
     </section>}
     {step === "location" && <section className="portal-wizard-panel" aria-labelledby="request-location-title"><header><span>Step 2 of 5</span><h3 id="request-location-title">Show us the work area</h3><p>{geometryRequired ? "One or more selected services require a drawn work area. Search, add points, or draw the area directly on the secure map." : "The selected services do not require a work area, but you may add one when it helps explain the scope."} Clients cannot upload or import KML files.</p></header><div className="portal-request-map portal-request-map-step"><MapAreaSelector value={areaGeoJson} onChange={value => change(() => setAreaGeoJson(value))} token={mapboxPublicToken} points={points} onPoints={value => change(() => setPoints(value))} locationLabel={location} onLocationLabel={value => change(() => setLocation(value))} /></div>{draft?.areaAcres != null && <div className="portal-coverage-card"><span>Estimated coverage</span><strong>{draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres</strong><small>Calculated by LTDS from the area drawn above.</small></div>}</section>}
     {step === "details" && <section className="portal-wizard-panel" aria-labelledby="request-details-title"><header><span>Step 3 of 5</span><h3 id="request-details-title">Scope and timing</h3><p>Describe the outcome you need. LTDS will confirm feasibility and the final scope.</p></header>{!fixedProjectId && <label>Project context<select value={projectId} onChange={event => change(() => setProjectId(event.target.value))}><option value="">New or one-off service</option>{eligibleProjects.map(project => <option key={project.id} value={project.id}>{project.projectName}</option>)}</select></label>}<label>Service request title<input value={title} onChange={event => change(() => setTitle(event.target.value))} maxLength={160} required /></label><label>What do you need?<textarea value={details} onChange={event => change(() => setDetails(event.target.value))} maxLength={5000} rows={6} required /></label><div className="portal-form-grid"><label>Location <span>(optional)</span><input value={location} onChange={event => change(() => setLocation(event.target.value))} maxLength={240} /></label><label>Preferred start <span>(optional)</span><input type="datetime-local" value={preferredStartAt} onChange={event => change(() => setPreferredStartAt(event.target.value))} /></label><label>Desired completion <span>(optional)</span><input type="datetime-local" value={desiredCompletionAt} onChange={event => change(() => setDesiredCompletionAt(event.target.value))} /></label></div><label>Requested deliverables <span>(optional)</span><textarea value={deliverables} onChange={event => change(() => setDeliverables(event.target.value))} maxLength={2000} rows={4} /></label></section>}
-    {step === "contact" && <section className="portal-wizard-panel" aria-labelledby="request-contact-title"><header><span>Step 4 of 5</span><h3 id="request-contact-title">Contact and supporting files</h3><p>Add an optional on-site contact and any authorized reference photos or PDFs.</p></header><fieldset className="portal-contact-fields"><legend>Contact details <span>(optional)</span></legend><label>Name<input value={siteContactName} onChange={event => change(() => setSiteContactName(event.target.value))} maxLength={160} /></label><label>Email<input type="email" value={siteContactEmail} onChange={event => change(() => setSiteContactEmail(event.target.value))} maxLength={320} /></label><label>Phone<input type="tel" value={siteContactPhone} onChange={event => change(() => setSiteContactPhone(event.target.value))} maxLength={64} /></label></fieldset>{attachmentsEnabled ? <div className="portal-attachment-uploader"><header><div><strong>Supporting files</strong><p>Up to 10 JPEG, PNG, WebP, HEIC, HEIF, or PDF files; 25 MiB each and 100 MiB total. Archives are not allowed.</p></div><label className="button-ghost portal-file-picker">Add files<input type="file" multiple accept=".jpg,.jpeg,.png,.webp,.heic,.heif,.pdf,image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf" onChange={event => { addAttachments(event.target.files); event.currentTarget.value = ""; }} /></label></header>{attachmentMessage && <p role="alert" className="portal-message error">{attachmentMessage}</p>}<div className="portal-attachment-list" aria-live="polite">{attachments.map(item => <article key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)} / {attachmentStatusLabel(item.status)}</span></div><progress max={item.size} value={Math.min(item.uploadedBytes, item.size)} aria-label={`${item.name} upload progress`} /><small>{item.totalParts ? `${item.completedParts} of ${item.totalParts} parts` : "Preparing upload"}</small>{item.error && <p role="alert">{item.error}</p>}<div>{item.status === "error" && <button type="button" className="button-ghost button-small" onClick={() => void uploadAttachment(item)}>Retry</button>}{["queued", "uploading", "error"].includes(item.status) && <button type="button" className="button-ghost button-small" onClick={() => void removeAttachment(item)}>Remove</button>}</div></article>)}</div></div> : <div className="portal-attachments-coming"><strong>Supporting files are coming soon</strong><p>Secure request attachments are not enabled for this portal. Do not place sensitive file links in the description.</p></div>}</section>}
-    {step === "review" && <section className="portal-wizard-panel portal-review" aria-labelledby="request-review-title"><header><span>Step 5 of 5</span><h3 id="request-review-title">Review your request</h3><p>Nothing is submitted until you select Submit request.</p></header><div className="portal-review-grid"><article><header><h4>Services</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("services")}>Edit services</button></header><ul>{selectedCatalog.map(service => <li key={service.publicId}><strong>{service.name}</strong>{service.questions.map(question => { const value = answers[service.publicId]?.[question.id]; if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) return null; const labels = question.type === "select" || question.type === "multi_select" ? question.options.filter(option => (Array.isArray(value) ? value : [value]).includes(option.value)).map(option => option.label).join(", ") : typeof value === "boolean" ? value ? "Yes" : "No" : String(value); return <span key={question.id}>{question.label}: {labels}</span>; })}</li>)}</ul></article><article><header><h4>Work area</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("location")}>Edit work area</button></header><p>{location || "No location label provided"}</p><p>{draft?.areaAcres != null ? `${draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres` : areaGeoJson ? "Coverage is being calculated" : "No polygon drawn"} / {points.length} point{points.length === 1 ? "" : "s"}</p></article><article><header><h4>Scope and timing</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("details")}>Edit details</button></header><strong>{title || "Title required"}</strong><p>{details || "Description required"}</p><p>{projectId ? eligibleProjects.find(project => project.id === projectId)?.projectName ?? "Authorized project" : "New or one-off service"}</p><p>{deliverables || "No separate deliverables noted"}</p></article><article><header><h4>Contact</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit contact</button></header><p>{siteContactName || "No on-site contact"}</p>{siteContactEmail && <p>{siteContactEmail}</p>}{siteContactPhone && <p>{siteContactPhone}</p>}</article></div><aside className="portal-pricing-hint"><span>Planning guidance</span>{pricingHint ? <><strong>{pricingHint.kind === "starting_at" ? `Starting at ${formatRequestMoney(pricingHint.startingAtMinor, pricingHint.currency)}` : `Typical range ${formatRequestMoney(pricingHint.minimumMinor, pricingHint.currency)} to ${formatRequestMoney(pricingHint.maximumMinor, pricingHint.currency)}`}</strong><p>{pricingHint.disclaimer}</p></> : <><strong>Final quote after review</strong><p>A reliable price hint is not available for this request. Submitting does not authorize work or create a charge. LTDS will review the scope and create the actual estimate in Project Alpha.</p></>}</aside></section>}
-    {step === "review" && <section className="portal-review-attachments" aria-labelledby="review-attachments-title"><header><h3 id="review-attachments-title">Supporting files</h3><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit files</button></header>{attachments.length ? <ul>{attachments.filter(item => item.status !== "aborted").map(item => <li key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)}</span></div><span className={`portal-attachment-status ${item.status}`}>{attachmentStatusLabel(item.status)}</span></li>)}</ul> : <p>No supporting files were added.</p>}</section>}
+    {step === "contact" && <section className="portal-wizard-panel" aria-labelledby="request-contact-title"><header><span>Step 4 of 5</span><h3 id="request-contact-title">Contact and supporting files</h3><p>Add an optional on-site contact and any authorized reference photos or PDFs.</p></header><fieldset className="portal-contact-fields"><legend>Contact details <span>(optional)</span></legend><label>Name<input value={siteContactName} onChange={event => change(() => setSiteContactName(event.target.value))} maxLength={160} /></label><label>Email<input type="email" value={siteContactEmail} onChange={event => change(() => setSiteContactEmail(event.target.value))} maxLength={320} /></label><label>Phone<input type="tel" value={siteContactPhone} onChange={event => change(() => setSiteContactPhone(event.target.value))} maxLength={64} /></label></fieldset>{attachmentsEnabled ? <div className="portal-attachment-uploader"><header><div><strong>Supporting files</strong><p>Up to 10 JPEG, PNG, WebP, HEIC, HEIF, or PDF files; 25 MiB each and 100 MiB total. Archives are not allowed.</p></div><label className="button-ghost portal-file-picker">Add files<input type="file" multiple accept=".jpg,.jpeg,.png,.webp,.heic,.heif,.pdf,image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf" onChange={event => { addAttachments(event.target.files); event.currentTarget.value = ""; }} /></label></header>{attachmentMessage && <p role="alert" className="portal-message error">{attachmentMessage}</p>}<div className="portal-attachment-list" aria-live="polite">{attachments.map(item => <article key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)} / {attachmentStatusLabel(item.status)}</span></div><progress max={item.size} value={Math.min(item.uploadedBytes, item.size)} aria-label={`${item.name} upload progress`} /><small>{item.totalParts ? `${item.completedParts} of ${item.totalParts} parts` : "Preparing upload"}</small>{item.error && <p role="alert">{item.error}</p>}<div>{item.status === "error" && <button type="button" className="button-ghost button-small" onClick={() => void uploadAttachment(item)}>Retry</button>}{["queued", "uploading", "error", "rejected"].includes(item.status) && <button type="button" className="button-ghost button-small" onClick={() => void removeAttachment(item)}>Remove</button>}</div></article>)}</div></div> : <div className="portal-attachments-coming"><strong>Supporting files are coming soon</strong><p>Secure request attachments are not enabled for this portal. Do not place sensitive file links in the description.</p></div>}</section>}
+    {step === "review" && <section className="portal-wizard-panel portal-review" aria-labelledby="request-review-title"><header><span>Step 5 of 5</span><h3 id="request-review-title">Review your request</h3><p>Double-check every section below. Nothing is submitted until you select Submit request.</p></header><div className="portal-review-grid"><article><header><h4>Services</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("services")}>Edit services</button></header><ul>{selectedCatalog.map(service => <li key={service.publicId}><strong>{service.name}</strong>{service.questions.map(question => { const value = answers[service.publicId]?.[question.id]; if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) return null; const labels = question.type === "select" || question.type === "multi_select" ? question.options.filter(option => (Array.isArray(value) ? value : [value]).includes(option.value)).map(option => option.label).join(", ") : typeof value === "boolean" ? value ? "Yes" : "No" : String(value); return <span key={question.id}>{question.label}: {labels}</span>; })}</li>)}</ul></article><article className="portal-review-work-area"><header><h4>Work area</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("location")}>Edit work area</button></header><p>{location || "No location label provided"}</p><p>{draft?.areaAcres != null ? `${draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres` : areaGeoJson ? "Coverage is being calculated" : "No polygon drawn"} / {points.length} point{points.length === 1 ? "" : "s"}</p><RequestReviewMap area={areaGeoJson} points={points} />{points.length > 0 && <ol className="portal-review-pois" aria-label="Points of interest">{points.map((point, index) => <li key={`${point.longitude}:${point.latitude}:${index}`}><span>{index + 1}</span><div><strong>{point.label || `Point ${index + 1}`}</strong><small>{point.latitude.toFixed(6)}, {point.longitude.toFixed(6)}</small></div></li>)}</ol>}</article><article><header><h4>Scope and timing</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("details")}>Edit details</button></header><strong>{title || "Title required"}</strong><p>{details || "Description required"}</p><p>{projectId ? eligibleProjects.find(project => project.id === projectId)?.projectName ?? "Authorized project" : "New or one-off service"}</p><p>{deliverables || "No separate deliverables noted"}</p><dl className="portal-review-timing"><div><dt>Preferred start</dt><dd>{input.preferredStartAt ? formatDate(input.preferredStartAt) : "Not specified"}</dd></div><div><dt>Desired completion</dt><dd>{input.desiredCompletionAt ? formatDate(input.desiredCompletionAt) : "Not specified"}</dd></div></dl></article><article><header><h4>Contact</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit contact</button></header><p>{siteContactName || "No on-site contact"}</p>{siteContactEmail && <p>{siteContactEmail}</p>}{siteContactPhone && <p>{siteContactPhone}</p>}</article></div><aside className="portal-pricing-hint"><span>Planning guidance</span>{pricingHint ? <><strong>{pricingHint.kind === "starting_at" ? `Starting at ${formatRequestMoney(pricingHint.startingAtMinor, pricingHint.currency)}` : `Typical range ${formatRequestMoney(pricingHint.minimumMinor, pricingHint.currency)} to ${formatRequestMoney(pricingHint.maximumMinor, pricingHint.currency)}`}</strong><p>{pricingHint.disclaimer}</p></> : <><strong>Final quote after review</strong><p>A reliable price hint is not available for this request. Submitting does not authorize work or create a charge. LTDS will review the scope and create the actual estimate in Project Alpha.</p></>}</aside></section>}
+    {step === "review" && <section className="portal-review-attachments" aria-labelledby="review-attachments-title"><header><h3 id="review-attachments-title">Supporting files</h3><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit files</button></header>{attachments.some(item => item.status === "rejected") && <p className="portal-attachment-recovery" role="alert">A security scan rejected one or more files. Return to Edit files, remove each rejected file, and upload a safe replacement before submitting.</p>}{attachments.length ? <ul>{attachments.filter(item => item.status !== "aborted").map(item => <li key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)}</span></div><span className={`portal-attachment-status ${item.status}`}>{attachmentStatusLabel(item.status)}</span></li>)}</ul> : <p>No supporting files were added.</p>}</section>}
     {message && <p className="portal-message error" role="alert">{message}</p>}
-    <div className="portal-form-actions portal-wizard-actions">{onCancel && <button type="button" className="button-ghost" onClick={onCancel}>Cancel</button>}{step !== "services" && <button type="button" className="button-ghost" onClick={() => goTo(REQUEST_STEPS[REQUEST_STEPS.indexOf(step) - 1]!)}>Back</button>}{step === "review" ? <button key="submit-request" type="submit" className="button-orange" disabled={submitting || saveState === "conflict" || !geometryComplete || attachments.some(item => ["queued", "uploading", "quarantined", "scanning", "error"].includes(item.status))}>{submitting ? "Submitting..." : "Submit request"}</button> : <button key="continue-request" type="button" className="button-orange" onClick={() => void next()}>Continue</button>}</div>
+    <div className="portal-form-actions portal-wizard-actions">{onCancel && <button type="button" className="button-ghost" onClick={onCancel}>Cancel</button>}{step !== "services" && <button type="button" className="button-ghost" onClick={() => goTo(REQUEST_STEPS[REQUEST_STEPS.indexOf(step) - 1]!)}>Back</button>}{step === "review" ? <button key="submit-request" type="submit" className="button-orange" disabled={submitting || saveState === "conflict" || !geometryComplete || attachments.some(item => ["queued", "uploading", "quarantined", "scanning", "rejected", "error"].includes(item.status))}>{submitting ? "Submitting..." : "Submit request"}</button> : <button key="continue-request" type="button" className="button-orange" onClick={() => void next()}>Continue</button>}</div>
   </form>;
 }
 
@@ -1754,6 +1921,10 @@ export function ClientPortalApp({
     initialRoute.projectId,
   );
   const [requests, setRequests] = useState<PortalServiceRequest[]>([]);
+  const [drafts, setDrafts] = useState<PortalServiceDraftSummary[]>([]);
+  const [requestDraftId, setRequestDraftId] = useState<string | null>(
+    () => new URL(window.location.href).searchParams.get("draft"),
+  );
   const [editing, setEditing] = useState<{
     request: PortalServiceRequest;
     change: boolean;
@@ -1789,12 +1960,24 @@ export function ClientPortalApp({
     };
   }, []);
   useEffect(() => {
+    if (gate.status !== "ready" || !gate.data.capabilities.requestV2) {
+      setDrafts([]);
+      return;
+    }
+    let active = true;
+    loadPortalServiceDrafts()
+      .then(items => { if (active) setDrafts(items); })
+      .catch(() => { if (active) setDrafts([]); });
+    return () => { active = false; };
+  }, [gate, page]);
+  useEffect(() => {
     const onPopState = () => {
       const route = parseClientPortalRoute(window.location.pathname);
       if (!route.isPortal) window.location.reload();
       else {
         setPage(route.page);
         setProjectId(route.projectId);
+        setRequestDraftId(new URL(window.location.href).searchParams.get("draft"));
         setMobileNavOpen(false);
       }
     };
@@ -1831,6 +2014,7 @@ export function ClientPortalApp({
     window.history.pushState({}, "", clientPortalPath(nextPage));
     setProjectId(null);
     setPage(nextPage);
+    setRequestDraftId(null);
     setEditing(null);
     setMobileNavOpen(false);
   }
@@ -1839,10 +2023,13 @@ export function ClientPortalApp({
     setProjectId(id);
     setPage("project");
   }
-  function openNewRequest() {
-    window.history.pushState({}, "", clientRequestNewPath());
+  function openNewRequest(draftId?: string) {
+    const url = new URL(clientRequestNewPath(), window.location.origin);
+    if (draftId) url.searchParams.set("draft", draftId);
+    window.history.pushState({}, "", `${url.pathname}${url.search}`);
     setProjectId(null);
     setPage("request-new");
+    setRequestDraftId(draftId ?? null);
     setEditing(null);
     setRequestNotice(null);
   }
@@ -1851,6 +2038,7 @@ export function ClientPortalApp({
     setRequestNotice("Request submitted. LTDS will review it shortly.");
     window.history.pushState({}, "", clientPortalPath("requests"));
     setPage("requests");
+    setRequestDraftId(null);
   }
   if (gate.status === "loading")
     return (
@@ -1881,6 +2069,7 @@ export function ClientPortalApp({
       setRequests(data.requests);
       setProjectId(null);
       setPage("dashboard");
+      setRequestDraftId(null);
       window.history.pushState({}, "", clientPortalPath("dashboard"));
       setGate({ status: "ready", data });
     } catch (caught) {
@@ -2125,12 +2314,27 @@ export function ClientPortalApp({
             <p>Review request status, scope, estimates, and prior activity.</p>
           </div>
           {!editing && (
-            <button className="button-orange" onClick={openNewRequest}>
+            <button className="button-orange" onClick={() => openNewRequest()}>
               Submit new request
             </button>
           )}
         </section>
         {requestNotice && <p className="portal-message portal-request-notice" role="status">{requestNotice}</p>}
+        {!editing && drafts.length > 0 && (
+          <Card title="Saved drafts" className="portal-request-drafts-card">
+            <p className="portal-card-intro">Continue an autosaved request in this workspace. Nothing is submitted until you review and confirm it.</p>
+            <div className="portal-request-drafts" role="list">
+              {drafts.map(item => <article key={item.id} role="listitem">
+                <div>
+                  <strong>{item.title}</strong>
+                  <span>{item.serviceNames.length ? item.serviceNames.join(", ") : "Services not selected"}</span>
+                  <small>{item.areaAcres != null ? `${item.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres` : "No work area saved"} · Updated {formatDate(item.updatedAt)}</small>
+                </div>
+                <button type="button" className="button-ghost" onClick={() => openNewRequest(item.id)}>Continue draft</button>
+              </article>)}
+            </div>
+          </Card>
+        )}
         {editing ? (
           <Card
             className="portal-request-card"
@@ -2186,13 +2390,14 @@ export function ClientPortalApp({
         </section>
         <Card title="New request" className="portal-request-card">
           <ServiceRequestForm
-            key="new-request"
+            key={`new-request:${requestDraftId ?? "blank"}`}
             projects={projects}
             onSaved={finishNewRequest}
             onCancel={() => navigate("requests")}
             mapboxPublicToken={mapboxPublicToken}
             requestV2={capabilities.requestV2}
             attachmentsEnabled={capabilities.requestAttachments}
+            initialDraftId={requestDraftId}
           />
         </Card>
       </>

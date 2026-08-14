@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, REQUIRED_EXTERNAL_GATES, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultEvidence = path.join(root, ".backups", "staging-release-evidence.json");
@@ -36,15 +36,51 @@ const sameSet = (left, right) => Array.isArray(left) && Array.isArray(right)
   && left.every((item) => right.includes(item))
   && right.every((item) => left.includes(item));
 
+export function validateActivationPlan(plan, evidence, options = {}) {
+  const now = options.now ?? Date.now();
+  const errors = [];
+  if (!plan || typeof plan !== "object" || Array.isArray(plan)) return ["activationPlan must be an object"];
+  const requested = plan.requestedFlags;
+  if (!Array.isArray(requested) || new Set(requested).size !== requested.length) return ["activationPlan.requestedFlags must be a duplicate-free array"];
+  for (const value of requested) {
+    if (typeof value !== "string" || !value.includes(".")) { errors.push(`activation flag ${String(value)} is invalid`); continue; }
+    const separator = value.indexOf(".");
+    const app = value.slice(0, separator);
+    const flag = value.slice(separator + 1);
+    const policy = FEATURE_FLAG_ACTIVATION_POLICIES[app]?.[flag];
+    if (!policy) { errors.push(`activation flag ${value} is not part of the reviewed release contract`); continue; }
+    if (policy.prohibitedReason) { errors.push(`activation flag ${value} is prohibited: ${policy.prohibitedReason}`); continue; }
+    for (const gate of policy.gates ?? []) {
+      const result = evidence.externalGates?.[gate] ?? {};
+      if (result.ready !== true || !recentDate(result.verifiedAt, now) || !populated(result.evidenceRef)) {
+        errors.push(`activation flag ${value} requires current ready gate ${gate}`);
+      }
+      for (const proof of REQUIRED_EXTERNAL_GATE_PROOFS[gate] ?? []) {
+        if (result[proof] !== true) errors.push(`activation flag ${value} requires gate ${gate} proof ${proof}`);
+      }
+    }
+  }
+  if (requested.length) {
+    if (plan.approvalGranted !== true) errors.push("activationPlan.approvalGranted must be true when flags are requested");
+    if (!recentDate(plan.approvedAt, now) || !populated(plan.approvalRef)) errors.push("activation plan approval must be current and referenced");
+  } else if (plan.approvalGranted !== false) errors.push("empty activation plan must explicitly keep approvalGranted=false");
+  return errors;
+}
+
 export function validateEvidence(evidence, options = {}) {
   const base = options.base ?? root;
   const head = options.head ?? "";
   const configs = options.configs ?? {};
   const configHashes = options.configHashes ?? {};
+  const sourceControlVerified = options.sourceControlVerified ?? false;
   const now = options.now ?? Date.now();
   const errors = [];
 
   if (!/^[a-f0-9]{40}$/i.test(evidence.releaseCommit ?? "") || evidence.releaseCommit !== head) errors.push("releaseCommit must equal the exact local HEAD SHA");
+  const sourceControl = evidence.sourceControl ?? {};
+  if (sourceControl.pushed !== true || !populated(sourceControl.remoteRef)) errors.push("sourceControl must prove the exact release commit is pushed to a named remote ref");
+  if (!recentDate(sourceControl.verifiedAt, now) || !populated(sourceControl.evidenceRef)) errors.push("sourceControl pushed-commit evidence must be current and referenced");
+  if (sourceControlVerified !== true) errors.push("releaseCommit must be reachable from the named local remote-tracking ref");
   for (const app of apps) {
     if (!/^[A-F0-9]{64}$/i.test(evidence.configSha256?.[app] ?? "") || evidence.configSha256[app].toUpperCase() !== configHashes[app]) {
       errors.push(`${app} staging config SHA-256 must match the ignored config used for release`);
@@ -125,6 +161,14 @@ export function validateEvidence(evidence, options = {}) {
     const migration = migrations[app] ?? {};
     if (!sameSet(migration.expected, REQUIRED_STAGING_MIGRATIONS[app])) errors.push(`${app} portal/ACL migration set must exactly match the release contract`);
     if (migration.appliedToStaging !== true || !populated(migration.listEvidenceRef) || !populated(migration.applyEvidenceRef)) errors.push(`${app} staging migrations must be applied and evidenced`);
+    for (const proof of ["secondListEmpty", "foreignKeyCheckPassed", "idempotentReapplyPassed"]) {
+      if (migration[proof] !== true) errors.push(`${app} staging migrations must prove ${proof}`);
+    }
+    if (!recentDate(migration.verifiedAt, now) || !populated(migration.verificationEvidenceRef)) errors.push(`${app} migration verification must be current and referenced`);
+  }
+  const deliveryMigration = migrations.delivery ?? {};
+  for (const proof of ["videoRecoveryCompleted", "videoRowsPendingForTrueNas", "legacyBridgeAcceptanceMatrixPassed"]) {
+    if (deliveryMigration[proof] !== true) errors.push(`delivery staging migrations must prove ${proof}`);
   }
   if (migrations.productionUnchanged !== true) errors.push("production migrations must be confirmed unchanged");
 
@@ -134,6 +178,9 @@ export function validateEvidence(evidence, options = {}) {
     if (result.ready !== true) errors.push(`external gate ${gate} must be confirmed ready`);
     if (!recentDate(result.verifiedAt, now) || !populated(result.evidenceRef)) {
       errors.push(`external gate ${gate} needs current referenced staging evidence`);
+    }
+    for (const proof of REQUIRED_EXTERNAL_GATE_PROOFS[gate] ?? []) {
+      if (result[proof] !== true) errors.push(`external gate ${gate} must prove ${proof}`);
     }
   }
   const accessEnrollment = externalGates.workspaceAccessEnrollment ?? {};
@@ -178,6 +225,45 @@ export function validateEvidence(evidence, options = {}) {
     }
   }
 
+  const deployments = evidence.deployments ?? {};
+  for (const app of apps) {
+    const deployment = deployments[app] ?? {};
+    if (!populated(deployment.versionId)) errors.push(`${app} deployment needs an immutable staging version ID`);
+    if (deployment.releaseCommit !== evidence.releaseCommit) errors.push(`${app} deployed release commit must match releaseCommit`);
+    if (typeof deployment.configSha256 !== "string" || deployment.configSha256.toUpperCase() !== configHashes[app]) errors.push(`${app} deployed config SHA-256 must match the reviewed config`);
+    if (!recentDate(deployment.deployedAt, now) || !populated(deployment.evidenceRef)) errors.push(`${app} deployment evidence must be current and referenced`);
+    for (const proof of ["bindingsVerified", "healthCheckPassed", "hostAdmissionDenied"]) {
+      if (deployment[proof] !== true) errors.push(`${app} deployment must prove ${proof}`);
+    }
+    if (!sameSet(deployment.disabledFeatureFlags, REQUIRED_DISABLED_FEATURE_FLAGS[app] ?? [])) errors.push(`${app} deployed disabled feature flags must exactly match the release contract`);
+  }
+
+  const infrastructure = evidence.infrastructure ?? {};
+  for (const proof of [
+    "remoteInventoryVerified", "dnsTlsAndRoutesVerified", "queuesAndDlqsVerified",
+    "eventNotificationsVerified", "cronsVerified", "workflowBindingsVerified",
+    "containerBindingAndEntitlementVerified", "r2LifecycleVerified",
+    "accessPoliciesVerified", "emailBindingsVerified", "mapboxOriginRestrictionsVerified",
+    "observabilityAndAlertDestinationsVerified", "costBudgetsVerified",
+  ]) if (infrastructure[proof] !== true) errors.push(`staging infrastructure must prove ${proof}`);
+  if (!recentDate(infrastructure.verifiedAt, now) || !populated(infrastructure.evidenceRef)) errors.push("staging infrastructure verification must be current and referenced");
+
+  const rollback = evidence.rollback ?? {};
+  for (const app of apps) {
+    const target = rollback.targetVersionIds?.[app];
+    if (!populated(target)) errors.push(`${app} rollback target version ID is required`);
+    else if (target === deployments[app]?.versionId) errors.push(`${app} rollback target must differ from the deployed version`);
+  }
+  for (const proof of ["drillPassed", "d1FixForwardReviewed", "noDestructiveRollback"]) if (rollback[proof] !== true) errors.push(`rollback must prove ${proof}`);
+  if (!recentDate(rollback.testedAt, now) || !populated(rollback.evidenceRef)) errors.push("rollback evidence must be current and referenced");
+
+  const productionState = evidence.productionState ?? {};
+  if (productionState.unchanged !== true || !recentDate(productionState.verifiedAt, now) || !populated(productionState.evidenceRef)) {
+    errors.push("production unchanged state must be current and referenced");
+  }
+
+  errors.push(...validateActivationPlan(evidence.activationPlan, evidence, { now }));
+
   for (const gate of ["stagingDnsAndRoutes", "stagingMigrations", "stagingDeployment"]) if (evidence.approvals?.[gate] !== true) errors.push(`approval ${gate} must be explicitly recorded`);
   if (evidence.approvals?.productionChanges !== false) errors.push("productionChanges must remain false");
   return errors;
@@ -195,7 +281,11 @@ export function validateEvidenceFile(base = root, evidenceFile = defaultEvidence
       configHashes[app] = sha256(file);
     }
     const head = headOverride ?? spawnSync("git", ["rev-parse", "HEAD"], { cwd: base, encoding: "utf8" }).stdout.trim();
-    return validateEvidence(evidence, { base, head, configs, configHashes });
+    const remoteRef = evidence.sourceControl?.remoteRef;
+    const safeRemoteRef = typeof remoteRef === "string" && /^(?:origin|upstream)\/[A-Za-z0-9._/-]+$/.test(remoteRef);
+    const sourceControlVerified = safeRemoteRef
+      && spawnSync("git", ["merge-base", "--is-ancestor", head, remoteRef], { cwd: base, encoding: "utf8" }).status === 0;
+    return validateEvidence(evidence, { base, head, configs, configHashes, sourceControlVerified });
   } catch (error) { return [`staging release evidence is invalid: ${error.message}`]; }
 }
 

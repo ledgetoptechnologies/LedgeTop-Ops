@@ -186,6 +186,15 @@ export interface ClientServiceRequestDraft extends Omit<ClientServiceRequestDraf
   updatedAt: string;
 }
 
+export interface ClientServiceRequestDraftSummary {
+  id: string;
+  projectId: string | null;
+  title: string;
+  serviceNames: string[];
+  areaAcres: number | null;
+  updatedAt: string;
+}
+
 export type ClientRequestAttachmentStatus =
   | "uploading"
   | "quarantined"
@@ -315,6 +324,7 @@ export interface ClientPortalRepository {
   updateServiceRequest(env: Env, session: ClientPortalSession, requestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequest | null>;
   createChangeRequest(env: Env, session: ClientPortalSession, parentRequestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;
   listServiceCatalog?(env: Env, session: ClientPortalSession): Promise<ClientServiceCatalogItem[]>;
+  listServiceRequestDrafts?(env: Env, session: ClientPortalSession): Promise<ClientServiceRequestDraftSummary[]>;
   getServiceRequestDraft?(env: Env, session: ClientPortalSession, draftId: string): Promise<ClientServiceRequestDraft | null>;
   createServiceRequestDraft?(env: Env, session: ClientPortalSession, input: ClientServiceRequestDraftInput, mutationKey: string): Promise<ClientServiceDraftMutationResult | null>;
   saveServiceRequestDraft?(env: Env, session: ClientPortalSession, draftId: string, expectedVersion: number, input: ClientServiceRequestDraftInput, mutationKey: string): Promise<ClientServiceDraftMutationResult | null>;

@@ -24,6 +24,7 @@ import {
   createServiceRequestDraft,
   getServiceRequestDraft,
   listServiceCatalog,
+  listServiceRequestDrafts,
   saveServiceRequestDraft,
   submitServiceRequestDraft,
 } from "./request-v2";
@@ -599,6 +600,10 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
 
   async getServiceRequestDraft(env, session, draftId) {
     return getServiceRequestDraft(env, session, draftId);
+  },
+
+  async listServiceRequestDrafts(env, session) {
+    return listServiceRequestDrafts(env, session);
   },
 
   async createServiceRequestDraft(env, session, input, mutationKey) {

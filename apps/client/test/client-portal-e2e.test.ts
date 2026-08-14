@@ -37,7 +37,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const migrationsDirectory = fileURLToPath(new URL("../migrations/", import.meta.url));
     for (const migration of readdirSync(migrationsDirectory).filter(name => name.endsWith(".sql")).sort()) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
-      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql", "0127_portal_invitation_secret_scrub.sql", "0129_portal_hierarchy_relations.sql", "0130_client_delegated_share_provisioning.sql", "0132_portal_v2_legacy_member_bridges.sql", "0133_portal_invitation_access_enrollment_receipts.sql"].includes(migration)) {
+      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql", "0127_portal_invitation_secret_scrub.sql", "0129_portal_hierarchy_relations.sql", "0130_client_delegated_share_provisioning.sql", "0132_portal_v2_legacy_member_bridges.sql", "0133_portal_invitation_access_enrollment_receipts.sql", "0134_rejected_request_attachment_submit_guard.sql"].includes(migration)) {
         await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
         continue;
       }
@@ -550,6 +550,22 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     }, env);
     expect((await submit()).status).toBe(422);
     await db.prepare("UPDATE pa_service_catalog_items SET source_version='pa-v4',name='2D Mapping' WHERE public_id='svc-2d-map'").run();
+    await db.prepare(`INSERT INTO client_service_request_attachments
+      (id,draft_id,account_id,created_by_identity_id,client_upload_id,object_key,multipart_upload_id,
+       original_name,declared_size,content_type,status,actual_size,scanner_verdict,verified_sha256,
+       scanned_at,completed_at,expires_at)
+      VALUES ('rejected-attachment-e2e',?,'account-a','identity-a','rejected-upload-e2e-0001',
+       '_ltds/quarantine/request-attachments/rejected-attachment-e2e/object','completed-upload',
+       'unsafe.pdf',2048,'application/pdf','rejected',2048,'rejected',?,datetime('now'),datetime('now'),datetime('now','+1 day'))`)
+      .bind(createdDraft.id, "c".repeat(64)).run();
+    expect((await submit()).status).toBe(422);
+    await expect(db.prepare("UPDATE client_service_request_drafts SET state='submitted' WHERE id=?").bind(createdDraft.id).run())
+      .rejects.toThrow(/accepted or removed/);
+    const removal = await portal().request(`${portalOrigin}/service-request-drafts/${createdDraft.id}/attachments/rejected-attachment-e2e`, {
+      method: "DELETE", headers: { Origin: portalOrigin },
+    }, env);
+    expect(removal.status).toBe(200);
+    expect(await db.prepare("SELECT status FROM client_service_request_attachments WHERE id='rejected-attachment-e2e'").first("status")).toBe("aborted");
     const submitted = await submit();
     expect(submitted.status).toBe(201);
     const requestId = (await submitted.json() as { request: { id: string } }).request.id;
@@ -557,7 +573,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     expect(await db.prepare("SELECT COUNT(*) count FROM client_service_requests WHERE id=?").bind(requestId).first("count")).toBe(1);
     expect(await db.prepare("SELECT COUNT(*) count FROM client_service_request_services WHERE request_id=? AND service_public_id='svc-2d-map' AND service_source_version='pa-v4'").bind(requestId).first("count")).toBe(1);
     expect(await db.prepare("SELECT COUNT(*) count FROM request_revisions WHERE request_id=? AND action='submitted'").bind(requestId).first("count")).toBe(1);
-  });
+  }, 15_000);
 
   it("hides stored service-request notifications after project access is revoked", async () => {
     await db.batch([

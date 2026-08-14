@@ -8,6 +8,7 @@ import type {
   ClientServiceQuestion,
   ClientServiceRequest,
   ClientServiceRequestDraft,
+  ClientServiceRequestDraftSummary,
   ClientServiceRequestDraftInput,
   ClientServiceDraftSubmitResult,
 } from "./types";
@@ -47,6 +48,15 @@ interface DraftServiceRow {
   service_source_version: string;
   service_snapshot_json: string;
   answers_json: string;
+}
+
+interface DraftSummaryRow {
+  id: string;
+  project_id: string | null;
+  draft_json: string;
+  area_acres: number | null;
+  service_names_json: string;
+  updated_at: string;
 }
 
 const sessionJoin = `
@@ -261,6 +271,39 @@ async function loadDraft(env: Env, session: ClientPortalSession, draftId: string
   };
 }
 
+export async function listServiceRequestDrafts(
+  env: Env,
+  session: ClientPortalSession,
+): Promise<ClientServiceRequestDraftSummary[]> {
+  const rows = await db(env).prepare(`SELECT d.id,d.project_id,d.draft_json,d.area_acres,d.updated_at,
+      COALESCE((SELECT json_group_array(json_extract(service.service_snapshot_json,'$.name'))
+        FROM client_service_request_draft_services service WHERE service.draft_id=d.id),'[]') service_names_json
+    FROM client_service_request_drafts d ${sessionJoin}
+    WHERE d.account_id=a.id AND d.state='draft' ${draftAccess}
+    ORDER BY d.updated_at DESC,d.id DESC LIMIT 20`)
+    .bind(session.accountId, session.identityId)
+    .all<DraftSummaryRow>();
+  const summaries: ClientServiceRequestDraftSummary[] = [];
+  for (const row of rows.results) {
+    try {
+      const fields = JSON.parse(row.draft_json) as { title?: unknown };
+      const names = JSON.parse(row.service_names_json) as unknown;
+      if (!Array.isArray(names) || names.length > 10 || !names.every(name => typeof name === "string" && name.length <= 160)) continue;
+      summaries.push({
+        id: row.id,
+        projectId: row.project_id,
+        title: safeText(fields.title, 160) ?? "Untitled request",
+        serviceNames: names,
+        areaAcres: row.area_acres,
+        updatedAt: row.updated_at,
+      });
+    } catch {
+      // A malformed legacy draft is omitted instead of breaking the whole list.
+    }
+  }
+  return summaries;
+}
+
 function serviceSnapshot(service: ClientServiceDraftSelection): string {
   return JSON.stringify({
     publicId: service.publicId,
@@ -409,7 +452,7 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
   if (draft.version !== expectedVersion) return { kind: "conflict" };
   if (!completeForSubmission(draft) || !await servicesRemainSubmitEligible(env, draft.services)) return { kind: "incomplete" };
   const pendingAttachments = await db(env).prepare(`SELECT COUNT(*) AS count FROM client_service_request_attachments
-    WHERE draft_id=? AND status NOT IN ('accepted','rejected','aborted','expired')`).bind(draftId).first<{ count: number }>();
+    WHERE draft_id=? AND status NOT IN ('accepted','aborted','expired')`).bind(draftId).first<{ count: number }>();
   if ((pendingAttachments?.count ?? 0) > 0) return { kind: "incomplete" };
   const requestId = crypto.randomUUID();
   const serviceCategory = draft.services.length === 1 ? draft.services[0]!.name.slice(0, 100) : `Multiple services (${draft.services.length})`;

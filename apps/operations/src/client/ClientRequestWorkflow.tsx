@@ -44,6 +44,16 @@ export interface ClientRequestRecord {
 }
 interface DetailResponse {
   request: ClientRequestRecord;
+  services: Array<{
+    publicId: string;
+    sourceVersion: string;
+    name: string;
+    summary: string | null;
+    category: string;
+    geometryRequirement: "none" | "optional" | "required" | null;
+    answers: Array<{ questionId: string; label: string; displayValue: string }>;
+    integrity: "verified" | "invalid";
+  }>;
   revisions: Array<{
     revision_number: number;
     author_type: string;
@@ -477,6 +487,51 @@ function ClientRequestDetail({
             </div>
           )}
         </Card>
+        {!!data.services?.length && (
+          <Card title={`Selected services (${data.services.length})`} className="request-services-card">
+            <p className="muted">
+              Read-only service names, questions, and answers captured with the submitted request.
+            </p>
+            <div className="request-service-review-list">
+              {data.services.map((service, index) => (
+                <article key={`${service.publicId}:${service.sourceVersion}:${index}`}>
+                  <header>
+                    <div>
+                      <span className="eyebrow">{service.category}</span>
+                      <h3>{service.name}</h3>
+                    </div>
+                    {service.geometryRequirement && (
+                      <StatusPill tone={service.geometryRequirement === "required" ? "warning" : "neutral"}>
+                        {service.geometryRequirement === "required"
+                          ? "Work area required"
+                          : service.geometryRequirement === "optional"
+                            ? "Work area optional"
+                            : "No work area required"}
+                      </StatusPill>
+                    )}
+                  </header>
+                  {service.summary && <p>{service.summary}</p>}
+                  {service.integrity === "invalid" ? (
+                    <div className="notice error" role="alert">
+                      This service snapshot could not be verified. Do not create a quote until the request audit record is reviewed.
+                    </div>
+                  ) : service.answers.length ? (
+                    <dl className="request-service-answers">
+                      {service.answers.map(answer => (
+                        <div key={answer.questionId}>
+                          <dt>{answer.label}</dt>
+                          <dd>{answer.displayValue}</dd>
+                        </div>
+                      ))}
+                    </dl>
+                  ) : (
+                    <p className="muted">No additional service questions were submitted.</p>
+                  )}
+                </article>
+              ))}
+            </div>
+          </Card>
+        )}
         <Card title="Work area">
           {editingWorkArea ? (
             <RequestMapEditor

@@ -1,25 +1,25 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "<OPERATIONS_STAGING_WORKER>-staging",
+  "name": "ltds-ops-staging",
   "account_id": "846c924bf17bf4f3dd15c97a4c5d1d51",
   "main": "src/worker/index.ts",
   "compatibility_date": "2026-07-22",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
-  "routes": [{ "pattern": "<OPERATIONS_STAGING_HOST>", "custom_domain": true }],
+  "routes": [{ "pattern": "ops-staging.ledgetopdroneservices.com", "custom_domain": true }],
   "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*", "/health", "/r/*"] },
   "vars": {
-    "PUBLIC_BASE_URL": "https://<OPERATIONS_STAGING_HOST>",
-    "EXPECTED_HOST": "<OPERATIONS_STAGING_HOST>",
+    "PUBLIC_BASE_URL": "https://ops-staging.ledgetopdroneservices.com",
+    "EXPECTED_HOST": "ops-staging.ledgetopdroneservices.com",
     "DIRECT_DELIVERY_UPLOADS_ENABLED": "false",
-    "INCOMING_BASE_URL": "https://<INCOMING_STAGING_HOST>",
-    "INCOMING_EXPECTED_HOST": "<INCOMING_STAGING_HOST>",
-    "THUMBNAIL_INGEST_EXPECTED_HOST": "<OPERATIONS_STAGING_HOST>",
+    "INCOMING_BASE_URL": "https://incoming-staging.ledgetopdroneservices.com",
+    "INCOMING_EXPECTED_HOST": "incoming-staging.ledgetopdroneservices.com",
+    "THUMBNAIL_INGEST_EXPECTED_HOST": "ops-staging.ledgetopdroneservices.com",
     "ENVIRONMENT": "staging",
-    "TEAM_DOMAIN": "https://<ACCESS_TEAM_DOMAIN>",
-    "OPERATIONS_AUD": "<OPERATIONS_STAGING_ACCESS_AUD>",
-    "DELIVERY_BASE_URL": "https://<CLIENT_STAGING_HOST>",
+    "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
+    "OPERATIONS_AUD": "e5e2026896677c6fbaa0c7eb9b795e326516c15a3191dfba3c2ad43da4728671",
+    "DELIVERY_BASE_URL": "https://client-staging.ledgetopdroneservices.com",
     "PROJECT_ALPHA_BASE_URL": "https://project-alpha-staging.ledgetopdroneservices.com",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "false",
@@ -32,13 +32,13 @@
     "MAPBOX_PUBLIC_TOKEN": "<OPERATIONS_STAGING_RESTRICTED_MAPBOX_PUBLIC_TOKEN>",
     "STREAM_ACCOUNT_ID": "",
     "STREAM_CUSTOMER_CODE": "",
-    "R2_ACCOUNT_ID": "<STAGING_ACCOUNT_ID>",
-    "R2_BUCKET_NAME": "<DELIVERY_STAGING_R2_BUCKET>",
+    "R2_ACCOUNT_ID": "846c924bf17bf4f3dd15c97a4c5d1d51",
+    "R2_BUCKET_NAME": "client-data-staging",
     "R2_PURGE_ENABLED": "false",
-    "R2_INCOMING_BUCKET_NAME": "<INCOMING_STAGING_R2_BUCKET>",
-    "FILE_EVENTS_QUEUE_NAME": "<FILE_EVENTS_STAGING_QUEUE>",
-    "THUMBNAIL_QUEUE_NAME": "<THUMBNAIL_STAGING_QUEUE>",
-    "THUMBNAIL_DLQ_NAME": "<THUMBNAIL_STAGING_DLQ>",
+    "R2_INCOMING_BUCKET_NAME": "ltds-incoming-staging",
+    "FILE_EVENTS_QUEUE_NAME": "ltds-file-events-staging",
+    "THUMBNAIL_QUEUE_NAME": "ltds-thumbnail-jobs-staging",
+    "THUMBNAIL_DLQ_NAME": "ltds-thumbnail-jobs-staging-dlq",
     "ALERT_FROM": "",
     "ALERT_TO": "",
     "NOTIFICATION_FROM": "delivery@<STAGING_EMAIL_DOMAIN>",
@@ -46,26 +46,23 @@
     "DROPBOX_IMPORT_ENABLED": "false",
     "DROPBOX_CLIENT_ID": ""
   },
-  "secrets": {
-    "required": ["OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "PROJECT_ALPHA_API_KEY", "PROJECT_ALPHA_DRAFT_QUOTE_API_KEY", "PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_DELIVERY_UPLOAD_ACCESS_KEY_ID", "R2_DELIVERY_UPLOAD_SECRET_ACCESS_KEY", "TURNSTILE_SITE_KEY", "TURNSTILE_SECRET", "INCOMING_SESSION_SECRET", "INCOMING_ACCESS_CODE_PEPPER", "INCOMING_PICKUP_SECRET", "THUMBNAIL_INGEST_SECRET"]
-  },
   "send_email": [{ "name": "NOTIFICATION_EMAIL", "allowed_sender_addresses": ["delivery@<STAGING_EMAIL_DOMAIN>"] }],
   "observability": { "enabled": true, "head_sampling_rate": 1 },
   "triggers": { "crons": ["*/15 * * * *", "*/5 * * * *"] },
   "r2_buckets": [
-    { "binding": "DATA_BUCKET", "bucket_name": "<DELIVERY_STAGING_R2_BUCKET>" },
-    { "binding": "INCOMING_BUCKET", "bucket_name": "<INCOMING_STAGING_R2_BUCKET>" }
+    { "binding": "DATA_BUCKET", "bucket_name": "client-data-staging" },
+    { "binding": "INCOMING_BUCKET", "bucket_name": "ltds-incoming-staging" }
   ],
   "d1_databases": [
-    { "binding": "OPS_DB", "database_name": "<OPERATIONS_STAGING_D1_NAME>", "database_id": "<OPERATIONS_STAGING_D1_ID>", "migrations_dir": "migrations" },
-    { "binding": "DELIVERY_DB", "database_name": "<DELIVERY_STAGING_D1_NAME>", "database_id": "<DELIVERY_STAGING_D1_ID>", "migrations_dir": "../client/migrations" }
+    { "binding": "OPS_DB", "database_name": "ltds-ops-staging", "database_id": "78b34173-b168-4e3d-9832-bb9d245cc6b8", "migrations_dir": "migrations" },
+    { "binding": "DELIVERY_DB", "database_name": "client-data-staging", "database_id": "b6f653ab-9acd-4421-9ad0-207754b59aeb", "migrations_dir": "../client/migrations" }
   ],
   "queues": {
-    "producers": [{ "binding": "THUMBNAIL_QUEUE", "queue": "<THUMBNAIL_STAGING_QUEUE>" }],
+    "producers": [{ "binding": "THUMBNAIL_QUEUE", "queue": "ltds-thumbnail-jobs-staging" }],
     "consumers": [
-      { "queue": "<FILE_EVENTS_STAGING_QUEUE>", "max_batch_size": 25, "max_batch_timeout": 10, "max_retries": 5, "dead_letter_queue": "<FILE_EVENTS_STAGING_DLQ>" },
-      { "queue": "<THUMBNAIL_STAGING_QUEUE>", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "<THUMBNAIL_STAGING_DLQ>" },
-      { "queue": "<THUMBNAIL_STAGING_DLQ>", "max_batch_size": 10, "max_batch_timeout": 5 }
+      { "queue": "ltds-file-events-staging", "max_batch_size": 25, "max_batch_timeout": 10, "max_retries": 5, "dead_letter_queue": "ltds-file-events-staging-dlq" },
+      { "queue": "ltds-thumbnail-jobs-staging", "max_batch_size": 10, "max_batch_timeout": 5, "max_retries": 5, "max_concurrency": 1, "dead_letter_queue": "ltds-thumbnail-jobs-staging-dlq" },
+      { "queue": "ltds-thumbnail-jobs-staging-dlq", "max_batch_size": 10, "max_batch_timeout": 5 }
     ]
   },
   "stream": { "binding": "STREAM" },
@@ -86,8 +83,8 @@
     }
   ],
   "workflows": [
-    { "name": "<R2_CRUD_STAGING_WORKFLOW>", "binding": "R2_CRUD_WORKFLOW", "class_name": "R2CrudWorkflow" },
-    { "name": "<INCOMING_LIFECYCLE_STAGING_WORKFLOW>", "binding": "INCOMING_LIFECYCLE_WORKFLOW", "class_name": "IncomingUploadLifecycleWorkflow" },
-    { "name": "<DROPBOX_IMPORT_STAGING_WORKFLOW>", "binding": "DROPBOX_IMPORT_WORKFLOW", "class_name": "DropboxImportWorkflow" }
+    { "name": "ltds-r2-crud-staging", "binding": "R2_CRUD_WORKFLOW", "class_name": "R2CrudWorkflow" },
+    { "name": "ltds-incoming-upload-lifecycle-staging", "binding": "INCOMING_LIFECYCLE_WORKFLOW", "class_name": "IncomingUploadLifecycleWorkflow" },
+    { "name": "ltds-dropbox-import-staging", "binding": "DROPBOX_IMPORT_WORKFLOW", "class_name": "DropboxImportWorkflow" }
   ]
 }

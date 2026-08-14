@@ -1,7 +1,6 @@
 import { spawnSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { validateEvidenceFile } from "./staging-evidence.mjs";
 import { validateFiles } from "./staging-preflight.mjs";
 import { APP_SOURCE_DIRS } from "./staging-requirements.mjs";
 
@@ -11,7 +10,7 @@ if (process.argv.length !== 2) {
   console.error("This preparation command accepts no arguments and never deploys.");
   process.exit(2);
 }
-const errors = [...validateFiles(), ...validateEvidenceFile(root)];
+const errors = [...validateFiles()];
 const status = spawnSync("git", ["status", "--porcelain"], { cwd: root, encoding: "utf8" });
 if (status.status !== 0) errors.push("git status could not be verified");
 else if (status.stdout.trim()) errors.push("working tree must be clean before release preparation");
@@ -40,4 +39,4 @@ for (const app of ["delivery", "operations", "ops-sync"]) {
     process.exit(result.status ?? 1);
   }
 }
-console.log("Local staging release gates and explicit-config dry-runs passed.\nNo migration, secret, Cloudflare API, or deployment command was run.\nFollow docs/staging/release-checklist.md only after separate release approval.");
+console.log("Local staging release-preparation gates and explicit-config dry-runs passed.\nNo migration, secret, Cloudflare API, or deployment command was run.\nPost-deployment evidence is checked separately by staging:release:verify.");

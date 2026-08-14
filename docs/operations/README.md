@@ -67,7 +67,7 @@ failures correctly remain on their local file-type icon.
 - Local tests and dry-run configuration checks do not prove Cloudflare Container
   entitlement, decoder behavior, queue/DLQ existence, R2 event subscriptions,
   cron installation, or production bindings. Verify each in isolated staging.
-- Delivery migrations `0105` through `0112` and `0114` through `0133`, plus
+- Delivery migrations `0105` through `0112` and `0114` through `0134`, plus
   Operations migrations `0017` through `0023`, are
   additive and remain after a Worker version rollback. Preserve verified D1
   exports and prior Worker version IDs before rollout.

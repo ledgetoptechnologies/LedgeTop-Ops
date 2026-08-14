@@ -358,18 +358,18 @@ addresses; and execute cross-account, revoked-access, retry, and rollback
 checks. The checked-in staging config intentionally leaves the Mapbox token and
 triage address blank and SMTP disabled, so it is not release-ready.
 
-The reviewed LTDS source through commit `3f8b104` is committed and pushed, but
-that commit has not been promoted to the live Workers and Delivery D1 still has
-pending additive migrations. Portal-v2 capabilities remain disabled. Promotion
+The reviewed release branch is committed and pushed, but it has not been
+promoted to the live Workers and Delivery D1 still has pending additive
+migrations. Portal-v2 capabilities remain disabled. Promotion
 requires the isolated staging exercise, evidence packet, backups, external
 provider integrations, and explicit deployment/migration approval. PA
 verification credentials must remain read-only.
 
 ## Known limitations and blockers
 
-- Playwright's managed fixture-server teardown hangs on this Windows host after
-  successful tests. The evidence above used an explicitly started local fixture
-  and `PLAYWRIGHT_EXTERNAL_SERVER=true`, then terminated that exact process.
+- The managed browser fixtures now own and await their listener shutdown. The
+  current desktop/mobile suites exit normally; retain this teardown assertion
+  in future browser-runner changes.
 - Client production builds warn that the Mapbox/client JavaScript chunk exceeds
   500 kB. This is a performance concern, not a failed build.
 - Operations-to-Delivery folder association spans two D1 databases and cannot

@@ -1,5 +1,11 @@
 {
   "releaseCommit": "<REVIEWED_40_CHARACTER_GIT_SHA>",
+  "sourceControl": {
+    "pushed": false,
+    "remoteRef": "<REMOTE_REF_CONTAINING_RELEASE_COMMIT>",
+    "verifiedAt": "<ISO_8601_TIMESTAMP>",
+    "evidenceRef": "<EVIDENCE_REFERENCE>"
+  },
   "configSha256": {
     "delivery": "<SHA256>",
     "operations": "<SHA256>",
@@ -161,11 +167,20 @@
         "0130_client_delegated_share_provisioning.sql",
         "0131_video_thumbnail_recovery_backfill.sql",
         "0132_portal_v2_legacy_member_bridges.sql",
-        "0133_portal_invitation_access_enrollment_receipts.sql"
+        "0133_portal_invitation_access_enrollment_receipts.sql",
+        "0134_rejected_request_attachment_submit_guard.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
-      "applyEvidenceRef": "<EVIDENCE_REFERENCE>"
+      "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
+      "secondListEmpty": false,
+      "foreignKeyCheckPassed": false,
+      "idempotentReapplyPassed": false,
+      "videoRecoveryCompleted": false,
+      "videoRowsPendingForTrueNas": false,
+      "legacyBridgeAcceptanceMatrixPassed": false,
+      "verifiedAt": "<ISO_8601_TIMESTAMP>",
+      "verificationEvidenceRef": "<EVIDENCE_REFERENCE>"
     },
     "operations": {
       "expected": [
@@ -182,16 +197,21 @@
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
-      "applyEvidenceRef": "<EVIDENCE_REFERENCE>"
+      "applyEvidenceRef": "<EVIDENCE_REFERENCE>",
+      "secondListEmpty": false,
+      "foreignKeyCheckPassed": false,
+      "idempotentReapplyPassed": false,
+      "verifiedAt": "<ISO_8601_TIMESTAMP>",
+      "verificationEvidenceRef": "<EVIDENCE_REFERENCE>"
     },
     "productionUnchanged": false
   },
   "externalGates": {
-    "projectAlphaPortalProjection": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "projectAlphaCatalogProjection": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "projectAlphaPricingHints": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "projectAlphaDraftQuotes": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "requestAttachmentScanner": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "projectAlphaPortalProjection": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "fixturesPinned": false, "orderedReplayVerified": false, "scopeParityVerified": false, "tombstoneRemovalVerified": false },
+    "projectAlphaCatalogProjection": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "fixturesPinned": false, "completeGenerationVerified": false, "staleRecoveryVerified": false, "sanitizedFieldsVerified": false },
+    "projectAlphaPricingHints": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "fixturePinned": false, "safeDegradationVerified": false, "noLocalFallbackVerified": false },
+    "projectAlphaDraftQuotes": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "fixturePinned": false, "idempotentReplayVerified": false, "conflictingReplayDenied": false, "noFinancialSideEffects": false, "nativeEditorHandoffVerified": false },
+    "requestAttachmentScanner": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "scannerVersionPinned": false, "quarantineDispatchVerified": false, "objectDigestBound": false, "cleanAndMaliciousSamplesVerified": false, "quarantineCleanupVerified": false, "alertOwnershipVerified": false },
     "requestAttachmentR2CorsAndLeastPrivilege": {
       "ready": false,
       "verifiedAt": "<ISO_8601_TIMESTAMP>",
@@ -201,7 +221,7 @@
       "outOfScopeOriginDenied": false,
       "leastPrivilegeCredentialVerified": false
     },
-    "workspaceInvitationEmail": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "workspaceInvitationEmail": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "senderDomainVerified": false, "bindingRestricted": false, "deliveryVerified": false, "revocationRaceVerified": false, "noSensitiveContentVerified": false },
     "workspaceAccessEnrollment": {
       "ready": false,
       "verifiedAt": "<ISO_8601_TIMESTAMP>",
@@ -217,11 +237,11 @@
       "staffGroupUnchanged": false,
       "processorEvidenceRef": "<DEDICATED_PROCESSOR_EVIDENCE_REFERENCE>"
     },
-    "workspaceStaffRecovery": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "delegatedShareSignerBinding": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "delegatedSharePublicAuthorization": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "trueNasVideoThumbnailRenderer": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "projectionParityAndAlerts": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" }
+    "workspaceStaffRecovery": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "transferBeforeOffboardingVerified": false, "projectAlphaManagerRemovalDenied": false, "effectiveReplacementVerified": false, "auditVerified": false },
+    "delegatedShareSignerBinding": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "deployedBindingVerified": false, "flagPairVerified": false, "smokeVerified": false },
+    "delegatedSharePublicAuthorization": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "currentStateReauthorizationVerified": false, "crossWorkspaceDenied": false, "revocationImmediate": false, "rootApprovalVerified": false, "bulkCloudCopyDenied": false },
+    "trueNasVideoThumbnailRenderer": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "rendererVersionPinned": false, "opaqueLeaseVerified": false, "reclaimedAttemptDenied": false, "videoBypassesCloudflareVerified": false, "recoveryBackfillVerified": false, "gracePathsVerified": false },
+    "projectionParityAndAlerts": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>", "parityThresholdsConfigured": false, "stalenessAlertConfigured": false, "alertDestinationVerified": false, "testAlertObserved": false }
   },
   "secrets": {
     "delivery": {
@@ -304,6 +324,38 @@
       "confirmedIntentionallyEmpty": false
     }
   },
+  "deployments": {
+    "delivery": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "<REVIEWED_40_CHARACTER_GIT_SHA>", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": ["CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_PORTAL_SYNC_ENABLED", "PROJECT_ALPHA_PRICING_HINTS_ENABLED", "CLIENT_REQUEST_ATTACHMENTS_ENABLED", "CLIENT_PORTAL_TEAM_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED", "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY", "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED", "CLIENT_DELEGATED_SHARES_ENABLED", "CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED"], "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "operations": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "<REVIEWED_40_CHARACTER_GIT_SHA>", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": ["PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED", "DIRECT_DELIVERY_UPLOADS_ENABLED", "DROPBOX_IMPORT_ENABLED", "R2_PURGE_ENABLED"], "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "ops-sync": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "<REVIEWED_40_CHARACTER_GIT_SHA>", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [], "evidenceRef": "<EVIDENCE_REFERENCE>" }
+  },
+  "infrastructure": {
+    "remoteInventoryVerified": false,
+    "dnsTlsAndRoutesVerified": false,
+    "queuesAndDlqsVerified": false,
+    "eventNotificationsVerified": false,
+    "cronsVerified": false,
+    "workflowBindingsVerified": false,
+    "containerBindingAndEntitlementVerified": false,
+    "r2LifecycleVerified": false,
+    "accessPoliciesVerified": false,
+    "emailBindingsVerified": false,
+    "mapboxOriginRestrictionsVerified": false,
+    "observabilityAndAlertDestinationsVerified": false,
+    "costBudgetsVerified": false,
+    "verifiedAt": "<ISO_8601_TIMESTAMP>",
+    "evidenceRef": "<EVIDENCE_REFERENCE>"
+  },
+  "rollback": {
+    "targetVersionIds": { "delivery": "<ROLLBACK_VERSION_ID>", "operations": "<ROLLBACK_VERSION_ID>", "ops-sync": "<ROLLBACK_VERSION_ID>" },
+    "drillPassed": false,
+    "d1FixForwardReviewed": false,
+    "noDestructiveRollback": false,
+    "testedAt": "<ISO_8601_TIMESTAMP>",
+    "evidenceRef": "<EVIDENCE_REFERENCE>"
+  },
+  "productionState": { "unchanged": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+  "activationPlan": { "requestedFlags": [], "approvalGranted": false },
   "approvals": {
     "stagingDnsAndRoutes": false,
     "stagingMigrations": false,

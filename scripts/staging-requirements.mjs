@@ -99,6 +99,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0131_video_thumbnail_recovery_backfill.sql",
     "0132_portal_v2_legacy_member_bridges.sql",
     "0133_portal_invitation_access_enrollment_receipts.sql",
+    "0134_rejected_request_attachment_submit_guard.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -164,6 +165,94 @@ export const REQUIRED_EXTERNAL_GATES = Object.freeze([
   "projectionParityAndAlerts",
 ]);
 
+// A bare "ready" attestation is not enough for any external capability. These
+// proof names are deliberately stable so the ignored evidence packet can be
+// validated without storing provider credentials or customer data in Git.
+export const REQUIRED_EXTERNAL_GATE_PROOFS = Object.freeze({
+  projectAlphaPortalProjection: Object.freeze([
+    "fixturesPinned", "orderedReplayVerified", "scopeParityVerified", "tombstoneRemovalVerified",
+  ]),
+  projectAlphaCatalogProjection: Object.freeze([
+    "fixturesPinned", "completeGenerationVerified", "staleRecoveryVerified", "sanitizedFieldsVerified",
+  ]),
+  projectAlphaPricingHints: Object.freeze([
+    "fixturePinned", "safeDegradationVerified", "noLocalFallbackVerified",
+  ]),
+  projectAlphaDraftQuotes: Object.freeze([
+    "fixturePinned", "idempotentReplayVerified", "conflictingReplayDenied",
+    "noFinancialSideEffects", "nativeEditorHandoffVerified",
+  ]),
+  requestAttachmentScanner: Object.freeze([
+    "scannerVersionPinned", "quarantineDispatchVerified", "objectDigestBound",
+    "cleanAndMaliciousSamplesVerified", "quarantineCleanupVerified", "alertOwnershipVerified",
+  ]),
+  requestAttachmentR2CorsAndLeastPrivilege: Object.freeze([
+    "allowedOriginPutVerified", "outOfScopeOriginDenied", "leastPrivilegeCredentialVerified",
+  ]),
+  workspaceInvitationEmail: Object.freeze([
+    "senderDomainVerified", "bindingRestricted", "deliveryVerified",
+    "revocationRaceVerified", "noSensitiveContentVerified",
+  ]),
+  workspaceAccessEnrollment: Object.freeze([
+    "clientGroupIsolated", "enrollmentBeforeEmail", "perInvitationReceiptEnforced",
+    "receiptBindsWorkspaceAndEmailHash", "receiptRevocationRaceVerified",
+    "multiWorkspaceRetention", "lastEligibilityRevocation", "staffGroupUnchanged",
+  ]),
+  workspaceStaffRecovery: Object.freeze([
+    "transferBeforeOffboardingVerified", "projectAlphaManagerRemovalDenied",
+    "effectiveReplacementVerified", "auditVerified",
+  ]),
+  delegatedShareSignerBinding: Object.freeze([
+    "deployedBindingVerified", "flagPairVerified", "smokeVerified",
+  ]),
+  delegatedSharePublicAuthorization: Object.freeze([
+    "currentStateReauthorizationVerified", "crossWorkspaceDenied", "revocationImmediate",
+    "rootApprovalVerified", "bulkCloudCopyDenied",
+  ]),
+  trueNasVideoThumbnailRenderer: Object.freeze([
+    "rendererVersionPinned", "opaqueLeaseVerified", "reclaimedAttemptDenied",
+    "videoBypassesCloudflareVerified", "recoveryBackfillVerified", "gracePathsVerified",
+  ]),
+  projectionParityAndAlerts: Object.freeze([
+    "parityThresholdsConfigured", "stalenessAlertConfigured",
+    "alertDestinationVerified", "testAlertObserved",
+  ]),
+});
+
+// Every default-off flag is either tied to current evidence gates or explicitly
+// prohibited from activation by this release packet. This prevents a later
+// operator from treating an unrelated green gate as authorization.
+export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
+  delivery: Object.freeze({
+    CLIENT_PORTAL_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
+    CLIENT_PORTAL_REQUEST_V2_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectAlphaPortalProjection"]) }),
+    PROJECT_ALPHA_CATALOG_SYNC_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaCatalogProjection", "projectionParityAndAlerts"]) }),
+    PROJECT_ALPHA_PORTAL_SYNC_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
+    PROJECT_ALPHA_PRICING_HINTS_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPricingHints", "projectAlphaCatalogProjection"]) }),
+    CLIENT_REQUEST_ATTACHMENTS_ENABLED: Object.freeze({ gates: Object.freeze(["requestAttachmentScanner", "requestAttachmentR2CorsAndLeastPrivilege"]) }),
+    CLIENT_PORTAL_TEAM_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "workspaceStaffRecovery"]) }),
+    CLIENT_PORTAL_HIERARCHY_V2_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
+    CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
+    CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: Object.freeze({ gates: Object.freeze(["workspaceAccessEnrollment", "workspaceStaffRecovery"]) }),
+    CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: Object.freeze({ gates: Object.freeze(["workspaceAccessEnrollment"]) }),
+    CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: Object.freeze({ gates: Object.freeze(["workspaceAccessEnrollment", "workspaceInvitationEmail"]) }),
+    CLIENT_DELEGATED_SHARES_ENABLED: Object.freeze({ gates: Object.freeze(["delegatedShareSignerBinding", "delegatedSharePublicAuthorization"]) }),
+    CLOUD_TRANSFER_DROPBOX_ENABLED: Object.freeze({ prohibitedReason: "Dropbox client transfer is outside this release packet" }),
+    CLOUD_TRANSFER_GOOGLE_ENABLED: Object.freeze({ prohibitedReason: "Google client transfer is outside this release packet" }),
+    CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED: Object.freeze({ prohibitedReason: "Google Picker is outside this release packet" }),
+  }),
+  operations: Object.freeze({
+    PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaDraftQuotes", "projectAlphaCatalogProjection"]) }),
+    CLIENT_DELEGATED_SHARE_SIGNER_ENABLED: Object.freeze({ gates: Object.freeze(["delegatedShareSignerBinding", "delegatedSharePublicAuthorization"]) }),
+    CLIENT_PORTAL_HIERARCHY_V2_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
+    DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
+    DIRECT_DELIVERY_UPLOADS_ENABLED: Object.freeze({ prohibitedReason: "Direct Delivery upload activation requires its separate media acceptance packet" }),
+    DROPBOX_IMPORT_ENABLED: Object.freeze({ prohibitedReason: "Dropbox import is outside this release packet" }),
+    R2_PURGE_ENABLED: Object.freeze({ prohibitedReason: "Permanent purge requires a separate destructive-lifecycle approval" }),
+  }),
+  "ops-sync": Object.freeze({}),
+});
+
 export const STAGING_ACCESS_AUDS = Object.freeze({
   delivery: "f6942c97e306d81d206c94746dc731413d5e59461b35d9b213f13fdf96b62835",
   operations: "e5e2026896677c6fbaa0c7eb9b795e326516c15a3191dfba3c2ad43da4728671",
@@ -228,12 +317,59 @@ export const STAGING_STATIC_VARS = Object.freeze({
     TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
     CF_ACCOUNT_ID: STAGING_ACCOUNT_ID,
     APPLICATION_KEY: "ltds_ops_staging",
+    PROJECT_ALPHA_ALLOW_LEGACY_HMAC: "true",
   }),
+});
+
+export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
+  delivery: Object.freeze([
+    "PUBLIC_BASE_URL", "EXPECTED_HOST", "ENVIRONMENT", "TEAM_DOMAIN", "POLICY_AUD",
+    "CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED",
+    "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_CATALOG_APPLICATION_KEY",
+    "PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN", "PROJECT_ALPHA_CATALOG_ACCESS_AUD",
+    "PROJECT_ALPHA_PORTAL_SYNC_ENABLED", "PROJECT_ALPHA_PORTAL_APPLICATION_KEY",
+    "PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN", "PROJECT_ALPHA_PORTAL_ACCESS_AUD",
+    "PROJECT_ALPHA_PRICING_HINTS_ENABLED", "PROJECT_ALPHA_PRICING_HINT_URL",
+    "PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN", "PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY",
+    "PROJECT_ALPHA_PRICING_HINT_CURRENCIES", "CLIENT_REQUEST_ATTACHMENTS_ENABLED",
+    "CLIENT_PORTAL_TEAM_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
+    "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
+    "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY", "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED",
+    "CLIENT_PORTAL_INVITATION_FROM", "CLIENT_PORTAL_INVITATION_FROM_NAME",
+    "CLIENT_DELEGATED_SHARES_ENABLED", "CLIENT_DELEGATED_SHARE_KEY_ID",
+    "CLIENT_PORTAL_ORIGIN", "CLIENT_ACCESS_TEAM_DOMAIN", "CLIENT_ACCESS_AUD",
+    "MAPBOX_PUBLIC_TOKEN", "SESSION_KEY_ID", "PREVIOUS_SESSION_KEY_ID",
+    "STREAM_CUSTOMER_CODE", "R2_S3_ENDPOINT", "R2_BUCKET_NAME",
+    "CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED",
+    "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED", "DROPBOX_CLIENT_ID",
+    "GOOGLE_CLIENT_ID", "GOOGLE_PICKER_API_KEY", "GOOGLE_CLOUD_PROJECT_NUMBER",
+  ]),
+  operations: Object.freeze([
+    "PUBLIC_BASE_URL", "EXPECTED_HOST", "DIRECT_DELIVERY_UPLOADS_ENABLED",
+    "INCOMING_BASE_URL", "INCOMING_EXPECTED_HOST", "THUMBNAIL_INGEST_EXPECTED_HOST",
+    "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD", "DELIVERY_BASE_URL",
+    "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
+    "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
+    "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED", "APPLICATION_KEY", "TFR_REGION",
+    "DISPLAY_TIMEZONE", "MAP_STYLE_URL", "MAPBOX_PUBLIC_TOKEN", "STREAM_ACCOUNT_ID",
+    "STREAM_CUSTOMER_CODE", "R2_ACCOUNT_ID", "R2_BUCKET_NAME", "R2_PURGE_ENABLED",
+    "R2_INCOMING_BUCKET_NAME", "FILE_EVENTS_QUEUE_NAME", "THUMBNAIL_QUEUE_NAME",
+    "THUMBNAIL_DLQ_NAME", "ALERT_FROM", "ALERT_TO", "NOTIFICATION_FROM",
+    "CLIENT_REQUEST_TRIAGE_TO", "DROPBOX_IMPORT_ENABLED", "DROPBOX_CLIENT_ID",
+  ]),
+  "ops-sync": Object.freeze([
+    "ENVIRONMENT", "EXPECTED_HOST", "TEAM_DOMAIN", "CF_ACCESS_AUD", "CF_ACCOUNT_ID",
+    "CF_ACCESS_GROUP_ID", "CF_ACCESS_GROUP_NAME", "APPLICATION_KEY",
+    "PROJECT_ALPHA_ALLOW_LEGACY_HMAC",
+  ]),
 });
 
 export const STAGING_INVENTORY = Object.freeze({
   delivery: {
     name: "ltds-delivery-staging",
+    main: "src/worker/index.ts",
+    compatibility_date: "2026-07-16",
+    compatibility_flags: ["nodejs_compat"],
     routes: [
       { pattern: STAGING_HOSTS.delivery, custom_domain: true },
       { pattern: STAGING_HOSTS.client, custom_domain: true },
@@ -249,6 +385,10 @@ export const STAGING_INVENTORY = Object.freeze({
     ],
     queues: [],
     crons: ["*/5 * * * *", "15 * * * *"],
+    limits: { cpu_ms: 300000, subrequests: 25000 },
+    assets: { binding: "ASSETS", directory: "./dist/client", not_found_handling: "single-page-application", run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/health"] },
+    observability: { enabled: true, head_sampling_rate: 1 },
+    stream: { binding: "STREAM" },
     ratelimits: [
       { name: "ACCESS_CODE_RATE_LIMITER", namespace_id: "730202601", simple: { limit: 10, period: 60 } },
       { name: "PUBLIC_SESSION_RATE_LIMITER", namespace_id: "730202602", simple: { limit: 20, period: 60 } },
@@ -262,6 +402,9 @@ export const STAGING_INVENTORY = Object.freeze({
   },
   operations: {
     name: "ltds-ops-staging",
+    main: "src/worker/index.ts",
+    compatibility_date: "2026-07-22",
+    compatibility_flags: ["nodejs_compat"],
     routes: [{ pattern: STAGING_HOSTS.operations, custom_domain: true }],
     d1_databases: [
       { binding: "OPS_DB", database_name: "ltds-ops-staging", database_id: "78b34173-b168-4e3d-9832-bb9d245cc6b8", migrations_dir: "migrations" },
@@ -279,17 +422,26 @@ export const STAGING_INVENTORY = Object.freeze({
     services: [],
     queues: [
       { queue: "ltds-file-events-staging", max_batch_size: 25, max_batch_timeout: 10, max_retries: 5, dead_letter_queue: "ltds-file-events-staging-dlq" },
-      { queue: "ltds-thumbnail-jobs-staging", max_batch_size: 10, max_batch_timeout: 5, max_retries: 5, dead_letter_queue: "ltds-thumbnail-jobs-staging-dlq" },
+      { queue: "ltds-thumbnail-jobs-staging", max_batch_size: 10, max_batch_timeout: 5, max_retries: 5, max_concurrency: 1, dead_letter_queue: "ltds-thumbnail-jobs-staging-dlq" },
       { queue: "ltds-thumbnail-jobs-staging-dlq", max_batch_size: 10, max_batch_timeout: 5 },
     ],
     queueProducers: [
       { binding: "THUMBNAIL_QUEUE", queue: "ltds-thumbnail-jobs-staging" },
     ],
     crons: ["*/15 * * * *", "*/5 * * * *"],
+    assets: { binding: "ASSETS", directory: "./dist/client", not_found_handling: "single-page-application", run_worker_first: ["/api/*", "/health", "/r/*"] },
+    observability: { enabled: true, head_sampling_rate: 1 },
+    stream: { binding: "STREAM" },
+    durable_objects: { bindings: [{ name: "THUMBNAIL_RENDERER", class_name: "ThumbnailRendererContainer" }] },
+    exports: { ThumbnailRendererContainer: { type: "durable-object", storage: "sqlite" } },
+    containers: [{ class_name: "ThumbnailRendererContainer", image: "./containers/thumbnail-renderer/Dockerfile", max_instances: 1, instance_type: "standard-1", constraints: { regions: ["WNAM"] }, ssh: { enabled: false } }],
     ratelimits: [],
   },
   "ops-sync": {
     name: "ltds-ops-sync-staging",
+    main: "src/index.ts",
+    compatibility_date: "2026-07-22",
+    compatibility_flags: ["nodejs_compat"],
     routes: [{ pattern: STAGING_HOSTS["ops-sync"], custom_domain: true }],
     d1_databases: [
       { binding: "OPS_DB", database_name: "ltds-ops-staging", database_id: "78b34173-b168-4e3d-9832-bb9d245cc6b8", migrations_dir: "../operations/migrations" },
@@ -300,6 +452,7 @@ export const STAGING_INVENTORY = Object.freeze({
     services: [],
     queues: [],
     crons: ["*/5 * * * *"],
+    observability: { enabled: true, head_sampling_rate: 1 },
     ratelimits: [],
   },
 });

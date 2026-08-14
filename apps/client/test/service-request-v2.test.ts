@@ -96,6 +96,19 @@ describe("service request v2 validation", () => {
 });
 
 describe("service request v2 routes", () => {
+  it("lists only the repository's authorized resumable drafts", async () => {
+    const summaries = [{
+      id: "draft-a", projectId: "project-a", title: "Map the site",
+      serviceNames: ["2D Mapping"], areaAcres: 219.7, updatedAt: "2026-08-13 12:01:00",
+    }];
+    const list = vi.fn(async () => summaries);
+    const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ listServiceRequestDrafts: list }) });
+    const response = await app.request("https://client.example/service-request-drafts", {}, env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ drafts: summaries });
+    expect(list).toHaveBeenCalledWith(expect.anything(), session);
+  });
+
   it("autosaves with optimistic versioning and rejects browser-computed money or area", async () => {
     const save = vi.fn(async () => ({ kind: "updated" as const, draft: { ...draft, version: 3 } }));
     const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ saveServiceRequestDraft: save }) });

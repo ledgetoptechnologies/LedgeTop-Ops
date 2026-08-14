@@ -84,6 +84,11 @@ all three ignored staging configs immediately before each mutation phase;
 
 ## Required staging secret names
 
+The canonical non-secret list is
+`docs/staging/staging-secret-manifest.json`. Wrangler configs must not contain a
+top-level `secrets` pseudo-field; use the sidecar to review ignored secret-file
+keys and remote secret-name listings.
+
 Delivery:
 
 - `DELIVERY_SESSION_SECRET`
@@ -142,7 +147,6 @@ npm.cmd run staging:check:test
 Get-FileHash -Algorithm SHA256 apps/client/wrangler.staging.json
 Get-FileHash -Algorithm SHA256 apps/operations/wrangler.staging.json
 Get-FileHash -Algorithm SHA256 apps/ops-sync/wrangler.staging.json
-node scripts/staging-evidence.mjs .backups/staging-release-evidence.json
 npm.cmd run staging:release:prepare
 
 & '.\apps\client\node_modules\.bin\wrangler.cmd' deploy --dry-run --config apps/client/wrangler.staging.json --outdir C:\tmp\ltds-delivery-staging-dry-run
@@ -163,6 +167,19 @@ contract, migrations, end-to-end tests, final default-off state, and every
 portal-v2 external dependency in `REQUIRED_EXTERNAL_GATES` are recorded. Do not
 mark future or inferred results true.
 
+It also requires the pushed source ref, exact deployed version/config hashes,
+second-empty migration lists, foreign-key and reapply checks, live resource and
+entitlement inventory, rollback targets/drill, referenced production-unchanged
+proof, and the complete disabled-flag set for each deployed Worker. A generic
+`ready` statement cannot satisfy an external gate; every named proof in
+`REQUIRED_EXTERNAL_GATE_PROOFS` must be current and referenced.
+
+`activationPlan.requestedFlags` is empty for this release preparation. Any
+later staging activation is validated against
+`FEATURE_FLAG_ACTIVATION_POLICIES`; flags marked prohibited require their own
+release packet, and dependent gates must remain current. Production flags stay
+false and production activation is never authorized by this packet.
+
 ## Read-only backup and migration preflight
 
 After identity, exact config/resource inventory, and branch-control checks pass,
@@ -180,13 +197,14 @@ Get-FileHash -Algorithm SHA256 .backups/client-data-staging-pre-release.sql
 Get-FileHash -Algorithm SHA256 .backups/ltds-ops-staging-pre-release.sql
 ```
 
-Then complete the evidence file and run `staging:evidence:check`. Only after
-all evidence gates and separate migration approval pass, rerun identity and
-evidence checks immediately before applying migrations:
+Update the evidence file as operator-owned results become available, but do not
+claim post-deployment fields before a version exists. Only after local
+preparation and separate migration approval pass, rerun identity and config
+checks immediately before applying migrations:
 
 ```powershell
 & '.\apps\client\node_modules\.bin\wrangler.cmd' whoami
-npm.cmd run staging:evidence:check
+npm.cmd run staging:check
 ```
 
 ```powershell
@@ -277,11 +295,12 @@ because the TrueNAS client is maintained outside this repository.
 Do not use `wrangler secret put`: it deploys a new version immediately.
 Prepare ignored per-app secret files and use `versions upload --secrets-file`
 to create reviewable staging versions without routing traffic. Immediately
-before this mutation phase, rerun identity and evidence checks:
+before this mutation phase, rerun identity and local preparation checks. Full
+evidence verification is post-deployment so it can bind real version IDs:
 
 ```powershell
 & '.\apps\client\node_modules\.bin\wrangler.cmd' whoami
-npm.cmd run staging:evidence:check
+npm.cmd run staging:release:prepare
 ```
 
 ```powershell
@@ -307,3 +326,14 @@ requires its own approval and version; after the full client/team/request/share
 matrix passes, deploy a reviewed false version again. Evidence passes only
 after the false state is restored. The Project Alpha payment/billing contract
 must be ready, but it never substitutes for LTDS authorization checks.
+
+After all controlled tests, deploy the reviewed all-false version again, record
+its immutable version IDs and binding/config hashes, complete every structured
+evidence field, and run:
+
+```powershell
+npm.cmd run staging:release:verify
+```
+
+That command reruns local preparation and validates the complete current
+post-deployment packet. It performs no remote action.

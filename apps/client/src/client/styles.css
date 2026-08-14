@@ -1224,6 +1224,7 @@
 .portal-review-attachments ul { display: grid; gap: .45rem; margin: 0; padding: 0; list-style: none; }
 .portal-review-attachments li { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .65rem; border-radius: 8px; background: #f6f8f9; }
 .portal-review-attachments li > div { display: grid; min-width: 0; }
+.portal-attachment-recovery { padding: .75rem .85rem; border: 1px solid #e7a08c; border-radius: 9px; background: #fff5f2; color: #8b2d17; line-height: 1.45; }
 .portal-attachment-status { flex: 0 0 auto; padding: .25rem .5rem; border-radius: 999px; background: #e8edf0; font-size: .72rem; font-weight: 780; }
 .portal-attachment-status.accepted { background: #dcf4e4; color: #21633a; }
 .portal-attachment-status.rejected, .portal-attachment-status.error { background: #fde6df; color: #8b2d17; }
@@ -1236,6 +1237,26 @@
 .portal-review-grid ul { display: grid; gap: .7rem; margin: 0; padding: 0; list-style: none; }
 .portal-review-grid li { display: grid; gap: .2rem; }
 .portal-review-grid li span { color: var(--muted); font-size: .82rem; }
+.portal-review-work-area { grid-column: 1 / -1; }
+.portal-review-map-summary { display: grid; gap: .45rem; margin: .85rem 0 0; }
+.portal-review-map-summary svg { display: block; width: 100%; max-height: 280px; border: 1px solid #ccd7de; border-radius: 12px; background: #edf4f6; }
+.portal-review-map-background { fill: #edf4f6; }
+.portal-review-map-grid { fill: none; stroke: #d4e0e5; stroke-width: 1; }
+.portal-review-boundary { fill: #ee50072b; stroke: #c94408; stroke-width: 4; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.portal-review-poi-marker { fill: #ee5007; stroke: #fff; stroke-width: 3; vector-effect: non-scaling-stroke; }
+.portal-review-poi-number { fill: #fff; font-size: 9px; font-weight: 850; text-anchor: middle; pointer-events: none; }
+.portal-review-map-summary figcaption { color: var(--muted); font-size: .76rem; line-height: 1.4; }
+.portal-review-map-empty { display: grid; min-height: 120px; place-items: center; margin-top: .85rem; padding: 1rem; border: 1px dashed #bdc7ce; border-radius: 12px; background: #f7f9fa; color: var(--muted); text-align: center; }
+.portal-review-pois { display: grid !important; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem !important; margin-top: .75rem !important; }
+.portal-review-pois li { grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: .6rem !important; padding: .55rem .65rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.portal-review-pois li > span { display: grid; width: 24px; height: 24px; place-items: center; border-radius: 50%; background: var(--orange); color: #fff; font-weight: 850; }
+.portal-review-pois li > div { display: grid; min-width: 0; }
+.portal-review-pois strong, .portal-review-pois small { overflow-wrap: anywhere; }
+.portal-review-pois small { color: var(--muted); }
+.portal-review-timing { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .55rem; margin: .85rem 0 0; }
+.portal-review-timing > div { min-width: 0; padding: .65rem; border-radius: 8px; background: #fff; }
+.portal-review-timing dt { color: var(--muted); font-size: .72rem; font-weight: 800; text-transform: uppercase; }
+.portal-review-timing dd { margin: .25rem 0 0; overflow-wrap: anywhere; font-weight: 700; }
 .portal-pricing-hint { border: 1px solid #f0b58e; background: #fff7f1; }
 .portal-pricing-hint p { margin: 0; line-height: 1.55; }
 .portal-wizard-actions { padding: .75rem; border: 1px solid var(--line); border-radius: 12px; background: #fff; box-shadow: 0 12px 32px #111b2312; }
@@ -1288,6 +1309,18 @@
 }
 .portal-request-notice { padding: .75rem 1rem; border: 1px solid #b9dfc4; border-radius: 9px; background: #f4fbf6; }
 .portal-request-card { min-width: 0; overflow: clip; }
+.portal-card-intro { margin: 0 0 1rem; color: var(--muted); }
+.portal-request-drafts { display: grid; gap: .75rem; }
+.portal-request-drafts article { display: flex; align-items: center; justify-content: space-between; gap: 1rem; min-width: 0; padding: .9rem 1rem; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+.portal-request-drafts article > div { display: grid; min-width: 0; gap: .2rem; }
+.portal-request-drafts strong,
+.portal-request-drafts span,
+.portal-request-drafts small { overflow-wrap: anywhere; }
+.portal-request-drafts span,
+.portal-request-drafts small { color: var(--muted); }
+.portal-request-drafts button { min-height: 44px; flex: 0 0 auto; }
+.portal-request-draft-loading { display: grid; min-height: 16rem; place-items: center; }
+.portal-request-draft-error { display: grid; justify-items: start; gap: 1rem; }
 .portal-request-summary {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1602,6 +1635,7 @@
   .portal-attachment-uploader > header { display: grid; }
   .portal-file-picker { width: 100%; justify-content: center; box-sizing: border-box; }
   .portal-attachment-list article { grid-template-columns: 1fr; }
+  .portal-review-pois, .portal-review-timing { grid-template-columns: 1fr; }
   .image-location-map { padding: .8rem; }
   .image-location-map-header { align-items: stretch; flex-direction: column; }
   .image-location-map-header button { width: 100%; min-height: 42px; }
@@ -1725,6 +1759,8 @@
   .portal-stat-grid, .portal-form-grid { grid-template-columns: 1fr; }
   .portal-stat-grid .ltds-card:last-child, .portal-form-wide { grid-column: auto; }
   .portal-request-summary { grid-template-columns: 1fr; }
+  .portal-request-drafts article { align-items: stretch; flex-direction: column; }
+  .portal-request-drafts button { width: 100%; }
   .portal-request-card { padding: .7rem; }
   .portal-request-card > header { padding: .2rem .15rem .65rem; }
   .portal-map-selector { padding: 0; border: 0; border-radius: 0; box-shadow: none; }
