@@ -19,14 +19,28 @@ do not deploy, apply a remote migration, send real email, push, or merge unless
 the user separately authorizes it.
 
 Your objective is to implement Project Alpha's half of the LTDS Client Portal
-v2 contract. Use the reviewed LTDS `origin/main` compatibility commit and
-fixture hashes named in the handoff message accompanying this prompt. Treat
-that commit's repository-relative `docs/client-portal-v2-architecture.md`,
-`docs/project-alpha.md`, and five
-`packages/shared/fixtures/project-alpha-*.json` files as normative. Verify the
-fixture SHA-256 values before editing. If those exact bytes are unavailable,
-stop and request them rather than reading another worktree or inventing a
-divergent contract.
+v2 contract. The exact reviewed LTDS compatibility source is
+`https://github.com/ledgetoptechnologies/LTDS-Ops.git` commit
+`cfb00e889f6e166ed9aa65dde4326ea06ec031ae`; do not substitute a branch tip or
+another checkout. Treat that commit's repository-relative
+`docs/client-portal-v2-architecture.md`, `docs/project-alpha.md`, and the five
+fixture files below as normative. Verify these SHA-256 values before editing:
+
+- `packages/shared/fixtures/project-alpha-portal-v2.json`:
+  `808185cb582476f7e64f5a2c1f8c9c283d1bb5c4db1550227b19ff82887301bd`
+- `packages/shared/fixtures/project-alpha-portal-relations-v3.json`:
+  `87508874a56c76eb768e1b2a87fe77dec28b58fb06802c45d85c640685890a28`
+- `packages/shared/fixtures/project-alpha-catalog-v2.json`:
+  `9626ee5147ac9cd2198e6bca58eee9bb464c2105861c679a16745e1d9bf022fe`
+- `packages/shared/fixtures/project-alpha-pricing-hint-v1.json`:
+  `6354ad8fb2439e4463202290516a05198ec03cf0a966fbfb4bd83fcf18449d6b`
+- `packages/shared/fixtures/project-alpha-draft-quote-v1.json`:
+  `fc47be82960b11ab6cb705e2dcaa11f76f39ef9c5c3199ff6861e8a787034f90`
+
+This prompt is the complete handoff; no companion message supplies missing
+contract details. If that exact commit or those exact fixture bytes are
+unavailable, stop and request them rather than reading another worktree or
+inventing a divergent contract.
 
 Project Alpha remains authoritative for organizations, departments, clients,
 projects, portal authorization intent, the Service Library, pricing policy,
