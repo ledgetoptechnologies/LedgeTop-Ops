@@ -560,19 +560,20 @@ Migration `0127_portal_invitation_secret_scrub.sql` adds the terminal-state D1
 trigger that atomically cancels a leased delivery and redacts its plaintext
 token whenever an invitation is accepted, revoked, or explicitly expired.
 
-Migration `0124_client_delegated_public_shares.sql` adds the disabled delegation
-foundation without touching staff `shares`. It models staff-provisioned opaque
-folder targets, exact-identity/versioned delegations, independent client bearer
-records, audit events, idempotency and durable rate windows. Client routes can
-list owned records and revoke them, while creation returns unavailable even if
-an environment flag is set. `/client-share/:publicId` renders a dedicated
-unavailable screen and does not start the staff DeliveryApp.
+Migration `0124_client_delegated_public_shares.sql` adds the default-off
+delegation foundation without touching staff `shares`. Migration
+`0130_client_delegated_share_provisioning.sql` adds browser-safe target labels
+and fingerprint-bound staff mutation receipts. The Operations Share dialog can
+provision an opaque target/delegation, Administration can transfer or revoke
+authority, and the Client Deliveries page can list authorized targets and
+create/list/revoke independent `/client-share/` bearers. No browser API returns
+the binding prefix or target-relative prefix.
 
-Future enablement requires a real internal Operations service binding/RPC that
-resolves the server-only folder target, mints an independently signed bearer
-and returns an auditable receipt. The client Worker must not receive the
-Operations `DELIVERY_TOKEN_SECRET`. Every bearer request must continue to
-recheck live workspace membership, `delegated_share.create`, delegation,
+Creation uses a private named Operations service binding that resolves the
+server-only folder target, repeats live authorization, mints an independently
+signed bearer, and returns an auditable receipt. The client Worker never
+receives the Operations `DELIVERY_TOKEN_SECRET`. Every bearer request continues
+to recheck live workspace membership, `delegated_share.create`, delegation,
 binding version, strict target containment, expiry and revocation.
 The link is workspace-owned: `created_by_identity_id` is immutable provenance,
 while runtime authority follows the delegation's current exact identity and
@@ -593,9 +594,9 @@ Do not enable the flag until all of these gates have evidence:
   invitation state immediately before handoff, and scrubs the plaintext token
   after send, cancellation, acceptance, expiry, or permanent failure. Never
   log `payload_json`, message bodies, or invitation URLs.
-- Operations exposes the transfer/recovery seam only behind
-  `client.accounts.manage`/administrator authorization, with a reviewed restore
-  workflow. The client Worker cannot call that seam.
+- Operations exposes transfer/recovery only from administrator routes with
+  global `delivery.share.audit`/`delivery.share.revoke`; the client Worker
+  cannot call that seam.
 - Cross-workspace IDOR, revoked/expired grants, deny precedence, incomplete and
   out-of-order generations, invitation replay, legacy-route isolation, mobile
   account switching, migration upgrade, and foreign-key tests all pass in

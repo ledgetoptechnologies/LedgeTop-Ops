@@ -205,9 +205,12 @@ must not itself delete data. Legal or operational holds override expiry. Backup
 and restore drills must prove D1 tombstones/manifests and R2 objects can be
 recovered together without reviving access that has since been revoked.
 
-This includes an outstanding code gate: restore currently blocks after
-`purging_at` is set, but does not enforce `purge_after`/retention expiry
-server-side. Expired restore requests must fail safely and have focused tests.
+Restore now fails closed when `purge_after` is expired or malformed and when
+`purging_at` is set. The deadline is repeated in the conditional D1 update so a
+purge claim or expiry race cannot restore the tombstone. A completed restore is
+an idempotent no-op, without repeating audit or thumbnail side effects. Focused
+tests cover pre-expiry success, response retry, exact-deadline expiry, malformed
+deadlines, and an active purge claim.
 
 This protects objects uploaded directly with R2/S3 tools: a visible object is
 manifested when the authorized delete begins, regardless of how it arrived.
@@ -231,12 +234,14 @@ create alerts or operator-review holds. It must not delete R2 objects or derived
 artifacts, revoke shares, or purge ambiguous data merely because a scan
 disagrees with D1.
 
-This remains an outstanding code gate: `reconcileFileIndex` currently contains
-automatic share revocation after a missing-object grace period and automatic
-deletion of preview-artifact relationship records from D1 after a missing-source
-grace period; it does not delete the R2 preview objects in that branch. Those
-actions must become hold/alert-only or move behind a separately approved,
-ownership-protected lifecycle action with focused tests.
+`reconcileFileIndex` is repair-and-hold-only. A missing share prefix or preview
+source is marked unavailable/missing and, after the grace period, creates one
+deduplicated operator-review alert. Reconciliation does not revoke the share,
+delete the source index row, delete the preview relationship, or delete R2
+derivatives. When the source returns, it clears the marker and acknowledges the
+open alert. Focused tests prove preservation, alert deduplication, and recovery.
+Any future destructive resolution requires a separately approved,
+ownership-protected lifecycle action; reconciliation is not that authority.
 
 Lifecycle acceptance:
 
@@ -292,9 +297,13 @@ The queue consumer must:
 Supported still images and first-page PDFs use only the bounded, private
 libvips/Poppler renderer after staging proves format support, decoded-pixel and
 output bounds, access controls, cleanup, and acceptable Container usage. Video
-thumbnails remain disabled; existing Stream playback is a separate authorized
-viewer capability and must not be treated as thumbnail generation. Other media
-stays on a file-kind icon until a sandboxed processor is independently proven.
+jobs deliberately bypass that Cloudflare renderer and remain pending until the
+separately deployed, authenticated TrueNAS queue worker claims them through
+`/api/internal/thumbnail-renderer/v1`. The TrueNAS worker extracts one bounded
+frame and must echo the claim's opaque `leaseId` on heartbeat, failure, and
+completion. Existing Stream playback remains a separate authorized viewer
+capability and is never the thumbnail source. Other media stays on a file-kind
+icon until a sandboxed processor is independently proven.
 
 Cost controls include maximum source bytes/pixels/duration, queue batch and
 retry limits, per-tenant concurrency, daily transformation/minute budgets,

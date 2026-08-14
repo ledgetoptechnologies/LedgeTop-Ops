@@ -2,7 +2,6 @@ import { mediaKind, mime } from "./delivery";
 import type { Env } from "./types";
 import { artifactDirectory } from "./artifacts";
 import { sendAdminAlert } from "./alerts";
-import { notificationStatement } from "./notifications";
 import { canonicalThumbnailSourceKey, enqueueThumbnailJob, handleRemovedPrebuiltThumbnail, prebuiltThumbnailArtifactKey, removeThumbnailStateForPath, THUMBNAIL_PREBUILT_GRACE_SECONDS, THUMBNAIL_SIDECAR_GRACE_SECONDS, thumbnailSourceEligible } from "./image-thumbnails";
 import { deleteImageLocation, enqueueImageLocationJob } from "./image-locations";
 import { isMovedSourceMarker } from "@ltds/shared";
@@ -51,6 +50,9 @@ export function hidden(key: string): boolean {
 function created(action: string): boolean { return ["PutObject", "CopyObject", "CompleteMultipartUpload"].some(value => action.includes(value)); }
 function removed(action: string): boolean { return action.includes("Delete") || action.includes("Lifecycle"); }
 function metadata(value: string): string { let binary = ""; for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte); return btoa(binary); }
+function databaseTimestampMillis(value: string): number {
+  return Date.parse(/(?:Z|[+-]\d\d:\d\d)$/i.test(value) ? value : `${value.replace(" ", "T")}Z`);
+}
 
 export function thumbnailJobForCreatedObject(
   action: string,
@@ -360,7 +362,7 @@ export async function refreshStreamStatuses(env: Env): Promise<number> {
 
 export async function reconcileFileIndex(env: Env): Promise<number> {
   const marker = crypto.randomUUID(); let cursor: string | undefined; let count = 0; let visibleBytes = 0;
-  const activeShares = await env.DELIVERY_DB.prepare(`SELECT s.id,COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.unavailable_since,s.recipient_email,s.public_id,p.client_name,p.project_name FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{ id:string; r2_prefix:string; unavailable_since:string|null; recipient_email:string|null; public_id:string|null; client_name:string; project_name:string }>();
+  const activeShares = await env.DELIVERY_DB.prepare(`SELECT s.id,COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.unavailable_since FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{ id:string; r2_prefix:string; unavailable_since:string|null }>();
   const presentShares = new Set<string>();
   try {
     do {
@@ -376,55 +378,81 @@ export async function reconcileFileIndex(env: Env): Promise<number> {
       }
       if (statements.length) await env.DELIVERY_DB.batch(statements); cursor = listed.truncated ? listed.cursor : undefined;
     } while (cursor);
-    const shareUpdates:D1PreparedStatement[]=[]; let revocationCount = 0;
+    const unresolvedShareHolds = await env.OPS_DB.prepare(`SELECT json_extract(details_json,'$.shareId') share_id
+      FROM delivery_reconciliation_alerts WHERE source='truenas' AND alert_type='share_source_missing'
+      AND acknowledged_at IS NULL AND json_valid(details_json)`).all<{ share_id: string | null }>();
+    const shareHoldIds = new Set(unresolvedShareHolds.results.map(row => row.share_id).filter((value): value is string => Boolean(value)));
+    const shareUpdates:D1PreparedStatement[]=[];
+    const shareHoldStatements:D1PreparedStatement[]=[];
+    const shareAcknowledgements:D1PreparedStatement[]=[];
     for(const share of activeShares.results){
-      if(presentShares.has(share.id)){if(share.unavailable_since)shareUpdates.push(env.DELIVERY_DB.prepare("UPDATE shares SET unavailable_since=NULL WHERE id=? AND revoked_at IS NULL").bind(share.id));continue;}
+      if(presentShares.has(share.id)){
+        if(share.unavailable_since)shareUpdates.push(env.DELIVERY_DB.prepare("UPDATE shares SET unavailable_since=NULL WHERE id=? AND revoked_at IS NULL").bind(share.id));
+        if(shareHoldIds.has(share.id)) shareAcknowledgements.push(env.OPS_DB.prepare(`UPDATE delivery_reconciliation_alerts SET acknowledged_at=datetime('now')
+          WHERE source='truenas' AND alert_type='share_source_missing' AND acknowledged_at IS NULL
+          AND json_valid(details_json) AND json_extract(details_json,'$.shareId')=?`).bind(share.id));
+        continue;
+      }
       if(!share.unavailable_since)shareUpdates.push(env.DELIVERY_DB.prepare("UPDATE shares SET unavailable_since=datetime('now') WHERE id=? AND revoked_at IS NULL AND unavailable_since IS NULL").bind(share.id));
-      else if(Date.parse(`${share.unavailable_since.replace(" ","T")}Z`)+24*60*60*1000<=Date.now()){
-        shareUpdates.push(env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='folder_unavailable',share_version=share_version+1 WHERE id=? AND revoked_at IS NULL").bind(share.id));
-        shareUpdates.push(env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('system','reconciliation','share.auto_revoked','share',?,?)").bind(share.id,JSON.stringify({reason:"folder_unavailable",r2Prefix:share.r2_prefix})));
-        const notification = notificationStatement(env, { shareId: share.id, kind: "share_revoked", recipientEmail: share.recipient_email, payload: { publicId: share.public_id, clientName: share.client_name, projectName: share.project_name, r2Prefix: share.r2_prefix } });
-        if (notification) shareUpdates.push(notification);
-        revocationCount += 1;
+      else if((!Number.isFinite(databaseTimestampMillis(share.unavailable_since))||databaseTimestampMillis(share.unavailable_since)+24*60*60*1000<=Date.now())&&!shareHoldIds.has(share.id)){
+        shareHoldStatements.push(env.OPS_DB.prepare(`INSERT INTO delivery_reconciliation_alerts(source,alert_type,details_json)
+          SELECT 'truenas','share_source_missing',? WHERE NOT EXISTS (
+            SELECT 1 FROM delivery_reconciliation_alerts WHERE source='truenas' AND alert_type='share_source_missing'
+            AND acknowledged_at IS NULL AND json_valid(details_json) AND json_extract(details_json,'$.shareId')=?
+          )`).bind(JSON.stringify({ shareId: share.id, r2Prefix: share.r2_prefix, unavailableSince: share.unavailable_since, action: "operator_review_required" }), share.id));
       }
     }
     const previous = await env.OPS_DB.prepare("SELECT last_visible_count,last_visible_bytes FROM delivery_reconciliation_state WHERE source='truenas'").first<{last_visible_count:number;last_visible_bytes:number}>();
     const visibleDrop = Boolean(previous && previous.last_visible_count > 0 && count < previous.last_visible_count * 0.5);
-    if (visibleDrop || revocationCount > 5) {
-      const details = { visibleCount: count, previousVisibleCount: previous?.last_visible_count || 0, visibleBytes, previousVisibleBytes: previous?.last_visible_bytes || 0, revocationCount, reasons: [visibleDrop ? "visible_object_drop_over_50_percent" : null, revocationCount > 5 ? "revocation_count_over_5" : null].filter(Boolean) };
+    if (visibleDrop) {
+      const details = { visibleCount: count, previousVisibleCount: previous?.last_visible_count || 0, visibleBytes, previousVisibleBytes: previous?.last_visible_bytes || 0, reasons: ["visible_object_drop_over_50_percent"] };
       await env.OPS_DB.prepare("INSERT INTO delivery_reconciliation_alerts(source,alert_type,details_json) VALUES('truenas','circuit_breaker',?)").bind(JSON.stringify(details)).run();
       await env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,status,details_json) VALUES ('reconciliation',datetime('now'),'error',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),status='error',details_json=excluded.details_json,updated_at=datetime('now')`).bind(JSON.stringify({ error: "reconciliation circuit breaker", ...details })).run();
-      await sendAdminAlert(env, "Delivery reconciliation paused", `Automatic share revocation and pruning were paused. ${JSON.stringify(details)}`);
+      await sendAdminAlert(env, "Delivery reconciliation paused", `Repair and missing-state updates were paused. ${JSON.stringify(details)}`);
       return count;
     }
     await env.DELIVERY_DB.batch([
-      env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE last_seen_reconcile IS NOT NULL AND last_seen_reconcile<>?").bind(marker),
       env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,last_success_at,status,object_count) VALUES ('reconciliation',datetime('now'),datetime('now'),'healthy',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=datetime('now'),status='healthy',object_count=excluded.object_count,updated_at=datetime('now')`).bind(count),
       ...shareUpdates,
     ]);
+    if (shareAcknowledgements.length) await env.OPS_DB.batch(shareAcknowledgements);
+    const shareHoldResults = shareHoldStatements.length ? await env.OPS_DB.batch(shareHoldStatements) : [];
+    const newShareHolds = shareHoldResults.reduce((total, result) => total + Number(result.meta.changes || 0), 0);
     await env.OPS_DB.prepare(`INSERT INTO delivery_reconciliation_state(source,last_success_at,last_visible_count,last_visible_bytes) VALUES('truenas',datetime('now'),?,?) ON CONFLICT(source) DO UPDATE SET last_success_at=datetime('now'),last_visible_count=excluded.last_visible_count,last_visible_bytes=excluded.last_visible_bytes,updated_at=datetime('now')`).bind(count, visibleBytes).run();
     const artifacts = await env.DELIVERY_DB.prepare(`SELECT artifact_prefix,source_key,missing_since FROM preview_artifacts
-      WHERE NOT EXISTS (SELECT 1 FROM file_index WHERE r2_key=preview_artifacts.source_key) OR missing_since IS NOT NULL LIMIT 200`)
+      ORDER BY updated_at,artifact_prefix LIMIT 200`)
       .all<{artifact_prefix:string;source_key:string;missing_since:string|null}>();
+    const unresolvedPreviewHolds = await env.OPS_DB.prepare(`SELECT json_extract(details_json,'$.artifactPrefix') artifact_prefix
+      FROM delivery_reconciliation_alerts WHERE source='truenas' AND alert_type='preview_source_missing'
+      AND acknowledged_at IS NULL AND json_valid(details_json)`).all<{ artifact_prefix: string | null }>();
+    const previewHoldPrefixes = new Set(unresolvedPreviewHolds.results.map(row => row.artifact_prefix).filter((value): value is string => Boolean(value)));
+    let newPreviewHolds = 0;
     for (const artifact of artifacts.results) {
       const source = await env.DATA_BUCKET.head(artifact.source_key);
       if (source) {
-        if (artifact.missing_since) await env.DELIVERY_DB.prepare("UPDATE preview_artifacts SET missing_since=NULL,updated_at=datetime('now') WHERE artifact_prefix=?").bind(artifact.artifact_prefix).run();
+        await env.DELIVERY_DB.prepare("UPDATE preview_artifacts SET missing_since=NULL,last_seen_at=datetime('now'),updated_at=datetime('now') WHERE artifact_prefix=?").bind(artifact.artifact_prefix).run();
+        if (previewHoldPrefixes.has(artifact.artifact_prefix)) await env.OPS_DB.prepare(`UPDATE delivery_reconciliation_alerts SET acknowledged_at=datetime('now')
+          WHERE source='truenas' AND alert_type='preview_source_missing' AND acknowledged_at IS NULL
+          AND json_valid(details_json) AND json_extract(details_json,'$.artifactPrefix')=?`).bind(artifact.artifact_prefix).run();
         continue;
       }
       if (!artifact.missing_since) {
         await env.DELIVERY_DB.prepare("UPDATE preview_artifacts SET missing_since=datetime('now'),updated_at=datetime('now') WHERE artifact_prefix=? AND missing_since IS NULL").bind(artifact.artifact_prefix).run();
         continue;
       }
-      if (Date.parse(`${artifact.missing_since.replace(" ","T")}Z`) + 24 * 60 * 60 * 1000 > Date.now()) continue;
-      let artifactCursor: string | undefined;
-      do {
-        const page = await env.DATA_BUCKET.list({ prefix: artifact.artifact_prefix, limit: 1000, cursor: artifactCursor });
-        if (page.objects.length) await env.DATA_BUCKET.delete(page.objects.map(object => object.key));
-        artifactCursor = page.truncated ? page.cursor : undefined;
-      } while (artifactCursor);
-      await env.DELIVERY_DB.prepare("DELETE FROM preview_artifacts WHERE artifact_prefix=?").bind(artifact.artifact_prefix).run();
+      await env.DELIVERY_DB.prepare("UPDATE preview_artifacts SET updated_at=datetime('now') WHERE artifact_prefix=?").bind(artifact.artifact_prefix).run();
+      const missingSince = databaseTimestampMillis(artifact.missing_since);
+      if (Number.isFinite(missingSince) && missingSince + 24 * 60 * 60 * 1000 > Date.now()) continue;
+      if (!previewHoldPrefixes.has(artifact.artifact_prefix)) {
+        const created = await env.OPS_DB.prepare(`INSERT INTO delivery_reconciliation_alerts(source,alert_type,details_json)
+          SELECT 'truenas','preview_source_missing',? WHERE NOT EXISTS (
+            SELECT 1 FROM delivery_reconciliation_alerts WHERE source='truenas' AND alert_type='preview_source_missing'
+            AND acknowledged_at IS NULL AND json_valid(details_json) AND json_extract(details_json,'$.artifactPrefix')=?
+          )`).bind(JSON.stringify({ artifactPrefix: artifact.artifact_prefix, sourceKey: artifact.source_key, missingSince: artifact.missing_since, action: "operator_review_required" }), artifact.artifact_prefix).run();
+        newPreviewHolds += Number(created.meta.changes || 0);
+      }
     }
+    if (newShareHolds || newPreviewHolds) await sendAdminAlert(env, "Delivery reconciliation requires review", `${newShareHolds} share source hold(s) and ${newPreviewHolds} preview source hold(s) require operator review. No access or objects were removed.`);
     return count;
   } catch (error) {
     await env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,status,details_json) VALUES ('reconciliation',datetime('now'),'error',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),status='error',details_json=excluded.details_json,updated_at=datetime('now')`).bind(JSON.stringify({ error: error instanceof Error ? error.message : "unknown" })).run();

@@ -459,6 +459,9 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
           <button className="button-orange button-small download-all-control" disabled={bulkBusy} onClick={() => void downloadBulk(true)}><span>{bulkBusy ? "Preparing…" : "Download all"}</span><small>{downloadSummaryText(downloadSummary)}</small></button>
         </div>
       </div>}
+      {namespace === "client-delegated" && <div className="download-toolbar" role="note" aria-label="Bulk download availability">
+        <span><strong>Download individual files</strong><small>Download all is not yet available for client-created links. Open or focus a file and use its Download action.</small></span>
+      </div>}
       {navigationError && <p className="bulk-error" role="alert">{navigationError}</p>}
       {bulkError && <p className="bulk-error" role="alert">{bulkError}</p>}
       {bulkProgress && <BulkProgress progress={bulkProgress} />}

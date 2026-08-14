@@ -41,6 +41,8 @@ export interface Env {
   CLIENT_PORTAL_TEAM_ENABLED?: string;
   /** Additive PA-backed workspace hierarchy. Default-off until shadow parity is proven. */
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
+  /** Many-to-many PA directory edges and project-retention authorization. Independent/default-off. */
+  CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED?: string;
   /** Client invitation/member mutations. Independent from read-only hierarchy rollout. */
   CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED?: string;
   /** Native Cloudflare Email Service delivery for the invitation outbox. Default-off. */

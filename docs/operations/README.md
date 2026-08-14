@@ -79,8 +79,9 @@ failures correctly remain on their local file-type icon.
   be monitored.
 - Invalid, empty, unsupported, over-512-MiB or over-110-MP still images and
   over-256-MiB PDFs use a local file-type icon. Supported PDFs render page one.
-  All video, Office, audio and archive files remain icon-only and are not sent
-  to a decoder. Thumbnail DLQ rows and retained unregistered prebuilt objects
+  Video bypasses the Cloudflare image/PDF decoder and is processed only by the
+  authenticated TrueNAS claim worker; Office, audio and archive files remain
+  icon-only. Thumbnail DLQ rows and retained unregistered prebuilt objects
   require monitoring and separately reviewed replay/cleanup.
 - The active private Container fallback and optional TrueNAS prebuilt renderer
   require separate entitlement/cost and staging evidence. Neither may expose a

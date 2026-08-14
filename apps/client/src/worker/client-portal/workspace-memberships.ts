@@ -4,7 +4,9 @@ import {
   authorizePortalWorkspaceCapability,
   portalHierarchyV2Enabled,
   type PortalWorkspaceCapability,
+  type PortalWorkspaceTarget,
 } from "./workspace-v2";
+import { portalHierarchyRelationsEnabled } from "./hierarchy-relations";
 
 const INVITABLE_CAPABILITIES = new Set<PortalWorkspaceCapability>([
   "workspace.view", "delivery.view", "request.create",
@@ -14,6 +16,7 @@ const INVITE_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 export interface WorkspaceInvitationInput {
   email: string;
   projectPublicId?: string;
+  targetScope?: { type: "organization" | "department" | "client" | "project"; publicId: string };
   organizationWide?: boolean;
   confirmOrganizationWide?: boolean;
   capabilities: PortalWorkspaceCapability[];
@@ -23,7 +26,7 @@ export interface WorkspaceInvitationView {
   id: string;
   email: string;
   status: "pending" | "accepted" | "revoked" | "expired";
-  scope: { type: "project" | "workspace"; publicId: string | null };
+  scope: { type: "organization" | "department" | "client" | "project" | "workspace"; publicId: string | null };
   capabilities: PortalWorkspaceCapability[];
   expiresAt: string;
 }
@@ -70,12 +73,13 @@ async function actorIdentity(env: Env, principal: VerifiedClientPrincipal): Prom
     .bind(principal.issuer, principal.subject).first<Identity>();
 }
 
-async function activeProjectExists(env: Env, workspaceId: string, publicId: string): Promise<boolean> {
+async function activeScopeExists(env: Env, workspaceId: string, target: PortalWorkspaceTarget): Promise<boolean> {
+  if (target.scopeType === "workspace") return target.publicId === workspaceId;
   return (await db(env).prepare(`SELECT 1 ok FROM portal_v2_directory_checkpoints c
     JOIN portal_v2_directory_generations g ON g.id=c.active_generation_id AND g.workspace_id=c.workspace_id AND g.status='active' AND g.complete=1
     JOIN portal_v2_directory_entities e ON e.workspace_id=c.workspace_id AND e.generation_id=c.active_generation_id
-      AND e.entity_type='project' AND e.public_id=? AND e.active=1
-    WHERE c.workspace_id=?`).bind(publicId, workspaceId).first("ok")) !== null;
+      AND e.entity_type=? AND e.public_id=? AND e.active=1
+    WHERE c.workspace_id=?`).bind(target.scopeType, target.publicId, workspaceId).first("ok")) !== null;
 }
 
 async function replayedInvitation(env: Env, workspaceId: string, actorId: string, key: string, requestHash: string): Promise<WorkspaceInvitationView | null | "conflict"> {
@@ -94,11 +98,11 @@ async function getInvitation(env: Env, workspaceId: string, invitationId: string
     .bind(invitationId, workspaceId).first<{ id: string; invited_email: string; status: WorkspaceInvitationView["status"]; expires_at: string }>();
   if (!row) return null;
   const grants = await db(env).prepare(`SELECT capability,scope_type,scope_public_id FROM portal_v2_invitation_entitlements
-    WHERE invitation_id=? ORDER BY capability`).bind(invitationId).all<{ capability: PortalWorkspaceCapability; scope_type: "project" | "workspace"; scope_public_id: string }>();
-  const scoped = grants.results.find(grant => grant.scope_type === "project") ?? grants.results[0];
+    WHERE invitation_id=? ORDER BY capability`).bind(invitationId).all<{ capability: PortalWorkspaceCapability; scope_type: WorkspaceInvitationView["scope"]["type"]; scope_public_id: string }>();
+  const scoped = grants.results.find(grant => grant.scope_type !== "workspace") ?? grants.results[0];
   return {
     id: row.id, email: row.invited_email, status: row.status, expiresAt: row.expires_at,
-    scope: { type: scoped?.scope_type ?? "workspace", publicId: scoped?.scope_type === "project" ? scoped.scope_public_id : null },
+    scope: { type: scoped?.scope_type ?? "workspace", publicId: !scoped || scoped.scope_type === "workspace" ? null : scoped.scope_public_id },
     capabilities: [...new Set(grants.results.map(grant => grant.capability))],
   };
 }
@@ -116,17 +120,27 @@ export async function createWorkspaceInvitation(
 ): Promise<CreateWorkspaceInvitationResult> {
   if (!workspaceMembershipManagementEnabled(env) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceId) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(idempotencyKey)) return { outcome: "invalid" };
   const actor = await actorIdentity(env, principal);
-  if (!actor || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "member.manage", { scopeType: "workspace", publicId: workspaceId }))) return { outcome: "denied" };
+  if (!actor) return { outcome: "denied" };
   const email = normalizeEmail(input.email);
   const capabilities = [...new Set(input.capabilities)].sort();
   if (!email || capabilities.length === 0 || capabilities.some(capability => !INVITABLE_CAPABILITIES.has(capability))) return { outcome: "invalid" };
 
   const organizationWide = input.organizationWide === true;
+  if (input.targetScope && !portalHierarchyRelationsEnabled(env)) return { outcome: "invalid" };
+  if (input.targetScope && (organizationWide || input.projectPublicId)) return { outcome: "invalid" };
   if (organizationWide && input.confirmOrganizationWide !== true) return { outcome: "invalid" };
-  if (!organizationWide && (!input.projectPublicId || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.projectPublicId))) return { outcome: "invalid" };
-  if (!organizationWide && !(await activeProjectExists(env, workspaceId, input.projectPublicId!))) return { outcome: "denied" };
+  const selectedTarget: PortalWorkspaceTarget = organizationWide
+    ? { scopeType: "workspace", publicId: workspaceId }
+    : input.targetScope
+      ? { scopeType: input.targetScope.type, publicId: input.targetScope.publicId }
+      : { scopeType: "project", publicId: input.projectPublicId ?? "" };
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(selectedTarget.publicId)) return { outcome: "invalid" };
+  if (!(await activeScopeExists(env, workspaceId, selectedTarget))) return { outcome: "denied" };
+  // Managers can create only LTDS-local guest grants within their own exact
+  // authority. member.manage itself is never invit-able or client-created.
+  if (!(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "member.manage", selectedTarget))) return { outcome: "denied" };
 
-  const canonical = JSON.stringify({ email, capabilities, organizationWide, projectPublicId: organizationWide ? null : input.projectPublicId });
+  const canonical = JSON.stringify({ email, capabilities, scopeType: selectedTarget.scopeType, scopePublicId: selectedTarget.publicId });
   const requestHash = await digest(canonical);
   const replay = await replayedInvitation(env, workspaceId, actor.id, idempotencyKey, requestHash);
   if (replay === "conflict") return { outcome: "conflict" };
@@ -142,8 +156,8 @@ export async function createWorkspaceInvitation(
   const token = randomToken();
   const tokenHash = await digest(token);
   const expiresAt = new Date(Date.now() + INVITE_LIFETIME_MS).toISOString();
-  const scopeType = organizationWide ? "workspace" : "project";
-  const scopePublicId = organizationWide ? workspaceId : input.projectPublicId!;
+  const scopeType = selectedTarget.scopeType;
+  const scopePublicId = selectedTarget.publicId;
   const grants = [...new Set<PortalWorkspaceCapability>(["workspace.view", ...capabilities])];
   const database = db(env);
   try {
@@ -202,11 +216,24 @@ export async function listWorkspaceAccess(env: Env, principal: VerifiedClientPri
 
 export async function revokeWorkspaceInvitation(env: Env, principal: VerifiedClientPrincipal, workspaceId: string, invitationId: string): Promise<boolean> {
   const actor = await actorIdentity(env, principal);
-  if (!actor || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "member.manage", { scopeType: "workspace", publicId: workspaceId }))) return false;
+  if (!actor) return false;
+  const inviteScope = await db(env).prepare(`SELECT grant_record.scope_type,grant_record.scope_public_id
+    FROM portal_v2_invitations invitation
+    JOIN portal_v2_invitation_entitlements grant_record ON grant_record.invitation_id=invitation.id
+    WHERE invitation.id=? AND invitation.workspace_id=?
+    ORDER BY CASE WHEN grant_record.scope_type='workspace' THEN 1 ELSE 0 END
+    LIMIT 1`).bind(invitationId, workspaceId)
+    .first<{ scope_type: PortalWorkspaceTarget["scopeType"]; scope_public_id: string }>();
+  if (!inviteScope || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "member.manage", {
+    scopeType: inviteScope.scope_type,
+    publicId: inviteScope.scope_public_id,
+  }))) return false;
   const database = db(env);
   const changed = await database.prepare(`UPDATE portal_v2_invitations SET status='revoked',revoked_at=datetime('now')
     WHERE id=? AND workspace_id=? AND status='pending' AND revoked_at IS NULL`).bind(invitationId, workspaceId).run();
-  if (changed.meta.changes !== 1) return false;
+  // D1 includes the terminal-secret scrub trigger's outbox update in changes.
+  // Zero is the only failure signal for the guarded invitation transition.
+  if (changed.meta.changes < 1) return false;
   await database.batch([
     database.prepare(`UPDATE portal_v2_invitation_email_outbox SET
       status=CASE WHEN status='sent' THEN 'sent' ELSE 'cancelled' END,payload_json='{"redacted":true}',

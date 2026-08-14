@@ -69,7 +69,8 @@ export function validateEvidence(evidence, options = {}) {
   if (!httpsStagingUrl(projectAlpha.baseUrl)) errors.push("Project Alpha baseUrl must be an approved HTTPS staging origin");
   if (projectAlpha.baseUrl !== configs.operations?.vars?.PROJECT_ALPHA_BASE_URL) errors.push("Project Alpha baseUrl must match Operations staging config");
   if (!populated(projectAlpha.approvalRef)) errors.push("Project Alpha needs an approval reference");
-  for (const gate of ["operationsReadCredentialReady", "opsSyncServiceAuthReady", "opsSyncAccessGroupReady", "ed25519Ready"]) if (projectAlpha[gate] !== true) errors.push(`Project Alpha ${gate} must be confirmed true`);
+  for (const gate of ["operationsReadCredentialReady", "opsSyncServiceAuthReady", "opsSyncAccessGroupReady"]) if (projectAlpha[gate] !== true) errors.push(`Project Alpha ${gate} must be confirmed true`);
+  if (projectAlpha.ed25519Ready !== true && projectAlpha.ed25519Ready !== false) errors.push("Project Alpha ed25519Ready must explicitly record the optional rollout state");
   if (projectAlpha.paymentBillingContractReady !== true) errors.push("Project Alpha paymentBillingContractReady must be confirmed true");
   if (projectAlpha.authorizationBypassUsed !== false) errors.push("Project Alpha must not bypass LTDS authorization");
 

@@ -16,6 +16,7 @@ import {
 } from "./files";
 import { listDownloadableObjects, summarizeDownloadableObjects } from "./downloadable-files";
 import { matchesEtag } from "./prepared-images";
+import { listScopedDeliveryLocations, resolveScopedDeliveryLocation } from "./public-locations";
 import { hmac, parseCookie, sha256, verifyAccessCode } from "./security";
 import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import type { Env } from "./types";
@@ -65,7 +66,7 @@ async function enforceRateLimit(
 function rateLimitFor(method: string, path: string): { binding: keyof Pick<Env,
   "PUBLIC_MANIFEST_RATE_LIMITER" | "PUBLIC_MEDIA_RATE_LIMITER" | "PUBLIC_THUMBNAIL_RATE_LIMITER" |
   "PUBLIC_DOWNLOAD_RATE_LIMITER" | "PUBLIC_STREAM_RATE_LIMITER">; scope: string } {
-  if (path.endsWith("/download-summary") || path.endsWith("/manifest") || path.endsWith("/manifest/media"))
+  if (path.endsWith("/download-summary") || path.endsWith("/manifest") || path.endsWith("/manifest/media") || path.endsWith("/locations"))
     return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "manifest" };
   if (path.endsWith("/thumbnail")) return { binding: "PUBLIC_THUMBNAIL_RATE_LIMITER", scope: "thumbnail" };
   if (path.endsWith("/stream-ticket")) return { binding: "PUBLIC_STREAM_RATE_LIMITER", scope: "stream" };
@@ -411,10 +412,46 @@ export function createClientDelegatedPublicRouter(): Hono<{ Bindings: Env; Varia
     return c.json(summarizeDownloadableObjects(await listDownloadableObjects(c.env.DATA_BUCKET, prefix, tombstones)));
   });
 
-  // Client-created links do not independently opt into location disclosure.
-  router.get(`${API_ROOT}/:publicId/locations`, c => c.json({
-    locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null,
-  }));
+  router.get(`${API_ROOT}/:publicId/locations`, async c => {
+    const share = c.get("delegatedShare");
+    if (!share.imageLocationMapEnabled) return c.json({
+      locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null,
+    });
+    const locations = await listScopedDeliveryLocations(
+      c.env,
+      c.env.CLIENT_DELEGATED_SHARE_SESSION_SECRET!,
+      {
+        id: share.shareId,
+        version: share.shareVersion,
+        deliveryPrefix: share.deliveryPrefix,
+        assetApiBase: `/client-share/api/shares/${encodeURIComponent(share.publicId)}`,
+        refContext: "client-delegated-location:v1",
+      },
+      c.req.query("folder") || "",
+    );
+    c.executionCtx.waitUntil(audit(c.env, c.req.raw, share, "client_share.locations.viewed", c.req.query("folder") || ""));
+    return c.json({ locations, mapboxPublicToken: locations.points.length ? c.env.MAPBOX_PUBLIC_TOKEN || null : null });
+  });
+
+  router.get(`${API_ROOT}/:publicId/locations/:assetRef`, async c => {
+    const share = c.get("delegatedShare");
+    if (!share.imageLocationMapEnabled) throw new HTTPException(404, { message: "Mapped image not found" });
+    const item = await resolveScopedDeliveryLocation(
+      c.env,
+      c.env.CLIENT_DELEGATED_SHARE_SESSION_SECRET!,
+      {
+        id: share.shareId,
+        version: share.shareVersion,
+        deliveryPrefix: share.deliveryPrefix,
+        assetApiBase: `/client-share/api/shares/${encodeURIComponent(share.publicId)}`,
+        refContext: "client-delegated-location:v1",
+      },
+      c.req.param("assetRef"),
+      c.req.query("folder") || "",
+    );
+    c.executionCtx.waitUntil(audit(c.env, c.req.raw, share, "client_share.location_asset.viewed", c.req.param("assetRef")));
+    return c.json({ item });
+  });
 
   router.on(["GET", "HEAD"], `${API_ROOT}/:publicId/items/:itemRef/preview`, async c => {
     const share = c.get("delegatedShare");

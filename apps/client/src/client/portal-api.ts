@@ -9,6 +9,7 @@ export interface PortalCapabilities {
   workspaceHierarchyV2: boolean;
   workspaceMembershipManagement: boolean;
   invitationEmailDelivery: boolean;
+  delegatedShares: boolean;
 }
 
 export interface PortalAccount {
@@ -204,6 +205,7 @@ export async function loadPortalBootstrap(
       workspaceHierarchyV2: session.capabilities?.workspaceHierarchyV2 === true,
       workspaceMembershipManagement: session.capabilities?.workspaceMembershipManagement === true,
       invitationEmailDelivery: session.capabilities?.invitationEmailDelivery === true,
+      delegatedShares: session.capabilities?.delegatedShares === true,
     },
     projects: projects.projects,
     requests: requests.requests,
@@ -255,6 +257,35 @@ export interface PortalWorkspace { id: string; rootType: "organization" | "stand
 export interface PortalWorkspaceEntry { type: string; publicId: string; parentPublicId: string | null; displayName: string; sourceVersion: string }
 export interface PortalWorkspaceMember { identityId: string; email: string | null; status: "active" | "suspended" | "revoked"; manager: boolean; source: string }
 export interface PortalWorkspaceInvitation { id: string; email: string; status: "pending" | "accepted" | "revoked" | "expired"; scope: { type: "project" | "workspace"; publicId: string | null }; capabilities: string[]; expiresAt: string }
+export interface PortalDelegatedShareTarget {
+  delegationId: string;
+  folderTargetId: string;
+  displayName: string;
+  maximumLinkLifetimeSeconds: number;
+  requirePassword: boolean;
+  delegationExpiresAt: string;
+}
+export interface PortalDelegatedShare {
+  id: string;
+  publicId: string;
+  path: string;
+  label: string | null;
+  status: "pending_signer" | "active" | "failed" | "revoked" | "expired";
+  expiresAt: string;
+  revokedAt: string | null;
+  createdAt: string;
+}
+export interface PortalDelegatedShareCreated {
+  id: string;
+  publicId: string;
+  path: string;
+  shareUrl: string;
+  label: string | null;
+  status: "active";
+  passwordProtected: boolean;
+  expiresAt: string;
+  createdAt: string;
+}
 
 export async function loadPortalWorkspaces(request: PortalRequest = requestJson): Promise<PortalWorkspace[]> {
   return (await request<{ workspaces: PortalWorkspace[] }>("/api/client/v2/workspaces")).workspaces;
@@ -282,6 +313,33 @@ export async function suspendPortalWorkspaceMember(workspaceId: string, identity
   await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(identityId)}`, { method: "DELETE" });
 }
 
+export async function loadPortalDelegatedShareTargets(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalDelegatedShareTarget[]> {
+  return (await request<{ targets: PortalDelegatedShareTarget[] }>(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-share-targets`)).targets;
+}
+
+export async function loadPortalDelegatedShares(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalDelegatedShare[]> {
+  return (await request<{ shares: PortalDelegatedShare[] }>(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-shares`)).shares;
+}
+
+export async function createPortalDelegatedShare(
+  workspaceId: string,
+  input: { delegationId: string; folderTargetId: string; label: string | null; expiresAt: string; accessCode?: string },
+  request: PortalRequest = requestJson,
+): Promise<PortalDelegatedShareCreated> {
+  const response = await request<{ share: PortalDelegatedShareCreated }>(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-shares`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
+    body: JSON.stringify(input),
+  });
+  return response.share;
+}
+
+export async function revokePortalDelegatedShare(workspaceId: string, shareId: string, request: PortalRequest = requestJson): Promise<void> {
+  await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/delegated-shares/${encodeURIComponent(shareId)}`, {
+    method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() },
+  });
+}
+
 export type PortalServiceQuestion =
   | { id: string; label: string; type: "text"; required: boolean; helpText: string | null; maxLength: number }
   | { id: string; label: string; type: "number"; required: boolean; helpText: string | null; minimum: number | null; maximum: number | null }
@@ -293,6 +351,9 @@ export interface PortalServiceCatalogItem {
   sourceVersion: string;
   name: string;
   summary: string | null;
+  category: string;
+  displayOrder: number;
+  geometryRequirement: "none" | "optional" | "required";
   questions: PortalServiceQuestion[];
 }
 

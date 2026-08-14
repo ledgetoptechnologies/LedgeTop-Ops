@@ -33,6 +33,10 @@ not become active deployments.
   app/audience/group, and its separately reviewed public Bypass app/policy;
 - reviewed commit SHA and current build-control evidence;
 - D1 export paths and SHA-256 checksums.
+- origin-restricted staging Mapbox public tokens for both Delivery and
+  Operations;
+- a non-production Operations triage recipient and exact allowed notification
+  sender;
 
 `CLIENT_PORTAL_ENABLED` and every feature listed in
 `REQUIRED_DISABLED_FEATURE_FLAGS` must be explicitly `false`;
@@ -173,7 +177,7 @@ Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
 `0112_public_share_location_privacy.sql`, then `0114_delivery_share_prefix_lookup.sql`
-through `0127_portal_invitation_secret_scrub.sql` (`0113` is intentionally
+through `0130_client_delegated_share_provisioning.sql` (`0113` is intentionally
 reserved), and Operations
 `0014_staff_acl_controls.sql` through
 `0022_r2_operation_retries.sql`. Migration `0100` removes
@@ -186,7 +190,7 @@ five-minute notification consumer; `0106`/`0107`/`0108` must be present before
 thumbnail jobs or cleanup; `0109` must be present before photo location
 extraction or map routes run; `0110` must be present before a `Jobs/` backfill
 run; `0111` must precede prebuilt registration, Container fallback activation,
-or exact-ETag derivative reconciliation. Migrations `0112` and `0114`-`0127`
+or exact-ETag derivative reconciliation. Migrations `0112` and `0114`-`0130`
 must precede public location privacy, indexed share lookup, client notification,
 request-v2, attachment, workspace hierarchy, membership, delegated-share,
 catalog/hierarchy projection, and directory-recipient activation. `0017` must
@@ -225,6 +229,12 @@ grace, the 30-second direct-upload grace, and private Container fallback
 independently. Do not enable a delete-authoritative TrueNAS
 source sync until browser/team prefixes are disjoint and excluded by path; R2
 metadata tags are not a deletion boundary.
+
+Record that end-to-end proof under the mandatory
+`trueNasVideoThumbnailRenderer` external gate. The evidence must identify the
+deployed TrueNAS renderer version or immutable image digest and show that it
+treats `leaseId` as opaque. Repository tests cannot substitute for this check
+because the TrueNAS client is maintained outside this repository.
 
 ## Separately approved version and deployment sequence
 

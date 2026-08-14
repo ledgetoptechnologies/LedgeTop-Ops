@@ -81,14 +81,14 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "ba2f99b9d4710d81d21768c82f07dafb7293dd440b677327f5e3bfd065c69a8c");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "e15d191e2cff3a953c2f1ddf310f38160f141c5e77ba0b4aef24a90b1f393509");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
   assert.deepEqual(config.routes, [{ pattern: "client.ledgetopdroneservices.com", custom_domain: true }]);
   assert.equal(config.workers_dev, false);
   assert.equal(config.preview_urls, false);
-  assert.deepEqual(config.triggers, { crons: ["15 * * * *"] });
+  assert.deepEqual(config.triggers, { crons: ["*/5 * * * *", "15 * * * *"] });
   assert.deepEqual(config.assets, {
     binding: "ASSETS",
     directory: "./dist/client",
@@ -103,6 +103,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_REQUEST_V2_ENABLED, "false");
   assert.equal(config.vars.CLIENT_REQUEST_ATTACHMENTS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_V2_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_INVITATION_EMAIL_ENABLED, "false");
   assert.equal(config.vars.CLIENT_DELEGATED_SHARES_ENABLED, "false");

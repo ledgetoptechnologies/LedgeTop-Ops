@@ -29,6 +29,10 @@ function stagingConfig(app) {
         CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
         CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN,
         CLIENT_ACCESS_AUD: "a".repeat(64),
+        PROJECT_ALPHA_CATALOG_ACCESS_AUD: "b".repeat(64),
+        PROJECT_ALPHA_PORTAL_ACCESS_AUD: "c".repeat(64),
+        MAPBOX_PUBLIC_TOKEN: "pk.staging-client-mapbox-token",
+        CLIENT_PORTAL_INVITATION_FROM: "portal@staging.example.test",
       } : {}),
       CLOUD_TRANSFER_DROPBOX_ENABLED: "false",
       CLOUD_TRANSFER_GOOGLE_ENABLED: "false",
@@ -36,13 +40,23 @@ function stagingConfig(app) {
       DROPBOX_IMPORT_ENABLED: "false",
       DIRECT_DELIVERY_UPLOADS_ENABLED: "false",
       R2_PURGE_ENABLED: "false",
-      ...(app === "operations" ? { PROJECT_ALPHA_BASE_URL: "https://project-alpha-staging.test", INCOMING_EXPECTED_HOST: "incoming-staging.ledgetopdroneservices.com", INCOMING_BASE_URL: "https://incoming-staging.ledgetopdroneservices.com" } : {}),
+      ...(app === "operations" ? {
+        PROJECT_ALPHA_BASE_URL: STAGING_STATIC_VARS.operations.PROJECT_ALPHA_BASE_URL,
+        INCOMING_EXPECTED_HOST: "incoming-staging.ledgetopdroneservices.com",
+        INCOMING_BASE_URL: "https://incoming-staging.ledgetopdroneservices.com",
+        MAPBOX_PUBLIC_TOKEN: "pk.staging-operations-mapbox-token",
+        CLIENT_REQUEST_TRIAGE_TO: "triage@staging.example.test",
+        NOTIFICATION_FROM: "delivery@staging.example.test",
+      } : {}),
       ...(app === "ops-sync" ? { CF_ACCESS_GROUP_ID: "staging-group", CF_ACCESS_GROUP_NAME: "Staging Testers" } : {}),
     },
     secrets: { required: [...REQUIRED_STAGING_SECRETS[app]] },
     d1_databases: inventory.d1_databases,
     r2_buckets: inventory.r2_buckets,
     workflows: inventory.workflows,
+    services: inventory.services,
+    ...(app === "delivery" ? { send_email: [{ name: "CLIENT_PORTAL_INVITATION_EMAIL", allowed_sender_addresses: ["portal@staging.example.test"] }] } : {}),
+    ...(app === "operations" ? { send_email: [{ name: "NOTIFICATION_EMAIL", allowed_sender_addresses: ["delivery@staging.example.test"] }] } : {}),
     ratelimits: inventory.ratelimits,
     ...(inventory.queues.length || inventory.queueProducers?.length ? { queues: {
       consumers: inventory.queues,
@@ -60,6 +74,7 @@ function productionFrom(staging) {
   production.d1_databases = production.d1_databases.map((item) => ({ ...item, database_id: `prod-${item.database_id}` }));
   production.r2_buckets = production.r2_buckets.map((item) => ({ ...item, bucket_name: `prod-${item.bucket_name}` }));
   production.workflows = production.workflows.map((item) => ({ ...item, name: `prod-${item.name}` }));
+  production.services = production.services.map((item) => ({ ...item, service: item.service.replace("-staging", "") }));
   production.ratelimits = production.ratelimits.map((item) => ({ ...item, namespace_id: `prod-${item.namespace_id}` }));
   if (production.queues) {
     production.queues.consumers = production.queues.consumers.map((item) => ({ ...item, queue: `prod-${item.queue}` }));
@@ -106,10 +121,30 @@ test("requires the authenticated client portal origin for Operations mail", () =
   const errors = validateApp("operations", staging, productionFrom(staging));
   assert(errors.some((error) => error.includes("DELIVERY_BASE_URL")), errors.join(" | "));
 });
+test("requires staging-only map, triage, and email bindings", () => {
+  const delivery = stagingConfig("delivery");
+  delivery.vars.MAPBOX_PUBLIC_TOKEN = "";
+  delivery.vars.PROJECT_ALPHA_PORTAL_ACCESS_AUD = delivery.vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD;
+  delivery.send_email[0].allowed_sender_addresses = ["wrong@staging.example.test"];
+  const deliveryErrors = validateApp("delivery", delivery, productionFrom(stagingConfig("delivery")));
+  assert(deliveryErrors.some((error) => error.includes("MAPBOX_PUBLIC_TOKEN")), deliveryErrors.join(" | "));
+  assert(deliveryErrors.some((error) => error.includes("Access audiences must all be distinct")), deliveryErrors.join(" | "));
+  assert(deliveryErrors.some((error) => error.includes("invitation email binding")), deliveryErrors.join(" | "));
+
+  const operations = stagingConfig("operations");
+  operations.vars.CLIENT_REQUEST_TRIAGE_TO = "not-an-email";
+  operations.send_email = [];
+  const operationsErrors = validateApp("operations", operations, productionFrom(stagingConfig("operations")));
+  assert(operationsErrors.some((error) => error.includes("CLIENT_REQUEST_TRIAGE_TO")), operationsErrors.join(" | "));
+  assert(operationsErrors.some((error) => error.includes("notification email binding")), operationsErrors.join(" | "));
+});
 test("requires shared staging resources to agree", () => {
   const configs = { delivery: stagingConfig("delivery"), operations: stagingConfig("operations"), "ops-sync": stagingConfig("ops-sync") };
   configs.operations.d1_databases[1].database_id = "wrong";
-  assert(validateCrossApp(configs).some((error) => error.includes("DELIVERY_DB")));
+  configs.delivery.services[0].service = "wrong-ops-staging";
+  const errors = validateCrossApp(configs);
+  assert(errors.some((error) => error.includes("DELIVERY_DB")));
+  assert(errors.some((error) => error.includes("delegated-share signer")));
 });
 test("resolves logical delivery staging files from apps/client", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-layout-"));

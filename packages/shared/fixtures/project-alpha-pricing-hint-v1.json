@@ -1,0 +1,29 @@
+{
+  "contract": "ltds-project-alpha-pricing-hint-v1",
+  "request": {
+    "schemaVersion": 1,
+    "source": "ltds-client-portal",
+    "scope": "portal.pricing.preview",
+    "authorizationContext": {
+      "workspaceRoot": {
+        "type": "organization",
+        "publicId": "pa-org-acme"
+      },
+      "projectPublicId": "pa-project-north-site"
+    },
+    "coverageSquareMetres": "889000.000000",
+    "services": [
+      {
+        "publicId": "svc-mapping",
+        "sourceVersion": "v7"
+      }
+    ]
+  },
+  "authorizationRules": {
+    "workspaceRootTypes": ["organization", "standalone_client"],
+    "identifiersAreOpaquePublicIds": true,
+    "numericLegacyIdsAllowed": false,
+    "projectContextRequired": true,
+    "browserSuppliedContextAllowed": false
+  }
+}

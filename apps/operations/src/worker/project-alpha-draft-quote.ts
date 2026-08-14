@@ -19,6 +19,8 @@ const MAX_COMMAND_BYTES = 96 * 1024;
 const SQUARE_METERS_PER_ACRE = 4_046.8564224;
 const EARTH_RADIUS_METERS = 6_371_008.8;
 const SAFE_PUBLIC_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const OPAQUE_PUBLIC_ID = /^(?=.{1,128}$)(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const SHA256_HEX = /^[a-f0-9]{64}$/;
 
 interface RequestRow {
   id: string;
@@ -98,6 +100,44 @@ export interface ProjectAlphaDraftQuoteResult {
   };
 }
 
+const opaquePublicId = z.string().trim().min(1).max(128).regex(OPAQUE_PUBLIC_ID);
+const projectAlphaDraftQuotePayloadSchema = z.object({
+  schemaVersion: z.literal(1),
+  source: z.literal("ltds-operations"),
+  request: z.object({
+    publicId: opaquePublicId,
+    revision: z.number().int().positive(),
+    title: z.string().min(1).max(160),
+    scopeSummary: z.string().min(1).max(5_000),
+    deliverablesSummary: z.string().min(1).max(2_000).nullable(),
+  }).strict(),
+  authorization: z.object({
+    organizationPublicId: opaquePublicId.nullable(),
+    clientPublicId: opaquePublicId,
+    projectPublicId: opaquePublicId.nullable(),
+  }).strict(),
+  services: z.array(z.object({
+    publicId: opaquePublicId,
+    catalogVersion: z.string().trim().min(1).max(128).regex(SAFE_PUBLIC_ID),
+    answers: z.record(z.string(), z.unknown()),
+  }).strict()).min(1).max(10),
+  workArea: z.object({
+    revision: z.number().int().nonnegative(),
+    hash: z.string().regex(SHA256_HEX),
+    squareMeters: z.number().nonnegative().nullable(),
+    acres: z.number().nonnegative().nullable(),
+  }).strict().refine(
+    area => (area.squareMeters === null) === (area.acres === null),
+    "squareMeters and acres must both be present or both be null",
+  ),
+  attachments: z.array(z.object({
+    name: z.string().min(1).max(255),
+    contentType: z.string().min(1).max(100),
+    sizeBytes: z.number().int().positive().safe(),
+    sha256: z.string().regex(SHA256_HEX),
+  }).strict()).max(10),
+}).strict();
+
 interface ReceiptRow {
   request_revision: number;
   area_revision: number;
@@ -114,9 +154,9 @@ interface ReceiptRow {
 }
 
 const responseSchema = z.object({
-  receiptId: z.string().trim().min(1).max(128).regex(SAFE_PUBLIC_ID),
+  receiptId: opaquePublicId,
   draftQuote: z.object({
-    publicId: z.string().trim().min(1).max(128).regex(SAFE_PUBLIC_ID),
+    publicId: opaquePublicId,
     documentNumber: z.string().trim().min(1).max(120).nullable(),
     status: z.literal("draft"),
     version: z.number().int().positive(),
@@ -126,6 +166,16 @@ const responseSchema = z.object({
     ),
   }).strict(),
 }).strict();
+
+export function parseProjectAlphaDraftQuotePayload(value: unknown): ProjectAlphaDraftQuotePayload | null {
+  const parsed = projectAlphaDraftQuotePayloadSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+export function parseProjectAlphaDraftQuoteResult(value: unknown): ProjectAlphaDraftQuoteResult | null {
+  const parsed = responseSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
 
 const errorSchema = z.object({
   code: z.enum(["IDEMPOTENCY_CONFLICT", "STALE_CATALOG", "SCOPE_DENIED", "INVALID_REQUEST"]).optional(),
@@ -224,7 +274,7 @@ export function projectAlphaDraftIdempotencyKey(
   areaRevision: number,
 ): string {
   if (
-    !SAFE_PUBLIC_ID.test(requestPublicId) ||
+    !OPAQUE_PUBLIC_ID.test(requestPublicId) ||
     !Number.isSafeInteger(requestRevision) || requestRevision < 1 ||
     !Number.isSafeInteger(areaRevision) || areaRevision < 0
   ) throw new Error("Invalid Project Alpha draft revision identity");
@@ -318,7 +368,10 @@ export async function sendProjectAlphaDraftQuoteCommand(
   const configuration = integrationConfiguration(env);
   if (!configuration)
     throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "Project Alpha draft creation is not available");
-  const rawBody = canonicalProjectAlphaJson(payload);
+  const validatedPayload = parseProjectAlphaDraftQuotePayload(payload);
+  if (!validatedPayload)
+    throw new ProjectAlphaDraftQuoteError(409, "invalid_response", "The Project Alpha draft command is invalid");
+  const rawBody = canonicalProjectAlphaJson(validatedPayload);
   if (new TextEncoder().encode(rawBody).byteLength > MAX_COMMAND_BYTES)
     throw new ProjectAlphaDraftQuoteError(409, "invalid_response", "The Project Alpha draft command is too large");
   const bodyHash = await sha256Hex(rawBody);
@@ -363,10 +416,10 @@ export async function sendProjectAlphaDraftQuoteCommand(
         : "Project Alpha rejected the draft command",
     );
   }
-  const parsed = responseSchema.safeParse(await response.json().catch(() => null));
-  if (!parsed.success)
+  const parsed = parseProjectAlphaDraftQuoteResult(await response.json().catch(() => null));
+  if (!parsed)
     throw new ProjectAlphaDraftQuoteError(502, "invalid_response", "Project Alpha returned an invalid draft receipt");
-  return parsed.data;
+  return parsed;
 }
 
 async function requestForDraft(env: Env, requestId: string): Promise<RequestRow | null> {
@@ -407,9 +460,9 @@ async function latestReceipt(env: Env, requestId: string): Promise<ReceiptRow | 
 }
 
 async function buildPayload(env: Env, row: RequestRow): Promise<ProjectAlphaDraftQuotePayload> {
-  if (!SAFE_PUBLIC_ID.test(row.id))
+  if (!OPAQUE_PUBLIC_ID.test(row.id))
     throw new HTTPException(409, { message: "This request has an invalid public identifier" });
-  if (!row.project_alpha_client_id || !SAFE_PUBLIC_ID.test(row.project_alpha_client_id))
+  if (!row.project_alpha_client_id || !OPAQUE_PUBLIC_ID.test(row.project_alpha_client_id))
     throw new HTTPException(409, { message: "This client request is not linked to an authorized Project Alpha client" });
   if (
     row.portal_project_id !== null &&
@@ -418,7 +471,7 @@ async function buildPayload(env: Env, row: RequestRow): Promise<ProjectAlphaDraf
     message: "This request is no longer linked to an authorized Project Alpha project",
   });
   for (const optionalId of [row.project_alpha_organization_id, row.project_alpha_project_id]) {
-    if (optionalId !== null && !SAFE_PUBLIC_ID.test(optionalId))
+    if (optionalId !== null && !OPAQUE_PUBLIC_ID.test(optionalId))
       throw new HTTPException(409, { message: "This request has an invalid Project Alpha authorization link" });
   }
   if (row.request_revision < 1)
@@ -470,7 +523,7 @@ async function buildPayload(env: Env, row: RequestRow): Promise<ProjectAlphaDraf
       projectPublicId: row.project_alpha_project_id,
     },
     services: serviceResult.results.map(service => {
-      if (!SAFE_PUBLIC_ID.test(service.service_public_id) || !SAFE_PUBLIC_ID.test(service.service_source_version))
+      if (!OPAQUE_PUBLIC_ID.test(service.service_public_id) || !SAFE_PUBLIC_ID.test(service.service_source_version))
         throw new HTTPException(409, { message: "A selected Project Alpha service identifier is invalid" });
       return {
         publicId: service.service_public_id,

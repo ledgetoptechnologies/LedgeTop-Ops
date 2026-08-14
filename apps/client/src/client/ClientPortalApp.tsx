@@ -29,6 +29,10 @@ import {
   loadPortalWorkspaceAccess,
   loadPortalWorkspaceHierarchy,
   loadPortalWorkspaces,
+  loadPortalDelegatedShares,
+  loadPortalDelegatedShareTargets,
+  createPortalDelegatedShare,
+  revokePortalDelegatedShare,
   invitePortalWorkspaceMember,
   revokePortalWorkspaceInvitation,
   suspendPortalWorkspaceMember,
@@ -60,6 +64,9 @@ import {
   type PortalWorkspaceEntry,
   type PortalWorkspaceInvitation,
   type PortalWorkspaceMember,
+  type PortalDelegatedShare,
+  type PortalDelegatedShareCreated,
+  type PortalDelegatedShareTarget,
 } from "./portal-api";
 import {
   clientPortalPath,
@@ -730,7 +737,7 @@ function NewServiceRequestWizard({
   const persist = (snapshot: PortalServiceDraftInput, serialized: string): Promise<void> => {
     saveChain.current = saveChain.current.catch(() => undefined).then(async () => {
       if (serialized === lastSaved.current) return;
-      if (mounted.current) { setSaveState("saving"); setMessage(""); }
+      if (mounted.current) setSaveState("saving");
       try {
         const current = draftRef.current;
         const saved = current
@@ -838,9 +845,11 @@ function NewServiceRequestWizard({
     return () => window.clearTimeout(timer);
   }, [inputJson, dirty, saveState]);
 
-  const change = (setter: () => void) => { setter(); setDirty(true); setSaveState("idle"); };
+  const change = (setter: () => void) => { setter(); setDirty(true); setSaveState("idle"); setMessage(""); };
   const selectedCatalog = selectedServices.map(id => catalog.find(service => service.publicId === id)).filter((service): service is PortalServiceCatalogItem => Boolean(service));
   const servicesComplete = selectedCatalog.length > 0 && selectedCatalog.every(service => service.questions.every(question => questionIsAnswered(question, answers[service.publicId]?.[question.id])));
+  const geometryRequired = selectedCatalog.some(service => service.geometryRequirement === "required");
+  const geometryComplete = !geometryRequired || areaGeoJson !== null;
 
   function goTo(next: RequestStep, replace = false) {
     const url = new URL(window.location.href);
@@ -852,6 +861,7 @@ function NewServiceRequestWizard({
 
   async function next() {
     if (step === "services" && !servicesComplete) { setMessage("Select at least one service and answer its required questions."); return; }
+    if (step === "location" && !geometryComplete) { setMessage("Draw the required work area on the map before continuing."); return; }
     if (step === "details" && (!title.trim() || !details.trim())) { setMessage("Add a request title and description before continuing."); return; }
     if (step === "contact" && siteContactEmail && !/^\S+@\S+\.\S+$/.test(siteContactEmail)) { setMessage("Enter a valid on-site contact email or leave it blank."); return; }
     setMessage("");
@@ -862,8 +872,9 @@ function NewServiceRequestWizard({
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const pendingAttachments = attachments.some(item => ["queued", "uploading", "quarantined", "scanning", "error"].includes(item.status));
-    if (step !== "review" || submitting || pendingAttachments || !servicesComplete || !title.trim() || !details.trim()) {
+    if (step !== "review" || submitting || pendingAttachments || !servicesComplete || !geometryComplete || !title.trim() || !details.trim()) {
       if (pendingAttachments) setMessage("Wait for every attachment to be accepted or rejected before submitting.");
+      else if (!geometryComplete) setMessage("Return to Work area and draw the area required by the selected service.");
       return;
     }
     setSubmitting(true);
@@ -887,15 +898,15 @@ function NewServiceRequestWizard({
       {catalogState === "loading" && <div aria-label="Loading service library"><Loading /></div>}
       {catalogState === "error" && <div className="portal-inline-error" role="alert"><p>The service library could not be loaded. No request data was lost.</p><button type="button" className="button-ghost" onClick={reloadCatalog}>Retry</button></div>}
       {catalogState === "ready" && catalog.length === 0 && <EmptyState title="No services available" detail="LTDS has not published any client-request services yet." />}
-      <div className="portal-service-catalog">{catalog.map(service => { const selected = selectedServices.includes(service.publicId); return <article key={service.publicId} className={selected ? "is-selected" : ""}><label className="portal-service-select"><input type="checkbox" checked={selected} disabled={!selected && selectedServices.length >= 10} onChange={(event) => change(() => setSelectedServices(current => event.target.checked ? [...current, service.publicId] : current.filter(id => id !== service.publicId)))} /><span><strong>{service.name}</strong>{service.summary && <small>{service.summary}</small>}</span></label>{selected && service.questions.length > 0 && <div className="portal-service-questions">{service.questions.map(question => <ServiceQuestionField key={question.id} serviceId={service.publicId} question={question} value={answers[service.publicId]?.[question.id]} onChange={value => change(() => setAnswers(current => ({ ...current, [service.publicId]: { ...(current[service.publicId] ?? {}), [question.id]: value } })))} />)}</div>}</article>; })}</div>
+      <div className="portal-service-catalog">{catalog.map(service => { const selected = selectedServices.includes(service.publicId); return <article key={service.publicId} className={selected ? "is-selected" : ""}><label className="portal-service-select"><input type="checkbox" checked={selected} disabled={!selected && selectedServices.length >= 10} onChange={(event) => change(() => setSelectedServices(current => event.target.checked ? [...current, service.publicId] : current.filter(id => id !== service.publicId)))} /><span><span className="portal-service-meta"><small>{service.category}</small><small>{service.geometryRequirement === "required" ? "Work area required" : service.geometryRequirement === "none" ? "No work area needed" : "Work area optional"}</small></span><strong>{service.name}</strong>{service.summary && <small>{service.summary}</small>}</span></label>{selected && service.questions.length > 0 && <div className="portal-service-questions">{service.questions.map(question => <ServiceQuestionField key={question.id} serviceId={service.publicId} question={question} value={answers[service.publicId]?.[question.id]} onChange={value => change(() => setAnswers(current => ({ ...current, [service.publicId]: { ...(current[service.publicId] ?? {}), [question.id]: value } })))} />)}</div>}</article>; })}</div>
     </section>}
-    {step === "location" && <section className="portal-wizard-panel" aria-labelledby="request-location-title"><header><span>Step 2 of 5</span><h3 id="request-location-title">Show us the work area</h3><p>Search, add points, or draw the area directly on the secure map. Clients cannot upload or import KML files.</p></header><div className="portal-request-map portal-request-map-step"><MapAreaSelector value={areaGeoJson} onChange={value => change(() => setAreaGeoJson(value))} token={mapboxPublicToken} points={points} onPoints={value => change(() => setPoints(value))} locationLabel={location} onLocationLabel={value => change(() => setLocation(value))} /></div>{draft?.areaAcres != null && <div className="portal-coverage-card"><span>Estimated coverage</span><strong>{draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres</strong><small>Calculated by LTDS from the area drawn above.</small></div>}</section>}
+    {step === "location" && <section className="portal-wizard-panel" aria-labelledby="request-location-title"><header><span>Step 2 of 5</span><h3 id="request-location-title">Show us the work area</h3><p>{geometryRequired ? "One or more selected services require a drawn work area. Search, add points, or draw the area directly on the secure map." : "The selected services do not require a work area, but you may add one when it helps explain the scope."} Clients cannot upload or import KML files.</p></header><div className="portal-request-map portal-request-map-step"><MapAreaSelector value={areaGeoJson} onChange={value => change(() => setAreaGeoJson(value))} token={mapboxPublicToken} points={points} onPoints={value => change(() => setPoints(value))} locationLabel={location} onLocationLabel={value => change(() => setLocation(value))} /></div>{draft?.areaAcres != null && <div className="portal-coverage-card"><span>Estimated coverage</span><strong>{draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres</strong><small>Calculated by LTDS from the area drawn above.</small></div>}</section>}
     {step === "details" && <section className="portal-wizard-panel" aria-labelledby="request-details-title"><header><span>Step 3 of 5</span><h3 id="request-details-title">Scope and timing</h3><p>Describe the outcome you need. LTDS will confirm feasibility and the final scope.</p></header>{!fixedProjectId && <label>Project context<select value={projectId} onChange={event => change(() => setProjectId(event.target.value))}><option value="">New or one-off service</option>{eligibleProjects.map(project => <option key={project.id} value={project.id}>{project.projectName}</option>)}</select></label>}<label>Service request title<input value={title} onChange={event => change(() => setTitle(event.target.value))} maxLength={160} required /></label><label>What do you need?<textarea value={details} onChange={event => change(() => setDetails(event.target.value))} maxLength={5000} rows={6} required /></label><div className="portal-form-grid"><label>Location <span>(optional)</span><input value={location} onChange={event => change(() => setLocation(event.target.value))} maxLength={240} /></label><label>Preferred start <span>(optional)</span><input type="datetime-local" value={preferredStartAt} onChange={event => change(() => setPreferredStartAt(event.target.value))} /></label><label>Desired completion <span>(optional)</span><input type="datetime-local" value={desiredCompletionAt} onChange={event => change(() => setDesiredCompletionAt(event.target.value))} /></label></div><label>Requested deliverables <span>(optional)</span><textarea value={deliverables} onChange={event => change(() => setDeliverables(event.target.value))} maxLength={2000} rows={4} /></label></section>}
     {step === "contact" && <section className="portal-wizard-panel" aria-labelledby="request-contact-title"><header><span>Step 4 of 5</span><h3 id="request-contact-title">Contact and supporting files</h3><p>Add an optional on-site contact and any authorized reference photos or PDFs.</p></header><fieldset className="portal-contact-fields"><legend>Contact details <span>(optional)</span></legend><label>Name<input value={siteContactName} onChange={event => change(() => setSiteContactName(event.target.value))} maxLength={160} /></label><label>Email<input type="email" value={siteContactEmail} onChange={event => change(() => setSiteContactEmail(event.target.value))} maxLength={320} /></label><label>Phone<input type="tel" value={siteContactPhone} onChange={event => change(() => setSiteContactPhone(event.target.value))} maxLength={64} /></label></fieldset>{attachmentsEnabled ? <div className="portal-attachment-uploader"><header><div><strong>Supporting files</strong><p>Up to 10 JPEG, PNG, WebP, HEIC, HEIF, or PDF files; 25 MiB each and 100 MiB total. Archives are not allowed.</p></div><label className="button-ghost portal-file-picker">Add files<input type="file" multiple accept=".jpg,.jpeg,.png,.webp,.heic,.heif,.pdf,image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf" onChange={event => { addAttachments(event.target.files); event.currentTarget.value = ""; }} /></label></header>{attachmentMessage && <p role="alert" className="portal-message error">{attachmentMessage}</p>}<div className="portal-attachment-list" aria-live="polite">{attachments.map(item => <article key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)} / {attachmentStatusLabel(item.status)}</span></div><progress max={item.size} value={Math.min(item.uploadedBytes, item.size)} aria-label={`${item.name} upload progress`} /><small>{item.totalParts ? `${item.completedParts} of ${item.totalParts} parts` : "Preparing upload"}</small>{item.error && <p role="alert">{item.error}</p>}<div>{item.status === "error" && <button type="button" className="button-ghost button-small" onClick={() => void uploadAttachment(item)}>Retry</button>}{["queued", "uploading", "error"].includes(item.status) && <button type="button" className="button-ghost button-small" onClick={() => void removeAttachment(item)}>Remove</button>}</div></article>)}</div></div> : <div className="portal-attachments-coming"><strong>Supporting files are coming soon</strong><p>Secure request attachments are not enabled for this portal. Do not place sensitive file links in the description.</p></div>}</section>}
     {step === "review" && <section className="portal-wizard-panel portal-review" aria-labelledby="request-review-title"><header><span>Step 5 of 5</span><h3 id="request-review-title">Review your request</h3><p>Nothing is submitted until you select Submit request.</p></header><div className="portal-review-grid"><article><header><h4>Services</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("services")}>Edit services</button></header><ul>{selectedCatalog.map(service => <li key={service.publicId}><strong>{service.name}</strong>{service.questions.map(question => { const value = answers[service.publicId]?.[question.id]; if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) return null; const labels = question.type === "select" || question.type === "multi_select" ? question.options.filter(option => (Array.isArray(value) ? value : [value]).includes(option.value)).map(option => option.label).join(", ") : typeof value === "boolean" ? value ? "Yes" : "No" : String(value); return <span key={question.id}>{question.label}: {labels}</span>; })}</li>)}</ul></article><article><header><h4>Work area</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("location")}>Edit work area</button></header><p>{location || "No location label provided"}</p><p>{draft?.areaAcres != null ? `${draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres` : areaGeoJson ? "Coverage is being calculated" : "No polygon drawn"} / {points.length} point{points.length === 1 ? "" : "s"}</p></article><article><header><h4>Scope and timing</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("details")}>Edit details</button></header><strong>{title || "Title required"}</strong><p>{details || "Description required"}</p><p>{projectId ? eligibleProjects.find(project => project.id === projectId)?.projectName ?? "Authorized project" : "New or one-off service"}</p><p>{deliverables || "No separate deliverables noted"}</p></article><article><header><h4>Contact</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit contact</button></header><p>{siteContactName || "No on-site contact"}</p>{siteContactEmail && <p>{siteContactEmail}</p>}{siteContactPhone && <p>{siteContactPhone}</p>}</article></div><aside className="portal-pricing-hint"><span>Planning guidance</span>{pricingHint ? <><strong>{pricingHint.kind === "starting_at" ? `Starting at ${formatRequestMoney(pricingHint.startingAtMinor, pricingHint.currency)}` : `Typical range ${formatRequestMoney(pricingHint.minimumMinor, pricingHint.currency)} to ${formatRequestMoney(pricingHint.maximumMinor, pricingHint.currency)}`}</strong><p>{pricingHint.disclaimer}</p></> : <><strong>Final quote after review</strong><p>A reliable price hint is not available for this request. Submitting does not authorize work or create a charge. LTDS will review the scope and create the actual estimate in Project Alpha.</p></>}</aside></section>}
     {step === "review" && <section className="portal-review-attachments" aria-labelledby="review-attachments-title"><header><h3 id="review-attachments-title">Supporting files</h3><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit files</button></header>{attachments.length ? <ul>{attachments.filter(item => item.status !== "aborted").map(item => <li key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)}</span></div><span className={`portal-attachment-status ${item.status}`}>{attachmentStatusLabel(item.status)}</span></li>)}</ul> : <p>No supporting files were added.</p>}</section>}
     {message && <p className="portal-message error" role="alert">{message}</p>}
-    <div className="portal-form-actions portal-wizard-actions">{onCancel && <button type="button" className="button-ghost" onClick={onCancel}>Cancel</button>}{step !== "services" && <button type="button" className="button-ghost" onClick={() => goTo(REQUEST_STEPS[REQUEST_STEPS.indexOf(step) - 1]!)}>Back</button>}{step === "review" ? <button key="submit-request" type="submit" className="button-orange" disabled={submitting || saveState === "conflict" || attachments.some(item => ["queued", "uploading", "quarantined", "scanning", "error"].includes(item.status))}>{submitting ? "Submitting..." : "Submit request"}</button> : <button key="continue-request" type="button" className="button-orange" onClick={() => void next()}>Continue</button>}</div>
+    <div className="portal-form-actions portal-wizard-actions">{onCancel && <button type="button" className="button-ghost" onClick={onCancel}>Cancel</button>}{step !== "services" && <button type="button" className="button-ghost" onClick={() => goTo(REQUEST_STEPS[REQUEST_STEPS.indexOf(step) - 1]!)}>Back</button>}{step === "review" ? <button key="submit-request" type="submit" className="button-orange" disabled={submitting || saveState === "conflict" || !geometryComplete || attachments.some(item => ["queued", "uploading", "quarantined", "scanning", "error"].includes(item.status))}>{submitting ? "Submitting..." : "Submit request"}</button> : <button key="continue-request" type="button" className="button-orange" onClick={() => void next()}>Continue</button>}</div>
   </form>;
 }
 
@@ -1374,6 +1385,88 @@ function ProjectWorkspace({
   );
 }
 
+function DelegatedSharePanel({ workspaceId }: { workspaceId: string }) {
+  const [targets, setTargets] = useState<PortalDelegatedShareTarget[]>([]);
+  const [shares, setShares] = useState<PortalDelegatedShare[]>([]);
+  const [selected, setSelected] = useState("");
+  const [label, setLabel] = useState("");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [accessCode, setAccessCode] = useState("");
+  const [created, setCreated] = useState<PortalDelegatedShareCreated | null>(null);
+  const [busy, setBusy] = useState(true);
+  const [error, setError] = useState("");
+
+  const refresh = async () => {
+    setBusy(true); setError("");
+    try {
+      const [nextTargets, nextShares] = await Promise.all([
+        loadPortalDelegatedShareTargets(workspaceId), loadPortalDelegatedShares(workspaceId),
+      ]);
+      setTargets(nextTargets); setShares(nextShares);
+      setSelected(current => nextTargets.some(target => `${target.delegationId}:${target.folderTargetId}` === current)
+        ? current : nextTargets[0] ? `${nextTargets[0].delegationId}:${nextTargets[0].folderTargetId}` : "");
+    } catch (caught) { setError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  useEffect(() => { void refresh(); }, [workspaceId]);
+  const target = targets.find(candidate => `${candidate.delegationId}:${candidate.folderTargetId}` === selected) ?? null;
+
+  const create = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!target || busy) return;
+    setBusy(true); setError(""); setCreated(null);
+    try {
+      const expiration = new Date(expiresAt);
+      if (!Number.isFinite(expiration.getTime())) throw new Error("Choose a valid expiration date and time.");
+      const maximum = Math.min(
+        Date.now() + target.maximumLinkLifetimeSeconds * 1000,
+        Date.parse(target.delegationExpiresAt),
+      );
+      if (expiration.getTime() > maximum) throw new Error("That expiration exceeds the approved sharing policy.");
+      const result = await createPortalDelegatedShare(workspaceId, {
+        delegationId: target.delegationId, folderTargetId: target.folderTargetId,
+        label: label.trim() || null, expiresAt: expiration.toISOString(),
+        ...(accessCode.trim() ? { accessCode: accessCode.trim() } : {}),
+      });
+      setCreated(result); setAccessCode("");
+      setShares(await loadPortalDelegatedShares(workspaceId));
+    } catch (caught) { setError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  return <Card title="Client-created public links" className="portal-delegated-share-card">
+    <p className="portal-copy">Create a separate client link only for a folder LTDS approved. Links never expand when a folder or account changes.</p>
+    {error && <p className="portal-message" role="alert">{error}</p>}
+    {created && <div className="portal-share-created" role="status">
+      <strong>Link created — copy it now</strong>
+      <p>The private fragment is shown only in this response. It is not available from link history.</p>
+      <div><input readOnly aria-label="New client public link" value={created.shareUrl} /><button type="button" className="button-ghost button-small" onClick={() => void navigator.clipboard.writeText(created.shareUrl)}>Copy</button></div>
+    </div>}
+    {targets.length > 0 ? <form className="portal-delegated-share-form" onSubmit={create}>
+      <label>Approved folder<select value={selected} disabled={busy} onChange={event => setSelected(event.target.value)}>
+        {targets.map(option => <option key={`${option.delegationId}:${option.folderTargetId}`} value={`${option.delegationId}:${option.folderTargetId}`}>{option.displayName}</option>)}
+      </select></label>
+      <label>Link label (optional)<input maxLength={160} value={label} disabled={busy} onChange={event => setLabel(event.target.value)} /></label>
+      <label>Expires<input type="datetime-local" required value={expiresAt} disabled={busy} onChange={event => setExpiresAt(event.target.value)} /></label>
+      <label>Access code {target?.requirePassword ? "(required)" : "(optional)"}<input type="password" minLength={8} maxLength={128} required={target?.requirePassword === true} value={accessCode} disabled={busy} autoComplete="new-password" onChange={event => setAccessCode(event.target.value)} /></label>
+      <small>Maximum lifetime: {Math.floor((target?.maximumLinkLifetimeSeconds ?? 0) / 86400)} day(s). The link stops immediately if LTDS or your workspace manager access is revoked.</small>
+      <button className="button-orange" disabled={busy || !target}>{busy ? "Creating…" : "Create public link"}</button>
+    </form> : !busy && <p className="portal-copy">No folders are currently approved for client-created links.</p>}
+    <section className="portal-delegated-share-history"><h3>Link history</h3>
+      {busy && !shares.length ? <Loading /> : shares.length ? shares.map(share => <div className="portal-team-row" key={share.id}>
+        <span><strong>{share.label || "Client public link"}</strong><small>{share.status} · Expires {formatDate(share.expiresAt)}</small></span>
+        {share.status === "active" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={async () => {
+          if (!window.confirm("Revoke this public link? Anyone using it will immediately lose access.")) return;
+          setBusy(true); setError("");
+          try { await revokePortalDelegatedShare(workspaceId, share.id); setShares(await loadPortalDelegatedShares(workspaceId)); }
+          catch (caught) { setError((caught as Error).message); } finally { setBusy(false); }
+        }}>Revoke</button>}
+      </div>) : <p className="portal-copy">No client-created links yet.</p>}
+    </section>
+  </Card>;
+}
+
 function WorkspaceTeamPanel({ invitationEmailDelivery }: { invitationEmailDelivery: boolean }) {
   const [workspaces, setWorkspaces] = useState<PortalWorkspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
@@ -1821,6 +1914,9 @@ export function ClientPortalApp({
             emptyDetail="Files published to your client archive will appear here."
           />
         </Card>
+        {capabilities.delegatedShares && selectedWorkspaceId && (
+          <DelegatedSharePanel workspaceId={selectedWorkspaceId} />
+        )}
       </>
     );
   else if (page === "requests")

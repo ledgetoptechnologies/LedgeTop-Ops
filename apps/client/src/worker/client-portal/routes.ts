@@ -54,6 +54,7 @@ import {
   clientDelegatedShareCreationCapability,
   consumeClientDelegatedShareRate,
   listClientDelegatedShares,
+  listClientDelegatedShareTargets,
   revokeClientDelegatedShare,
   verifyAndRecordClientDelegatedShareSignerResult,
 } from "./delegated-shares";
@@ -65,11 +66,16 @@ import {
   workspaceMembershipManagementEnabled,
 } from "./workspace-memberships";
 import { invitationEmailDeliveryEnabled } from "./invitation-email";
+import {
+  resolveProjectAlphaPricingAuthorizationContext,
+  type ProjectAlphaPricingAuthorizationContextResolver,
+} from "./project-alpha-pricing-hint";
 
 interface ClientPortalDependencies {
   resolvePrincipal?: ResolveClientPrincipal;
   repository?: ClientPortalRepository;
   pricingHintProvider?: ClientPricingHintProvider;
+  pricingAuthorizationContextResolver?: ProjectAlphaPricingAuthorizationContextResolver;
 }
 
 type ClientPortalVariables = {
@@ -237,6 +243,10 @@ const workspaceInvitationAcceptanceBody = z.object({
 const workspaceInvitationBody = z.object({
   email: z.string().trim().email().max(320),
   projectPublicId: opaqueId.optional(),
+  targetScope: z.object({
+    type: z.enum(["organization", "department", "client", "project"]),
+    publicId: opaqueId,
+  }).strict().optional(),
   organizationWide: z.boolean().optional(),
   confirmOrganizationWide: z.boolean().optional(),
   capabilities: z.array(z.enum(["workspace.view", "delivery.view", "request.create"])).min(1).max(3),
@@ -500,6 +510,15 @@ export function createClientPortalRouter(
     const shares = await listClientDelegatedShares(c.env, c.get("clientPrincipal"), workspaceId.data);
     if (!shares) throw new HTTPException(404, { message: "Workspace not found" });
     return c.json({ shares, creation: clientDelegatedShareCreationCapability(c.env) });
+  });
+
+  router.get("/v2/workspaces/:workspaceId/delegated-share-targets", async (c) => {
+    if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
+    if (!workspaceId.success) throw new HTTPException(404, { message: "Workspace not found" });
+    const targets = await listClientDelegatedShareTargets(c.env, c.get("clientPrincipal"), workspaceId.data);
+    if (!targets) throw new HTTPException(404, { message: "Workspace not found" });
+    return c.json({ targets, creation: clientDelegatedShareCreationCapability(c.env) });
   });
 
   router.post("/v2/workspaces/:workspaceId/delegated-shares", async (c) => {
@@ -1123,7 +1142,19 @@ export function createClientPortalRouter(
     if (!dependencies.pricingHintProvider)
       return c.json({ available: false, hint: null });
     try {
-      const provided = await dependencies.pricingHintProvider({ services: draft.services, areaSquareMeters: draft.areaSquareMeters, areaAcres: draft.areaAcres }, c.env);
+      const workspace = selectedWorkspace(c);
+      if (!workspace || !draft.projectId || !(await authorizeProject(c, "request.create", draft.projectId)))
+        return c.json({ available: false, hint: null });
+      const authorizationContext = await (
+        dependencies.pricingAuthorizationContextResolver ?? resolveProjectAlphaPricingAuthorizationContext
+      )(c.env, workspace, draft.projectId);
+      if (!authorizationContext) return c.json({ available: false, hint: null });
+      const provided = await dependencies.pricingHintProvider({
+        services: draft.services,
+        areaSquareMeters: draft.areaSquareMeters,
+        areaAcres: draft.areaAcres,
+        authorizationContext,
+      }, c.env);
       const validated = pricingHint.safeParse(provided);
       if (!validated.success) return c.json({ available: false, hint: null });
       return c.json({ available: true, hint: validated.data });

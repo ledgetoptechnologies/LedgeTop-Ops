@@ -27,6 +27,7 @@ const polygon = {
 };
 const service = {
   publicId: "svc-mapping", sourceVersion: "v7", name: "2D Mapping", summary: "Orthomosaic mapping",
+  category: "Mapping", displayOrder: 10, geometryRequirement: "required" as const,
   questions: [{ id: "resolution", label: "Resolution", type: "select" as const, required: true, helpText: null, options: [{ value: "standard", label: "Standard" }] }],
   answers: { resolution: "standard" },
 };
@@ -124,19 +125,14 @@ describe("service request v2 routes", () => {
     expect(create).not.toHaveBeenCalled();
   });
 
-  it("passes only the stored authoritative draft to the advisory provider and fails open", async () => {
+  it("keeps pricing unavailable without an authorized v2 workspace/project context", async () => {
     const getServiceRequestDraft = vi.fn(async () => draft);
-    const provider = vi.fn(async (input) => {
-      expect(input).toEqual({ services: draft.services, areaSquareMeters: 889_000, areaAcres: 219.7 });
-      return { kind: "starting_at" as const, currency: "USD", startingAtMinor: 150_000, disclaimer: "Final quote after review.", basisVersion: "pricing-v3", validUntil: "2026-08-13T13:00:00.000Z" };
-    });
+    const provider = vi.fn(async () => ({ kind: "starting_at" as const, currency: "USD", startingAtMinor: 150_000, disclaimer: "Final quote after review.", basisVersion: "pricing-v3", validUntil: "2026-08-13T13:00:00.000Z" }));
     const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ getServiceRequestDraft }), pricingHintProvider: provider });
     const response = await app.request("https://client.example/service-request-drafts/draft-a/pricing-hint", {}, env);
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ available: true, hint: { kind: "starting_at", startingAtMinor: 150_000 } });
-
-    const unavailable = createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ getServiceRequestDraft }), pricingHintProvider: vi.fn(async () => { throw new Error("provider down"); }) });
-    expect(await (await unavailable.request("https://client.example/service-request-drafts/draft-a/pricing-hint", {}, env)).json()).toEqual({ available: false, hint: null });
+    expect(await response.json()).toEqual({ available: false, hint: null });
+    expect(provider).not.toHaveBeenCalled();
   });
 
   it("submits with version and idempotency headers and preserves replay status", async () => {

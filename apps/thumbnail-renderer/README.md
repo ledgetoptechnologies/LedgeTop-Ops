@@ -22,8 +22,11 @@ The broker never PUTs an R2 object or uploads source bytes. The decoder never
 receives an R2 or Operations credential. Neither service publishes a port.
 
 Videos, Office documents, archives, and other unsupported formats are skipped
-without transfer and remain on their local type-specific icon. PDFs render page
-one only. Video extraction is not enabled.
+by this **pre-generation app** without transfer. PDFs render page one only.
+Video extraction is intentionally not implemented in this package: the
+separate authenticated TrueNAS queue worker claims pending video jobs from
+`/api/internal/thumbnail-renderer/v1`. Do not point this pre-generator at that
+claim API or treat its video skip as disabling the queue-worker pipeline.
 
 ## TrueNAS SCALE installation (UI only)
 
@@ -201,8 +204,10 @@ Use synthetic non-client media only:
    pending to a thumbnail. Opening the original must still require an authorized
    user click.
 4. Repeat with a synthetic PDF and confirm a first-page thumbnail.
-5. Add a video and unsupported document; confirm neither is decoded or posted
-   and both remain type icons.
+5. Add a video and unsupported document. Confirm this pre-generator decodes or
+   posts neither. Independently confirm the video becomes ready through the
+   authenticated TrueNAS queue worker while the unsupported document remains a
+   type icon.
 6. Replace a synthetic still at the same path. Confirm the exact R2 ETag changes
    and only the new version becomes ready. Delete it and confirm Operations
    retires the derivative; no original fallback appears.

@@ -37,7 +37,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const migrationsDirectory = fileURLToPath(new URL("../migrations/", import.meta.url));
     for (const migration of readdirSync(migrationsDirectory).filter(name => name.endsWith(".sql")).sort()) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
-      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql", "0127_portal_invitation_secret_scrub.sql"].includes(migration)) {
+      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql", "0127_portal_invitation_secret_scrub.sql", "0129_portal_hierarchy_relations.sql", "0130_client_delegated_share_provisioning.sql"].includes(migration)) {
         await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
         continue;
       }
@@ -145,12 +145,13 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       'client_service_request_area_revisions','client_service_request_attachments','request_pa_draft_quote_receipts',
       'portal_v2_workspaces','pa_service_catalog_generations','portal_v2_invitation_commands',
       'client_delegated_shares','pa_portal_projection_generations','delivery_share_audience_snapshots',
-      'delivery_share_recipient_members'
+      'delivery_share_recipient_members','client_share_folder_target_labels','client_delegated_share_staff_mutations'
     ) ORDER BY name`).all<{ name: string }>();
     expect(migrationTables.results.map(row => row.name)).toEqual([
       "client_access_sync_outbox",
       "client_account_members",
       "client_accounts",
+      "client_delegated_share_staff_mutations",
       "client_delegated_shares",
       "client_folder_grant_mutations",
       "client_folder_grant_notifications",
@@ -158,6 +159,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       "client_service_request_area_revisions",
       "client_service_request_attachments",
       "client_service_request_drafts",
+      "client_share_folder_target_labels",
       "delivery_share_audience_snapshots",
       "delivery_share_recipient_members",
       "pa_portal_projection_generations",
@@ -176,6 +178,15 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       .toEqual(expect.arrayContaining(["scope_stale_at", "scope_stale_area_revision_id"]));
     expect((await db.prepare("PRAGMA table_info(request_pa_draft_quote_receipts)").all<{ name: string }>()).results.map(column => column.name))
       .toContain("scope_stale_at");
+    expect((await db.prepare("PRAGMA table_info(pa_service_catalog_items)").all<{ name: string }>()).results.map(column => column.name))
+      .toEqual(expect.arrayContaining(["category", "display_order", "geometry_requirement"]));
+    await db.prepare(`INSERT INTO pa_service_catalog_items(public_id,source_version,name,summary,question_schema_json,source_updated_at)
+      VALUES ('migration-catalog-default','v1','Legacy compatible service',NULL,'[]','2026-08-13T12:00:00Z')`).run();
+    expect(await db.prepare("SELECT category,display_order,geometry_requirement FROM pa_service_catalog_items WHERE public_id='migration-catalog-default'").first())
+      .toEqual({ category: "Uncategorized", display_order: 0, geometry_requirement: "optional" });
+    await expect(db.prepare("UPDATE pa_service_catalog_items SET display_order=1000001 WHERE public_id='migration-catalog-default'").run()).rejects.toThrow();
+    await expect(db.prepare("UPDATE pa_service_catalog_items SET geometry_requirement='sometimes' WHERE public_id='migration-catalog-default'").run()).rejects.toThrow();
+    await db.prepare("DELETE FROM pa_service_catalog_items WHERE public_id='migration-catalog-default'").run();
     await db.prepare(`INSERT INTO client_service_request_area_revisions
       (id,request_id,revision_number,base_request_updated_at,area_geojson,poi_points_json,reason,change_summary,created_by,mutation_key,mutation_fingerprint)
       VALUES ('migration-area-revision','migration-request',1,'2026-08-01T12:00:00Z',NULL,'[]','Boundary reviewed','service-area boundary removed','staff-test','migration-area-key-0001',?)`)
@@ -422,8 +433,8 @@ describe("client portal migrated-D1 end-to-end contract", () => {
   });
 
   it("autosaves and idempotently submits a versioned multi-service draft with immutable catalog snapshots", async () => {
-    await db.prepare(`INSERT INTO pa_service_catalog_items(public_id,source_version,name,summary,question_schema_json,source_updated_at)
-      VALUES ('svc-2d-map','pa-v4','2D Mapping','Orthomosaic and map products',?, '2026-08-13T12:00:00Z')`)
+    await db.prepare(`INSERT INTO pa_service_catalog_items(public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,source_updated_at)
+      VALUES ('svc-2d-map','pa-v4','2D Mapping','Orthomosaic and map products','Mapping',10,'required',?, '2026-08-13T12:00:00Z')`)
       .bind(JSON.stringify([{ id: "resolution", label: "Resolution", type: "select", required: true, options: [{ value: "standard", label: "Standard" }] }])).run();
     const areaGeoJson = { type: "Polygon", coordinates: [[[-88, 44], [-87.99, 44], [-87.99, 44.01], [-88, 44.01], [-88, 44]]] };
     const input = {
@@ -432,6 +443,15 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       siteContactPhone: null, desiredCompletionAt: null, latitude: null, longitude: null, areaGeoJson, poiPoints: [],
       services: [{ publicId: "svc-2d-map", answers: { resolution: "standard" } }],
     };
+    const withoutArea = await portal().request(`${portalOrigin}/service-request-drafts`, {
+      method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "portal-draft-no-area-0001", Origin: portalOrigin },
+      body: JSON.stringify({ ...input, areaGeoJson: null }),
+    }, env);
+    expect(withoutArea.status).toBe(201);
+    const incompleteDraft = (await withoutArea.json() as { draft: { id: string; version: number } }).draft;
+    expect((await portal().request(`${portalOrigin}/service-request-drafts/${incompleteDraft.id}/submit`, {
+      method: "POST", headers: { "Idempotency-Key": "portal-submit-no-area-0001", "If-Match": String(incompleteDraft.version), Origin: portalOrigin },
+    }, env)).status).toBe(422);
     const create = () => portal().request(`${portalOrigin}/service-request-drafts`, {
       method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "portal-draft-create-0001", Origin: portalOrigin }, body: JSON.stringify(input),
     }, env);
@@ -443,8 +463,13 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     expect((await create()).status).toBe(200);
 
     await db.prepare("UPDATE pa_service_catalog_items SET source_version='pa-v5',name='Renamed mapping' WHERE public_id='svc-2d-map'").run();
-    const storedDraftService = await db.prepare("SELECT service_source_version,json_extract(service_snapshot_json,'$.name') name FROM client_service_request_draft_services WHERE draft_id=?").bind(createdDraft.id).first<{ service_source_version: string; name: string }>();
-    expect(storedDraftService).toEqual({ service_source_version: "pa-v4", name: "2D Mapping" });
+    const storedDraftService = await db.prepare(`SELECT service_source_version,json_extract(service_snapshot_json,'$.name') name,
+      json_extract(service_snapshot_json,'$.category') category,json_extract(service_snapshot_json,'$.displayOrder') display_order,
+      json_extract(service_snapshot_json,'$.geometryRequirement') geometry_requirement
+      FROM client_service_request_draft_services WHERE draft_id=?`).bind(createdDraft.id).first<{
+        service_source_version: string; name: string; category: string; display_order: number; geometry_requirement: string;
+      }>();
+    expect(storedDraftService).toEqual({ service_source_version: "pa-v4", name: "2D Mapping", category: "Mapping", display_order: 10, geometry_requirement: "required" });
 
     const submit = () => portal().request(`${portalOrigin}/service-request-drafts/${createdDraft.id}/submit`, {
       method: "POST", headers: { "Idempotency-Key": "portal-draft-submit-0001", "If-Match": String(createdDraft.version), Origin: portalOrigin },

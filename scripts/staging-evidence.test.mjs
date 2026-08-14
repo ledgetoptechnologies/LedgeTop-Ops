@@ -27,7 +27,7 @@ function fixture(base) {
     configSha256: { delivery: "B".repeat(64), operations: "C".repeat(64), "ops-sync": "D".repeat(64) },
     credential: { valid: true, accountId: STAGING_ACCOUNT_ID, verifiedAt: "2026-07-30T12:00:00Z", confirmedPermissions: ["workers:write", "d1:write", "zone:read"] },
     branchBuilds: Object.fromEntries(["delivery", "operations", "ops-sync"].map((app) => [app, { productionBranch: "main", nonProductionBuildsEnabled: false, verifiedAt: "2026-07-30T12:00:00Z", evidenceRef: `ticket:${app}` }])),
-    projectAlpha: { baseUrl: configs.operations.vars.PROJECT_ALPHA_BASE_URL, approvalRef: "ticket:pa", operationsReadCredentialReady: true, opsSyncServiceAuthReady: true, opsSyncAccessGroupReady: true, ed25519Ready: true, paymentBillingContractReady: true, authorizationBypassUsed: false },
+    projectAlpha: { baseUrl: configs.operations.vars.PROJECT_ALPHA_BASE_URL, approvalRef: "ticket:pa", operationsReadCredentialReady: true, opsSyncServiceAuthReady: true, opsSyncAccessGroupReady: true, ed25519Ready: false, paymentBillingContractReady: true, authorizationBypassUsed: false },
     hosts: {
       delivery: { hostname: STAGING_HOSTS.delivery, dnsReady: true, accessReady: true },
       client: { hostname: STAGING_HOSTS.client, dnsReady: true, accessReady: true },
@@ -110,7 +110,9 @@ test("fails closed when any portal-v2 external dependency lacks current evidence
   const { evidence, configs, configHashes } = fixture(base);
   evidence.externalGates.delegatedShareSignerBinding.ready = false;
   evidence.externalGates.requestAttachmentScanner.evidenceRef = "";
+  evidence.externalGates.trueNasVideoThumbnailRenderer.ready = false;
   const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now });
   assert(errors.some((error) => error.includes("delegatedShareSignerBinding")), errors.join(" | "));
   assert(errors.some((error) => error.includes("requestAttachmentScanner")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("trueNasVideoThumbnailRenderer")), errors.join(" | "));
 });

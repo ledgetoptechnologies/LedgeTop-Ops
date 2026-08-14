@@ -16,9 +16,13 @@ the user separately authorizes it.
 
 Your objective is to implement Project Alpha's half of the LTDS Client Portal
 v2 contract. Treat the LTDS documents
-`docs/client-portal-v2-architecture.md` and `docs/project-alpha.md` as the
-normative wire contract. If this checkout cannot read them, stop and request
-their exact contents rather than inventing a divergent contract.
+`C:\Users\fstor\.codex\worktrees\6d08\LTDS-Ops\docs\client-portal-v2-architecture.md`
+and
+`C:\Users\fstor\.codex\worktrees\6d08\LTDS-Ops\docs\project-alpha.md`
+as the normative wire contract. Their repository-relative paths are
+`docs/client-portal-v2-architecture.md` and `docs/project-alpha.md`. If this
+checkout cannot read them, stop and request their exact contents rather than
+inventing a divergent contract.
 
 Project Alpha remains authoritative for organizations, departments, clients,
 projects, portal authorization intent, the Service Library, pricing policy,
@@ -61,23 +65,44 @@ Implement this as additive, default-off, independently gated capabilities:
    - Implement the signed, ordered, complete-generation snapshot and
      incremental event publisher for LTDS
      `POST /api/internal/project-alpha/portal-v2` exactly as documented.
-   - Resources include organization, standalone client, department, client,
-     contact, project with department relationship, portal principal, and
-     scoped entitlement. Include active/tombstone state and stable public IDs.
+   - Publish strict schema v3 only for the separately gated relation contract.
+     Resources include organization, standalone client, department, client,
+     contact, project, versioned `contains`/`contact_assignment` edges, one
+     lifecycle record per active project, portal principal, and scoped
+     entitlement. Include active/tombstone state and stable public IDs.
+   - Emit only the normative directed edges: `contains` permits organization to
+     department/client/project, standalone client to project, and
+     department/client to project; `contact_assignment` permits organization,
+     standalone client, department, client, or project to contact. LTDS rejects
+     every other direction. Entity and workspace tombstones are single
+     authoritative events: LTDS closes their dependent graph, lifecycle, and
+     PA-derived authorization atomically.
    - Persist mutation plus outbox event in the same database transaction.
      Delivery must be idempotent and retryable; per-workspace sequences are
      contiguous and monotonic. Interrupted snapshots must be resumable without
      declaring an incomplete generation active.
    - Keep existing v1 consumers unchanged. Add parity reports and do not enable
      the new publisher until snapshot/event convergence is demonstrated.
+   - Import or copy byte-for-byte
+     `packages/shared/fixtures/project-alpha-portal-v2.json` from LTDS and run
+     every positive and negative specimen through PA producer contract tests.
+     Emit the separate `snapshotActivate` envelope exactly; do not add resource
+     arrays to it. Schema-v2 remains unchanged. Do not publish schema-v3 until
+     `packages/shared/fixtures/project-alpha-portal-relations-v3.json` is copied
+     byte-for-byte and every positive/negative specimen is exercised in PA
+     contract tests, a full snapshot is accepted in staging, and the LTDS
+     relation flag is separately approved.
 
 3. **Sanitized Service Library projection**
    - Add an immutable public ID and monotonic portal-visible version to each
      Service Library item/package needed by LTDS.
-   - Add an explicit `portal_request_enabled`-style control, client-safe name,
-     summary/category/order, geometry requirement, and a bounded declarative
-     question schema. The only question types are the contract's text, bounded
-     number, boolean, select, and multi-select forms with stable field IDs.
+   - Add an explicit `portal_request_enabled`-style control. Every published
+     item must contain exactly `publicId`, `sourceVersion`, `name`, nullable
+     `summary`, non-empty `category` (maximum 100 characters), integer
+     `displayOrder` (0–1,000,000), `geometryRequirement` (`none`, `optional`, or
+     `required`), and 0–10 declarative client questions. The only question types
+     are the contract's text, bounded number, boolean, select, and multi-select
+     forms with stable field IDs.
    - Never publish unit prices by default, private formulas, margins, costs,
      tax rules, fulfillment notes, work activities, compensation, credentials,
      raw HTML/JavaScript, arbitrary regexes, or numeric database IDs.
@@ -85,6 +110,10 @@ Implement this as additive, default-off, independently gated capabilities:
      ordered event publisher exactly as documented for
      `POST /api/internal/project-alpha/catalog-v2`. Reject same-version content
      changes; a source version is immutable evidence.
+   - Treat
+     `packages/shared/fixtures/project-alpha-catalog-v2.json` in the LTDS repo as
+     the machine-readable compatibility fixture and run it through PA producer
+     tests byte-for-field before enabling catalog sync.
 
 4. **Non-binding pricing preview**
    - Implement the dedicated server-only
@@ -93,6 +122,13 @@ Implement this as additive, default-off, independently gated capabilities:
    - Accept only current service public IDs/versions and LTDS server-computed
      canonical square metres. Never trust browser acreage or money and do not
      accept raw KML/GeoJSON for pricing.
+   - Require the exact `authorizationContext` from
+     `packages/shared/fixtures/project-alpha-pricing-hint-v1.json`: one opaque
+     workspace root (`organization` or `standalone_client`) plus one opaque
+     project public ID. Reject numeric legacy IDs and reauthorize that the
+     active project belongs beneath that active root before applying policy.
+     Never accept LTDS-local workspace/account/project/identity IDs as a
+     substitute.
    - Return one PA-calculated aggregate for the complete selection using only
      `none`, `starting_at`, or `typical_range`, decimal-string amounts,
      allowlisted currency, bounded expiry, source versions, and the exact
@@ -119,6 +155,12 @@ Implement this as additive, default-off, independently gated capabilities:
    - Reject redirects on outbound/inbound integration hops as applicable and
      ensure ambiguous timeout retry resolves via the receipt without creating
      a duplicate.
+   - Import or copy byte-for-byte
+     `packages/shared/fixtures/project-alpha-draft-quote-v1.json` from LTDS.
+     Run its valid request/response and every invalid request/response through
+     the PA receiver tests. Reject extra keys, numeric legacy authorization
+     IDs, mismatched area nullability, non-draft results, and non-relative
+     editor paths exactly as the shared corpus requires.
 
 6. **Integration security and operations**
    - Use separate credentials/scopes/secrets for portal projection, catalog

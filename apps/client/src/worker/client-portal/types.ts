@@ -119,6 +119,9 @@ export interface ClientServiceCatalogItem {
   sourceVersion: string;
   name: string;
   summary: string | null;
+  category: string;
+  displayOrder: number;
+  geometryRequirement: "none" | "optional" | "required";
   questions: ClientServiceQuestion[];
 }
 
@@ -151,6 +154,9 @@ export interface ClientServiceDraftSelection {
   sourceVersion: string;
   name: string;
   summary: string | null;
+  category: string;
+  displayOrder: number;
+  geometryRequirement: "none" | "optional" | "required";
   questions: ClientServiceQuestion[];
   answers: Record<string, unknown>;
 }
@@ -209,6 +215,13 @@ export interface ClientPricingHintInput {
   services: ClientServiceDraftSelection[];
   areaSquareMeters: number | null;
   areaAcres: number | null;
+  authorizationContext: {
+    workspaceRoot: {
+      type: "organization" | "standalone_client";
+      publicId: string;
+    };
+    projectPublicId: string;
+  };
 }
 
 export type ClientPricingHintProvider = (input: ClientPricingHintInput, env: Env) => Promise<ClientPricingHint | null>;

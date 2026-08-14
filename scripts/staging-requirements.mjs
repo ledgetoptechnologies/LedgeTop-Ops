@@ -1,4 +1,5 @@
 export const STAGING_ACCOUNT_ID = "846c924bf17bf4f3dd15c97a4c5d1d51";
+export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledgetopdroneservices.com";
 
 // Logical service identities remain stable even when their source directories
 // change. "delivery" still names the deployed Worker and staging evidence;
@@ -43,7 +44,7 @@ export const STAGING_CLIENT_PORTAL = Object.freeze({
   publicApplicationName: "LTDS Client Public Staging",
   hostname: STAGING_HOSTS.client,
   protectedPaths: Object.freeze(["/portal", "/portal/*", "/api/client", "/api/client/*"]),
-  publicPaths: Object.freeze(["/", "/s/*", "/api/public/*", "/health", "/assets/*"]),
+  publicPaths: Object.freeze(["/", "/s/*", "/client-share/*", "/api/public/*", "/health", "/assets/*"]),
   groupName: "LTDS Client Portal Staging Testers",
 });
 
@@ -80,6 +81,9 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0125_project_alpha_portal_projection.sql",
     "0126_delivery_share_recipient_snapshots.sql",
     "0127_portal_invitation_secret_scrub.sql",
+    "0128_project_alpha_catalog_compatibility.sql",
+    "0129_portal_hierarchy_relations.sql",
+    "0130_client_delegated_share_provisioning.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -107,6 +111,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "CLIENT_REQUEST_ATTACHMENTS_ENABLED",
     "CLIENT_PORTAL_TEAM_ENABLED",
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
+    "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
     "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED",
     "CLIENT_DELEGATED_SHARES_ENABLED",
@@ -116,6 +121,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
   ]),
   operations: Object.freeze([
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
+    "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED",
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED",
     "DIRECT_DELIVERY_UPLOADS_ENABLED",
     "DROPBOX_IMPORT_ENABLED",
@@ -136,6 +142,7 @@ export const REQUIRED_EXTERNAL_GATES = Object.freeze([
   "workspaceStaffRecovery",
   "delegatedShareSignerBinding",
   "delegatedSharePublicAuthorization",
+  "trueNasVideoThumbnailRenderer",
   "projectionParityAndAlerts",
 ]);
 
@@ -156,14 +163,24 @@ export const STAGING_STATIC_VARS = Object.freeze({
     R2_BUCKET_NAME: "client-data-staging",
     CLIENT_PORTAL_REQUEST_V2_ENABLED: "false",
     PROJECT_ALPHA_CATALOG_SYNC_ENABLED: "false",
+    PROJECT_ALPHA_CATALOG_APPLICATION_KEY: "ltds_client_catalog_staging",
+    PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
     PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "false",
+    PROJECT_ALPHA_PORTAL_APPLICATION_KEY: "ltds_client_portal_staging",
+    PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
     PROJECT_ALPHA_PRICING_HINTS_ENABLED: "false",
+    PROJECT_ALPHA_PRICING_HINT_URL: `${STAGING_PROJECT_ALPHA_ORIGIN}/api/v2/integrations/ltds/pricing-hints`,
+    PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN: STAGING_PROJECT_ALPHA_ORIGIN,
+    PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY: "ltds_client_pricing_staging",
+    PROJECT_ALPHA_PRICING_HINT_CURRENCIES: "USD",
     CLIENT_REQUEST_ATTACHMENTS_ENABLED: "false",
     CLIENT_PORTAL_TEAM_ENABLED: "false",
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "false",
+    CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "false",
     CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "false",
     CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: "false",
     CLIENT_DELEGATED_SHARES_ENABLED: "false",
+    CLIENT_DELEGATED_SHARE_KEY_ID: "staging-v1",
     CLOUD_TRANSFER_DROPBOX_ENABLED: "false",
     CLOUD_TRANSFER_GOOGLE_ENABLED: "false",
     CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED: "false",
@@ -171,6 +188,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
   operations: Object.freeze({
     TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
     DELIVERY_BASE_URL: `https://${STAGING_HOSTS.client}`,
+    PROJECT_ALPHA_BASE_URL: STAGING_PROJECT_ALPHA_ORIGIN,
     R2_ACCOUNT_ID: STAGING_ACCOUNT_ID,
     R2_BUCKET_NAME: "client-data-staging",
     R2_INCOMING_BUCKET_NAME: "ltds-incoming-staging",
@@ -180,6 +198,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     THUMBNAIL_INGEST_EXPECTED_HOST: STAGING_HOSTS.operations,
     APPLICATION_KEY: "ltds_ops_staging",
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "false",
+    CLIENT_DELEGATED_SHARE_SIGNER_ENABLED: "false",
     DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED: "false",
     DIRECT_DELIVERY_UPLOADS_ENABLED: "false",
     DROPBOX_IMPORT_ENABLED: "false",
@@ -205,8 +224,11 @@ export const STAGING_INVENTORY = Object.freeze({
       { name: "ltds-bulk-download-staging", binding: "BULK_DOWNLOAD_WORKFLOW", class_name: "BulkDownloadWorkflow" },
       { name: "ltds-cloud-transfer-staging", binding: "CLOUD_TRANSFER_WORKFLOW", class_name: "CloudTransferWorkflow" },
     ],
+    services: [
+      { binding: "CLIENT_DELEGATED_SHARE_SIGNER", service: "ltds-ops-staging", entrypoint: "ClientDelegatedShareSigner" },
+    ],
     queues: [],
-    crons: ["15 * * * *"],
+    crons: ["*/5 * * * *", "15 * * * *"],
     ratelimits: [
       { name: "ACCESS_CODE_RATE_LIMITER", namespace_id: "730202601", simple: { limit: 10, period: 60 } },
       { name: "PUBLIC_SESSION_RATE_LIMITER", namespace_id: "730202602", simple: { limit: 20, period: 60 } },
@@ -234,6 +256,7 @@ export const STAGING_INVENTORY = Object.freeze({
       { name: "ltds-incoming-upload-lifecycle-staging", binding: "INCOMING_LIFECYCLE_WORKFLOW", class_name: "IncomingUploadLifecycleWorkflow" },
       { name: "ltds-dropbox-import-staging", binding: "DROPBOX_IMPORT_WORKFLOW", class_name: "DropboxImportWorkflow" },
     ],
+    services: [],
     queues: [
       { queue: "ltds-file-events-staging", max_batch_size: 25, max_batch_timeout: 10, max_retries: 5, dead_letter_queue: "ltds-file-events-staging-dlq" },
       { queue: "ltds-thumbnail-jobs-staging", max_batch_size: 10, max_batch_timeout: 5, max_retries: 5, dead_letter_queue: "ltds-thumbnail-jobs-staging-dlq" },
@@ -254,6 +277,7 @@ export const STAGING_INVENTORY = Object.freeze({
     ],
     r2_buckets: [],
     workflows: [],
+    services: [],
     queues: [],
     crons: ["*/5 * * * *"],
     ratelimits: [],

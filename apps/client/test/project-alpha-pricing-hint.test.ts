@@ -1,10 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
+import { Miniflare } from "miniflare";
 import {
   createProjectAlphaPricingHintProvider,
   fetchProjectAlphaPricingHint,
   projectAlphaPricingHintCapability,
+  resolveProjectAlphaPricingAuthorizationContext,
 } from "../src/worker/client-portal/project-alpha-pricing-hint";
+import pricingFixture from "../../../packages/shared/fixtures/project-alpha-pricing-hint-v1.json";
 import type { ClientPricingHintInput } from "../src/worker/client-portal/types";
+import type { EffectivePortalWorkspaceContext } from "../src/worker/client-portal/workspace-v2";
 import type { Env } from "../src/worker/types";
 
 const now = new Date("2026-08-13T12:00:00.000Z");
@@ -13,11 +17,18 @@ const bearer = "pricing-preview-service-token";
 const input: ClientPricingHintInput = {
   areaSquareMeters: 889_000,
   areaAcres: 219.7,
+  authorizationContext: {
+    workspaceRoot: { type: "organization", publicId: "pa-org-acme" },
+    projectPublicId: "pa-project-north-site",
+  },
   services: [{
     publicId: "svc-mapping",
     sourceVersion: "v7",
     name: "Private display name",
     summary: null,
+    category: "Mapping",
+    displayOrder: 10,
+    geometryRequirement: "required",
     questions: [],
     answers: { browserControlledAnswer: "not-forwarded" },
   }],
@@ -69,16 +80,11 @@ describe("Project Alpha pricing hint provider", () => {
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       expect(String(url)).toBe("https://alpha.example/api/v2/integrations/ltds/pricing-hints");
       const body = String(init?.body);
-      expect(JSON.parse(body)).toEqual({
-        coverageSquareMetres: "889000.000000",
-        schemaVersion: 1,
-        scope: "portal.pricing.preview",
-        services: [{ publicId: "svc-mapping", sourceVersion: "v7" }],
-        source: "ltds-client-portal",
-      });
+      expect(JSON.parse(body)).toEqual(pricingFixture.request);
       expect(body).not.toContain("browserControlledAnswer");
       expect(body).not.toContain("219.7");
       expect(body).not.toContain("Private display name");
+      expect(body).not.toContain("project-a");
       const headers = new Headers(init?.headers);
       expect(headers.get("Authorization")).toBe(`Bearer ${bearer}`);
       expect(headers.get("X-LTDS-Scope")).toBe("portal.pricing.preview");
@@ -120,6 +126,20 @@ describe("Project Alpha pricing hint provider", () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it("fails unavailable before network for missing, malformed, or numeric legacy authorization context", async () => {
+    const fetcher = vi.fn();
+    for (const authorizationContext of [
+      undefined,
+      { workspaceRoot: { type: "organization", publicId: "42" }, projectPublicId: "pa-project-north-site" },
+      { workspaceRoot: { type: "organization", publicId: "pa-org-acme" }, projectPublicId: "42" },
+      { workspaceRoot: { type: "department", publicId: "pa-org-acme" }, projectPublicId: "pa-project-north-site" },
+      { workspaceRoot: { type: "organization", publicId: "pa-org-acme", localId: "account-a" }, projectPublicId: "pa-project-north-site" },
+    ]) {
+      await expect(fetchProjectAlphaPricingHint({ ...input, authorizationContext } as ClientPricingHintInput, env(), { fetcher, now })).resolves.toBeNull();
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["unapproved currency", { currency: "EUR" }],
     ["malformed decimal", { startingAt: "1500" }],
@@ -154,5 +174,43 @@ describe("Project Alpha pricing hint provider", () => {
     await expect(fetchProjectAlphaPricingHint(input, env(), { fetcher: vi.fn(async () => response({
       displayMode: "none", currency: null, startingAt: null, reasonUnavailable: "Scope requires staff review",
     })) as typeof fetch, now })).resolves.toBeNull();
+  });
+});
+
+describe("Project Alpha pricing authorization context resolver", () => {
+  it("derives only opaque PA root/project identities from the authorized local relationship", async () => {
+    const miniflare = new Miniflare({
+      compatibilityDate: "2026-07-16",
+      modules: true,
+      script: "export default { fetch() { return new Response('ok'); } };",
+      d1Databases: { DELIVERY_DB: "pricing-context-test" },
+    });
+    try {
+      const database = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
+      await database.batch([
+        database.prepare("CREATE TABLE projects (id TEXT PRIMARY KEY,project_alpha_project_id TEXT,active INTEGER NOT NULL)"),
+        database.prepare("CREATE TABLE client_project_grants (account_id TEXT NOT NULL,project_id TEXT NOT NULL,can_request_service INTEGER NOT NULL,revoked_at TEXT)"),
+      ]);
+      await database.batch([
+        database.prepare("INSERT INTO projects VALUES ('project-local','pa-project-north-site',1)"),
+        database.prepare("INSERT INTO client_project_grants VALUES ('account-a','project-local',1,NULL)"),
+      ]);
+      const workspace: EffectivePortalWorkspaceContext = {
+        workspaceId: "workspace-a", identityId: "identity-v2", rootType: "organization",
+        rootPublicId: "pa-org-acme", legacyAccountId: "account-a", legacyIdentityId: "identity-a",
+        displayName: "Acme", role: "manager", canViewBilling: false,
+      };
+      const resolved = await resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env, workspace, "project-local");
+      expect(resolved).toEqual(pricingFixture.request.authorizationContext);
+      expect(JSON.stringify(resolved)).not.toMatch(/project-local|account-a|identity/);
+
+      await database.prepare("UPDATE projects SET project_alpha_project_id='42' WHERE id='project-local'").run();
+      await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env, workspace, "project-local")).resolves.toBeNull();
+      await database.prepare("UPDATE projects SET project_alpha_project_id='pa-project-north-site',active=0 WHERE id='project-local'").run();
+      await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env, workspace, "project-local")).resolves.toBeNull();
+      await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env, { ...workspace, rootPublicId: "42" }, "project-local")).resolves.toBeNull();
+    } finally {
+      await miniflare.dispose();
+    }
   });
 });

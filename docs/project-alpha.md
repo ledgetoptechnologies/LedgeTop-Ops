@@ -57,25 +57,55 @@ total count, then swaps the active catalog and checkpoint in one D1 batch. An
 interrupted generation never changes browser catalog reads.
 
 Incremental messages use `kind: "event"` and one strict `event`. An upsert item
-contains exactly `publicId`, `sourceVersion`, `name`, nullable `summary`, and
-`questions`. A tombstone contains only `action: "tombstone"`, `publicId`, and
-`sourceVersion`. Events must match the active `sourceGeneration` and use the
-next contiguous `sourceSequence`; gaps and stale deliveries return 409 so the
+contains exactly the following fields (no omissions and no extras):
+
+```json
+{
+  "publicId": "svc-2d-mapping",
+  "sourceVersion": "catalog-item-v3",
+  "name": "2D Mapping",
+  "summary": "Orthomosaic mapping for a client-drawn work area.",
+  "category": "Mapping",
+  "displayOrder": 10,
+  "geometryRequirement": "required",
+  "questions": []
+}
+```
+
+`category` is 1–100 plain-text characters. `displayOrder` is an integer from 0
+through 1,000,000. `geometryRequirement` is exactly `none`, `optional`, or
+`required`. LTDS sorts active client catalog results by case-insensitive
+category, then `displayOrder`, case-insensitive name, and public ID. A tombstone
+contains only `action: "tombstone"`, `publicId`, and `sourceVersion`. Events
+must match the active `sourceGeneration` and use the next contiguous
+`sourceSequence`; gaps and stale deliveries return 409 so the
 producer retries or sends a fresh snapshot. Delivery receipts bind an ID to the
 exact payload hash: identical retries return success and changed reuse returns
 409.
 
-Each item allows 1–10 plain-text questions. Types are `text`, `number`,
+Each item allows 0–10 plain-text questions. Types are `text`, `number`,
 `boolean`, `select`, and wire-format `multi-select` (stored as `multi_select`
 for the existing renderer). Lengths, numeric bounds, option counts, duplicate
 IDs/options, control characters, bidi controls, and markup are rejected. The
 contract cannot carry unit prices, internal fulfillment/work activities,
 compensation, margins, taxes, raw pricing rules, credentials, or database IDs.
 
+All six portal-visible item values (`name`, `summary`, `category`,
+`displayOrder`, `geometryRequirement`, and `questions`) are part of immutable
+`sourceVersion` evidence. Snapshot activation and incremental upsert both reject
+same-version changes with 409. Migration
+`0128_project_alpha_catalog_compatibility.sql` persists these fields in staging
+generations and active rows; legacy rows default to `Uncategorized`, order `0`,
+and optional geometry until PA publishes a new version. The machine-readable
+cross-repository examples and limits are in
+[`packages/shared/fixtures/project-alpha-catalog-v2.json`](../packages/shared/fixtures/project-alpha-catalog-v2.json).
+
 The public client endpoint remains read-only and request-v2 submission still
 requires the selected `sourceVersion` to be active. Existing draft snapshots
 remain immutable, while a catalog change makes stale draft submission fail 422
-until the client reviews the current version.
+until the client reviews the current version. A draft may autosave without an
+area, but submission fails 422 whenever any selected immutable service snapshot
+has `geometryRequirement: "required"` and no validated Mapbox polygon is stored.
 
 ## Portal hierarchy and entitlement projection (implemented, disabled)
 
@@ -120,6 +150,17 @@ repeats one immutable workspace descriptor and contains bounded arrays of:
   organization, department, client, and project. Allowed capabilities are the
   six values enforced by `workspace-v2.ts`.
 
+The exact positive snapshot-page, snapshot-activation, and event envelopes plus
+strict negative specimens are the versioned compatibility corpus in
+[`packages/shared/fixtures/project-alpha-portal-v2.json`](../packages/shared/fixtures/project-alpha-portal-v2.json).
+Both repositories must run the unchanged specimens through their wire parsers.
+The independently gated schema-v3 relation/lifecycle corpus is
+[`packages/shared/fixtures/project-alpha-portal-relations-v3.json`](../packages/shared/fixtures/project-alpha-portal-relations-v3.json);
+it must not be published while the LTDS relation flag is false.
+The activation is a distinct delivery: it repeats the generation, sequence,
+snapshot hash, page count, and total record count, and it contains no resource
+arrays or other fields.
+
 The complete snapshot is limited to 100 pages, 100 records per page, and 2,000
 records. Pages are invisible until `snapshot.activate` proves contiguous page
 coverage and exact total counts. LTDS validates a single exact root, globally
@@ -157,6 +198,78 @@ must remain in Project Alpha contract tests.
 Migration `0125_project_alpha_portal_projection.sql` is additive and
 idempotent. Applying it alone grants no access and enables no endpoint.
 
+### Portal hierarchy relation contract delta (implemented, disabled)
+
+The single `parentPublicId` is retained only as a canonical display parent.
+Before `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED` can be enabled, PA must
+publish the following additional versioned records in every complete portal
+snapshot and equivalent ordered upsert/tombstone events:
+
+```json
+{
+  "relations": [
+    {
+      "publicId": "opaque-relation-id",
+      "relationType": "contains",
+      "from": { "type": "department", "publicId": "pa-dept-field" },
+      "to": { "type": "project", "publicId": "pa-project-north" },
+      "sourceVersion": "relation-v4",
+      "active": true
+    },
+    {
+      "publicId": "opaque-contact-assignment-id",
+      "relationType": "contact_assignment",
+      "from": { "type": "department", "publicId": "pa-dept-field" },
+      "to": { "type": "contact", "publicId": "pa-contact-craig" },
+      "sourceVersion": "assignment-v2",
+      "active": true
+    }
+  ],
+  "projectLifecycles": [
+    {
+      "projectPublicId": "pa-project-north",
+      "status": "completed",
+      "completedAt": "2026-08-13T18:00:00.000Z",
+      "sourceVersion": "project-v8"
+    }
+  ]
+}
+```
+
+Contract constraints are exact:
+
+- endpoints must be active entities in the same workspace and generation;
+  IDs and source versions use the existing opaque-public-ID rules;
+- `contains` is directed parent-to-child; `contact_assignment` is directed
+  organization/department/client/project-to-contact; duplicate logical edges,
+  self edges, cycles, missing endpoints, and cross-workspace edges are invalid;
+- every active project has exactly one lifecycle row. `active` requires
+  `completedAt: null`; `completed` requires an ISO UTC `completedAt`. Reopen is
+  an ordinary higher-version `active` update, never a new project ID;
+- PA alone designates PA-backed managers by signed `member.manage`
+  entitlements. LTDS never accepts a browser-created PA principal or manager
+  grant. Client-created invitees remain LTDS-local scoped guests;
+- activation must stage entities, edges, lifecycle, principals, and
+  entitlements as one generation and advance one checkpoint only after all
+  counts and references validate. Until PA producer fixtures and receiver
+  ingestion prove this delta in staging, keep the relation flag false.
+
+Migration `0129_portal_hierarchy_relations.sql` is additive and idempotent; it
+does not enable projection ingestion or runtime relation authorization. The
+receiver accepts strict schema v3 only when
+`CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true`; with the flag false it rejects
+v3 at the envelope before persistence. Existing schema-v2 snapshot pages,
+activation, and ordered events remain byte-for-byte compatible. Schema-v3
+`snapshot.page` requires both arrays and counts their records; activation keeps
+the schema-v2 field shape with `schemaVersion: 3`. Incremental v3 events support
+relation upsert/tombstone and project-lifecycle upsert. Lifecycle tombstones are
+not valid: an active project must always have one explicit lifecycle row. The
+normative positive page/activation/events, strict parser negatives, and
+activation rules are in
+[`packages/shared/fixtures/project-alpha-portal-relations-v3.json`](../packages/shared/fixtures/project-alpha-portal-relations-v3.json).
+Project Alpha must consume both the unchanged v2 corpus and this separately
+gated v3 corpus before either producer is enabled.
+
 ## Non-binding pricing preview (implemented, disabled)
 
 The Client Worker can call Project Alpha's server-only endpoint at exactly
@@ -174,11 +287,43 @@ whose only Project Alpha scope is `portal.pricing.preview`, stored as
 `PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY` and a comma-separated response
 allowlist such as `PROJECT_ALPHA_PRICING_HINT_CURRENCIES=USD`.
 
-LTDS sends only schema/source/scope, the selected services' public IDs and
-immutable source versions, and the server-computed polygon area as a six-place
-decimal square-metre string. It deliberately omits browser acreage, display
-names, answers, Project Alpha numeric IDs, and all money. The canonical JSON
-body is capped by construction and signed as follows:
+LTDS sends only schema/source/scope, an authorization context resolved from the
+currently authenticated workspace and its already-authorized project, the
+selected services' public IDs and immutable source versions, and the
+server-computed polygon area as a six-place decimal square-metre string:
+
+```json
+{
+  "schemaVersion": 1,
+  "source": "ltds-client-portal",
+  "scope": "portal.pricing.preview",
+  "authorizationContext": {
+    "workspaceRoot": {
+      "type": "organization",
+      "publicId": "pa-org-acme"
+    },
+    "projectPublicId": "pa-project-north-site"
+  },
+  "coverageSquareMetres": "889000.000000",
+  "services": [
+    { "publicId": "svc-mapping", "sourceVersion": "v7" }
+  ]
+}
+```
+
+Both authorization IDs are opaque Project Alpha public IDs. The local account,
+workspace selection ID, local project ID, identity IDs, and numeric PA legacy
+IDs are never sent. LTDS rechecks workspace membership, `request.create`, the
+active local project grant, and the project-to-PA-public-ID mapping on every
+preview. A projectless request or unresolved/invalid public context returns no
+hint without calling PA. PA must independently reauthorize that the project is
+active beneath the supplied organization or standalone-client root before
+calculating anything. The machine-readable request fixture is
+[`packages/shared/fixtures/project-alpha-pricing-hint-v1.json`](../packages/shared/fixtures/project-alpha-pricing-hint-v1.json).
+
+The request deliberately omits browser acreage, display names, answers, local
+or Project Alpha numeric IDs, and all money. The canonical JSON body is capped
+by construction and signed as follows:
 
 ```text
 signature input = <ISO timestamp>\nPOST\n/api/v2/integrations/ltds/pricing-hints\nportal.pricing.preview\n<SHA-256 body hex>
@@ -279,6 +424,15 @@ LTDS emits canonical JSON (recursively sorted object keys), capped at 96 KiB:
   ]
 }
 ```
+
+The normative positive request/response, negative strict-schema specimens, and
+bounded error responses are in
+[`packages/shared/fixtures/project-alpha-draft-quote-v1.json`](../packages/shared/fixtures/project-alpha-draft-quote-v1.json).
+LTDS validates the request immediately before signing it. Every object is
+exact-keyed, public authorization and service IDs are opaque (numeric legacy
+IDs are rejected), arrays and strings are bounded, both area measurements are
+present or both are null, and the success response is strict. Project Alpha's
+receiver contract tests must consume the same fixture corpus before rollout.
 
 Only attachment rows already accepted by the authenticated scanner are sent,
 and only their bounded display/verification metadata is included. R2 object

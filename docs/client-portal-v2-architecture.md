@@ -111,6 +111,56 @@ effective. Email hints and primary-contact flags never bind or grant access.
 The exact producer envelope and signing input are documented in
 [the Project Alpha integration guide](project-alpha.md).
 
+Cross-repository compatibility is executable, not prose-only. The shared
+corpus contains strict positive and negative specimens for portal projection
+and activation (`packages/shared/fixtures/project-alpha-portal-v2.json`), the
+independently gated relation/lifecycle projection
+(`project-alpha-portal-relations-v3.json`), the catalog
+(`project-alpha-catalog-v2.json`), pricing authorization
+(`project-alpha-pricing-hint-v1.json`), and the private draft-quote command
+(`project-alpha-draft-quote-v1.json`). LTDS consumer tests and Project Alpha
+producer/receiver tests must consume equivalent byte-for-byte copies before any
+independent feature flag is enabled.
+
+### Relation-compatible authorization foundation
+
+Migration 0129 adds generation-owned `contains` and `contact_assignment`
+edges plus an explicit project lifecycle row. This removes the authorization
+assumption that every PA object has only one parent: one project may be related
+to an organization, department, and client, and one contact may be assigned to
+multiple departments. The legacy `parent_public_id` remains a display-order
+compatibility field and is not authoritative when
+`CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=true`.
+
+The directed relation contract is closed rather than inferred. `contains`
+allows organization to department/client/project, standalone client to project,
+and department/client to project. `contact_assignment` allows an organization,
+standalone client, department, client, or project to point to a contact. All
+other directions are rejected by both the strict receiver and D1 triggers.
+Schema-v3 project tombstones atomically deactivate the project, dependent edges,
+orphaned descendants, lifecycle, and scoped entitlement intents. A workspace
+tombstone atomically suspends the complete workspace graph and PA-derived
+authorization state; neither operation leaves the previous checkpoint live.
+
+The relation flag is independent and defaults to false. When enabled, the
+signed receiver accepts strict schema-v3 snapshot pages and ordered relation
+or lifecycle events, stages every resource family, and advances the directory
+checkpoint only after complete cross-reference validation. Schema v2 remains
+unchanged. The Worker then resolves all active reverse edges in the current complete generation,
+requires the exact workspace root to be reachable, and evaluates entitlements
+against the resulting target scopes. Any matching deny wins. Directory search
+returns only entries for which that identity has `directory.read`; it never
+uses a workspace-wide read as a shortcut. A project completed by PA retains
+access for 30 days after `completedAt`, then fails closed. PA reopening the
+project publishes `active` with `completedAt: null`, which restores the
+underlying unexpired grants without rewriting or resurrecting revoked grants.
+
+Client managers can create only `client_invitation` guest memberships within a
+scope where they already hold `member.manage`. The invit-able capability set
+does not include `member.manage`; PA-backed manager designation remains a PA
+staff-controlled entitlement and cannot be created or transferred in the
+client portal.
+
 ## Versioned, sanitized Service Library resource
 
 PA publishes a portal-safe catalog projection. It is not the administrative
@@ -132,6 +182,9 @@ Project Alpha pushes bounded pages to the server-only receiver documented in
       "sourceVersion": "opaque-service-version",
       "name": "2D Mapping",
       "summary": "Client-safe description",
+      "category": "Mapping",
+      "displayOrder": 10,
+      "geometryRequirement": "required",
       "questions": [
         {
           "id": "deliverable-format",
@@ -157,10 +210,14 @@ Contract rules:
   monotonic across the activation and later incremental events.
 - Only active, explicitly portal-requestable service selections are projected.
   Project Alpha decides what is requestable before publishing it.
-- Each item has 1–10 client-safe questions. Allowed wire types are `text`,
+- Each item has 0–10 client-safe questions. Allowed wire types are `text`,
   `number`, `boolean`, `select`, and `multi-select`, with bounded lengths,
   options, minimums, and maximums. Questions cannot contain executable code,
   HTML, arbitrary regular expressions, prices, credentials, or internal notes.
+- `category` is 1–100 plain-text characters, `displayOrder` is an integer from
+  0 through 1,000,000, and `geometryRequirement` is exactly `none`, `optional`,
+  or `required`. These fields and the question schema are immutable for a given
+  `sourceVersion` and are retained in request snapshots.
 - Pricing-hint eligibility and amounts are obtained only through the separate
   pricing-preview contract. They are not catalog projection fields.
 - LTDS applies a complete generation atomically, retains its last-known-good
@@ -234,8 +291,14 @@ call a dedicated PA preview endpoint, for example
 `portal.pricing.preview`.
 
 The request includes only the active PA service public IDs/versions, canonical
-coverage in square metres, project/client public context IDs when authorized,
-and non-sensitive selection answers needed by PA's published hint policy. PA
+coverage in square metres, and a server-derived authorization context. The
+context contains a workspace root `{ type: organization | standalone_client,
+publicId }` and `projectPublicId`. LTDS resolves those opaque PA public IDs only
+after reauthorizing the selected workspace and stored draft project; browser
+IDs, local IDs, projectless drafts, numeric PA legacy IDs, and unresolved
+relationships degrade to no hint before any PA call. PA independently verifies
+that the active project belongs beneath the supplied root. The exact request
+fixture is `packages/shared/fixtures/project-alpha-pricing-hint-v1.json`. PA
 returns a bounded presentation result:
 
 ```json
@@ -425,7 +488,7 @@ demonstrated with tests and recorded evidence:
   creates nothing.
 - [ ] Draft creation never approves, sends, signs, contracts, invoices, charges,
   pays, or emails, and returns only a safe native-editor handoff.
-- [ ] PA provides three distinct scopes: `portal.catalog.read`,
+- [ ] PA provides three distinct scopes: `portal.catalog.publish`,
   `portal.pricing.preview`, and `portal.quote-draft.create`.
 - [ ] Requests are authenticated and signed server-to-server with timestamp and
   replay protection; no browser credential can call an integration route.

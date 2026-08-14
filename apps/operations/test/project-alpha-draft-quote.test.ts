@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   canonicalProjectAlphaJson,
+  parseProjectAlphaDraftQuotePayload,
+  parseProjectAlphaDraftQuoteResult,
   projectAlphaDraftQuoteCapability,
   projectAlphaDraftIdempotencyKey,
   sendProjectAlphaDraftQuoteCommand,
@@ -8,40 +10,9 @@ import {
   type ProjectAlphaDraftQuotePayload,
 } from "../src/worker/project-alpha-draft-quote";
 import type { Env } from "../src/worker/types";
+import draftQuoteFixture from "../../../packages/shared/fixtures/project-alpha-draft-quote-v1.json";
 
-const payload: ProjectAlphaDraftQuotePayload = {
-  schemaVersion: 1,
-  source: "ltds-operations",
-  request: {
-    publicId: "request-public-a",
-    revision: 4,
-    title: "North site mapping",
-    scopeSummary: "Capture the reviewed area.",
-    deliverablesSummary: "Orthomosaic and stills",
-  },
-  authorization: {
-    organizationPublicId: "org-public-a",
-    clientPublicId: "client-public-a",
-    projectPublicId: "project-public-a",
-  },
-  services: [{
-    publicId: "svc-ortho",
-    catalogVersion: "catalog-7",
-    answers: { resolution: "standard" },
-  }],
-  workArea: {
-    revision: 2,
-    hash: "a".repeat(64),
-    squareMeters: 8093.713,
-    acres: 2,
-  },
-  attachments: [{
-    name: "authorization.pdf",
-    contentType: "application/pdf",
-    sizeBytes: 2048,
-    sha256: "b".repeat(64),
-  }],
-};
+const payload = draftQuoteFixture.valid.request as ProjectAlphaDraftQuotePayload;
 
 function environment(overrides: Partial<Env> = {}): Env {
   return {
@@ -64,6 +35,28 @@ async function expectedHmac(secret: string, value: string): Promise<string> {
 }
 
 describe("Project Alpha private draft command", () => {
+  it("accepts and rejects the shared versioned command corpus exactly", () => {
+    expect(draftQuoteFixture.contract).toBe("ltds-project-alpha-draft-quote-v1");
+    expect(draftQuoteFixture.endpoint).toBe("/api/v2/integrations/ltds/draft-quotes");
+    expect(parseProjectAlphaDraftQuotePayload(draftQuoteFixture.valid.request)).toEqual(payload);
+    expect(parseProjectAlphaDraftQuoteResult(draftQuoteFixture.valid.response)).toEqual(draftQuoteFixture.valid.response);
+    for (const specimen of draftQuoteFixture.invalidRequests)
+      expect(parseProjectAlphaDraftQuotePayload(specimen.request), specimen.name).toBeNull();
+    for (const specimen of draftQuoteFixture.invalidResponses)
+      expect(parseProjectAlphaDraftQuoteResult(specimen.response), specimen.name).toBeNull();
+  });
+
+  it("fails before signing or network for every shared invalid request", async () => {
+    const fetcher = vi.fn();
+    for (const specimen of draftQuoteFixture.invalidRequests) {
+      await expect(sendProjectAlphaDraftQuoteCommand(
+        environment(), specimen.request as ProjectAlphaDraftQuotePayload,
+        "ltds-pa-draft:request-public-a:r4:a2", { fetcher },
+      ), specimen.name).rejects.toMatchObject({ status: 409, code: "invalid_response" });
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("is fail-closed by default and requires the dedicated secret set", () => {
     expect(projectAlphaDraftQuoteCapability(environment({ PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "false" }))).toEqual({
       enabled: false,
@@ -103,31 +96,18 @@ describe("Project Alpha private draft command", () => {
       expect(init?.redirect).toBe("error");
       const signed = `${now.toISOString()}\nPOST\n/api/v2/integrations/ltds/draft-quotes\n${idempotencyKey}\n${bodyHash}`;
       expect(headers.get("X-LTDS-Signature")).toBe(`sha256=${await expectedHmac("0123456789abcdef0123456789abcdef", signed)}`);
-      return Response.json({
-        receiptId: "receipt-public-a",
-        draftQuote: {
-          publicId: "quote-public-a",
-          documentNumber: "Q-DRAFT-7",
-          status: "draft",
-          version: 1,
-          editorPath: "/quotes/quote-public-a/edit",
-        },
-      });
+      return Response.json(draftQuoteFixture.valid.response);
     });
     await expect(sendProjectAlphaDraftQuoteCommand(environment(), payload, idempotencyKey, { now, fetcher }))
       .resolves.toMatchObject({ receiptId: "receipt-public-a", draftQuote: { status: "draft" } });
     expect(fetcher).toHaveBeenCalledOnce();
   });
 
-  it("rejects non-draft and non-relative editor responses", async () => {
-    const invalid = [
-      { publicId: "quote-a", documentNumber: null, status: "approved", version: 1, editorPath: "/quotes/a" },
-      { publicId: "quote-a", documentNumber: null, status: "draft", version: 1, editorPath: "https://evil.example/quotes/a" },
-    ];
-    for (const draftQuote of invalid) {
+  it("rejects every shared invalid response specimen", async () => {
+    for (const specimen of draftQuoteFixture.invalidResponses) {
       const call = sendProjectAlphaDraftQuoteCommand(
         environment(), payload, "ltds-pa-draft:request-public-a:r4:a2",
-        { fetcher: async () => Response.json({ receiptId: "receipt-a", draftQuote }) },
+        { fetcher: async () => Response.json(specimen.response) },
       );
       await expect(call).rejects.toMatchObject({
         status: 502,
@@ -136,11 +116,20 @@ describe("Project Alpha private draft command", () => {
     }
   });
 
-  it("surfaces catalog staleness and makes transient failures explicitly retryable", async () => {
-    await expect(sendProjectAlphaDraftQuoteCommand(
-      environment(), payload, "ltds-pa-draft:request-public-a:r4:a2",
-      { fetcher: async () => Response.json({ code: "STALE_CATALOG" }, { status: 409 }) },
-    )).rejects.toMatchObject({ status: 409, code: "stale_catalog" });
+  it("maps every shared bounded error and makes transient failures retryable", async () => {
+    const expected: Record<string, { status: number; code: string }> = {
+      IDEMPOTENCY_CONFLICT: { status: 409, code: "idempotency_conflict" },
+      STALE_CATALOG: { status: 409, code: "stale_catalog" },
+      SCOPE_DENIED: { status: 409, code: "scope_denied" },
+    };
+    for (const specimen of draftQuoteFixture.errorResponses) {
+      const expectedError = expected[specimen.body.code];
+      expect(expectedError, specimen.body.code).toBeDefined();
+      await expect(sendProjectAlphaDraftQuoteCommand(
+        environment(), payload, "ltds-pa-draft:request-public-a:r4:a2",
+        { fetcher: async () => Response.json(specimen.body, { status: specimen.status }) },
+      )).rejects.toMatchObject(expectedError!);
+    }
     await expect(sendProjectAlphaDraftQuoteCommand(
       environment(), payload, "ltds-pa-draft:request-public-a:r4:a2",
       { fetcher: async () => Response.json({}, { status: 503 }) },

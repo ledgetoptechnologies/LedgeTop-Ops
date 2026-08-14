@@ -9,6 +9,7 @@ const markers = /<[^>]+>|CHANGE[_-]?ME|REPLACE[_-]?ME|example\.invalid/i;
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const mapped = (entries = [], key) => new Map(entries.map((item) => [item.binding, item[key]]));
 const routeHosts = (config) => (config.routes ?? []).map((route) => typeof route === "string" ? route : route.pattern);
+const email = (value) => typeof value === "string" && value.length <= 320 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value);
 
 function complete(value, label, errors) {
   if (typeof value !== "string" || !value || markers.test(value)) errors.push(`${label} is empty or contains a placeholder`);
@@ -27,7 +28,7 @@ export function validateApp(app, staging, production) {
   const errors = [];
   const inventory = STAGING_INVENTORY[app];
   if (staging.account_id !== STAGING_ACCOUNT_ID) errors.push(`${app} account_id must equal the approved LTDS staging account`);
-  for (const key of ["name", "routes", "d1_databases", "r2_buckets", "workflows", "ratelimits", "images"]) {
+  for (const key of ["name", "routes", "d1_databases", "r2_buckets", "workflows", "services", "ratelimits", "images"]) {
     const actual = staging[key] ?? (Array.isArray(inventory[key]) ? [] : undefined);
     if (JSON.stringify(actual) !== JSON.stringify(inventory[key])) errors.push(`${app} ${key} does not match the approved staging inventory`);
   }
@@ -57,8 +58,31 @@ export function validateApp(app, staging, production) {
     if (vars.CLIENT_ACCESS_TEAM_DOMAIN !== STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN) errors.push("delivery CLIENT_ACCESS_TEAM_DOMAIN must match the approved Access team");
     if (!/^[a-f0-9]{64}$/i.test(vars.CLIENT_ACCESS_AUD ?? "")) errors.push("delivery CLIENT_ACCESS_AUD must be the dedicated client portal Access audience");
     if (Object.values(STAGING_ACCESS_AUDS).includes(vars.CLIENT_ACCESS_AUD)) errors.push("delivery CLIENT_ACCESS_AUD must not reuse another staging Access audience");
+    const integrationAudiences = [vars.PROJECT_ALPHA_CATALOG_ACCESS_AUD, vars.PROJECT_ALPHA_PORTAL_ACCESS_AUD];
+    for (const [index, audience] of integrationAudiences.entries()) {
+      const label = index === 0 ? "PROJECT_ALPHA_CATALOG_ACCESS_AUD" : "PROJECT_ALPHA_PORTAL_ACCESS_AUD";
+      if (!/^[a-f0-9]{64}$/i.test(audience ?? "")) errors.push(`delivery ${label} must be a dedicated 64-character Access audience`);
+    }
+    if (new Set([vars.CLIENT_ACCESS_AUD, ...integrationAudiences, ...Object.values(STAGING_ACCESS_AUDS)]).size !== 3 + Object.values(STAGING_ACCESS_AUDS).length) {
+      errors.push("delivery client, catalog, portal, and staff Access audiences must all be distinct");
+    }
+    complete(vars.MAPBOX_PUBLIC_TOKEN, "delivery vars.MAPBOX_PUBLIC_TOKEN", errors);
+    if (!email(vars.CLIENT_PORTAL_INVITATION_FROM)) errors.push("delivery CLIENT_PORTAL_INVITATION_FROM must be a valid staging sender");
+    const invitationEmail = (staging.send_email ?? []).find((binding) => binding.name === "CLIENT_PORTAL_INVITATION_EMAIL");
+    if (!invitationEmail || JSON.stringify(invitationEmail.allowed_sender_addresses) !== JSON.stringify([vars.CLIENT_PORTAL_INVITATION_FROM])) {
+      errors.push("delivery invitation email binding must allow exactly CLIENT_PORTAL_INVITATION_FROM");
+    }
   }
-  if (app === "operations" && (vars.INCOMING_EXPECTED_HOST !== STAGING_HOSTS.incoming || vars.INCOMING_BASE_URL !== `https://${STAGING_HOSTS.incoming}`)) errors.push("operations incoming host variables must match the reserved staging hostname");
+  if (app === "operations") {
+    if (vars.INCOMING_EXPECTED_HOST !== STAGING_HOSTS.incoming || vars.INCOMING_BASE_URL !== `https://${STAGING_HOSTS.incoming}`) errors.push("operations incoming host variables must match the reserved staging hostname");
+    complete(vars.MAPBOX_PUBLIC_TOKEN, "operations vars.MAPBOX_PUBLIC_TOKEN", errors);
+    if (!email(vars.CLIENT_REQUEST_TRIAGE_TO)) errors.push("operations CLIENT_REQUEST_TRIAGE_TO must be a valid staging recipient");
+    if (!email(vars.NOTIFICATION_FROM)) errors.push("operations NOTIFICATION_FROM must be a valid staging sender");
+    const notificationEmail = (staging.send_email ?? []).find((binding) => binding.name === "NOTIFICATION_EMAIL");
+    if (!notificationEmail || JSON.stringify(notificationEmail.allowed_sender_addresses) !== JSON.stringify([vars.NOTIFICATION_FROM])) {
+      errors.push("operations notification email binding must allow exactly NOTIFICATION_FROM");
+    }
+  }
   const declaredSecrets = staging.secrets?.required ?? [];
   if (!Array.isArray(declaredSecrets)) errors.push(`${app} secrets.required must be an array`);
   else {
@@ -103,6 +127,7 @@ export function validateApp(app, staging, production) {
   compareResources(app, "D1", staging.d1_databases, production.d1_databases, "database_id", errors);
   compareResources(app, "R2", staging.r2_buckets, production.r2_buckets, "bucket_name", errors);
   compareResources(app, "workflow", staging.workflows, production.workflows, "name", errors);
+  compareResources(app, "service", staging.services, production.services, "service", errors);
 
   const prodQueues = new Set((production.queues?.consumers ?? []).map((item) => item.queue));
   const prodProducerQueues = new Set((production.queues?.producers ?? []).map((item) => item.queue));
@@ -139,6 +164,10 @@ export function validateCrossApp(configs) {
   if (operationsDb !== mapped(configs["ops-sync"].d1_databases, "database_id").get("OPS_DB")) errors.push("ops-sync OPS_DB must equal operations staging OPS_DB");
   const deliveryBucket = mapped(configs.delivery.r2_buckets, "bucket_name").get("DATA_BUCKET");
   if (deliveryBucket !== mapped(configs.operations.r2_buckets, "bucket_name").get("DATA_BUCKET")) errors.push("operations DATA_BUCKET must equal delivery staging DATA_BUCKET");
+  const delegatedSigner = (configs.delivery.services ?? []).find((service) => service.binding === "CLIENT_DELEGATED_SHARE_SIGNER");
+  if (delegatedSigner?.service !== configs.operations.name || delegatedSigner?.entrypoint !== "ClientDelegatedShareSigner") {
+    errors.push("delivery delegated-share signer must target the Operations staging Worker and named signer entrypoint");
+  }
   return errors;
 }
 

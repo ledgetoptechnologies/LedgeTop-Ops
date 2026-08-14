@@ -1,0 +1,45 @@
+{
+  "contract": "ltds-project-alpha-catalog-v2",
+  "schemaVersion": 2,
+  "itemLimits": {
+    "categoryMaxLength": 100,
+    "displayOrderMinimum": 0,
+    "displayOrderMaximum": 1000000,
+    "questionsMinimum": 0,
+    "questionsMaximum": 10,
+    "geometryRequirements": ["none", "optional", "required"]
+  },
+  "validItems": [
+    {
+      "publicId": "svc-site-photography",
+      "sourceVersion": "catalog-item-v1",
+      "name": "Site Photography",
+      "summary": "Client-safe progress photography.",
+      "category": "Photography",
+      "displayOrder": 20,
+      "geometryRequirement": "optional",
+      "questions": []
+    },
+    {
+      "publicId": "svc-2d-mapping",
+      "sourceVersion": "catalog-item-v3",
+      "name": "2D Mapping",
+      "summary": "Orthomosaic mapping for a client-drawn work area.",
+      "category": "Mapping",
+      "displayOrder": 10,
+      "geometryRequirement": "required",
+      "questions": [
+        {
+          "id": "deliverable_format",
+          "label": "Preferred deliverable",
+          "type": "select",
+          "required": true,
+          "helpText": "LTDS will confirm final feasibility.",
+          "options": [
+            { "value": "orthomosaic", "label": "Orthomosaic" }
+          ]
+        }
+      ]
+    }
+  ]
+}

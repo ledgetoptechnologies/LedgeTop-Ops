@@ -22,6 +22,9 @@ const serviceCatalog = [{
   sourceVersion: "pa-v4",
   name: "2D Mapping",
   summary: "Orthomosaic mapping and site coverage.",
+  category: "Mapping",
+  displayOrder: 10,
+  geometryRequirement: "optional" as const,
   questions: [{ id: "resolution", label: "Preferred resolution", type: "select", required: true, helpText: "Choose the best fit; LTDS will confirm feasibility.", options: [{ value: "standard", label: "Standard" }, { value: "survey", label: "Survey detail" }] }],
 }];
 
@@ -165,6 +168,71 @@ async function navigatePortal(page: Page, label: "Projects" | "Deliveries" | "Re
   }
 }
 
+test("client-created links use opaque authorized targets and remain usable on desktop and mobile", async ({ page }) => {
+  let created = false;
+  let revoked = false;
+  await page.route("**/api/client/**", async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === "/api/client/session") return route.fulfill({ json: { account, capabilities: { workspaceHierarchyV2: true, delegatedShares: true } } });
+    if (path === "/api/client/v2/workspaces") return route.fulfill({ json: { workspaces: [{ id: "workspace-00000001", rootType: "organization", rootPublicId: "pa-org-one", displayName: "Acme" }] } });
+    if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
+    if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
+    if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
+    if (path === "/api/client/notifications") return route.fulfill({ json: { notifications: [], unreadCount: 0, cursor: null } });
+    if (path === "/api/client/past-deliveries") return route.fulfill({ json: { files: [], prefix: "", cursor: null } });
+    if (path === "/api/client/past-delivery-locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
+    if (path.endsWith("/delegated-share-targets")) return route.fulfill({ json: { targets: [{
+      delegationId: "delegation-0000001", folderTargetId: "target-child-00001",
+      displayName: "Client photos", maximumLinkLifetimeSeconds: 604800,
+      requirePassword: false, delegationExpiresAt: "2099-01-01T00:00:00.000Z",
+    }], creation: { enabled: true } } });
+    if (path.endsWith("/delegated-shares") && request.method() === "GET") return route.fulfill({ json: { shares: created && !revoked ? [{
+      id: "client-share-000001", publicId: "cs_public_00000000001", path: "/client-share/cs_public_00000000001",
+      label: "Subcontractor review", status: "active", expiresAt: "2026-08-15T12:00:00.000Z",
+      revokedAt: null, createdAt: "2026-08-13T12:00:00.000Z",
+    }] : [], creation: { enabled: true } } });
+    if (path.endsWith("/delegated-shares") && request.method() === "POST") {
+      const body = request.postDataJSON();
+      expect(body).toMatchObject({ delegationId: "delegation-0000001", folderTargetId: "target-child-00001", label: "Subcontractor review" });
+      expect(JSON.stringify(body)).not.toContain("clients/");
+      expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+      created = true;
+      return route.fulfill({ status: 201, json: { share: {
+        id: "client-share-000001", publicId: "cs_public_00000000001",
+        path: "/client-share/cs_public_00000000001",
+        shareUrl: "https://client.example.test/client-share/cs_public_00000000001#private-fragment-00000000000000000000001",
+        label: "Subcontractor review", status: "active", passwordProtected: false,
+        expiresAt: body.expiresAt, createdAt: "2026-08-13T12:00:00.000Z",
+      } } });
+    }
+    if (path.endsWith("/delegated-shares/client-share-000001") && request.method() === "DELETE") {
+      expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+      revoked = true;
+      return route.fulfill({ json: { revoked: true, replayed: false } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  await page.goto("/portal/deliveries");
+  await expect(page.getByRole("heading", { name: "Client-created public links" })).toBeVisible();
+  await expect(page.getByLabel("Approved folder")).toHaveValue("delegation-0000001:target-child-00001");
+  await page.getByLabel("Link label (optional)").fill("Subcontractor review");
+  await page.getByLabel("Expires").fill("2026-08-15T07:00");
+  await page.getByRole("button", { name: "Create public link" }).click();
+  await expect(page.getByText("Link created — copy it now")).toBeVisible();
+  await expect(page.getByLabel("New client public link")).toHaveValue(/\/client-share\/cs_public_.*#private-fragment/);
+  await expect(page.locator("body")).not.toContainText("clients/private");
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const form = page.locator(".portal-delegated-share-form");
+  await expect(form).toBeVisible();
+  expect((await form.boundingBox())!.width).toBeLessThanOrEqual(390);
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Revoke" }).click();
+  await expect(page.getByText("No client-created links yet.")).toBeVisible();
+  expect(revoked).toBe(true);
+});
+
 test("workspace-v2 selection scopes every authenticated resource request and switches without a full refresh", async ({ page }) => {
   const observed: Array<{ path: string; workspace: string | undefined }> = [];
   await page.route("**/api/client/**", async route => {
@@ -242,6 +310,20 @@ test("authorized portal supports project, delivery, and request workflows", asyn
   await expect(page.getByText("North Site spring imagery")).toBeVisible();
 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("catalog geometry contract is visible and blocks progress until a required work area is drawn", async ({ page }) => {
+  await mockAuthorizedPortal(page);
+  await page.route("**/api/client/service-catalog", route => route.fulfill({
+    json: { services: [{ ...serviceCatalog[0], geometryRequirement: "required" }] },
+  }));
+  await page.goto("/portal/requests/new");
+  await expect(page.getByText("Mapping", { exact: true })).toBeVisible();
+  await expect(page.getByText("Work area required", { exact: true })).toBeVisible();
+  await openRequestWorkArea(page);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByText("Draw the required work area on the map before continuing.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Scope and timing" })).toHaveCount(0);
 });
 
 test("desktop portal navigation uses the client IA and restores routes with browser history", async ({ page }) => {
@@ -501,19 +583,30 @@ test("request map is primary, responsive, accessible, and supports targeted POI 
   const canvas = page.locator(".mapboxgl-canvas");
   await expect(map).toBeVisible();
   await expect(canvas).toBeVisible();
-  const mapBox = await map.boundingBox();
-  const mapRegionBox = await page.locator(".portal-request-map").boundingBox();
-  const titleBox = await page.getByRole("heading", { name: "Show us the work area" }).boundingBox();
-  expect(mapBox).not.toBeNull();
-  expect(mapRegionBox).not.toBeNull();
-  expect(titleBox).not.toBeNull();
+  // Read all geometry in one animation frame. Mapbox can update its canvas and
+  // scroll position while it finishes initializing; separate boundingBox()
+  // calls can otherwise compare coordinates from different viewport states.
+  const geometry = await map.evaluate(element => {
+    const region = element.closest(".portal-request-map");
+    const title = document.querySelector("#request-location-title");
+    if (!(region instanceof HTMLElement) || !(title instanceof HTMLElement)) return null;
+    const box = (target: Element) => {
+      const rect = target.getBoundingClientRect();
+      return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    };
+    return { map: box(element), region: box(region), title: box(title) };
+  });
+  expect(geometry).not.toBeNull();
+  const mapBox = geometry!.map;
+  const mapRegionBox = geometry!.region;
+  const titleBox = geometry!.title;
   const mobile = testInfo.project.name.includes("mobile");
-  expect(mapRegionBox!.width).toBeGreaterThanOrEqual(page.viewportSize()!.width * (mobile ? 0.7 : 0.6));
-  expect(mapBox!.width).toBeGreaterThanOrEqual(mapRegionBox!.width - 40);
-  expect(mapBox!.height).toBeGreaterThanOrEqual(mobile ? 430 : 560);
-  expect(mapRegionBox!.y).toBeGreaterThan(titleBox!.y);
-  expect(mapBox!.x).toBeGreaterThanOrEqual(0);
-  expect(mapBox!.x + mapBox!.width).toBeLessThanOrEqual(page.viewportSize()!.width);
+  expect(mapRegionBox.width).toBeGreaterThanOrEqual(page.viewportSize()!.width * (mobile ? 0.7 : 0.6));
+  expect(mapBox.width).toBeGreaterThanOrEqual(mapRegionBox.width - 40);
+  expect(mapBox.height).toBeGreaterThanOrEqual(mobile ? 430 : 560);
+  expect(mapRegionBox.y).toBeGreaterThan(titleBox.y);
+  expect(mapBox.x).toBeGreaterThanOrEqual(0);
+  expect(mapBox.x + mapBox.width).toBeLessThanOrEqual(page.viewportSize()!.width);
 
   const drawArea = page.getByRole("button", { name: "Draw area" });
   const streets = page.getByRole("button", { name: "Streets" });
@@ -568,7 +661,11 @@ test("current location reports loading, failure, and success without blocking th
           window.setTimeout(() => {
             if (call === 0) failure({ code: 1, message: "denied", PERMISSION_DENIED: 1, POSITION_UNAVAILABLE: 2, TIMEOUT: 3 } as GeolocationPositionError);
             else success({ coords: { longitude: -88.071, latitude: 44.501, accuracy: 150, altitude: null, altitudeAccuracy: null, heading: null, speed: null }, timestamp: Date.now() } as GeolocationPosition);
-          }, 120);
+          // Keep the asynchronous loading state observable even when the
+          // mobile project and assertion scheduler are running concurrently.
+          // The test still exercises the real success/error callbacks; it no
+          // longer depends on catching a 120 ms transient between assertions.
+          }, 750);
         },
       },
     });

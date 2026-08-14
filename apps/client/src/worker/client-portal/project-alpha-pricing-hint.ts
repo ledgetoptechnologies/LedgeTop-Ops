@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { Env } from "../types";
 import type { ClientPricingHint, ClientPricingHintInput, ClientPricingHintProvider } from "./types";
+import type { EffectivePortalWorkspaceContext } from "./workspace-v2";
 
 const PRICING_PATH = "/api/v2/integrations/ltds/pricing-hints";
 const PRICING_SCOPE = "portal.pricing.preview";
@@ -8,7 +9,26 @@ const PRICING_TIMEOUT_MS = 4_000;
 const MAX_RESPONSE_BYTES = 16 * 1024;
 const REQUIRED_DISCLAIMER = "Planning guidance only. Final quote after staff review.";
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const OPAQUE_PA_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const MONEY = /^(?:0|[1-9][0-9]{0,10})\.[0-9]{2}$/;
+
+export const projectAlphaPricingRequestSchema = z.object({
+  schemaVersion: z.literal(1),
+  source: z.literal("ltds-client-portal"),
+  scope: z.literal("portal.pricing.preview"),
+  authorizationContext: z.object({
+    workspaceRoot: z.object({
+      type: z.enum(["organization", "standalone_client"]),
+      publicId: z.string().min(1).max(128).regex(OPAQUE_PA_ID).refine(value => !/^\d+$/.test(value)),
+    }).strict(),
+    projectPublicId: z.string().min(1).max(128).regex(OPAQUE_PA_ID).refine(value => !/^\d+$/.test(value)),
+  }).strict(),
+  coverageSquareMetres: z.string().regex(/^(?:0|[1-9][0-9]{0,14})\.[0-9]{6}$/),
+  services: z.array(z.object({
+    publicId: z.string().min(1).max(128).regex(SAFE_ID),
+    sourceVersion: z.string().min(1).max(128).regex(SAFE_ID),
+  }).strict()).min(1).max(10),
+}).strict();
 
 const responseSchema = z.object({
   schemaVersion: z.literal(1),
@@ -36,6 +56,44 @@ export interface ProjectAlphaPricingOptions {
   fetcher?: typeof fetch;
   now?: Date;
 }
+
+export type ProjectAlphaPricingAuthorizationContextResolver = (
+  env: Env,
+  workspace: EffectivePortalWorkspaceContext,
+  localProjectId: string,
+) => Promise<ClientPricingHintInput["authorizationContext"] | null>;
+
+function validOpaquePaId(value: string): boolean {
+  return OPAQUE_PA_ID.test(value) && !/^\d+$/.test(value);
+}
+
+/**
+ * Converts already-authorized LTDS scope into PA public identity. Neither the
+ * browser-selected workspace ID nor the local/numeric project ID crosses the
+ * integration boundary.
+ */
+export const resolveProjectAlphaPricingAuthorizationContext: ProjectAlphaPricingAuthorizationContextResolver = async (
+  env,
+  workspace,
+  localProjectId,
+) => {
+  if (!validOpaquePaId(workspace.rootPublicId) || !OPAQUE_PA_ID.test(localProjectId)) return null;
+  const candidate = env.DELIVERY_DB as D1Database & { withSession?: (consistency: "first-primary") => D1Database };
+  const database = typeof candidate.withSession === "function" ? candidate.withSession("first-primary") : env.DELIVERY_DB;
+  const project = await database.prepare(`SELECT project.project_alpha_project_id public_id
+    FROM projects project
+    JOIN client_project_grants grant_record
+      ON grant_record.project_id=project.id AND grant_record.account_id=?
+      AND grant_record.revoked_at IS NULL AND grant_record.can_request_service=1
+    WHERE project.id=? AND project.active=1 AND project.project_alpha_project_id IS NOT NULL`)
+    .bind(workspace.legacyAccountId, localProjectId)
+    .first<{ public_id: string }>();
+  if (!project || !validOpaquePaId(project.public_id)) return null;
+  return {
+    workspaceRoot: { type: workspace.rootType, publicId: workspace.rootPublicId },
+    projectPublicId: project.public_id,
+  };
+};
 
 function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
@@ -192,13 +250,16 @@ export async function fetchProjectAlphaPricingHint(
     new Set(services.map(service => service.publicId)).size !== services.length
   ) return null;
   const squareMetres = input.areaSquareMeters.toFixed(6);
-  const body = canonicalJson({
+  const requestPayload = projectAlphaPricingRequestSchema.safeParse({
     schemaVersion: 1,
     source: "ltds-client-portal",
     scope: PRICING_SCOPE,
+    authorizationContext: input.authorizationContext,
     coverageSquareMetres: squareMetres,
     services,
   });
+  if (!requestPayload.success) return null;
+  const body = canonicalJson(requestPayload.data);
   const bodyHash = await sha256Hex(body);
   const now = options.now ?? new Date();
   const timestamp = now.toISOString();

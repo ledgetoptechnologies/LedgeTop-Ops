@@ -22,6 +22,9 @@ interface CatalogRow {
   source_version: string;
   name: string;
   summary: string | null;
+  category: string;
+  display_order: number;
+  geometry_requirement: string;
   question_schema_json: string;
 }
 
@@ -130,12 +133,24 @@ export function sanitizeServiceQuestions(value: unknown): ClientServiceQuestion[
 
 function mapCatalog(row: CatalogRow): ClientServiceCatalogItem | null {
   const summary = row.summary === null ? null : safeText(row.summary, 1000);
-  if (!PUBLIC_ID.test(row.public_id) || !safeText(row.source_version, 128) || !safeText(row.name, 160) || (row.summary !== null && !summary)) return null;
+  const category = safeText(row.category, 100);
+  if (!PUBLIC_ID.test(row.public_id) || !safeText(row.source_version, 128) || !safeText(row.name, 160) || (row.summary !== null && !summary) || !category) return null;
+  if (!Number.isSafeInteger(row.display_order) || row.display_order < 0 || row.display_order > 1_000_000) return null;
+  if (row.geometry_requirement !== "none" && row.geometry_requirement !== "optional" && row.geometry_requirement !== "required") return null;
   let parsed: unknown;
   try { parsed = JSON.parse(row.question_schema_json); } catch { return null; }
   const questions = sanitizeServiceQuestions(parsed);
   if (!questions) return null;
-  return { publicId: row.public_id, sourceVersion: row.source_version, name: row.name.trim(), summary, questions };
+  return {
+    publicId: row.public_id,
+    sourceVersion: row.source_version,
+    name: row.name.trim(),
+    summary,
+    category,
+    displayOrder: row.display_order,
+    geometryRequirement: row.geometry_requirement,
+    questions,
+  };
 }
 
 export function validateServiceAnswers(questions: ClientServiceQuestion[], value: unknown, allowIncomplete = false): Record<string, unknown> | null {
@@ -195,7 +210,7 @@ async function resolveSelections(env: Env, input: ClientServiceRequestDraftInput
   const selected: ClientServiceDraftSelection[] = [];
   for (const inputService of input.services) {
     if (!PUBLIC_ID.test(inputService.publicId)) return null;
-    const row = await db(env).prepare(`SELECT public_id,source_version,name,summary,question_schema_json FROM pa_service_catalog_items WHERE public_id=? AND active=1`).bind(inputService.publicId).first<CatalogRow>();
+    const row = await db(env).prepare(`SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json FROM pa_service_catalog_items WHERE public_id=? AND active=1`).bind(inputService.publicId).first<CatalogRow>();
     const catalog = row ? mapCatalog(row) : null;
     if (!catalog) return null;
     const answers = validateServiceAnswers(catalog.questions, inputService.answers, true);
@@ -233,7 +248,10 @@ async function loadDraft(env: Env, session: ClientPortalSession, draftId: string
     for (const serviceRow of serviceRows.results) {
       const snapshot = JSON.parse(serviceRow.service_snapshot_json) as Omit<ClientServiceDraftSelection, "answers">;
       const answers = JSON.parse(serviceRow.answers_json) as Record<string, unknown>;
-      services.push({ ...snapshot, publicId: serviceRow.service_public_id, sourceVersion: serviceRow.service_source_version, answers });
+      const category = safeText(snapshot.category, 100) ?? "Uncategorized";
+      const displayOrder = Number.isSafeInteger(snapshot.displayOrder) && snapshot.displayOrder >= 0 && snapshot.displayOrder <= 1_000_000 ? snapshot.displayOrder : 0;
+      const geometryRequirement = snapshot.geometryRequirement === "none" || snapshot.geometryRequirement === "required" ? snapshot.geometryRequirement : "optional";
+      services.push({ ...snapshot, publicId: serviceRow.service_public_id, sourceVersion: serviceRow.service_source_version, category, displayOrder, geometryRequirement, answers });
     }
   } catch { return null; }
   return {
@@ -244,11 +262,22 @@ async function loadDraft(env: Env, session: ClientPortalSession, draftId: string
 }
 
 function serviceSnapshot(service: ClientServiceDraftSelection): string {
-  return JSON.stringify({ publicId: service.publicId, sourceVersion: service.sourceVersion, name: service.name, summary: service.summary, questions: service.questions });
+  return JSON.stringify({
+    publicId: service.publicId,
+    sourceVersion: service.sourceVersion,
+    name: service.name,
+    summary: service.summary,
+    category: service.category,
+    displayOrder: service.displayOrder,
+    geometryRequirement: service.geometryRequirement,
+    questions: service.questions,
+  });
 }
 
 export async function listServiceCatalog(env: Env): Promise<ClientServiceCatalogItem[]> {
-  const result = await db(env).prepare(`SELECT public_id,source_version,name,summary,question_schema_json FROM pa_service_catalog_items WHERE active=1 ORDER BY name COLLATE NOCASE,public_id LIMIT 500`).all<CatalogRow>();
+  const result = await db(env).prepare(`SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json
+    FROM pa_service_catalog_items WHERE active=1
+    ORDER BY category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id LIMIT 500`).all<CatalogRow>();
   return result.results.map(mapCatalog).filter((item): item is ClientServiceCatalogItem => item !== null);
 }
 
@@ -336,7 +365,8 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
 
 function completeForSubmission(draft: ClientServiceRequestDraft): boolean {
   return draft.title.trim().length > 0 && draft.details.trim().length > 0 && draft.services.length > 0
-    && draft.services.every(service => validateServiceAnswers(service.questions, service.answers) !== null);
+    && draft.services.every(service => validateServiceAnswers(service.questions, service.answers) !== null)
+    && (!draft.services.some(service => service.geometryRequirement === "required") || draft.areaGeoJson !== null);
 }
 
 async function servicesRemainSubmitEligible(env: Env, services: ClientServiceDraftSelection[]): Promise<boolean> {

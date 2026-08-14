@@ -19,7 +19,7 @@ ignored staging configuration must end with `CLIENT_PORTAL_ENABLED=false`.
 - Public app: `LTDS Client Public Staging`, with the client test hostname as its
   root destination and a Bypass Everyone policy. The more-specific portal paths
   must retain the dedicated portal Allow policy. The release-critical public
-  path families are `/`, `/s/*`, `/api/public/*`, `/health`, and `/assets/*`;
+  path families are `/`, `/s/*`, `/client-share/*`, `/api/public/*`, `/health`, and `/assets/*`;
   each remains subject to the Worker's routing and authorization behavior.
 
 The public Bypass policy is not client authentication. It exists so the
@@ -54,7 +54,7 @@ and warns that Bypass disables Access enforcement in
 1. Run `npm.cmd run staging:check:test`, the repository tests, and build from
    the pinned commit. Record all config hashes.
 2. Export both staging D1 databases. List migrations and confirm the exact
-   Delivery release set `0096`-`0112` and `0114`-`0127` plus Operations
+   Delivery release set `0096`-`0112`, `0114`-`0130`, plus Operations
    `0014`-`0022`. Migration `0113` is intentionally reserved and absent. The
    release evidence validator compares the complete filename sets; do not
    shorten them to a range or infer success from a local migration run.
@@ -97,6 +97,9 @@ operator owns that dependency:
 - the private Operations delegated-share signer binding and complete public
   authorization path;
 - projection parity/staleness monitors and alerts.
+- PA relation/lifecycle contract fixtures, many-to-many scope parity, deny
+  precedence, completed-project day-30 cutoff, and reopen restoration. Keep
+  `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=false` until all are recorded.
 
 `staging:evidence:check` rejects a packet that omits any one of these gates.
 

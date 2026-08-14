@@ -1,6 +1,7 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import migration from "../migrations/0124_client_delegated_public_shares.sql?raw";
+import provisioningMigration from "../migrations/0130_client_delegated_share_provisioning.sql?raw";
 import { createSessionCookie, parseCookie, sha256 } from "../src/worker/security";
 import { encodeItemRef } from "../src/worker/files";
 import { createClientDelegatedPublicRouter } from "../src/worker/client-delegated-public";
@@ -13,6 +14,7 @@ import {
   createClientDelegatedShareSessionCookie,
   delegatedTargetContained,
   listClientDelegatedShares,
+  listClientDelegatedShareTargets,
   revokeClientDelegatedShare,
   verifyClientDelegatedShareSessionCookie,
 } from "../src/worker/client-portal/delegated-shares";
@@ -89,9 +91,14 @@ describe("client-delegated public share foundation", () => {
         source_key TEXT PRIMARY KEY,source_etag TEXT,thumbnail_key TEXT,thumbnail_etag TEXT,
         thumbnail_size INTEGER,status TEXT);
       CREATE TABLE file_index(
-        r2_key TEXT PRIMARY KEY,stream_uid TEXT,stream_status TEXT);
+        r2_key TEXT PRIMARY KEY,etag TEXT,media_kind TEXT,size INTEGER,uploaded_at TEXT,
+        content_type TEXT,stream_uid TEXT,stream_status TEXT);
+      CREATE TABLE image_asset_locations(
+        source_key TEXT PRIMARY KEY,source_etag TEXT NOT NULL,folder_prefix TEXT NOT NULL,
+        latitude REAL,longitude REAL,status TEXT NOT NULL);
     `);
     await applySql(db, migration);
+    await applySql(db, provisioningMigration);
     await db.prepare("PRAGMA foreign_keys=ON").run();
     await db.batch([
       db.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status)
@@ -142,6 +149,10 @@ describe("client-delegated public share foundation", () => {
          expires_at,created_by_staff_id)
         VALUES (?,?,?,'entitlement-share-01',7,?,'binding-v1',?,datetime('now','+7 day'),'staff-one')`)
         .bind(delegationId, workspaceId, identityId, bindingId, rootTargetId),
+      db.prepare(`INSERT INTO client_share_folder_target_labels(target_id,workspace_id,display_name)
+        VALUES (?,?,'Approved root')`).bind(rootTargetId, workspaceId),
+      db.prepare(`INSERT INTO client_share_folder_target_labels(target_id,workspace_id,display_name)
+        VALUES (?,?,'Client photos')`).bind(childTargetId, workspaceId),
     ]);
     env = {
       DELIVERY_DB: db,
@@ -161,6 +172,25 @@ describe("client-delegated public share foundation", () => {
     expect(delegatedTargetContained("deliverables/", "deliverables/", false)).toBe(false);
     expect(delegatedTargetContained("deliverables/", "deliverables-old/photos/", false)).toBe(false);
     expect(delegatedTargetContained("Deliverables/", "deliverables/photos/", false)).toBe(false);
+  });
+
+  it("lists only authorized opaque targets and never serializes storage or policy internals", async () => {
+    const targets = await listClientDelegatedShareTargets(env, principal, workspaceId);
+    expect(targets).toEqual([expect.objectContaining({
+      delegationId, folderTargetId: childTargetId, displayName: "Client photos",
+      requirePassword: false,
+    })]);
+    const serialized = JSON.stringify(targets);
+    expect(serialized).not.toContain("clients/private");
+    expect(serialized).not.toContain("deliverables/");
+    expect(serialized).not.toContain(bindingId);
+    expect(serialized).not.toContain("entitlement-share-01");
+    expect(await listClientDelegatedShareTargets(env, otherPrincipal, workspaceId)).toBeNull();
+
+    await db.prepare("UPDATE client_share_delegations SET allow_exact_root=1 WHERE id=?").bind(delegationId).run();
+    expect(await listClientDelegatedShareTargets(env, principal, workspaceId))
+      .toEqual(expect.arrayContaining([expect.objectContaining({ folderTargetId: rootTargetId })]));
+    await db.prepare("UPDATE client_share_delegations SET allow_exact_root=0 WHERE id=?").bind(delegationId).run();
   });
 
   it("authorizes only the exact identity, workspace, binding version and strict descendant", async () => {
@@ -348,6 +378,13 @@ describe("client-delegated public share foundation", () => {
     const sessionSecret = "client-share-session-secret-must-be-unique-0001";
     await db.prepare("INSERT INTO delivery_tombstones(physical_key,tombstone_kind) VALUES (?,'exact')")
       .bind(`${root}deleted.jpg`).run();
+    await db.batch([
+      db.prepare(`INSERT INTO file_index(r2_key,etag,media_kind,size,uploaded_at,content_type)
+        VALUES (?,'visible-etag','image',13,'2026-08-01T12:00:00Z','image/jpeg')`).bind(`${root}visible.jpg`),
+      db.prepare(`INSERT INTO image_asset_locations
+        (source_key,source_etag,folder_prefix,latitude,longitude,status)
+        VALUES (?,'visible-etag',?,44.5133,-88.0133,'ready')`).bind(`${root}visible.jpg`, root),
+    ]);
     const router = createClientDelegatedPublicRouter();
     const requestEnv = {
       ...env,
@@ -393,6 +430,49 @@ describe("client-delegated public share foundation", () => {
     expect(JSON.stringify(manifestBody)).not.toContain("hidden.jpg");
     expect(JSON.stringify(manifestBody)).not.toContain("deleted.jpg");
 
+    const disabledLocations = await router.request(`https://client.test/shares/${publicId}/locations`, {
+      headers: { Cookie: cookie },
+    }, requestEnv, executionCtx);
+    expect(await disabledLocations.json()).toEqual({
+      locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null,
+    });
+    await db.prepare(`INSERT INTO client_share_delegation_policies
+      (delegation_id,workspace_id,image_location_map_enabled,created_by_staff_id)
+      VALUES (?,?,1,'staff-one')`).bind(delegationId, workspaceId).run();
+    const locationsResponse = await router.request(`https://client.test/shares/${publicId}/locations`, {
+      headers: { Cookie: cookie },
+    }, { ...requestEnv, MAPBOX_PUBLIC_TOKEN: "pk.test" }, executionCtx);
+    expect(locationsResponse.status).toBe(200);
+    const locationsBody = await locationsResponse.json<any>();
+    expect(locationsBody).toMatchObject({
+      locations: { points: [{ latitude: 44.5133, longitude: -88.0133, imageCount: 1 }], imageCount: 1 },
+      mapboxPublicToken: "pk.test",
+    });
+    expect(JSON.stringify(locationsBody)).not.toContain("clients/private");
+    expect(JSON.stringify(locationsBody)).not.toContain("source_key");
+    expect(JSON.stringify(locationsBody)).not.toContain("EXIF");
+    const assetRef = locationsBody.locations.points[0].assetRef as string;
+    const mappedAsset = await router.request(
+      `https://client.test/shares/${publicId}/locations/${encodeURIComponent(assetRef)}`,
+      { headers: { Cookie: cookie } }, requestEnv, executionCtx,
+    );
+    expect(mappedAsset.status).toBe(200);
+    const mappedBody = await mappedAsset.json<any>();
+    expect(mappedBody.item).toMatchObject({
+      name: "visible.jpg",
+      sourceUrl: expect.stringMatching(/^\/client-share\/api\/shares\//),
+      downloadUrl: expect.stringMatching(/^\/client-share\/api\/shares\//),
+    });
+    expect(JSON.stringify(mappedBody)).not.toContain("clients/private");
+    await db.prepare("UPDATE client_share_delegation_policies SET image_location_map_enabled=0 WHERE delegation_id=?")
+      .bind(delegationId).run();
+    expect((await router.request(
+      `https://client.test/shares/${publicId}/locations/${encodeURIComponent(assetRef)}`,
+      { headers: { Cookie: cookie } }, requestEnv, executionCtx,
+    )).status).toBe(404);
+    await db.prepare("UPDATE client_share_delegation_policies SET image_location_map_enabled=1 WHERE delegation_id=?")
+      .bind(delegationId).run();
+
     const visibleRef = encodeItemRef("visible.jpg");
     const download = await router.request(
       `https://client.test/shares/${publicId}/items/${visibleRef}/download`, { headers: { Cookie: cookie } }, requestEnv, executionCtx,
@@ -421,6 +501,13 @@ describe("client-delegated public share foundation", () => {
     expect((await router.request(`https://client.test/shares/${publicId}/manifest`, {
       headers: { Cookie: cookie },
     }, requestEnv, executionCtx)).status).toBe(404);
+    expect((await router.request(`https://client.test/shares/${publicId}/locations`, {
+      headers: { Cookie: cookie },
+    }, requestEnv, executionCtx)).status).toBe(404);
+    expect((await router.request(
+      `https://client.test/shares/${publicId}/locations/${encodeURIComponent(assetRef)}`,
+      { headers: { Cookie: cookie } }, requestEnv, executionCtx,
+    )).status).toBe(404);
     await db.prepare("UPDATE portal_v2_workspace_memberships SET status='active',revoked_at=NULL WHERE workspace_id=? AND identity_id=?")
       .bind(workspaceId, identityId).run();
     await db.prepare("UPDATE portal_v2_folder_bindings SET source_version='binding-v2' WHERE id=?").bind(bindingId).run();
@@ -551,6 +638,7 @@ describe("client-delegated public share foundation", () => {
 
   it("is migration-idempotent and denies expired or revoked delegation state immediately", async () => {
     await applySql(db, migration);
+    await applySql(db, provisioningMigration);
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     await db.prepare("UPDATE client_share_delegations SET expires_at=datetime('now','-1 second') WHERE id=?")
       .bind(delegationId).run();

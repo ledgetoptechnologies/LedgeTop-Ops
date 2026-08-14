@@ -155,7 +155,10 @@
         "0124_client_delegated_public_shares.sql",
         "0125_project_alpha_portal_projection.sql",
         "0126_delivery_share_recipient_snapshots.sql",
-        "0127_portal_invitation_secret_scrub.sql"
+        "0127_portal_invitation_secret_scrub.sql",
+        "0128_project_alpha_catalog_compatibility.sql",
+        "0129_portal_hierarchy_relations.sql",
+        "0130_client_delegated_share_provisioning.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -191,6 +194,7 @@
     "workspaceStaffRecovery": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
     "delegatedShareSignerBinding": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
     "delegatedSharePublicAuthorization": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "trueNasVideoThumbnailRenderer": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
     "projectionParityAndAlerts": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" }
   },
   "secrets": {

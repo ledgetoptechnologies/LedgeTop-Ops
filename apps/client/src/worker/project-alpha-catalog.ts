@@ -27,6 +27,9 @@ export interface CatalogProjectionItem {
   sourceVersion: string;
   name: string;
   summary: string | null;
+  category: string;
+  displayOrder: number;
+  geometryRequirement: "none" | "optional" | "required";
   questions: CatalogQuestion[];
 }
 
@@ -185,10 +188,11 @@ function parseQuestion(value: unknown): CatalogQuestion {
 }
 
 function parseItem(value: unknown): CatalogProjectionItem {
-  if (!record(value) || !exactKeys(value, ["publicId", "sourceVersion", "name", "summary", "questions"])) throw new Error("catalog-item-fields-invalid");
+  if (!record(value) || !exactKeys(value, ["publicId", "sourceVersion", "name", "summary", "category", "displayOrder", "geometryRequirement", "questions"])) throw new Error("catalog-item-fields-invalid");
   const publicId = plainText(value.publicId, 128)!;
   const sourceVersion = plainText(value.sourceVersion, 128)!;
-  if (!PUBLIC_ID.test(publicId) || !SAFE_ID.test(sourceVersion) || !Array.isArray(value.questions) || value.questions.length < 1 || value.questions.length > 10) throw new Error("catalog-item-invalid");
+  if (!PUBLIC_ID.test(publicId) || !SAFE_ID.test(sourceVersion) || !Array.isArray(value.questions) || value.questions.length > 10) throw new Error("catalog-item-invalid");
+  if (value.geometryRequirement !== "none" && value.geometryRequirement !== "optional" && value.geometryRequirement !== "required") throw new Error("catalog-geometry-requirement-invalid");
   const questions = value.questions.map(parseQuestion);
   if (new Set(questions.map(question => question.id)).size !== questions.length) throw new Error("catalog-question-duplicate");
   return {
@@ -196,6 +200,9 @@ function parseItem(value: unknown): CatalogProjectionItem {
     sourceVersion,
     name: plainText(value.name, 160)!,
     summary: value.summary === null ? null : plainText(value.summary, 1000),
+    category: plainText(value.category, 100)!,
+    displayOrder: integer(value.displayOrder, 0, 1_000_000),
+    geometryRequirement: value.geometryRequirement,
     questions,
   };
 }
@@ -316,8 +323,10 @@ async function stageSnapshotPage(env: Env, delivery: SnapshotPageDelivery, paylo
   }
   await db.batch([
     db.prepare("INSERT INTO pa_service_catalog_generation_pages(generation_id,page_number,item_count,payload_hash) VALUES(?,?,?,?)").bind(generation.id, delivery.pageNumber, delivery.items.length, payloadHash),
-    ...delivery.items.map(item => db.prepare(`INSERT INTO pa_service_catalog_generation_items(generation_id,page_number,public_id,source_version,name,summary,question_schema_json) VALUES(?,?,?,?,?,?,?)`)
-      .bind(generation!.id, delivery.pageNumber, item.publicId, item.sourceVersion, item.name, item.summary, JSON.stringify(item.questions))),
+    ...delivery.items.map(item => db.prepare(`INSERT INTO pa_service_catalog_generation_items
+      (generation_id,page_number,public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json)
+      VALUES(?,?,?,?,?,?,?,?,?,?)`)
+      .bind(generation!.id, delivery.pageNumber, item.publicId, item.sourceVersion, item.name, item.summary, item.category, item.displayOrder, item.geometryRequirement, JSON.stringify(item.questions))),
     receiptStatement(db, delivery, payloadHash, "snapshot_page"),
     auditStatement(db, delivery, "snapshot_page_staged", { pageNumber: delivery.pageNumber, pageCount: delivery.pageCount, itemCount: delivery.items.length }),
   ]);
@@ -345,14 +354,18 @@ async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, pa
     JOIN pa_service_catalog_items current ON current.public_id=staged.public_id AND current.source_version=staged.source_version
     WHERE staged.generation_id=? AND (
       current.name<>staged.name OR COALESCE(current.summary,'')<>COALESCE(staged.summary,'')
+      OR current.category<>staged.category OR current.display_order<>staged.display_order
+      OR current.geometry_requirement<>staged.geometry_requirement
       OR current.question_schema_json<>staged.question_schema_json
     ) LIMIT 1`).bind(generation.id).first("conflict");
   if (reusedVersion) throw new Error("catalog-source-version-conflict");
   await db.batch([
     db.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE active=1"),
-    db.prepare(`INSERT INTO pa_service_catalog_items(public_id,source_version,name,summary,question_schema_json,active,source_updated_at,mirrored_at,source_generation,source_sequence)
-      SELECT public_id,source_version,name,summary,question_schema_json,1,?,datetime('now'),?,? FROM pa_service_catalog_generation_items WHERE generation_id=?
-      ON CONFLICT(public_id,source_version) DO UPDATE SET name=excluded.name,summary=excluded.summary,question_schema_json=excluded.question_schema_json,active=1,source_updated_at=excluded.source_updated_at,mirrored_at=datetime('now'),source_generation=excluded.source_generation,source_sequence=excluded.source_sequence`)
+    db.prepare(`INSERT INTO pa_service_catalog_items
+      (public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at,mirrored_at,source_generation,source_sequence)
+      SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,1,?,datetime('now'),?,?
+      FROM pa_service_catalog_generation_items WHERE generation_id=?
+      ON CONFLICT(public_id,source_version) DO UPDATE SET name=excluded.name,summary=excluded.summary,category=excluded.category,display_order=excluded.display_order,geometry_requirement=excluded.geometry_requirement,question_schema_json=excluded.question_schema_json,active=1,source_updated_at=excluded.source_updated_at,mirrored_at=datetime('now'),source_generation=excluded.source_generation,source_sequence=excluded.source_sequence`)
       .bind(delivery.occurredAt, delivery.sourceGeneration, delivery.sourceSequence, generation.id),
     db.prepare("UPDATE pa_service_catalog_entity_state SET active=0,source_sequence=?,updated_at=datetime('now')").bind(delivery.sourceSequence),
     db.prepare(`INSERT INTO pa_service_catalog_entity_state(public_id,source_version,source_sequence,active)
@@ -380,17 +393,19 @@ async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string
     const item = delivery.event.item;
     const reusedVersion = await db.prepare(`SELECT 1 conflict FROM pa_service_catalog_items
       WHERE public_id=? AND source_version=? AND (
-        name<>? OR COALESCE(summary,'')<>COALESCE(?, '') OR question_schema_json<>?
-      ) LIMIT 1`).bind(item.publicId,item.sourceVersion,item.name,item.summary,JSON.stringify(item.questions)).first("conflict");
+        name<>? OR COALESCE(summary,'')<>COALESCE(?, '') OR category<>? OR display_order<>?
+        OR geometry_requirement<>? OR question_schema_json<>?
+      ) LIMIT 1`).bind(item.publicId,item.sourceVersion,item.name,item.summary,item.category,item.displayOrder,item.geometryRequirement,JSON.stringify(item.questions)).first("conflict");
     if (reusedVersion) throw new Error("catalog-source-version-conflict");
   }
   const statements: D1PreparedStatement[] = [db.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE public_id=? AND active=1").bind(publicId)];
   if (delivery.event.action === "upsert") {
     const item = delivery.event.item;
-    statements.push(db.prepare(`INSERT INTO pa_service_catalog_items(public_id,source_version,name,summary,question_schema_json,active,source_updated_at,mirrored_at,source_generation,source_sequence)
-      VALUES(?,?,?,?,?,1,?,datetime('now'),?,?)
-      ON CONFLICT(public_id,source_version) DO UPDATE SET name=excluded.name,summary=excluded.summary,question_schema_json=excluded.question_schema_json,active=1,source_updated_at=excluded.source_updated_at,mirrored_at=datetime('now'),source_generation=excluded.source_generation,source_sequence=excluded.source_sequence`)
-      .bind(item.publicId, item.sourceVersion, item.name, item.summary, JSON.stringify(item.questions), delivery.occurredAt, delivery.sourceGeneration, delivery.sourceSequence));
+    statements.push(db.prepare(`INSERT INTO pa_service_catalog_items
+      (public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at,mirrored_at,source_generation,source_sequence)
+      VALUES(?,?,?,?,?,?,?,?,1,?,datetime('now'),?,?)
+      ON CONFLICT(public_id,source_version) DO UPDATE SET name=excluded.name,summary=excluded.summary,category=excluded.category,display_order=excluded.display_order,geometry_requirement=excluded.geometry_requirement,question_schema_json=excluded.question_schema_json,active=1,source_updated_at=excluded.source_updated_at,mirrored_at=datetime('now'),source_generation=excluded.source_generation,source_sequence=excluded.source_sequence`)
+      .bind(item.publicId, item.sourceVersion, item.name, item.summary, item.category, item.displayOrder, item.geometryRequirement, JSON.stringify(item.questions), delivery.occurredAt, delivery.sourceGeneration, delivery.sourceSequence));
   }
   statements.push(
     db.prepare(`INSERT INTO pa_service_catalog_entity_state(public_id,source_version,source_sequence,active) VALUES(?,?,?,?)

@@ -799,4 +799,17 @@ app.onError((error, c) => {
   return c.json({ error: status >= 500 ? "An unexpected error occurred" : error.message,...(code?{code}:{}) }, status);
 });
 
-export default { fetch: app.fetch, scheduled: (_event, env, ctx) => ctx.waitUntil(Promise.all([cleanupTemporaryZips(env),cleanupExpiredRequestAttachments(env),processInvitationEmailBatch(env),env.CLOUD_TRANSFER_TOKEN_SECRET?cleanupCloudTransfers(cloudEnv(env),{dropbox:createCloudProviderAdapter("dropbox",cloudEnv(env)),google:createCloudProviderAdapter("google",cloudEnv(env))}):Promise.resolve()]).then(()=>undefined)) } satisfies ExportedHandler<Env>;
+export default { fetch: app.fetch, scheduled: (event, env, ctx) => {
+  const tasks: Promise<unknown>[] = [processInvitationEmailBatch(env)];
+  // Invitation delivery has a five-minute SLA. Heavier storage cleanup stays
+  // on the existing hourly trigger so the more frequent mail poll does not
+  // multiply R2/D1 maintenance work.
+  if (event.cron === "15 * * * *") tasks.push(
+    cleanupTemporaryZips(env),
+    cleanupExpiredRequestAttachments(env),
+    env.CLOUD_TRANSFER_TOKEN_SECRET
+      ? cleanupCloudTransfers(cloudEnv(env), { dropbox: createCloudProviderAdapter("dropbox", cloudEnv(env)), google: createCloudProviderAdapter("google", cloudEnv(env)) })
+      : Promise.resolve(),
+  );
+  ctx.waitUntil(Promise.all(tasks).then(() => undefined));
+} } satisfies ExportedHandler<Env>;

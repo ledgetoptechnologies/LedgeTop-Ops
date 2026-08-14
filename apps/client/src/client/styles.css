@@ -1156,6 +1156,8 @@
 .portal-service-catalog { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .85rem; }
 .portal-service-catalog > article { min-width: 0; border: 1px solid var(--line); border-radius: 13px; background: #fafbfc; transition: border-color .15s ease, background .15s ease; }
 .portal-service-catalog > article.is-selected { grid-column: 1 / -1; border-color: #ee500780; background: #fffaf7; }
+.portal-service-meta { display: flex; flex-wrap: wrap; gap: .35rem; margin-bottom: .25rem; }
+.portal-service-select .portal-service-meta small { display: inline-flex; width: auto; padding: .16rem .48rem; border-radius: 999px; background: #e8edf3; color: #344054; font-size: .72rem; font-weight: 700; }
 .portal-service-select { grid-template-columns: auto minmax(0, 1fr) !important; align-items: start; gap: .75rem !important; padding: 1rem; cursor: pointer; }
 .portal-service-select input { width: 19px; height: 19px; margin-top: .1rem; accent-color: var(--orange); }
 .portal-service-select > span { display: grid; gap: .3rem; }
@@ -1302,6 +1304,13 @@
 .portal-team-row { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .75rem 0; border-top: 1px solid var(--line); }
 .portal-team-row span { min-width: 0; display: grid; gap: .2rem; overflow-wrap: anywhere; }
 .portal-team-row small { color: var(--muted); }
+.portal-delegated-share-form { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 1rem; }
+.portal-delegated-share-form label { display: grid; gap: .4rem; font-weight: 700; }
+.portal-delegated-share-form > small, .portal-delegated-share-form > button { grid-column: 1 / -1; }
+.portal-share-created { margin: 1rem 0; padding: 1rem; border: 1px solid #75b798; border-radius: 12px; background: #eefaf3; }
+.portal-share-created > div { display: flex; gap: .5rem; align-items: center; }
+.portal-share-created input { min-width: 0; flex: 1; }
+.portal-delegated-share-history { margin-top: 1.5rem; }
 .portal-contact-action { display: inline-flex; margin-top: 1rem; text-decoration: none; }
 
 /* ---------------------------------------------------------------------------
@@ -1665,6 +1674,8 @@
   .portal-request-row { grid-template-columns: 1fr; }
   .portal-request-state { justify-items: start; }
   .portal-project-grid { grid-template-columns: 1fr; }
+  .portal-delegated-share-form { grid-template-columns: 1fr; }
+  .portal-share-created > div { align-items: stretch; flex-direction: column; }
 }
 
 @media (max-width: 560px) {

@@ -1,6 +1,8 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import projectionMigration from "../migrations/0122_project_alpha_service_catalog_projection.sql?raw";
+import compatibilityMigration from "../migrations/0128_project_alpha_catalog_compatibility.sql?raw";
+import compatibilityFixture from "../../../packages/shared/fixtures/project-alpha-catalog-v2.json";
 import { listServiceCatalog } from "../src/worker/client-portal/request-v2";
 import { handleProjectAlphaCatalogRequest, parseCatalogProjectionDelivery } from "../src/worker/project-alpha-catalog";
 import type { Env } from "../src/worker/types";
@@ -22,6 +24,9 @@ function item(publicId: string, sourceVersion = "v1") {
     sourceVersion,
     name: publicId === "svc-map" ? "2D Mapping" : "Site photography",
     summary: "Client-safe service summary.",
+    category: "Aerial services",
+    displayOrder: publicId === "svc-map" ? 20 : 10,
+    geometryRequirement: publicId === "svc-map" ? "required" : "none",
     questions: [
       { id: "notes", label: "Notes", type: "text", required: false, maxLength: 500 },
       { id: "acreage", label: "Expected acreage", type: "number", required: false, minimum: 0, maximum: 100000 },
@@ -69,6 +74,11 @@ describe("Project Alpha sanitized service catalog projection", () => {
       if (!executable || /^PRAGMA\s+foreign_keys/i.test(executable)) continue;
       await db.prepare(executable).run();
     }
+    for (const statement of compatibilityMigration.split(/;\s*(?:\n|$)/)) {
+      const executable = statement.replace(/^\s*--.*$/gm, "").trim();
+      if (!executable || /^PRAGMA\s+foreign_keys/i.test(executable)) continue;
+      await db.prepare(executable).run();
+    }
     env = {
       DELIVERY_DB: db,
       PROJECT_ALPHA_CATALOG_SYNC_ENABLED: "true",
@@ -95,36 +105,48 @@ describe("Project Alpha sanitized service catalog projection", () => {
   }
 
   it("stages pages without changing reads, then atomically activates a complete generation", async () => {
-    const firstPage = envelope("snapshot.page", "snapshot-page-1", 10, { snapshotHash, pageNumber: 1, pageCount: 2, itemCount: 2, items: [item("svc-map")] });
-    const secondPage = envelope("snapshot.page", "snapshot-page-2", 10, { snapshotHash, pageNumber: 2, pageCount: 2, itemCount: 2, items: [item("svc-photo")] });
+    const firstPage = envelope("snapshot.page", "snapshot-page-1", 10, { snapshotHash, pageNumber: 1, pageCount: 2, itemCount: 3, items: [item("svc-map")] });
+    const secondPage = envelope("snapshot.page", "snapshot-page-2", 10, { snapshotHash, pageNumber: 2, pageCount: 2, itemCount: 3, items: [
+      item("svc-photo"),
+      { ...item("svc-report"), category: "Reports", displayOrder: 0, geometryRequirement: "optional", questions: [] },
+    ] });
     expect((await deliver(firstPage)).status).toBe(200);
     expect(await listServiceCatalog(env)).toEqual([]);
 
-    const premature = await deliver(envelope("snapshot.activate", "snapshot-activate-early", 10, { snapshotHash, pageCount: 2, itemCount: 2 }));
+    const premature = await deliver(envelope("snapshot.activate", "snapshot-activate-early", 10, { snapshotHash, pageCount: 2, itemCount: 3 }));
     expect(premature.status).toBe(409);
     expect(await listServiceCatalog(env)).toEqual([]);
 
     expect((await deliver(secondPage)).status).toBe(200);
-    const activated = await deliver(envelope("snapshot.activate", "snapshot-activate", 10, { snapshotHash, pageCount: 2, itemCount: 2 }));
+    const activated = await deliver(envelope("snapshot.activate", "snapshot-activate", 10, { snapshotHash, pageCount: 2, itemCount: 3 }));
     expect(activated.status).toBe(200);
-    expect((await listServiceCatalog(env)).map(service => [service.publicId, service.sourceVersion])).toEqual([
-      ["svc-map", "v1"], ["svc-photo", "v1"],
+    expect((await listServiceCatalog(env)).map(service => [service.publicId, service.sourceVersion, service.category, service.displayOrder, service.geometryRequirement])).toEqual([
+      ["svc-photo", "v1", "Aerial services", 10, "none"],
+      ["svc-map", "v1", "Aerial services", 20, "required"],
+      ["svc-report", "v1", "Reports", 0, "optional"],
     ]);
     expect((await listServiceCatalog(env))[0]!.questions.at(-1)?.type).toBe("multi_select");
   });
 
   it("applies only ordered idempotent events and tombstones", async () => {
-    const update = envelope("event", "catalog-event-11", 11, { event: { action: "upsert", item: item("svc-map", "v2") } });
+    const updatedItem = { ...item("svc-map", "v2"), category: "Mapping", displayOrder: 5, geometryRequirement: "optional" };
+    const update = envelope("event", "catalog-event-11", 11, { event: { action: "upsert", item: updatedItem } });
     const first = await deliver(update);
     expect(first.status).toBe(200);
     expect((await first.json() as { status: string }).status).toBe("completed");
     const replay = await deliver(update);
     expect((await replay.json() as { status: string }).status).toBe("duplicate");
-    expect((await listServiceCatalog(env)).find(service => service.publicId === "svc-map")?.sourceVersion).toBe("v2");
+    expect((await listServiceCatalog(env)).find(service => service.publicId === "svc-map")).toMatchObject({
+      sourceVersion: "v2", category: "Mapping", displayOrder: 5, geometryRequirement: "optional",
+    });
 
-    const reusedVersion = item("svc-map", "v2");
+    const reusedVersion = { ...updatedItem };
     reusedVersion.name = "Changed without a new version";
     expect((await deliver(envelope("event", "catalog-event-version-reuse", 12, { event: { action: "upsert", item: reusedVersion } }))).status).toBe(409);
+    for (const [field, value] of [["category", "Changed category"], ["displayOrder", 999], ["geometryRequirement", "optional"]] as const) {
+      const changed = { ...updatedItem, [field]: field === "geometryRequirement" ? "required" : value };
+      expect((await deliver(envelope("event", `catalog-event-version-reuse-${field}`, 12, { event: { action: "upsert", item: changed } }))).status).toBe(409);
+    }
 
     const gap = await deliver(envelope("event", "catalog-event-13", 13, { event: { action: "tombstone", publicId: "svc-photo", sourceVersion: "v2" } }));
     expect(gap.status).toBe(409);
@@ -180,5 +202,22 @@ describe("catalog producer contract parser", () => {
     expect(() => parseCatalogProjectionDelivery(envelope("event", "parser-ok", 1, { event: { action: "upsert", item: item("svc-map") } }), applicationKey)).not.toThrow();
     expect(() => parseCatalogProjectionDelivery(envelope("event", "parser-numeric-id", 1, { event: { action: "upsert", item: { ...item("svc-map"), publicId: 42 } } }), applicationKey)).toThrow();
     expect(() => parseCatalogProjectionDelivery({ ...envelope("event", "parser-secret", 1, { event: { action: "tombstone", publicId: "svc-map", sourceVersion: "v2" } }), apiKey: "must-not-be-in-body" }, applicationKey)).toThrow();
+  });
+
+  it("accepts the shared zero-question fixture and enforces every compatibility bound", () => {
+    const valid = compatibilityFixture.validItems[0]!;
+    expect(() => parseCatalogProjectionDelivery(envelope("event", "parser-shared-fixture", 1, { event: { action: "upsert", item: valid } }), applicationKey)).not.toThrow();
+    for (const invalid of [
+      { ...valid, displayOrder: -1 },
+      { ...valid, displayOrder: 1_000_001 },
+      { ...valid, geometryRequirement: "sometimes" },
+      { ...valid, category: "" },
+      { ...valid, category: "x".repeat(101) },
+      { ...valid, questions: Array.from({ length: 11 }, (_, index) => ({ id: `q${index}`, label: `Question ${index}`, type: "boolean", required: false })) },
+    ]) {
+      expect(() => parseCatalogProjectionDelivery(envelope("event", "parser-invalid-bound", 1, { event: { action: "upsert", item: invalid } }), applicationKey)).toThrow();
+    }
+    const { category: _category, ...missingCategory } = valid;
+    expect(() => parseCatalogProjectionDelivery(envelope("event", "parser-missing-category", 1, { event: { action: "upsert", item: missingCategory } }), applicationKey)).toThrow();
   });
 });

@@ -36,6 +36,7 @@ interface DelegationPolicyRow {
   allow_exact_root: number;
   maximum_link_lifetime_seconds: number;
   require_password: number;
+  image_location_map_enabled: number;
   expires_at: string;
 }
 
@@ -51,6 +52,7 @@ export interface AuthorizedClientShareDelegation {
   folderTargetId: string;
   maximumLinkLifetimeSeconds: number;
   requirePassword: boolean;
+  imageLocationMapEnabled: boolean;
   /** Server-only physical scope. Never serialize this value to a client. */
   deliveryPrefix: string;
 }
@@ -76,6 +78,15 @@ export interface ClientDelegatedShareSummary {
   expiresAt: string;
   revokedAt: string | null;
   createdAt: string;
+}
+
+export interface ClientDelegatedShareTargetSummary {
+  delegationId: string;
+  folderTargetId: string;
+  displayName: string;
+  maximumLinkLifetimeSeconds: number;
+  requirePassword: boolean;
+  delegationExpiresAt: string;
 }
 
 export interface ClientDelegatedShareSession {
@@ -159,7 +170,8 @@ async function delegationPolicyRow(
       target.binding_source_version target_binding_source_version,
       target.staff_exact_root_approved target_staff_approved,
       delegation.allow_exact_root,delegation.maximum_link_lifetime_seconds,
-      delegation.require_password,delegation.expires_at
+      delegation.require_password,delegation.expires_at,
+      COALESCE(policy.image_location_map_enabled,0) image_location_map_enabled
     FROM client_share_delegations delegation
     JOIN portal_v2_identities identity
       ON identity.id=delegation.identity_id AND identity.status='active' AND identity.revoked_at IS NULL
@@ -189,6 +201,8 @@ async function delegationPolicyRow(
       ON target.id=? AND target.workspace_id=delegation.workspace_id
       AND target.folder_binding_id=delegation.folder_binding_id
       AND target.status='active' AND target.revoked_at IS NULL
+    LEFT JOIN client_share_delegation_policies policy
+      ON policy.delegation_id=delegation.id AND policy.workspace_id=delegation.workspace_id
     WHERE delegation.id=? AND delegation.workspace_id=? AND delegation.status='active'
       AND delegation.revoked_at IS NULL AND datetime(delegation.expires_at)>datetime('now')`)
     .bind(targetId, delegationId, workspaceId)
@@ -232,6 +246,7 @@ async function authorizeDelegationRow(
     folderTargetId: row.target_id,
     maximumLinkLifetimeSeconds: row.maximum_link_lifetime_seconds,
     requirePassword: row.require_password === 1,
+    imageLocationMapEnabled: row.image_location_map_enabled === 1,
     deliveryPrefix: `${bindingPrefix}${row.target_relative_prefix}`,
   };
 }
@@ -436,6 +451,59 @@ export async function listClientDelegatedShares(
     revokedAt: row.revoked_at,
     createdAt: row.created_at,
   }));
+}
+
+/** Lists only opaque, currently authorized target choices. No binding prefix,
+ * relative prefix, storage key, entitlement ID, or internal source version is
+ * serialized to the client. */
+export async function listClientDelegatedShareTargets(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  workspaceId: string,
+): Promise<ClientDelegatedShareTargetSummary[] | null> {
+  const identityId = await principalIdentityId(env, principal);
+  if (!identityId || !(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "workspace.view", {
+    scopeType: "workspace", publicId: workspaceId,
+  }))) return null;
+  if (!(await consumeClientDelegatedShareRate(env, workspaceId, identityId, "list")))
+    throw new HTTPException(429, { message: "Too many share requests" });
+  const rows = await delegatedShareDb(env).prepare(`SELECT delegation.id delegation_id,target.id target_id,
+      label.display_name,delegation.maximum_link_lifetime_seconds,delegation.require_password,
+      delegation.expires_at
+    FROM client_share_delegations delegation
+    JOIN client_share_folder_targets target
+      ON target.workspace_id=delegation.workspace_id
+      AND target.folder_binding_id=delegation.folder_binding_id
+      AND target.status='active' AND target.revoked_at IS NULL
+    JOIN client_share_folder_target_labels label
+      ON label.target_id=target.id AND label.workspace_id=target.workspace_id
+    WHERE delegation.workspace_id=? AND delegation.identity_id=?
+      AND delegation.status='active' AND delegation.revoked_at IS NULL
+      AND datetime(delegation.expires_at)>datetime('now')
+    ORDER BY label.display_name COLLATE NOCASE,target.id,delegation.id LIMIT 101`)
+    .bind(workspaceId, identityId)
+    .all<{
+      delegation_id: string; target_id: string; display_name: string;
+      maximum_link_lifetime_seconds: number; require_password: number; expires_at: string;
+    }>();
+  if (rows.results.length > 100)
+    throw new HTTPException(409, { message: "Share target list is too large" });
+  const authorized: ClientDelegatedShareTargetSummary[] = [];
+  for (const row of rows.results) {
+    const delegation = await authorizeClientShareDelegation(
+      env, principal, workspaceId, row.delegation_id, row.target_id,
+    );
+    if (!delegation) continue;
+    authorized.push({
+      delegationId: row.delegation_id,
+      folderTargetId: row.target_id,
+      displayName: row.display_name,
+      maximumLinkLifetimeSeconds: row.maximum_link_lifetime_seconds,
+      requirePassword: row.require_password === 1,
+      delegationExpiresAt: row.expires_at,
+    });
+  }
+  return authorized;
 }
 
 export async function revokeClientDelegatedShare(

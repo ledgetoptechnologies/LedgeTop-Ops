@@ -1,5 +1,10 @@
 import type { Env } from "../types";
 import type { VerifiedClientPrincipal } from "./types";
+import {
+  portalHierarchyRelationsEnabled,
+  resolvePortalRelationAuthorizedTargets,
+  resolvePortalRelationTargetScopes,
+} from "./hierarchy-relations";
 
 export const PORTAL_HIERARCHY_V2_FLAG = "CLIENT_PORTAL_HIERARCHY_V2_ENABLED";
 
@@ -14,9 +19,11 @@ export type PortalWorkspaceCapability =
 export type PortalWorkspaceScopeType =
   | "workspace"
   | "organization"
+  | "standalone_client"
   | "department"
   | "client"
   | "project"
+  | "contact"
   | "folder";
 
 export interface PortalWorkspaceTarget {
@@ -55,6 +62,11 @@ interface EntitlementRow {
   scope_public_id: string;
 }
 interface ScopeRow { entity_type: PortalWorkspaceScopeType; public_id: string }
+
+function isPreRelationContractDatabase(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no such table:\s*(?:main\.)?portal_v2_directory_generation_contracts\b/i.test(message);
+}
 
 function portalDb(env: Env): D1Database {
   return env.DELIVERY_DB;
@@ -289,6 +301,29 @@ async function targetScopes(
   workspace: WorkspaceRow,
   target: PortalWorkspaceTarget,
 ): Promise<Set<string> | null> {
+  if (portalHierarchyRelationsEnabled(env)) {
+    return resolvePortalRelationTargetScopes(env, {
+      id: workspace.id,
+      rootType: workspace.root_type,
+      rootPublicId: workspace.pa_organization_public_id ?? workspace.pa_client_public_id!,
+    }, target);
+  }
+  // A schema-v3 generation must never be reinterpreted as the legacy
+  // single-parent tree during a flag rollback. Older installations do not
+  // have the additive contract table; only those pre-v3 databases may safely
+  // fall through to legacy behavior.
+  try {
+    const contract = await portalDb(env).prepare(`SELECT contract.schema_version
+      FROM portal_v2_directory_checkpoints checkpoint
+      JOIN portal_v2_directory_generation_contracts contract
+        ON contract.generation_id=checkpoint.active_generation_id AND contract.workspace_id=checkpoint.workspace_id
+      WHERE checkpoint.workspace_id=?`).bind(workspace.id).first<number>("schema_version");
+    if (contract === 3) return null;
+  } catch (error) {
+    // Only the explicit pre-0129 missing-table state is compatible. Permission,
+    // availability, corruption, and all other lookup errors fail closed.
+    if (!isPreRelationContractDatabase(error)) return null;
+  }
   const scopes = new Set<string>([["workspace", workspace.id].join(":")]);
   const rootId = workspace.pa_organization_public_id ?? workspace.pa_client_public_id;
   if (target.scopeType === "workspace") return target.publicId === workspace.id ? scopes : null;
@@ -423,11 +458,16 @@ export async function listPortalWorkspaceHierarchy(
   workspaceId: string,
   search: string | null,
 ): Promise<PortalDirectoryEntry[] | null> {
-  if (!(await authorizePortalWorkspaceCapability(
-    env,
-    principal,
-    workspaceId,
-    "directory.read",
+  const relationScoped = portalHierarchyRelationsEnabled(env);
+  let relationAuthorization: { identityId: string; workspace: WorkspaceRow } | null = null;
+  if (relationScoped) {
+    const identity = await resolveGlobalIdentity(env, principal);
+    if (!identity) return null;
+    const workspace = await activeWorkspace(env, identity.id, workspaceId);
+    if (!workspace || !(await activeRootExists(env, workspace))) return null;
+    relationAuthorization = { identityId: identity.id, workspace };
+  } else if (!(await authorizePortalWorkspaceCapability(
+    env, principal, workspaceId, "directory.read",
     { scopeType: "workspace", publicId: workspaceId },
   ))) return null;
   const normalized = search?.trim().toLocaleLowerCase("en-US") ?? "";
@@ -443,7 +483,7 @@ export async function listPortalWorkspaceHierarchy(
     WHERE checkpoint.workspace_id=?
       AND (?='' OR instr(lower(entity.display_name),?)>0)
     ORDER BY entity.entity_type,entity.display_name COLLATE NOCASE,entity.public_id
-    LIMIT 101`)
+    LIMIT 201`)
     .bind(workspaceId, normalized, normalized)
     .all<{
       entity_type: PortalDirectoryEntry["type"];
@@ -452,8 +492,26 @@ export async function listPortalWorkspaceHierarchy(
       display_name: string;
       source_version: string;
     }>();
-  if (result.results.length > 100) return null;
-  return result.results.map(row => ({
+  if (result.results.length > 200) return null;
+  let visible = result.results;
+  if (relationScoped) {
+    const workspace = relationAuthorization!.workspace;
+    const authorized = await resolvePortalRelationAuthorizedTargets(
+      env,
+      {
+        id: workspace.id,
+        rootType: workspace.root_type,
+        rootPublicId: workspace.pa_organization_public_id ?? workspace.pa_client_public_id!,
+      },
+      relationAuthorization!.identityId,
+      "directory.read",
+      result.results.map(row => ({ scopeType: row.entity_type, publicId: row.public_id })),
+    );
+    if (!authorized) return null;
+    visible = result.results.filter(row => authorized.has(`${row.entity_type}:${row.public_id}`));
+  }
+  if (visible.length > 100) return null;
+  return visible.map(row => ({
     type: row.entity_type,
     publicId: row.public_id,
     parentPublicId: row.parent_public_id,

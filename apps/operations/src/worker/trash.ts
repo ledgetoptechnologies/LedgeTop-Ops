@@ -96,11 +96,26 @@ export async function listTrash(env: Env): Promise<Array<Tombstone & { display_n
 }
 
 export async function restoreTombstone(env: Env, principal: StaffPrincipal, id: string): Promise<void> {
-  const tombstone = await env.DELIVERY_DB.prepare("SELECT id,physical_key,tombstone_kind FROM delivery_tombstones WHERE id=? AND restored_at IS NULL AND purging_at IS NULL").bind(id).first<{ id: string; physical_key: string; tombstone_kind: "exact" | "prefix" }>();
-  if (!tombstone) throw new HTTPException(404, { message: "Trash item not found or already restored" });
+  const tombstone = await env.DELIVERY_DB.prepare(`SELECT id,physical_key,tombstone_kind,purge_after,purging_at,restored_at
+    FROM delivery_tombstones WHERE id=?`).bind(id).first<Pick<Tombstone, "id" | "physical_key" | "tombstone_kind" | "purge_after" | "purging_at" | "restored_at">>();
+  if (!tombstone) throw new HTTPException(404, { message: "Trash item not found" });
+  // A completed restore is intentionally idempotent. Do not repeat its audit or
+  // thumbnail side effects when a client retries after losing the response.
+  if (tombstone.restored_at) return;
   const restoredAt = new Date().toISOString();
-  const restored = await env.DELIVERY_DB.prepare("UPDATE delivery_tombstones SET restored_by=?,restored_at=? WHERE id=? AND restored_at IS NULL AND purging_at IS NULL").bind(principal.id, restoredAt, id).run();
-  if (restored.meta.changes !== 1) throw new HTTPException(409, { message: "This item is already being purged and can no longer be restored" });
+  const purgeAfter = Date.parse(tombstone.purge_after);
+  if (tombstone.purging_at || !Number.isFinite(purgeAfter) || purgeAfter <= Date.parse(restoredAt)) {
+    throw new HTTPException(409, { message: "This item's retention period has expired or purge has started, so it can no longer be restored" });
+  }
+  const restored = await env.DELIVERY_DB.prepare(`UPDATE delivery_tombstones SET restored_by=?,restored_at=?
+    WHERE id=? AND restored_at IS NULL AND purging_at IS NULL AND julianday(purge_after)>julianday(?)`)
+    .bind(principal.id, restoredAt, id, restoredAt).run();
+  if (restored.meta.changes !== 1) {
+    const current = await env.DELIVERY_DB.prepare("SELECT restored_at FROM delivery_tombstones WHERE id=?")
+      .bind(id).first<{ restored_at: string | null }>();
+    if (current?.restored_at) return;
+    throw new HTTPException(409, { message: "This item's retention period has expired or purge has started, so it can no longer be restored" });
+  }
   await env.OPS_DB.prepare(`INSERT INTO audit_events(actor_type,actor_id,actor_email,actor_display_name,action,entity_type,entity_id,details_json)
     VALUES('staff',?,?,?,?,?,?,?)`).bind(principal.id, principal.email, principal.displayName, "delivery.source_restored", "trash", id, JSON.stringify({ physicalKey: tombstone.physical_key })).run();
   try {

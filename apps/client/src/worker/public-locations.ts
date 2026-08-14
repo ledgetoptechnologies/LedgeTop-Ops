@@ -23,13 +23,21 @@ interface LocationRow {
   thumbnail_status: ThumbnailJobRow["status"] | null;
 }
 
-function locationPrefix(share: Pick<ShareRow, "r2_prefix">, folderRef: string): string {
-  const root = normalizeRoot(share.r2_prefix);
+interface ScopedLocationDelivery {
+  id: string;
+  version: number;
+  deliveryPrefix: string;
+  assetApiBase: string;
+  refContext: "public-location:v1" | "client-delegated-location:v1";
+}
+
+function locationPrefix(deliveryPrefix: string, folderRef: string): string {
+  const root = normalizeRoot(deliveryPrefix);
   return folderRef ? `${keyWithinRoot(root, decodeItemRef(folderRef)).replace(/\/$/, "")}/` : root;
 }
 
-async function currentShareLocationRows(env: Pick<Env, "DELIVERY_DB">, share: Pick<ShareRow, "r2_prefix">, folderRef: string): Promise<LocationRow[]> {
-  const prefix = locationPrefix(share, folderRef);
+async function currentShareLocationRows(env: Pick<Env, "DELIVERY_DB">, deliveryPrefix: string, folderRef: string): Promise<LocationRow[]> {
+  const prefix = locationPrefix(deliveryPrefix, folderRef);
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`/* image-location.public-share-assets */
     SELECT location.source_key,location.source_etag,location.latitude,location.longitude,
       file.size,file.uploaded_at,file.content_type,
@@ -55,28 +63,42 @@ async function currentShareLocationRows(env: Pick<Env, "DELIVERY_DB">, share: Pi
   return rows.results;
 }
 
-async function locationRef(secret: string, share: Pick<ShareRow, "id" | "share_version">, prefix: string, row: Pick<LocationRow, "source_key" | "source_etag">): Promise<string> {
-  return `loc_${await hmac(secret, `public-location:v1\0${share.id}\0${share.share_version}\0${prefix}\0${row.source_key}\0${row.source_etag}`)}`;
+async function locationRef(secret: string, scope: ScopedLocationDelivery, prefix: string, row: Pick<LocationRow, "source_key" | "source_etag">): Promise<string> {
+  return `loc_${await hmac(secret, `${scope.refContext}\0${scope.id}\0${scope.version}\0${prefix}\0${row.source_key}\0${row.source_etag}`)}`;
 }
 
-export async function listPublicShareLocations(env: Pick<Env, "DELIVERY_DB" | "DELIVERY_SESSION_SECRET">, share: ShareRow, folderRef = ""): Promise<DeliveryLocationCollection> {
-  const prefix = locationPrefix(share, folderRef); const rows = (await currentShareLocationRows(env, share, folderRef)).filter(row => row.source_key.startsWith(prefix) && !isHiddenKey(row.source_key));
+export async function listScopedDeliveryLocations(
+  env: Pick<Env, "DELIVERY_DB">,
+  secret: string,
+  scope: ScopedLocationDelivery,
+  folderRef = "",
+): Promise<DeliveryLocationCollection> {
+  const prefix = locationPrefix(scope.deliveryPrefix, folderRef);
+  const rows = (await currentShareLocationRows(env, scope.deliveryPrefix, folderRef))
+    .filter(row => row.source_key.startsWith(prefix) && !isHiddenKey(row.source_key));
   return aggregateDeliveryLocations(await Promise.all(rows.map(async row => ({
     latitude: row.latitude,
     longitude: row.longitude,
-    assetRef: await locationRef(env.DELIVERY_SESSION_SECRET, share, prefix, row),
+    assetRef: await locationRef(secret, scope, prefix, row),
   }))), PUBLIC_LOCATION_LIMIT);
 }
 
-export async function resolvePublicShareLocation(env: Pick<Env, "DELIVERY_DB" | "DELIVERY_SESSION_SECRET">, share: ShareRow, assetRef: string, folderRef = ""): Promise<DeliveryItem> {
+export async function resolveScopedDeliveryLocation(
+  env: Pick<Env, "DELIVERY_DB">,
+  secret: string,
+  scope: ScopedLocationDelivery,
+  assetRef: string,
+  folderRef = "",
+): Promise<DeliveryItem> {
   if (!LOCATION_REF_PATTERN.test(assetRef)) throw new HTTPException(404, { message: "Mapped image not found" });
-  const root = normalizeRoot(share.r2_prefix), prefix = locationPrefix(share, folderRef); const rows = await currentShareLocationRows(env, share, folderRef); let row: LocationRow | undefined;
+  const root = normalizeRoot(scope.deliveryPrefix), prefix = locationPrefix(scope.deliveryPrefix, folderRef);
+  const rows = await currentShareLocationRows(env, scope.deliveryPrefix, folderRef); let row: LocationRow | undefined;
   for (const candidate of rows) {
     if (!candidate.source_key.startsWith(prefix) || isHiddenKey(candidate.source_key)) continue;
-    if (constantTimeEqual(await locationRef(env.DELIVERY_SESSION_SECRET, share, prefix, candidate), assetRef)) { row = candidate; break; }
+    if (constantTimeEqual(await locationRef(secret, scope, prefix, candidate), assetRef)) { row = candidate; break; }
   }
   if (!row || !row.source_key.startsWith(root)) throw new HTTPException(404, { message: "Mapped image not found" });
-  const relative = row.source_key.slice(root.length); const id = encodeItemRef(relative); const base = `/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${id}`;
+  const relative = row.source_key.slice(root.length); const id = encodeItemRef(relative); const base = `${scope.assetApiBase}/items/${id}`;
   const thumbnail = row.thumbnail_source_etag && row.thumbnail_key && row.thumbnail_status ? {
     source_etag: row.thumbnail_source_etag, thumbnail_key: row.thumbnail_key, thumbnail_etag: row.thumbnail_etag,
     thumbnail_size: row.thumbnail_size, status: row.thumbnail_status,
@@ -86,4 +108,20 @@ export async function resolvePublicShareLocation(env: Pick<Env, "DELIVERY_DB" | 
     ...thumbnailFieldsForObject(row.source_key, "image", base, row.source_etag, thumbnail, row.size, row.content_type || undefined),
     previewUrl: `${base}/source`, sourceUrl: `${base}/source`, downloadUrl: `${base}/download`,
   };
+}
+
+export async function listPublicShareLocations(env: Pick<Env, "DELIVERY_DB" | "DELIVERY_SESSION_SECRET">, share: ShareRow, folderRef = ""): Promise<DeliveryLocationCollection> {
+  return listScopedDeliveryLocations(env, env.DELIVERY_SESSION_SECRET, {
+    id: share.id, version: share.share_version, deliveryPrefix: share.r2_prefix,
+    assetApiBase: `/api/public/shares/${encodeURIComponent(share.public_id!)}`,
+    refContext: "public-location:v1",
+  }, folderRef);
+}
+
+export async function resolvePublicShareLocation(env: Pick<Env, "DELIVERY_DB" | "DELIVERY_SESSION_SECRET">, share: ShareRow, assetRef: string, folderRef = ""): Promise<DeliveryItem> {
+  return resolveScopedDeliveryLocation(env, env.DELIVERY_SESSION_SECRET, {
+    id: share.id, version: share.share_version, deliveryPrefix: share.r2_prefix,
+    assetApiBase: `/api/public/shares/${encodeURIComponent(share.public_id!)}`,
+    refContext: "public-location:v1",
+  }, assetRef, folderRef);
 }

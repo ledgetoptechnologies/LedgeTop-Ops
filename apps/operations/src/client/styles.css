@@ -2088,3 +2088,13 @@ ul { color: var(--muted); }
   .sop-markdown pre, .sop-markdown table, .sop-markdown blockquote, .sop-markdown img { break-inside: avoid; }
   .sop-markdown a { color: #000; text-decoration: underline; }
 }
+.delegated-share-admin-list { display: grid; gap: .75rem; }
+.delegated-share-admin-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem 0; border-top: 1px solid var(--line); }
+.delegated-share-admin-row > span { display: grid; min-width: 0; gap: .25rem; }
+.delegated-share-admin-row small { color: var(--muted); overflow-wrap: anywhere; }
+.delegated-share-admin-row .actions { display: flex; align-items: center; flex-wrap: wrap; gap: .5rem; }
+@media (max-width: 760px) {
+  .delegated-share-admin-row { align-items: stretch; flex-direction: column; }
+  .delegated-share-admin-row .actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .delegated-share-admin-row .actions select { grid-column: 1 / -1; width: 100%; }
+}

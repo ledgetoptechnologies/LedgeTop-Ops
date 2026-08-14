@@ -32,7 +32,12 @@ Create the source task in the TrueNAS Data Protection/Cloud Sync UI:
 
 Begin with COPY and validate one synthetic folder. Confirm key paths, counts,
 byte totals and checksum samples; nested `Dump` exclusions; R2 index events;
-and image/PDF thumbnail jobs. Video and other documents must remain icons. Take
+and image/PDF pre-generation jobs. This checked-in pre-generator intentionally
+does not decode video; video jobs remain pending for the separate authenticated
+TrueNAS `/api/internal/thumbnail-renderer/v1` queue worker described in the
+[media thumbnail runbook](../media-thumbnail-pipeline.md). Confirm the video
+worker produces a thumbnail and that unsupported non-video documents remain
+icons. Take
 a ZFS snapshot and export the task configuration before switching an approved
 server-owned prefix to SYNC.
 

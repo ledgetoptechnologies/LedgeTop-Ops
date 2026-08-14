@@ -145,6 +145,25 @@ describe("client workspace hierarchy v2", () => {
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   });
 
+  it("uses legacy hierarchy only for an explicitly missing pre-0129 contract table", async () => {
+    expect(await authorizePortalWorkspaceCapability(env, principal, "workspace-account-a", "request.create", {
+      scopeType: "project", publicId: "pa-project-a",
+    })).toBe(true);
+    const unavailableDb = new Proxy(db, {
+      get(target, property) {
+        if (property === "prepare") return (query: string) => {
+          if (query.includes("portal_v2_directory_generation_contracts")) throw new Error("D1_ERROR: authorization contract lookup unavailable");
+          return target.prepare(query);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    expect(await authorizePortalWorkspaceCapability({ ...env, DELIVERY_DB: unavailableDb }, principal, "workspace-account-a", "request.create", {
+      scopeType: "project", publicId: "pa-project-a",
+    })).toBe(false);
+  });
+
   it("is default-off and permits one verified identity to switch between independent workspaces", async () => {
     await addWorkspaceB();
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspace_memberships WHERE workspace_id='workspace-b' AND identity_id='identity-one'").first("count")).toBe(1);

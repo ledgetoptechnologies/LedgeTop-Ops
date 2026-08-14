@@ -120,6 +120,14 @@ import { registerJobBriefRoutes } from "./job-brief";
 import { registerSopRoutes } from "./sop";
 import { registerClientRequestAttachmentRoutes } from "./client-request-attachments";
 import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quote";
+import {
+  createDelegatedShareDelegation,
+  createDelegatedShareTarget,
+  delegatedShareFolderContext,
+  listDelegatedShareProvisioning,
+  revokeDelegatedShareProvisioningEntity,
+  transferDelegatedShareDelegation,
+} from "./client-delegated-share-provisioning";
 import { requestAreaKml, requestAreaKmlFilename } from "./request-area-kml";
 import {
   parseStoredWorkArea,
@@ -352,6 +360,29 @@ const clientFolderGrantSchema = z
     notificationMode: z.enum(["off", "added", "removed", "both"]).optional(),
   })
   .strict();
+const delegatedShareTargetSchema = z.object({
+  workspaceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
+  folderBindingId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
+  folderRef: z.string().regex(/^[A-Za-z0-9_-]{2,1400}$/),
+  displayName: z.string().trim().min(1).max(160),
+  exactRootApproved: z.boolean().default(false),
+}).strict();
+const delegatedShareDelegationSchema = z.object({
+  workspaceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
+  identityId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
+  entitlementId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
+  rootTargetId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
+  allowExactRoot: z.boolean().default(false),
+  maximumLinkLifetimeSeconds: z.number().int().min(300).max(2592000).default(604800),
+  requirePassword: z.boolean().default(false),
+  imageLocationMapEnabled: z.boolean().default(false),
+  expiresAt: z.iso.datetime({ offset: true }),
+}).strict();
+const delegatedShareTransferSchema = z.object({
+  identityId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
+  entitlementId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
+  expectedVersion: z.number().int().positive(),
+}).strict();
 const paQuoteLinkSchema = z
   .object({ artifactId: z.coerce.number().int().positive() })
   .strict();
@@ -837,6 +868,59 @@ app.get("/api/client-portal/folder-grant-targets", async (c) => {
 app.delete("/api/client-portal/accounts/:accountId/folder-grants/:grantId", async (c) => {
   await revokeClientFolderGrant(c.env, c.req.raw, c.get("principal"), c.req.param("accountId"), c.req.param("grantId"));
   return c.json({ success: true });
+});
+app.get("/api/admin/client-delegated-shares", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "delivery.share.audit");
+  return c.json(await listDelegatedShareProvisioning(c.env));
+});
+app.get("/api/admin/client-delegated-shares/folder-context", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "delivery.share.audit");
+  const folderRef = c.req.query("folderRef") || "";
+  if (!/^[A-Za-z0-9_-]{2,1400}$/.test(folderRef))
+    throw new HTTPException(400, { message: "Folder reference is invalid" });
+  const folderKey = await authorizeItem(c.env, c.get("principal"), folderRef);
+  const context = await delegatedShareFolderContext(c.env, folderKey);
+  if (!context) throw new HTTPException(404, { message: "This folder is not bound to a client workspace" });
+  return c.json({ context });
+});
+app.post("/api/admin/client-delegated-shares/targets", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "delivery.share.create");
+  const input = await body(c, delegatedShareTargetSchema);
+  await authorizeItem(c.env, c.get("principal"), input.folderRef);
+  const result = await createDelegatedShareTarget(
+    c.env, c.get("principal"), input,
+    c.req.header("Idempotency-Key") || "",
+  );
+  return c.json({ target: result }, result.replayed ? 200 : 201);
+});
+app.delete("/api/admin/client-delegated-shares/targets/:targetId", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "delivery.share.revoke");
+  return c.json({ target: await revokeDelegatedShareProvisioningEntity(
+    c.env, c.get("principal"), "target", c.req.param("targetId"),
+    c.req.header("Idempotency-Key") || "",
+  ) });
+});
+app.post("/api/admin/client-delegated-shares/delegations", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "delivery.share.create");
+  const result = await createDelegatedShareDelegation(
+    c.env, c.get("principal"), await body(c, delegatedShareDelegationSchema),
+    c.req.header("Idempotency-Key") || "",
+  );
+  return c.json({ delegation: result }, result.replayed ? 200 : 201);
+});
+app.post("/api/admin/client-delegated-shares/delegations/:delegationId/transfer", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "delivery.share.revoke");
+  return c.json({ delegation: await transferDelegatedShareDelegation(
+    c.env, c.get("principal"), c.req.param("delegationId"),
+    await body(c, delegatedShareTransferSchema), c.req.header("Idempotency-Key") || "",
+  ) });
+});
+app.delete("/api/admin/client-delegated-shares/delegations/:delegationId", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "delivery.share.revoke");
+  return c.json({ delegation: await revokeDelegatedShareProvisioningEntity(
+    c.env, c.get("principal"), "delegation", c.req.param("delegationId"),
+    c.req.header("Idempotency-Key") || "",
+  ) });
 });
 app.post("/api/client-portal/projects", async (c) => {
   const principal = c.get("principal");

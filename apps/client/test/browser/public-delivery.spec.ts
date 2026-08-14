@@ -282,7 +282,10 @@ test("client-share uses the isolated API shell on desktop and mobile", async ({ 
     }
     if (url.pathname.endsWith("/manifest/media")) return route.fulfill({ json: { items: [] } });
     if (url.pathname.endsWith("/download-summary")) return route.fulfill({ json: { fileCount: 1, totalBytes: 1024, knownBytes: 1024, unknownSizeCount: 0 } });
-    if (url.pathname.endsWith("/locations")) return route.fulfill({ json: { locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null } });
+    if (url.pathname.endsWith("/locations")) return route.fulfill({ json: { locations: {
+      points: [{ latitude: 44.51, longitude: -88.01, imageCount: 1, assetRef: "loc_opaque-client-map-reference-00000000000000" }],
+      imageCount: 1, truncated: false,
+    }, mapboxPublicToken: null } });
     if (url.pathname.endsWith("/manifest")) {
       if (url.pathname.includes("/malformed/")) return route.fulfill({ status: 404, json: { error: "Not found" } });
       return route.fulfill({ json: {
@@ -300,6 +303,9 @@ test("client-share uses the isolated API shell on desktop and mobile", async ({ 
   await expect(page.getByRole("heading", { name: "Approved files" })).toBeVisible();
   await expect(page.getByText("photo.jpg", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Download photo.jpg" })).toHaveAttribute("href", /^\/client-share\/api\/shares\//);
+  await expect(page.getByRole("heading", { name: "Image locations from available photo metadata" })).toBeVisible();
+  await expect(page.getByText("Download individual files", { exact: true })).toBeVisible();
+  await expect(page.getByText(/Download all is not yet available for client-created links/)).toBeVisible();
   expect(delegatedSessionSecret).toBe(fragment);
   expect(new URL(page.url()).pathname).toBe("/client-share/clientpublicid0000000001");
   expect(new URL(page.url()).hash).toBe("");

@@ -6,10 +6,10 @@ import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
 import { handleProjectAlphaPortalProjectionRequest, parsePortalProjectionDelivery } from "../src/worker/project-alpha-portal";
 import type { Env } from "../src/worker/types";
+import portalFixture from "../../../packages/shared/fixtures/project-alpha-portal-v2.json";
 
 const applicationKey = "field_operations_portal";
 const secret = "portal-test-secret-at-least-thirty-two-bytes";
-const snapshotHash = "b".repeat(64);
 const access = async () => undefined;
 const principal: VerifiedClientPrincipal = { issuer: "https://team.cloudflareaccess.com", subject: "verified-subject", email: "manager@example.test" };
 
@@ -23,16 +23,9 @@ const workspace = {
   publicId: "pa-workspace-acme", rootType: "organization", rootPublicId: "pa-org-acme",
   displayName: "Acme Construction", sourceVersion: "org-v1", active: true,
 } as const;
-const root = { type: "organization", publicId: "pa-org-acme", parentPublicId: null, displayName: "Acme Construction", sourceVersion: "org-v1", active: true, primaryContact: false } as const;
-const department = { type: "department", publicId: "pa-dept-field", parentPublicId: "pa-org-acme", displayName: "Field Team", sourceVersion: "dept-v1", active: true, primaryContact: false } as const;
 const contact = { type: "contact", publicId: "pa-contact-primary", parentPublicId: "pa-dept-field", displayName: "Primary Contact", sourceVersion: "contact-v1", active: true, primaryContact: true } as const;
 const project = { type: "project", publicId: "pa-project-north", parentPublicId: "pa-dept-field", displayName: "North Site", sourceVersion: "project-v1", active: true, primaryContact: false } as const;
 const projectedPrincipal = { publicId: "pa-principal-manager", emailHint: "manager@example.test", displayName: "Portal Manager", sourceVersion: "principal-v1", active: true } as const;
-const entitlement = {
-  publicId: "pa-entitlement-project", principalPublicId: projectedPrincipal.publicId,
-  capability: "delivery.view", effect: "allow", scopeType: "project", scopePublicId: project.publicId,
-  sourceVersion: "grant-v1", active: true, validFrom: "2026-08-01T00:00:00.000Z", expiresAt: null,
-} as const;
 
 function envelope(kind: string, deliveryId: string, sourceSequence: number, extra: Record<string, unknown>) {
   return {
@@ -88,15 +81,22 @@ describe("Project Alpha portal hierarchy projection", () => {
     }), env, options.accessVerifier ?? access);
   }
 
+  it("accepts and rejects the shared schema-v2 producer corpus exactly", () => {
+    expect(portalFixture.contract).toBe("ltds-project-alpha-portal-v2");
+    expect(portalFixture.endpoint).toBe("/api/internal/project-alpha/portal-v2");
+    for (const delivery of Object.values(portalFixture.valid))
+      expect(parsePortalProjectionDelivery(delivery, portalFixture.applicationKey)).toBeTruthy();
+    for (const specimen of portalFixture.invalid)
+      expect(() => parsePortalProjectionDelivery(specimen.delivery, portalFixture.applicationKey))
+        .toThrow(specimen.expectedError);
+    expect(portalFixture.relationProjectionStatus.acceptedByCurrentReceiver).toBe(false);
+  });
+
   it("stages a complete bounded generation and atomically activates hierarchy and unbound authorization intent", async () => {
-    const page = envelope("snapshot.page", "portal-page-1", 10, {
-      snapshotHash, pageNumber: 1, pageCount: 1, recordCount: 7, workspace,
-      entities: [root, department, contact, project], principals: [projectedPrincipal],
-      entitlements: [entitlement, { ...entitlement, publicId: "pa-entitlement-workspace", capability: "workspace.view", scopeType: "workspace", scopePublicId: workspace.publicId }],
-    });
+    const page = portalFixture.valid.snapshotPage as Record<string, unknown>;
     expect((await deliver(page)).status).toBe(200);
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspaces").first("count")).toBe(0);
-    expect((await deliver(envelope("snapshot.activate", "portal-activate-1", 10, { snapshotHash, pageCount: 1, recordCount: 7 }))).status).toBe(200);
+    expect((await deliver(portalFixture.valid.snapshotActivate as Record<string, unknown>)).status).toBe(200);
     expect(await db.prepare("SELECT active_generation_id FROM portal_v2_directory_checkpoints WHERE workspace_id=?").bind(workspace.publicId).first("active_generation_id")).toBeTruthy();
     expect(await db.prepare("SELECT primary_contact FROM portal_v2_directory_entities WHERE workspace_id=? AND public_id=?").bind(workspace.publicId, contact.publicId).first("primary_contact")).toBe(1);
     expect(await db.prepare("SELECT identity_id FROM pa_portal_principals WHERE workspace_id=? AND public_id=?").bind(workspace.publicId, projectedPrincipal.publicId).first("identity_id")).toBeNull();

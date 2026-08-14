@@ -1501,6 +1501,7 @@ function Delivery({ session }: { session: Session }) {
         <ShareDialog
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
+          canProvisionDelegated={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           close={() => setPreview(null)}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           changed={() => setShareRevision((value) => value + 1)}
@@ -2424,6 +2425,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
         <ShareDialog
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
+          canProvisionDelegated={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           close={() => setPreview(null)}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           changed={() => {}}
@@ -3311,6 +3313,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         <ShareDialog
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
+          canProvisionDelegated={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           close={() => setPreview(null)}
           changed={() => {
@@ -4024,6 +4027,104 @@ type WorkspaceGrantTarget = {
   grant: null | { grantId: string; version: number; preferences: Array<{ recipient_identity_id: string; mode: string }> };
 };
 
+type DelegatedFolderContext = {
+  workspaceId: string;
+  workspaceDisplayName: string;
+  folderBindingId: string;
+  currentTarget: { id: string; displayName: string; exactRootApproved: boolean } | null;
+  ancestorTargets: Array<{ id: string; displayName: string; exactRootApproved: boolean }>;
+  managers: Array<{ identityId: string; email: string | null; entitlementId: string }>;
+};
+
+function ClientDelegatedFolderProvisioning({ folder }: { folder: { id: string; name?: string } }) {
+  const [expanded, setExpanded] = useState(false);
+  const [context, setContext] = useState<DelegatedFolderContext | null>(null);
+  const [managerKey, setManagerKey] = useState("");
+  const [rootTargetId, setRootTargetId] = useState("");
+  const [displayName, setDisplayName] = useState(folder.name || "Shared folder");
+  const [allowExactRoot, setAllowExactRoot] = useState(false);
+  const [requirePassword, setRequirePassword] = useState(false);
+  const [imageLocationMapEnabled, setImageLocationMapEnabled] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const load = async () => {
+    setBusy(true); setMessage("");
+    try {
+      const value = await api<{ context: DelegatedFolderContext }>(`/api/admin/client-delegated-shares/folder-context?folderRef=${encodeURIComponent(folder.id)}`);
+      setContext(value.context);
+      const manager = value.context.managers[0];
+      if (manager) setManagerKey(`${manager.identityId}:${manager.entitlementId}`);
+      const root = value.context.ancestorTargets[0] ?? value.context.currentTarget;
+      if (root) setRootTargetId(root.id);
+    } catch (caught) { setMessage((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  useEffect(() => { if (expanded) void load(); }, [expanded, folder.id]);
+  const submit = async () => {
+    if (!context || !managerKey || busy) return;
+    setBusy(true); setMessage("");
+    try {
+      let targetId = context.currentTarget?.id ?? "";
+      if (!targetId) {
+        const result = await api<{ target: { id: string } }>("/api/admin/client-delegated-shares/targets", {
+          method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+          body: JSON.stringify({
+            workspaceId: context.workspaceId, folderBindingId: context.folderBindingId,
+            folderRef: folder.id, displayName, exactRootApproved: allowExactRoot,
+          }),
+        });
+        targetId = result.target.id;
+      }
+      const [identityId, entitlementId] = managerKey.split(":");
+      const selectedRoot = rootTargetId || targetId;
+      await api("/api/admin/client-delegated-shares/delegations", {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          workspaceId: context.workspaceId, identityId, entitlementId,
+          rootTargetId: selectedRoot,
+          allowExactRoot: selectedRoot === targetId && allowExactRoot,
+          maximumLinkLifetimeSeconds: 604800, requirePassword, imageLocationMapEnabled,
+          expiresAt: new Date(Date.now() + 30 * 86400_000).toISOString(),
+        }),
+      });
+      setMessage(selectedRoot === targetId && !allowExactRoot
+        ? "Policy root saved. Approve a descendant folder before the client can create a link."
+        : "Client-delegated sharing is provisioned for the selected manager.");
+      await load();
+    } catch (caught) { setMessage((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  return <section className="client-workspace-grant">
+    <button type="button" className="button-ghost button-small" onClick={() => setExpanded(value => !value)} aria-expanded={expanded}>
+      {expanded ? "Close client link provisioning" : "Provision client-created links"}
+    </button>
+    {expanded && <div className="client-workspace-grant-panel">
+      <strong>Client-created public links</strong>
+      <small>Default policy is strict descendants only. Storage prefixes are never returned by this API.</small>
+      {busy && !context ? <Loading /> : context && <>
+        <p>Workspace: <strong>{context.workspaceDisplayName}</strong></p>
+        {!context.currentTarget && <label>Client label<input value={displayName} maxLength={160} onChange={event => setDisplayName(event.target.value)} /></label>}
+        <label>Workspace manager<select value={managerKey} onChange={event => setManagerKey(event.target.value)}>
+          {context.managers.map(manager => <option key={`${manager.identityId}:${manager.entitlementId}`} value={`${manager.identityId}:${manager.entitlementId}`}>{manager.email || "Verified manager"}</option>)}
+        </select></label>
+        {(context.ancestorTargets.length > 0 || context.currentTarget) && <label>Policy root<select value={rootTargetId} onChange={event => setRootTargetId(event.target.value)}>
+          {context.ancestorTargets.map(target => <option key={target.id} value={target.id}>{target.displayName} (ancestor)</option>)}
+          {context.currentTarget && <option value={context.currentTarget.id}>{context.currentTarget.displayName} (this folder)</option>}
+        </select></label>}
+        <label className="check"><input type="checkbox" checked={allowExactRoot} onChange={event => setAllowExactRoot(event.target.checked)} /> Explicitly allow a link to the policy root itself</label>
+        <label className="check"><input type="checkbox" checked={requirePassword} onChange={event => setRequirePassword(event.target.checked)} /> Require clients to set an access code</label>
+        <label className="check"><input type="checkbox" checked={imageLocationMapEnabled} onChange={event => setImageLocationMapEnabled(event.target.checked)} /> Show the location map for GPS-enabled shared images</label>
+        <small>Operations controls this setting. Raw EXIF and storage paths are never shown.</small>
+        <button type="button" className="button-orange button-small" disabled={busy || !managerKey || (!context.currentTarget && !displayName.trim())} onClick={() => void submit()}>Save client link policy</button>
+      </>}
+      {message && <small role="status">{message}</small>}
+    </div>}
+  </section>;
+}
+
 function ClientWorkspaceGrant({ prefix }: { prefix: string }) {
   const [expanded, setExpanded] = useState(false);
   const [query, setQuery] = useState("");
@@ -4100,12 +4201,14 @@ function ClientWorkspaceGrant({ prefix }: { prefix: string }) {
 function ShareDialog({
   folder,
   canRevoke,
+  canProvisionDelegated,
   directoryRecipientsEnabled,
   close,
   changed,
 }: {
   folder: any;
   canRevoke: boolean;
+  canProvisionDelegated: boolean;
   directoryRecipientsEnabled: boolean;
   close: () => void;
   changed: () => void;
@@ -4274,6 +4377,7 @@ function ShareDialog({
               <code>{folder.prefix}</code>
             </div>
             <ClientWorkspaceGrant prefix={folder.prefix} />
+            {canProvisionDelegated && <ClientDelegatedFolderProvisioning folder={folder} />}
             {shown && (
               <div className="current-share">
                 <div>
@@ -5167,6 +5271,80 @@ function Team({ session }: { session: Session }) {
   );
 }
 
+type DelegatedShareAdminState = {
+  workspaces: Array<{ id: string; displayName: string; managers: Array<{ identityId: string; email: string | null; entitlementId: string }> }>;
+  targets: Array<{ id: string; workspaceId: string; displayName: string; status: string }>;
+  delegations: Array<{ id: string; workspaceId: string; identityId: string; managerEmail: string | null; rootTargetId: string; imageLocationMapEnabled: boolean; version: number; status: string; expiresAt: string }>;
+  shares: Array<{ id: string; publicId: string; delegationId: string; label: string | null; status: string; expiresAt: string }>;
+};
+
+function DelegatedShareAdministration() {
+  const state = useLoad(() => api<DelegatedShareAdminState>("/api/admin/client-delegated-shares"), []);
+  const [busy, setBusy] = useState("");
+  const [message, setMessage] = useState("");
+  const [replacements, setReplacements] = useState<Record<string, string>>({});
+  const mutate = async (id: string, action: "transfer" | "revoke") => {
+    const delegation = state.data?.delegations.find(item => item.id === id);
+    if (!delegation) return;
+    setBusy(id); setMessage("");
+    try {
+      if (action === "transfer") {
+        const [identityId, entitlementId] = (replacements[id] || "").split(":");
+        if (!identityId || !entitlementId) throw new Error("Choose a replacement manager.");
+        await api(`/api/admin/client-delegated-shares/delegations/${encodeURIComponent(id)}/transfer`, {
+          method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+          body: JSON.stringify({ identityId, entitlementId, expectedVersion: delegation.version }),
+        });
+        setMessage("Manager authority transferred. Existing links now recheck the replacement manager policy.");
+      } else {
+        if (!confirm("Revoke this delegation? Every client-created link under it will stop immediately.")) return;
+        await api(`/api/admin/client-delegated-shares/delegations/${encodeURIComponent(id)}`, {
+          method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() },
+        });
+        setMessage("Delegation revoked.");
+      }
+      await state.reload();
+    } catch (caught) { setMessage((caught as Error).message); }
+    finally { setBusy(""); }
+  };
+  const revokeTarget = async (targetId: string) => {
+    if (!confirm("Revoke this folder target? Every delegation and public link that depends on it will stop immediately.")) return;
+    setBusy(targetId); setMessage("");
+    try {
+      await api(`/api/admin/client-delegated-shares/targets/${encodeURIComponent(targetId)}`, {
+        method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() },
+      });
+      setMessage("Folder target revoked. Dependent links now fail their live policy check.");
+      await state.reload();
+    } catch (caught) { setMessage((caught as Error).message); }
+    finally { setBusy(""); }
+  };
+  return <Card title="Client-created link recovery">
+    <p>Review, transfer, or revoke client link authority. Configure a folder from its Share dialog; exact-root access is never selected by default.</p>
+    <ErrorLine error={state.error} />{message && <div className="notice" role="status">{message}</div>}
+    {state.data?.delegations.length ? <div className="delegated-share-admin-list">{state.data.delegations.map(delegation => {
+      const workspace = state.data!.workspaces.find(item => item.id === delegation.workspaceId);
+      const target = state.data!.targets.find(item => item.id === delegation.rootTargetId);
+      const managers = workspace?.managers.filter(manager => manager.identityId !== delegation.identityId) ?? [];
+      const shareCount = state.data!.shares.filter(share => share.delegationId === delegation.id && share.status === "active").length;
+      return <section className="delegated-share-admin-row" key={delegation.id}>
+        <span><strong>{target?.displayName || "Approved folder"} · {workspace?.displayName || "Client workspace"}</strong><small>{delegation.managerEmail || "Verified manager"} · {delegation.status} · {shareCount} active link(s) · map {delegation.imageLocationMapEnabled ? "enabled" : "disabled"} · expires {date(delegation.expiresAt)}</small></span>
+        {delegation.status === "active" && <div className="actions">
+          <select aria-label={`Replacement manager for ${target?.displayName || "delegation"}`} value={replacements[delegation.id] || ""} onChange={event => setReplacements(current => ({ ...current, [delegation.id]: event.target.value }))}>
+            <option value="">Replacement manager…</option>{managers.map(manager => <option key={`${manager.identityId}:${manager.entitlementId}`} value={`${manager.identityId}:${manager.entitlementId}`}>{manager.email || "Verified manager"}</option>)}
+          </select>
+          <button className="button-ghost button-small" disabled={busy === delegation.id || !replacements[delegation.id]} onClick={() => void mutate(delegation.id, "transfer")}>Transfer</button>
+          <button className="button-danger button-small" disabled={busy === delegation.id} onClick={() => void mutate(delegation.id, "revoke")}>Revoke</button>
+        </div>}
+      </section>;
+    })}</div> : !state.error && <EmptyState title="No client link delegations" detail="Open a delivery folder Share dialog to provision one." />}
+    {!!state.data?.targets.length && <section className="delegated-share-target-admin"><h3>Folder targets</h3>{state.data.targets.map(target => <div className="delegated-share-admin-row" key={target.id}>
+      <span><strong>{target.displayName}</strong><small>{state.data!.workspaces.find(workspace => workspace.id === target.workspaceId)?.displayName || "Client workspace"} · {target.status}</small></span>
+      {target.status === "active" && <button className="button-danger button-small" disabled={busy === target.id} onClick={() => void revokeTarget(target.id)}>Revoke target</button>}
+    </div>)}</section>}
+  </Card>;
+}
+
 function Administration({ session }: { session: Session }) {
   const [message, setMessage] = useState("");
   const audit = useLoad(
@@ -5220,6 +5398,7 @@ function Administration({ session }: { session: Session }) {
           </ul>
         </Card>
       </div>
+      {session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <DelegatedShareAdministration />}
       {allowed(session.user, "audit.view") && (
         <Card title="Audit history">
           <ErrorLine error={audit.error} />
