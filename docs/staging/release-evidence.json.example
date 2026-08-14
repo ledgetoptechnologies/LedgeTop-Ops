@@ -168,7 +168,8 @@
         "0131_video_thumbnail_recovery_backfill.sql",
         "0132_portal_v2_legacy_member_bridges.sql",
         "0133_portal_invitation_access_enrollment_receipts.sql",
-        "0134_rejected_request_attachment_submit_guard.sql"
+        "0134_rejected_request_attachment_submit_guard.sql",
+        "0135_security_scan_followups.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -232,6 +233,7 @@
       "perInvitationReceiptEnforced": false,
       "receiptBindsWorkspaceAndEmailHash": false,
       "receiptRevocationRaceVerified": false,
+      "earlyRevocationOrderingVerified": false,
       "multiWorkspaceRetention": false,
       "lastEligibilityRevocation": false,
       "staffGroupUnchanged": false,

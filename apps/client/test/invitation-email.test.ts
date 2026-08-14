@@ -4,6 +4,7 @@ import hierarchyMigration from "../migrations/0121_client_workspace_hierarchy_v2
 import membershipMigration from "../migrations/0123_portal_v2_membership_management.sql?raw";
 import scrubMigration from "../migrations/0127_portal_invitation_secret_scrub.sql?raw";
 import accessReceiptMigration from "../migrations/0133_portal_invitation_access_enrollment_receipts.sql?raw";
+import securityFollowupsMigration from "../migrations/0135_security_scan_followups.sql?raw";
 import {
   invitationRecipientEmailHash,
   recordInvitationAccessEnrollmentReceipt,
@@ -32,13 +33,18 @@ describe("workspace invitation email delivery", () => {
       d1Databases: { DELIVERY_DB: `invitation-email-${crypto.randomUUID()}` },
     });
     database = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
-    await database.exec("CREATE TABLE client_accounts(id TEXT PRIMARY KEY);");
+    await database.exec(`
+      CREATE TABLE client_accounts(id TEXT PRIMARY KEY);
+      CREATE TABLE client_service_request_drafts(id TEXT PRIMARY KEY,state TEXT NOT NULL);
+      CREATE TABLE client_service_request_attachments(id TEXT PRIMARY KEY,draft_id TEXT NOT NULL,status TEXT NOT NULL);
+    `);
     // This focused fixture needs the additive v2 schema, not 0121's legacy
     // backfill SELECTs (those are covered by the full migration suite).
     await database.exec(executableMigration(hierarchyMigration.split("INSERT OR IGNORE INTO portal_v2_identities")[0]!));
     await database.exec(executableMigration(membershipMigration));
     await database.exec(executableMigration(scrubMigration));
     await database.exec(executableMigration(accessReceiptMigration));
+    await database.exec(executableMigration(securityFollowupsMigration));
     await database.prepare("PRAGMA foreign_keys=ON").run();
     await database.batch([
       database.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES ('inviter','https://access.test','inviter','manager@example.test')"),
@@ -136,6 +142,36 @@ describe("workspace invitation email delivery", () => {
     expect(result.sent).toBe(1);
     expect(sent.map(message => message.to)).toEqual(["shared@example.test"]);
     expect(await database.prepare("SELECT revoked_at FROM portal_v2_invitation_access_enrollment_receipts WHERE invitation_id='workspace-b-invite'").first("revoked_at")).toBeNull();
+  });
+
+  it("persists early revocation and permits only a genuinely newer enrollment", async () => {
+    await queueInvitation({ id: "reordered-enrollment", enrolled: false });
+    expect(await revokeInvitationAccessEnrollmentReceipt(env, "reordered-enrollment", "workspace-a", 1)).toBe(true);
+    expect(await recordInvitationAccessEnrollmentReceipt(env, {
+      invitationId: "reordered-enrollment", workspaceId: "workspace-a", email: "person@example.test",
+      enrollmentVersion: 1, providerReceiptHash: "D".repeat(43), enrolledAt: "2026-08-13T00:00:00.000Z",
+    })).toBe(false);
+    expect((await processInvitationEmailBatch(env, { now: new Date("2026-08-13T12:00:00.000Z") })).claimed).toBe(0);
+    expect(sent).toHaveLength(0);
+    expect(await recordInvitationAccessEnrollmentReceipt(env, {
+      invitationId: "reordered-enrollment", workspaceId: "workspace-a", email: "person@example.test",
+      enrollmentVersion: 2, providerReceiptHash: "E".repeat(43), enrolledAt: "2026-08-13T00:00:00.000Z",
+    })).toBe(true);
+    expect((await processInvitationEmailBatch(env, { now: new Date("2026-08-13T12:00:00.000Z") })).sent).toBe(1);
+  });
+
+  it("serializes concurrent enrollment and revocation fail closed", async () => {
+    await queueInvitation({ id: "concurrent-enrollment", enrolled: false });
+    await Promise.all([
+      recordInvitationAccessEnrollmentReceipt(env, {
+        invitationId: "concurrent-enrollment", workspaceId: "workspace-a", email: "person@example.test",
+        enrollmentVersion: 1, providerReceiptHash: "F".repeat(43), enrolledAt: "2026-08-13T00:00:00.000Z",
+      }),
+      revokeInvitationAccessEnrollmentReceipt(env, "concurrent-enrollment", "workspace-a", 1),
+    ]);
+    expect(await database.prepare(`SELECT COUNT(*) count FROM portal_v2_invitation_access_enrollment_receipts
+      WHERE invitation_id='concurrent-enrollment' AND revoked_at IS NULL`).first("count")).toBe(0);
+    expect((await processInvitationEmailBatch(env, { now: new Date("2026-08-13T12:00:00.000Z") })).claimed).toBe(0);
   });
 
   it("leases once, sends a fragment-only token link, and scrubs the plaintext token", async () => {
@@ -242,6 +278,16 @@ describe("workspace invitation email delivery", () => {
       .toMatchObject({ status: "cancelled", payload_json: '{"redacted":true}', lease_expires_at: null });
     expect(await database.prepare("SELECT revoked_at FROM portal_v2_invitation_access_enrollment_receipts WHERE invitation_id='accepted-now'").first("revoked_at"))
       .not.toBeNull();
+  });
+
+  it("reapplies the security follow-up migration without losing revocation state", async () => {
+    await queueInvitation({ id: "migration-reapply", enrolled: false });
+    expect(await revokeInvitationAccessEnrollmentReceipt(env, "migration-reapply", "workspace-a", 2)).toBe(true);
+    await database.exec(executableMigration(securityFollowupsMigration));
+    await database.exec(executableMigration(securityFollowupsMigration));
+    expect(await database.prepare(`SELECT revoked_through_version FROM portal_v2_invitation_access_enrollment_revocations
+      WHERE invitation_id='migration-reapply' AND workspace_id='workspace-a'`).first("revoked_through_version")).toBe(2);
+    expect((await database.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
   });
 
   it("migration 0127 idempotently scrubs terminal rows that predate the trigger", async () => {

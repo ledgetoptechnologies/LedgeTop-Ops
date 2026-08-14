@@ -39,7 +39,7 @@ async function mockAuthorizedPortal(
   },
   requestV2 = true,
   requestAttachments = false,
-  attachmentEvents?: { workerBinaryBytes: number; directBytes: number; completed: boolean; scanAccepted: boolean; scanRejected?: boolean; removed?: boolean },
+  attachmentEvents?: { workerBinaryBytes: number; directBytes: number; completed: boolean; scanAccepted: boolean; scanRejected?: boolean; scanExpired?: boolean; removed?: boolean },
   projectFileFixture?: (url: URL) => PortalFilePage | Promise<PortalFilePage>,
 ) {
   let draftVersion = 1;
@@ -90,7 +90,7 @@ async function mockAuthorizedPortal(
       if (attachmentEvents) attachmentEvents.completed = true;
       await route.fulfill({ json: { status: "quarantined", idempotent: false } });
     } else if (requestAttachments && request.method() === "GET" && path === "/api/client/service-request-drafts/draft-a/attachments/attachment-a") {
-      await route.fulfill({ json: { attachmentId: "attachment-a", id: "attachment-a", name: "authorization.pdf", contentType: "application/pdf", size: 18, status: attachmentEvents?.scanRejected ? "rejected" : attachmentEvents?.scanAccepted ? "accepted" : "scanning", partSize: 8 * 1024 * 1024, completedParts: [] } });
+      await route.fulfill({ json: { attachmentId: "attachment-a", id: "attachment-a", name: "authorization.pdf", contentType: "application/pdf", size: 18, status: attachmentEvents?.scanRejected ? "rejected" : attachmentEvents?.scanExpired ? "expired" : attachmentEvents?.scanAccepted ? "accepted" : "scanning", partSize: 8 * 1024 * 1024, completedParts: [] } });
     } else if (requestAttachments && request.method() === "DELETE" && path === "/api/client/service-request-drafts/draft-a/attachments/attachment-a") {
       if (attachmentEvents) attachmentEvents.removed = true;
       await route.fulfill({ json: { ok: true, status: "aborted", idempotent: false } });
@@ -732,6 +732,33 @@ test("rejected request attachments block submission and provide remove-and-repla
   attachmentEvents.scanAccepted = true;
   await picker.setInputFiles({ name: "authorization.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7\nreference") });
   await expect(page.getByText(/\/ Accepted$/)).toBeVisible();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("button", { name: "Submit request" })).toBeEnabled();
+});
+
+test("expired request attachments stay visible and require explicit removal", async ({ page }) => {
+  const attachmentEvents = { workerBinaryBytes: 0, directBytes: 0, completed: false, scanAccepted: false, scanExpired: true, removed: false };
+  await mockAuthorizedPortal(page, null, requests, undefined, undefined, true, true, attachmentEvents);
+  await page.route("https://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.r2.cloudflarestorage.com/**", async route => {
+    const request = route.request();
+    if (request.method() === "OPTIONS") return route.fulfill({ status: 204, headers: { "Access-Control-Allow-Origin": "http://127.0.0.1:4173", "Access-Control-Allow-Methods": "PUT", "Access-Control-Allow-Headers": "content-type" } });
+    await route.fulfill({ status: 200, headers: { ETag: '"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"', "Access-Control-Allow-Origin": "http://127.0.0.1:4173", "Access-Control-Expose-Headers": "ETag" } });
+  });
+  await page.goto("/portal/requests/new");
+  await openRequestWorkArea(page);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Service request title").fill("Expired attachment recovery");
+  await page.getByLabel("What do you need?").fill("Require an explicit decision when an upload expires.");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.locator(".portal-file-picker input").setInputFiles({ name: "authorization.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.7\nreference") });
+  await expect(page.getByText(/\/ Expired$/)).toBeVisible();
+  await expect(page.getByText(/upload expired before it was accepted/i)).toBeVisible();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.getByRole("button", { name: "Submit request" })).toBeDisabled();
+  await expect(page.getByText(/remove each expired file/i)).toBeVisible();
+  await page.getByRole("button", { name: "Edit files" }).click();
+  await page.getByRole("button", { name: "Remove" }).click();
+  expect(attachmentEvents.removed).toBe(true);
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByRole("button", { name: "Submit request" })).toBeEnabled();
 });

@@ -452,7 +452,7 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
   if (draft.version !== expectedVersion) return { kind: "conflict" };
   if (!completeForSubmission(draft) || !await servicesRemainSubmitEligible(env, draft.services)) return { kind: "incomplete" };
   const pendingAttachments = await db(env).prepare(`SELECT COUNT(*) AS count FROM client_service_request_attachments
-    WHERE draft_id=? AND status NOT IN ('accepted','aborted','expired')`).bind(draftId).first<{ count: number }>();
+    WHERE draft_id=? AND status NOT IN ('accepted','aborted')`).bind(draftId).first<{ count: number }>();
   if ((pendingAttachments?.count ?? 0) > 0) return { kind: "incomplete" };
   const requestId = crypto.randomUUID();
   const serviceCategory = draft.services.length === 1 ? draft.services[0]!.name.slice(0, 100) : `Multiple services (${draft.services.length})`;

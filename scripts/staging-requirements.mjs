@@ -100,6 +100,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0132_portal_v2_legacy_member_bridges.sql",
     "0133_portal_invitation_access_enrollment_receipts.sql",
     "0134_rejected_request_attachment_submit_guard.sql",
+    "0135_security_scan_followups.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -195,7 +196,7 @@ export const REQUIRED_EXTERNAL_GATE_PROOFS = Object.freeze({
   ]),
   workspaceAccessEnrollment: Object.freeze([
     "clientGroupIsolated", "enrollmentBeforeEmail", "perInvitationReceiptEnforced",
-    "receiptBindsWorkspaceAndEmailHash", "receiptRevocationRaceVerified",
+    "receiptBindsWorkspaceAndEmailHash", "receiptRevocationRaceVerified", "earlyRevocationOrderingVerified",
     "multiWorkspaceRetention", "lastEligibilityRevocation", "staffGroupUnchanged",
   ]),
   workspaceStaffRecovery: Object.freeze([

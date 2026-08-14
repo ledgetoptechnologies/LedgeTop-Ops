@@ -101,7 +101,7 @@ still disabled; run baseline smoke tests; and only then request separate
 approval for each capability rollout. A branch push alone is never a release.
 
 The current combined schema gate requires Delivery migrations `0096`–`0112`
-and `0114`–`0134` (`0113` is the reserved production-ledger gap), plus
+and `0114`–`0135` (`0113` is the reserved production-ledger gap), plus
 Operations `0014`–`0023`, with fresh staging exports and exact list/apply
 evidence. Operations `0019` follows `0018` for server-detected, per-file upload
 collision resolution; `0020` adds the SOP library, `0021` hardens Project Alpha
@@ -127,7 +127,9 @@ email activation so accepted guests receive the exact legacy resource bridge
 and mail cannot leave before an invitation-bound Access enrollment receipt.
 Delivery `0134` must precede request-attachment activation so a rejected scan
 cannot be linked by a concurrent submit even if the application preflight is
-bypassed.
+bypassed. Delivery `0135` persists monotonic Access-enrollment revocation
+watermarks so reordered provider callbacks cannot recreate a revoked receipt,
+and requires expired uploads to be explicitly removed before submission.
 These migrations are not rolled back with Worker code. The Project
 Alpha payment/billing contract is a blocking dependency, never an exception to
 local staff, client-team, account, project, delivery, request, or billing ACLs.

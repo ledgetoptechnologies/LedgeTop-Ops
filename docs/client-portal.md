@@ -645,6 +645,14 @@ operator gate; it never substitutes for the per-invitation receipt. Existing
 queued rows are deliberately left without a recipient hash and remain
 ineligible until a reviewed reissue flow creates a new invitation.
 
+Migration `0135_security_scan_followups.sql` makes revocation ordering durable.
+The reconciler records the highest revoked enrollment version even when its
+positive receipt has not arrived; the same or an older delayed callback is
+denied, while a genuinely newer enrollment version remains eligible. The same
+migration keeps expired supporting-file rows visible and blocks request
+submission until the client explicitly removes the expired file or uploads a
+replacement that reaches `accepted`.
+
 ## Provider-neutral future integration
 
 Future work may define a generic read-only business-system provider interface

@@ -4,6 +4,7 @@ import migration from "../migrations/0121_client_workspace_hierarchy_v2.sql?raw"
 import membershipMigration from "../migrations/0123_portal_v2_membership_management.sql?raw";
 import legacyBridgeMigration from "../migrations/0132_portal_v2_legacy_member_bridges.sql?raw";
 import accessReceiptMigration from "../migrations/0133_portal_invitation_access_enrollment_receipts.sql?raw";
+import securityFollowupsMigration from "../migrations/0135_security_scan_followups.sql?raw";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
@@ -88,6 +89,7 @@ describe("client workspace hierarchy v2", () => {
       );
       CREATE TABLE client_service_requests(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,project_id TEXT,created_by_identity_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'submitted');
       CREATE TABLE client_service_request_drafts(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,project_id TEXT,created_by_identity_id TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'draft');
+      CREATE TABLE client_service_request_attachments(id TEXT PRIMARY KEY,draft_id TEXT NOT NULL,status TEXT NOT NULL);
       CREATE TABLE client_portal_notifications(
         id TEXT PRIMARY KEY,account_id TEXT NOT NULL,recipient_identity_id TEXT NOT NULL,event_type TEXT NOT NULL,
         source_type TEXT NOT NULL,source_id TEXT NOT NULL,dedupe_key TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,
@@ -117,6 +119,10 @@ describe("client workspace hierarchy v2", () => {
       .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
       .replace(/\s*\n\s*/g, " "));
     await db.exec(accessReceiptMigration
+      .replace(/^\s*--.*$/gm, "")
+      .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
+      .replace(/\s*\n\s*/g, " "));
+    await db.exec(securityFollowupsMigration
       .replace(/^\s*--.*$/gm, "")
       .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
       .replace(/\s*\n\s*/g, " "));
@@ -541,6 +547,28 @@ describe("client workspace hierarchy v2", () => {
       SET window_started_at='2000-01-01T00:00:00Z',request_count=0
       WHERE workspace_id='workspace-account-a' AND actor_identity_id='identity-one'`).run();
   }, 30_000);
+
+  it("denies acceptance when enrollment revocation arrives before its receipt", async () => {
+    const accessReadyEnv = { ...env, CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: "true" };
+    const created = await createWorkspaceInvitation(env, principal, "workspace-account-a", {
+      email: "early-revoked@example.test", projectPublicId: "pa-project-a", capabilities: ["delivery.view"],
+    }, "early-revoked-acceptance-0001");
+    if (created.outcome !== "created") throw new Error(`invitation was not created: ${created.outcome}`);
+    const payload = await db.prepare("SELECT payload_json FROM portal_v2_invitation_email_outbox WHERE invitation_id=?")
+      .bind(created.invitation.id).first<string>("payload_json");
+    expect(await revokeInvitationAccessEnrollmentReceipt(accessReadyEnv, created.invitation.id, "workspace-account-a", 1)).toBe(true);
+    expect(await recordInvitationAccessEnrollmentReceipt(accessReadyEnv, {
+      invitationId: created.invitation.id, workspaceId: "workspace-account-a", email: "early-revoked@example.test",
+      enrollmentVersion: 1, providerReceiptHash: "S".repeat(43), enrolledAt: new Date(Date.now() - 60_000).toISOString(),
+    })).toBe(false);
+    expect(await acceptPortalWorkspaceInvitation(accessReadyEnv, {
+      issuer, subject: "early-revoked", email: "early-revoked@example.test",
+    }, (JSON.parse(payload!) as { token: string }).token)).toBe("denied");
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_identities WHERE subject='early-revoked'").first("count")).toBe(0);
+    await db.prepare(`UPDATE portal_v2_invitation_rate_limits
+      SET window_started_at='2000-01-01T00:00:00Z',request_count=0
+      WHERE workspace_id='workspace-account-a' AND actor_identity_id='identity-one'`).run();
+  });
 
   it("does not backfill a legacy bridge for a historical accepted invitation on a PA-owned membership", async () => {
     await db.batch([

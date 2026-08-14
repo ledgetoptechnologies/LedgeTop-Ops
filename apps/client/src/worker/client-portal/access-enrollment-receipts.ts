@@ -55,13 +55,19 @@ export async function recordInvitationAccessEnrollmentReceipt(
     FROM portal_v2_invitations
     WHERE id=? AND workspace_id=? AND lower(invited_email)=?
       AND status='pending' AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
+      AND NOT EXISTS (
+        SELECT 1 FROM portal_v2_invitation_access_enrollment_revocations revocation
+        WHERE revocation.invitation_id=portal_v2_invitations.id
+          AND revocation.workspace_id=portal_v2_invitations.workspace_id
+          AND revocation.revoked_through_version>=?
+      )
     ON CONFLICT(invitation_id) DO UPDATE SET
       workspace_id=excluded.workspace_id,invited_email_hash=excluded.invited_email_hash,
       invitation_token_hash=excluded.invitation_token_hash,enrollment_version=excluded.enrollment_version,
       provider_receipt_hash=excluded.provider_receipt_hash,enrolled_at=excluded.enrolled_at,
       expires_at=excluded.expires_at,revoked_at=NULL,updated_at=datetime('now')
     WHERE excluded.enrollment_version>portal_v2_invitation_access_enrollment_receipts.enrollment_version`)
-    .bind(emailHash, input.enrollmentVersion, input.providerReceiptHash, enrolledAt.toISOString(), input.invitationId, input.workspaceId, email)
+    .bind(emailHash, input.enrollmentVersion, input.providerReceiptHash, enrolledAt.toISOString(), input.invitationId, input.workspaceId, email, input.enrollmentVersion)
     .run();
   return changed.meta.changes === 1;
 }
@@ -74,9 +80,26 @@ export async function revokeInvitationAccessEnrollmentReceipt(
 ): Promise<boolean> {
   if (!OPAQUE_ID.test(invitationId) || !OPAQUE_ID.test(workspaceId)
     || !Number.isSafeInteger(enrollmentVersion) || enrollmentVersion < 1) return false;
-  const changed = await database(env).prepare(`UPDATE portal_v2_invitation_access_enrollment_receipts
-    SET revoked_at=COALESCE(revoked_at,datetime('now')),updated_at=datetime('now')
-    WHERE invitation_id=? AND workspace_id=? AND enrollment_version=? AND revoked_at IS NULL`)
-    .bind(invitationId, workspaceId, enrollmentVersion).run();
-  return changed.meta.changes === 1;
+  const db = database(env);
+  const results = await db.batch([
+    db.prepare(`INSERT INTO portal_v2_invitation_access_enrollment_revocations(
+        invitation_id,workspace_id,revoked_through_version)
+      SELECT id,workspace_id,? FROM portal_v2_invitations
+      WHERE id=? AND workspace_id=? AND NOT EXISTS (
+        SELECT 1 FROM portal_v2_invitation_access_enrollment_receipts receipt
+        WHERE receipt.invitation_id=portal_v2_invitations.id
+          AND receipt.workspace_id=portal_v2_invitations.workspace_id
+          AND receipt.enrollment_version>? AND receipt.revoked_at IS NULL
+      )
+      ON CONFLICT(invitation_id) DO UPDATE SET
+        revoked_through_version=excluded.revoked_through_version,updated_at=datetime('now')
+      WHERE excluded.workspace_id=portal_v2_invitation_access_enrollment_revocations.workspace_id
+        AND excluded.revoked_through_version>portal_v2_invitation_access_enrollment_revocations.revoked_through_version`)
+      .bind(enrollmentVersion, invitationId, workspaceId, enrollmentVersion),
+    db.prepare(`UPDATE portal_v2_invitation_access_enrollment_receipts
+      SET revoked_at=COALESCE(revoked_at,datetime('now')),updated_at=datetime('now')
+      WHERE invitation_id=? AND workspace_id=? AND enrollment_version<=? AND revoked_at IS NULL`)
+      .bind(invitationId, workspaceId, enrollmentVersion),
+  ]);
+  return results.some(result => result.meta.changes === 1);
 }

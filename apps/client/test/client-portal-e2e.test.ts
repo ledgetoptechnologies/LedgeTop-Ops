@@ -37,7 +37,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const migrationsDirectory = fileURLToPath(new URL("../migrations/", import.meta.url));
     for (const migration of readdirSync(migrationsDirectory).filter(name => name.endsWith(".sql")).sort()) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
-      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql", "0127_portal_invitation_secret_scrub.sql", "0129_portal_hierarchy_relations.sql", "0130_client_delegated_share_provisioning.sql", "0132_portal_v2_legacy_member_bridges.sql", "0133_portal_invitation_access_enrollment_receipts.sql", "0134_rejected_request_attachment_submit_guard.sql"].includes(migration)) {
+      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql", "0127_portal_invitation_secret_scrub.sql", "0129_portal_hierarchy_relations.sql", "0130_client_delegated_share_provisioning.sql", "0132_portal_v2_legacy_member_bridges.sql", "0133_portal_invitation_access_enrollment_receipts.sql", "0134_rejected_request_attachment_submit_guard.sql", "0135_security_scan_followups.sql"].includes(migration)) {
         await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
         continue;
       }
@@ -147,7 +147,8 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       'client_delegated_shares','pa_portal_projection_generations','delivery_share_audience_snapshots',
       'delivery_share_recipient_members','client_share_folder_target_labels','client_delegated_share_staff_mutations',
       'legacy_video_thumbnail_recovery','portal_v2_legacy_member_bridges',
-      'portal_v2_invitation_access_enrollment_receipts'
+      'portal_v2_invitation_access_enrollment_receipts',
+      'portal_v2_invitation_access_enrollment_revocations'
     ) ORDER BY name`).all<{ name: string }>();
     expect(migrationTables.results.map(row => row.name)).toEqual([
       "client_access_sync_outbox",
@@ -168,6 +169,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       "pa_portal_projection_generations",
       "pa_service_catalog_generations",
       "portal_v2_invitation_access_enrollment_receipts",
+      "portal_v2_invitation_access_enrollment_revocations",
       "portal_v2_invitation_commands",
       "portal_v2_legacy_member_bridges",
       "portal_v2_workspaces",
@@ -566,6 +568,25 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     }, env);
     expect(removal.status).toBe(200);
     expect(await db.prepare("SELECT status FROM client_service_request_attachments WHERE id='rejected-attachment-e2e'").first("status")).toBe("aborted");
+    await db.prepare(`INSERT INTO client_service_request_attachments
+      (id,draft_id,account_id,created_by_identity_id,client_upload_id,object_key,multipart_upload_id,
+       original_name,declared_size,content_type,status,expires_at)
+      VALUES ('expired-attachment-e2e',?,'account-a','identity-a','expired-upload-e2e-0001',
+       '_ltds/quarantine/request-attachments/expired-attachment-e2e/object','expired-upload',
+       'expired-authorization.pdf',2048,'application/pdf','expired',datetime('now','-1 day'))`)
+      .bind(createdDraft.id).run();
+    const expiredList = await portal().request(`${portalOrigin}/service-request-drafts/${createdDraft.id}/attachments`, {}, env);
+    expect(expiredList.status).toBe(200);
+    expect((await expiredList.json() as { attachments: Array<{ id: string; status: string }> }).attachments)
+      .toContainEqual(expect.objectContaining({ id: "expired-attachment-e2e", status: "expired" }));
+    expect((await submit()).status).toBe(422);
+    await expect(db.prepare("UPDATE client_service_request_drafts SET state='submitted' WHERE id=?").bind(createdDraft.id).run())
+      .rejects.toThrow(/accepted or removed/);
+    const expiredRemoval = await portal().request(`${portalOrigin}/service-request-drafts/${createdDraft.id}/attachments/expired-attachment-e2e`, {
+      method: "DELETE", headers: { Origin: portalOrigin },
+    }, env);
+    expect(expiredRemoval.status).toBe(200);
+    expect(await db.prepare("SELECT status FROM client_service_request_attachments WHERE id='expired-attachment-e2e'").first("status")).toBe("aborted");
     const submitted = await submit();
     expect(submitted.status).toBe(201);
     const requestId = (await submitted.json() as { request: { id: string } }).request.id;

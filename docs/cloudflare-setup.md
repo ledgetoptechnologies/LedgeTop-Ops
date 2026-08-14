@@ -406,6 +406,10 @@ and enrollment version before the outbox row can be leased. The receipt must be
 revoked when eligibility or the invitation ends, and the staging packet must
 prove the revoke-versus-send race. No public or portal route writes receipts;
 the provider-side reconciler remains an external release prerequisite.
+Migration `0135` adds the required monotonic revocation watermark: a revoke
+that arrives before its enrollment receipt must still block that version and
+every older version. Staging evidence must include reordered and concurrent
+record/revoke cases plus a successful later-version re-enrollment.
 
 The Project Alpha pricing preview is a separate outbound Client Worker
 integration. Set `PROJECT_ALPHA_PRICING_HINT_URL` to the exact HTTPS endpoint,
@@ -498,7 +502,7 @@ npm.cmd run db:migrate:remote
 ```
 
 Confirm Delivery migrations through `0112_thumbnail_renderer_jobs_root.sql`
-and `0114` through `0133_portal_invitation_access_enrollment_receipts.sql`
+and `0114` through `0135_security_scan_followups.sql`
 (`0113` is the reserved production-ledger gap), and Operations migrations
 through `0023_project_task_sop_links.sql`, appear in the
 remote migration lists before deploying dependent Workers. Before the

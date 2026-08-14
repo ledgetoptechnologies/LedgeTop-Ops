@@ -70,7 +70,10 @@ last-eligibility revocation, and zero staff-group mutation. The global flag is
 not sufficient to release mail: before each outbox lease, migration `0133`
 requires a live server-recorded receipt bound to that invitation, workspace,
 normalized-email hash, current invitation-token hash, and monotonic enrollment
-version. Revocation and lease/send race evidence is mandatory. The
+version. Migration `0135` persists the highest revoked version before or after
+the positive receipt arrives; prove both orderings, concurrent delivery, and a
+legitimate later-version re-enrollment. Revocation and lease/send race evidence
+is mandatory. The
 legacy `client_access_sync_outbox` is account-scoped and imperative, and its
 processor is not deployed; it cannot safely represent workspace-v2 desired
 membership. Manual pre-enrollment may test acceptance mechanics but does not
@@ -218,7 +221,7 @@ Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
 `0112_public_share_location_privacy.sql`, then `0114_delivery_share_prefix_lookup.sql`
-through `0133_portal_invitation_access_enrollment_receipts.sql` (`0113` is intentionally
+through `0135_security_scan_followups.sql` (`0113` is intentionally
 reserved), and Operations
 `0014_staff_acl_controls.sql` through
 `0023_project_task_sop_links.sql`. Migration `0100` removes
@@ -231,7 +234,7 @@ five-minute notification consumer; `0106`/`0107`/`0108` must be present before
 thumbnail jobs or cleanup; `0109` must be present before photo location
 extraction or map routes run; `0110` must be present before a `Jobs/` backfill
 run; `0111` must precede prebuilt registration, Container fallback activation,
-or exact-ETag derivative reconciliation. Migrations `0112` and `0114`-`0133`
+or exact-ETag derivative reconciliation. Migrations `0112` and `0114`-`0135`
 must precede public location privacy, indexed share lookup, client notification,
 request-v2, attachment, workspace hierarchy, membership, delegated-share,
 catalog/hierarchy projection, and directory-recipient activation.

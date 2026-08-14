@@ -54,7 +54,7 @@ and warns that Bypass disables Access enforcement in
 1. Run `npm.cmd run staging:check:test`, the repository tests, and build from
    the pinned commit. Record all config hashes.
 2. Export both staging D1 databases. List migrations and confirm the exact
-   Delivery release set `0096`-`0112`, `0114`-`0133`, plus Operations
+   Delivery release set `0096`-`0112`, `0114`-`0135`, plus Operations
    `0014`-`0023`. Migration `0113` is intentionally reserved and absent. The
    release evidence validator compares the complete filename sets; do not
    shorten them to a range or infer success from a local migration run.
