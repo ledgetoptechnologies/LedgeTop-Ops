@@ -128,8 +128,10 @@ Implement this as additive, default-off, independently gated capabilities:
      relation flag is separately approved.
 
 3. **Sanitized Service Library projection**
-   - Add an immutable public ID and monotonic portal-visible version to each
-     Service Library service needed by LTDS. Catalog schema v2 is intentionally
+   - Add an immutable public ID and opaque immutable source version that changes
+     whenever portal-visible content changes to each Service Library service
+     needed by LTDS. Only delivery `sourceSequence` is contiguous and monotonic.
+     Catalog schema v2 is intentionally
      flat: publish only `entry_type=service`. Fees and bundles remain PA-only;
      do not flatten package composition until a later versioned wire contract
      defines its composition and pricing semantics.
@@ -179,8 +181,10 @@ Implement this as additive, default-off, independently gated capabilities:
      `POST /api/v2/integrations/ltds/draft-quotes` contract with only the
      `portal.quote-draft.create` scope. Do not call or wrap the existing browser
      form controller.
-   - Reauthorize every organization/client/project/service public ID and their
-     relationships. Recalculate actual draft pricing only in PA from current
+   - Reauthorize every supplied non-null organization/client/project/service
+     public ID and their relationships. `clientPublicId` is required;
+     `organizationPublicId` and `projectPublicId` may be null exactly where the
+     strict fixture/schema permits. Recalculate actual draft pricing only in PA from current
      business rules, then snapshot the catalog/request source into the draft.
    - Store a durable unique constraint on `(integration principal,
      Idempotency-Key)` and store the canonical payload hash/fingerprint as a
