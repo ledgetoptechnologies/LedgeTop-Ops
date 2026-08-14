@@ -139,6 +139,24 @@ describe("private TrueNAS thumbnail renderer API", () => {
     expect(value.head).not.toHaveBeenCalled();
   });
 
+  it("does not expose the renderer API on the incoming upload host", async () => {
+    const value = videoClaimFixture();
+    const response = await dispatchThumbnailRendererApi(new Request(
+      "https://incoming.example.test/api/internal/thumbnail-renderer/v1/claim?includeKind=video",
+      { method: "POST", headers: { Authorization: `Bearer ${SECRET}` } },
+    ), {
+      THUMBNAIL_INGEST_EXPECTED_HOST: "ops.example.test",
+      INCOMING_EXPECTED_HOST: "incoming.example.test",
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare: value.prepare },
+      DATA_BUCKET: { head: value.head },
+    } as never);
+
+    expect(response).toBeNull();
+    expect(value.prepare).not.toHaveBeenCalled();
+    expect(value.head).not.toHaveBeenCalled();
+  });
+
   it("serves an exact leased source range through the R2 range option", async () => {
     const value = videoClaimFixture();
     const sourceKey = value.job.source_key;

@@ -78,13 +78,8 @@ function authorized(request: Request, env: Env): boolean {
   return configured.length >= 32 && supplied.length >= 32 && timingSafeEqual(configured, supplied);
 }
 
-function expectedHosts(env: Env): string[] {
-  const hosts: string[] = [];
-  const ingest = (env.THUMBNAIL_INGEST_EXPECTED_HOST || "").trim().toLowerCase();
-  const incoming = (env.INCOMING_EXPECTED_HOST || "").trim().toLowerCase();
-  if (ingest) hosts.push(ingest);
-  if (incoming) hosts.push(incoming);
-  return hosts;
+function expectedHost(env: Env): string {
+  return (env.THUMBNAIL_INGEST_EXPECTED_HOST || "").trim().toLowerCase();
 }
 
 /**
@@ -96,8 +91,8 @@ export async function dispatchThumbnailRendererApi(request: Request, env: Env): 
   const url = new URL(request.url);
   if (!url.pathname.startsWith(RENDERER_API_PREFIX)) return null;
 
-  const hosts = expectedHosts(env);
-  if (hosts.length === 0 || !hosts.includes(url.hostname.toLowerCase())) return null;
+  const host = expectedHost(env);
+  if (!host || url.hostname.toLowerCase() !== host) return null;
   if (!authorized(request, env)) return json({ error: "unauthorized" }, 401);
 
   const path = url.pathname.slice(RENDERER_API_PREFIX.length);
