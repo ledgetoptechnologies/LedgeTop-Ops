@@ -129,7 +129,8 @@ describe("thumbnail metadata backfill", () => {
   });
 
   async function indexSource(source: StoredObject, etag = source.httpEtag, size = source.size) {
-    const mediaKind = source.httpMetadata.contentType === "application/pdf" ? "pdf" : "image";
+    const mediaKind = source.httpMetadata.contentType === "application/pdf" ? "pdf" :
+      source.httpMetadata.contentType?.startsWith("video/") ? "video" : "image";
     await db.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind)
       VALUES(?,?,?,?,?,?)`)
       .bind(source.key, etag, size, source.uploaded.toISOString(), source.httpMetadata.contentType || null, mediaKind).run();

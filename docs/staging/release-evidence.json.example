@@ -158,7 +158,8 @@
         "0127_portal_invitation_secret_scrub.sql",
         "0128_project_alpha_catalog_compatibility.sql",
         "0129_portal_hierarchy_relations.sql",
-        "0130_client_delegated_share_provisioning.sql"
+        "0130_client_delegated_share_provisioning.sql",
+        "0131_video_thumbnail_recovery_backfill.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",

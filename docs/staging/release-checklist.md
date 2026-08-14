@@ -177,7 +177,7 @@ Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
 `0112_public_share_location_privacy.sql`, then `0114_delivery_share_prefix_lookup.sql`
-through `0130_client_delegated_share_provisioning.sql` (`0113` is intentionally
+through `0131_video_thumbnail_recovery_backfill.sql` (`0113` is intentionally
 reserved), and Operations
 `0014_staff_acl_controls.sql` through
 `0022_r2_operation_retries.sql`. Migration `0100` removes
@@ -190,14 +190,18 @@ five-minute notification consumer; `0106`/`0107`/`0108` must be present before
 thumbnail jobs or cleanup; `0109` must be present before photo location
 extraction or map routes run; `0110` must be present before a `Jobs/` backfill
 run; `0111` must precede prebuilt registration, Container fallback activation,
-or exact-ETag derivative reconciliation. Migrations `0112` and `0114`-`0130`
+or exact-ETag derivative reconciliation. Migrations `0112` and `0114`-`0131`
 must precede public location privacy, indexed share lookup, client notification,
 request-v2, attachment, workspace hierarchy, membership, delegated-share,
 catalog/hierarchy projection, and directory-recipient activation. `0017` must
-be present before job-brief routes; `0018`/`0019` must precede
+precede the Operations thumbnail renderer APIs and be present before job-brief
+routes; `0018`/`0019` must precede
 browser-upload and conflict-resolution routes; `0020` must precede the internal
 SOP library; `0021` must precede Project Alpha sync hardening; and `0022` must
-precede bounded R2 retry state. Worker
+precede bounded R2 retry state. Migration `0131` seeds a cutoff-pinned,
+video-only recovery pass; confirm it reaches `completed` and that repaired rows
+remain pending until the authenticated TrueNAS worker claims them. It must not
+publish those rows to the Cloudflare thumbnail queue. Worker
 rollback does not undo either database.
 
 Before version upload, verify rather than infer the remaining operator-owned

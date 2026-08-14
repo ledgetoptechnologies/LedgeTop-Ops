@@ -84,6 +84,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0128_project_alpha_catalog_compatibility.sql",
     "0129_portal_hierarchy_relations.sql",
     "0130_client_delegated_share_provisioning.sql",
+    "0131_video_thumbnail_recovery_backfill.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",

@@ -145,7 +145,8 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       'client_service_request_area_revisions','client_service_request_attachments','request_pa_draft_quote_receipts',
       'portal_v2_workspaces','pa_service_catalog_generations','portal_v2_invitation_commands',
       'client_delegated_shares','pa_portal_projection_generations','delivery_share_audience_snapshots',
-      'delivery_share_recipient_members','client_share_folder_target_labels','client_delegated_share_staff_mutations'
+      'delivery_share_recipient_members','client_share_folder_target_labels','client_delegated_share_staff_mutations',
+      'legacy_video_thumbnail_recovery'
     ) ORDER BY name`).all<{ name: string }>();
     expect(migrationTables.results.map(row => row.name)).toEqual([
       "client_access_sync_outbox",
@@ -162,6 +163,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       "client_share_folder_target_labels",
       "delivery_share_audience_snapshots",
       "delivery_share_recipient_members",
+      "legacy_video_thumbnail_recovery",
       "pa_portal_projection_generations",
       "pa_service_catalog_generations",
       "portal_v2_invitation_commands",
@@ -169,6 +171,10 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       "request_pa_draft_quote_receipts",
     ]);
     expect(await d1ClientPortalRepository.resolveSession(env, { ...principal, subject: "not-provisioned" })).toBeNull();
+    expect(await db.prepare(`SELECT status,cursor,attempt_count,cutoff_at IS NOT NULL cutoff_set
+      FROM legacy_video_thumbnail_recovery WHERE singleton=1`).first()).toEqual({
+      status: "queued", cursor: null, attempt_count: 0, cutoff_set: 1,
+    });
     expect(await db.prepare("SELECT status FROM client_service_requests WHERE id='migration-request'").first("status")).toBe("accepted_pending_pa_linkage");
     expect(await db.prepare("SELECT status_value FROM client_portal_notification_outbox WHERE id='migration-notification'").first("status_value")).toBe("accepted_pending_pa_linkage");
     expect(await db.prepare("SELECT json_extract(snapshot_json,'$.areaGeoJson') area,json_array_length(json_extract(snapshot_json,'$.poiPoints')) points FROM request_revisions WHERE request_id='migration-invalid-json'").first()).toMatchObject({ area: null, points: 0 });

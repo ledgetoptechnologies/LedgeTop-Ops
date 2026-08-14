@@ -32,6 +32,7 @@ import {
 } from "./file-events";
 import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, reconcileManagedThumbnailOrphans, reconcileThumbnailRegistrations, recoverExpiredThumbnailLeases, recoverTransientThumbnailFailures, thumbnailSourceEligible, type ThumbnailJobMessage } from "./image-thumbnails";
 import { processThumbnailBackfills } from "./thumbnail-backfill";
+import { processLegacyVideoThumbnailRecovery } from "./video-thumbnail-recovery";
 import { enqueueImageLocationBackfill } from "./image-locations";
 import { listDeliveryFolderLocations, resolveDeliveryLocationAsset } from "./delivery-locations";
 import { dispatchThumbnailIngestRequest } from "./thumbnail-ingest-api";
@@ -2598,6 +2599,7 @@ async function scheduled(
 ) {
   if (event.cron === CLIENT_REQUEST_NOTIFICATION_CRON) {
     ctx.waitUntil(processThumbnailBackfills(env));
+    ctx.waitUntil(processLegacyVideoThumbnailRecovery(env));
     try {
       await Promise.all([
         processClientPortalRequestNotifications(env),
@@ -2662,6 +2664,7 @@ async function scheduled(
   ctx.waitUntil(recoverExpiredThumbnailLeases(env));
   ctx.waitUntil(recoverTransientThumbnailFailures(env));
   ctx.waitUntil(processThumbnailBackfills(env));
+  ctx.waitUntil(processLegacyVideoThumbnailRecovery(env));
   ctx.waitUntil(enqueueImageLocationBackfill(env));
   ctx.waitUntil(
     enqueueExpiringNotifications(env).then(() =>
