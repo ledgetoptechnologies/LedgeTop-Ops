@@ -47,10 +47,14 @@ test("staff deep-link review shows all request evidence and sends an idempotent 
     } else if (incoming.method() === "GET" && path === "/api/client-service-requests") {
       await route.fulfill({ json: { requests: [requestRecord] } });
     } else if (incoming.method() === "GET" && path === "/api/client-service-requests/request-a") {
-      await route.fulfill({ json: { request: requestRecord, services: [{ publicId: "svc-2d-mapping", sourceVersion: "catalog-item-v3", name: "2D Mapping", summary: "Orthomosaic mapping for the submitted work area.", category: "Mapping", geometryRequirement: "required", integrity: "verified", answers: [{ questionId: "deliverable_format", label: "Preferred deliverable", displayValue: "Orthomosaic" }, { questionId: "ground_resolution", label: "Target ground resolution", displayValue: "2.5 cm/pixel" }] }], revisions: [{ revision_number: 1, author_type: "client", author_id: "client-a", action: "submitted", snapshot_json: "{}", note: null, created_at: requestRecord.created_at }], estimates: estimateReady ? [{ id: "estimate-a", version: 1, scope_text: "Progress capture and orthomosaic", estimate_amount_minor: 125000, currency: "USD", status: "ready", client_response_note: null, updated_at: requestRecord.updated_at }] : [], history: [{ actor_id: "staff-a", action: "review_opened", details_json: null, created_at: requestRecord.created_at }], children: [{ id: "request-child", title: "Add east parcel", status: "submitted", created_at: requestRecord.created_at }] } });
+      await route.fulfill({ json: { request: requestRecord, capabilities: { legacyPaQuoteLinkEnabled: true }, services: [{ publicId: "svc-2d-mapping", sourceVersion: "catalog-item-v3", name: "2D Mapping", summary: "Orthomosaic mapping for the submitted work area.", category: "Mapping", geometryRequirement: "required", integrity: "verified", answers: [{ questionId: "deliverable_format", label: "Preferred deliverable", displayValue: "Orthomosaic" }, { questionId: "ground_resolution", label: "Target ground resolution", displayValue: "2.5 cm/pixel" }] }], revisions: [{ revision_number: 1, author_type: "client", author_id: "client-a", action: "submitted", snapshot_json: "{}", note: null, created_at: requestRecord.created_at }], estimates: estimateReady ? [{ id: "estimate-a", version: 1, scope_text: "Progress capture and orthomosaic", estimate_amount_minor: 125000, currency: "USD", status: "ready", client_response_note: null, updated_at: requestRecord.updated_at }] : [], history: [{ actor_id: "staff-a", action: "review_opened", details_json: null, created_at: requestRecord.created_at }], children: [{ id: "request-child", title: "Add east parcel", status: "submitted", created_at: requestRecord.created_at }] } });
     } else if (incoming.method() === "POST" && path === "/api/client-service-requests/request-a/estimate") {
       expect(incoming.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
-      expect(incoming.postDataJSON()).toMatchObject({ scope: "Progress capture and orthomosaic", amount: null, currency: null, status: "ready" });
+      expect(incoming.postDataJSON()).toEqual({
+        scope: "Progress capture and orthomosaic",
+        proposedFields: null,
+        status: "ready",
+      });
       estimateReady = true;
       await route.fulfill({ status: 201, json: { id: "estimate-a", version: 1, status: "ready", idempotentReplay: false } });
     } else if (incoming.method() === "GET" && path === "/api/client-service-requests/request-child") {
@@ -85,6 +89,7 @@ test("staff deep-link review shows all request evidence and sends an idempotent 
     "/api/client-service-requests/request-a/area.kml?revision=effective",
   );
   await expect(page.getByText(/Pricing is created and reviewed in Project Alpha/i)).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Scope proposal" })).toBeVisible();
   await expect(page.getByLabel("Optional non-binding estimate")).toHaveCount(0);
   await expect(page.getByText("Revision 1 · submitted")).toBeVisible();
   await expect(page.getByText("review opened")).toBeVisible();
@@ -92,7 +97,8 @@ test("staff deep-link review shows all request evidence and sends an idempotent 
 
   await page.getByLabel("Scope proposal").fill("Progress capture and orthomosaic");
   await page.getByRole("button", { name: "Send for client confirmation" }).click();
-  await expect(page.getByText("Estimate ready")).toBeVisible();
+  await expect(page.getByText("Scope proposal ready")).toBeVisible();
+  await expect(page.getByText(/\$1,250(?:\.00)?/)).toHaveCount(0);
   expect(policyErrors).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   const selectedServices = page.locator(".request-services-card");

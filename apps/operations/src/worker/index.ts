@@ -426,6 +426,9 @@ const operationalEstimateSchema = z
   })
   .strict();
 const workflowIdempotencyKey = z.string().trim().min(16).max(128);
+function legacyClientRequestPaQuoteLinkEnabled(env: Env): boolean {
+  return env.LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED === "true";
+}
 const staffWorkAreaSchema = z
   .object({
     expectedUpdatedAt: z.string().trim().min(1).max(64),
@@ -1190,10 +1193,25 @@ app.get("/api/client-service-requests", async (c) => {
   await requireGlobal(c.env, principal, "operations.manage");
   const result = await c.env.DELIVERY_DB.withSession("first-primary")
     .prepare(
-      `SELECT r.id,r.account_id,r.project_id,r.parent_request_id,r.request_type,r.title,r.details,r.location_text,r.preferred_start_at,r.service_category,r.deliverables_text,r.site_contact_name,r.site_contact_email,r.site_contact_phone,r.desired_completion_at,r.latitude,r.longitude,r.area_geojson,r.poi_points_json,r.status,r.created_at,r.updated_at,a.display_name account_name,p.project_name,p.client_name,quote.project_alpha_artifact_id quote_id,quote.document_number quote_document_number,quote.artifact_status quote_status,quote.total_minor quote_total_minor,quote.currency quote_currency,quote.verified_at quote_verified_at FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id LEFT JOIN projects p ON p.id=r.project_id LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id AND quote.artifact_type='quote' AND quote.superseded_at IS NULL WHERE a.status='active' ORDER BY CASE r.status WHEN 'submitted' THEN 0 WHEN 'under_review' THEN 1 WHEN 'accepted_pending_pa_linkage' THEN 2 WHEN 'accepted_linked' THEN 3 ELSE 4 END,CASE WHEN r.desired_completion_at IS NULL THEN 1 ELSE 0 END,r.desired_completion_at ASC,r.created_at ASC,r.id ASC LIMIT 200`,
+      `SELECT r.id,r.account_id,r.project_id,r.parent_request_id,r.request_type,r.title,r.details,r.location_text,r.preferred_start_at,r.service_category,r.deliverables_text,r.site_contact_name,r.site_contact_email,r.site_contact_phone,r.desired_completion_at,r.latitude,r.longitude,r.area_geojson,r.poi_points_json,r.status,r.created_at,r.updated_at,a.display_name account_name,p.project_name,p.client_name,quote.project_alpha_artifact_id quote_id,quote.document_number quote_document_number,quote.artifact_status quote_status,quote.total_minor quote_total_minor,quote.currency quote_currency,quote.verified_at quote_verified_at,EXISTS(SELECT 1 FROM client_service_request_services service WHERE service.request_id=r.id) uses_catalog_v2 FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id LEFT JOIN projects p ON p.id=r.project_id LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id AND quote.artifact_type='quote' AND quote.superseded_at IS NULL WHERE a.status='active' ORDER BY CASE r.status WHEN 'submitted' THEN 0 WHEN 'under_review' THEN 1 WHEN 'accepted_pending_pa_linkage' THEN 2 WHEN 'accepted_linked' THEN 3 ELSE 4 END,CASE WHEN r.desired_completion_at IS NULL THEN 1 ELSE 0 END,r.desired_completion_at ASC,r.created_at ASC,r.id ASC LIMIT 200`,
     )
     .all();
-  return c.json({ requests: result.results });
+  return c.json({
+    requests: result.results.map((raw) => {
+      const row = { ...raw } as Record<string, unknown>;
+      const usesCatalogV2 = Number(row.uses_catalog_v2 || 0) === 1;
+      delete row.uses_catalog_v2;
+      if (usesCatalogV2) {
+        row.quote_id = null;
+        row.quote_document_number = null;
+        row.quote_status = null;
+        row.quote_total_minor = null;
+        row.quote_currency = null;
+        row.quote_verified_at = null;
+      }
+      return row;
+    }),
+  });
 });
 app.get("/api/client-service-requests/pending-count", async (c) => {
   const principal = c.get("principal");
@@ -1277,14 +1295,49 @@ app.get("/api/client-service-requests/:id", async (c) => {
     created_by: string;
     created_at: string;
   } | undefined;
+  const usesCatalogV2 = serviceRows.results.length > 0;
+  const responseRequest = { ...(request as Record<string, unknown>) };
+  if (usesCatalogV2) {
+    responseRequest.quote_document_number = null;
+    responseRequest.quote_status = null;
+    responseRequest.quote_total_minor = null;
+    responseRequest.quote_currency = null;
+    responseRequest.quote_verified_at = null;
+    responseRequest.quote_scope_stale_at = null;
+  }
+  const responseEstimates = estimates.results.map((raw) => {
+    const estimate = { ...raw } as Record<string, unknown>;
+    if (usesCatalogV2) {
+      delete estimate.estimate_amount_minor;
+      delete estimate.currency;
+    }
+    return estimate;
+  });
+  const responseRevisions = revisions.results.map((raw) => {
+    const revision = { ...raw } as Record<string, unknown>;
+    if (!usesCatalogV2 || typeof revision.snapshot_json !== "string") return revision;
+    try {
+      const snapshot = JSON.parse(revision.snapshot_json) as Record<string, unknown>;
+      delete snapshot.amount;
+      delete snapshot.currency;
+      revision.snapshot_json = JSON.stringify(snapshot);
+    } catch {
+      // Immutable malformed history remains opaque; the UI never renders its body.
+    }
+    return revision;
+  });
   return c.json({
-    request,
-    revisions: revisions.results,
-    estimates: estimates.results,
+    request: responseRequest,
+    revisions: responseRevisions,
+    estimates: responseEstimates,
     history: history.results,
     children: children.results,
     areaRevisions: areaRevisions.results,
     services: serviceRows.results.map(clientRequestServiceReview),
+    capabilities: {
+      legacyPaQuoteLinkEnabled:
+        !usesCatalogV2 && legacyClientRequestPaQuoteLinkEnabled(c.env),
+    },
     effectiveWorkArea: effectiveArea
       ? {
           revisionNumber: effectiveArea.revision_number,
@@ -1529,10 +1582,17 @@ app.get("/api/client-service-requests/:id/area.kml", async (c) => {
   });
   if (!kml)
     throw new HTTPException(404, { message: "This request does not have an exportable work area" });
-  c.executionCtx.waitUntil(c.env.DELIVERY_DB.prepare(
-    `INSERT INTO request_admin_audit(request_id,actor_id,action,details_json)
-     VALUES(?,?,'work_area_kml_exported',?)`,
-  ).bind(id, principal.id, JSON.stringify({ revision })).run().then(() => undefined));
+  try {
+    const audit = await c.env.DELIVERY_DB.prepare(
+      `INSERT INTO request_admin_audit(request_id,actor_id,action,details_json)
+       VALUES(?,?,'work_area_kml_exported',?)`,
+    ).bind(id, principal.id, JSON.stringify({ revision })).run();
+    if (audit.meta.changes !== 1) throw new Error("KML export audit was not persisted");
+  } catch {
+    throw new HTTPException(503, {
+      message: "The KML export audit could not be recorded; no file was returned",
+    });
+  }
   return new Response(kml, {
     headers: {
       "Content-Type": "application/vnd.google-earth.kml+xml; charset=utf-8",
@@ -1555,8 +1615,28 @@ app.post("/api/client-service-requests/:id/estimate", async (c) => {
   const value = await body(c, operationalEstimateSchema),
     db = c.env.DELIVERY_DB.withSession("first-primary"),
     id = c.req.param("id"),
-    mutationKey = parsedMutationKey.data,
-    mutationFingerprint = await sha256Hex(
+    mutationKey = parsedMutationKey.data;
+  const request = await db
+    .prepare(
+      `SELECT id,project_id,status,
+        EXISTS(SELECT 1 FROM client_service_request_services service WHERE service.request_id=client_service_requests.id) uses_catalog_v2
+       FROM client_service_requests WHERE id=?`,
+    )
+    .bind(id)
+    .first<{ id: string; project_id: string | null; status: string; uses_catalog_v2: number }>();
+  if (!request)
+    throw new HTTPException(404, { message: "Client request not found" });
+  const usesCatalogV2 = Number(request.uses_catalog_v2 || 0) === 1;
+  if (
+    usesCatalogV2 &&
+    (Object.prototype.hasOwnProperty.call(value, "amount") ||
+      Object.prototype.hasOwnProperty.call(value, "currency"))
+  )
+    throw new HTTPException(422, {
+      message:
+        "Catalog-backed requests accept scope only; pricing is created in Project Alpha",
+    });
+  const mutationFingerprint = await sha256Hex(
       JSON.stringify({ requestId: id, ...value }),
     ),
     replay = await db
@@ -1570,13 +1650,7 @@ app.post("/api/client-service-requests/:id/estimate", async (c) => {
         version: number;
         status: string;
         mutation_fingerprint: string;
-      }>(),
-    request = await db
-      .prepare(
-        "SELECT id,project_id,status FROM client_service_requests WHERE id=?",
-      )
-      .bind(id)
-      .first<{ id: string; project_id: string | null; status: string }>();
+      }>();
   if (replay) {
     if (
       replay.request_id !== id ||
@@ -1592,8 +1666,6 @@ app.post("/api/client-service-requests/:id/estimate", async (c) => {
       idempotentReplay: true,
     });
   }
-  if (!request)
-    throw new HTTPException(404, { message: "Client request not found" });
   if (!["submitted", "under_review"].includes(request.status))
     throw new HTTPException(409, {
       message: "This request is no longer open for an operational estimate",
@@ -1698,8 +1770,12 @@ app.post("/api/client-service-requests/:id/estimate", async (c) => {
             version,
             status: value.status,
             scope: value.scope,
-            amount: value.amount ?? null,
-            currency: value.currency ?? null,
+            ...(usesCatalogV2
+              ? {}
+              : {
+                  amount: value.amount ?? null,
+                  currency: value.currency ?? null,
+                }),
             proposedFields: value.proposedFields ?? null,
           }),
           value.scope,
@@ -1969,12 +2045,19 @@ app.patch("/api/client-service-requests/:id", async (c) => {
 app.post("/api/client-service-requests/:id/pa-quote", async (c) => {
   const principal = c.get("principal");
   await requireGlobal(c.env, principal, "operations.manage");
+  if (!legacyClientRequestPaQuoteLinkEnabled(c.env))
+    throw new HTTPException(404, {
+      message: "Legacy Project Alpha quote linkage is not enabled",
+    });
   const value = await body(c, paQuoteLinkSchema),
     id = c.req.param("id"),
     db = c.env.DELIVERY_DB.withSession("first-primary"),
     request = await db
       .prepare(
-        `SELECT r.id,r.status,r.project_id,a.project_alpha_client_id,p.project_alpha_project_id FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id LEFT JOIN projects p ON p.id=r.project_id WHERE r.id=?`,
+        `SELECT r.id,r.status,r.project_id,a.project_alpha_client_id,p.project_alpha_project_id,
+          EXISTS(SELECT 1 FROM client_service_request_services service WHERE service.request_id=r.id) uses_catalog_v2
+         FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id
+         LEFT JOIN projects p ON p.id=r.project_id WHERE r.id=?`,
       )
       .bind(id)
       .first<{
@@ -1983,9 +2066,15 @@ app.post("/api/client-service-requests/:id/pa-quote", async (c) => {
         project_id: string | null;
         project_alpha_client_id: string | null;
         project_alpha_project_id: string | null;
+        uses_catalog_v2: number;
       }>();
   if (!request)
     throw new HTTPException(404, { message: "Client request not found" });
+  if (Number(request.uses_catalog_v2 || 0) === 1)
+    throw new HTTPException(409, {
+      message:
+        "Catalog-backed requests use the Project Alpha draft public-ID handoff; numeric quote linkage is unavailable",
+    });
   if (request.status !== "accepted_pending_pa_linkage")
     throw new HTTPException(409, {
       message: "Accept the client request before linking a Project Alpha quote",

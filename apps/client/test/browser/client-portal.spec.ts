@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { DeliveryLocationCollection } from "@ltds/shared";
-import type { PortalFilePage, PortalServiceDraft, PortalServiceRequest } from "../../src/client/portal-api";
+import type { PortalAccount, PortalFilePage, PortalServiceDraft, PortalServiceRequest } from "../../src/client/portal-api";
 
 const account = { id: "account-a", displayName: "Acme Surveying" };
 const projects = [{ id: "project-a", externalRef: "ALPHA-1", clientName: "Acme", projectName: "North Site", canRequestService: true, status: "in_progress", summary: "Aerial progress documentation", siteAddress: null, serviceAddress: "100 Main St", projectContactName: "LTDS Operations", projectContactEmail: "ops@example.com", projectContactPhone: null, nextMilestone: "Spring progress imagery", lastUpdateAt: "2026-08-01T12:00:00.000Z" }];
@@ -41,6 +41,7 @@ async function mockAuthorizedPortal(
   requestAttachments = false,
   attachmentEvents?: { workerBinaryBytes: number; directBytes: number; completed: boolean; scanAccepted: boolean; scanRejected?: boolean; scanExpired?: boolean; removed?: boolean },
   projectFileFixture?: (url: URL) => PortalFilePage | Promise<PortalFilePage>,
+  accountFixture: PortalAccount = account,
 ) {
   let draftVersion = 1;
   let draftBody: Record<string, unknown> | null = null;
@@ -49,7 +50,7 @@ async function mockAuthorizedPortal(
     const requestUrl = new URL(request.url());
     const path = requestUrl.pathname;
     if (request.method() === "GET" && path === "/api/client/session") {
-      await route.fulfill({ json: { account, capabilities: { manageTeam: true, viewBilling: false, requestV2, requestAttachments, invitationEmailDelivery: true } } });
+      await route.fulfill({ json: { account: accountFixture, capabilities: { manageTeam: true, viewBilling: false, requestV2, requestAttachments, invitationEmailDelivery: true } } });
     } else if (request.method() === "GET" && path === "/api/client/map-config") {
       await route.fulfill({ json: { mapboxPublicToken } });
     } else if (request.method() === "GET" && path === "/api/client/projects") {
@@ -399,6 +400,54 @@ test("autosaved service-request drafts resume after navigation and reload", asyn
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test("catalog refresh preserves the saved service version until the client explicitly reselects", async ({ page }) => {
+  await mockAuthorizedPortal(page);
+  const currentService = {
+    ...serviceCatalog[0]!,
+    sourceVersion: "pa-v5",
+    questions: [{ id: "format", label: "Delivery format", type: "select" as const, required: true, helpText: "Choose the current output.", options: [{ value: "geotiff", label: "GeoTIFF" }] }],
+  };
+  let catalogChanged = false;
+  let selectedCurrent = false;
+  await page.route("**/api/client/service-catalog", route => route.fulfill({ json: { services: catalogChanged ? [currentService] : serviceCatalog } }));
+  await page.route("**/api/client/service-request-drafts/draft-a", async route => {
+    if (route.request().method() !== "PUT" || !catalogChanged) return route.fallback();
+    const body = route.request().postDataJSON();
+    const selected = (body.services as Array<{ publicId: string; sourceVersion: string; answers: Record<string, unknown> }>)[0]!;
+    if (selected.sourceVersion === "pa-v4") return route.fulfill({ status: 409, json: {
+      error: "One or more selected services changed in the Project Alpha service library. Review and reselect them before continuing.",
+      code: "catalog_changed",
+      servicePublicIds: [selected.publicId],
+    } });
+    selectedCurrent = selected.sourceVersion === "pa-v5";
+    return route.fulfill({ json: { draft: {
+      ...body, id: "draft-a", state: "draft", version: 50, areaSquareMeters: null, areaAcres: null,
+      services: [{ ...currentService, answers: selected.answers }], submittedRequestId: null,
+      createdAt: "2026-08-13T12:00:00.000Z", updatedAt: "2026-08-14T12:00:00.000Z",
+    } } });
+  });
+
+  await page.goto("/portal/requests/new");
+  await openRequestWorkArea(page);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Service request title").fill("Pinned catalog version");
+  await page.getByLabel("What do you need?").fill("Keep the approved service snapshot until I review the replacement.");
+  await expect(page.getByText("Draft saved")).toBeVisible();
+
+  catalogChanged = true;
+  await page.getByLabel("Service request title").fill("Pinned catalog version updated");
+  await expect(page.getByText(/service library changed/i)).toBeVisible();
+  await page.getByRole("button", { name: "Services" }).click();
+  await expect(page.getByText("This service changed in Project Alpha.")).toBeVisible();
+  await expect(page.getByLabel("Preferred resolution")).toHaveValue("standard");
+  await expect(page.getByLabel("Delivery format")).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Use current service version" }).click();
+  await expect(page.getByLabel("Delivery format")).toBeVisible();
+  await page.getByLabel("Delivery format").selectOption("geotiff");
+  await expect.poll(() => selectedCurrent).toBe(true);
+});
+
 test("project folders are keyboard accessible and restore opaque history/deep links", async ({ page }) => {
   const fixture = (url: URL): PortalFilePage => {
     const folder = url.searchParams.get("folder");
@@ -638,6 +687,43 @@ for (const width of [320, 390, 768]) {
     expect(headingTop).toBeGreaterThanOrEqual(headerBottom);
   });
 }
+
+test("client shell contains very long account text and reflows at a 200% zoom equivalent", async ({ page }) => {
+  const longName = `Client${"N".repeat(180)}`;
+  const longEmail = `${"e".repeat(180)}@example.test`;
+  await mockAuthorizedPortal(
+    page,
+    null,
+    requests,
+    undefined,
+    undefined,
+    true,
+    false,
+    undefined,
+    undefined,
+    { id: "account-long", displayName: longName, email: longEmail },
+  );
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/portal/account");
+  const accountCard = page.locator(".portal-account-card");
+  await expect(accountCard.getByText(longName, { exact: true })).toBeVisible();
+  await expect(accountCard.getByText(longEmail, { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+
+  // A 640 CSS-pixel viewport is the reflow equivalent of 200% browser zoom
+  // on the 1280-pixel desktop canvas above.
+  await page.setViewportSize({ width: 640, height: 800 });
+  await expect(page.getByRole("button", { name: "Open navigation" })).toBeVisible();
+  const cardBounds = await accountCard.boundingBox();
+  expect(cardBounds).not.toBeNull();
+  expect(cardBounds!.x).toBeGreaterThanOrEqual(0);
+  expect(cardBounds!.x + cardBounds!.width).toBeLessThanOrEqual(641);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+  const headerBottom = await page.locator(".client-portal-header").evaluate(node => node.getBoundingClientRect().bottom);
+  const headingTop = await page.getByRole("heading", { name: "Your account" }).evaluate(node => node.getBoundingClientRect().top);
+  expect(headingTop).toBeGreaterThanOrEqual(headerBottom);
+});
 
 test("request v2 is fail-closed and preserves legacy creation when the server capability is off", async ({ page }) => {
   await mockAuthorizedPortal(page, null, requests, undefined, undefined, false);
@@ -970,6 +1056,17 @@ test("current location reports loading, failure, and success without blocking th
 test("final review shows timing, POI coordinates, and a responsive read-only boundary preview", async ({ page }) => {
   await mockMapbox(page);
   await mockAuthorizedPortal(page, "pk.local-browser-test");
+  await page.route("**/api/client/service-request-drafts/draft-a/pricing-hint", route => route.fulfill({ json: {
+    available: true,
+    hint: {
+      kind: "starting_at",
+      currency: "USD",
+      startingAtMinor: 125000,
+      disclaimer: "Planning guidance only. Final quote after staff review.",
+      basisVersion: "pricing-v1",
+      validUntil: "2099-01-01T00:00:00.000Z",
+    },
+  } }));
   await page.goto("/portal/requests/new");
   await openRequestWorkArea(page);
   const canvas = page.locator(".mapboxgl-canvas");
@@ -997,6 +1094,10 @@ test("final review shows timing, POI coordinates, and a responsive read-only bou
   await expect(page.locator(".portal-review-timing")).toContainText("Preferred start");
   await expect(page.locator(".portal-review-timing")).toContainText("Desired completion");
   await expect(page.locator(".portal-review-timing")).not.toContainText("Not specified");
+  const pricing = page.locator(".portal-pricing-hint");
+  await expect(pricing).toContainText("Estimated coverage: 12.5 acres");
+  await expect(pricing).toContainText("Starting at $1,250");
+  await expect(pricing).toContainText("Planning guidance only. Final quote after staff review.");
 
   for (const viewport of [{ width: 844, height: 390 }, { width: 640, height: 900 }]) {
     await page.setViewportSize(viewport);
@@ -1007,6 +1108,69 @@ test("final review shows timing, POI coordinates, and a responsive read-only bou
     expect(previewBox!.x + previewBox!.width).toBeLessThanOrEqual(viewport.width);
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
   }
+});
+
+test("pricing guidance ignores an older response after the service basis changes", async ({ page }) => {
+  await mockAuthorizedPortal(page);
+  let mode: "initial" | "race" = "initial";
+  let raceCalls = 0;
+  let releaseOld!: () => void;
+  const oldGate = new Promise<void>(resolve => { releaseOld = resolve; });
+  await page.route("**/api/client/service-request-drafts/draft-a/pricing-hint", async route => {
+    if (mode === "initial") return route.fulfill({ json: { available: true, hint: {
+      kind: "starting_at", currency: "USD", startingAtMinor: 100000,
+      disclaimer: "Planning guidance only. Final quote after staff review.", basisVersion: "initial", validUntil: "2099-01-01T00:00:00.000Z",
+    } } });
+    raceCalls += 1;
+    if (raceCalls === 1) await oldGate;
+    return route.fulfill({ json: { available: true, hint: {
+      kind: "starting_at", currency: "USD", startingAtMinor: raceCalls === 1 ? 100000 : 200000,
+      disclaimer: "Planning guidance only. Final quote after staff review.", basisVersion: raceCalls === 1 ? "old" : "new", validUntil: "2099-01-01T00:00:00.000Z",
+    } } });
+  });
+
+  await page.goto("/portal/requests/new");
+  await openRequestWorkArea(page);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Service request title").fill("Pricing race check");
+  await page.getByLabel("What do you need?").fill("Confirm that changed service scope never shows an older price hint.");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.locator(".portal-pricing-hint")).toContainText("Starting at $1,000");
+
+  mode = "race";
+  await page.getByRole("button", { name: "Edit services" }).click();
+  await page.getByLabel("Preferred resolution").selectOption("survey");
+  await expect.poll(() => raceCalls).toBe(1);
+  await page.getByLabel("Preferred resolution").selectOption("standard");
+  await expect.poll(() => raceCalls).toBe(2);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await expect(page.locator(".portal-pricing-hint")).toContainText("Starting at $2,000");
+  releaseOld();
+  await expect(page.locator(".portal-pricing-hint")).toContainText("Starting at $2,000");
+  await expect(page.locator(".portal-pricing-hint")).not.toContainText("Starting at $1,000");
+});
+
+test("a server-side attachment scan change returns the client to file recovery", async ({ page }) => {
+  await mockAuthorizedPortal(page);
+  await page.route("**/api/client/service-request-drafts/draft-a/submit", route => route.fulfill({ status: 422, json: {
+    error: "Remove every rejected supporting file and upload a safe replacement before submitting.",
+    code: "attachments_rejected",
+    attachmentCount: 1,
+  } }));
+  await page.goto("/portal/requests/new");
+  await openRequestWorkArea(page);
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByLabel("Service request title").fill("Scanner changed state");
+  await page.getByLabel("What do you need?").fill("Exercise precise recovery when the scanner changes immediately before submit.");
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Continue" }).click();
+  await page.getByRole("button", { name: "Submit request" }).click();
+  await expect(page.getByRole("heading", { name: "Contact and supporting files" })).toBeVisible();
+  await expect(page.getByText("Remove every rejected supporting file and upload a safe replacement before submitting.")).toBeVisible();
 });
 
 test("client can edit before review, create a child change, and answer an estimate", async ({ page }) => {
@@ -1026,6 +1190,8 @@ test("client can edit before review, create a child change, and answer an estima
   const workflowEvents: { edited?: boolean; changeRequested?: boolean; estimateAccepted?: boolean } = {};
   await mockAuthorizedPortal(page, null, workflowRequests, workflowEvents);
   await page.goto("/portal/requests");
+  await expect(page.getByText("Scope proposal")).toBeVisible();
+  await expect(page.locator("body")).not.toContainText("$1,250");
 
   await page.getByRole("button", { name: "Edit" }).click();
   await page.getByLabel("Service request title").fill("Edited before review");

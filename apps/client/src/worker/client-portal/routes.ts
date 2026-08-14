@@ -99,6 +99,11 @@ const idempotencyKey = z
   .min(16)
   .max(128)
   .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
+const catalogSourceVersion = z
+  .string()
+  .min(1)
+  .max(128)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 const serviceRequestBody = z
   .object({
     projectId: opaqueId.nullable().optional(),
@@ -193,6 +198,7 @@ const serviceRequestDraftBody = z
     }).strict()).max(20),
     services: z.array(z.object({
       publicId: opaqueId,
+      sourceVersion: catalogSourceVersion,
       answers: z.record(z.string().max(64), z.unknown()),
     }).strict()).max(10),
   })
@@ -1017,6 +1023,12 @@ export function createClientPortalRouter(
       throw new HTTPException(404, { message: "Project or service catalog item not found" });
     if (result.kind === "conflict")
       throw new HTTPException(409, { message: "This Idempotency-Key was already used for different draft content" });
+    if (result.kind === "catalog_changed")
+      return c.json({
+        error: "One or more selected services changed in the Project Alpha service library. Review and reselect them before continuing.",
+        code: "catalog_changed" as const,
+        servicePublicIds: result.servicePublicIds,
+      }, 409);
     return c.json({ draft: result.draft }, result.kind === "created" ? 201 : 200);
   });
 
@@ -1156,6 +1168,12 @@ export function createClientPortalRouter(
       throw new HTTPException(404, { message: "Service request draft not found" });
     if (result.kind === "conflict")
       throw new HTTPException(409, { message: "The draft changed or this Idempotency-Key was reused" });
+    if (result.kind === "catalog_changed")
+      return c.json({
+        error: "One or more selected services changed in the Project Alpha service library. Review and reselect them before continuing.",
+        code: "catalog_changed" as const,
+        servicePublicIds: result.servicePublicIds,
+      }, 409);
     return c.json({ draft: result.draft });
   });
 
@@ -1206,8 +1224,23 @@ export function createClientPortalRouter(
       throw new HTTPException(503, { message: "Service request drafts are not configured" });
     const result = await repository.submitServiceRequestDraft(c.env, c.get("clientSession"), draftId.data, version.data, key.data);
     if (!result) throw new HTTPException(404, { message: "Service request draft not found" });
-    if (result.kind === "incomplete")
-      throw new HTTPException(422, { message: "Complete the required request and service fields before submitting" });
+    if (result.kind === "incomplete") {
+      const messages = {
+        request_fields_incomplete: "Add the required request title and description before submitting.",
+        answers_incomplete: "Answer every required question for the selected services before submitting.",
+        geometry_required: "Draw the required work area before submitting.",
+        catalog_changed: "One or more selected services changed in the Project Alpha service library. Review and reselect them before submitting.",
+        attachments_pending: "Wait for every supporting file to finish its security scan, or remove it, before submitting.",
+        attachments_rejected: "Remove every rejected supporting file and upload a safe replacement before submitting.",
+        attachments_expired: "Remove every expired supporting file and upload it again before submitting.",
+      } as const;
+      return c.json({
+        error: messages[result.reason],
+        code: result.reason,
+        ...(result.servicePublicIds ? { servicePublicIds: result.servicePublicIds } : {}),
+        ...(result.attachmentCount !== undefined ? { attachmentCount: result.attachmentCount } : {}),
+      }, 422);
+    }
     if (result.kind === "conflict")
       throw new HTTPException(409, { message: "The draft changed or was already submitted" });
     return c.json({ request: result.request }, result.kind === "submitted" ? 201 : 200);

@@ -292,10 +292,25 @@ export async function checkpointRequestAttachment(env: Env, row: RequestAttachme
   return { partNumber, etag, size };
 }
 
+async function deleteRemovedAttachmentObject(env: Env, row: Pick<RequestAttachmentRow, "id" | "object_key">): Promise<void> {
+  try { await env.DATA_BUCKET.delete(row.object_key); }
+  catch (error) {
+    console.error(JSON.stringify({
+      event: "client-request-attachment.delete-failed",
+      attachmentId: row.id,
+      message: error instanceof Error ? error.message : "unknown",
+    }));
+    throw new HTTPException(503, { message: "The attachment was removed from the draft, but quarantine cleanup is still pending. Retry removal." });
+  }
+}
+
 export async function abortRequestAttachment(env: Env, row: RequestAttachmentRow): Promise<{ idempotent: boolean }> {
-  if (row.status === "aborted") return { idempotent: true };
-  if (row.status !== "uploading" && row.status !== "rejected" && row.status !== "expired")
-    throw new HTTPException(409, { message: "Only an in-progress, rejected, or expired attachment can be removed" });
+  if (row.submitted_request_id !== null)
+    throw new HTTPException(409, { message: "Submitted request attachments are immutable" });
+  if (row.status === "aborted") {
+    await deleteRemovedAttachmentObject(env, row);
+    return { idempotent: true };
+  }
   if (row.status === "uploading" && !row.multipart_upload_id.startsWith("pending:")) {
     try { await env.DATA_BUCKET.resumeMultipartUpload(row.object_key, row.multipart_upload_id).abort(); }
     catch (error) {
@@ -303,8 +318,33 @@ export async function abortRequestAttachment(env: Env, row: RequestAttachmentRow
       throw new HTTPException(503, { message: "The attachment could not be removed yet. Please retry." });
     }
   }
-  const result = await database(env).prepare("UPDATE client_service_request_attachments SET status='aborted',updated_at=datetime('now') WHERE id=? AND status IN ('uploading','rejected','expired')").bind(row.id).run();
-  await database(env).prepare("DELETE FROM client_service_request_attachment_parts WHERE attachment_id=?").bind(row.id).run();
+  const db = database(env);
+  const result = await db.prepare(`UPDATE client_service_request_attachments
+    SET status='aborted',updated_at=datetime('now')
+    WHERE id=? AND submitted_request_id IS NULL
+      AND status IN ('uploading','quarantined','scanning','accepted','rejected','expired')
+      AND EXISTS (SELECT 1 FROM client_service_request_drafts draft
+        WHERE draft.id=client_service_request_attachments.draft_id AND draft.state='draft')`)
+    .bind(row.id).run();
+  if (result.meta.changes !== 1) {
+    const current = await db.prepare(`SELECT attachment.status,attachment.submitted_request_id,draft.state draft_state
+      FROM client_service_request_attachments attachment
+      JOIN client_service_request_drafts draft ON draft.id=attachment.draft_id
+      WHERE attachment.id=?`).bind(row.id).first<{
+        status: RequestAttachmentRow["status"];
+        submitted_request_id: string | null;
+        draft_state: string;
+      }>();
+    if (current?.status === "aborted" && current.submitted_request_id === null) {
+      await deleteRemovedAttachmentObject(env, row);
+      return { idempotent: true };
+    }
+    if (current?.submitted_request_id !== null || current?.draft_state === "submitted")
+      throw new HTTPException(409, { message: "The request was submitted before this attachment could be removed" });
+    throw new HTTPException(409, { message: "The attachment changed before it could be removed" });
+  }
+  await db.prepare("DELETE FROM client_service_request_attachment_parts WHERE attachment_id=?").bind(row.id).run();
+  await deleteRemovedAttachmentObject(env, row);
   return { idempotent: result.meta.changes !== 1 };
 }
 
@@ -368,13 +408,25 @@ export async function acceptRequestAttachmentScanReceipt(env: Env, authorization
   if (row.status === "accepted" || row.status === "rejected") {
     if (row.verified_sha256 !== input.sha256.toLowerCase() || row.scanner_verdict !== input.verdict)
       throw new HTTPException(409, { message: "The scanner receipt does not match the recorded verdict" });
+    if (row.status === "rejected") await deleteRemovedAttachmentObject(env, row);
     return row.status;
   }
   if (!(await env.DATA_BUCKET.head(row.object_key))) throw new HTTPException(409, { message: "The quarantined attachment is missing" });
   const status = input.verdict === "clean" ? "accepted" : "rejected";
-  if (status === "rejected") await env.DATA_BUCKET.delete(row.object_key);
-  await database(env).prepare("UPDATE client_service_request_attachments SET status=?,scanner_verdict=?,verified_sha256=?,scanned_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND status IN ('quarantined','scanning')")
+  const db = database(env);
+  const updated = await db.prepare("UPDATE client_service_request_attachments SET status=?,scanner_verdict=?,verified_sha256=?,scanned_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND submitted_request_id IS NULL AND status IN ('quarantined','scanning')")
     .bind(status, input.verdict, input.sha256.toLowerCase(), row.id).run();
+  if (updated.meta.changes !== 1) {
+    const current = await db.prepare("SELECT status,scanner_verdict,verified_sha256 FROM client_service_request_attachments WHERE id=?")
+      .bind(row.id).first<Pick<RequestAttachmentRow, "status" | "scanner_verdict" | "verified_sha256">>();
+    if (current && (current.status === "accepted" || current.status === "rejected")
+      && current.verified_sha256 === input.sha256.toLowerCase() && current.scanner_verdict === input.verdict) {
+      if (current.status === "rejected") await deleteRemovedAttachmentObject(env, row);
+      return current.status;
+    }
+    throw new HTTPException(404, { message: "Quarantined attachment not found" });
+  }
+  if (status === "rejected") await deleteRemovedAttachmentObject(env, row);
   return status;
 }
 

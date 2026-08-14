@@ -3,7 +3,8 @@
   "version": "0.2.0",
   "private": true,
   "scripts": {
-    "check": "npm --prefix apps/client run check && npm --prefix apps/operations run check && npm --prefix apps/ops-sync run check && npm --prefix apps/thumbnail-renderer run check",
+    "check:worker-types": "npm --prefix apps/client run cf-typegen:check && npm --prefix apps/operations run cf-typegen:check && npm --prefix apps/ops-sync run cf-typegen:check",
+    "check": "npm run check:worker-types && npm --prefix apps/client run check && npm --prefix apps/operations run check && npm --prefix apps/ops-sync run check && npm --prefix apps/thumbnail-renderer run check",
     "test": "node --test scripts/source-layout-invariants.test.mjs && npm --prefix apps/client test && npm --prefix apps/operations test && npm --prefix apps/ops-sync test && npm --prefix apps/thumbnail-renderer test",
     "test:browser": "npm --prefix apps/client run test:browser && npm --prefix apps/operations run test:browser",
     "build": "npm --prefix apps/client run build && npm --prefix apps/operations run build && npm --prefix apps/ops-sync run build",

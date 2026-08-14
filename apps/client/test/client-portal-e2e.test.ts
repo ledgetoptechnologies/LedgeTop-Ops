@@ -116,6 +116,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
             writeHttpMetadata(headers: Headers) { headers.set("Content-Type", "application/pdf"); },
           } : null;
         },
+        delete: async () => undefined,
       } as unknown as R2Bucket,
     } as Env;
   }, 30_000);
@@ -517,7 +518,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       projectId: "project-a", requestType: "service", title: "Map the site", details: "Capture the current construction area.",
       location: null, preferredStartAt: null, deliverables: null, siteContactName: null, siteContactEmail: null,
       siteContactPhone: null, desiredCompletionAt: null, latitude: null, longitude: null, areaGeoJson, poiPoints: [],
-      services: [{ publicId: "svc-2d-map", answers: { resolution: "standard" } }],
+      services: [{ publicId: "svc-2d-map", sourceVersion: "pa-v4", answers: { resolution: "standard" } }],
     };
     const withoutArea = await portal().request(`${portalOrigin}/service-request-drafts`, {
       method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "portal-draft-no-area-0001", Origin: portalOrigin },
@@ -525,9 +526,11 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     }, env);
     expect(withoutArea.status).toBe(201);
     const incompleteDraft = (await withoutArea.json() as { draft: { id: string; version: number } }).draft;
-    expect((await portal().request(`${portalOrigin}/service-request-drafts/${incompleteDraft.id}/submit`, {
+    const missingArea = await portal().request(`${portalOrigin}/service-request-drafts/${incompleteDraft.id}/submit`, {
       method: "POST", headers: { "Idempotency-Key": "portal-submit-no-area-0001", "If-Match": String(incompleteDraft.version), Origin: portalOrigin },
-    }, env)).status).toBe(422);
+    }, env);
+    expect(missingArea.status).toBe(422);
+    expect(await missingArea.json()).toMatchObject({ code: "geometry_required", servicePublicIds: ["svc-2d-map"] });
     const create = () => portal().request(`${portalOrigin}/service-request-drafts`, {
       method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": "portal-draft-create-0001", Origin: portalOrigin }, body: JSON.stringify(input),
     }, env);
@@ -547,10 +550,23 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       }>();
     expect(storedDraftService).toEqual({ service_source_version: "pa-v4", name: "2D Mapping", category: "Mapping", display_order: 10, geometry_requirement: "required" });
 
+    const staleSave = await portal().request(`${portalOrigin}/service-request-drafts/${createdDraft.id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json", "Idempotency-Key": "portal-draft-stale-save-0001", "If-Match": String(createdDraft.version), Origin: portalOrigin },
+      body: JSON.stringify({ ...input, title: "This stale save must not persist" }),
+    }, env);
+    expect(staleSave.status).toBe(409);
+    expect(await staleSave.json()).toMatchObject({ code: "catalog_changed", servicePublicIds: ["svc-2d-map"] });
+    expect(await db.prepare("SELECT version FROM client_service_request_drafts WHERE id=?").bind(createdDraft.id).first("version")).toBe(createdDraft.version);
+    const unchangedDraft = await portal().request(`${portalOrigin}/service-request-drafts/${createdDraft.id}`, {}, env);
+    expect((await unchangedDraft.json() as { draft: { title: string } }).draft.title).toBe(input.title);
+
     const submit = () => portal().request(`${portalOrigin}/service-request-drafts/${createdDraft.id}/submit`, {
       method: "POST", headers: { "Idempotency-Key": "portal-draft-submit-0001", "If-Match": String(createdDraft.version), Origin: portalOrigin },
     }, env);
-    expect((await submit()).status).toBe(422);
+    const catalogBlocked = await submit();
+    expect(catalogBlocked.status).toBe(422);
+    expect(await catalogBlocked.json()).toMatchObject({ code: "catalog_changed", servicePublicIds: ["svc-2d-map"] });
     await db.prepare("UPDATE pa_service_catalog_items SET source_version='pa-v4',name='2D Mapping' WHERE public_id='svc-2d-map'").run();
     await db.prepare(`INSERT INTO client_service_request_attachments
       (id,draft_id,account_id,created_by_identity_id,client_upload_id,object_key,multipart_upload_id,
@@ -560,7 +576,9 @@ describe("client portal migrated-D1 end-to-end contract", () => {
        '_ltds/quarantine/request-attachments/rejected-attachment-e2e/object','completed-upload',
        'unsafe.pdf',2048,'application/pdf','rejected',2048,'rejected',?,datetime('now'),datetime('now'),datetime('now','+1 day'))`)
       .bind(createdDraft.id, "c".repeat(64)).run();
-    expect((await submit()).status).toBe(422);
+    const rejectedBlocked = await submit();
+    expect(rejectedBlocked.status).toBe(422);
+    expect(await rejectedBlocked.json()).toMatchObject({ code: "attachments_rejected", attachmentCount: 1 });
     await expect(db.prepare("UPDATE client_service_request_drafts SET state='submitted' WHERE id=?").bind(createdDraft.id).run())
       .rejects.toThrow(/accepted or removed/);
     const removal = await portal().request(`${portalOrigin}/service-request-drafts/${createdDraft.id}/attachments/rejected-attachment-e2e`, {
@@ -579,7 +597,9 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     expect(expiredList.status).toBe(200);
     expect((await expiredList.json() as { attachments: Array<{ id: string; status: string }> }).attachments)
       .toContainEqual(expect.objectContaining({ id: "expired-attachment-e2e", status: "expired" }));
-    expect((await submit()).status).toBe(422);
+    const expiredBlocked = await submit();
+    expect(expiredBlocked.status).toBe(422);
+    expect(await expiredBlocked.json()).toMatchObject({ code: "attachments_expired", attachmentCount: 1 });
     await expect(db.prepare("UPDATE client_service_request_drafts SET state='submitted' WHERE id=?").bind(createdDraft.id).run())
       .rejects.toThrow(/accepted or removed/);
     const expiredRemoval = await portal().request(`${portalOrigin}/service-request-drafts/${createdDraft.id}/attachments/expired-attachment-e2e`, {
@@ -587,9 +607,30 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     }, env);
     expect(expiredRemoval.status).toBe(200);
     expect(await db.prepare("SELECT status FROM client_service_request_attachments WHERE id='expired-attachment-e2e'").first("status")).toBe("aborted");
-    const submitted = await submit();
+    await db.prepare(`INSERT INTO client_service_request_attachments
+      (id,draft_id,account_id,created_by_identity_id,client_upload_id,object_key,multipart_upload_id,
+       original_name,declared_size,content_type,status,actual_size,scanner_verdict,verified_sha256,
+       scanned_at,completed_at,expires_at)
+      VALUES ('accepted-attachment-e2e',?,'account-a','identity-a','accepted-upload-e2e-0001',
+       '_ltds/quarantine/request-attachments/accepted-attachment-e2e/object','completed-upload',
+       'authorization.pdf',2048,'application/pdf','accepted',2048,'clean',?,datetime('now'),datetime('now'),datetime('now','+1 day'))`)
+      .bind(createdDraft.id, "e".repeat(64)).run();
+    const acceptedRemovalRequest = portal().request(`${portalOrigin}/service-request-drafts/${createdDraft.id}/attachments/accepted-attachment-e2e`, {
+      method: "DELETE", headers: { Origin: portalOrigin },
+    }, env);
+    const [submitted, acceptedRemoval] = await Promise.all([submit(), acceptedRemovalRequest]);
     expect(submitted.status).toBe(201);
     const requestId = (await submitted.json() as { request: { id: string } }).request.id;
+    expect([200, 404, 409]).toContain(acceptedRemoval.status);
+    const racedAttachment = await db.prepare("SELECT status,submitted_request_id FROM client_service_request_attachments WHERE id='accepted-attachment-e2e'")
+      .first<{ status: string; submitted_request_id: string | null }>();
+    if (racedAttachment?.status === "aborted") {
+      expect(acceptedRemoval.status).toBe(200);
+      expect(racedAttachment.submitted_request_id).toBeNull();
+    } else {
+      expect(racedAttachment).toEqual({ status: "accepted", submitted_request_id: requestId });
+      expect(acceptedRemoval.status).not.toBe(200);
+    }
     expect((await submit()).status).toBe(200);
     expect(await db.prepare("SELECT COUNT(*) count FROM client_service_requests WHERE id=?").bind(requestId).first("count")).toBe(1);
     expect(await db.prepare("SELECT COUNT(*) count FROM client_service_request_services WHERE request_id=? AND service_public_id='svc-2d-map' AND service_source_version='pa-v4'").bind(requestId).first("count")).toBe(1);

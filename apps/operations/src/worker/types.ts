@@ -1,8 +1,20 @@
 import type { Permission, PermissionScope } from "@ltds/shared";
 import type { ThumbnailRendererContainer } from "./thumbnail-renderer-container";
 
-export type Env = Omit<Cloudflare.Env, "DIRECT_DELIVERY_UPLOADS_ENABLED" | "R2_PURGE_ENABLED" | "THUMBNAIL_RENDERER"> & {
+export type Env = Omit<
+  Cloudflare.Env,
+  | "DIRECT_DELIVERY_UPLOADS_ENABLED"
+  | "R2_PURGE_ENABLED"
+  | "THUMBNAIL_RENDERER"
+  | "LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED"
+  | "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED"
+  | "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED"
+  | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
+  | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
+> & {
   PROJECT_ALPHA_API_KEY?: string;
+  /** Temporary, default-off gate for numeric quote linkage on pre-catalog requests only. */
+  LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED?: string;
   /** Enables the separately scoped, staff-triggered private draft command. */
   PROJECT_ALPHA_DRAFT_QUOTES_ENABLED?: string;
   /** Dedicated PA credential with only portal.quote-draft.create. */

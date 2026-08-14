@@ -503,14 +503,7 @@ function EstimateSummary({
   return (
     <aside className="portal-estimate-summary">
       <span>Non-binding LTDS operational estimate</span>
-      <strong>
-        {estimate.amount === null
-          ? "Scope proposal"
-          : new Intl.NumberFormat(undefined, {
-              style: "currency",
-              currency: estimate.currency || "USD",
-            }).format(estimate.amount)}
-      </strong>
+      <strong>Scope proposal</strong>
       <p>{estimate.scope}</p>
       <small>
         This is not a quote, contract, or invoice. Project Alpha remains the
@@ -805,6 +798,7 @@ function NewServiceRequestWizard({
   const [catalog, setCatalog] = useState<PortalServiceCatalogItem[]>([]);
   const [catalogState, setCatalogState] = useState<"loading" | "ready" | "error">("loading");
   const [selectedServices, setSelectedServices] = useState<string[]>([]);
+  const [selectedServiceVersions, setSelectedServiceVersions] = useState<Record<string, string>>({});
   const [answers, setAnswers] = useState<Record<string, Record<string, unknown>>>({});
   const [projectId, setProjectId] = useState(fixedProjectId ?? "");
   const [title, setTitle] = useState("");
@@ -833,6 +827,8 @@ function NewServiceRequestWizard({
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const lastSaved = useRef("");
   const createKey = useRef(crypto.randomUUID());
+  const pricingHintController = useRef<AbortController | null>(null);
+  const pricingBasisRef = useRef("");
 
   const reloadCatalog = () => {
     setCatalogState("loading");
@@ -852,7 +848,11 @@ function NewServiceRequestWizard({
     reloadCatalog();
     const onPopState = () => setStepState(requestStepFromLocation());
     window.addEventListener("popstate", onPopState);
-    return () => { mounted.current = false; window.removeEventListener("popstate", onPopState); };
+    return () => {
+      mounted.current = false;
+      pricingHintController.current?.abort();
+      window.removeEventListener("popstate", onPopState);
+    };
   }, []);
 
   useEffect(() => {
@@ -884,7 +884,7 @@ function NewServiceRequestWizard({
         longitude: saved.longitude,
         areaGeoJson: saved.areaGeoJson,
         poiPoints: saved.poiPoints,
-        services: saved.services.map(service => ({ publicId: service.publicId, answers: service.answers })),
+        services: saved.services.map(service => ({ publicId: service.publicId, sourceVersion: service.sourceVersion, answers: service.answers })),
       };
       draftRef.current = saved;
       lastSaved.current = JSON.stringify(restoredInput);
@@ -902,6 +902,7 @@ function NewServiceRequestWizard({
       setPoints(saved.poiPoints);
       setAreaGeoJson(saved.areaGeoJson);
       setSelectedServices(saved.services.map(service => service.publicId));
+      setSelectedServiceVersions(Object.fromEntries(saved.services.map(service => [service.publicId, service.sourceVersion])));
       setAnswers(Object.fromEntries(saved.services.map(service => [service.publicId, service.answers])));
       setCatalog(current => {
         const present = new Set(current.map(item => item.publicId));
@@ -927,7 +928,7 @@ function NewServiceRequestWizard({
       setDirty(false);
       setMessage("");
       for (const item of savedAttachments) {
-        if (["quarantined", "scanning"].includes(item.status)) void pollAttachment(item.id, saved.id, item.id);
+        if (["quarantined", "scanning"].includes(item.status)) void pollAttachment(item.id, saved.id, item.id).catch(() => undefined);
       }
     }).catch((caught) => {
       if (active) {
@@ -967,15 +968,30 @@ function NewServiceRequestWizard({
     longitude: points[0]?.longitude ?? null,
     areaGeoJson,
     poiPoints: points.map(point => ({ longitude: point.longitude, latitude: point.latitude, label: point.label?.trim() || null })),
-    services: selectedServices.map(publicId => ({ publicId, answers: answers[publicId] ?? {} })),
-  }), [projectId, title, details, location, preferredStartAt, deliverables, siteContactName, siteContactEmail, siteContactPhone, desiredCompletionAt, points, areaGeoJson, selectedServices, answers]);
+    services: selectedServices.map(publicId => ({
+      publicId,
+      sourceVersion: selectedServiceVersions[publicId] ?? catalog.find(service => service.publicId === publicId)?.sourceVersion ?? "",
+      answers: answers[publicId] ?? {},
+    })),
+  }), [projectId, title, details, location, preferredStartAt, deliverables, siteContactName, siteContactEmail, siteContactPhone, desiredCompletionAt, points, areaGeoJson, selectedServices, selectedServiceVersions, answers, catalog]);
   const inputJson = JSON.stringify(input);
+  const pricingBasisJson = JSON.stringify({
+    projectId: input.projectId,
+    areaGeoJson: input.areaGeoJson,
+    services: input.services,
+  });
+  pricingBasisRef.current = pricingBasisJson;
 
   const persist = (snapshot: PortalServiceDraftInput, serialized: string): Promise<void> => {
     saveChain.current = saveChain.current.catch(() => undefined).then(async () => {
       if (serialized === lastSaved.current) return;
       if (mounted.current) setSaveState("saving");
       try {
+        const savedPricingBasis = JSON.stringify({
+          projectId: snapshot.projectId,
+          areaGeoJson: snapshot.areaGeoJson,
+          services: snapshot.services,
+        });
         const current = draftRef.current;
         const saved = current
           ? await savePortalServiceDraft(current.id, current.version, snapshot, crypto.randomUUID())
@@ -991,13 +1007,29 @@ function NewServiceRequestWizard({
           setDraft(saved);
           setSaveState("saved");
           setDirty(false);
-          loadPortalPricingHint(saved.id).then(hint => mounted.current && setPricingHint(hint)).catch(() => mounted.current && setPricingHint(null));
+          pricingHintController.current?.abort();
+          const controller = new AbortController();
+          pricingHintController.current = controller;
+          loadPortalPricingHint(saved.id, undefined, controller.signal).then(hint => {
+            if (mounted.current && pricingHintController.current === controller && pricingBasisRef.current === savedPricingBasis) {
+              setPricingHint(hint);
+            }
+          }).catch(() => {
+            if (mounted.current && pricingHintController.current === controller && !controller.signal.aborted) setPricingHint(null);
+          });
         }
       } catch (caught) {
         const error = caught as RequestError;
         if (mounted.current) {
-          setSaveState(error.status === 409 ? "conflict" : "error");
-          setMessage(error.status === 409 ? "This draft changed in another tab. Reload this page before making more changes." : "Your latest changes could not be saved. Check your connection and try again.");
+          const catalogChanged = error.status === 409 && error.body?.code === "catalog_changed";
+          setSaveState(error.status === 409 && !catalogChanged ? "conflict" : "error");
+          if (catalogChanged) setDirty(false);
+          setMessage(catalogChanged
+            ? "The Project Alpha service library changed. Your saved selection was preserved; review the highlighted service and explicitly use its current version."
+            : error.status === 409
+              ? "This draft changed in another tab. Reload this page before making more changes."
+              : "Your latest changes could not be saved. Check your connection and try again.");
+          if (catalogChanged) reloadCatalog();
         }
         throw caught;
       }
@@ -1085,7 +1117,7 @@ function NewServiceRequestWizard({
   async function removeAttachment(item: RequestAttachmentUi) {
     try {
       const currentDraft = draftRef.current;
-      if (currentDraft && item.id && ["uploading", "rejected", "expired"].includes(item.status)) await removePortalRequestAttachment(currentDraft.id, item.id);
+      if (currentDraft && item.id && item.status !== "aborted") await removePortalRequestAttachment(currentDraft.id, item.id);
       setAttachments(current => current.filter(candidate => candidate.key !== item.key));
     } catch (caught) { updateAttachment(item.key, { error: (caught as Error).message || "The file could not be removed." }); }
   }
@@ -1097,7 +1129,46 @@ function NewServiceRequestWizard({
   }, [inputJson, dirty, saveState]);
 
   const change = (setter: () => void) => { setter(); setDirty(true); setSaveState("idle"); setMessage(""); };
-  const selectedCatalog = selectedServices.map(id => catalog.find(service => service.publicId === id)).filter((service): service is PortalServiceCatalogItem => Boolean(service));
+  const changePricingBasis = (setter: () => void) => {
+    pricingHintController.current?.abort();
+    pricingHintController.current = null;
+    setPricingHint(null);
+    change(setter);
+  };
+  const selectedCatalog = selectedServices.map(id => {
+    const version = selectedServiceVersions[id];
+    return catalog.find(service => service.publicId === id && (!version || service.sourceVersion === version))
+      ?? draftRef.current?.services.find(service => service.publicId === id && (!version || service.sourceVersion === version));
+  }).filter((service): service is PortalServiceCatalogItem => Boolean(service));
+  const displayCatalog = catalog.map(current => {
+    const version = selectedServiceVersions[current.publicId];
+    if (!version || version === current.sourceVersion) return current;
+    return draftRef.current?.services.find(service => service.publicId === current.publicId && service.sourceVersion === version) ?? current;
+  });
+  for (const selected of selectedCatalog) {
+    if (!displayCatalog.some(service => service.publicId === selected.publicId)) displayCatalog.push(selected);
+  }
+  const toggleService = (service: PortalServiceCatalogItem, selected: boolean) => changePricingBasis(() => {
+    setSelectedServices(current => selected ? [...current, service.publicId] : current.filter(id => id !== service.publicId));
+    setSelectedServiceVersions(current => {
+      const next = { ...current };
+      if (selected) next[service.publicId] = service.sourceVersion;
+      else delete next[service.publicId];
+      return next;
+    });
+    if (!selected) setAnswers(current => {
+      const next = { ...current };
+      delete next[service.publicId];
+      return next;
+    });
+  });
+  const useCurrentServiceVersion = (service: PortalServiceCatalogItem) => {
+    changePricingBasis(() => {
+      setSelectedServiceVersions(current => ({ ...current, [service.publicId]: service.sourceVersion }));
+      setAnswers(current => ({ ...current, [service.publicId]: {} }));
+    });
+    setMessage("The current service version is selected. Review and answer its questions before continuing.");
+  };
   const servicesComplete = selectedCatalog.length > 0 && selectedCatalog.every(service => service.questions.every(question => questionIsAnswered(question, answers[service.publicId]?.[question.id])));
   const geometryRequired = selectedCatalog.some(service => service.geometryRequirement === "required");
   const geometryComplete = !geometryRequired || areaGeoJson !== null;
@@ -1142,7 +1213,12 @@ function NewServiceRequestWizard({
       onSaved(request);
     } catch (caught) {
       const error = caught as RequestError;
-      setMessage(error.status === 422 ? "The service library changed or a required answer is missing. Return to Services, review your selections, and try again." : error.message || "The request could not be submitted.");
+      const code = error.body?.code;
+      if (error.status === 422 && code === "catalog_changed") { reloadCatalog(); goTo("services"); }
+      else if (error.status === 422 && ["answers_incomplete", "request_fields_incomplete"].includes(code ?? "")) goTo(code === "request_fields_incomplete" ? "details" : "services");
+      else if (error.status === 422 && code === "geometry_required") goTo("location");
+      else if (error.status === 422 && ["attachments_pending", "attachments_rejected", "attachments_expired"].includes(code ?? "")) goTo("contact");
+      setMessage(error.message || "The request could not be submitted.");
     } finally { setSubmitting(false); }
   }
 
@@ -1156,12 +1232,12 @@ function NewServiceRequestWizard({
       {catalogState === "loading" && <div aria-label="Loading service library"><Loading /></div>}
       {catalogState === "error" && <div className="portal-inline-error" role="alert"><p>The service library could not be loaded. No request data was lost.</p><button type="button" className="button-ghost" onClick={reloadCatalog}>Retry</button></div>}
       {catalogState === "ready" && catalog.length === 0 && <EmptyState title="No services available" detail="LTDS has not published any client-request services yet." />}
-      <div className="portal-service-catalog">{catalog.map(service => { const selected = selectedServices.includes(service.publicId); return <article key={service.publicId} className={selected ? "is-selected" : ""}><label className="portal-service-select"><input type="checkbox" checked={selected} disabled={!selected && selectedServices.length >= 10} onChange={(event) => change(() => setSelectedServices(current => event.target.checked ? [...current, service.publicId] : current.filter(id => id !== service.publicId)))} /><span><span className="portal-service-meta"><small>{service.category}</small><small>{service.geometryRequirement === "required" ? "Work area required" : service.geometryRequirement === "none" ? "No work area needed" : "Work area optional"}</small></span><strong>{service.name}</strong>{service.summary && <small>{service.summary}</small>}</span></label>{selected && service.questions.length > 0 && <div className="portal-service-questions">{service.questions.map(question => <ServiceQuestionField key={question.id} serviceId={service.publicId} question={question} value={answers[service.publicId]?.[question.id]} onChange={value => change(() => setAnswers(current => ({ ...current, [service.publicId]: { ...(current[service.publicId] ?? {}), [question.id]: value } })))} />)}</div>}</article>; })}</div>
+      <div className="portal-service-catalog">{displayCatalog.map(service => { const selected = selectedServices.includes(service.publicId); const currentService = catalog.find(item => item.publicId === service.publicId); const changed = selected && Boolean(currentService) && selectedServiceVersions[service.publicId] !== currentService?.sourceVersion; return <article key={service.publicId} className={`${selected ? "is-selected" : ""}${changed ? " is-stale" : ""}`}><label className="portal-service-select"><input type="checkbox" checked={selected} disabled={!selected && selectedServices.length >= 10} onChange={(event) => toggleService(service, event.target.checked)} /><span><span className="portal-service-meta"><small>{service.category}</small><small>{service.geometryRequirement === "required" ? "Work area required" : service.geometryRequirement === "none" ? "No work area needed" : "Work area optional"}</small></span><strong>{service.name}</strong>{service.summary && <small>{service.summary}</small>}</span></label>{changed && currentService && <div className="portal-service-version-warning" role="alert"><strong>This service changed in Project Alpha.</strong><p>Your saved answers still use the prior version. Nothing was replaced automatically.</p><button type="button" className="button-ghost button-small" onClick={() => useCurrentServiceVersion(currentService)}>Use current service version</button></div>}{selected && service.questions.length > 0 && <div className="portal-service-questions">{service.questions.map(question => <ServiceQuestionField key={question.id} serviceId={service.publicId} question={question} value={answers[service.publicId]?.[question.id]} onChange={value => changePricingBasis(() => setAnswers(current => ({ ...current, [service.publicId]: { ...(current[service.publicId] ?? {}), [question.id]: value } })))} />)}</div>}</article>; })}</div>
     </section>}
-    {step === "location" && <section className="portal-wizard-panel" aria-labelledby="request-location-title"><header><span>Step 2 of 5</span><h3 id="request-location-title">Show us the work area</h3><p>{geometryRequired ? "One or more selected services require a drawn work area. Search, add points, or draw the area directly on the secure map." : "The selected services do not require a work area, but you may add one when it helps explain the scope."} Clients cannot upload or import KML files.</p></header><div className="portal-request-map portal-request-map-step"><MapAreaSelector value={areaGeoJson} onChange={value => change(() => setAreaGeoJson(value))} token={mapboxPublicToken} points={points} onPoints={value => change(() => setPoints(value))} locationLabel={location} onLocationLabel={value => change(() => setLocation(value))} /></div>{draft?.areaAcres != null && <div className="portal-coverage-card"><span>Estimated coverage</span><strong>{draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres</strong><small>Calculated by LTDS from the area drawn above.</small></div>}</section>}
-    {step === "details" && <section className="portal-wizard-panel" aria-labelledby="request-details-title"><header><span>Step 3 of 5</span><h3 id="request-details-title">Scope and timing</h3><p>Describe the outcome you need. LTDS will confirm feasibility and the final scope.</p></header>{!fixedProjectId && <label>Project context<select value={projectId} onChange={event => change(() => setProjectId(event.target.value))}><option value="">New or one-off service</option>{eligibleProjects.map(project => <option key={project.id} value={project.id}>{project.projectName}</option>)}</select></label>}<label>Service request title<input value={title} onChange={event => change(() => setTitle(event.target.value))} maxLength={160} required /></label><label>What do you need?<textarea value={details} onChange={event => change(() => setDetails(event.target.value))} maxLength={5000} rows={6} required /></label><div className="portal-form-grid"><label>Location <span>(optional)</span><input value={location} onChange={event => change(() => setLocation(event.target.value))} maxLength={240} /></label><label>Preferred start <span>(optional)</span><input type="datetime-local" value={preferredStartAt} onChange={event => change(() => setPreferredStartAt(event.target.value))} /></label><label>Desired completion <span>(optional)</span><input type="datetime-local" value={desiredCompletionAt} onChange={event => change(() => setDesiredCompletionAt(event.target.value))} /></label></div><label>Requested deliverables <span>(optional)</span><textarea value={deliverables} onChange={event => change(() => setDeliverables(event.target.value))} maxLength={2000} rows={4} /></label></section>}
-    {step === "contact" && <section className="portal-wizard-panel" aria-labelledby="request-contact-title"><header><span>Step 4 of 5</span><h3 id="request-contact-title">Contact and supporting files</h3><p>Add an optional on-site contact and any authorized reference photos or PDFs.</p></header><fieldset className="portal-contact-fields"><legend>Contact details <span>(optional)</span></legend><label>Name<input value={siteContactName} onChange={event => change(() => setSiteContactName(event.target.value))} maxLength={160} /></label><label>Email<input type="email" value={siteContactEmail} onChange={event => change(() => setSiteContactEmail(event.target.value))} maxLength={320} /></label><label>Phone<input type="tel" value={siteContactPhone} onChange={event => change(() => setSiteContactPhone(event.target.value))} maxLength={64} /></label></fieldset>{attachmentsEnabled ? <div className="portal-attachment-uploader"><header><div><strong>Supporting files</strong><p>Up to 10 JPEG, PNG, WebP, HEIC, HEIF, or PDF files; 25 MiB each and 100 MiB total. Archives are not allowed.</p></div><label className="button-ghost portal-file-picker">Add files<input type="file" multiple accept=".jpg,.jpeg,.png,.webp,.heic,.heif,.pdf,image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf" onChange={event => { addAttachments(event.target.files); event.currentTarget.value = ""; }} /></label></header>{attachmentMessage && <p role="alert" className="portal-message error">{attachmentMessage}</p>}<div className="portal-attachment-list" aria-live="polite">{attachments.map(item => <article key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)} / {attachmentStatusLabel(item.status)}</span></div><progress max={item.size} value={Math.min(item.uploadedBytes, item.size)} aria-label={`${item.name} upload progress`} /><small>{item.totalParts ? `${item.completedParts} of ${item.totalParts} parts` : "Preparing upload"}</small>{item.error && <p role="alert">{item.error}</p>}<div>{item.status === "error" && <button type="button" className="button-ghost button-small" onClick={() => void uploadAttachment(item)}>Retry</button>}{["queued", "uploading", "error", "rejected", "expired"].includes(item.status) && <button type="button" className="button-ghost button-small" onClick={() => void removeAttachment(item)}>Remove</button>}</div></article>)}</div></div> : <div className="portal-attachments-coming"><strong>Supporting files are coming soon</strong><p>Secure request attachments are not enabled for this portal. Do not place sensitive file links in the description.</p></div>}</section>}
-    {step === "review" && <section className="portal-wizard-panel portal-review" aria-labelledby="request-review-title"><header><span>Step 5 of 5</span><h3 id="request-review-title">Review your request</h3><p>Double-check every section below. Nothing is submitted until you select Submit request.</p></header><div className="portal-review-grid"><article><header><h4>Services</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("services")}>Edit services</button></header><ul>{selectedCatalog.map(service => <li key={service.publicId}><strong>{service.name}</strong>{service.questions.map(question => { const value = answers[service.publicId]?.[question.id]; if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) return null; const labels = question.type === "select" || question.type === "multi_select" ? question.options.filter(option => (Array.isArray(value) ? value : [value]).includes(option.value)).map(option => option.label).join(", ") : typeof value === "boolean" ? value ? "Yes" : "No" : String(value); return <span key={question.id}>{question.label}: {labels}</span>; })}</li>)}</ul></article><article className="portal-review-work-area"><header><h4>Work area</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("location")}>Edit work area</button></header><p>{location || "No location label provided"}</p><p>{draft?.areaAcres != null ? `${draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres` : areaGeoJson ? "Coverage is being calculated" : "No polygon drawn"} / {points.length} point{points.length === 1 ? "" : "s"}</p><RequestReviewMap area={areaGeoJson} points={points} />{points.length > 0 && <ol className="portal-review-pois" aria-label="Points of interest">{points.map((point, index) => <li key={`${point.longitude}:${point.latitude}:${index}`}><span>{index + 1}</span><div><strong>{point.label || `Point ${index + 1}`}</strong><small>{point.latitude.toFixed(6)}, {point.longitude.toFixed(6)}</small></div></li>)}</ol>}</article><article><header><h4>Scope and timing</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("details")}>Edit details</button></header><strong>{title || "Title required"}</strong><p>{details || "Description required"}</p><p>{projectId ? eligibleProjects.find(project => project.id === projectId)?.projectName ?? "Authorized project" : "New or one-off service"}</p><p>{deliverables || "No separate deliverables noted"}</p><dl className="portal-review-timing"><div><dt>Preferred start</dt><dd>{input.preferredStartAt ? formatDate(input.preferredStartAt) : "Not specified"}</dd></div><div><dt>Desired completion</dt><dd>{input.desiredCompletionAt ? formatDate(input.desiredCompletionAt) : "Not specified"}</dd></div></dl></article><article><header><h4>Contact</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit contact</button></header><p>{siteContactName || "No on-site contact"}</p>{siteContactEmail && <p>{siteContactEmail}</p>}{siteContactPhone && <p>{siteContactPhone}</p>}</article></div><aside className="portal-pricing-hint"><span>Planning guidance</span>{pricingHint ? <><strong>{pricingHint.kind === "starting_at" ? `Starting at ${formatRequestMoney(pricingHint.startingAtMinor, pricingHint.currency)}` : `Typical range ${formatRequestMoney(pricingHint.minimumMinor, pricingHint.currency)} to ${formatRequestMoney(pricingHint.maximumMinor, pricingHint.currency)}`}</strong><p>{pricingHint.disclaimer}</p></> : <><strong>Final quote after review</strong><p>A reliable price hint is not available for this request. Submitting does not authorize work or create a charge. LTDS will review the scope and create the actual estimate in Project Alpha.</p></>}</aside></section>}
+    {step === "location" && <section className="portal-wizard-panel" aria-labelledby="request-location-title"><header><span>Step 2 of 5</span><h3 id="request-location-title">Show us the work area</h3><p>{geometryRequired ? "One or more selected services require a drawn work area. Search, add points, or draw the area directly on the secure map." : "The selected services do not require a work area, but you may add one when it helps explain the scope."} Clients cannot upload or import KML files.</p></header><div className="portal-request-map portal-request-map-step"><MapAreaSelector value={areaGeoJson} onChange={value => changePricingBasis(() => setAreaGeoJson(value))} token={mapboxPublicToken} points={points} onPoints={value => changePricingBasis(() => setPoints(value))} locationLabel={location} onLocationLabel={value => change(() => setLocation(value))} /></div>{draft?.areaAcres != null && <div className="portal-coverage-card"><span>Estimated coverage</span><strong>{draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres</strong><small>Calculated by LTDS from the area drawn above.</small></div>}</section>}
+    {step === "details" && <section className="portal-wizard-panel" aria-labelledby="request-details-title"><header><span>Step 3 of 5</span><h3 id="request-details-title">Scope and timing</h3><p>Describe the outcome you need. LTDS will confirm feasibility and the final scope.</p></header>{!fixedProjectId && <label>Project context<select value={projectId} onChange={event => changePricingBasis(() => setProjectId(event.target.value))}><option value="">New or one-off service</option>{eligibleProjects.map(project => <option key={project.id} value={project.id}>{project.projectName}</option>)}</select></label>}<label>Service request title<input value={title} onChange={event => change(() => setTitle(event.target.value))} maxLength={160} required /></label><label>What do you need?<textarea value={details} onChange={event => change(() => setDetails(event.target.value))} maxLength={5000} rows={6} required /></label><div className="portal-form-grid"><label>Location <span>(optional)</span><input value={location} onChange={event => change(() => setLocation(event.target.value))} maxLength={240} /></label><label>Preferred start <span>(optional)</span><input type="datetime-local" value={preferredStartAt} onChange={event => change(() => setPreferredStartAt(event.target.value))} /></label><label>Desired completion <span>(optional)</span><input type="datetime-local" value={desiredCompletionAt} onChange={event => change(() => setDesiredCompletionAt(event.target.value))} /></label></div><label>Requested deliverables <span>(optional)</span><textarea value={deliverables} onChange={event => change(() => setDeliverables(event.target.value))} maxLength={2000} rows={4} /></label></section>}
+    {step === "contact" && <section className="portal-wizard-panel" aria-labelledby="request-contact-title"><header><span>Step 4 of 5</span><h3 id="request-contact-title">Contact and supporting files</h3><p>Add an optional on-site contact and any authorized reference photos or PDFs.</p></header><fieldset className="portal-contact-fields"><legend>Contact details <span>(optional)</span></legend><label>Name<input value={siteContactName} onChange={event => change(() => setSiteContactName(event.target.value))} maxLength={160} /></label><label>Email<input type="email" value={siteContactEmail} onChange={event => change(() => setSiteContactEmail(event.target.value))} maxLength={320} /></label><label>Phone<input type="tel" value={siteContactPhone} onChange={event => change(() => setSiteContactPhone(event.target.value))} maxLength={64} /></label></fieldset>{attachmentsEnabled ? <div className="portal-attachment-uploader"><header><div><strong>Supporting files</strong><p>Up to 10 JPEG, PNG, WebP, HEIC, HEIF, or PDF files; 25 MiB each and 100 MiB total. Archives are not allowed.</p></div><label className="button-ghost portal-file-picker">Add files<input type="file" multiple accept=".jpg,.jpeg,.png,.webp,.heic,.heif,.pdf,image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf" onChange={event => { addAttachments(event.target.files); event.currentTarget.value = ""; }} /></label></header>{attachmentMessage && <p role="alert" className="portal-message error">{attachmentMessage}</p>}<div className="portal-attachment-list" aria-live="polite">{attachments.map(item => <article key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)} / {attachmentStatusLabel(item.status)}</span></div><progress max={item.size} value={Math.min(item.uploadedBytes, item.size)} aria-label={`${item.name} upload progress`} /><small>{item.totalParts ? `${item.completedParts} of ${item.totalParts} parts` : "Preparing upload"}</small>{item.error && <p role="alert">{item.error}</p>}<div>{item.status === "error" && <button type="button" className="button-ghost button-small" onClick={() => void uploadAttachment(item)}>Retry</button>}{item.status !== "aborted" && <button type="button" className="button-ghost button-small" onClick={() => void removeAttachment(item)}>Remove</button>}</div></article>)}</div></div> : <div className="portal-attachments-coming"><strong>Supporting files are coming soon</strong><p>Secure request attachments are not enabled for this portal. Do not place sensitive file links in the description.</p></div>}</section>}
+    {step === "review" && <section className="portal-wizard-panel portal-review" aria-labelledby="request-review-title"><header><span>Step 5 of 5</span><h3 id="request-review-title">Review your request</h3><p>Double-check every section below. Nothing is submitted until you select Submit request.</p></header><div className="portal-review-grid"><article><header><h4>Services</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("services")}>Edit services</button></header><ul>{selectedCatalog.map(service => <li key={service.publicId}><strong>{service.name}</strong>{service.questions.map(question => { const value = answers[service.publicId]?.[question.id]; if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) return null; const labels = question.type === "select" || question.type === "multi_select" ? question.options.filter(option => (Array.isArray(value) ? value : [value]).includes(option.value)).map(option => option.label).join(", ") : typeof value === "boolean" ? value ? "Yes" : "No" : String(value); return <span key={question.id}>{question.label}: {labels}</span>; })}</li>)}</ul></article><article className="portal-review-work-area"><header><h4>Work area</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("location")}>Edit work area</button></header><p>{location || "No location label provided"}</p><p>{draft?.areaAcres != null ? `${draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres` : areaGeoJson ? "Coverage is being calculated" : "No polygon drawn"} / {points.length} point{points.length === 1 ? "" : "s"}</p><RequestReviewMap area={areaGeoJson} points={points} />{points.length > 0 && <ol className="portal-review-pois" aria-label="Points of interest">{points.map((point, index) => <li key={`${point.longitude}:${point.latitude}:${index}`}><span>{index + 1}</span><div><strong>{point.label || `Point ${index + 1}`}</strong><small>{point.latitude.toFixed(6)}, {point.longitude.toFixed(6)}</small></div></li>)}</ol>}</article><article><header><h4>Scope and timing</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("details")}>Edit details</button></header><strong>{title || "Title required"}</strong><p>{details || "Description required"}</p><p>{projectId ? eligibleProjects.find(project => project.id === projectId)?.projectName ?? "Authorized project" : "New or one-off service"}</p><p>{deliverables || "No separate deliverables noted"}</p><dl className="portal-review-timing"><div><dt>Preferred start</dt><dd>{input.preferredStartAt ? formatDate(input.preferredStartAt) : "Not specified"}</dd></div><div><dt>Desired completion</dt><dd>{input.desiredCompletionAt ? formatDate(input.desiredCompletionAt) : "Not specified"}</dd></div></dl></article><article><header><h4>Contact</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit contact</button></header><p>{siteContactName || "No on-site contact"}</p>{siteContactEmail && <p>{siteContactEmail}</p>}{siteContactPhone && <p>{siteContactPhone}</p>}</article></div><aside className="portal-pricing-hint"><span>Planning guidance</span>{pricingHint ? <>{draft?.areaAcres != null && <p className="portal-pricing-coverage">Estimated coverage: {draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres</p>}<strong>{pricingHint.kind === "starting_at" ? `Starting at ${formatRequestMoney(pricingHint.startingAtMinor, pricingHint.currency)}` : `Typical range ${formatRequestMoney(pricingHint.minimumMinor, pricingHint.currency)} to ${formatRequestMoney(pricingHint.maximumMinor, pricingHint.currency)}`}</strong><p>{pricingHint.disclaimer}</p></> : <><strong>Final quote after review</strong><p>A reliable price hint is not available for this request. Submitting does not authorize work or create a charge. LTDS will review the scope and create the actual estimate in Project Alpha.</p></>}</aside></section>}
     {step === "review" && <section className="portal-review-attachments" aria-labelledby="review-attachments-title"><header><h3 id="review-attachments-title">Supporting files</h3><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit files</button></header>{attachments.some(item => item.status === "rejected") && <p className="portal-attachment-recovery" role="alert">A security scan rejected one or more files. Return to Edit files, remove each rejected file, and upload a safe replacement before submitting.</p>}{attachments.some(item => item.status === "expired") && <p className="portal-attachment-recovery" role="alert">One or more uploads expired before acceptance. Return to Edit files, remove each expired file, and upload it again before submitting.</p>}{attachments.length ? <ul>{attachments.filter(item => item.status !== "aborted").map(item => <li key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)}</span></div><span className={`portal-attachment-status ${item.status}`}>{attachmentStatusLabel(item.status)}</span></li>)}</ul> : <p>No supporting files were added.</p>}</section>}
     {message && <p className="portal-message error" role="alert">{message}</p>}
     <div className="portal-form-actions portal-wizard-actions">{onCancel && <button type="button" className="button-ghost" onClick={onCancel}>Cancel</button>}{step !== "services" && <button type="button" className="button-ghost" onClick={() => goTo(REQUEST_STEPS[REQUEST_STEPS.indexOf(step) - 1]!)}>Back</button>}{step === "review" ? <button key="submit-request" type="submit" className="button-orange" disabled={submitting || saveState === "conflict" || !geometryComplete || attachments.some(item => ["queued", "uploading", "quarantined", "scanning", "rejected", "expired", "error"].includes(item.status))}>{submitting ? "Submitting..." : "Submit request"}</button> : <button key="continue-request" type="button" className="button-orange" onClick={() => void next()}>Continue</button>}</div>

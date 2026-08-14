@@ -16,6 +16,7 @@ import type {
 const EARTH_RADIUS_METERS = 6_371_008.8;
 const SQUARE_METERS_PER_ACRE = 4_046.8564224;
 const PUBLIC_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const SOURCE_VERSION = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
 const QUESTION_ID = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 
 interface CatalogRow {
@@ -215,19 +216,32 @@ function requestFields(input: ClientServiceRequestDraftInput): Omit<ClientServic
   return fields;
 }
 
-async function resolveSelections(env: Env, input: ClientServiceRequestDraftInput): Promise<ClientServiceDraftSelection[] | null> {
-  if (input.services.length > 10 || new Set(input.services.map(service => service.publicId)).size !== input.services.length) return null;
+type SelectionResolution =
+  | { kind: "resolved"; services: ClientServiceDraftSelection[] }
+  | { kind: "catalog_changed"; servicePublicIds: string[] }
+  | { kind: "invalid" };
+
+async function resolveSelections(env: Env, input: ClientServiceRequestDraftInput): Promise<SelectionResolution> {
+  if (input.services.length > 10 || new Set(input.services.map(service => service.publicId)).size !== input.services.length)
+    return { kind: "invalid" };
   const selected: ClientServiceDraftSelection[] = [];
+  const changed: string[] = [];
   for (const inputService of input.services) {
-    if (!PUBLIC_ID.test(inputService.publicId)) return null;
+    if (!PUBLIC_ID.test(inputService.publicId) || !SOURCE_VERSION.test(inputService.sourceVersion))
+      return { kind: "invalid" };
     const row = await db(env).prepare(`SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json FROM pa_service_catalog_items WHERE public_id=? AND active=1`).bind(inputService.publicId).first<CatalogRow>();
     const catalog = row ? mapCatalog(row) : null;
-    if (!catalog) return null;
+    if (!catalog || catalog.sourceVersion !== inputService.sourceVersion) {
+      changed.push(inputService.publicId);
+      continue;
+    }
     const answers = validateServiceAnswers(catalog.questions, inputService.answers, true);
-    if (!answers) return null;
+    if (!answers) return { kind: "invalid" };
     selected.push({ ...catalog, answers });
   }
-  return selected;
+  return changed.length
+    ? { kind: "catalog_changed", servicePublicIds: changed }
+    : { kind: "resolved", services: selected };
 }
 
 function serializeDraft(input: ClientServiceRequestDraftInput, services: ClientServiceDraftSelection[], id: string, version: number, state: "draft" | "submitted", timestamps: { createdAt: string; updatedAt: string }, submittedRequestId: string | null): ClientServiceRequestDraft {
@@ -336,8 +350,10 @@ export async function createServiceRequestDraft(env: Env, session: ClientPortalS
     const draft = await loadDraft(env, session, existing.id);
     return draft ? { kind: "replayed", draft } : null;
   }
-  const services = await resolveSelections(env, input);
-  if (!services) return null;
+  const resolution = await resolveSelections(env, input);
+  if (resolution.kind === "invalid") return null;
+  if (resolution.kind === "catalog_changed") return resolution;
+  const services = resolution.services;
   const id = crypto.randomUUID();
   const areaSquareMeters = calculateRequestAreaSquareMeters(input.areaGeoJson);
   const database = db(env);
@@ -375,8 +391,10 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
     const draft = await loadDraft(env, session, draftId);
     return draft ? { kind: "replayed", draft } : null;
   }
-  const services = await resolveSelections(env, input);
-  if (!services) return null;
+  const resolution = await resolveSelections(env, input);
+  if (resolution.kind === "invalid") return null;
+  if (resolution.kind === "catalog_changed") return resolution;
+  const services = resolution.services;
   const areaSquareMeters = calculateRequestAreaSquareMeters(input.areaGeoJson);
   const database = db(env);
   const update = database.prepare(`UPDATE client_service_request_drafts AS d SET project_id=?,draft_json=?,area_geojson=?,area_square_meters=?,area_acres=?,version=version+1,last_mutation_key=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
@@ -406,18 +424,37 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
   return draft ? { kind: "updated", draft } : null;
 }
 
-function completeForSubmission(draft: ClientServiceRequestDraft): boolean {
-  return draft.title.trim().length > 0 && draft.details.trim().length > 0 && draft.services.length > 0
-    && draft.services.every(service => validateServiceAnswers(service.questions, service.answers) !== null)
-    && (!draft.services.some(service => service.geometryRequirement === "required") || draft.areaGeoJson !== null);
+function incompleteAnswerServices(draft: ClientServiceRequestDraft): string[] {
+  if (!draft.services.length) return [];
+  return draft.services
+    .filter(service => validateServiceAnswers(service.questions, service.answers) === null)
+    .map(service => service.publicId);
 }
 
-async function servicesRemainSubmitEligible(env: Env, services: ClientServiceDraftSelection[]): Promise<boolean> {
+async function changedCatalogServices(env: Env, services: ClientServiceDraftSelection[]): Promise<string[]> {
+  const changed: string[] = [];
   for (const service of services) {
     const current = await db(env).prepare(`SELECT source_version FROM pa_service_catalog_items WHERE public_id=? AND active=1`).bind(service.publicId).first<{ source_version: string }>();
-    if (!current || current.source_version !== service.sourceVersion) return false;
+    if (!current || current.source_version !== service.sourceVersion) changed.push(service.publicId);
   }
-  return true;
+  return changed;
+}
+
+async function attachmentSubmissionBlock(
+  env: Env,
+  draftId: string,
+): Promise<{ reason: "attachments_pending" | "attachments_rejected" | "attachments_expired"; attachmentCount: number } | null> {
+  const rows = await db(env).prepare(`SELECT status,COUNT(*) count FROM client_service_request_attachments
+    WHERE draft_id=? AND status NOT IN ('accepted','aborted') GROUP BY status`)
+    .bind(draftId).all<{ status: string; count: number }>();
+  const counts = new Map(rows.results.map(row => [row.status, Number(row.count)]));
+  const rejected = counts.get("rejected") ?? 0;
+  if (rejected > 0) return { reason: "attachments_rejected", attachmentCount: rejected };
+  const expired = counts.get("expired") ?? 0;
+  if (expired > 0) return { reason: "attachments_expired", attachmentCount: expired };
+  const pending = [...counts.entries()].reduce((total, [status, count]) =>
+    status === "rejected" || status === "expired" ? total : total + count, 0);
+  return pending > 0 ? { reason: "attachments_pending", attachmentCount: pending } : null;
 }
 
 function legacyRequestFromRow(row: Record<string, unknown>): ClientServiceRequest {
@@ -450,10 +487,23 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
     return request ? { kind: "replayed", request } : null;
   }
   if (draft.version !== expectedVersion) return { kind: "conflict" };
-  if (!completeForSubmission(draft) || !await servicesRemainSubmitEligible(env, draft.services)) return { kind: "incomplete" };
-  const pendingAttachments = await db(env).prepare(`SELECT COUNT(*) AS count FROM client_service_request_attachments
-    WHERE draft_id=? AND status NOT IN ('accepted','aborted')`).bind(draftId).first<{ count: number }>();
-  if ((pendingAttachments?.count ?? 0) > 0) return { kind: "incomplete" };
+  if (!draft.title.trim() || !draft.details.trim())
+    return { kind: "incomplete", reason: "request_fields_incomplete" };
+  if (!draft.services.length)
+    return { kind: "incomplete", reason: "answers_incomplete", servicePublicIds: [] };
+  const incompleteAnswers = incompleteAnswerServices(draft);
+  if (incompleteAnswers.length)
+    return { kind: "incomplete", reason: "answers_incomplete", servicePublicIds: incompleteAnswers };
+  const missingGeometry = draft.services
+    .filter(service => service.geometryRequirement === "required" && draft.areaGeoJson === null)
+    .map(service => service.publicId);
+  if (missingGeometry.length)
+    return { kind: "incomplete", reason: "geometry_required", servicePublicIds: missingGeometry };
+  const changedServices = await changedCatalogServices(env, draft.services);
+  if (changedServices.length)
+    return { kind: "incomplete", reason: "catalog_changed", servicePublicIds: changedServices };
+  const attachmentBlock = await attachmentSubmissionBlock(env, draftId);
+  if (attachmentBlock) return { kind: "incomplete", ...attachmentBlock };
   const requestId = crypto.randomUUID();
   const serviceCategory = draft.services.length === 1 ? draft.services[0]!.name.slice(0, 100) : `Multiple services (${draft.services.length})`;
   const requestFingerprint = await sha256(JSON.stringify(draft));

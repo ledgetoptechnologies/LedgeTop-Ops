@@ -66,8 +66,8 @@ interface DetailResponse {
     id: string;
     version: number;
     scope_text: string;
-    estimate_amount_minor: number | null;
-    currency: string | null;
+    estimate_amount_minor?: number | null;
+    currency?: string | null;
     status: string;
     client_response_note: string | null;
     updated_at: string;
@@ -100,6 +100,9 @@ interface DetailResponse {
     changeSummary: string | null;
     createdBy: string | null;
     createdAt: string | null;
+  };
+  capabilities?: {
+    legacyPaQuoteLinkEnabled: boolean;
   };
 }
 
@@ -323,6 +326,9 @@ function ClientRequestDetail({
       </>
     );
   const request = data.request,
+    usesCatalogV2 = (data.services?.length ?? 0) > 0,
+    legacyPaQuoteLinkEnabled =
+      !usesCatalogV2 && data.capabilities?.legacyPaQuoteLinkEnabled === true,
     effectiveWorkArea = data.effectiveWorkArea || {
       revisionNumber: 0,
       areaGeoJson: request.area_geojson,
@@ -358,8 +364,6 @@ function ClientRequestDetail({
                 ? currentEstimate.version
                 : undefined,
             scope,
-            amount: null,
-            currency: null,
             proposedFields: null,
             status,
           }),
@@ -595,20 +599,23 @@ function ClientRequestDetail({
           <span>The linked commercial artifact predates the effective work-area revision and is no longer treated as current.</span>
         </div>
       )}
-      <Card title="Operational estimate / scope proposal">
+      <Card title={usesCatalogV2 ? "Scope proposal" : "Operational estimate / scope proposal"}>
         <p className="muted">
-          This is a non-binding planning estimate, not a Project Alpha quote,
-          contract, or invoice.
+          {usesCatalogV2
+            ? "This proposal records scope, timing, assumptions, and deliverables only. Project Alpha owns all pricing."
+            : "This is a non-binding planning estimate, not a Project Alpha quote, contract, or invoice."}
         </p>
         {currentEstimate && !["draft", "change_requested"].includes(currentEstimate.status) ? (
           <div className="estimate-current">
             <StatusPill tone={tone(currentEstimate.status)}>
               {currentEstimate.status === "ready"
-                ? "Estimate ready"
+                ? usesCatalogV2
+                  ? "Scope proposal ready"
+                  : "Estimate ready"
                 : currentEstimate.status.replaceAll("_", " ")}
             </StatusPill>
             <p>{currentEstimate.scope_text}</p>
-            {currentEstimate.estimate_amount_minor !== null && (
+            {!usesCatalogV2 && typeof currentEstimate.estimate_amount_minor === "number" && (
               <strong>
                 {new Intl.NumberFormat(undefined, {
                   style: "currency",
@@ -695,7 +702,8 @@ function ClientRequestDetail({
               Create Project Alpha draft
             </button>
           )}
-          {request.status === "accepted_pending_pa_linkage" && (
+          {request.status === "accepted_pending_pa_linkage" &&
+            legacyPaQuoteLinkEnabled && (
             <button
               className="button-ghost"
               disabled={busy}
@@ -749,7 +757,8 @@ function ClientRequestDetail({
             )}
           </div>
         )}
-        {request.status === "accepted_pending_pa_linkage" && (
+        {request.status === "accepted_pending_pa_linkage" &&
+          legacyPaQuoteLinkEnabled && (
           <p className="muted">
             Manual fallback verifies an already approved Project Alpha quote; it does not create or price one in LTDS.
           </p>

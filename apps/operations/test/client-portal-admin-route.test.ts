@@ -31,6 +31,11 @@ type DbState = {
   outboxPayloads?: string[];
   first?: (kind: "ops" | "delivery", sql: string, values: unknown[]) => unknown;
   all?: (kind: "ops" | "delivery", sql: string, values: unknown[]) => unknown[] | undefined;
+  run?: (
+    kind: "ops" | "delivery",
+    sql: string,
+    values: unknown[],
+  ) => { meta: { changes: number } } | Promise<{ meta: { changes: number } }> | undefined;
 };
 
 function database(kind: "ops" | "delivery", state: DbState) {
@@ -52,7 +57,11 @@ function database(kind: "ops" | "delivery", state: DbState) {
           return null;
         },
         async all() { return { results: state.all?.(kind, sql, this.values) ?? [] }; },
-        async run() { (state.runs ??= []).push(sql); return { meta: { changes: 1 } }; },
+        async run() {
+          (state.runs ??= []).push(sql);
+          const configured = state.run?.(kind, sql, this.values);
+          return configured === undefined ? { meta: { changes: 1 } } : await configured;
+        },
       };
       return statement;
     },
@@ -71,11 +80,12 @@ function database(kind: "ops" | "delivery", state: DbState) {
   return db;
 }
 
-function environment(state: DbState) {
+function environment(state: DbState, overrides: Record<string, unknown> = {}) {
   return {
     ENVIRONMENT: "development", EXPECTED_HOST: "ops.example", INCOMING_EXPECTED_HOST: "incoming.example",
     PROJECT_ALPHA_BASE_URL: "https://project-alpha.example", PROJECT_ALPHA_API_KEY: "secret-key",
     OPS_DB: database("ops", state), DELIVERY_DB: database("delivery", state),
+    ...overrides,
   };
 }
 
@@ -107,6 +117,16 @@ describe("verified Project Alpha quote linkage", () => {
         return null;
       },
       all(kind, sql) {
+        if (kind === "delivery" && sql.includes("FROM request_operational_estimates"))
+          return [{
+            id: "estimate-a", version: 1, scope_text: "Capture the mapped area.",
+            estimate_amount_minor: 999900, currency: "USD", status: "ready",
+          }];
+        if (kind === "delivery" && sql.includes("FROM request_revisions"))
+          return [{
+            revision_number: 1, author_type: "staff", action: "staff_proposal",
+            snapshot_json: JSON.stringify({ scope: "Capture the mapped area.", amount: 9999, currency: "USD" }),
+          }];
         if (kind === "delivery" && sql.includes("FROM client_service_request_services")) {
           return [{
             service_public_id: "svc-2d-mapping",
@@ -154,6 +174,39 @@ describe("verified Project Alpha quote linkage", () => {
       integrity: "verified",
     }]);
     expect(JSON.stringify(payload)).not.toMatch(/unitPrice|privateFormula|never-forward-this|1000\.00/);
+    expect(payload.capabilities).toEqual({ legacyPaQuoteLinkEnabled: false });
+    expect(payload.estimates[0]).not.toHaveProperty("estimate_amount_minor");
+    expect(payload.estimates[0]).not.toHaveProperty("currency");
+    expect(JSON.parse(payload.revisions[0].snapshot_json)).toEqual({ scope: "Capture the mapped area." });
+    expect(JSON.stringify(payload)).not.toMatch(/9999|USD/);
+  });
+
+  it("suppresses legacy numeric quote fields from the v2 request queue", async () => {
+    const state: DbState = {
+      batches: [],
+      all(kind, sql) {
+        if (kind !== "delivery" || !sql.includes("uses_catalog_v2")) return [];
+        return [{
+          id: "request-v2", title: "Catalog-backed request", uses_catalog_v2: 1,
+          quote_id: 42, quote_document_number: "Q-0042", quote_status: "approved",
+          quote_total_minor: 125000, quote_currency: "USD",
+          quote_verified_at: "2026-08-01T12:00:00Z",
+        }];
+      },
+    };
+    const response = await worker.fetch(
+      new Request("https://ops.example/api/client-service-requests"),
+      environment(state) as any,
+      executionCtx,
+    );
+    expect(response.status).toBe(200);
+    const payload = await response.json() as any;
+    expect(payload.requests[0]).toMatchObject({
+      id: "request-v2", quote_id: null, quote_document_number: null,
+      quote_status: null, quote_total_minor: null, quote_currency: null,
+      quote_verified_at: null,
+    });
+    expect(JSON.stringify(payload)).not.toMatch(/Q-0042|125000|USD|"quote_id":42/);
   });
 
   it("verifies exact client/project ownership before atomically linking an approved quote", async () => {
@@ -170,7 +223,9 @@ describe("verified Project Alpha quote linkage", () => {
     vi.stubGlobal("fetch", fetchMock);
     const response = await worker.fetch(new Request("https://ops.example/api/client-service-requests/request-a/pa-quote", {
       method: "POST", headers: { "Content-Type": "application/json", Origin: "https://ops.example" }, body: JSON.stringify({ artifactId: 42 }),
-    }), environment(state) as any, executionCtx);
+    }), environment(state, {
+      LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED: "true",
+    }) as any, executionCtx);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ status: "accepted_linked", quote: { documentNumber: "Q-0042", total: 1250 } });
     const deliveryBatch = state.batches.find(batch => batch.some(sql => sql.includes("request_pa_artifacts")));
@@ -207,8 +262,8 @@ describe("verified Project Alpha quote linkage", () => {
                 mutation_fingerprint: thisFingerprint,
               }
             : null;
-        if (sql.includes("SELECT id,project_id,status FROM client_service_requests"))
-          return { id: "request-a", project_id: "portal-pa-9", status: "submitted" };
+        if (sql.includes("uses_catalog_v2") && sql.includes("FROM client_service_requests"))
+          return { id: "request-a", project_id: "portal-pa-9", status: "submitted", uses_catalog_v2: 0 };
         if (sql.includes("status IN ('draft','ready','accepted','change_requested')"))
           return null;
         if (sql.includes("SELECT r.title,r.project_id,r.service_category"))
@@ -255,14 +310,123 @@ describe("verified Project Alpha quote linkage", () => {
     expect(state.batches).toHaveLength(batchCount);
   });
 
+  it("rejects local amount or currency fields for v2 service requests", async () => {
+    const state: DbState = {
+      batches: [],
+      first(kind, sql) {
+        if (kind === "delivery" && sql.includes("uses_catalog_v2"))
+          return { id: "request-a", project_id: "portal-pa-9", status: "submitted", uses_catalog_v2: 1 };
+        return null;
+      },
+    };
+    const response = await worker.fetch(new Request(
+      "https://ops.example/api/client-service-requests/request-a/estimate",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": "staff-estimate-route-v2-0001",
+          Origin: "https://ops.example",
+        },
+        body: JSON.stringify({
+          scope: "Capture the approved site area.",
+          amount: 1,
+          currency: "USD",
+          status: "ready",
+        }),
+      },
+    ), environment(state) as any, executionCtx);
+    expect(response.status).toBe(422);
+    expect(await response.text()).toContain("pricing is created in Project Alpha");
+    expect(state.batches).toEqual([]);
+  });
+
+  it("accepts a scope-only v2 proposal without amount fields", async () => {
+    const state: DbState = {
+      batches: [],
+      first(kind, sql) {
+        if (kind !== "delivery") return null;
+        if (sql.includes("uses_catalog_v2"))
+          return { id: "request-a", project_id: "portal-pa-9", status: "submitted", uses_catalog_v2: 1 };
+        if (sql.includes("status IN ('draft','ready','accepted','change_requested')")) return null;
+        return null;
+      },
+    };
+    const response = await worker.fetch(new Request(
+      "https://ops.example/api/client-service-requests/request-a/estimate",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": "staff-estimate-route-v2-0002",
+          Origin: "https://ops.example",
+        },
+        body: JSON.stringify({ scope: "Capture the approved site area.", status: "draft" }),
+      },
+    ), environment(state) as any, executionCtx);
+    expect(response.status).toBe(201);
+    expect(state.batches.flat()).toEqual(expect.arrayContaining([
+      expect.stringContaining("INSERT INTO request_operational_estimates"),
+      expect.stringContaining("request_revisions"),
+    ]));
+  });
+
   it("fails closed when PA returns an artifact for another client", async () => {
     const state = { batches: [] as string[][] };
     vi.stubGlobal("fetch", vi.fn(async () => Response.json({ artifact: { id: 42, type: "quote", client_id: 99, project_id: 9, status: "approved", document_number: "Q-0042", total: "10.00", currency: "USD", updated_at: null }, request_id: "trace-b" })));
     const response = await worker.fetch(new Request("https://ops.example/api/client-service-requests/request-a/pa-quote", {
       method: "POST", headers: { "Content-Type": "application/json", Origin: "https://ops.example" }, body: JSON.stringify({ artifactId: 42 }),
-    }), environment(state) as any, executionCtx);
+    }), environment(state, {
+      LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED: "true",
+    }) as any, executionCtx);
     expect(response.status).toBe(404);
     expect(state.batches.some(batch => batch.some(sql => sql.includes("request_pa_artifacts")))).toBe(false);
+  });
+
+  it("keeps manual numeric quote linkage off by default without an upstream call", async () => {
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+    const response = await worker.fetch(new Request(
+      "https://ops.example/api/client-service-requests/request-a/pa-quote",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "https://ops.example" },
+        body: JSON.stringify({ artifactId: 42 }),
+      },
+    ), environment({ batches: [] }) as any, executionCtx);
+    expect(response.status).toBe(404);
+    expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it("rejects manual numeric quote linkage for v2 even when the legacy gate is on", async () => {
+    const state: DbState = {
+      batches: [],
+      first(kind, sql) {
+        if (kind === "delivery" && sql.includes("uses_catalog_v2"))
+          return {
+            id: "request-a", status: "accepted_pending_pa_linkage",
+            project_id: "portal-pa-9", project_alpha_client_id: "21",
+            project_alpha_project_id: "9", uses_catalog_v2: 1,
+          };
+        return null;
+      },
+    };
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+    const response = await worker.fetch(new Request(
+      "https://ops.example/api/client-service-requests/request-a/pa-quote",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Origin: "https://ops.example" },
+        body: JSON.stringify({ artifactId: 42 }),
+      },
+    ), environment(state, {
+      LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED: "true",
+    }) as any, executionCtx);
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain("draft public-ID handoff");
+    expect(upstream).not.toHaveBeenCalled();
+    expect(state.batches).toEqual([]);
   });
 
   it("creates only a private PA draft from server-derived immutable request evidence", async () => {
@@ -490,6 +654,9 @@ describe("verified Project Alpha quote linkage", () => {
     expect(body).toContain("<name>Gate</name>");
     expect(body).toContain("-88,44,0 -87.9,44,0 -87.9,44.1,0 -88,44,0");
     expect(body).not.toContain("project_alpha_client_id");
+    expect(state.runs).toEqual([
+      expect.stringContaining("work_area_kml_exported"),
+    ]);
   });
 
   it("uses the immutable client revision for original KML and rejects invalid selectors", async () => {
@@ -514,6 +681,9 @@ describe("verified Project Alpha quote linkage", () => {
     );
     expect(original.status).toBe(200);
     expect(await original.text()).toContain("-89,43,0 -88.8,43,0 -88.8,43.2,0 -89,43,0");
+    expect(state.runs).toEqual([
+      expect.stringContaining("work_area_kml_exported"),
+    ]);
 
     const invalid = await worker.fetch(
       new Request("https://ops.example/api/client-service-requests/request-a/area.kml?revision=other"),
@@ -521,5 +691,41 @@ describe("verified Project Alpha quote linkage", () => {
       executionCtx,
     );
     expect(invalid.status).toBe(400);
+  });
+
+  it("returns no KML bytes when the durable export audit fails", async () => {
+    const state: DbState = {
+      batches: [],
+      first(kind, sql) {
+        if (kind === "delivery" && sql.includes("JOIN client_accounts"))
+          return {
+            title: "North site mapping",
+            area_geojson: JSON.stringify({
+              type: "Polygon",
+              coordinates: [[[-88, 44], [-87.9, 44], [-87.9, 44.1], [-88, 44]]],
+            }),
+            poi_points_json: "[]",
+          };
+        return null;
+      },
+      run(kind, sql) {
+        if (kind === "delivery" && sql.includes("work_area_kml_exported"))
+          throw new Error("simulated D1 audit outage");
+        return undefined;
+      },
+    };
+    const response = await worker.fetch(
+      new Request("https://ops.example/api/client-service-requests/request-a/area.kml?revision=effective"),
+      environment(state) as any,
+      executionCtx,
+    );
+    expect(response.status).toBe(503);
+    expect(response.headers.get("Content-Type")).not.toContain(
+      "application/vnd.google-earth.kml+xml",
+    );
+    const body = await response.text();
+    expect(body).toContain("An unexpected error occurred");
+    expect(body).not.toContain("<kml");
+    expect(body).not.toContain("-88,44,0");
   });
 });

@@ -56,6 +56,7 @@ describe("request attachment D1 and direct-R2 lifecycle", () => {
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES ('account-a','identity-a','manager')"),
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES ('account-b','identity-b','manager')"),
       db.prepare("INSERT INTO client_service_request_drafts VALUES ('draft-a','account-a',NULL,'identity-a','draft',NULL)"),
+      db.prepare("INSERT INTO client_service_request_drafts VALUES ('draft-removal','account-a',NULL,'identity-a','draft',NULL)"),
     ]);
     const bucket = {
       async createMultipartUpload(key: string) {
@@ -109,5 +110,51 @@ describe("request attachment D1 and direct-R2 lifecycle", () => {
     await db.prepare("UPDATE client_service_request_drafts SET state='submitted',submitted_request_id='request-a' WHERE id='draft-a'").run();
     expect(await db.prepare("SELECT submitted_request_id FROM client_service_request_attachments WHERE id=?").bind(created.attachmentId).first("submitted_request_id")).toBe("request-a");
     await expect(db.prepare("UPDATE client_service_request_attachments SET original_name='changed.pdf' WHERE id=?").bind(created.attachmentId).run()).rejects.toThrow(/immutable/);
+  });
+
+  it("explicitly removes every unsubmitted attachment state and rejects late scanner receipts", async () => {
+    const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repository() });
+    const statuses = ["uploading", "quarantined", "scanning", "accepted", "rejected", "expired"] as const;
+    for (const [index, status] of statuses.entries()) {
+      const id = `removal-${status}`;
+      const accepted = status === "accepted";
+      await db.prepare(`INSERT INTO client_service_request_attachments
+        (id,draft_id,account_id,created_by_identity_id,client_upload_id,object_key,multipart_upload_id,
+         original_name,declared_size,content_type,status,actual_size,etag,scanner_verdict,verified_sha256,scanned_at,expires_at)
+        VALUES (?,'draft-removal','account-a','identity-a',?,?,?,'authorization.pdf',10,'application/pdf',?,?,?,?,?,?,datetime('now','+1 day'))`)
+        .bind(
+          id,
+          `removal-upload-${String(index).padStart(4, "0")}`,
+          `_ltds/quarantine/request-attachments/${id}/object`,
+          status === "uploading" ? `pending:${id}` : `completed:${id}`,
+          status,
+          status === "uploading" ? null : 10,
+          status === "uploading" ? null : etag,
+          accepted ? "clean" : status === "rejected" ? "rejected" : null,
+          accepted ? "b".repeat(64) : null,
+          accepted ? "2026-08-13T12:00:00Z" : null,
+        ).run();
+      const removal = await app.request(`${origin}/service-request-drafts/draft-removal/attachments/${id}`, {
+        method: "DELETE",
+        headers: { Origin: origin },
+      }, env);
+      expect(removal.status, status).toBe(200);
+      expect(await removal.json()).toMatchObject({ ok: true, status: "aborted", idempotent: false });
+      expect(await db.prepare("SELECT status,submitted_request_id FROM client_service_request_attachments WHERE id=?")
+        .bind(id).first()).toEqual({ status: "aborted", submitted_request_id: null });
+      await expect(acceptRequestAttachmentScanReceipt(
+        env,
+        `Bearer ${"s".repeat(32)}`,
+        id,
+        { verdict: "clean", sha256: "b".repeat(64) },
+      )).rejects.toMatchObject({ status: 404 });
+    }
+
+    const retry = await app.request(`${origin}/service-request-drafts/draft-removal/attachments/removal-accepted`, {
+      method: "DELETE",
+      headers: { Origin: origin },
+    }, env);
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toMatchObject({ ok: true, status: "aborted", idempotent: true });
   });
 });

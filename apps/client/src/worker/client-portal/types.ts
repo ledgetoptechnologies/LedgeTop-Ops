@@ -140,6 +140,8 @@ export interface ClientServiceCatalogItem {
 
 export interface ClientServiceDraftSelectionInput {
   publicId: string;
+  /** The exact catalog version the client reviewed for this selection. */
+  sourceVersion: string;
   answers: Record<string, unknown>;
 }
 
@@ -215,12 +217,27 @@ export interface ClientRequestAttachment {
 
 export type ClientServiceDraftMutationResult =
   | { kind: "created" | "updated" | "replayed"; draft: ClientServiceRequestDraft }
-  | { kind: "conflict" };
+  | { kind: "conflict" }
+  | { kind: "catalog_changed"; servicePublicIds: string[] };
+
+export type ClientServiceDraftSubmitBlockReason =
+  | "request_fields_incomplete"
+  | "answers_incomplete"
+  | "geometry_required"
+  | "catalog_changed"
+  | "attachments_pending"
+  | "attachments_rejected"
+  | "attachments_expired";
 
 export type ClientServiceDraftSubmitResult =
   | { kind: "submitted" | "replayed"; request: ClientServiceRequest }
   | { kind: "conflict" }
-  | { kind: "incomplete" };
+  | {
+    kind: "incomplete";
+    reason: ClientServiceDraftSubmitBlockReason;
+    servicePublicIds?: string[];
+    attachmentCount?: number;
+  };
 
 export interface ClientPricingHint {
   kind: "starting_at" | "typical_range";

@@ -21,7 +21,7 @@ const request = {
   longitude: null,
   area_geojson: null,
   poi_points_json: "[]",
-  status: "under_review",
+  status: "accepted_pending_pa_linkage",
   created_at: "2026-08-01T12:00:00.000Z",
   updated_at: "2026-08-01T12:00:00.000Z",
 };
@@ -44,7 +44,17 @@ test("staff explicitly creates a private Project Alpha draft and opens the PA ed
     } else if (incoming.method() === "GET" && path === "/api/client-service-requests") {
       await route.fulfill({ json: { requests: [request] } });
     } else if (incoming.method() === "GET" && path === "/api/client-service-requests/request-pa-draft") {
-      await route.fulfill({ json: { request, revisions: [], estimates: [], history: [], children: [], areaRevisions: [], effectiveWorkArea: { revisionNumber: 0, areaGeoJson: null, poiPointsJson: "[]", reason: null, changeSummary: null, createdBy: null, createdAt: null } } });
+      await route.fulfill({ json: {
+        request,
+        capabilities: { legacyPaQuoteLinkEnabled: true },
+        services: [{
+          publicId: "svc-2d-mapping", sourceVersion: "catalog-v3", name: "2D Mapping",
+          summary: null, category: "Mapping", geometryRequirement: "required",
+          integrity: "verified", answers: [],
+        }],
+        revisions: [], estimates: [], history: [], children: [], areaRevisions: [],
+        effectiveWorkArea: { revisionNumber: 0, areaGeoJson: null, poiPointsJson: "[]", reason: null, changeSummary: null, createdBy: null, createdAt: null },
+      } });
     } else if (incoming.method() === "GET" && path === "/api/client-service-requests/request-pa-draft/attachments") {
       await route.fulfill({ json: { attachments: [] } });
     } else if (incoming.method() === "GET" && path === "/api/client-service-requests/request-pa-draft/pa-draft") {
@@ -78,6 +88,8 @@ test("staff explicitly creates a private Project Alpha draft and opens the PA ed
   const create = page.getByRole("button", { name: "Create Project Alpha draft" });
   await expect(create).toBeVisible();
   await expect(create).toBeEnabled();
+  await expect(page.getByRole("button", { name: "Link approved Project Alpha quote manually" })).toHaveCount(0);
+  await expect(page.getByText(/Manual fallback verifies an already approved Project Alpha quote/i)).toHaveCount(0);
   await create.click();
   await expect(page.getByText("Private Project Alpha draft Q-DRAFT-7")).toBeVisible();
   await expect(page.getByText(/Project Alpha owns pricing, approval, sending, invoicing, and payment/i)).toBeVisible();

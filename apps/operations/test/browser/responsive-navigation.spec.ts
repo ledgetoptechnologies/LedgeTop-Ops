@@ -1,11 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 
-async function mockSession(page: Page, permissions: string[]) {
+async function mockSession(page: Page, permissions: string[], identity?: { displayName: string; email: string }) {
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/session") {
       await route.fulfill({ json: {
-        user: { id: "staff-a", email: "staff@example.com", displayName: "Staff User", status: "Active", profileType: "Employee", isAdministrator: false, permissions, divisions: [] },
+        user: { id: "staff-a", email: identity?.email ?? "staff@example.com", displayName: identity?.displayName ?? "Staff User", status: "Active", profileType: "Employee", isAdministrator: false, permissions, divisions: [] },
         csrfToken: "csrf-test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
       } });
       return;
@@ -83,3 +83,26 @@ for (const width of [320, 390, 768]) {
     expect(headingTop).toBeGreaterThanOrEqual(headerBottom);
   });
 }
+
+test("operations shell contains very long identity text and reflows at a 200% zoom equivalent", async ({ page }) => {
+  const displayName = `Staff${"N".repeat(180)}`;
+  const email = `${"e".repeat(180)}@example.test`;
+  await mockSession(page, allNavigationPermissions, { displayName, email });
+
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/");
+  const profile = page.locator(".profile");
+  await expect(profile).toContainText(displayName);
+  await expect(profile).toContainText(email);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+
+  // A 640 CSS-pixel viewport is the reflow equivalent of 200% browser zoom
+  // on the 1280-pixel desktop canvas above.
+  await page.setViewportSize({ width: 640, height: 800 });
+  const trigger = page.getByRole("button", { name: "Open navigation" });
+  await expect(trigger).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+  const headerBottom = await page.locator(".ops-header").evaluate(node => node.getBoundingClientRect().bottom);
+  const headingTop = await page.getByRole("heading", { name: "Operations dashboard" }).evaluate(node => node.getBoundingClientRect().top);
+  expect(headingTop).toBeGreaterThanOrEqual(headerBottom);
+});

@@ -406,7 +406,7 @@ export interface PortalServiceDraftInput {
   longitude: number | null;
   areaGeoJson: PortalAreaGeoJson | null;
   poiPoints: Array<{ longitude: number; latitude: number; label: string | null }>;
-  services: Array<{ publicId: string; answers: Record<string, unknown> }>;
+  services: Array<{ publicId: string; sourceVersion: string; answers: Record<string, unknown> }>;
 }
 
 export interface PortalServiceDraft extends Omit<PortalServiceDraftInput, "services"> {
@@ -539,8 +539,12 @@ export async function savePortalServiceDraft(
 export async function loadPortalPricingHint(
   draftId: string,
   request: PortalRequest = requestJson,
+  signal?: AbortSignal,
 ): Promise<PortalPricingHint | null> {
-  const response = await request<{ available: boolean; hint: PortalPricingHint | null }>(`/api/client/service-request-drafts/${encodeURIComponent(draftId)}/pricing-hint`);
+  const response = await request<{ available: boolean; hint: PortalPricingHint | null }>(
+    `/api/client/service-request-drafts/${encodeURIComponent(draftId)}/pricing-hint`,
+    { signal },
+  );
   return response.available ? response.hint : null;
 }
 

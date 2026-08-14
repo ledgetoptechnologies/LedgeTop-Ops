@@ -61,7 +61,7 @@ const draftBody = {
   projectId: "project-a", requestType: "service", title: "Map the site", details: "Capture the current construction area.",
   location: null, preferredStartAt: null, deliverables: null, siteContactName: null, siteContactEmail: null,
   siteContactPhone: null, desiredCompletionAt: null, latitude: null, longitude: null, areaGeoJson: polygon, poiPoints: [],
-  services: [{ publicId: "svc-mapping", answers: { resolution: "standard" } }],
+  services: [{ publicId: "svc-mapping", sourceVersion: "v7", answers: { resolution: "standard" } }],
 };
 
 describe("service request v2 validation", () => {
@@ -127,6 +127,38 @@ describe("service request v2 routes", () => {
     expect(save).toHaveBeenCalledTimes(1);
   });
 
+  it("returns a typed catalog drift response for create and save", async () => {
+    const catalogChanged = {
+      kind: "catalog_changed" as const,
+      servicePublicIds: ["svc-mapping"],
+    };
+    const create = vi.fn(async () => catalogChanged);
+    const save = vi.fn(async () => catalogChanged);
+    const app = createClientPortalRouter({
+      resolvePrincipal: principal,
+      repository: repository({ createServiceRequestDraft: create, saveServiceRequestDraft: save }),
+    });
+    const createResponse = await app.request("https://client.example/service-request-drafts", {
+      method: "POST",
+      headers: { Origin: "https://client.example", "Content-Type": "application/json", "Idempotency-Key": "draft-create-drift-0001" },
+      body: JSON.stringify(draftBody),
+    }, env);
+    expect(createResponse.status).toBe(409);
+    expect(await createResponse.json()).toEqual({
+      error: expect.any(String),
+      code: "catalog_changed",
+      servicePublicIds: ["svc-mapping"],
+    });
+
+    const saveResponse = await app.request("https://client.example/service-request-drafts/draft-a", {
+      method: "PUT",
+      headers: { Origin: "https://client.example", "Content-Type": "application/json", "Idempotency-Key": "draft-save-drift-0001", "If-Match": "2" },
+      body: JSON.stringify(draftBody),
+    }, env);
+    expect(saveResponse.status).toBe(409);
+    expect(await saveResponse.json()).toMatchObject({ code: "catalog_changed", servicePublicIds: ["svc-mapping"] });
+  });
+
   it("enforces at most ten unique Project Alpha service ids", async () => {
     const create = vi.fn();
     const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ createServiceRequestDraft: create }) });
@@ -162,5 +194,23 @@ describe("service request v2 routes", () => {
     }, env);
     expect(response.status).toBe(200);
     expect(submit).toHaveBeenCalledWith(expect.anything(), session, "draft-a", 2, "draft-submit-000001");
+  });
+
+  it.each([
+    ["answers_incomplete", { servicePublicIds: ["svc-mapping"] as string[] }],
+    ["geometry_required", { servicePublicIds: ["svc-mapping"] as string[] }],
+    ["catalog_changed", { servicePublicIds: ["svc-mapping"] as string[] }],
+    ["attachments_pending", { attachmentCount: 2 }],
+    ["attachments_rejected", { attachmentCount: 1 }],
+    ["attachments_expired", { attachmentCount: 1 }],
+  ] as const)("returns a safe typed %s submit block", async (reason, details) => {
+    const submit = vi.fn(async () => ({ kind: "incomplete" as const, reason, ...details }));
+    const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ submitServiceRequestDraft: submit }) });
+    const response = await app.request("https://client.example/service-request-drafts/draft-a/submit", {
+      method: "POST",
+      headers: { Origin: "https://client.example", "Idempotency-Key": `draft-submit-${reason}-0001`, "If-Match": "2" },
+    }, env);
+    expect(response.status).toBe(422);
+    expect(await response.json()).toEqual({ error: expect.any(String), code: reason, ...details });
   });
 });
