@@ -510,6 +510,16 @@ describe("client portal activation hardening", () => {
     expect(conflict.status).toBe(409);
   });
 
+  it("passes only opaque folder and cursor selectors into the authorized project repository", async () => {
+    const listProjectFiles = vi.fn(async () => ({ files: [], folders: [], breadcrumbs: [], folderId: "pf1_folder", prefix: "", cursor: null }));
+    const response = await createClientPortalRouter({
+      resolvePrincipal: principal,
+      repository: repository({ listProjectFiles }),
+    }).request("/projects/project-a/files?folder=pf1_folder&cursor=pc1_cursor", {}, env("true"));
+    expect(response.status).toBe(200);
+    expect(listProjectFiles).toHaveBeenCalledWith(expect.anything(), session, "project-a", "pc1_cursor", "pf1_folder");
+  });
+
   it("lists only repository-authorized notifications and origin-protects read/dismiss mutations", async () => {
     const listNotifications = vi.fn(async () => ({ notifications: [{ id: "notice-1", eventType: "files_added" as const, title: "New files", body: "Files are available.", actionPath: "/portal/deliveries", readAt: null, createdAt: "2026-08-13 12:00:00" }], unreadCount: 1, cursor: null }));
     const updateNotification = vi.fn(async () => true);

@@ -382,13 +382,30 @@ binding restricted to the one reviewed sender:
 
 Set `CLIENT_PORTAL_INVITATION_FROM` to that exact address and optionally set
 `CLIENT_PORTAL_INVITATION_FROM_NAME`. Keep
-`CLIENT_PORTAL_INVITATION_EMAIL_ENABLED=false` until a controlled staging
+`CLIENT_PORTAL_INVITATION_EMAIL_ENABLED=false` and
+`CLIENT_PORTAL_ACCESS_ENROLLMENT_READY=false` until a controlled staging
 invite proves delivery, Access login with the invited email, immediate URL
 fragment removal, acceptance, replay denial for another identity, revocation,
 lease recovery, transient retry, permanent failure, and token scrubbing. Do
 not use `remote: true` during ordinary local development because it sends real
 mail. The production config intentionally omits the binding until this gate is
 approved; a missing binding always disables the processor.
+
+The readiness flag is not a manual override. It may be true only after a
+dedicated internal workspace desired-state reconciler proves enrollment before
+mail, preserves enrollment while any workspace remains eligible, removes it
+after the last eligibility ends, and never mutates the staff Access group. The
+legacy account-scoped `client_access_sync_outbox` and staff Ops Sync processor
+do not meet that contract. Until the dedicated reconciler exists, keep the flag
+false; a manually enrolled staging tester validates acceptance mechanics only.
+
+The readiness flag alone cannot release an invitation. Migration `0133`
+requires the internal reconciler to write a live receipt for the exact
+invitation, workspace, normalized-email hash, current invitation-token hash,
+and enrollment version before the outbox row can be leased. The receipt must be
+revoked when eligibility or the invitation ends, and the staging packet must
+prove the revoke-versus-send race. No public or portal route writes receipts;
+the provider-side reconciler remains an external release prerequisite.
 
 The Project Alpha pricing preview is a separate outbound Client Worker
 integration. Set `PROJECT_ALPHA_PRICING_HINT_URL` to the exact HTTPS endpoint,
@@ -480,8 +497,10 @@ Set-Location ../operations
 npm.cmd run db:migrate:remote
 ```
 
-Confirm Delivery migrations through `0111_thumbnail_render_provenance.sql` and
-Operations migrations through `0022_r2_operation_retries.sql` appear in the
+Confirm Delivery migrations through `0112_thumbnail_renderer_jobs_root.sql`
+and `0114` through `0133_portal_invitation_access_enrollment_receipts.sql`
+(`0113` is the reserved production-ledger gap), and Operations migrations
+through `0023_project_task_sop_links.sql`, appear in the
 remote migration lists before deploying dependent Workers. Before the
 Operations deployment, separately verify the thumbnail queue and DLQ exist;
 the producer/main-consumer/DLQ consumer bindings resolve to those exact queues;

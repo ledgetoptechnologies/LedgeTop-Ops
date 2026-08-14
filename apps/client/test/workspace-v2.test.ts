@@ -2,9 +2,15 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import migration from "../migrations/0121_client_workspace_hierarchy_v2.sql?raw";
 import membershipMigration from "../migrations/0123_portal_v2_membership_management.sql?raw";
+import legacyBridgeMigration from "../migrations/0132_portal_v2_legacy_member_bridges.sql?raw";
+import accessReceiptMigration from "../migrations/0133_portal_invitation_access_enrollment_receipts.sql?raw";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
+import {
+  recordInvitationAccessEnrollmentReceipt,
+  revokeInvitationAccessEnrollmentReceipt,
+} from "../src/worker/client-portal/access-enrollment-receipts";
 import {
   acceptPortalWorkspaceInvitation,
   authorizePortalWorkspaceCapability,
@@ -19,7 +25,6 @@ import {
   listWorkspaceAccess,
   revokeWorkspaceInvitation,
   suspendWorkspaceMember,
-  transferWorkspaceManagerByStaff,
 } from "../src/worker/client-portal/workspace-memberships";
 import type { Env } from "../src/worker/types";
 
@@ -66,13 +71,20 @@ describe("client workspace hierarchy v2", () => {
         FOREIGN KEY(account_id) REFERENCES client_accounts(id),FOREIGN KEY(project_id) REFERENCES projects(id)
       );
       CREATE TABLE client_member_project_grants(
-        account_id TEXT NOT NULL,identity_id TEXT NOT NULL,project_id TEXT NOT NULL,revoked_at TEXT,
+        account_id TEXT NOT NULL,identity_id TEXT NOT NULL,project_id TEXT NOT NULL,granted_by_identity_id TEXT NOT NULL,revoked_at TEXT,
         PRIMARY KEY(account_id,identity_id,project_id)
       );
       CREATE TABLE client_folder_associations(
         id TEXT PRIMARY KEY,scope_type TEXT NOT NULL,project_id TEXT,account_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,
         created_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT (datetime('now')),revoked_at TEXT,
         logical_grant_id TEXT,grant_version INTEGER NOT NULL DEFAULT 1
+      );
+      CREATE TABLE file_index(
+        r2_key TEXT PRIMARY KEY,size INTEGER NOT NULL,uploaded_at TEXT NOT NULL,
+        content_type TEXT,media_kind TEXT NOT NULL
+      );
+      CREATE TABLE delivery_tombstones(
+        physical_key TEXT PRIMARY KEY,tombstone_kind TEXT NOT NULL,restored_at TEXT
       );
       CREATE TABLE client_service_requests(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,project_id TEXT,created_by_identity_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'submitted');
       CREATE TABLE client_service_request_drafts(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,project_id TEXT,created_by_identity_id TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'draft');
@@ -100,12 +112,21 @@ describe("client workspace hierarchy v2", () => {
       .replace(/^\s*--.*$/gm, "")
       .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
       .replace(/\s*\n\s*/g, " "));
+    await db.exec(legacyBridgeMigration
+      .replace(/^\s*--.*$/gm, "")
+      .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
+      .replace(/\s*\n\s*/g, " "));
+    await db.exec(accessReceiptMigration
+      .replace(/^\s*--.*$/gm, "")
+      .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
+      .replace(/\s*\n\s*/g, " "));
     await db.prepare("PRAGMA foreign_keys=ON").run();
     env = {
       DELIVERY_DB: db,
       CLIENT_PORTAL_ENABLED: "true",
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
       CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "true",
+      CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: "false",
       CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: "true",
       CLIENT_PORTAL_INVITATION_FROM: "portal@example.test",
       CLIENT_PORTAL_INVITATION_EMAIL: { send: async (_message: EmailMessageBuilder) => ({ messageId: "test-only" }) },
@@ -313,7 +334,7 @@ describe("client workspace hierarchy v2", () => {
     }, { ...env, CLIENT_PORTAL_TEAM_ENABLED: "true" })).status).toBe(403);
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_invitations").first<number>("count")).toBe(before);
     await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='cutover-deny-member-manage'").run();
-  });
+  }, 30_000);
 
   it("applies the selected-workspace draft guard to every request and attachment subroute", async () => {
     await db.prepare("INSERT INTO client_service_request_drafts(id,account_id,project_id,created_by_identity_id) VALUES ('draft-a','account-a','project-a','identity-one')").run();
@@ -452,6 +473,193 @@ describe("client workspace hierarchy v2", () => {
     expect(await acceptPortalWorkspaceInvitation(env, { issuer, subject: "expired", email: "expired@example.test" }, (JSON.parse(expiredPayload!) as { token: string }).token)).toBe("denied");
   }, 30_000);
 
+  it("requires the exact live Access enrollment receipt and never mixes invitation grants into a PA-owned membership", async () => {
+    const accessReadyEnv = { ...env, CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: "true" };
+    const create = async (email: string, key: string) => {
+      const created = await createWorkspaceInvitation(env, principal, "workspace-account-a", {
+        email, projectPublicId: "pa-project-a", capabilities: ["delivery.view"],
+      }, key);
+      if (created.outcome !== "created") throw new Error(`invitation was not created: ${created.outcome}`);
+      const payload = await db.prepare("SELECT payload_json FROM portal_v2_invitation_email_outbox WHERE invitation_id=?")
+        .bind(created.invitation.id).first<string>("payload_json");
+      return { invitation: created.invitation, token: (JSON.parse(payload!) as { token: string }).token };
+    };
+    const enroll = async (invitationId: string, email: string, version = 1) => recordInvitationAccessEnrollmentReceipt(accessReadyEnv, {
+      invitationId,
+      workspaceId: "workspace-account-a",
+      email,
+      enrollmentVersion: version,
+      providerReceiptHash: "R".repeat(43),
+      enrolledAt: new Date(Date.now() - 60_000).toISOString(),
+    });
+
+    const valid = await create("receipt-valid@example.test", "receipt-valid-acceptance-0001");
+    expect(await enroll(valid.invitation.id, "receipt-valid@example.test")).toBe(true);
+    expect(await acceptPortalWorkspaceInvitation(accessReadyEnv, {
+      issuer, subject: "receipt-valid", email: "receipt-valid@example.test",
+    }, valid.token)).toBe("accepted");
+
+    const missing = await create("receipt-missing@example.test", "receipt-missing-acceptance-01");
+    expect(await acceptPortalWorkspaceInvitation(accessReadyEnv, {
+      issuer, subject: "receipt-missing", email: "receipt-missing@example.test",
+    }, missing.token)).toBe("denied");
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_identities WHERE subject='receipt-missing'").first("count")).toBe(0);
+
+    const revoked = await create("receipt-revoked@example.test", "receipt-revoked-acceptance-01");
+    expect(await enroll(revoked.invitation.id, "receipt-revoked@example.test")).toBe(true);
+    expect(await revokeInvitationAccessEnrollmentReceipt(accessReadyEnv, revoked.invitation.id, "workspace-account-a", 1)).toBe(true);
+    expect(await acceptPortalWorkspaceInvitation(accessReadyEnv, {
+      issuer, subject: "receipt-revoked", email: "receipt-revoked@example.test",
+    }, revoked.token)).toBe("denied");
+    expect(await db.prepare("SELECT status FROM portal_v2_invitations WHERE id=?").bind(revoked.invitation.id).first("status")).toBe("pending");
+
+    const expired = await create("receipt-expired@example.test", "receipt-expired-acceptance-01");
+    expect(await enroll(expired.invitation.id, "receipt-expired@example.test")).toBe(true);
+    await db.prepare("UPDATE portal_v2_invitation_access_enrollment_receipts SET expires_at='2000-01-01T00:00:00Z' WHERE invitation_id=?")
+      .bind(expired.invitation.id).run();
+    expect(await acceptPortalWorkspaceInvitation(accessReadyEnv, {
+      issuer, subject: "receipt-expired", email: "receipt-expired@example.test",
+    }, expired.token)).toBe("denied");
+
+    const paOwned = await create("one@example.test", "pa-owned-acceptance-reject-01");
+    expect(await enroll(paOwned.invitation.id, "one@example.test")).toBe(true);
+    const beforeEntitlements = await db.prepare("SELECT COUNT(*) count FROM portal_v2_entitlements WHERE identity_id='identity-one' AND source_type='client_invitation'").first<number>("count");
+    expect(await acceptPortalWorkspaceInvitation(accessReadyEnv, principal, paOwned.token)).toBe("denied");
+    expect(await db.prepare("SELECT status FROM portal_v2_invitations WHERE id=?").bind(paOwned.invitation.id).first("status")).toBe("pending");
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_entitlements WHERE identity_id='identity-one' AND source_type='client_invitation'").first<number>("count")).toBe(beforeEntitlements);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_legacy_member_bridges WHERE invitation_id=?").bind(paOwned.invitation.id).first("count")).toBe(0);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_membership_audit WHERE invitation_id=? AND action='invitation.accepted'").bind(paOwned.invitation.id).first("count")).toBe(0);
+    await db.prepare(`UPDATE portal_v2_invitations SET created_at='2000-01-01T00:00:00Z'
+      WHERE id IN (?,?,?,?,?)`).bind(
+      valid.invitation.id,
+      missing.invitation.id,
+      revoked.invitation.id,
+      expired.invitation.id,
+      paOwned.invitation.id,
+    ).run();
+    await db.prepare(`UPDATE portal_v2_invitation_rate_limits
+      SET window_started_at='2000-01-01T00:00:00Z',request_count=0
+      WHERE workspace_id='workspace-account-a' AND actor_identity_id='identity-one'`).run();
+  }, 30_000);
+
+  it("does not backfill a legacy bridge for a historical accepted invitation on a PA-owned membership", async () => {
+    await db.batch([
+      db.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES ('identity-pa-history',?,'pa-history','pa-history@example.test')").bind(issuer),
+      db.prepare("INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status) VALUES ('membership-pa-history','workspace-account-a','identity-pa-history','project_alpha','active')"),
+      db.prepare(`INSERT INTO portal_v2_invitations
+        (id,workspace_id,token_hash,invited_email,invited_by_identity_id,status,expires_at,accepted_at,accepted_by_identity_id)
+        VALUES ('invitation-pa-history','workspace-account-a',?,'pa-history@example.test','identity-one','accepted','2099-01-01T00:00:00Z',datetime('now'),'identity-pa-history')`)
+        .bind("H".repeat(43)),
+    ]);
+
+    await db.exec(legacyBridgeMigration
+      .replace(/^\s*--.*$/gm, "")
+      .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
+      .replace(/\s*\n\s*/g, " "));
+
+    expect(await db.prepare("SELECT COUNT(*) count FROM client_identity_links WHERE subject='identity-pa-history' AND issuer='urn:ltds:portal-v2-bridge:workspace-account-a'").first("count")).toBe(0);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_legacy_member_bridges WHERE invitation_id='invitation-pa-history'").first("count")).toBe(0);
+    await expect(db.prepare(`INSERT INTO portal_v2_legacy_member_bridges
+      (workspace_id,identity_id,legacy_account_id,legacy_identity_id,invitation_id)
+      VALUES ('workspace-account-a','identity-pa-history','account-a','identity-one','invitation-pa-history')`).run())
+      .rejects.toThrow(/client invitation membership/);
+  });
+
+  it("atomically bridges an accepted guest into exact workspaces and revokes the bridge on suspension", async () => {
+    await db.batch([
+      db.prepare("INSERT OR IGNORE INTO projects(id,project_alpha_project_id,project_name) VALUES ('project-b','pa-project-b','South Site')"),
+      db.prepare("INSERT OR IGNORE INTO client_project_grants(account_id,project_id,can_request_service) VALUES ('account-a','project-b',1)"),
+      db.prepare("INSERT OR IGNORE INTO client_folder_associations(id,scope_type,project_id,account_id,r2_prefix,created_by) VALUES ('folder-b','project','project-b','account-a','clients/a/south/','staff')"),
+      db.prepare("INSERT OR IGNORE INTO file_index(r2_key,size,uploaded_at,content_type,media_kind) VALUES ('clients/a/north/photo.jpg',10,'2026-01-01T00:00:00Z','image/jpeg','image')"),
+      db.prepare("INSERT OR IGNORE INTO file_index(r2_key,size,uploaded_at,content_type,media_kind) VALUES ('clients/a/south/secret.jpg',10,'2026-01-01T00:00:00Z','image/jpeg','image')"),
+      db.prepare(`INSERT OR IGNORE INTO portal_v2_directory_entities
+        (workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version)
+        VALUES ('workspace-account-a','legacy-generation-account-a','project','pa-project-b','pa-org-a','South Site','1')`),
+    ]);
+    const created = await createWorkspaceInvitation(env, principal, "workspace-account-a", {
+      email: "scoped-guest@example.test", projectPublicId: "pa-project-a",
+      capabilities: ["delivery.view", "request.create"],
+    }, "scoped-legacy-bridge-0001");
+    if (created.outcome !== "created") throw new Error("invitation was not created");
+    const payload = await db.prepare("SELECT payload_json FROM portal_v2_invitation_email_outbox WHERE invitation_id=?")
+      .bind(created.invitation.id).first<string>("payload_json");
+    const guest = { issuer, subject: "scoped-guest-subject", email: "scoped-guest@example.test" };
+    expect(await acceptPortalWorkspaceInvitation(env, guest, (JSON.parse(payload!) as { token: string }).token)).toBe("accepted");
+    const contextA = await resolveEffectivePortalWorkspaceContext(env, guest, "workspace-account-a");
+    expect(contextA).toMatchObject({ legacyAccountId: "account-a", role: "member" });
+    const identityId = contextA!.identityId;
+    expect(contextA?.legacyIdentityId).toBe(`portal-v2-bridge:workspace-account-a:${identityId}`);
+
+    const createdRequestProjects: string[] = [];
+    const bridgeRepository = {
+      ...d1ClientPortalRepository,
+      createServiceRequest: async (_env: Env, _session: unknown, input: { projectId: string | null }) => {
+        createdRequestProjects.push(input.projectId ?? "");
+        return { kind: "created", request: { id: "guest-request", projectId: input.projectId } } as any;
+      },
+      listServiceRequests: async () => [
+        { id: "request-a", projectId: "project-a" },
+        { id: "request-b", projectId: "project-b" },
+      ] as any,
+    };
+    const router = createClientPortalRouter({ resolvePrincipal: async () => guest, repository: bridgeRepository as any });
+    const headers = { "X-LTDS-Workspace-Id": "workspace-account-a" };
+    const projects = await router.request("https://client.test/projects", { headers }, env);
+    expect(projects.status).toBe(200);
+    expect((await projects.json() as { projects: Array<{ id: string }> }).projects.map(project => project.id)).toEqual(["project-a"]);
+    const allowedFiles = await router.request("https://client.test/projects/project-a/files", { headers }, env);
+    expect(allowedFiles.status).toBe(200);
+    expect((await allowedFiles.json() as { files: Array<{ name: string }> }).files.map(file => file.name)).toEqual(["photo.jpg"]);
+    expect((await router.request("https://client.test/projects/project-b/files", { headers }, env)).status).toBe(404);
+    const requestHeaders = {
+      ...headers, Origin: "https://client.test", "Content-Type": "application/json",
+      "Idempotency-Key": "guest-request-route-0001",
+    };
+    const allowedRequest = await router.request("https://client.test/service-requests", {
+      method: "POST", headers: requestHeaders,
+      body: JSON.stringify({ projectId: "project-a", requestType: "service", title: "North Site", details: "Authorized request" }),
+    }, { ...env, PUBLIC_BULK_RATE_LIMITER: { limit: async () => ({ success: true }) } } as Env);
+    expect(allowedRequest.status).toBe(201);
+    const deniedRequest = await router.request("https://client.test/service-requests", {
+      method: "POST", headers: { ...requestHeaders, "Idempotency-Key": "guest-request-route-0002" },
+      body: JSON.stringify({ projectId: "project-b", requestType: "service", title: "South Site", details: "Out of scope" }),
+    }, { ...env, PUBLIC_BULK_RATE_LIMITER: { limit: async () => ({ success: true }) } } as Env);
+    expect(deniedRequest.status).toBe(404);
+    expect(createdRequestProjects).toEqual(["project-a"]);
+    const listedRequests = await router.request("https://client.test/service-requests", { headers }, env);
+    expect(listedRequests.status).toBe(200);
+    expect((await listedRequests.json() as { requests: Array<{ id: string }> }).requests.map(request => request.id)).toEqual(["request-a"]);
+
+    await addWorkspaceB();
+    await db.batch([
+      db.prepare("INSERT OR IGNORE INTO client_accounts(id,display_name,status,project_alpha_client_id) VALUES ('account-b','Beta Client','active','pa-client-b')"),
+      db.prepare("UPDATE portal_v2_workspaces SET legacy_account_id='account-b' WHERE id='workspace-b'"),
+    ]);
+    const tokenB = "B".repeat(48), tokenHashB = await hashPortalInvitationToken(tokenB);
+    await db.batch([
+      db.prepare(`INSERT INTO portal_v2_invitations
+        (id,workspace_id,token_hash,invited_email,invited_by_identity_id,expires_at)
+        VALUES ('scoped-guest-b','workspace-b',?,'scoped-guest@example.test','identity-one','2099-01-01T00:00:00Z')`).bind(tokenHashB),
+      db.prepare("INSERT INTO portal_v2_invitation_entitlements(invitation_id,capability,scope_type,scope_public_id) VALUES ('scoped-guest-b','workspace.view','workspace','workspace-b')"),
+    ]);
+    expect(await acceptPortalWorkspaceInvitation(env, guest, tokenB)).toBe("accepted");
+    const contextB = await resolveEffectivePortalWorkspaceContext(env, guest, "workspace-b");
+    expect(contextB?.legacyAccountId).toBe("account-b");
+    expect(contextB?.legacyIdentityId).not.toBe(contextA?.legacyIdentityId);
+
+    expect(await suspendWorkspaceMember(env, principal, "workspace-account-a", identityId!)).toBe("suspended");
+    expect(await resolveEffectivePortalWorkspaceContext(env, guest, "workspace-account-a")).toBeNull();
+    expect((await router.request("https://client.test/projects", { headers }, env)).status).toBe(403);
+    expect((await router.request("https://client.test/service-requests", { headers }, env)).status).toBe(403);
+    expect((await router.request("https://client.test/service-requests", {
+      method: "POST", headers: { ...requestHeaders, "Idempotency-Key": "guest-request-route-0003" },
+      body: JSON.stringify({ projectId: "project-a", requestType: "service", title: "Suspended", details: "Must fail" }),
+    }, { ...env, PUBLIC_BULK_RATE_LIMITER: { limit: async () => ({ success: true }) } } as Env)).status).toBe(403);
+    expect(await db.prepare("SELECT status FROM portal_v2_legacy_member_bridges WHERE workspace_id='workspace-account-a' AND identity_id=?")
+      .bind(identityId).first("status")).toBe("suspended");
+    expect(await resolveEffectivePortalWorkspaceContext(env, guest, "workspace-b")).not.toBeNull();
+  }, 30_000);
+
   it("protects the last manager and makes a suspended manager fail authorization immediately", async () => {
     expect(await suspendWorkspaceMember(env, principal, "workspace-account-a", "identity-one")).toBe("last_manager");
     await db.batch([
@@ -467,8 +675,6 @@ describe("client workspace hierarchy v2", () => {
     expect(await authorizePortalWorkspaceCapability(env, managerTwo, "workspace-account-a", "member.manage", { scopeType: "workspace", publicId: "workspace-account-a" })).toBe(false);
     expect(await listWorkspaceAccess(env, managerTwo, "workspace-account-a")).toBeNull();
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspace_memberships WHERE workspace_id='workspace-account-a' AND identity_id NOT IN ('identity-manager-two') AND status='active'").first<number>("count")).toBeGreaterThan(0);
-    expect(await transferWorkspaceManagerByStaff(env, "workspace-account-a", "identity-manager-two", "staff-admin-a")).toBe(true);
-    expect(await authorizePortalWorkspaceCapability(env, managerTwo, "workspace-account-a", "member.manage", { scopeType: "workspace", publicId: "workspace-account-a" })).toBe(true);
   });
 
   it("does not let a client suspension pretend to override a Project Alpha-managed member", async () => {
@@ -480,37 +686,38 @@ describe("client workspace hierarchy v2", () => {
 
   it("enforces same-origin and workspace authorization on membership HTTP routes", async () => {
     const router = createClientPortalRouter({ resolvePrincipal: async () => principal, repository: d1ClientPortalRepository });
+    const enabledEnv = { ...env, CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: "true" };
     const outboxBefore = await db.prepare("SELECT COUNT(*) count FROM portal_v2_invitation_email_outbox").first<number>("count");
     const disabled = await router.request("https://client.test/v2/workspaces/workspace-account-a/invitations", {
       method: "POST", headers: { Origin: "https://client.test", "Content-Type": "application/json", "Idempotency-Key": "route-disabled-test-0001" },
       body: JSON.stringify({ email: "route@example.test", projectPublicId: "pa-project-a", capabilities: ["delivery.view"] }),
-    }, { ...env, CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "false" });
+    }, { ...enabledEnv, CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "false" });
     expect(disabled.status).toBe(404);
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_invitation_email_outbox").first<number>("count")).toBe(outboxBefore);
 
     const deliveryDisabled = await router.request("https://client.test/v2/workspaces/workspace-account-a/invitations", {
       method: "POST", headers: { Origin: "https://client.test", "Content-Type": "application/json", "Idempotency-Key": "route-email-disabled-0001" },
       body: JSON.stringify({ email: "route@example.test", projectPublicId: "pa-project-a", capabilities: ["delivery.view"] }),
-    }, { ...env, CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: "false" });
+    }, { ...enabledEnv, CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: "false" });
     expect(deliveryDisabled.status).toBe(503);
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_invitation_email_outbox").first<number>("count")).toBe(outboxBefore);
 
     const forbiddenOrigin = await router.request("https://client.test/v2/workspaces/workspace-account-a/invitations", {
       method: "POST", headers: { Origin: "https://evil.test", "Content-Type": "application/json", "Idempotency-Key": "route-origin-test-000001" },
       body: JSON.stringify({ email: "route@example.test", projectPublicId: "pa-project-a", capabilities: ["delivery.view"] }),
-    }, env);
+    }, enabledEnv);
     expect(forbiddenOrigin.status).toBe(403);
 
     const crossWorkspace = await router.request("https://client.test/v2/workspaces/workspace-b/invitations", {
       method: "POST", headers: { Origin: "https://client.test", "Content-Type": "application/json", "Idempotency-Key": "route-idor-test-0000001" },
       body: JSON.stringify({ email: "route@example.test", organizationWide: true, confirmOrganizationWide: true, capabilities: ["delivery.view"] }),
-    }, env);
+    }, enabledEnv);
     expect(crossWorkspace.status).toBe(404);
 
     const valid = await router.request("https://client.test/v2/workspaces/workspace-account-a/invitations", {
       method: "POST", headers: { Origin: "https://client.test", "Content-Type": "application/json", "Idempotency-Key": "route-valid-test-0000001" },
       body: JSON.stringify({ email: "route@example.test", projectPublicId: "pa-project-a", capabilities: ["delivery.view"] }),
-    }, env);
+    }, enabledEnv);
     expect(valid.status).toBe(201);
   }, 30_000);
 

@@ -37,7 +37,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const migrationsDirectory = fileURLToPath(new URL("../migrations/", import.meta.url));
     for (const migration of readdirSync(migrationsDirectory).filter(name => name.endsWith(".sql")).sort()) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
-      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql", "0127_portal_invitation_secret_scrub.sql", "0129_portal_hierarchy_relations.sql", "0130_client_delegated_share_provisioning.sql"].includes(migration)) {
+      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql", "0127_portal_invitation_secret_scrub.sql", "0129_portal_hierarchy_relations.sql", "0130_client_delegated_share_provisioning.sql", "0132_portal_v2_legacy_member_bridges.sql", "0133_portal_invitation_access_enrollment_receipts.sql"].includes(migration)) {
         await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
         continue;
       }
@@ -146,7 +146,8 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       'portal_v2_workspaces','pa_service_catalog_generations','portal_v2_invitation_commands',
       'client_delegated_shares','pa_portal_projection_generations','delivery_share_audience_snapshots',
       'delivery_share_recipient_members','client_share_folder_target_labels','client_delegated_share_staff_mutations',
-      'legacy_video_thumbnail_recovery'
+      'legacy_video_thumbnail_recovery','portal_v2_legacy_member_bridges',
+      'portal_v2_invitation_access_enrollment_receipts'
     ) ORDER BY name`).all<{ name: string }>();
     expect(migrationTables.results.map(row => row.name)).toEqual([
       "client_access_sync_outbox",
@@ -166,7 +167,9 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       "legacy_video_thumbnail_recovery",
       "pa_portal_projection_generations",
       "pa_service_catalog_generations",
+      "portal_v2_invitation_access_enrollment_receipts",
       "portal_v2_invitation_commands",
+      "portal_v2_legacy_member_bridges",
       "portal_v2_workspaces",
       "request_pa_draft_quote_receipts",
     ]);
@@ -220,12 +223,24 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       'portal_v2_checkpoint_requires_complete_generation_insert',
       'portal_v2_checkpoint_requires_complete_generation_update',
       'portal_v2_checkpoint_prevents_out_of_order_update',
+      'portal_v2_legacy_bridge_new_project_grant',
+      'portal_v2_legacy_bridge_project_grant_lifecycle',
+      'portal_v2_legacy_bridge_reactivate_membership',
+      'portal_v2_legacy_bridge_suspend_membership',
+      'portal_v2_legacy_bridge_invitation_source_insert',
+      'portal_v2_legacy_bridge_invitation_source_update',
+      'portal_v2_invitation_revoke_access_receipt',
       'trg_delivery_share_audience_snapshots_no_update',
       'trg_delivery_share_audience_snapshots_no_delete',
       'trg_delivery_share_recipient_members_no_update',
       'trg_delivery_share_recipient_members_no_delete'
     ) ORDER BY name`).all<{ name: string }>()).results.map(row => row.name);
-    expect(triggerNames).toHaveLength(15);
+    expect(triggerNames).toHaveLength(22);
+    expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+    const bridgeMigration = readFileSync(new URL("../migrations/0132_portal_v2_legacy_member_bridges.sql", import.meta.url), "utf8")
+      .replace(/\r\n/g, "\n").replace(/^\s*--.*$/gm, "")
+      .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " ");
+    await expect(db.exec(bridgeMigration)).resolves.toBeTruthy();
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     await expect(db.prepare("INSERT INTO client_portal_notification_outbox (id,request_id,event_type,status_value,recipient_kind,dedupe_key,payload_json) VALUES ('migration-linked','migration-request','request_status_changed','accepted_linked','client_requester','request_status_changed:accepted_linked:client_requester','{}')").run()).resolves.toBeTruthy();
     await expect(db.prepare("INSERT INTO client_portal_notification_outbox (id,request_id,event_type,status_value,recipient_kind,dedupe_key,payload_json) VALUES ('migration-area-notice','migration-request','request_work_area_changed','under_review','client_requester','request_work_area_changed:migration-area-revision:client_requester','{}')").run()).resolves.toBeTruthy();
@@ -257,8 +272,18 @@ describe("client portal migrated-D1 end-to-end contract", () => {
   it("issues only authorization-bound file paths and reauthorizes before every controlled download", async () => {
     const projectFiles = await portal().request(`${portalOrigin}/projects/project-a/files`, {}, env);
     expect(projectFiles.status).toBe(200);
-    const projectBody = await projectFiles.json() as { files: Array<{ id: string; key: string; downloadPath: string }> };
-    expect(projectBody.files.map(file => file.key)).toEqual([
+    const projectRoot = await projectFiles.json() as { files: unknown[]; folders: Array<{ id: string; name: string }> };
+    expect(projectRoot.files).toEqual([]);
+    expect(projectRoot.folders.map(folder => folder.name).sort()).toEqual(["%", "Case", "north"]);
+    expect(JSON.stringify(projectRoot)).not.toContain("clients/acme/");
+    const folderPage = async (name: string) => {
+      const folder = projectRoot.folders.find(candidate => candidate.name === name)!;
+      const response = await portal().request(`${portalOrigin}/projects/project-a/files?folder=${encodeURIComponent(folder.id)}`, {}, env);
+      expect(response.status).toBe(200);
+      return response.json() as Promise<{ files: Array<{ id: string; key: string; downloadPath: string }>; folders: Array<{ id: string; name: string }> }>;
+    };
+    const [literalBody, caseBody, projectBody] = await Promise.all([folderPage("%"), folderPage("Case"), folderPage("north")]);
+    expect([...literalBody.files, ...caseBody.files, ...projectBody.files].map(file => file.key).sort()).toEqual([
       "clients/acme/%/literal.txt",
       "clients/acme/Case/exact.txt",
       "clients/acme/north/report.pdf",
@@ -319,7 +344,8 @@ describe("client portal migrated-D1 end-to-end contract", () => {
 
     await db.prepare(`INSERT INTO delivery_tombstones(id,physical_key,tombstone_kind,deleted_by,purge_after)
       VALUES('portal-tombstone','clients/acme/north/report.pdf','exact','staff-owner',datetime('now','+7 days'))`).run();
-    const trashedListing = await portal().request(`${portalOrigin}/projects/project-a/files`, {}, env);
+    const northFolder = projectRoot.folders.find(candidate => candidate.name === "north")!;
+    const trashedListing = await portal().request(`${portalOrigin}/projects/project-a/files?folder=${encodeURIComponent(northFolder.id)}`, {}, env);
     expect((await trashedListing.json() as { files: Array<{ key: string }> }).files.map(file => file.key))
       .not.toContain("clients/acme/north/report.pdf");
     const trashedDownload = await portal().request(`${portalOrigin}${routePath}`, {}, env);
@@ -331,6 +357,48 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     expect(restoredDownload.status).toBe(200);
     expect(bucketGetKeys).toEqual(["clients/acme/north/report.pdf"]);
   });
+
+  it("lists only immediate indexed children with bounded opaque pagination and rejects handle reuse", async () => {
+    bucketGetKeys.length = 0;
+    await db.prepare(`WITH RECURSIVE sequence(value) AS (
+      SELECT 0 UNION ALL SELECT value+1 FROM sequence WHERE value<1199
+    ) INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind)
+      SELECT 'clients/acme/north/mass/file-' || printf('%04d',value) || '.txt',
+        'etag-' || value,value+1,'2026-08-13T12:00:00.000Z','text/plain','text'
+      FROM sequence`).run();
+
+    const activeSession = await d1ClientPortalRepository.resolveSession(env, principal);
+    expect(activeSession).not.toBeNull();
+    const root = await d1ClientPortalRepository.listProjectFiles(env, activeSession!, "project-a") as { files: unknown[]; folders: Array<{ id: string; name: string }> };
+    expect(root.files).toEqual([]);
+    expect(root.folders).toHaveLength(3);
+    expect(bucketGetKeys).toEqual([]);
+    const north = root.folders.find(folder => folder.name === "north")!;
+    const northPage = await d1ClientPortalRepository.listProjectFiles(env, activeSession!, "project-a", null, north.id) as { files: Array<{ name: string }>; folders: Array<{ id: string; name: string }>; cursor: string | null };
+    expect(northPage.files.map(file => file.name)).toEqual(["report.pdf"]);
+    expect(northPage.folders.map(folder => folder.name)).toEqual(["mass"]);
+    expect(northPage.cursor).toBeNull();
+
+    const mass = northPage.folders[0]!;
+    let cursor: string | null = null;
+    let count = 0;
+    let pages = 0;
+    do {
+      const page = await d1ClientPortalRepository.listProjectFiles(env, activeSession!, "project-a", cursor, mass.id) as { files: Array<{ name: string }>; folders: unknown[]; cursor: string | null };
+      expect(page.files.length).toBeLessThanOrEqual(100);
+      expect(page.folders).toEqual([]);
+      count += page.files.length;
+      pages += 1;
+      cursor = page.cursor;
+    } while (cursor);
+    expect({ count, pages }).toEqual({ count: 1_200, pages: 12 });
+    expect(bucketGetKeys).toEqual([]);
+
+    const otherSession = await d1ClientPortalRepository.resolveSession(env, otherPrincipal);
+    expect(await d1ClientPortalRepository.listProjectFiles(env, otherSession!, "project-b", null, mass.id)).toBeNull();
+    const tampered = `${mass.id.slice(0, -1)}${mass.id.endsWith("A") ? "B" : "A"}`;
+    expect(await d1ClientPortalRepository.listProjectFiles(env, activeSession!, "project-a", null, tampered)).toBeNull();
+  }, 60_000);
 
   it("creates an idempotent request and durable staff-notification/audit records", async () => {
     const request = () => portal().request(`${portalOrigin}/service-requests`, {

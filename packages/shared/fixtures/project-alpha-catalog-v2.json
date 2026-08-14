@@ -1,6 +1,12 @@
 {
   "contract": "ltds-project-alpha-catalog-v2",
   "schemaVersion": 2,
+  "producerPolicy": {
+    "publishedEntryTypes": ["service"],
+    "feesPublished": false,
+    "bundlesPublished": false,
+    "note": "Catalog v2 is intentionally flat. Fees and bundles remain Project Alpha-only until a later versioned contract defines composition and pricing semantics."
+  },
   "itemLimits": {
     "categoryMaxLength": 100,
     "displayOrderMinimum": 0,
@@ -40,6 +46,63 @@
           ]
         }
       ]
+    }
+  ],
+  "invalidItems": [
+    {
+      "name": "private-unit-price",
+      "item": {
+        "publicId": "svc-private-price",
+        "sourceVersion": "catalog-item-v1",
+        "name": "Private price",
+        "summary": null,
+        "category": "Mapping",
+        "displayOrder": 30,
+        "geometryRequirement": "none",
+        "questions": [],
+        "unitPrice": "1000.00"
+      }
+    },
+    {
+      "name": "bundle-composition-not-in-v2",
+      "item": {
+        "publicId": "bundle-site-package",
+        "sourceVersion": "catalog-item-v1",
+        "name": "Site package",
+        "summary": null,
+        "category": "Packages",
+        "displayOrder": 30,
+        "geometryRequirement": "none",
+        "questions": [],
+        "entryType": "bundle",
+        "bundleItems": [{ "publicId": "svc-site-photography", "quantity": 1 }]
+      }
+    },
+    {
+      "name": "numeric-legacy-public-id",
+      "item": {
+        "publicId": "42",
+        "sourceVersion": "catalog-item-v1",
+        "name": "Legacy item",
+        "summary": null,
+        "category": "Mapping",
+        "displayOrder": 30,
+        "geometryRequirement": "none",
+        "questions": []
+      }
+    },
+    {
+      "name": "markup-in-summary",
+      "item": {
+        "publicId": "svc-markup",
+        "sourceVersion": "catalog-item-v1",
+        "name": "Markup",
+        "summary": "<script>alert(1)</script>",
+        "category": "Mapping",
+        "displayOrder": 30,
+        "geometryRequirement": "none",
+        "questions": []
+      }
     }
   ]
 }

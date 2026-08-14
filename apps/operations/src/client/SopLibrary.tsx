@@ -205,17 +205,36 @@ function versionHeaders(version: number): HeadersInit {
 
 function pathSlug(): string | null {
   const parts = location.pathname.split("/").filter(Boolean);
-  return parts[0] === "sops" && parts.length === 2 ? decodeURIComponent(parts[1]!) : null;
+  return parts[0] === "sops" && (parts.length === 2 || (parts.length === 4 && parts[2] === "revisions"))
+    ? decodeURIComponent(parts[1]!)
+    : null;
+}
+
+function pathRevisionId(): string | null {
+  const parts = location.pathname.split("/").filter(Boolean);
+  return parts[0] === "sops" && parts.length === 4 && parts[2] === "revisions"
+    ? decodeURIComponent(parts[3]!)
+    : null;
+}
+
+function pathRevisionContext(): { kind: "project" | "task"; id: string } | null {
+  const parameters = new URLSearchParams(location.search);
+  const kind = parameters.get("contextKind"), id = parameters.get("contextId")?.trim();
+  return (kind === "project" || kind === "task") && id ? { kind, id } : null;
 }
 
 export function SopLibrary({ user }: { user: SopUser }) {
   const canManage = user.isAdministrator && user.permissions.includes("sops.manage");
   const [workspace, setWorkspace] = useState<"library" | "admin">("library");
   const [slug, setSlug] = useState(pathSlug);
+  const [revisionId, setRevisionId] = useState(pathRevisionId);
+  const [revisionContext, setRevisionContext] = useState(pathRevisionContext);
 
   useEffect(() => {
     const sync = () => {
       setSlug(pathSlug());
+      setRevisionId(pathRevisionId());
+      setRevisionContext(pathRevisionContext());
       setWorkspace("library");
     };
     addEventListener("popstate", sync);
@@ -225,6 +244,8 @@ export function SopLibrary({ user }: { user: SopUser }) {
   const showLibrary = () => {
     if (location.pathname !== "/sops") history.pushState(null, "", "/sops");
     setSlug(null);
+    setRevisionId(null);
+    setRevisionContext(null);
     setWorkspace("library");
     window.scrollTo(0, 0);
   };
@@ -256,9 +277,13 @@ export function SopLibrary({ user }: { user: SopUser }) {
       ) : (
         <PublishedSopLibrary
           slug={slug}
+          revisionId={revisionId}
+          revisionContext={revisionContext}
           open={(nextSlug) => {
             history.pushState(null, "", `/sops/${encodeURIComponent(nextSlug)}`);
             setSlug(nextSlug);
+            setRevisionId(null);
+            setRevisionContext(null);
             window.scrollTo(0, 0);
           }}
           back={showLibrary}
@@ -270,10 +295,14 @@ export function SopLibrary({ user }: { user: SopUser }) {
 
 function PublishedSopLibrary({
   slug,
+  revisionId,
+  revisionContext,
   open,
   back,
 }: {
   slug: string | null;
+  revisionId: string | null;
+  revisionContext: { kind: "project" | "task"; id: string } | null;
   open(slug: string): void;
   back(): void;
 }) {
@@ -286,7 +315,12 @@ function PublishedSopLibrary({
     if (slug) {
       setDetail(null);
       setError("");
-      api<SopDetailResponse | SopDocument>(`/api/sops/${encodeURIComponent(slug)}`)
+      const endpoint = revisionId
+        ? `/api/sops/${encodeURIComponent(slug)}/revisions/${encodeURIComponent(revisionId)}${revisionContext
+          ? `?contextKind=${revisionContext.kind}&contextId=${encodeURIComponent(revisionContext.id)}`
+          : ""}`
+        : `/api/sops/${encodeURIComponent(slug)}`;
+      api<SopDetailResponse | SopDocument>(endpoint)
         .then((value) => setDetail(responseSop(value)))
         .catch((caught) => setError((caught as Error).message));
       return;
@@ -303,7 +337,7 @@ function PublishedSopLibrary({
     return () => {
       current = false;
     };
-  }, [slug, search]);
+  }, [slug, revisionId, revisionContext?.kind, revisionContext?.id, search]);
 
   if (slug) {
     if (!detail && !error) return <Loading />;
@@ -386,11 +420,13 @@ function SopReader({
         <button className="button-ghost" onClick={() => window.print()}>Print</button>
       </div>
       <header className="sop-document-heading">
-        <span className="eyebrow">Published internal SOP</span>
+        <span className="eyebrow">Pinned published SOP revision</span>
         <h1>{sop.title}</h1>
         <p>{sop.purpose}</p>
         <div className="sop-attribution">
-          <StatusPill tone="success">Revision {revision.revisionNumber}</StatusPill>
+          <StatusPill tone={sop.status === "archived" ? "neutral" : "success"}>
+            {sop.status === "archived" ? "Archived source · " : ""}Revision {revision.revisionNumber}
+          </StatusPill>
           <span>Published {formatDate(revision.publishedAt || sop.publishedAt)}</span>
           <span>By {authorName(revision.author || sop.author)}</span>
         </div>

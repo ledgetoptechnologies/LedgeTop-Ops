@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { DeliveryLocationCollection } from "@ltds/shared";
-import type { PortalServiceRequest } from "../../src/client/portal-api";
+import type { PortalFilePage, PortalServiceRequest } from "../../src/client/portal-api";
 
 const account = { id: "account-a", displayName: "Acme Surveying" };
 const projects = [{ id: "project-a", externalRef: "ALPHA-1", clientName: "Acme", projectName: "North Site", canRequestService: true, status: "in_progress", summary: "Aerial progress documentation", siteAddress: null, serviceAddress: "100 Main St", projectContactName: "LTDS Operations", projectContactEmail: "ops@example.com", projectContactPhone: null, nextMilestone: "Spring progress imagery", lastUpdateAt: "2026-08-01T12:00:00.000Z" }];
@@ -40,12 +40,14 @@ async function mockAuthorizedPortal(
   requestV2 = true,
   requestAttachments = false,
   attachmentEvents?: { workerBinaryBytes: number; directBytes: number; completed: boolean; scanAccepted: boolean },
+  projectFileFixture?: (url: URL) => PortalFilePage | Promise<PortalFilePage>,
 ) {
   let draftVersion = 1;
   let draftBody: Record<string, unknown> | null = null;
   await page.route("**/api/client/**", async route => {
     const request = route.request();
-    const path = new URL(request.url()).pathname;
+    const requestUrl = new URL(request.url());
+    const path = requestUrl.pathname;
     if (request.method() === "GET" && path === "/api/client/session") {
       await route.fulfill({ json: { account, capabilities: { manageTeam: true, viewBilling: false, requestV2, requestAttachments, invitationEmailDelivery: true } } });
     } else if (request.method() === "GET" && path === "/api/client/map-config") {
@@ -93,7 +95,7 @@ async function mockAuthorizedPortal(
       expect(request.postDataJSON()).toMatchObject({ action: expect.stringMatching(/read|dismiss/) });
       await route.fulfill({ json: { success: true } });
     } else if (request.method() === "GET" && path === "/api/client/projects/project-a/files") {
-      await route.fulfill({ json: filePage });
+      await route.fulfill({ json: projectFileFixture ? await projectFileFixture(requestUrl) : filePage });
     } else if (request.method() === "GET" && path === "/api/client/projects/project-a/file-locations") {
       await route.fulfill({ json: locationFixtures.project });
     } else if (request.method() === "GET" && path === "/api/client/past-deliveries") {
@@ -173,7 +175,8 @@ test("client-created links use opaque authorized targets and remain usable on de
   let revoked = false;
   await page.route("**/api/client/**", async route => {
     const request = route.request();
-    const path = new URL(request.url()).pathname;
+    const requestUrl = new URL(request.url());
+    const path = requestUrl.pathname;
     if (path === "/api/client/session") return route.fulfill({ json: { account, capabilities: { workspaceHierarchyV2: true, delegatedShares: true } } });
     if (path === "/api/client/v2/workspaces") return route.fulfill({ json: { workspaces: [{ id: "workspace-00000001", rootType: "organization", rootPublicId: "pa-org-one", displayName: "Acme" }] } });
     if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
@@ -237,7 +240,8 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
   const observed: Array<{ path: string; workspace: string | undefined }> = [];
   await page.route("**/api/client/**", async route => {
     const request = route.request();
-    const path = new URL(request.url()).pathname;
+    const requestUrl = new URL(request.url());
+    const path = requestUrl.pathname;
     const workspace = request.headers()["x-ltds-workspace-id"];
     observed.push({ path, workspace });
     if (path === "/api/client/session") {
@@ -312,6 +316,98 @@ test("authorized portal supports project, delivery, and request workflows", asyn
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
+test("project folders are keyboard accessible and restore opaque history/deep links", async ({ page }) => {
+  const fixture = (url: URL): PortalFilePage => {
+    const folder = url.searchParams.get("folder");
+    if (folder === "pf1_nested") return {
+      files: [{ ...filePage.files[0]!, id: "nested-file", name: "nested.pdf" }], folders: [], prefix: "", cursor: null,
+      folderId: folder, breadcrumbs: [{ id: null, name: "Project files" }, { id: "pf1_alpha", name: "Alpha files" }, { id: folder, name: "Nested plans" }],
+    };
+    if (folder === "pf1_alpha") return {
+      files: [{ ...filePage.files[0]!, id: "alpha-file", name: "alpha-summary.pdf" }],
+      folders: [{ id: "pf1_nested", name: "Nested plans" }], prefix: "", cursor: null,
+      folderId: folder, breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Alpha files" }],
+    };
+    return { files: [], folders: [{ id: "pf1_alpha", name: "Alpha files" }, { id: "pf1_beta", name: "Beta files" }],
+      breadcrumbs: [{ id: null, name: "Project files" }], folderId: null, prefix: "", cursor: null };
+  };
+  await mockAuthorizedPortal(page, null, requests, undefined, undefined, true, false, undefined, fixture);
+  await page.goto("/portal/projects/project-a?tab=files");
+  const alpha = page.getByRole("button", { name: /Alpha files/ });
+  await alpha.focus();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/tab=files&folder=pf1_alpha/);
+  await expect(page.getByText("alpha-summary.pdf")).toBeVisible();
+  await page.getByRole("button", { name: /Nested plans/ }).click();
+  await expect(page).toHaveURL(/folder=pf1_nested/);
+  await expect(page.getByText("nested.pdf")).toBeVisible();
+  await page.goBack();
+  await expect(page.getByText("alpha-summary.pdf")).toBeVisible();
+  await page.goBack();
+  await expect(alpha).toBeVisible();
+  await page.goForward();
+  await expect(page.getByText("alpha-summary.pdf")).toBeVisible();
+  await page.goto("/portal/projects/project-a?tab=files&folder=pf1_nested");
+  await expect(page.getByText("nested.pdf")).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Project file folders" })).toContainText("Alpha files");
+});
+
+test("project files progressively paint 1200 immediate children with one request in flight on mobile", async ({ page }) => {
+  let inFlight = 0;
+  let maximumInFlight = 0;
+  let pageCalls = 0;
+  const fixture = async (url: URL): Promise<PortalFilePage> => {
+    const folder = url.searchParams.get("folder");
+    if (folder !== "pf1_mass") return { files: [], folders: [{ id: "pf1_mass", name: "Large deliverable set" }],
+      breadcrumbs: [{ id: null, name: "Project files" }], folderId: null, prefix: "", cursor: null };
+    inFlight += 1;
+    maximumInFlight = Math.max(maximumInFlight, inFlight);
+    pageCalls += 1;
+    await new Promise(resolve => setTimeout(resolve, 8));
+    const pageIndex = Number(url.searchParams.get("cursor") ?? "0");
+    const files = Array.from({ length: 100 }, (_, offset) => {
+      const index = pageIndex * 100 + offset;
+      return { ...filePage.files[0]!, id: `mass-${index}`, name: `file-${String(index).padStart(4, "0")}.pdf` };
+    });
+    inFlight -= 1;
+    return { files, folders: [], breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Large deliverable set" }],
+      folderId: folder, prefix: "", cursor: pageIndex < 11 ? String(pageIndex + 1) : null };
+  };
+  await mockAuthorizedPortal(page, null, requests, undefined, undefined, true, false, undefined, fixture);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/portal/projects/project-a?tab=files");
+  await page.getByRole("button", { name: /Large deliverable set/ }).click();
+  await expect(page.getByText("file-0000.pdf")).toBeVisible();
+  expect(pageCalls).toBeLessThan(12);
+  await expect(page.getByText("file-1199.pdf")).toBeVisible();
+  expect({ pageCalls, maximumInFlight }).toEqual({ pageCalls: 12, maximumInFlight: 1 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("leaving a folder aborts a manual continuation and ignores its stale result", async ({ page }) => {
+  const fixture = async (url: URL): Promise<PortalFilePage> => {
+    const folder = url.searchParams.get("folder");
+    if (folder !== "pf1_long") return { files: [], folders: [{ id: "pf1_long", name: "Long folder" }],
+      breadcrumbs: [{ id: null, name: "Project files" }], folderId: null, prefix: "", cursor: null };
+    const pageIndex = Number(url.searchParams.get("cursor") ?? "0");
+    if (pageIndex === 20) await new Promise(resolve => setTimeout(resolve, 250));
+    return {
+      files: [{ ...filePage.files[0]!, id: `continuation-${pageIndex}`, name: pageIndex === 20 ? "stale-late.pdf" : `page-${pageIndex}.pdf` }],
+      folders: [], breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Long folder" }],
+      folderId: folder, prefix: "", cursor: pageIndex < 20 ? String(pageIndex + 1) : null,
+    };
+  };
+  await mockAuthorizedPortal(page, null, requests, undefined, undefined, true, false, undefined, fixture);
+  await page.goto("/portal/projects/project-a?tab=files");
+  await page.getByRole("button", { name: /Long folder/ }).click();
+  await expect(page.getByRole("button", { name: "Load more" })).toBeVisible();
+  await page.getByRole("button", { name: "Load more" }).click();
+  await page.getByRole("button", { name: "Project files" }).click();
+  await expect(page.getByRole("button", { name: /Long folder/ })).toBeVisible();
+  await page.waitForTimeout(300);
+  await expect(page.getByText("stale-late.pdf")).toHaveCount(0);
+});
+
 test("catalog geometry contract is visible and blocks progress until a required work area is drawn", async ({ page }) => {
   await mockAuthorizedPortal(page);
   await page.route("**/api/client/service-catalog", route => route.fulfill({
@@ -346,37 +442,74 @@ test("desktop portal navigation uses the client IA and restores routes with brow
   await expect(page).toHaveURL(/\/portal\/account$/);
 });
 
-test("workspace team UI defaults to project access and gates workspace-wide invitations", async ({ page }) => {
-  await mockAuthorizedPortal(page);
-  const invitations: Array<Record<string, unknown>> = [];
-  await page.route("**/api/client/**", async route => {
-    const request = route.request();
-    const path = new URL(request.url()).pathname;
-    if (path === "/api/client/session") return route.fulfill({ json: { account, capabilities: { manageTeam: true, workspaceHierarchyV2: true, workspaceMembershipManagement: true, invitationEmailDelivery: true, viewBilling: false, requestV2: true, requestAttachments: false } } });
-    if (path === "/api/client/v2/workspaces") return route.fulfill({ json: { workspaces: [{ id: "workspace-a", rootType: "organization", rootPublicId: "org-a", displayName: "Acme" }] } });
-    if (path === "/api/client/v2/workspaces/workspace-a/hierarchy") return route.fulfill({ json: { entries: [{ type: "project", publicId: "pa-project-a", parentPublicId: "org-a", displayName: "North Site", sourceVersion: "1" }] } });
-    if (path === "/api/client/v2/workspaces/workspace-a/access") return route.fulfill({ json: { members: [{ identityId: "member-a", email: "manager@example.test", status: "active", manager: true, source: "project_alpha" }], invitations } });
-    if (path === "/api/client/v2/workspaces/workspace-a/invitations" && request.method() === "POST") {
-      invitations.push({ id: "invite-a", email: request.postDataJSON().email, status: "pending", scope: { type: request.postDataJSON().organizationWide ? "workspace" : "project", publicId: request.postDataJSON().projectPublicId ?? null }, capabilities: request.postDataJSON().capabilities, expiresAt: "2099-01-01T00:00:00Z" });
-      return route.fulfill({ status: 201, json: { outcome: "created" } });
+for (const width of [1280, 390, 320]) {
+  test(`workspace hierarchy invitations are scoped, keyboard accessible, and responsive at ${width}px`, async ({ page }) => {
+    await mockAuthorizedPortal(page);
+    const invitations: Array<Record<string, unknown>> = [];
+    const invitationBodies: Array<Record<string, unknown>> = [];
+    await page.route("**/api/client/**", async route => {
+      const request = route.request();
+      const path = new URL(request.url()).pathname;
+      if (path === "/api/client/session") return route.fulfill({ json: { account, capabilities: { manageTeam: true, workspaceHierarchyV2: true, workspaceMembershipManagement: true, hierarchyScopedInvitations: true, invitationEmailDelivery: true, viewBilling: false, requestV2: true, requestAttachments: false } } });
+      if (path === "/api/client/v2/workspaces") return route.fulfill({ json: { workspaces: [{ id: "workspace-a", rootType: "organization", rootPublicId: "org-a", displayName: "Acme" }] } });
+      if (path === "/api/client/v2/workspaces/workspace-a/hierarchy") return route.fulfill({ json: { entries: [
+        { type: "organization", publicId: "org-a", parentPublicId: null, displayName: "Acme", sourceVersion: "1" },
+        { type: "department", publicId: "department-a", parentPublicId: "org-a", displayName: "Survey", sourceVersion: "1" },
+        { type: "client", publicId: "client-a", parentPublicId: "department-a", displayName: "North Contact", sourceVersion: "1" },
+        { type: "project", publicId: "pa-project-a", parentPublicId: "department-a", displayName: "North Site", sourceVersion: "1" },
+        { type: "project", publicId: "pa-project-b", parentPublicId: "department-a", displayName: "South Site", sourceVersion: "1" },
+      ] } });
+      if (path === "/api/client/v2/workspaces/workspace-a/access") return route.fulfill({ json: { members: [{ identityId: "member-a", email: "manager@example.test", status: "active", manager: true, source: "project_alpha" }], invitations } });
+      if (path === "/api/client/v2/workspaces/workspace-a/invitations" && request.method() === "POST") {
+        const body = request.postDataJSON() as Record<string, any>;
+        invitationBodies.push(body);
+        invitations.push({ id: `invite-${invitations.length}`, email: body.email, status: "pending", scope: body.organizationWide ? { type: "workspace", publicId: null } : body.targetScope, capabilities: body.capabilities, expiresAt: "2099-01-01T00:00:00Z" });
+        return route.fulfill({ status: 201, json: { outcome: "created" } });
+      }
+      return route.fallback();
+    });
+    await page.setViewportSize({ width, height: width < 600 ? 844 : 900 });
+    await page.goto("/portal/account");
+    await expect(page.getByRole("heading", { name: "Invite a collaborator" })).toBeVisible();
+    const hierarchy = page.getByRole("radiogroup", { name: "Client hierarchy" });
+    const defaultProject = hierarchy.getByRole("radio", { name: /North Site/ });
+    await expect(defaultProject).toBeChecked();
+
+    await page.getByLabel("Find a scope").fill("South");
+    await expect(hierarchy.getByRole("radio", { name: /South Site/ })).toBeVisible();
+    await expect(defaultProject).toHaveCount(0);
+    await page.getByLabel("Find a scope").fill("");
+
+    const department = hierarchy.getByRole("radio", { name: /Survey/ });
+    await department.focus();
+    await page.keyboard.press("Space");
+    await expect(department).toBeChecked();
+    await page.getByLabel("Email address").fill("contractor@example.test");
+    await page.getByRole("button", { name: "Send invitation" }).click();
+    await expect.poll(() => invitationBodies.length).toBe(1);
+    expect(invitationBodies[0]).toMatchObject({ email: "contractor@example.test", targetScope: { type: "department", publicId: "department-a" }, capabilities: ["delivery.view"] });
+    expect(invitationBodies[0]).not.toHaveProperty("projectPublicId");
+
+    const organization = hierarchy.getByRole("radio", { name: /^Acme/ });
+    await organization.check();
+    await expect(page.getByRole("button", { name: "Send invitation" })).toBeDisabled();
+    await expect(page.getByRole("alert")).toContainText("current and future projects across this organization");
+    await page.getByLabel("I understand and want to grant organization-wide access.").check();
+    await expect(page.getByRole("button", { name: "Send invitation" })).toBeEnabled();
+
+    await page.getByLabel("Give access across this entire organization workspace").check();
+    await expect(page.getByRole("button", { name: "Send invitation" })).toBeDisabled();
+    await page.getByLabel("I understand and want to grant workspace-wide access.").check();
+    await expect(page.getByRole("button", { name: "Send invitation" })).toBeEnabled();
+
+    if (width <= 390) {
+      const overflow = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("body *")]
+        .filter(element => { const rect = element.getBoundingClientRect(); return rect.right > window.innerWidth + 1 || rect.left < -1; })
+        .map(element => ({ className: element.className, tag: element.tagName, left: element.getBoundingClientRect().left, right: element.getBoundingClientRect().right })));
+      expect(overflow).toEqual([]);
     }
-    return route.fallback();
   });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/portal/account");
-  await expect(page.getByRole("heading", { name: "Invite a project collaborator" })).toBeVisible();
-  await page.getByLabel("Email address").fill("contractor@example.test");
-  await expect(page.getByLabel("Project")).toHaveValue("pa-project-a");
-  await page.getByLabel("Give access across this entire client workspace").check();
-  await expect(page.getByRole("button", { name: "Send invitation" })).toBeDisabled();
-  await expect(page.getByRole("alert")).toContainText("current and future projects");
-  await page.getByLabel("I understand and want to grant workspace-wide access.").check();
-  await expect(page.getByRole("button", { name: "Send invitation" })).toBeEnabled();
-  const overflow = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("body *")]
-    .filter(element => { const rect = element.getBoundingClientRect(); return rect.right > window.innerWidth + 1 || rect.left < -1; })
-    .map(element => ({ className: element.className, tag: element.tagName, left: element.getBoundingClientRect().left, right: element.getBoundingClientRect().right })));
-  expect(overflow).toEqual([]);
-});
+}
 
 for (const width of [320, 390, 768]) {
   test(`portal mobile drawer is accessible without overflow at ${width}px`, async ({ page }) => {

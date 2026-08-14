@@ -5,6 +5,7 @@ import { renderSopMarkdown } from "../sop-markdown";
 import { requirePermission } from "./acl";
 import { auditAddress } from "./request-security";
 import type { Env, StaffPrincipal } from "./types";
+import { readAuthorizedWorkContextSopRevision } from "./work-context-sops";
 
 type AppEnv = {
   Bindings: Env;
@@ -245,6 +246,49 @@ export function registerSopRoutes(app: App): void {
       publishedRevisionNumber: row.revision_number,
       draftRevisionNumber: null,
     })) });
+  });
+
+  app.get("/api/sops/:slug/revisions/:revisionId", async c => {
+    const principal = c.get("principal");
+    const row = await readAuthorizedWorkContextSopRevision(
+      c.env,
+      principal,
+      c.req.query("contextKind"),
+      c.req.query("contextId"),
+      c.req.param("slug"),
+      c.req.param("revisionId"),
+    );
+    c.header("ETag", `"sop-revision-${row.revision_id}"`);
+    c.header("Cache-Control", "private, no-store");
+    return c.json({ sop: {
+      id: row.id,
+      slug: row.slug,
+      status: row.status,
+      version: row.version,
+      title: row.title,
+      purpose: row.purpose,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      publishedAt: row.revision_published_at,
+      revision: revisionDto({
+        id: row.revision_id,
+        sop_id: row.id,
+        revision_number: row.revision_number,
+        parent_revision_id: row.parent_revision_id,
+        change_kind: row.change_kind,
+        title: row.title,
+        purpose: row.purpose,
+        markdown_body: row.markdown_body,
+        rendered_html: row.rendered_html,
+        toc_json: row.toc_json,
+        sanitizer_version: row.sanitizer_version,
+        author_id: row.author_id,
+        author_email: row.author_email,
+        author_display_name: row.author_display_name,
+        created_at: row.revision_created_at,
+        published_at: row.revision_published_at,
+      }),
+    } });
   });
 
   app.get("/api/sops/:slug", async c => {

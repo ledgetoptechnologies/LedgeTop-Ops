@@ -84,13 +84,16 @@ describe("internal SOP migration sequence", () => {
     const tables = database.prepare(
       `SELECT name FROM sqlite_master
        WHERE type='table' AND name IN
-         ('sop_documents','sop_revisions','operational_job_brief_sop_links')
+         ('sop_documents','sop_revisions','operational_job_brief_sop_links',
+          'work_context_sop_link_sets','work_context_sop_links')
        ORDER BY name`,
     ).all();
     expect(tables).toEqual([
       { name: "operational_job_brief_sop_links" },
       { name: "sop_documents" },
       { name: "sop_revisions" },
+      { name: "work_context_sop_link_sets" },
+      { name: "work_context_sop_links" },
     ]);
 
     const grants = database.prepare(
@@ -183,6 +186,70 @@ describe("internal SOP migration sequence", () => {
       operation_id: "operation-1",
       sop_id: "sop-1",
       revision_id: "revision-1",
+    });
+    expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+    expect(database.prepare("PRAGMA integrity_check").all()).toEqual([
+      { integrity_check: "ok" },
+    ]);
+  });
+
+  it("keeps Project and Task links direct, immutable, and pinned after archival", () => {
+    database = new DatabaseSync(":memory:");
+    database.exec("PRAGMA foreign_keys=ON");
+    applyOperationsMigrations(database);
+    database.prepare(
+      `INSERT INTO pa_projects
+        (id,name,status,active,payload_json,last_sync_id)
+       VALUES ('project-1','North site','active',1,'{}','test-sync')`,
+    ).run();
+    database.prepare(
+      `INSERT INTO pa_tasks
+        (id,project_id,title,status,payload_json,last_sync_id,active)
+       VALUES ('task-1','project-1','Capture LiDAR','todo','{}','test-sync',1)`,
+    ).run();
+    for (const [kind, id] of [["project", "project-1"], ["task", "task-1"]] as const) {
+      database.prepare(
+        `INSERT INTO work_context_sop_link_sets
+          (context_kind,context_id,version,mutation_id,updated_by)
+         VALUES (?,?,1,?,?)`,
+      ).run(kind, id, `mutation-${kind}`, "staff-beau-koltz");
+    }
+    insertDocument(database, "sop-context", "lidar-capture");
+    insertRevision(database, "revision-context", "sop-context", 1);
+    database.prepare(
+      "UPDATE sop_documents SET draft_revision_id='revision-context' WHERE id='sop-context'",
+    ).run();
+    const link = (kind: "project" | "task", id: string) => database!.prepare(
+      `INSERT INTO work_context_sop_links
+        (context_kind,context_id,sop_id,revision_id,linked_by)
+       VALUES (?,?,'sop-context','revision-context','staff-beau-koltz')`,
+    ).run(kind, id);
+
+    expect(() => link("project", "project-1")).toThrow(/current published SOP revision/);
+    database.prepare(
+      `UPDATE sop_documents SET status='published',published_revision_id='revision-context',
+        published_at=datetime('now') WHERE id='sop-context'`,
+    ).run();
+    expect(link("project", "project-1").changes).toBe(1);
+    expect(database.prepare(
+      "SELECT COUNT(*) count FROM work_context_sop_links WHERE context_kind='task' AND context_id='task-1'",
+    ).get()).toEqual({ count: 0 });
+    expect(() => database!.prepare(
+      "UPDATE work_context_sop_links SET context_kind='task' WHERE context_kind='project' AND context_id='project-1'",
+    ).run()).toThrow(/immutable/);
+
+    database.prepare(
+      "UPDATE sop_documents SET status='archived',archived_at=datetime('now') WHERE id='sop-context'",
+    ).run();
+    expect(() => link("task", "task-1")).toThrow(/current published SOP revision/);
+    expect(database.prepare(
+      `SELECT context_kind,context_id,sop_id,revision_id FROM work_context_sop_links
+       WHERE context_kind='project' AND context_id='project-1'`,
+    ).get()).toEqual({
+      context_kind: "project",
+      context_id: "project-1",
+      sop_id: "sop-context",
+      revision_id: "revision-context",
     });
     expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
     expect(database.prepare("PRAGMA integrity_check").all()).toEqual([

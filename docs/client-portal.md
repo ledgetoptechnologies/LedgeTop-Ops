@@ -87,7 +87,8 @@ This feature is fail-closed. Keep `CLIENT_PORTAL_REQUEST_V2_ENABLED` and
 `CLIENT_REQUEST_ATTACHMENTS_ENABLED` false until a real scanner consumes
 quarantine objects and authenticates scan receipts with the 32+ character
 `CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET`. Apply
-`apps/client/r2-request-attachments-cors.json`, use least-privilege R2
+`apps/client/r2-request-attachments-cors.json` in production and
+`docs/staging/request-attachments-r2-cors.json` in staging, use least-privilege R2
 Object Read & Write credentials stored only as
 `CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID` and
 `CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY`, configure an R2 lifecycle backstop for
@@ -357,11 +358,12 @@ addresses; and execute cross-account, revoked-access, retry, and rollback
 checks. The checked-in staging config intentionally leaves the Mapbox token and
 triage address blank and SMTP disabled, so it is not release-ready.
 
-Production was authorized and deployed directly. Ongoing release hygiene still
-requires committing the exact deployed working tree, attaching this evidence to
-the release record, confirming alert ownership, and running a separate staging
-exercise before the next schema release. PA verification credentials must
-remain read-only.
+The reviewed LTDS source through commit `3f8b104` is committed and pushed, but
+that commit has not been promoted to the live Workers and Delivery D1 still has
+pending additive migrations. Portal-v2 capabilities remain disabled. Promotion
+requires the isolated staging exercise, evidence packet, backups, external
+provider integrations, and explicit deployment/migration approval. PA
+verification credentials must remain read-only.
 
 ## Known limitations and blockers
 
@@ -381,13 +383,11 @@ remain read-only.
   was not validated. Production `ALERT_FROM`/`ALERT_TO` are blank, so the
   separate terminal-failure alert path still needs an owned destination even
   though request mail delivery is configured.
-- The release was deployed from an uncommitted working tree by explicit
-  authorization. No push or merge was performed; the exact diff must be
-  reviewed and committed before normal source-controlled promotion resumes.
-- Unsaved-form navigation protection and richer client-side POI naming/removal
-  remain high-priority usability work. Staff can already see every POI label
-  and coordinate. KML import is intentionally deferred pending a confirmed
-  pilot intake need and a bounded parser/security contract.
+- Unsaved-form navigation protection and richer client-side POI naming remain
+  usability follow-ups. Staff can already see every POI label and coordinate.
+- Client KML upload/import/export is intentionally prohibited. Clients draw the
+  work area in Mapbox; authorized Operations staff may export the accepted or
+  revised geometry as KML.
 
 ## Todd's App read-only UX decision record
 
@@ -404,9 +404,8 @@ staff auto-fit geometry review.
 
 Adopt in priority order: (1) protect dirty request/map forms from accidental
 Cancel or navigation; (2) add accessible client POI naming/remove/focus
-controls—the staff roster was added now; (3) add constrained KML import only if
-pilot intake confirms the need, with file/geometry limits, no remote links, and
-malformed/unsupported geometry tests.
+controls. Do not adopt client KML import; Mapbox remains the client input
+surface and KML remains an Operations-only export.
 
 Reject or defer: browser/localStorage role gates, financial proposal/quote
 ownership, direct client status mutation, automatic geolocation, destructive
@@ -554,8 +553,13 @@ an email delivery outbox, and membership audit. Acceptance binds the exact
 normalized invitation email to a cryptographically verified Access
 issuer/subject; email alone never authorizes. Member removal is a recoverable
 suspension that leaves child grants available for reassignment and refuses to
-orphan the last active manager. The staff transfer/recovery function is not
-exposed until an Operations caller enforces `client.accounts.manage`.
+orphan the last active manager. Operations exposes the default-off staff
+transfer/recovery workflow under Administration. The route requires an
+administrator session plus global `operations.manage`, proves the replacement
+is a live effective manager, grants only missing Operations-owned
+`workspace.view` and `member.manage`, and suspends the previous manager only
+after the replacement is effective. It never reactivates unrelated grants or
+locally promotes/removes a Project Alpha-owned membership.
 Migration `0127_portal_invitation_secret_scrub.sql` adds the terminal-state D1
 trigger that atomically cancels a leased delivery and redacts its plaintext
 token whenever an invitation is accepted, revoked, or explicitly expired.
@@ -594,9 +598,10 @@ Do not enable the flag until all of these gates have evidence:
   invitation state immediately before handoff, and scrubs the plaintext token
   after send, cancellation, acceptance, expiry, or permanent failure. Never
   log `payload_json`, message bodies, or invitation URLs.
-- Operations exposes transfer/recovery only from administrator routes with
-  global `delivery.share.audit`/`delivery.share.revoke`; the client Worker
-  cannot call that seam.
+- Operations exposes workspace-manager transfer/recovery only from
+  administrator routes with global `operations.manage`; the client Worker
+  cannot call that seam. Delegated-share recovery remains separately governed
+  by the delivery-share permissions documented above.
 - Cross-workspace IDOR, revoked/expired grants, deny precedence, incomplete and
   out-of-order generations, invitation replay, legacy-route isolation, mobile
   account switching, migration upgrade, and foreign-key tests all pass in
@@ -609,10 +614,36 @@ Invitation links use
 the HTTP request and referrer; the acceptance screen replaces the current
 history entry without the fragment before it calls the authenticated API. The
 backend still requires the exact Access-verified email, an unexpired pending
-invitation, and the stored token hash. Replays by the same issuer/subject are
-idempotent; a different email or subject is denied. Email delivery does not
+invitation, the stored token hash, and—when autonomous enrollment is enabled—the
+exact current, unrevoked invitation enrollment receipt in the same acceptance
+transaction. It rejects an invitation for an identity whose existing workspace
+membership is Project Alpha-owned, so local invitation entitlements and legacy
+bridges cannot acquire a second lifecycle owner. Migration `0132` enforces the
+same `client_invitation` source invariant for historical backfill and direct
+database bridge writes. Replays by the same issuer/subject are idempotent; a
+different email or subject is denied. Email delivery does not
 provision Cloudflare Access by itself, so the Access enrollment gate remains a
 separate release requirement.
+
+The existing `client_access_sync_outbox` cannot satisfy that requirement for
+workspace-v2. It is legacy-account scoped, emits imperative per-source
+provision/revoke commands, and has no deployed consumer; using it could remove
+an email that remains eligible through a different workspace. Autonomous mail
+therefore also requires `CLIENT_PORTAL_ACCESS_ENROLLMENT_READY=true`, which is
+reserved for a dedicated internal desired-state reconciler targeting only the
+Client Portal Access group. The public Client Worker must never receive the
+Access management token. Manual staging pre-enrollment can exercise acceptance
+UX but is not autonomous-invitation release evidence.
+
+Migration `0133_portal_invitation_access_enrollment_receipts.sql` adds the
+durable handoff contract for that future reconciler. A newly queued invitation
+cannot be leased by the email processor without a live server-written receipt
+bound to its invitation ID, workspace ID, normalized-email SHA-256, current
+invitation-token hash, and monotonic enrollment version. Terminal invitation
+state revokes the receipt. The global readiness flag remains an additional
+operator gate; it never substitutes for the per-invitation receipt. Existing
+queued rows are deliberately left without a recipient hash and remain
+ineligible until a reviewed reissue flow creates a new invitation.
 
 ## Provider-neutral future integration
 

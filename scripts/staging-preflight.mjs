@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
@@ -171,6 +171,12 @@ export function validateCrossApp(configs) {
   return errors;
 }
 
+export function validateRequestAttachmentCors(config) {
+  return JSON.stringify(config) === JSON.stringify(STAGING_REQUEST_ATTACHMENT_R2_CORS)
+    ? []
+    : ["staging request-attachment R2 CORS must exactly match the approved origin, PUT method, content-type header, etag exposure, and max age"];
+}
+
 export function validateFiles(base = root) {
   const configs = {};
   const errors = [];
@@ -182,6 +188,12 @@ export function validateFiles(base = root) {
       configs[app] = readJson(stagingFile);
       errors.push(...validateApp(app, configs[app], readJson(path.join(base, "apps", sourceDir, "wrangler.jsonc"))));
     } catch (error) { errors.push(`${path.relative(base, stagingFile)} is invalid JSON: ${error.message}`); }
+  }
+  const corsFile = path.join(base, "docs", "staging", "request-attachments-r2-cors.json");
+  if (!fs.existsSync(corsFile)) errors.push(`${path.relative(base, corsFile)} is missing`);
+  else {
+    try { errors.push(...validateRequestAttachmentCors(readJson(corsFile))); }
+    catch (error) { errors.push(`${path.relative(base, corsFile)} is invalid JSON: ${error.message}`); }
   }
   if (apps.every((app) => configs[app])) errors.push(...validateCrossApp(configs));
   return errors;

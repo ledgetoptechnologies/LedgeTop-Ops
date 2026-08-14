@@ -89,7 +89,10 @@ describe("Project Alpha portal hierarchy projection", () => {
     for (const specimen of portalFixture.invalid)
       expect(() => parsePortalProjectionDelivery(specimen.delivery, portalFixture.applicationKey))
         .toThrow(specimen.expectedError);
-    expect(portalFixture.relationProjectionStatus.acceptedByCurrentReceiver).toBe(false);
+    expect(portalFixture.relationProjectionStatus).toMatchObject({
+      acceptedWhenRelationsFlagEnabled: true,
+      runtimeFeatureFlagDefault: false,
+    });
   });
 
   it("stages a complete bounded generation and atomically activates hierarchy and unbound authorization intent", async () => {

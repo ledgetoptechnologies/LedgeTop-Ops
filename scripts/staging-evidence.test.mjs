@@ -68,6 +68,24 @@ function fixture(base) {
     },
     approvals: { stagingDnsAndRoutes: true, stagingMigrations: true, stagingDeployment: true, productionChanges: false },
   };
+  Object.assign(evidence.externalGates.workspaceAccessEnrollment, {
+    mode: "dedicated_workspace_reconciler",
+    clientGroupIsolated: true,
+    enrollmentBeforeEmail: true,
+    perInvitationReceiptEnforced: true,
+    receiptBindsWorkspaceAndEmailHash: true,
+    receiptRevocationRaceVerified: true,
+    multiWorkspaceRetention: true,
+    lastEligibilityRevocation: true,
+    staffGroupUnchanged: true,
+    processorEvidenceRef: "ticket:client-access-reconciler",
+  });
+  Object.assign(evidence.externalGates.requestAttachmentR2CorsAndLeastPrivilege, {
+    corsArtifact: "docs/staging/request-attachments-r2-cors.json",
+    allowedOriginPutVerified: true,
+    outOfScopeOriginDenied: true,
+    leastPrivilegeCredentialVerified: true,
+  });
   return { configs, evidence };
 }
 
@@ -115,4 +133,25 @@ test("fails closed when any portal-v2 external dependency lacks current evidence
   assert(errors.some((error) => error.includes("delegatedShareSignerBinding")), errors.join(" | "));
   assert(errors.some((error) => error.includes("requestAttachmentScanner")), errors.join(" | "));
   assert(errors.some((error) => error.includes("trueNasVideoThumbnailRenderer")), errors.join(" | "));
+});
+test("rejects generic or legacy Access enrollment evidence for autonomous invitations", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-enrollment-"));
+  const { evidence, configs, configHashes } = fixture(base);
+  evidence.externalGates.workspaceAccessEnrollment.mode = "manual_pre_enrollment";
+  evidence.externalGates.workspaceAccessEnrollment.enrollmentBeforeEmail = false;
+  evidence.externalGates.workspaceAccessEnrollment.perInvitationReceiptEnforced = false;
+  evidence.externalGates.workspaceAccessEnrollment.processorEvidenceRef = "";
+  const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now });
+  for (const expected of ["dedicated workspace reconciler", "enrollmentBeforeEmail", "perInvitationReceiptEnforced", "processor evidence"]) {
+    assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
+  }
+});
+test("requires staging attachment CORS and least-privilege browser evidence", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-cors-"));
+  const { evidence, configs, configHashes } = fixture(base);
+  evidence.externalGates.requestAttachmentR2CorsAndLeastPrivilege.corsArtifact = "apps/client/r2-request-attachments-cors.json";
+  evidence.externalGates.requestAttachmentR2CorsAndLeastPrivilege.outOfScopeOriginDenied = false;
+  const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now });
+  assert(errors.some((error) => error.includes("reviewed staging CORS artifact")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("outOfScopeOriginDenied")), errors.join(" | "));
 });

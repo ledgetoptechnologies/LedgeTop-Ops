@@ -82,8 +82,12 @@ export interface DelegatedShareFolderContext {
   managers: Array<{ identityId: string; email: string | null; entitlementId: string }>;
 }
 
+export function delegatedShareProvisioningEnabled(env: Env): boolean {
+  return env.CLIENT_DELEGATED_SHARE_SIGNER_ENABLED === "true";
+}
+
 function provisioningEnabled(env: Env): void {
-  if (env.CLIENT_DELEGATED_SHARE_SIGNER_ENABLED !== "true")
+  if (!delegatedShareProvisioningEnabled(env))
     throw new HTTPException(404, { message: "Not found" });
 }
 

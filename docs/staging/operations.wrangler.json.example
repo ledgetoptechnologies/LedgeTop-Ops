@@ -23,6 +23,7 @@
     "PROJECT_ALPHA_BASE_URL": "https://project-alpha-staging.ledgetopdroneservices.com",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "false",
+    "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "false",
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED": "false",
     "APPLICATION_KEY": "ltds_ops_staging",
     "TFR_REGION": "WI",

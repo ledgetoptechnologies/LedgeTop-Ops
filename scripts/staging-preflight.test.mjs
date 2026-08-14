@@ -4,8 +4,8 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { validateApp, validateCrossApp, validateFiles } from "./staging-preflight.mjs";
-import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { validateApp, validateCrossApp, validateFiles, validateRequestAttachmentCors } from "./staging-preflight.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_REQUEST_ATTACHMENT_R2_CORS, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -155,6 +155,9 @@ test("resolves logical delivery staging files from apps/client", () => {
     fs.writeFileSync(path.join(directory, "wrangler.staging.json"), JSON.stringify(staging));
     fs.writeFileSync(path.join(directory, "wrangler.jsonc"), JSON.stringify(productionFrom(staging)));
   }
+  const corsDirectory = path.join(base, "docs", "staging");
+  fs.mkdirSync(corsDirectory, { recursive: true });
+  fs.writeFileSync(path.join(corsDirectory, "request-attachments-r2-cors.json"), JSON.stringify(STAGING_REQUEST_ATTACHMENT_R2_CORS));
   assert.deepEqual(validateFiles(base), []);
   fs.renameSync(path.join(base, "apps", "client"), path.join(base, "apps", "delivery"));
   assert(validateFiles(base).some((error) => error.includes(path.join("apps", "client", "wrangler.staging.json"))));
@@ -169,6 +172,17 @@ test("fails closed on client portal activation, origin, and audience reuse", () 
   for (const expected of ["CLIENT_PORTAL_ENABLED", "client portal and public origins", "must not reuse"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
+});
+test("requires the exact staging request-attachment R2 CORS policy", () => {
+  assert.deepEqual(validateRequestAttachmentCors(clone(STAGING_REQUEST_ATTACHMENT_R2_CORS)), []);
+  for (const drift of [
+    { rules: [{ ...clone(STAGING_REQUEST_ATTACHMENT_R2_CORS).rules[0], allowed: { ...clone(STAGING_REQUEST_ATTACHMENT_R2_CORS).rules[0].allowed, origins: ["*"] } }] },
+    { rules: [{ ...clone(STAGING_REQUEST_ATTACHMENT_R2_CORS).rules[0], allowed: { ...clone(STAGING_REQUEST_ATTACHMENT_R2_CORS).rules[0].allowed, methods: ["GET", "PUT"] } }] },
+    { rules: [{ ...clone(STAGING_REQUEST_ATTACHMENT_R2_CORS).rules[0], allowed: { ...clone(STAGING_REQUEST_ATTACHMENT_R2_CORS).rules[0].allowed, headers: ["*"] } }] },
+  ]) assert.equal(validateRequestAttachmentCors(drift).length, 1);
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const checkedIn = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", "request-attachments-r2-cors.json"), "utf8"));
+  assert.deepEqual(checkedIn, clone(STAGING_REQUEST_ATTACHMENT_R2_CORS));
 });
 test("requires every portal-v2 and Operations capability to be explicitly false", () => {
   for (const app of ["delivery", "operations"]) {

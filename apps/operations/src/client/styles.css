@@ -274,6 +274,55 @@ tbody tr:last-child td { border: 0; }
 .project-card p, .staff-card p { margin: 0; color: var(--muted); max-width: 100%; overflow-wrap: anywhere; }
 .project-card small, .staff-card small { margin-top: .55rem; color: var(--muted); max-width: 100%; overflow-wrap: anywhere; }
 .project-card code { margin-top: .8rem; }
+.work-context-sops {
+  display: grid;
+  gap: .55rem;
+  margin-top: .8rem;
+  min-width: 0;
+  padding-top: .75rem;
+  border-top: 1px solid var(--border);
+}
+.work-context-sop-heading { display: flex; align-items: center; gap: .45rem; }
+.work-context-sop-chips { display: flex; flex-wrap: wrap; gap: .45rem; min-width: 0; }
+.work-context-sop-chips a {
+  display: grid;
+  gap: .1rem;
+  min-height: 44px;
+  max-width: 100%;
+  padding: .5rem .7rem;
+  border: 1px solid #cbd5df;
+  border-radius: .65rem;
+  background: #fff;
+  color: var(--ink);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.work-context-sop-chips a:hover,
+.work-context-sop-chips a:focus-visible {
+  border-color: var(--orange);
+  box-shadow: 0 0 0 3px rgb(240 102 35 / 16%);
+}
+.work-context-sop-chips small { color: var(--muted); }
+.work-context-sop-manager { min-width: 0; }
+.work-context-sop-manager > summary {
+  width: fit-content;
+  min-height: 44px;
+  padding: .65rem 0;
+  color: var(--blue);
+  cursor: pointer;
+  font-weight: 700;
+}
+.work-context-sop-manager > p { margin: 0 0 .65rem; color: var(--muted); }
+.work-context-sop-manager fieldset { display: grid; gap: .45rem; min-width: 0; margin-bottom: .65rem; }
+.work-context-sop-manager label {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: .55rem;
+  align-items: start;
+  padding: .45rem;
+}
+.work-context-sop-manager label > span { display: grid; gap: .15rem; min-width: 0; overflow-wrap: anywhere; }
+.work-context-sop-manager input { margin-top: .15rem; accent-color: var(--orange); }
 
 /* ---------------------------------------------------------------------------
    Folder association
@@ -308,6 +357,7 @@ tbody tr:last-child td { border: 0; }
 .task-stack article:nth-child(even) { background: #f4f7f9; }
 .task-stack p { color: var(--muted); font-size: .84rem; margin: .35rem 0; }
 .task-stack small, .column-empty { color: var(--muted); font-size: .75rem; }
+.task-stack .work-context-sops { margin-top: .65rem; }
 
 /* ---------------------------------------------------------------------------
    Airspace page

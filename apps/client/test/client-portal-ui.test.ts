@@ -6,8 +6,10 @@ import {
   checkpointPortalAttachmentPart,
   completePortalRequestAttachment,
   initializePortalRequestAttachment,
+  invitePortalWorkspaceMember,
   loadPortalBootstrap,
   loadPortalPastDeliveries,
+  loadPortalProjectFolderFiles,
   loadPortalProjectFiles,
   savePortalServiceDraft,
   submitPortalServiceDraft,
@@ -67,7 +69,7 @@ describe("client portal browser API boundary", () => {
     await Promise.resolve();
     expect(calls).toEqual(["/api/client/session"]);
     resolveSession({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false } });
-    await expect(bootstrap).resolves.toEqual({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false, workspaceHierarchyV2: false, workspaceMembershipManagement: false, invitationEmailDelivery: false, delegatedShares: false }, projects: [], requests: [], mapboxPublicToken: null, workspaces: [], selectedWorkspaceId: null });
+    await expect(bootstrap).resolves.toEqual({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false, workspaceHierarchyV2: false, workspaceMembershipManagement: false, hierarchyScopedInvitations: false, invitationEmailDelivery: false, delegatedShares: false }, projects: [], requests: [], mapboxPublicToken: null, workspaces: [], selectedWorkspaceId: null });
     expect(calls).toEqual(["/api/client/session", "/api/client/projects", "/api/client/service-requests", "/api/client/map-config"]);
   });
 
@@ -96,6 +98,16 @@ describe("client portal browser API boundary", () => {
     await expect(loadPortalPastDeliveries(null, request)).resolves.toMatchObject({ files: [{ id: "/api/client/past-deliveries" }] });
   });
 
+  it("addresses project folders with opaque query state and forwards cancellation", async () => {
+    const controller = new AbortController();
+    const request = vi.fn(async <T>(url: string): Promise<T> => ({ files: [{ id: url }], folders: [], prefix: "", cursor: null }) as T) as PortalRequest;
+    await loadPortalProjectFolderFiles("project a", "pf1_opaque", "pc1_next", controller.signal, request);
+    expect(request).toHaveBeenCalledWith(
+      "/api/client/projects/project%20a/files?folder=pf1_opaque&cursor=pc1_next",
+      { signal: controller.signal },
+    );
+  });
+
   const input: PortalServiceRequestInput = {
     projectId: null, requestType: "flight", title: "Progress flight", details: "Capture the south elevation.",
     location: "South lot", preferredStartAt: null, poiPoints: [{ longitude: -88.1, latitude: 44.5 }],
@@ -118,6 +130,27 @@ describe("client portal browser API boundary", () => {
     expect(request).toHaveBeenLastCalledWith("/api/client/service-requests/request%20a/change-request", expect.objectContaining({ method: "POST", headers: expect.objectContaining({ "Idempotency-Key": "change-key-0001" }) }));
     const body = JSON.parse((vi.mocked(request).mock.calls.at(-1)?.[1] as RequestInit).body as string);
     expect(body.parentRequestId).toBe("request a");
+  });
+
+  it("sends only the selected opaque hierarchy scope when creating an invitation", async () => {
+    const request = vi.fn(async <T>(): Promise<T> => undefined as T) as PortalRequest;
+    await invitePortalWorkspaceMember("workspace a", {
+      email: "contractor@example.test",
+      targetScope: { type: "department", publicId: "pa-department-a" },
+      capabilities: ["delivery.view"],
+    }, request);
+    expect(request).toHaveBeenCalledWith(
+      "/api/client/v2/workspaces/workspace%20a/invitations",
+      expect.objectContaining({ method: "POST" }),
+    );
+    const body = JSON.parse((vi.mocked(request).mock.calls[0]?.[1] as RequestInit).body as string);
+    expect(body).toEqual({
+      email: "contractor@example.test",
+      targetScope: { type: "department", publicId: "pa-department-a" },
+      capabilities: ["delivery.view"],
+    });
+    expect(body).not.toHaveProperty("organizationWide");
+    expect(body).not.toHaveProperty("projectPublicId");
   });
 
   it("selects one authorized v2 workspace before loading scoped portal resources", async () => {

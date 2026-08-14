@@ -100,11 +100,13 @@ production migrations; deploy the same pinned commit with optional capabilities
 still disabled; run baseline smoke tests; and only then request separate
 approval for each capability rollout. A branch push alone is never a release.
 
-The current combined schema gate requires Delivery migrations `0096`–`0111`
-and Operations `0014`–`0022`, with fresh staging exports and exact list/apply
+The current combined schema gate requires Delivery migrations `0096`–`0112`
+and `0114`–`0133` (`0113` is the reserved production-ledger gap), plus
+Operations `0014`–`0023`, with fresh staging exports and exact list/apply
 evidence. Operations `0019` follows `0018` for server-detected, per-file upload
 collision resolution; `0020` adds the SOP library, `0021` hardens Project Alpha
-ordering, and `0022` adds bounded, leased file-operation retries. Client
+ordering, `0022` adds bounded, leased file-operation retries, and `0023` adds
+direct, immutable Project/Task SOP revision links. Client
 `0100` preserves independent share rotation/revocation by
 removing `share_version` from the delivery-grant foreign-key parent while
 retaining the recorded version as a fail-closed authorization check. Client
@@ -119,6 +121,10 @@ briefs and `0018` adds private browser-upload intents and staging sessions;
 `0019` adds the collision-resolution checkpoint without rewriting `0018`.
 Operations `0022` must be applied before deploying a Worker that claims file
 operation jobs through `attempt_count`, `next_attempt_at`, or `claim_token`.
+Operations `0023` must be applied before deploying the Project/Task Quick SOP
+surfaces. Delivery `0132` and `0133` must precede invitation acceptance and
+email activation so accepted guests receive the exact legacy resource bridge
+and mail cannot leave before an invitation-bound Access enrollment receipt.
 These migrations are not rolled back with Worker code. The Project
 Alpha payment/billing contract is a blocking dependency, never an exception to
 local staff, client-team, account, project, delivery, request, or billing ACLs.

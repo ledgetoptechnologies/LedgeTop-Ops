@@ -165,7 +165,16 @@ const responseSchema = z.object({
       "editorPath must be a same-origin relative path",
     ),
   }).strict(),
-}).strict();
+}).strict().superRefine((result, context) => {
+  const expectedPath = `/quotes/${encodeURIComponent(result.draftQuote.publicId)}/edit`;
+  if (result.draftQuote.editorPath !== expectedPath) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["draftQuote", "editorPath"],
+      message: "editorPath must identify the returned quote public ID",
+    });
+  }
+});
 
 export function parseProjectAlphaDraftQuotePayload(value: unknown): ProjectAlphaDraftQuotePayload | null {
   const parsed = projectAlphaDraftQuotePayloadSchema.safeParse(value);

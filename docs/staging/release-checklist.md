@@ -45,6 +45,16 @@ not become active deployments.
 must be the new portal app audience, never `POLICY_AUD`, `OPERATIONS_AUD`, or
 `CF_ACCESS_AUD`.
 
+The attachment upload CORS artifact is
+`docs/staging/request-attachments-r2-cors.json`. Preflight requires that exact
+policy: only the client staging origin, only `PUT`, only the `content-type`
+request header, only `etag` exposed, and a 300-second preflight cache. After
+separate R2 mutation approval, apply it only to `client-data-staging` with
+`wrangler r2 bucket cors set client-data-staging --file docs/staging/request-attachments-r2-cors.json`
+and verify it with `wrangler r2 bucket cors list client-data-staging`. The
+browser evidence must include the exact allowed origin and an out-of-scope
+origin denial. Do not apply the production artifact to staging.
+
 The invitation-mail gate also requires an onboarded staging Email Service
 domain, `CLIENT_PORTAL_INVITATION_EMAIL` restricted with
 `allowed_sender_addresses`, and an exact matching
@@ -52,6 +62,19 @@ domain, `CLIENT_PORTAL_INVITATION_EMAIL` restricted with
 preflight; enable it only for the controlled acceptance test after the evidence
 packet and Access enrollment gate are approved. No local or staging command may
 use a remote email binding unintentionally.
+
+`CLIENT_PORTAL_ACCESS_ENROLLMENT_READY` is a separate operator attestation and
+must remain false until a dedicated, internal workspace reconciler has proven
+dedicated client-group isolation, multi-workspace retention,
+last-eligibility revocation, and zero staff-group mutation. The global flag is
+not sufficient to release mail: before each outbox lease, migration `0133`
+requires a live server-recorded receipt bound to that invitation, workspace,
+normalized-email hash, current invitation-token hash, and monotonic enrollment
+version. Revocation and lease/send race evidence is mandatory. The
+legacy `client_access_sync_outbox` is account-scoped and imperative, and its
+processor is not deployed; it cannot safely represent workspace-v2 desired
+membership. Manual pre-enrollment may test acceptance mechanics but does not
+satisfy the autonomous-invitation release gate.
 
 Copy `docs/staging/release-evidence.json.example` to the ignored path
 `.backups/staging-release-evidence.json`. Record only booleans, identifiers,
@@ -177,10 +200,10 @@ Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
 `0112_public_share_location_privacy.sql`, then `0114_delivery_share_prefix_lookup.sql`
-through `0131_video_thumbnail_recovery_backfill.sql` (`0113` is intentionally
+through `0133_portal_invitation_access_enrollment_receipts.sql` (`0113` is intentionally
 reserved), and Operations
 `0014_staff_acl_controls.sql` through
-`0022_r2_operation_retries.sql`. Migration `0100` removes
+`0023_project_task_sop_links.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any
@@ -190,15 +213,24 @@ five-minute notification consumer; `0106`/`0107`/`0108` must be present before
 thumbnail jobs or cleanup; `0109` must be present before photo location
 extraction or map routes run; `0110` must be present before a `Jobs/` backfill
 run; `0111` must precede prebuilt registration, Container fallback activation,
-or exact-ETag derivative reconciliation. Migrations `0112` and `0114`-`0131`
+or exact-ETag derivative reconciliation. Migrations `0112` and `0114`-`0133`
 must precede public location privacy, indexed share lookup, client notification,
 request-v2, attachment, workspace hierarchy, membership, delegated-share,
-catalog/hierarchy projection, and directory-recipient activation. `0017` must
+catalog/hierarchy projection, and directory-recipient activation.
+`0132` must be applied before invitation acceptance is enabled: verify a fresh
+apply and idempotent reapply, `PRAGMA foreign_key_check`, exact-project guest
+file/request access, sibling-project denial, immediate suspension, and two
+independent workspace bridges for one verified issuer/subject. Staff manager
+recovery must also prove transfer-before-offboarding and reject local removal
+of a Project Alpha-managed manager.
+
+`0017` must
 precede the Operations thumbnail renderer APIs and be present before job-brief
 routes; `0018`/`0019` must precede
 browser-upload and conflict-resolution routes; `0020` must precede the internal
-SOP library; `0021` must precede Project Alpha sync hardening; and `0022` must
-precede bounded R2 retry state. Migration `0131` seeds a cutoff-pinned,
+SOP library; `0021` must precede Project Alpha sync hardening; `0022` must
+precede bounded R2 retry state; and `0023` must precede project/task SOP
+revision pinning. Migration `0131` seeds a cutoff-pinned,
 video-only recovery pass; confirm it reaches `completed` and that repaired rows
 remain pending until the authenticated TrueNAS worker claims them. It must not
 publish those rows to the Cloudflare thumbnail queue. Worker

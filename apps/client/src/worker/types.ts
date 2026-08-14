@@ -47,6 +47,11 @@ export interface Env {
   CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED?: string;
   /** Native Cloudflare Email Service delivery for the invitation outbox. Default-off. */
   CLIENT_PORTAL_INVITATION_EMAIL_ENABLED?: string;
+  /**
+   * Operator attestation that the invitee is enrolled in the dedicated Client
+   * Portal Access application before invitation email is handed off.
+   */
+  CLIENT_PORTAL_ACCESS_ENROLLMENT_READY?: string;
   CLIENT_PORTAL_INVITATION_EMAIL?: SendEmail;
   CLIENT_PORTAL_INVITATION_FROM?: string;
   CLIENT_PORTAL_INVITATION_FROM_NAME?: string;

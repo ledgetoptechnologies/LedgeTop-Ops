@@ -94,6 +94,11 @@ function validPrincipalPart(value: string): boolean {
   return value.length >= 1 && value.length <= 512;
 }
 
+function isPreLegacyBridgeDatabase(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no such table:\s*(?:main\.)?portal_v2_legacy_member_bridges\b/i.test(message);
+}
+
 async function resolveGlobalIdentity(
   env: Env,
   principal: VerifiedClientPrincipal,
@@ -147,7 +152,24 @@ export async function resolveEffectivePortalWorkspaceContext(
     "workspace.view",
     { scopeType: "workspace", publicId: workspaceId },
   ))) return null;
-  const legacy = await portalDb(env).prepare(`
+  let legacy: { identity_id: string; role: "manager" | "member"; can_view_billing: number } | null = null;
+  try {
+    legacy = await portalDb(env).prepare(`
+    SELECT bridge.legacy_identity_id identity_id,m.role,m.can_view_billing
+    FROM portal_v2_legacy_member_bridges bridge
+    JOIN client_accounts account
+      ON account.id=bridge.legacy_account_id AND account.id=? AND account.status='active'
+    JOIN client_identity_links i
+      ON i.id=bridge.legacy_identity_id AND i.account_id=account.id AND i.revoked_at IS NULL
+    JOIN client_account_members m
+      ON m.account_id=account.id AND m.identity_id=i.id AND m.revoked_at IS NULL
+    WHERE bridge.workspace_id=? AND bridge.identity_id=? AND bridge.status='active' AND bridge.revoked_at IS NULL`)
+      .bind(workspace.legacy_account_id, workspaceId, identity.id)
+      .first<{ identity_id: string; role: "manager" | "member"; can_view_billing: number }>();
+  } catch (error) {
+    if (!isPreLegacyBridgeDatabase(error)) throw error;
+  }
+  legacy ??= await portalDb(env).prepare(`
     SELECT i.id identity_id,m.role,m.can_view_billing
     FROM client_accounts account
     JOIN client_identity_links i
@@ -544,12 +566,46 @@ export async function acceptPortalWorkspaceInvitation(
   if (!tokenHash || !normalizedEmail || !validPrincipalPart(principal.issuer) || !validPrincipalPart(principal.subject)) return "denied";
   // Email narrows this one invitation only. The durable authorization subject
   // is always the provider-verified issuer + subject pair.
-  const matchingInvite = await portalDb(env).prepare(`SELECT id FROM portal_v2_invitations
-    WHERE token_hash=? AND lower(invited_email)=?`).bind(tokenHash, normalizedEmail).first("id");
-  if (matchingInvite === null) return "denied";
+  const invitation = await portalDb(env).prepare(`SELECT id,workspace_id,status,accepted_by_identity_id
+    FROM portal_v2_invitations WHERE token_hash=? AND lower(invited_email)=?`)
+    .bind(tokenHash, normalizedEmail)
+    .first<{ id: string; workspace_id: string; status: string; accepted_by_identity_id: string | null }>();
+  if (!invitation) return "denied";
   let identity = await portalDb(env).prepare(`SELECT id FROM portal_v2_identities
     WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?`)
     .bind(principal.issuer, principal.subject, normalizedEmail).first<IdentityRow>();
+  if (invitation.status === "accepted")
+    return identity && invitation.accepted_by_identity_id === identity.id ? "replayed" : "denied";
+  if (invitation.status !== "pending") return "denied";
+
+  const requireEnrollmentReceipt = env.CLIENT_PORTAL_ACCESS_ENROLLMENT_READY === "true";
+  if (requireEnrollmentReceipt) {
+    const activeReceipt = await portalDb(env).prepare(`SELECT 1 AS ok
+      FROM portal_v2_invitation_access_enrollment_receipts receipt
+      JOIN portal_v2_invitation_email_outbox outbox
+        ON outbox.invitation_id=receipt.invitation_id
+       AND outbox.recipient_email_hash=receipt.invited_email_hash
+      JOIN portal_v2_invitations current
+        ON current.id=receipt.invitation_id AND current.workspace_id=receipt.workspace_id
+       AND current.token_hash=receipt.invitation_token_hash
+      WHERE receipt.invitation_id=? AND receipt.workspace_id=?
+        AND current.status='pending' AND current.revoked_at IS NULL
+        AND datetime(current.expires_at)>datetime('now')
+        AND receipt.revoked_at IS NULL
+        AND datetime(receipt.enrolled_at)<=datetime('now')
+        AND datetime(receipt.expires_at)>datetime('now')`)
+      .bind(invitation.id, invitation.workspace_id)
+      .first("ok");
+    if (activeReceipt === null) return "denied";
+  }
+  if (identity) {
+    const managedMembership = await portalDb(env).prepare(`SELECT 1 AS ok
+      FROM portal_v2_workspace_memberships
+      WHERE workspace_id=? AND identity_id=? AND source_type<>'client_invitation'`)
+      .bind(invitation.workspace_id, identity.id)
+      .first("ok");
+    if (managedMembership !== null) return "denied";
+  }
   if (!identity) {
     const identityId = crypto.randomUUID();
     await portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_identities
@@ -560,24 +616,29 @@ export async function acceptPortalWorkspaceInvitation(
       .bind(principal.issuer, principal.subject, normalizedEmail).first<IdentityRow>();
   }
   if (!identity) return "denied";
-  const before = await portalDb(env).prepare(`SELECT status,accepted_by_identity_id
-    FROM portal_v2_invitations WHERE token_hash=? AND lower(invited_email)=lower(?)`)
-    .bind(tokenHash, normalizedEmail)
-    .first<{ status: string; accepted_by_identity_id: string | null }>();
-  if (before?.status === "accepted") return before.accepted_by_identity_id === identity.id ? "replayed" : "denied";
-  if (!before || before.status !== "pending") return "denied";
-
-  const invitation = await portalDb(env).prepare(`SELECT id,workspace_id FROM portal_v2_invitations
-    WHERE token_hash=? AND lower(invited_email)=lower(?) AND status='pending'
-      AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')`)
-    .bind(tokenHash, normalizedEmail)
-    .first<{ id: string; workspace_id: string }>();
-  if (!invitation) return "denied";
   await portalDb(env).batch([
-    portalDb(env).prepare(`UPDATE portal_v2_invitations
+    portalDb(env).prepare(`UPDATE portal_v2_invitations AS invitation
       SET status='accepted',accepted_at=datetime('now'),accepted_by_identity_id=?
-      WHERE id=? AND status='pending' AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')`)
-      .bind(identity.id, invitation.id),
+      WHERE id=? AND status='pending' AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
+        AND NOT EXISTS (
+          SELECT 1 FROM portal_v2_workspace_memberships membership
+          WHERE membership.workspace_id=invitation.workspace_id AND membership.identity_id=?
+            AND membership.source_type<>'client_invitation'
+        )
+        ${requireEnrollmentReceipt ? `AND EXISTS (
+          SELECT 1
+          FROM portal_v2_invitation_access_enrollment_receipts receipt
+          JOIN portal_v2_invitation_email_outbox outbox
+            ON outbox.invitation_id=invitation.id
+           AND outbox.recipient_email_hash=receipt.invited_email_hash
+          WHERE receipt.invitation_id=invitation.id
+            AND receipt.workspace_id=invitation.workspace_id
+            AND receipt.invitation_token_hash=invitation.token_hash
+            AND receipt.revoked_at IS NULL
+            AND datetime(receipt.enrolled_at)<=datetime('now')
+            AND datetime(receipt.expires_at)>datetime('now')
+        )` : ""}`)
+      .bind(identity.id, invitation.id, identity.id),
     portalDb(env).prepare(`INSERT INTO portal_v2_workspace_memberships
       (id,workspace_id,identity_id,source_type,status)
       SELECT 'invitation-membership-' || id,workspace_id,?,'client_invitation','active'
@@ -594,6 +655,50 @@ export async function acceptPortalWorkspaceInvitation(
         ON membership.workspace_id=invitation.workspace_id AND membership.identity_id=? AND membership.status='active'
       WHERE invitation.id=? AND invitation.status='accepted' AND invitation.accepted_by_identity_id=?`)
       .bind(identity.id, identity.id, invitation.id, identity.id),
+    portalDb(env).prepare(`INSERT OR IGNORE INTO client_identity_links
+      (id,account_id,issuer,subject,email,last_seen_at)
+      SELECT 'portal-v2-bridge:' || invitation.workspace_id || ':' || invitation.accepted_by_identity_id,
+        workspace.legacy_account_id,'urn:ltds:portal-v2-bridge:' || invitation.workspace_id,
+        invitation.accepted_by_identity_id,identity.verified_email,datetime('now')
+      FROM portal_v2_invitations invitation
+      JOIN portal_v2_workspaces workspace ON workspace.id=invitation.workspace_id
+        AND workspace.status='active' AND workspace.legacy_account_id IS NOT NULL
+      JOIN portal_v2_identities identity ON identity.id=invitation.accepted_by_identity_id
+        AND identity.status='active' AND identity.revoked_at IS NULL
+      WHERE invitation.id=? AND invitation.status='accepted' AND invitation.accepted_by_identity_id=?`)
+      .bind(invitation.id, identity.id),
+    portalDb(env).prepare(`INSERT OR IGNORE INTO client_account_members
+      (account_id,identity_id,role,can_view_billing)
+      SELECT workspace.legacy_account_id,link.id,'member',0
+      FROM portal_v2_invitations invitation
+      JOIN portal_v2_workspaces workspace ON workspace.id=invitation.workspace_id
+        AND workspace.status='active' AND workspace.legacy_account_id IS NOT NULL
+      JOIN client_identity_links link ON link.account_id=workspace.legacy_account_id
+        AND link.issuer='urn:ltds:portal-v2-bridge:' || invitation.workspace_id
+        AND link.subject=invitation.accepted_by_identity_id
+      WHERE invitation.id=? AND invitation.status='accepted' AND invitation.accepted_by_identity_id=?`)
+      .bind(invitation.id, identity.id),
+    portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_legacy_member_bridges
+      (workspace_id,identity_id,legacy_account_id,legacy_identity_id,invitation_id)
+      SELECT invitation.workspace_id,invitation.accepted_by_identity_id,
+        workspace.legacy_account_id,link.id,invitation.id
+      FROM portal_v2_invitations invitation
+      JOIN portal_v2_workspaces workspace ON workspace.id=invitation.workspace_id
+        AND workspace.status='active' AND workspace.legacy_account_id IS NOT NULL
+      JOIN client_identity_links link ON link.account_id=workspace.legacy_account_id
+        AND link.issuer='urn:ltds:portal-v2-bridge:' || invitation.workspace_id
+        AND link.subject=invitation.accepted_by_identity_id
+      WHERE invitation.id=? AND invitation.status='accepted' AND invitation.accepted_by_identity_id=?`)
+      .bind(invitation.id, identity.id),
+    portalDb(env).prepare(`INSERT OR IGNORE INTO client_member_project_grants
+      (account_id,identity_id,project_id,granted_by_identity_id)
+      SELECT bridge.legacy_account_id,bridge.legacy_identity_id,grant_record.project_id,
+        bridge.legacy_identity_id
+      FROM portal_v2_legacy_member_bridges bridge
+      JOIN client_project_grants grant_record ON grant_record.account_id=bridge.legacy_account_id
+        AND grant_record.revoked_at IS NULL
+      WHERE bridge.workspace_id=? AND bridge.identity_id=? AND bridge.status='active'`)
+      .bind(invitation.workspace_id, identity.id),
     portalDb(env).prepare(`INSERT INTO portal_v2_membership_audit
       (id,workspace_id,actor_identity_id,action,subject_identity_id,invitation_id)
       SELECT ?,workspace_id,?,'invitation.accepted',?,id FROM portal_v2_invitations

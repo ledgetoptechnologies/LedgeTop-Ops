@@ -23,6 +23,8 @@ idempotent draft-quote handoff is in the
 [client portal v2 compatibility contract](docs/client-portal-v2-architecture.md).
 That document is a staged implementation contract and does not supersede the
 current production pilot until its release gates pass.
+The cross-feature, conversation-level acceptance record is the
+[locked release scope](docs/locked-release-scope.md).
 
 LTDS Ops is the operating and client-delivery platform for Ledge Top Drone Services. It contains three independently deployed Cloudflare Workers in one repository:
 

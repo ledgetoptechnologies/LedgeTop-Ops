@@ -20,7 +20,7 @@ import {
   loadPortalPastDeliveries,
   loadPortalPastDeliveryLocations,
   loadPortalProjectFileLocations,
-  loadPortalProjectFiles,
+  loadPortalProjectFolderFiles,
   loadPortalNotifications,
   setPortalWorkspaceSelection,
   loadPortalPricingHint,
@@ -46,6 +46,8 @@ import {
   updatePortalServiceRequest,
   type PortalBootstrap,
   type PortalFile,
+  type PortalFolder,
+  type PortalFileBreadcrumb,
   type PortalFilePage,
   type PortalPoi,
   type PortalAreaGeoJson,
@@ -62,6 +64,7 @@ import {
   type PortalServiceRequestStatus,
   type PortalWorkspace,
   type PortalWorkspaceEntry,
+  type PortalHierarchyScopeType,
   type PortalWorkspaceInvitation,
   type PortalWorkspaceMember,
   type PortalDelegatedShare,
@@ -250,48 +253,97 @@ function PortalBoundary({ children }: { children: ReactNode }) {
 function FileBrowser({
   load,
   loadLocations,
+  folderId = null,
+  onFolderChange,
   mapToken,
   locationScopeLabel,
   emptyTitle,
   emptyDetail,
 }: {
-  load: (cursor: string | null) => Promise<PortalFilePage>;
+  load: (folderId: string | null, cursor: string | null, signal: AbortSignal) => Promise<PortalFilePage>;
   loadLocations: () => Promise<DeliveryLocationCollection>;
+  folderId?: string | null;
+  onFolderChange?: (folderId: string | null) => void;
   mapToken: string | null;
   locationScopeLabel: string;
   emptyTitle: string;
   emptyDetail: string;
 }) {
   const [files, setFiles] = useState<PortalFile[]>([]);
+  const [folders, setFolders] = useState<PortalFolder[]>([]);
+  const [breadcrumbs, setBreadcrumbs] = useState<PortalFileBreadcrumb[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
+  const [continuationFolderId, setContinuationFolderId] = useState<string | null>(folderId);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [retryVersion, setRetryVersion] = useState(0);
   const [locations, setLocations] = useState<DeliveryLocationCollection | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
+  const manualLoadController = useRef<AbortController | null>(null);
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
+    manualLoadController.current?.abort();
+    manualLoadController.current = null;
     setLoading(true);
+    setLoadingMore(false);
     setError(null);
     setFiles([]);
+    setFolders([]);
+    setBreadcrumbs([]);
     setCursor(null);
-    load(null)
-      .then((result) => {
-        if (active) {
-          setFiles(result.files);
-          setCursor(result.cursor);
+    setContinuationFolderId(folderId);
+    void (async () => {
+      let next: string | null = null;
+      let requestFolderId = folderId;
+      let pageCount = 0;
+      try {
+        do {
+          const result = await load(requestFolderId, next, controller.signal);
+          if (!active) return;
+          setFiles(current => pageCount === 0 ? result.files : [...current, ...result.files]);
+          setFolders(current => pageCount === 0 ? (result.folders ?? []) : [...current, ...(result.folders ?? [])]);
+          if (pageCount === 0) {
+            setBreadcrumbs(result.breadcrumbs ?? []);
+            requestFolderId = result.folderId ?? folderId;
+            setContinuationFolderId(requestFolderId);
+            setLoading(false);
+          }
+          next = result.cursor;
+          setCursor(next);
+          pageCount += 1;
+          if (!next || pageCount >= 20) break;
+          setLoadingMore(true);
+          await new Promise<void>(resolve => window.setTimeout(resolve, 0));
         }
-      })
-      .catch(() => {
-        if (active) setError("Files could not be loaded. Please try again.");
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
+        while (active && !controller.signal.aborted);
+      } catch (caught) {
+        if (!active || controller.signal.aborted || (caught as Error).name === "AbortError") return;
+        const status = (caught as RequestError).status;
+        if ([401, 403, 404, 410].includes(status ?? 0)) {
+          setFiles([]);
+          setFolders([]);
+          setBreadcrumbs([]);
+          setCursor(null);
+        }
+        setError(pageCount === 0
+          ? "Files could not be loaded. Your access may have changed; try again."
+          : "More files could not be loaded. Try again to continue.");
+      } finally {
+        if (active) {
+          setLoading(false);
+          setLoadingMore(false);
+        }
+      }
+    })();
     return () => {
       active = false;
+      controller.abort();
+      manualLoadController.current?.abort();
+      manualLoadController.current = null;
     };
-  }, [load]);
+  }, [folderId, load, retryVersion]);
   useEffect(() => {
     let active = true;
     setLocations(null);
@@ -303,27 +355,58 @@ function FileBrowser({
   }, [loadLocations]);
   const more = async () => {
     if (!cursor || loadingMore) return;
+    const controller = new AbortController();
+    manualLoadController.current?.abort();
+    manualLoadController.current = controller;
     setLoadingMore(true);
     setError(null);
     try {
-      const result = await load(cursor);
+      const result = await load(continuationFolderId, cursor, controller.signal);
       setFiles((current) => [...current, ...result.files]);
+      setFolders((current) => [...current, ...(result.folders ?? [])]);
       setCursor(result.cursor);
-    } catch {
+    } catch (caught) {
+      if (controller.signal.aborted || (caught as Error).name === "AbortError") return;
+      const status = (caught as RequestError).status;
+      if ([401, 403, 404, 410].includes(status ?? 0)) {
+        setFiles([]);
+        setFolders([]);
+        setBreadcrumbs([]);
+        setCursor(null);
+      }
       setError("More files could not be loaded.");
     } finally {
-      setLoadingMore(false);
+      if (manualLoadController.current === controller) {
+        manualLoadController.current = null;
+        setLoadingMore(false);
+      }
     }
   };
   return (
     <div>
       <ImageLocationMap token={mapToken} locations={locations} scopeLabel={locationScopeLabel} />
       {locationError && <p className="portal-message error" role="alert">{locationError}</p>}
-      {loading ? <Loading /> : error && files.length === 0 ? (
-        <p className="portal-message error" role="alert">{error}</p>
-      ) : files.length === 0 ? (
+      {breadcrumbs.length > 0 && onFolderChange && (
+        <nav className="portal-file-breadcrumbs" aria-label="Project file folders">
+          <ol>{breadcrumbs.map((crumb, index) => <li key={`${crumb.id ?? "root"}:${index}`}>
+            {index === breadcrumbs.length - 1
+              ? <span aria-current="page" title={crumb.name}>{crumb.name}</span>
+              : <button type="button" title={crumb.name} onClick={() => onFolderChange(crumb.id)}>{crumb.name}</button>}
+          </li>)}</ol>
+        </nav>
+      )}
+      {loading ? <Loading /> : error && files.length === 0 && folders.length === 0 ? (
+        <div className="portal-inline-error" role="alert"><p>{error}</p><button className="button-ghost button-small" onClick={() => setRetryVersion(current => current + 1)}>Try again</button></div>
+      ) : files.length === 0 && folders.length === 0 ? (
         <EmptyState title={emptyTitle} detail={emptyDetail} />
       ) : <div className="portal-file-list">
+        {folders.map((folder) => (
+          <button key={folder.id} type="button" className="portal-folder-row" title={folder.name} onClick={() => onFolderChange?.(folder.id)}>
+            <span className="portal-file-icon" aria-hidden="true">DIR</span>
+            <span><strong>{folder.name}</strong><small>Open folder</small></span>
+            <span aria-hidden="true">&gt;</span>
+          </button>
+        ))}
         {files.map((file) => (
           <article key={file.id} className="portal-file-row">
             <div className="portal-file-icon" aria-hidden="true">
@@ -359,7 +442,7 @@ function FileBrowser({
           </article>
         ))}
       </div>}
-      {error && (
+      {error && (files.length > 0 || folders.length > 0) && (
         <p className="portal-message error" role="alert">
           {error}
         </p>
@@ -1251,18 +1334,53 @@ function ProjectWorkspace({
   onSaved: (request: PortalServiceRequest) => void;
   onBack: () => void;
 }) {
-  const [tab, setTab] = useState<WorkspaceTab>("overview");
+  const readLocation = () => {
+    const params = new URLSearchParams(window.location.search);
+    const requestedTab = params.get("tab");
+    const nextTab: WorkspaceTab = requestedTab === "files" || requestedTab === "requests" ? requestedTab : "overview";
+    const candidateFolder = nextTab === "files" ? params.get("folder") : null;
+    return { tab: nextTab, folderId: candidateFolder && candidateFolder.length <= 4096 ? candidateFolder : null };
+  };
+  const initialLocation = readLocation();
+  const [tab, setTab] = useState<WorkspaceTab>(initialLocation.tab);
+  const [folderId, setFolderId] = useState<string | null>(initialLocation.folderId);
   const projectRequests = requests.filter(
     (request) => request.projectId === project.id,
   );
   const loadFiles = useMemo(
-    () => (cursor: string | null) => loadPortalProjectFiles(project.id, cursor),
+    () => (nextFolderId: string | null, cursor: string | null, signal: AbortSignal) =>
+      loadPortalProjectFolderFiles(project.id, nextFolderId, cursor, signal),
     [project.id],
   );
   const loadLocations = useMemo(
     () => () => loadPortalProjectFileLocations(project.id),
     [project.id],
   );
+  useEffect(() => {
+    const updateFromLocation = () => {
+      const next = readLocation();
+      setTab(next.tab);
+      setFolderId(next.folderId);
+    };
+    updateFromLocation();
+    window.addEventListener("popstate", updateFromLocation);
+    return () => window.removeEventListener("popstate", updateFromLocation);
+  }, [project.id]);
+  const navigateTab = (nextTab: WorkspaceTab) => {
+    const url = new URL(clientProjectPath(project.id), window.location.origin);
+    if (nextTab !== "overview") url.searchParams.set("tab", nextTab);
+    window.history.pushState({}, "", `${url.pathname}${url.search}`);
+    setTab(nextTab);
+    setFolderId(null);
+  };
+  const navigateFolder = (nextFolderId: string | null) => {
+    const url = new URL(clientProjectPath(project.id), window.location.origin);
+    url.searchParams.set("tab", "files");
+    if (nextFolderId) url.searchParams.set("folder", nextFolderId);
+    window.history.pushState({}, "", `${url.pathname}${url.search}`);
+    setTab("files");
+    setFolderId(nextFolderId);
+  };
   return (
     <>
       <button className="portal-back" onClick={onBack}>
@@ -1283,7 +1401,7 @@ function ProjectWorkspace({
           <button
             key={item}
             aria-current={tab === item ? "page" : undefined}
-            onClick={() => setTab(item)}
+            onClick={() => navigateTab(item)}
           >
             {item[0]!.toUpperCase() + item.slice(1)}
           </button>
@@ -1357,6 +1475,8 @@ function ProjectWorkspace({
           <FileBrowser
             load={loadFiles}
             loadLocations={loadLocations}
+            folderId={folderId}
+            onFolderChange={navigateFolder}
             mapToken={mapboxPublicToken}
             locationScopeLabel="this project's available files"
             emptyTitle="No project files yet"
@@ -1467,14 +1587,44 @@ function DelegatedSharePanel({ workspaceId }: { workspaceId: string }) {
   </Card>;
 }
 
-function WorkspaceTeamPanel({ invitationEmailDelivery }: { invitationEmailDelivery: boolean }) {
+const invitationScopeTypes = new Set<PortalWorkspaceEntry["type"]>(["organization", "department", "client", "project"]);
+
+function hierarchyScopeLabel(type: PortalHierarchyScopeType | "workspace"): string {
+  if (type === "workspace") return "Workspace-wide";
+  return `${type.charAt(0).toUpperCase()}${type.slice(1)} access`;
+}
+
+function hierarchyBrowserRows(entries: PortalWorkspaceEntry[]): Array<{ entry: PortalWorkspaceEntry & { type: PortalHierarchyScopeType }; depth: number }> {
+  const visible = entries.filter((entry): entry is PortalWorkspaceEntry & { type: PortalHierarchyScopeType } => invitationScopeTypes.has(entry.type));
+  const byId = new Map(visible.map(entry => [entry.publicId, entry]));
+  const children = new Map<string | null, typeof visible>();
+  for (const entry of visible) {
+    const parent = entry.parentPublicId && byId.has(entry.parentPublicId) ? entry.parentPublicId : null;
+    children.set(parent, [...(children.get(parent) ?? []), entry]);
+  }
+  for (const siblings of children.values()) siblings.sort((left, right) => left.displayName.localeCompare(right.displayName));
+  const rows: Array<{ entry: (typeof visible)[number]; depth: number }> = [];
+  const visited = new Set<string>();
+  const visit = (entry: (typeof visible)[number], depth: number) => {
+    if (visited.has(entry.publicId)) return;
+    visited.add(entry.publicId);
+    rows.push({ entry, depth: Math.min(depth, 8) });
+    for (const child of children.get(entry.publicId) ?? []) visit(child, depth + 1);
+  };
+  for (const root of children.get(null) ?? []) visit(root, 0);
+  for (const entry of visible) visit(entry, 0);
+  return rows;
+}
+
+function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitations }: { invitationEmailDelivery: boolean; hierarchyScopedInvitations: boolean }) {
   const [workspaces, setWorkspaces] = useState<PortalWorkspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
-  const [projects, setProjects] = useState<PortalWorkspaceEntry[]>([]);
+  const [hierarchy, setHierarchy] = useState<PortalWorkspaceEntry[]>([]);
   const [members, setMembers] = useState<PortalWorkspaceMember[]>([]);
   const [invitations, setInvitations] = useState<PortalWorkspaceInvitation[]>([]);
   const [email, setEmail] = useState("");
-  const [projectId, setProjectId] = useState("");
+  const [selectedScope, setSelectedScope] = useState<{ type: PortalHierarchyScopeType; publicId: string } | null>(null);
+  const [scopeSearch, setScopeSearch] = useState("");
   const [organizationWide, setOrganizationWide] = useState(false);
   const [wideConfirmed, setWideConfirmed] = useState(false);
   const [canRequest, setCanRequest] = useState(false);
@@ -1482,10 +1632,15 @@ function WorkspaceTeamPanel({ invitationEmailDelivery }: { invitationEmailDelive
   const [error, setError] = useState("");
 
   const refreshAccess = async (id: string) => {
-    const [hierarchy, access] = await Promise.all([loadPortalWorkspaceHierarchy(id), loadPortalWorkspaceAccess(id)]);
-    const availableProjects = hierarchy.filter(entry => entry.type === "project");
-    setProjects(availableProjects);
-    setProjectId(current => availableProjects.some(project => project.publicId === current) ? current : availableProjects[0]?.publicId ?? "");
+    const [entries, access] = await Promise.all([loadPortalWorkspaceHierarchy(id), loadPortalWorkspaceAccess(id)]);
+    const availableScopes = entries.filter((entry): entry is PortalWorkspaceEntry & { type: PortalHierarchyScopeType } =>
+      invitationScopeTypes.has(entry.type) && (entry.type === "project" || hierarchyScopedInvitations));
+    setHierarchy(entries);
+    setSelectedScope(current => {
+      if (current && availableScopes.some(scope => scope.type === current.type && scope.publicId === current.publicId)) return current;
+      const fallback = availableScopes.find(scope => scope.type === "project") ?? availableScopes[0];
+      return fallback ? { type: fallback.type, publicId: fallback.publicId } : null;
+    });
     setMembers(access.members);
     setInvitations(access.invitations);
   };
@@ -1510,12 +1665,18 @@ function WorkspaceTeamPanel({ invitationEmailDelivery }: { invitationEmailDelive
 
   const invite = async (event: FormEvent) => {
     event.preventDefault();
-    if (!invitationEmailDelivery || !workspaceId || (!organizationWide && !projectId)) return;
+    if (!invitationEmailDelivery || !workspaceId || (!organizationWide && !selectedScope)) return;
+    const confirmationRequired = organizationWide || selectedScope?.type === "organization";
+    if (confirmationRequired && !wideConfirmed) return;
     setBusy(true); setError("");
     try {
       await invitePortalWorkspaceMember(workspaceId, {
         email,
-        ...(organizationWide ? { organizationWide: true, confirmOrganizationWide: wideConfirmed } : { projectPublicId: projectId }),
+        ...(organizationWide
+          ? { organizationWide: true, confirmOrganizationWide: true }
+          : hierarchyScopedInvitations
+            ? { targetScope: selectedScope!, ...(selectedScope!.type === "organization" ? { confirmOrganizationWide: true } : {}) }
+            : { projectPublicId: selectedScope!.publicId }),
         capabilities: canRequest ? ["delivery.view", "request.create"] : ["delivery.view"],
       });
       setEmail(""); setOrganizationWide(false); setWideConfirmed(false); setCanRequest(false);
@@ -1524,24 +1685,59 @@ function WorkspaceTeamPanel({ invitationEmailDelivery }: { invitationEmailDelive
     finally { setBusy(false); }
   };
 
+  const rows = hierarchyBrowserRows(hierarchy);
+  const normalizedSearch = scopeSearch.trim().toLocaleLowerCase();
+  const filteredRows = normalizedSearch
+    ? rows.filter(({ entry }) => `${entry.displayName} ${entry.type}`.toLocaleLowerCase().includes(normalizedSearch))
+    : rows;
+  const selectedEntry = selectedScope
+    ? hierarchy.find(entry => entry.type === selectedScope.type && entry.publicId === selectedScope.publicId)
+    : null;
+  const broadConfirmationRequired = organizationWide || (!organizationWide && selectedScope?.type === "organization");
+  const currentWorkspace = workspaces.find(workspace => workspace.id === workspaceId);
+  const workspaceWideLabel = currentWorkspace?.rootType === "organization"
+    ? "Give access across this entire organization workspace"
+    : "Give access across this entire client workspace";
+
   if (error && workspaces.length === 0) return <p className="portal-copy" role="status">Team management is not available for this account. Contact LTDS for access changes.</p>;
   return <div className="portal-team-panel">
     {workspaces.length > 1 && <label>Workspace<select value={workspaceId} onChange={event => void selectWorkspace(event.target.value)} disabled={busy}>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.displayName}</option>)}</select></label>}
     <form onSubmit={invite} className="portal-team-invite-form">
-      <h3>Invite a project collaborator</h3>
+      <h3>Invite a collaborator</h3>
       {!invitationEmailDelivery && <div className="portal-info-notice" role="status"><strong>Invitation email is not active yet.</strong><p>Existing access can be reviewed and revoked, but a new invitation cannot be created until LTDS finishes the email and sign-in rollout.</p></div>}
       <p className="portal-copy">Access defaults to one project. Invitees authenticate with the exact email address below.</p>
       <label>Email address<input type="email" required maxLength={320} disabled={!invitationEmailDelivery} value={email} onChange={event => setEmail(event.target.value)} /></label>
-      {!organizationWide && <label>Project<select required disabled={!invitationEmailDelivery} value={projectId} onChange={event => setProjectId(event.target.value)}><option value="" disabled>Select a project</option>{projects.map(project => <option key={project.publicId} value={project.publicId}>{project.displayName}</option>)}</select></label>}
+      <fieldset className="portal-hierarchy-picker" disabled={!invitationEmailDelivery || organizationWide}>
+        <legend>Invitation scope</legend>
+        <p className="portal-copy">Choose one authorized organization, department, client, or project. Project access is selected by default.</p>
+        <label>Find a scope<input type="search" value={scopeSearch} onChange={event => setScopeSearch(event.target.value)} placeholder="Search the client hierarchy" /></label>
+        <div className="portal-hierarchy-tree" role="radiogroup" aria-label="Client hierarchy">
+          {filteredRows.map(({ entry, depth }) => {
+            const selectable = entry.type === "project" || hierarchyScopedInvitations;
+            const selected = selectedScope?.type === entry.type && selectedScope.publicId === entry.publicId;
+            return <label className={`portal-hierarchy-treeitem${selected ? " is-selected" : ""}`} style={{ paddingInlineStart: `${0.75 + depth * 0.9}rem` }} key={`${entry.type}:${entry.publicId}`}>
+              <input type="radio" name="invitation-scope" value={`${entry.type}:${entry.publicId}`} disabled={!selectable} checked={selected} onChange={() => { setSelectedScope({ type: entry.type, publicId: entry.publicId }); setWideConfirmed(false); }} />
+              <span className="portal-hierarchy-entry"><strong>{entry.displayName}</strong><small>{hierarchyScopeLabel(entry.type)}</small></span>
+                <span className="portal-scope-state">{selected ? "Selected" : selectable ? "Choose" : "View only"}</span>
+            </label>;
+          })}
+          {filteredRows.length === 0 && <p className="portal-copy">No matching invitation scopes.</p>}
+        </div>
+        {!hierarchyScopedInvitations && <small className="portal-hierarchy-note">Department, client, and organization invitation scopes will become selectable when hierarchy delegation is enabled. Projects remain available.</small>}
+      </fieldset>
+      {selectedEntry && !organizationWide && <p className="portal-selected-scope" role="status"><strong>Selected:</strong> {selectedEntry.displayName} ({selectedEntry.type})</p>}
       <label className="portal-check"><input type="checkbox" disabled={!invitationEmailDelivery} checked={canRequest} onChange={event => setCanRequest(event.target.checked)} /> Allow this person to submit service requests for the selected scope</label>
-      <label className="portal-check portal-wide-access"><input type="checkbox" disabled={!invitationEmailDelivery} checked={organizationWide} onChange={event => { setOrganizationWide(event.target.checked); setWideConfirmed(false); }} /> Give access across this entire client workspace</label>
-      {organizationWide && <div className="portal-danger-disclosure" role="alert"><strong>Broader access</strong><p>This person will be able to see current and future projects across the workspace.</p><label className="portal-check"><input type="checkbox" required checked={wideConfirmed} onChange={event => setWideConfirmed(event.target.checked)} /> I understand and want to grant workspace-wide access.</label></div>}
-      <button className="button-primary" disabled={!invitationEmailDelivery || busy || (!organizationWide && !projectId) || (organizationWide && !wideConfirmed)}>{busy ? "Saving…" : "Send invitation"}</button>
+      <label className="portal-check portal-wide-access"><input type="checkbox" disabled={!invitationEmailDelivery} checked={organizationWide} onChange={event => { setOrganizationWide(event.target.checked); setWideConfirmed(false); }} /> {workspaceWideLabel}</label>
+      {broadConfirmationRequired && <div className="portal-danger-disclosure" role="alert"><strong>Broader access</strong><p>This person will be able to see current and future projects across {organizationWide ? "the workspace" : "this organization"}.</p><label className="portal-check"><input type="checkbox" required checked={wideConfirmed} onChange={event => setWideConfirmed(event.target.checked)} /> I understand and want to grant {organizationWide ? "workspace-wide" : "organization-wide"} access.</label></div>}
+      <button className="button-primary" disabled={!invitationEmailDelivery || busy || (!organizationWide && !selectedScope) || (broadConfirmationRequired && !wideConfirmed)}>{busy ? "Saving..." : "Send invitation"}</button>
       {error && <p className="portal-form-error" role="alert">{error}</p>}
     </form>
     <div className="portal-team-lists">
       <section><h3>People</h3>{members.map(member => <div className="portal-team-row" key={member.identityId}><span><strong>{member.email ?? "Verified portal user"}</strong><small>{member.manager ? "Manager" : "Member"} · {member.status}</small></span>{member.status === "active" && <button className="button-ghost button-small" onClick={async () => { setBusy(true); try { await suspendPortalWorkspaceMember(workspaceId, member.identityId); await refreshAccess(workspaceId); } catch (caught) { setError((caught as Error).message); } finally { setBusy(false); } }}>Suspend</button>}</div>)}</section>
-      <section><h3>Invitations</h3>{invitations.length === 0 ? <p className="portal-copy">No invitations yet.</p> : invitations.map(invitation => <div className="portal-team-row" key={invitation.id}><span><strong>{invitation.email}</strong><small>{invitation.scope.type === "project" ? "Project access" : "Workspace-wide"} · {invitation.status}</small></span>{invitation.status === "pending" && <button className="button-ghost button-small" onClick={async () => { setBusy(true); try { await revokePortalWorkspaceInvitation(workspaceId, invitation.id); await refreshAccess(workspaceId); } catch (caught) { setError((caught as Error).message); } finally { setBusy(false); } }}>Revoke</button>}</div>)}</section>
+      <section><h3>Invitations</h3>{invitations.length === 0 ? <p className="portal-copy">No invitations yet.</p> : invitations.map(invitation => {
+        const scopedEntry = invitation.scope.publicId ? hierarchy.find(entry => entry.type === invitation.scope.type && entry.publicId === invitation.scope.publicId) : null;
+        return <div className="portal-team-row" key={invitation.id}><span><strong>{invitation.email}</strong><small>{scopedEntry ? `${scopedEntry.displayName} - ` : ""}{hierarchyScopeLabel(invitation.scope.type)} - {invitation.status}</small></span>{invitation.status === "pending" && <button className="button-ghost button-small" onClick={async () => { setBusy(true); try { await revokePortalWorkspaceInvitation(workspaceId, invitation.id); await refreshAccess(workspaceId); } catch (caught) { setError((caught as Error).message); } finally { setBusy(false); } }}>Revoke</button>}</div>;
+      })}</section>
     </div>
   </div>;
 }
@@ -1568,7 +1764,7 @@ export function ClientPortalApp({
   const mobileNavTrigger = useRef<HTMLButtonElement>(null);
   const mobileNavPanel = useRef<HTMLDivElement>(null);
   const pastDeliveryLoader = useMemo(
-    () => (cursor: string | null) => loadPortalPastDeliveries(cursor),
+    () => (_folderId: string | null, cursor: string | null) => loadPortalPastDeliveries(cursor),
     [],
   );
   const pastDeliveryLocationLoader = useMemo(
@@ -2035,7 +2231,7 @@ export function ClientPortalApp({
               Contact LTDS
             </a>
           </Card>
-          {capabilities.workspaceMembershipManagement && <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel invitationEmailDelivery={capabilities.invitationEmailDelivery} /></Card>}
+          {capabilities.workspaceMembershipManagement && <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel invitationEmailDelivery={capabilities.invitationEmailDelivery} hierarchyScopedInvitations={capabilities.hierarchyScopedInvitations} /></Card>}
         </div>
       </>
     );

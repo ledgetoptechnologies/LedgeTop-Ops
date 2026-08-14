@@ -5,6 +5,7 @@ import membershipMigration from "../migrations/0123_portal_v2_membership_managem
 import projectionMigration from "../migrations/0125_project_alpha_portal_projection.sql?raw";
 import scrubMigration from "../migrations/0127_portal_invitation_secret_scrub.sql?raw";
 import relationMigration from "../migrations/0129_portal_hierarchy_relations.sql?raw";
+import enrollmentReceiptMigration from "../migrations/0133_portal_invitation_access_enrollment_receipts.sql?raw";
 import {
   authorizePortalWorkspaceCapability,
   listPortalWorkspaceHierarchy,
@@ -43,6 +44,7 @@ describe("portal relation hierarchy compatibility", () => {
     await migrate(db, projectionMigration);
     await migrate(db, scrubMigration);
     await migrate(db, relationMigration);
+    await migrate(db, enrollmentReceiptMigration);
     await db.batch([
       db.prepare("INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,status) VALUES ('ws-acme','organization','org-acme','Acme','active')"),
       db.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status) VALUES ('manager',?,?,?,'active')").bind(principal.issuer, principal.subject, principal.email),

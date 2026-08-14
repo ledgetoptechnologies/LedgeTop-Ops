@@ -6,8 +6,12 @@ deployment, production migration, real email, or production data mutation.
 
 ---
 
-Work only in the current Project Alpha repository. Inspect current
-`origin/main`, the full schema/migration ledger, authorization middleware,
+Work only in the current Project Alpha repository. The reviewed compatibility
+baseline is Project Alpha commit `60e73526` on
+`codex/dev-recurring-expenses`/`origin/dev`; do not silently replace it with
+the older `origin/main`. If the checkout has moved, first compare it to that
+commit and report the exact delta. Inspect the full schema/migration ledger,
+authorization middleware,
 Service Library, quote creation, organization/department/contact screens,
 portal foundation, sync v1/v2 services, audit/outbox conventions, and tests
 before editing. Preserve unrelated work. Create a `codex/` feature branch, but
@@ -15,14 +19,14 @@ do not deploy, apply a remote migration, send real email, push, or merge unless
 the user separately authorizes it.
 
 Your objective is to implement Project Alpha's half of the LTDS Client Portal
-v2 contract. Treat the LTDS documents
-`C:\Users\fstor\.codex\worktrees\6d08\LTDS-Ops\docs\client-portal-v2-architecture.md`
-and
-`C:\Users\fstor\.codex\worktrees\6d08\LTDS-Ops\docs\project-alpha.md`
-as the normative wire contract. Their repository-relative paths are
-`docs/client-portal-v2-architecture.md` and `docs/project-alpha.md`. If this
-checkout cannot read them, stop and request their exact contents rather than
-inventing a divergent contract.
+v2 contract. Use the reviewed LTDS `origin/main` compatibility commit and
+fixture hashes named in the handoff message accompanying this prompt. Treat
+that commit's repository-relative `docs/client-portal-v2-architecture.md`,
+`docs/project-alpha.md`, and five
+`packages/shared/fixtures/project-alpha-*.json` files as normative. Verify the
+fixture SHA-256 values before editing. If those exact bytes are unavailable,
+stop and request them rather than reading another worktree or inventing a
+divergent contract.
 
 Project Alpha remains authoritative for organizations, departments, clients,
 projects, portal authorization intent, the Service Library, pricing policy,
@@ -49,10 +53,13 @@ Implement this as additive, default-off, independently gated capabilities:
      missing department-scoped entitlement model or a generic scoped model.
      A UI may suggest the primary department contact, but primary status alone
      must grant nothing.
-   - Organization administrators may appoint department heads/project
-     managers; department heads may appoint project managers; project managers
-     may add project members only. Project scope is always the safe default.
-     Organization-wide scope requires an explicit warning and confirmation.
+   - PA staff, through the audited PA authority screen, appoint or replace
+     organization administrators, department heads, and project managers.
+     Portal managers may invite ordinary LTDS-local guests only within a scope
+     where their PA entitlement already grants `member.manage`; an invitation
+     can never grant `member.manage` or create a PA-backed manager. Project
+     scope is always the safe default. Organization-wide guest scope requires
+     an explicit warning and confirmation.
    - Removing/reparenting/deactivating a source entity or entitlement must emit
      authoritative state that immediately removes the affected authorization
      intent. Changing a contact's email must not silently bind a different
@@ -77,6 +84,12 @@ Implement this as additive, default-off, independently gated capabilities:
      every other direction. Entity and workspace tombstones are single
      authoritative events: LTDS closes their dependent graph, lifecycle, and
      PA-derived authorization atomically.
+   - Map PA project lifecycle exactly: `not_started`, `active`, and `overdue`
+     publish `active` with `completedAt: null`; `completed` publishes
+     `completed` with an immutable authoritative `completed_at`; `cancelled`
+     publishes the project inactive/tombstoned and immediately closes its
+     dependent authorization graph. Add `completed_at` rather than deriving it
+     from `updated_at`. Reopening clears `completed_at` and publishes `active`.
    - Persist mutation plus outbox event in the same database transaction.
      Delivery must be idempotent and retryable; per-workspace sequences are
      contiguous and monotonic. Interrupted snapshots must be resumable without
@@ -95,7 +108,10 @@ Implement this as additive, default-off, independently gated capabilities:
 
 3. **Sanitized Service Library projection**
    - Add an immutable public ID and monotonic portal-visible version to each
-     Service Library item/package needed by LTDS.
+     Service Library service needed by LTDS. Catalog schema v2 is intentionally
+     flat: publish only `entry_type=service`. Fees and bundles remain PA-only;
+     do not flatten package composition until a later versioned wire contract
+     defines its composition and pricing semantics.
    - Add an explicit `portal_request_enabled`-style control. Every published
      item must contain exactly `publicId`, `sourceVersion`, `name`, nullable
      `summary`, non-empty `category` (maximum 100 characters), integer
@@ -149,7 +165,10 @@ Implement this as additive, default-off, independently gated capabilities:
      payload hash. Equal replay returns the same draft; changed reuse is 409;
      concurrent delivery creates exactly one draft. Add a stable quote public
      ID and return only draft status/version, receipt/correlation ID, and a
-     same-origin relative editor path or strictly allowlisted PA URL.
+     exact public-ID editor path `/quotes/{encodeURIComponent(quotePublicId)}/edit`.
+     Add that PA route and resolve it server-side to the internal row. Numeric query-string
+     routes such as `?id=42`, absolute URLs, and paths for a different quote
+     public ID are invalid.
    - The command may create **only a draft**. It must never approve, publish,
      send, sign, create a contract/invoice, charge/pay, or notify a client.
    - Reject redirects on outbound/inbound integration hops as applicable and
@@ -159,8 +178,9 @@ Implement this as additive, default-off, independently gated capabilities:
      `packages/shared/fixtures/project-alpha-draft-quote-v1.json` from LTDS.
      Run its valid request/response and every invalid request/response through
      the PA receiver tests. Reject extra keys, numeric legacy authorization
-     IDs, mismatched area nullability, non-draft results, and non-relative
-     editor paths exactly as the shared corpus requires.
+     IDs, mismatched area nullability, non-draft results, and editor paths that
+     do not identify the returned quote public ID exactly as the shared corpus
+     requires.
 
 6. **Integration security and operations**
    - Use separate credentials/scopes/secrets for portal projection, catalog

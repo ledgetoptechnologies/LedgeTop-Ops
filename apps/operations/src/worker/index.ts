@@ -99,6 +99,7 @@ import { incomingUploadsCapability } from "./incoming-policy";
 import { servePdfSourceFile, serveSourceFile } from "./source-file";
 import { directDeliveryUploadsCapability } from "./direct-upload-policy";
 import { isFrameableOperationsPdfRequest } from "./frame-policy";
+import { requestHostAllowed } from "./host-admission";
 import {
   dropboxImportCapability,
   registerDropboxImportRoutes,
@@ -122,13 +123,23 @@ import { registerSopRoutes } from "./sop";
 import { registerClientRequestAttachmentRoutes } from "./client-request-attachments";
 import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quote";
 import {
+  decorateWorkContextsWithSops,
+  registerWorkContextSopRoutes,
+} from "./work-context-sops";
+import {
   createDelegatedShareDelegation,
   createDelegatedShareTarget,
+  delegatedShareProvisioningEnabled,
   delegatedShareFolderContext,
   listDelegatedShareProvisioning,
   revokeDelegatedShareProvisioningEntity,
   transferDelegatedShareDelegation,
 } from "./client-delegated-share-provisioning";
+import {
+  clientWorkspaceManagerRecoveryEnabled,
+  listClientWorkspaceManagerRecovery,
+  transferClientWorkspaceManager,
+} from "./client-workspace-manager-recovery";
 import { requestAreaKml, requestAreaKmlFilename } from "./request-area-kml";
 import {
   parseStoredWorkArea,
@@ -235,11 +246,7 @@ app.use("*", (c, next) =>
     : lockedSecurityHeaders(c, next),
 );
 app.use("*", async (c, next) => {
-  if (
-    c.env.ENVIRONMENT === "production" &&
-    new URL(c.req.url).host !== c.env.EXPECTED_HOST
-  )
-    return c.json({ error: "Not found" }, 404);
+  if (!requestHostAllowed(c.req.url, c.env)) return c.json({ error: "Not found" }, 404);
   await next();
   c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   c.header("X-Robots-Tag", "noindex, nofollow");
@@ -383,6 +390,11 @@ const delegatedShareTransferSchema = z.object({
   identityId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
   entitlementId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
   expectedVersion: z.number().int().positive(),
+}).strict();
+const clientWorkspaceManagerTransferSchema = z.object({
+  targetIdentityId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
+  previousManagerIdentityId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/).optional(),
+  suspendPrevious: z.boolean().default(false),
 }).strict();
 const paQuoteLinkSchema = z
   .object({ artifactId: z.coerce.number().int().positive() })
@@ -564,6 +576,12 @@ app.get("/api/session", async (c) => {
       shareDirectoryRecipients: {
         enabled: shareDirectoryRecipientsEnabled(c.env),
       },
+      delegatedShareProvisioning: {
+        enabled: delegatedShareProvisioningEnabled(c.env),
+      },
+      clientWorkspaceManagerRecovery: {
+        enabled: clientWorkspaceManagerRecoveryEnabled(c.env),
+      },
     },
   });
 });
@@ -701,12 +719,13 @@ app.get("/api/projects", async (c) => {
     values.push(`%${search}%`, `%${search}%`, `%${search}%`, `%${search}%`);
   }
   sql += " ORDER BY COALESCE(p.start_date,p.updated_at) DESC LIMIT 200";
+  const projects = (
+    await c.env.OPS_DB.prepare(sql)
+      .bind(...values)
+      .all<{ id: string } & Record<string, unknown>>()
+  ).results;
   return c.json({
-    projects: (
-      await c.env.OPS_DB.prepare(sql)
-        .bind(...values)
-        .all()
-    ).results,
+    projects: await decorateWorkContextsWithSops(c.env, principal, "project", projects),
   });
 });
 app.get("/api/projects/:id", async (c) => {
@@ -923,6 +942,19 @@ app.delete("/api/admin/client-delegated-shares/delegations/:delegationId", async
     c.req.header("Idempotency-Key") || "",
   ) });
 });
+app.get("/api/admin/client-workspaces/recovery", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "operations.manage");
+  return c.json(await listClientWorkspaceManagerRecovery(c.env));
+});
+app.post("/api/admin/client-workspaces/:workspaceId/manager-transfer", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "operations.manage");
+  return c.json(await transferClientWorkspaceManager(
+    c.env,
+    c.get("principal"),
+    c.req.param("workspaceId"),
+    await body(c, clientWorkspaceManagerTransferSchema),
+  ));
+});
 app.post("/api/client-portal/projects", async (c) => {
   const principal = c.get("principal");
   await requireGlobal(c.env, principal, "operations.manage");
@@ -1122,6 +1154,7 @@ app.post("/api/operations", () => managedInProjectAlpha());
 app.patch("/api/operations/:id", () => managedInProjectAlpha());
 registerJobBriefRoutes(app);
 registerSopRoutes(app);
+registerWorkContextSopRoutes(app);
 registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
 
@@ -1140,8 +1173,10 @@ app.get("/api/tasks", async (c) => {
     `SELECT t.*,t.notes description,d.name division_name,o.title operation_title,p.name project_name,(SELECT GROUP_CONCAT(s.display_name, ', ') FROM pa_task_assignments ta JOIN staff_users s ON s.project_alpha_user_id=ta.user_id WHERE ta.task_id=t.id AND ta.active=1) assigned_name FROM pa_tasks t LEFT JOIN divisions d ON d.project_alpha_business_unit_id=t.business_unit_id LEFT JOIN pa_operations o ON o.id=t.operation_id LEFT JOIN pa_projects p ON p.id=t.project_id WHERE ${where.sql} ORDER BY CASE t.status WHEN 'blocked' THEN 0 WHEN 'in_progress' THEN 1 WHEN 'todo' THEN 2 ELSE 3 END,t.due_at LIMIT 300`,
   )
     .bind(...where.values)
-    .all();
-  return c.json({ tasks: result.results });
+    .all<{ id: string } & Record<string, unknown>>();
+  return c.json({
+    tasks: await decorateWorkContextsWithSops(c.env, principal, "task", result.results),
+  });
 });
 
 // Client requests live with their portal grants in DELIVERY_DB. PA remains the

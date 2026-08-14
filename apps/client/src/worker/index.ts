@@ -47,7 +47,7 @@ function cloudStatus(value:string):string{return value==="partial"?"failed":valu
 function providerPublicName(provider:CloudProvider):"dropbox"|"google-drive"{return provider==="google"?"google-drive":"dropbox";}
 
 export function requestHostAllowed(requestUrl:string,env:Pick<Env,"ENVIRONMENT"|"EXPECTED_HOST"|"CLIENT_PORTAL_ORIGIN">):boolean{
- if(env.ENVIRONMENT!=="production")return true;
+ if(env.ENVIRONMENT!=="production"&&env.ENVIRONMENT!=="staging")return true;
  const requestHost=new URL(requestUrl).host;
  if(requestHost===env.EXPECTED_HOST)return true;
  if(!env.CLIENT_PORTAL_ORIGIN)return false;

@@ -3,6 +3,7 @@ import { Miniflare } from "miniflare";
 import {
   createProjectAlphaPricingHintProvider,
   fetchProjectAlphaPricingHint,
+  projectAlphaPricingRequestSchema,
   projectAlphaPricingHintCapability,
   resolveProjectAlphaPricingAuthorizationContext,
 } from "../src/worker/client-portal/project-alpha-pricing-hint";
@@ -49,17 +50,7 @@ function env(overrides: Partial<Env> = {}): Env {
 
 function response(overrides: Record<string, unknown> = {}): Response {
   return Response.json({
-    schemaVersion: 1,
-    catalogVersion: "catalog-v19",
-    coverageSquareMetres: "889000.000000",
-    displayMode: "starting_at",
-    currency: "USD",
-    startingAt: "1500.00",
-    typicalMinimum: null,
-    typicalMaximum: null,
-    reasonUnavailable: null,
-    disclaimer: "Planning guidance only. Final quote after staff review.",
-    validUntil: "2026-08-13T12:10:00.000Z",
+    ...pricingFixture.response,
     ...overrides,
   });
 }
@@ -106,6 +97,23 @@ describe("Project Alpha pricing hint provider", () => {
       validUntil: "2026-08-13T12:10:00.000Z",
     });
     expect(fetcher).toHaveBeenCalledOnce();
+  });
+
+  it("accepts the shared response and rejects every shared negative request and response specimen", async () => {
+    expect(projectAlphaPricingRequestSchema.safeParse(pricingFixture.request).success).toBe(true);
+    for (const specimen of pricingFixture.invalidRequests) {
+      expect(projectAlphaPricingRequestSchema.safeParse(specimen.request).success, specimen.name).toBe(false);
+    }
+    await expect(fetchProjectAlphaPricingHint(input, env(), {
+      fetcher: vi.fn(async () => Response.json(pricingFixture.response)) as typeof fetch,
+      now,
+    })).resolves.toMatchObject({ kind: "starting_at", startingAtMinor: 150_000 });
+    for (const specimen of pricingFixture.invalidResponses) {
+      await expect(fetchProjectAlphaPricingHint(input, env(), {
+        fetcher: vi.fn(async () => Response.json(specimen.response)) as typeof fetch,
+        now,
+      }), specimen.name).resolves.toBeNull();
+    }
   });
 
   it("fails closed before network for disabled, incomplete, or non-allowlisted endpoint configuration", async () => {

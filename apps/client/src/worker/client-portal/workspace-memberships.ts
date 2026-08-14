@@ -1,4 +1,5 @@
 import type { Env } from "../types";
+import { invitationRecipientEmailHash } from "./access-enrollment-receipts";
 import type { VerifiedClientPrincipal } from "./types";
 import {
   authorizePortalWorkspaceCapability,
@@ -155,6 +156,8 @@ export async function createWorkspaceInvitation(
   const invitationId = crypto.randomUUID();
   const token = randomToken();
   const tokenHash = await digest(token);
+  const recipientEmailHash = await invitationRecipientEmailHash(email);
+  if (!recipientEmailHash) return { outcome: "invalid" };
   const expiresAt = new Date(Date.now() + INVITE_LIFETIME_MS).toISOString();
   const scopeType = selectedTarget.scopeType;
   const scopePublicId = selectedTarget.publicId;
@@ -176,8 +179,8 @@ export async function createWorkspaceInvitation(
         window_started_at=CASE WHEN datetime(window_started_at,'+1 hour')<=datetime('now') THEN datetime('now') ELSE window_started_at END,
         request_count=CASE WHEN datetime(window_started_at,'+1 hour')<=datetime('now') THEN 1 ELSE request_count+1 END`)
         .bind(workspaceId, actor.id),
-      database.prepare(`INSERT INTO portal_v2_invitation_email_outbox(id,invitation_id,recipient_email,payload_json)
-        VALUES (?,?,?,?)`).bind(crypto.randomUUID(), invitationId, email, JSON.stringify({ invitationId, token, expiresAt })),
+      database.prepare(`INSERT INTO portal_v2_invitation_email_outbox(id,invitation_id,recipient_email,payload_json,recipient_email_hash)
+        VALUES (?,?,?,?,?)`).bind(crypto.randomUUID(), invitationId, email, JSON.stringify({ invitationId, token, expiresAt }), recipientEmailHash),
       database.prepare(`INSERT INTO portal_v2_membership_audit
         (id,workspace_id,actor_identity_id,action,invitation_id,details_json) VALUES (?,?,?,'invitation.created',?,?)`)
         .bind(crypto.randomUUID(), workspaceId, actor.id, invitationId, JSON.stringify({ scopeType, scopePublicId, capabilities: grants })),
@@ -262,7 +265,7 @@ export async function suspendWorkspaceMember(env: Env, principal: VerifiedClient
   if (!target || target.status !== "active") return "not_found";
   if (target.source_type === "project_alpha") return "managed_source";
   const database = db(env);
-  const result = await database.batch([
+  await database.batch([
     database.prepare(`UPDATE portal_v2_workspace_memberships AS target SET status='suspended',updated_at=datetime('now')
       WHERE target.workspace_id=? AND target.identity_id=? AND target.status='active'
         AND (NOT EXISTS(SELECT 1 FROM portal_v2_entitlements target_allow WHERE target_allow.workspace_id=target.workspace_id
@@ -292,26 +295,11 @@ export async function suspendWorkspaceMember(env: Env, principal: VerifiedClient
     database.prepare(`INSERT INTO portal_v2_membership_audit(id,workspace_id,actor_identity_id,action,subject_identity_id)
       SELECT ?,?,?, 'membership.suspended',? WHERE changes()=1`).bind(crypto.randomUUID(), workspaceId, actor.id, identityId),
   ]);
-  if (result[0]?.meta.changes !== 1) return target.manager === 1 ? "last_manager" : "not_found";
-  return "suspended";
-}
-
-/** Staff-only recovery seam. Callers must first enforce client.accounts.manage;
- * it is intentionally not exposed by the client router. */
-export async function transferWorkspaceManagerByStaff(env: Env, workspaceId: string, targetIdentityId: string, staffActorId: string): Promise<boolean> {
-  if (!portalHierarchyV2Enabled(env)) return false;
-  const target = await db(env).prepare(`SELECT 1 ok FROM portal_v2_workspace_memberships WHERE workspace_id=? AND identity_id=? AND status IN ('active','suspended')`).bind(workspaceId, targetIdentityId).first("ok");
-  if (target === null) return false;
-  const database = db(env);
-  await database.batch([
-    database.prepare(`UPDATE portal_v2_workspace_memberships SET status='active',revoked_at=NULL,updated_at=datetime('now') WHERE workspace_id=? AND identity_id=?`).bind(workspaceId, targetIdentityId),
-    database.prepare(`UPDATE portal_v2_entitlements SET status='active',revoked_at=NULL WHERE workspace_id=? AND identity_id=? AND status='suspended'`).bind(workspaceId, targetIdentityId),
-    database.prepare(`INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status)
-      VALUES (?,?,?,?, 'allow','workspace',?,'operations','active')
-      ON CONFLICT(workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version) DO UPDATE SET status='active',revoked_at=NULL`)
-      .bind(crypto.randomUUID(), workspaceId, targetIdentityId, "member.manage", workspaceId),
-    database.prepare(`INSERT INTO portal_v2_membership_audit(id,workspace_id,action,subject_identity_id,details_json)
-      VALUES (?,?,'manager.transferred',?,?)`).bind(crypto.randomUUID(), workspaceId, targetIdentityId, JSON.stringify({ staffActorId })),
-  ]);
-  return true;
+  // D1 may include rows changed by migration-owned lifecycle triggers in the
+  // first statement's metadata. Read the guarded state instead of treating a
+  // trigger-expanded change count as a failed membership transition.
+  const status = await database.prepare(`SELECT status FROM portal_v2_workspace_memberships
+    WHERE workspace_id=? AND identity_id=?`).bind(workspaceId, identityId).first("status");
+  if (status === "suspended") return "suspended";
+  return target.manager === 1 ? "last_manager" : "not_found";
 }

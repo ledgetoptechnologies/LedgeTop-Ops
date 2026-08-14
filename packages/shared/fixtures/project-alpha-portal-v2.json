@@ -171,7 +171,7 @@
       }
     },
     {
-      "name": "schema-v3-relations-not-yet-ingestible",
+      "name": "schema-v3-rejected-when-relations-disabled",
       "expectedError": "portal-envelope-invalid",
       "delivery": {
         "schemaVersion": 3,
@@ -236,8 +236,8 @@
   ],
   "relationProjectionStatus": {
     "nextSchemaVersion": 3,
-    "acceptedByCurrentReceiver": false,
+    "acceptedWhenRelationsFlagEnabled": true,
     "runtimeFeatureFlagDefault": false,
-    "note": "Relations and project lifecycles remain gated until a coordinated schema-v3 producer and receiver contract is implemented and proven in staging."
+    "note": "The receiver accepts the separate schema-v3 fixture only when CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED is exactly true. The default-off schema-v2 parser rejects this specimen."
   }
 }

@@ -3,6 +3,12 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import hierarchyMigration from "../migrations/0121_client_workspace_hierarchy_v2.sql?raw";
 import membershipMigration from "../migrations/0123_portal_v2_membership_management.sql?raw";
 import scrubMigration from "../migrations/0127_portal_invitation_secret_scrub.sql?raw";
+import accessReceiptMigration from "../migrations/0133_portal_invitation_access_enrollment_receipts.sql?raw";
+import {
+  invitationRecipientEmailHash,
+  recordInvitationAccessEnrollmentReceipt,
+  revokeInvitationAccessEnrollmentReceipt,
+} from "../src/worker/client-portal/access-enrollment-receipts";
 import {
   invitationEmailDeliveryEnabled,
   processInvitationEmailBatch,
@@ -32,6 +38,7 @@ describe("workspace invitation email delivery", () => {
     await database.exec(executableMigration(hierarchyMigration.split("INSERT OR IGNORE INTO portal_v2_identities")[0]!));
     await database.exec(executableMigration(membershipMigration));
     await database.exec(executableMigration(scrubMigration));
+    await database.exec(executableMigration(accessReceiptMigration));
     await database.prepare("PRAGMA foreign_keys=ON").run();
     await database.batch([
       database.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES ('inviter','https://access.test','inviter','manager@example.test')"),
@@ -43,6 +50,7 @@ describe("workspace invitation email delivery", () => {
       CLIENT_PORTAL_ENABLED: "true",
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
       CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "true",
+      CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: "true",
       CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: "true",
       CLIENT_PORTAL_INVITATION_FROM: "portal@ledgetopdroneservices.com",
       CLIENT_PORTAL_INVITATION_FROM_NAME: "LTDS Portal",
@@ -54,26 +62,80 @@ describe("workspace invitation email delivery", () => {
 
   afterEach(async () => miniflare.dispose());
 
-  async function queueInvitation(options: { id?: string; token?: string; email?: string; payload?: unknown; status?: string; expiresAt?: string } = {}) {
+  async function queueInvitation(options: { id?: string; token?: string; email?: string; payload?: unknown; status?: string; expiresAt?: string; workspaceId?: string; enrolled?: boolean } = {}) {
     const id = options.id ?? "invite-a";
     const token = options.token ?? "A".repeat(43);
     const email = options.email ?? "person@example.test";
+    const workspaceId = options.workspaceId ?? "workspace-a";
     const expiresAt = options.expiresAt ?? "2099-01-01T00:00:00.000Z";
+    const recipientEmailHash = await invitationRecipientEmailHash(email);
+    expect(recipientEmailHash).not.toBeNull();
     await database.batch([
       database.prepare(`INSERT INTO portal_v2_invitations
         (id,workspace_id,token_hash,invited_email,invited_by_identity_id,status,expires_at)
-        VALUES (?,?,?,?,?,?,?)`).bind(id, "workspace-a", (`H${id}${"x".repeat(43)}`).slice(0, 43), email, "inviter", options.status ?? "pending", expiresAt),
-      database.prepare(`INSERT INTO portal_v2_invitation_email_outbox(id,invitation_id,recipient_email,payload_json,next_attempt_at)
-        VALUES (?,?,?,?,'2000-01-01T00:00:00.000Z')`).bind(`outbox-${id}`, id, email, JSON.stringify(options.payload ?? { invitationId: id, token, expiresAt })),
+        VALUES (?,?,?,?,?,?,?)`).bind(id, workspaceId, (`H${id}${"x".repeat(43)}`).slice(0, 43), email, "inviter", options.status ?? "pending", expiresAt),
+      database.prepare(`INSERT INTO portal_v2_invitation_email_outbox(id,invitation_id,recipient_email,payload_json,next_attempt_at,recipient_email_hash)
+        VALUES (?,?,?,?,'2000-01-01T00:00:00.000Z',?)`).bind(`outbox-${id}`, id, email, JSON.stringify(options.payload ?? { invitationId: id, token, expiresAt }), recipientEmailHash),
     ]);
+    if (options.enrolled !== false && (options.status ?? "pending") === "pending" && Date.parse(expiresAt) > Date.now()) {
+      expect(await recordInvitationAccessEnrollmentReceipt(env, {
+        invitationId: id, workspaceId, email, enrollmentVersion: 1,
+        providerReceiptHash: "R".repeat(43), enrolledAt: "2026-08-13T00:00:00.000Z",
+      })).toBe(true);
+    }
   }
 
   it("fails closed unless every rollout flag, sender, origin, and binding is configured", () => {
     expect(invitationEmailDeliveryEnabled(env)).toBe(true);
+    expect(invitationEmailDeliveryEnabled({ ...env, CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: "false" })).toBe(false);
     expect(invitationEmailDeliveryEnabled({ ...env, CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: "false" })).toBe(false);
     expect(invitationEmailDeliveryEnabled({ ...env, CLIENT_PORTAL_INVITATION_EMAIL: undefined })).toBe(false);
     expect(invitationEmailDeliveryEnabled({ ...env, CLIENT_PORTAL_INVITATION_FROM: "invalid" })).toBe(false);
     expect(invitationEmailDeliveryEnabled({ ...env, CLIENT_PORTAL_ORIGIN: "http://client.example" })).toBe(false);
+  });
+
+  it("does not lease or send queued invitations until Access enrollment is attested", async () => {
+    await queueInvitation({ id: "not-enrolled" });
+    const result = await processInvitationEmailBatch(
+      { ...env, CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: "false" },
+      { now: new Date("2026-08-13T12:00:00.000Z") },
+    );
+    expect(result).toEqual({ claimed: 0, sent: 0, retried: 0, failed: 0, cancelled: 0 });
+    expect(sent).toHaveLength(0);
+    expect(await database.prepare("SELECT status,attempts FROM portal_v2_invitation_email_outbox WHERE invitation_id='not-enrolled'").first())
+      .toMatchObject({ status: "pending", attempts: 0 });
+  });
+
+  it("requires a matching, live per-invitation Access enrollment receipt", async () => {
+    await queueInvitation({ id: "receipt-required", enrolled: false });
+    const now = new Date("2026-08-13T12:00:00.000Z");
+    expect((await processInvitationEmailBatch(env, { now })).claimed).toBe(0);
+    expect(sent).toHaveLength(0);
+    expect(await recordInvitationAccessEnrollmentReceipt(env, {
+      invitationId: "receipt-required", workspaceId: "workspace-a", email: "wrong@example.test",
+      enrollmentVersion: 1, providerReceiptHash: "W".repeat(43), enrolledAt: now.toISOString(),
+    })).toBe(false);
+    expect(await recordInvitationAccessEnrollmentReceipt(env, {
+      invitationId: "receipt-required", workspaceId: "workspace-a", email: "person@example.test",
+      enrollmentVersion: 1, providerReceiptHash: "C".repeat(43), enrolledAt: now.toISOString(),
+    })).toBe(true);
+    expect((await processInvitationEmailBatch(env, { now })).sent).toBe(1);
+  });
+
+  it("keeps same-email workspace receipts independent and rejects stale revocation", async () => {
+    await database.prepare("INSERT INTO portal_v2_workspaces(id,root_type,pa_client_public_id,display_name,status) VALUES ('workspace-b','standalone_client','client-b','Beta','active')").run();
+    await queueInvitation({ id: "workspace-a-invite", email: "shared@example.test" });
+    await queueInvitation({ id: "workspace-b-invite", email: "shared@example.test", workspaceId: "workspace-b" });
+    expect(await recordInvitationAccessEnrollmentReceipt(env, {
+      invitationId: "workspace-b-invite", workspaceId: "workspace-b", email: "shared@example.test",
+      enrollmentVersion: 2, providerReceiptHash: "N".repeat(43), enrolledAt: "2026-08-13T00:00:00.000Z",
+    })).toBe(true);
+    expect(await revokeInvitationAccessEnrollmentReceipt(env, "workspace-b-invite", "workspace-b", 1)).toBe(false);
+    expect(await revokeInvitationAccessEnrollmentReceipt(env, "workspace-a-invite", "workspace-a", 1)).toBe(true);
+    const result = await processInvitationEmailBatch(env, { now: new Date("2026-08-13T12:00:00.000Z"), limit: 25 });
+    expect(result.sent).toBe(1);
+    expect(sent.map(message => message.to)).toEqual(["shared@example.test"]);
+    expect(await database.prepare("SELECT revoked_at FROM portal_v2_invitation_access_enrollment_receipts WHERE invitation_id='workspace-b-invite'").first("revoked_at")).toBeNull();
   });
 
   it("leases once, sends a fragment-only token link, and scrubs the plaintext token", async () => {
@@ -145,6 +207,18 @@ describe("workspace invitation email delivery", () => {
       .toMatchObject({ status: "cancelled", payload_json: '{"redacted":true}' });
   });
 
+  it("cannot mark mail sent when its exact enrollment receipt is revoked during handoff", async () => {
+    await queueInvitation({ id: "receipt-race" });
+    env.CLIENT_PORTAL_INVITATION_EMAIL = { send: async () => {
+      expect(await revokeInvitationAccessEnrollmentReceipt(env, "receipt-race", "workspace-a", 1)).toBe(true);
+      return { messageId: "provider-handoff" };
+    } };
+    const result = await processInvitationEmailBatch(env, { now: new Date("2026-08-13T12:00:00.000Z") });
+    expect(result).toMatchObject({ claimed: 1, sent: 0, cancelled: 1 });
+    expect(await database.prepare("SELECT status,payload_json FROM portal_v2_invitation_email_outbox WHERE invitation_id='receipt-race'").first())
+      .toMatchObject({ status: "cancelled", payload_json: '{"redacted":true}' });
+  });
+
   it("reclaims an expired processing lease but never steals a live lease", async () => {
     await queueInvitation({ id: "lease" });
     await database.prepare(`UPDATE portal_v2_invitation_email_outbox SET
@@ -166,6 +240,8 @@ describe("workspace invitation email delivery", () => {
     await database.prepare("UPDATE portal_v2_invitations SET status='accepted',accepted_at=datetime('now') WHERE id='accepted-now'").run();
     expect(await database.prepare("SELECT status,payload_json,lease_expires_at FROM portal_v2_invitation_email_outbox WHERE invitation_id='accepted-now'").first())
       .toMatchObject({ status: "cancelled", payload_json: '{"redacted":true}', lease_expires_at: null });
+    expect(await database.prepare("SELECT revoked_at FROM portal_v2_invitation_access_enrollment_receipts WHERE invitation_id='accepted-now'").first("revoked_at"))
+      .not.toBeNull();
   });
 
   it("migration 0127 idempotently scrubs terminal rows that predate the trigger", async () => {

@@ -106,7 +106,7 @@
       "decision": "bypass",
       "include": "everyone",
       "destination": "client-staging.ledgetopdroneservices.com",
-      "workerPublicPaths": ["/", "/s/*", "/api/public/*", "/health", "/assets/*"]
+      "workerPublicPaths": ["/", "/s/*", "/client-share/*", "/api/public/*", "/health", "/assets/*"]
     },
     "approvalRef": "<APPROVAL_REFERENCE>",
     "tests": {
@@ -159,7 +159,9 @@
         "0128_project_alpha_catalog_compatibility.sql",
         "0129_portal_hierarchy_relations.sql",
         "0130_client_delegated_share_provisioning.sql",
-        "0131_video_thumbnail_recovery_backfill.sql"
+        "0131_video_thumbnail_recovery_backfill.sql",
+        "0132_portal_v2_legacy_member_bridges.sql",
+        "0133_portal_invitation_access_enrollment_receipts.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -175,7 +177,8 @@
         "0019_browser_upload_conflict_resolution.sql",
         "0020_internal_sop_library.sql",
         "0021_project_alpha_sync_hardening.sql",
-        "0022_r2_operation_retries.sql"
+        "0022_r2_operation_retries.sql",
+        "0023_project_task_sop_links.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -189,9 +192,31 @@
     "projectAlphaPricingHints": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
     "projectAlphaDraftQuotes": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
     "requestAttachmentScanner": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "requestAttachmentR2CorsAndLeastPrivilege": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "requestAttachmentR2CorsAndLeastPrivilege": {
+      "ready": false,
+      "verifiedAt": "<ISO_8601_TIMESTAMP>",
+      "evidenceRef": "<EVIDENCE_REFERENCE>",
+      "corsArtifact": "docs/staging/request-attachments-r2-cors.json",
+      "allowedOriginPutVerified": false,
+      "outOfScopeOriginDenied": false,
+      "leastPrivilegeCredentialVerified": false
+    },
     "workspaceInvitationEmail": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "workspaceAccessEnrollment": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "workspaceAccessEnrollment": {
+      "ready": false,
+      "verifiedAt": "<ISO_8601_TIMESTAMP>",
+      "evidenceRef": "<EVIDENCE_REFERENCE>",
+      "mode": "<dedicated_workspace_reconciler>",
+      "clientGroupIsolated": false,
+      "enrollmentBeforeEmail": false,
+      "perInvitationReceiptEnforced": false,
+      "receiptBindsWorkspaceAndEmailHash": false,
+      "receiptRevocationRaceVerified": false,
+      "multiWorkspaceRetention": false,
+      "lastEligibilityRevocation": false,
+      "staffGroupUnchanged": false,
+      "processorEvidenceRef": "<DEDICATED_PROCESSOR_EVIDENCE_REFERENCE>"
+    },
     "workspaceStaffRecovery": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
     "delegatedShareSignerBinding": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
     "delegatedSharePublicAuthorization": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },

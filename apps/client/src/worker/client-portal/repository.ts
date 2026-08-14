@@ -54,6 +54,22 @@ interface FileRow {
   association_prefix: string;
 }
 
+interface FolderAssociationRow {
+  id: string;
+  r2_prefix: string;
+}
+
+interface FileEntryRow {
+  entry_kind: "file" | "folder";
+  entry_name: string;
+  r2_key: string | null;
+  size: number | null;
+  uploaded_at: string | null;
+  content_type: string | null;
+  media_kind: string | null;
+  association_prefix: string;
+}
+
 interface DeliveryRow {
   share_id: string;
   project_id: string;
@@ -189,6 +205,90 @@ function decodeFileId(value: string): string | null {
   } catch {
     return null;
   }
+}
+
+const PROJECT_FOLDER_HANDLE_PREFIX = "pf1_";
+const PROJECT_CURSOR_HANDLE_PREFIX = "pc1_";
+const HANDLE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+function encodeHandle(prefix: string, values: string[]): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(values));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return `${prefix}${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
+}
+
+function decodeHandle(value: string, prefix: string): string[] | null {
+  if (!value.startsWith(prefix) || value.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  try {
+    const encoded = value.slice(prefix.length);
+    const padding = "=".repeat((4 - (encoded.length % 4)) % 4);
+    const binary = atob(encoded.replace(/-/g, "+").replace(/_/g, "/") + padding);
+    const parsed: unknown = JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, char => char.charCodeAt(0))));
+    return Array.isArray(parsed) && parsed.every(item => typeof item === "string") ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function validRelativeFolderPath(value: string): boolean {
+  if (value === "") return true;
+  if (value.length > 2048 || !value.endsWith("/") || value.startsWith("/") || value.includes("\\") || /[\u0000-\u001f\u007f]/.test(value)) return false;
+  const segments = value.slice(0, -1).split("/");
+  return segments.every(segment => segment.length > 0 && segment.length <= 255 && segment !== "." && segment !== "..");
+}
+
+function encodeProjectFolderHandle(associationId: string, relativePath: string): string {
+  return encodeHandle(PROJECT_FOLDER_HANDLE_PREFIX, [associationId, relativePath]);
+}
+
+function decodeProjectFolderHandle(value: string): { associationId: string; relativePath: string } | null {
+  const values = decodeHandle(value, PROJECT_FOLDER_HANDLE_PREFIX);
+  return values?.length === 2 && HANDLE_ID.test(values[0]!) && validRelativeFolderPath(values[1]!)
+    ? { associationId: values[0]!, relativePath: values[1]! }
+    : null;
+}
+
+type ProjectCursor =
+  | { kind: "root"; associationId: string }
+  | { kind: "folder"; associationId: string; relativePath: string; name: string; entryKind: "file" | "folder" };
+
+function encodeProjectCursor(cursor: ProjectCursor): string {
+  return cursor.kind === "root"
+    ? encodeHandle(PROJECT_CURSOR_HANDLE_PREFIX, ["root", cursor.associationId])
+    : encodeHandle(PROJECT_CURSOR_HANDLE_PREFIX, ["folder", cursor.associationId, cursor.relativePath, cursor.name, cursor.entryKind]);
+}
+
+function decodeProjectCursor(value: string | null | undefined): ProjectCursor | null {
+  if (!value) return null;
+  const values = decodeHandle(value, PROJECT_CURSOR_HANDLE_PREFIX);
+  if (values?.length === 2 && values[0] === "root" && HANDLE_ID.test(values[1]!))
+    return { kind: "root", associationId: values[1]! };
+  if (values?.length === 5 && values[0] === "folder" && HANDLE_ID.test(values[1]!)
+    && validRelativeFolderPath(values[2]!) && values[3]!.length > 0 && values[3]!.length <= 1024
+    && !/[\u0000-\u001f\u007f]/.test(values[3]!) && (values[4] === "file" || values[4] === "folder")) {
+    return { kind: "folder", associationId: values[1]!, relativePath: values[2]!, name: values[3]!, entryKind: values[4] };
+  }
+  return null;
+}
+
+function prefixUpperBound(prefix: string): string {
+  return `${prefix.slice(0, -1)}0`;
+}
+
+function associationName(prefix: string): string {
+  return fileName(prefix.replace(/\/+$/, "")) || "Project files";
+}
+
+function projectBreadcrumbs(association: FolderAssociationRow, relativePath: string) {
+  const breadcrumbs: Array<{ id: string | null; name: string }> = [{ id: null, name: "Project files" }];
+  breadcrumbs.push({ id: encodeProjectFolderHandle(association.id, ""), name: associationName(association.r2_prefix) });
+  let path = "";
+  for (const segment of relativePath.split("/").filter(Boolean)) {
+    path += `${segment}/`;
+    breadcrumbs.push({ id: encodeProjectFolderHandle(association.id, path), name: segment });
+  }
+  return breadcrumbs;
 }
 
 function fileName(key: string): string {
@@ -597,40 +697,136 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     session: ClientPortalSession,
     projectId: string,
     cursor?: string | null,
+    folderId?: string | null,
   ): Promise<ClientFilePage | null> {
     const project = await this.getProject(env, session, projectId);
     if (!project) return null;
-    const result = await portalDb(env)
-      .prepare(
-        `
-      SELECT DISTINCT f.r2_key,f.size,f.uploaded_at,f.content_type,f.media_kind,association.r2_prefix association_prefix
+    let folder = folderId ? decodeProjectFolderHandle(folderId) : null;
+    let resolvedAssociation: FolderAssociationRow | null = null;
+    if (folderId && !folder) return null;
+    const decodedCursor = decodeProjectCursor(cursor);
+    if (cursor && !decodedCursor) return null;
+
+    if (!folder) {
+      if (decodedCursor && decodedCursor.kind !== "root") return null;
+      const result = await portalDb(env).prepare(`
+        SELECT association.id,association.r2_prefix
+        FROM client_folder_associations association
+        ${sessionJoin}
+        JOIN client_project_grants g ON g.account_id=a.id AND g.project_id=association.project_id AND g.revoked_at IS NULL
+        JOIN projects p ON p.id=g.project_id AND p.active=1
+        WHERE association.account_id=a.id AND association.scope_type='project' AND association.project_id=?
+          AND association.revoked_at IS NULL AND association.id>? ${memberProjectConstraint}
+        ORDER BY association.id LIMIT 101`)
+        .bind(session.accountId, session.identityId, projectId, decodedCursor?.kind === "root" ? decodedCursor.associationId : "")
+        .all<FolderAssociationRow>();
+      if (!decodedCursor && result.results.length === 1) {
+        resolvedAssociation = result.results[0]!;
+        folder = { associationId: resolvedAssociation.id, relativePath: "" };
+        folderId = encodeProjectFolderHandle(resolvedAssociation.id, "");
+      } else {
+        const page = result.results.slice(0, 100);
+        return {
+          files: [],
+          folders: page.map(association => ({
+            id: encodeProjectFolderHandle(association.id, ""),
+            name: associationName(association.r2_prefix),
+          })),
+          breadcrumbs: [{ id: null, name: "Project files" }],
+          folderId: null,
+          prefix: "",
+          cursor: result.results.length > 100
+            ? encodeProjectCursor({ kind: "root", associationId: page.at(-1)!.id })
+            : null,
+        };
+      }
+    }
+
+    if (!folder) return null;
+    if (decodedCursor && (decodedCursor.kind !== "folder"
+      || decodedCursor.associationId !== folder.associationId
+      || decodedCursor.relativePath !== folder.relativePath)) return null;
+    const association = resolvedAssociation ?? await portalDb(env).prepare(`
+      SELECT association.id,association.r2_prefix
       FROM client_folder_associations association
       ${sessionJoin}
       JOIN client_project_grants g ON g.account_id=a.id AND g.project_id=association.project_id AND g.revoked_at IS NULL
       JOIN projects p ON p.id=g.project_id AND p.active=1
-      JOIN file_index f ON substr(f.r2_key,1,length(association.r2_prefix))=association.r2_prefix
-      WHERE association.account_id=a.id AND association.scope_type='project' AND association.project_id=?
-        AND association.revoked_at IS NULL AND f.r2_key>?
-        ${memberProjectConstraint}
-        AND f.r2_key NOT LIKE '_ltds/%' AND f.r2_key NOT LIKE '%/_ltds/%'
-        AND f.r2_key NOT LIKE '.previews/%' AND f.r2_key NOT LIKE '%/.previews/%'
-        AND f.r2_key NOT LIKE 'dump/%' AND f.r2_key NOT LIKE '%/dump/%'
-        AND NOT EXISTS (
-          SELECT 1 FROM delivery_tombstones tombstone
-          WHERE tombstone.restored_at IS NULL
-            AND (tombstone.physical_key=f.r2_key OR
-              (tombstone.tombstone_kind='prefix' AND substr(f.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key))
-        )
-      ORDER BY f.r2_key LIMIT 101`,
+      WHERE association.id=? AND association.account_id=a.id AND association.scope_type='project'
+        AND association.project_id=? AND association.revoked_at IS NULL ${memberProjectConstraint}
+      LIMIT 1`)
+      .bind(session.accountId, session.identityId, folder.associationId, projectId)
+      .first<FolderAssociationRow>();
+    if (!association) return null;
+
+    const targetPrefix = `${association.r2_prefix}${folder.relativePath}`;
+    const cursorName = decodedCursor?.kind === "folder" ? decodedCursor.name : "";
+    const cursorKind = decodedCursor?.kind === "folder" ? decodedCursor.entryKind : "";
+    const result = await portalDb(env).prepare(`
+      WITH candidates AS (
+        SELECT f.r2_key,f.size,f.uploaded_at,f.content_type,f.media_kind,
+          substr(f.r2_key,?) relative_key
+        FROM file_index f
+        WHERE f.r2_key>=? AND f.r2_key<?
+          AND f.r2_key NOT LIKE '_ltds/%' AND f.r2_key NOT LIKE '%/_ltds/%'
+          AND f.r2_key NOT LIKE '.previews/%' AND f.r2_key NOT LIKE '%/.previews/%'
+          AND f.r2_key NOT LIKE 'dump/%' AND f.r2_key NOT LIKE '%/dump/%'
+          AND NOT EXISTS (
+            SELECT 1 FROM delivery_tombstones tombstone
+            WHERE tombstone.restored_at IS NULL
+              AND (tombstone.physical_key=f.r2_key OR
+                (tombstone.tombstone_kind='prefix' AND substr(f.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key))
+          )
+      ), entries AS (
+        SELECT 'folder' entry_kind,
+          substr(relative_key,1,instr(relative_key,'/')-1) entry_name,
+          NULL r2_key,NULL size,NULL uploaded_at,NULL content_type,NULL media_kind
+        FROM candidates WHERE instr(relative_key,'/')>0
+        GROUP BY substr(relative_key,1,instr(relative_key,'/')-1)
+        UNION ALL
+        SELECT 'file' entry_kind,relative_key entry_name,r2_key,size,uploaded_at,content_type,media_kind
+        FROM candidates WHERE relative_key<>'' AND instr(relative_key,'/')=0
       )
-      .bind(session.accountId, session.identityId, projectId, cursor || "")
-      .all<FileRow>();
-    const rows = result.results;
-    const page = rows.slice(0, 100);
+      SELECT entry_kind,entry_name,r2_key,size,uploaded_at,content_type,media_kind,? association_prefix
+      FROM entries
+      WHERE lower(entry_name)>lower(?)
+        OR (lower(entry_name)=lower(?) AND entry_name>?)
+        OR (lower(entry_name)=lower(?) AND entry_name=? AND entry_kind>?)
+      ORDER BY lower(entry_name),entry_name,entry_kind LIMIT 101`)
+      .bind(targetPrefix.length + 1, targetPrefix, prefixUpperBound(targetPrefix), association.r2_prefix,
+        cursorName, cursorName, cursorName, cursorName, cursorName, cursorKind)
+      .all<FileEntryRow>();
+    const page = result.results.slice(0, 100);
+    const files = page.filter((row): row is FileEntryRow & { entry_kind: "file"; r2_key: string; size: number; uploaded_at: string; media_kind: string } =>
+      row.entry_kind === "file" && row.r2_key !== null && row.size !== null && row.uploaded_at !== null && row.media_kind !== null)
+      .map(row => mapFile({
+        r2_key: row.r2_key,
+        size: row.size,
+        uploaded_at: row.uploaded_at,
+        content_type: row.content_type,
+        media_kind: row.media_kind,
+        association_prefix: row.association_prefix,
+      }, projectId));
+    const folders = page.filter(row => row.entry_kind === "folder").map(row => ({
+      id: encodeProjectFolderHandle(association.id, `${folder.relativePath}${row.entry_name}/`),
+      name: row.entry_name,
+    }));
+    const last = page.at(-1);
     return {
-      files: page.map((row) => mapFile(row, projectId)),
+      files,
+      folders,
+      breadcrumbs: projectBreadcrumbs(association, folder.relativePath),
+      folderId,
       prefix: "",
-      cursor: rows.length > 100 ? page.at(-1)!.r2_key : null,
+      cursor: result.results.length > 100 && last
+        ? encodeProjectCursor({
+            kind: "folder",
+            associationId: association.id,
+            relativePath: folder.relativePath,
+            name: last.entry_name,
+            entryKind: last.entry_kind,
+          })
+        : null,
     };
   },
 

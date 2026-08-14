@@ -8,6 +8,7 @@ export interface PortalCapabilities {
   requestAttachments: boolean;
   workspaceHierarchyV2: boolean;
   workspaceMembershipManagement: boolean;
+  hierarchyScopedInvitations: boolean;
   invitationEmailDelivery: boolean;
   delegatedShares: boolean;
 }
@@ -47,8 +48,21 @@ export interface PortalFile {
   downloadPath: string;
 }
 
+export interface PortalFolder {
+  id: string;
+  name: string;
+}
+
+export interface PortalFileBreadcrumb {
+  id: string | null;
+  name: string;
+}
+
 export interface PortalFilePage {
   files: PortalFile[];
+  folders?: PortalFolder[];
+  breadcrumbs?: PortalFileBreadcrumb[];
+  folderId?: string | null;
   prefix: string;
   cursor: string | null;
 }
@@ -204,6 +218,7 @@ export async function loadPortalBootstrap(
       requestAttachments: session.capabilities?.requestAttachments === true,
       workspaceHierarchyV2: session.capabilities?.workspaceHierarchyV2 === true,
       workspaceMembershipManagement: session.capabilities?.workspaceMembershipManagement === true,
+      hierarchyScopedInvitations: session.capabilities?.hierarchyScopedInvitations === true,
       invitationEmailDelivery: session.capabilities?.invitationEmailDelivery === true,
       delegatedShares: session.capabilities?.delegatedShares === true,
     },
@@ -227,6 +242,23 @@ export async function loadPortalProjectFiles(
   const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
   return request<PortalFilePage>(
     `/api/client/projects/${encodeURIComponent(projectId)}/files${query}`,
+  );
+}
+
+export async function loadPortalProjectFolderFiles(
+  projectId: string,
+  folder: string | null,
+  cursor: string | null = null,
+  signal?: AbortSignal,
+  request: PortalRequest = requestJson,
+): Promise<PortalFilePage> {
+  const params = new URLSearchParams();
+  if (folder) params.set("folder", folder);
+  if (cursor) params.set("cursor", cursor);
+  const query = params.size ? `?${params.toString()}` : "";
+  return request<PortalFilePage>(
+    `/api/client/projects/${encodeURIComponent(projectId)}/files${query}`,
+    signal ? { signal } : undefined,
   );
 }
 
@@ -254,9 +286,10 @@ export async function loadPortalPastDeliveryLocations(
 }
 
 export interface PortalWorkspace { id: string; rootType: "organization" | "standalone_client"; rootPublicId: string; displayName: string }
-export interface PortalWorkspaceEntry { type: string; publicId: string; parentPublicId: string | null; displayName: string; sourceVersion: string }
+export type PortalHierarchyScopeType = "organization" | "department" | "client" | "project";
+export interface PortalWorkspaceEntry { type: PortalHierarchyScopeType | "standalone_client" | "contact"; publicId: string; parentPublicId: string | null; displayName: string; sourceVersion: string }
 export interface PortalWorkspaceMember { identityId: string; email: string | null; status: "active" | "suspended" | "revoked"; manager: boolean; source: string }
-export interface PortalWorkspaceInvitation { id: string; email: string; status: "pending" | "accepted" | "revoked" | "expired"; scope: { type: "project" | "workspace"; publicId: string | null }; capabilities: string[]; expiresAt: string }
+export interface PortalWorkspaceInvitation { id: string; email: string; status: "pending" | "accepted" | "revoked" | "expired"; scope: { type: PortalHierarchyScopeType | "workspace"; publicId: string | null }; capabilities: string[]; expiresAt: string }
 export interface PortalDelegatedShareTarget {
   delegationId: string;
   folderTargetId: string;
@@ -299,7 +332,7 @@ export async function loadPortalWorkspaceAccess(workspaceId: string, request: Po
   return request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/access`);
 }
 
-export async function invitePortalWorkspaceMember(workspaceId: string, input: { email: string; projectPublicId?: string; organizationWide?: boolean; confirmOrganizationWide?: boolean; capabilities: Array<"delivery.view" | "request.create"> }, request: PortalRequest = requestJson): Promise<void> {
+export async function invitePortalWorkspaceMember(workspaceId: string, input: { email: string; projectPublicId?: string; targetScope?: { type: PortalHierarchyScopeType; publicId: string }; organizationWide?: boolean; confirmOrganizationWide?: boolean; capabilities: Array<"delivery.view" | "request.create"> }, request: PortalRequest = requestJson): Promise<void> {
   await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/invitations`, {
     method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify(input),
   });

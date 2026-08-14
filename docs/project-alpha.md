@@ -89,6 +89,9 @@ for the existing renderer). Lengths, numeric bounds, option counts, duplicate
 IDs/options, control characters, bidi controls, and markup are rejected. The
 contract cannot carry unit prices, internal fulfillment/work activities,
 compensation, margins, taxes, raw pricing rules, credentials, or database IDs.
+Catalog schema v2 accepts only explicitly portal-enabled PA
+`entry_type=service` rows. Fees and bundles are not flattened or projected;
+their composition and pricing remain PA-only until a later versioned contract.
 
 All six portal-visible item values (`name`, `summary`, `category`,
 `displayOrder`, `geometryRequirement`, and `questions`) are part of immutable
@@ -246,6 +249,10 @@ Contract constraints are exact:
 - every active project has exactly one lifecycle row. `active` requires
   `completedAt: null`; `completed` requires an ISO UTC `completedAt`. Reopen is
   an ordinary higher-version `active` update, never a new project ID;
+- PA maps `not_started`, `active`, and `overdue` to `active`; `completed`
+  requires a dedicated authoritative `completed_at`; `cancelled` deactivates or
+  tombstones the project immediately. Do not derive completion from
+  `updated_at`;
 - PA alone designates PA-backed managers by signed `member.manage`
   entitlements. LTDS never accepts a browser-created PA principal or manager
   grant. Client-created invitees remain LTDS-local scoped guests;
@@ -479,7 +486,11 @@ are rejected:
 }
 ```
 
-`editorPath` must be a same-origin relative path. LTDS persists the result in
+`editorPath` must equal
+`/quotes/{encodeURIComponent(draftQuote.publicId)}/edit`. Project Alpha
+resolves that opaque public ID to its internal row. Numeric query-string routes,
+absolute URLs, and a path for a different quote public ID are rejected. LTDS
+persists the result in
 the immutable `request_pa_draft_quote_receipts` ledger with the payload hash,
 request/area revisions, staff actor, and public result identifiers. A changed
 request or area revision gets a new key. A transient failure leaves no LTDS
@@ -502,6 +513,13 @@ Visibility rules are assignment-driven:
 Only explicitly enabled Project Alpha entitlements provision an Operations account. Administrators map to the immutable global administrator role; every non-administrator entitlement maps to the assigned-only operator role in both incremental and snapshot recovery. An enabled non-administrator with no Project, Operation, or Task assignment can authenticate but receives an empty operational workspace.
 
 Projects may include `manager_user_id`. A Project Manager receives Project context in the same way as a Project Team member; Project Alpha remains responsible for making the manager a Team member and for choosing the Project's Business Unit.
+
+Project and Task public/projection IDs must remain opaque and stable for the
+entity lifetime. Operations may pin LTDS-local SOP revision links directly to
+those projected IDs. The links do not flow back to Project Alpha and never
+inherit between a Project, Task, Operation, or staff member; Project Alpha must
+not recycle an inactive ID for a different work item. See
+[`operations/contextual-sops.md`](operations/contextual-sops.md).
 
 Project Alpha posts signed incremental changes to `/v1/project-alpha/events`. The receiver validates Cloudflare Access, the configured application key, schema version, event ID, timestamp, and the current HMAC signature contract. Ed25519 remains the preferred optional algorithm when configured, and its failure never falls back to HMAC. Event receipts make delivery idempotent; per-entity source timestamps prevent older events from overwriting newer data. An owner-checked, expiring D1 lease serializes the snapshot and all incremental projection writes; entity leases still protect the Operations and client/organization portal projections and final source marker. A contending delivery receives a retryable response; it does not mutate Project Alpha or silently acknowledge an uncommitted projection.
 

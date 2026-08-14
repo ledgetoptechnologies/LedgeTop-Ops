@@ -7,15 +7,18 @@ import { verifyAccessCode } from "../src/worker/security";
 import deliveryWorker, { ensurePublicId, framePolicyForPath, markUnavailableFolder, requestHostAllowed, serveAppShell, sourceUrlForItem, streamItem } from "../src/worker/index";
 import type { ShareRow } from "../src/worker/types";
 
-describe("production host admission",()=>{
-  it("admits only the legacy delivery host and an exact configured portal origin",()=>{
-    const base={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example"} as const;
+describe("deployed host admission",()=>{
+  it.each(["production","staging"] as const)("admits only exact configured hosts in %s",ENVIRONMENT=>{
+    const base={ENVIRONMENT,EXPECTED_HOST:"delivery.example"} as const;
     expect(requestHostAllowed("https://delivery.example/health",base)).toBe(true);
     expect(requestHostAllowed("https://wrong.example/health",base)).toBe(false);
     expect(requestHostAllowed("https://client.example/portal",{...base,CLIENT_PORTAL_ORIGIN:"https://client.example"})).toBe(true);
     expect(requestHostAllowed("https://client.example.evil.test/portal",{...base,CLIENT_PORTAL_ORIGIN:"https://client.example"})).toBe(false);
     expect(requestHostAllowed("https://client.example/portal",{...base,CLIENT_PORTAL_ORIGIN:"http://client.example"})).toBe(false);
     expect(requestHostAllowed("https://client.example/portal",{...base,CLIENT_PORTAL_ORIGIN:"https://client.example/path"})).toBe(false);
+  });
+  it("keeps local development host-flexible",()=>{
+    expect(requestHostAllowed("http://127.0.0.1:8787/health",{ENVIRONMENT:"development",EXPECTED_HOST:"delivery.example"})).toBe(true);
   });
 });
 

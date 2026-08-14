@@ -3,6 +3,7 @@
   "endpoint": "/api/v2/integrations/ltds/draft-quotes",
   "scope": "portal.quote-draft.create",
   "schemaVersion": 1,
+  "editorPathContract": "/quotes/{encodeURIComponent(draftQuote.publicId)}/edit",
   "valid": {
     "request": {
       "schemaVersion": 1,
@@ -99,6 +100,14 @@
     {
       "name": "cross-origin-editor-url",
       "response": { "receiptId": "receipt-public-a", "draftQuote": { "publicId": "quote-public-a", "documentNumber": null, "status": "draft", "version": 1, "editorPath": "https://evil.example/quotes/quote-public-a" } }
+    },
+    {
+      "name": "numeric-editor-route",
+      "response": { "receiptId": "receipt-public-a", "draftQuote": { "publicId": "quote-public-a", "documentNumber": null, "status": "draft", "version": 1, "editorPath": "/?page=quote/quotes-edit&id=42" } }
+    },
+    {
+      "name": "editor-route-for-different-public-id",
+      "response": { "receiptId": "receipt-public-a", "draftQuote": { "publicId": "quote-public-a", "documentNumber": null, "status": "draft", "version": 1, "editorPath": "/quotes/quote-public-b/edit" } }
     },
     {
       "name": "extra-response-field",

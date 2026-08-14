@@ -54,12 +54,12 @@ and warns that Bypass disables Access enforcement in
 1. Run `npm.cmd run staging:check:test`, the repository tests, and build from
    the pinned commit. Record all config hashes.
 2. Export both staging D1 databases. List migrations and confirm the exact
-   Delivery release set `0096`-`0112`, `0114`-`0131`, plus Operations
-   `0014`-`0022`. Migration `0113` is intentionally reserved and absent. The
+   Delivery release set `0096`-`0112`, `0114`-`0133`, plus Operations
+   `0014`-`0023`. Migration `0113` is intentionally reserved and absent. The
    release evidence validator compares the complete filename sets; do not
    shorten them to a range or infer success from a local migration run.
 3. After migration approval, apply Delivery migrations first and Operations
-   `0014`-`0022` second. Record the list/apply output and confirm production
+   `0014`-`0023` second. Record the list/apply output and confirm production
    migration state was not touched.
 4. Upload a version with the portal false and inspect routes, bindings, vars,
    and secret names. Deploy only that reviewed version after deployment
@@ -100,6 +100,24 @@ operator owns that dependency:
 - PA relation/lifecycle contract fixtures, many-to-many scope parity, deny
   precedence, completed-project day-30 cutoff, and reopen restoration. Keep
   `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=false` until all are recorded.
+
+The exact staging attachment policy is
+`docs/staging/request-attachments-r2-cors.json`; the preflight reads that file
+and rejects wildcard origins/headers or method drift. Apply it only to
+`client-data-staging` after separate R2 approval, then record `cors list` plus
+allowed-origin and denied-origin browser results.
+
+Autonomous invitation email is additionally blocked by
+`CLIENT_PORTAL_ACCESS_ENROLLMENT_READY=false`. Do not assert readiness from a
+manually enrolled tester or the legacy account-scoped Access outbox. Evidence
+must identify a dedicated internal workspace reconciler and prove that every
+email lease has a live receipt bound to the exact invitation, workspace,
+normalized-email hash, current invitation-token hash, and monotonic enrollment
+version. It must also prove receipt revocation at the lease/send boundary,
+retention while another workspace remains eligible, removal after final
+eligibility, and zero staff-group mutation. Until that external component
+exists, invitation creation may remain locally testable but scheduled email
+delivery stays fail-closed.
 
 `staging:evidence:check` rejects a packet that omits any one of these gates.
 

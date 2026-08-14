@@ -34,7 +34,9 @@ export interface InvitationEmailBatchResult {
 }
 
 export function invitationEmailDeliveryEnabled(env: Env): boolean {
-  if (!workspaceMembershipManagementEnabled(env) || env.CLIENT_PORTAL_INVITATION_EMAIL_ENABLED !== "true") return false;
+  if (!workspaceMembershipManagementEnabled(env)
+    || env.CLIENT_PORTAL_ACCESS_ENROLLMENT_READY !== "true"
+    || env.CLIENT_PORTAL_INVITATION_EMAIL_ENABLED !== "true") return false;
   if (!env.CLIENT_PORTAL_INVITATION_EMAIL || typeof env.CLIENT_PORTAL_INVITATION_EMAIL.send !== "function") return false;
   if (!normalizeEmail(env.CLIENT_PORTAL_INVITATION_FROM || "")) return false;
   try {
@@ -96,26 +98,41 @@ async function claimRows(env: Env, now: Date, limit: number): Promise<Invitation
   const lease = new Date(now.getTime() + LEASE_MS).toISOString();
   const candidates = await database.prepare(`SELECT outbox.id FROM portal_v2_invitation_email_outbox outbox
     JOIN portal_v2_invitations invitation ON invitation.id=outbox.invitation_id
+    JOIN portal_v2_invitation_access_enrollment_receipts receipt
+      ON receipt.invitation_id=invitation.id AND receipt.workspace_id=invitation.workspace_id
+      AND receipt.invited_email_hash=outbox.recipient_email_hash
+      AND receipt.invitation_token_hash=invitation.token_hash
     WHERE outbox.attempts<? AND datetime(outbox.next_attempt_at)<=datetime(?)
       AND (outbox.status IN ('pending','failed') OR (outbox.status='processing' AND datetime(outbox.lease_expires_at)<=datetime(?)))
       AND invitation.status='pending' AND invitation.revoked_at IS NULL AND datetime(invitation.expires_at)>datetime(?)
+      AND receipt.revoked_at IS NULL AND datetime(receipt.enrolled_at)<=datetime(?) AND datetime(receipt.expires_at)>datetime(?)
     ORDER BY outbox.created_at,outbox.id LIMIT ?`)
-    .bind(MAX_ATTEMPTS, nowIso, nowIso, nowIso, limit).all<{ id: string }>();
+    .bind(MAX_ATTEMPTS, nowIso, nowIso, nowIso, nowIso, nowIso, limit).all<{ id: string }>();
   const claimed: InvitationEmailRow[] = [];
   for (const candidate of candidates.results) {
     const updated = await database.prepare(`UPDATE portal_v2_invitation_email_outbox SET
       status='processing',attempts=attempts+1,lease_expires_at=?,updated_at=datetime(?)
       WHERE id=? AND attempts<? AND datetime(next_attempt_at)<=datetime(?)
         AND (status IN ('pending','failed') OR (status='processing' AND datetime(lease_expires_at)<=datetime(?)))
-        AND EXISTS (SELECT 1 FROM portal_v2_invitations invitation WHERE invitation.id=invitation_id
-          AND invitation.status='pending' AND invitation.revoked_at IS NULL AND datetime(invitation.expires_at)>datetime(?))`)
-      .bind(lease, nowIso, candidate.id, MAX_ATTEMPTS, nowIso, nowIso, nowIso).run();
+        AND EXISTS (SELECT 1 FROM portal_v2_invitations invitation
+          JOIN portal_v2_invitation_access_enrollment_receipts receipt
+            ON receipt.invitation_id=invitation.id AND receipt.workspace_id=invitation.workspace_id
+            AND receipt.invited_email_hash=portal_v2_invitation_email_outbox.recipient_email_hash
+            AND receipt.invitation_token_hash=invitation.token_hash
+          WHERE invitation.id=portal_v2_invitation_email_outbox.invitation_id
+            AND invitation.status='pending' AND invitation.revoked_at IS NULL AND datetime(invitation.expires_at)>datetime(?)
+            AND receipt.revoked_at IS NULL AND datetime(receipt.enrolled_at)<=datetime(?) AND datetime(receipt.expires_at)>datetime(?))`)
+      .bind(lease, nowIso, candidate.id, MAX_ATTEMPTS, nowIso, nowIso, nowIso, nowIso, nowIso).run();
     if (updated.meta.changes !== 1) continue;
     const row = await database.prepare(`SELECT outbox.id,outbox.invitation_id,outbox.recipient_email,outbox.payload_json,
       outbox.attempts,outbox.lease_expires_at,workspace.display_name workspace_name
       FROM portal_v2_invitation_email_outbox outbox
       JOIN portal_v2_invitations invitation ON invitation.id=outbox.invitation_id
       JOIN portal_v2_workspaces workspace ON workspace.id=invitation.workspace_id
+      JOIN portal_v2_invitation_access_enrollment_receipts receipt
+        ON receipt.invitation_id=invitation.id AND receipt.workspace_id=invitation.workspace_id
+        AND receipt.invited_email_hash=outbox.recipient_email_hash
+        AND receipt.invitation_token_hash=invitation.token_hash
       WHERE outbox.id=? AND outbox.status='processing' AND outbox.lease_expires_at=?`)
       .bind(candidate.id, lease).first<InvitationEmailRow>();
     if (row) claimed.push(row);
@@ -136,10 +153,35 @@ async function cancelInvalidRows(env: Env, now: Date): Promise<void> {
 async function invitationStillSendable(env: Env, row: InvitationEmailRow, nowIso: string): Promise<boolean> {
   return (await env.DELIVERY_DB.prepare(`SELECT 1 ok FROM portal_v2_invitation_email_outbox outbox
     JOIN portal_v2_invitations invitation ON invitation.id=outbox.invitation_id
+    JOIN portal_v2_invitation_access_enrollment_receipts receipt
+      ON receipt.invitation_id=invitation.id AND receipt.workspace_id=invitation.workspace_id
+      AND receipt.invited_email_hash=outbox.recipient_email_hash
+      AND receipt.invitation_token_hash=invitation.token_hash
+    WHERE outbox.id=? AND outbox.status='processing' AND outbox.lease_expires_at=?
+      AND lower(outbox.recipient_email)=lower(invitation.invited_email)
+      AND invitation.status='pending' AND invitation.revoked_at IS NULL AND datetime(invitation.expires_at)>datetime(?)
+      AND receipt.revoked_at IS NULL AND datetime(receipt.enrolled_at)<=datetime(?) AND datetime(receipt.expires_at)>datetime(?)`)
+    .bind(row.id, row.lease_expires_at, nowIso, nowIso, nowIso).first("ok")) !== null;
+}
+
+async function invitationStillPending(env: Env, row: InvitationEmailRow, nowIso: string): Promise<boolean> {
+  return (await env.DELIVERY_DB.prepare(`SELECT 1 ok FROM portal_v2_invitation_email_outbox outbox
+    JOIN portal_v2_invitations invitation ON invitation.id=outbox.invitation_id
     WHERE outbox.id=? AND outbox.status='processing' AND outbox.lease_expires_at=?
       AND lower(outbox.recipient_email)=lower(invitation.invited_email)
       AND invitation.status='pending' AND invitation.revoked_at IS NULL AND datetime(invitation.expires_at)>datetime(?)`)
     .bind(row.id, row.lease_expires_at, nowIso).first("ok")) !== null;
+}
+
+async function releaseForEnrollmentRetry(env: Env, row: InvitationEmailRow, now: Date): Promise<number> {
+  const nowIso = now.toISOString();
+  const nextAttempt = new Date(now.getTime() + BASE_RETRY_MS).toISOString();
+  const changed = await env.DELIVERY_DB.prepare(`UPDATE portal_v2_invitation_email_outbox SET
+    status='pending',attempts=MAX(0,attempts-1),next_attempt_at=?,lease_expires_at=NULL,
+    last_error_code='access_enrollment_unavailable',updated_at=datetime(?)
+    WHERE id=? AND status='processing' AND lease_expires_at=?`)
+    .bind(nextAttempt, nowIso, row.id, row.lease_expires_at).run();
+  return changed.meta.changes;
 }
 
 export async function processInvitationEmailBatch(
@@ -166,11 +208,15 @@ export async function processInvitationEmailBatch(
       continue;
     }
     if (!(await invitationStillSendable(env, row, nowIso))) {
-      const changed = await env.DELIVERY_DB.prepare(`UPDATE portal_v2_invitation_email_outbox SET
-        status='cancelled',payload_json=?,lease_expires_at=NULL,last_error_code=NULL,updated_at=datetime(?)
-        WHERE id=? AND status='processing' AND lease_expires_at=?`)
-        .bind(SCRUBBED_PAYLOAD, nowIso, row.id, row.lease_expires_at).run();
-      result.cancelled += changed.meta.changes;
+      if (await invitationStillPending(env, row, nowIso)) {
+        result.retried += await releaseForEnrollmentRetry(env, row, now);
+      } else {
+        const changed = await env.DELIVERY_DB.prepare(`UPDATE portal_v2_invitation_email_outbox SET
+          status='cancelled',payload_json=?,lease_expires_at=NULL,last_error_code=NULL,updated_at=datetime(?)
+          WHERE id=? AND status='processing' AND lease_expires_at=?`)
+          .bind(SCRUBBED_PAYLOAD, nowIso, row.id, row.lease_expires_at).run();
+        result.cancelled += changed.meta.changes;
+      }
       continue;
     }
     const link = new URL("/portal/invitations/accept", env.CLIENT_PORTAL_ORIGIN);
@@ -180,7 +226,12 @@ export async function processInvitationEmailBatch(
     const expiryText = new Date(payload.expiresAt).toLocaleString("en-US", { timeZone: "UTC", timeZoneName: "short" });
     try {
       // Recheck immediately before handing the message to the external service.
-      if (!(await invitationStillSendable(env, row, nowIso))) throw Object.assign(new Error("cancelled"), { code: "E_INVITATION_CANCELLED" });
+      if (!(await invitationStillSendable(env, row, nowIso))) {
+        const code = await invitationStillPending(env, row, nowIso)
+          ? "E_ACCESS_ENROLLMENT_UNAVAILABLE"
+          : "E_INVITATION_CANCELLED";
+        throw Object.assign(new Error(code), { code });
+      }
       await env.CLIENT_PORTAL_INVITATION_EMAIL!.send({
         to: recipient,
         from: { email: normalizeEmail(env.CLIENT_PORTAL_INVITATION_FROM!)!, name: fromName },
@@ -191,9 +242,15 @@ export async function processInvitationEmailBatch(
       const changed = await env.DELIVERY_DB.prepare(`UPDATE portal_v2_invitation_email_outbox SET
         status='sent',payload_json=?,sent_at=datetime(?),lease_expires_at=NULL,last_error_code=NULL,updated_at=datetime(?)
         WHERE id=? AND status='processing' AND lease_expires_at=?
-          AND EXISTS (SELECT 1 FROM portal_v2_invitations invitation WHERE invitation.id=invitation_id
-            AND invitation.status='pending' AND invitation.revoked_at IS NULL AND datetime(invitation.expires_at)>datetime(?))`)
-        .bind(SCRUBBED_PAYLOAD, nowIso, nowIso, row.id, row.lease_expires_at, nowIso).run();
+          AND EXISTS (SELECT 1 FROM portal_v2_invitations invitation
+            JOIN portal_v2_invitation_access_enrollment_receipts receipt
+              ON receipt.invitation_id=invitation.id AND receipt.workspace_id=invitation.workspace_id
+              AND receipt.invited_email_hash=portal_v2_invitation_email_outbox.recipient_email_hash
+              AND receipt.invitation_token_hash=invitation.token_hash
+            WHERE invitation.id=portal_v2_invitation_email_outbox.invitation_id
+              AND invitation.status='pending' AND invitation.revoked_at IS NULL AND datetime(invitation.expires_at)>datetime(?)
+              AND receipt.revoked_at IS NULL AND datetime(receipt.enrolled_at)<=datetime(?) AND datetime(receipt.expires_at)>datetime(?))`)
+        .bind(SCRUBBED_PAYLOAD, nowIso, nowIso, row.id, row.lease_expires_at, nowIso, nowIso, nowIso).run();
       result.sent += changed.meta.changes;
       if (changed.meta.changes !== 1) {
         await env.DELIVERY_DB.prepare(`UPDATE portal_v2_invitation_email_outbox SET
@@ -204,6 +261,10 @@ export async function processInvitationEmailBatch(
       }
     } catch (error) {
       const code = errorCode(error);
+      if (code === "E_ACCESS_ENROLLMENT_UNAVAILABLE") {
+        result.retried += await releaseForEnrollmentRetry(env, row, now);
+        continue;
+      }
       const permanent = code === "E_INVITATION_CANCELLED" || isPermanentEmailError(code) || row.attempts >= MAX_ATTEMPTS;
       const status = code === "E_INVITATION_CANCELLED" ? "cancelled" : "failed";
       const nextAttempt = new Date(now.getTime() + retryDelayMs(row.attempts)).toISOString();

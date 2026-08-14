@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   requirePermission: vi.fn(),
   requireMutationSecurity: vi.fn(),
   auditAddress: vi.fn(),
+  readAuthorizedWorkContextSopRevision: vi.fn(),
 }));
 
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {}, WorkerEntrypoint: class {}, DurableObject: class {} }));
@@ -22,6 +23,10 @@ vi.mock("../src/worker/request-security", async importOriginal => ({
   ...await importOriginal<typeof import("../src/worker/request-security")>(),
   requireMutationSecurity: mocks.requireMutationSecurity,
   auditAddress: mocks.auditAddress,
+}));
+vi.mock("../src/worker/work-context-sops", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/worker/work-context-sops")>(),
+  readAuthorizedWorkContextSopRevision: mocks.readAuthorizedWorkContextSopRevision,
 }));
 
 import worker from "../src/worker/index";
@@ -189,6 +194,15 @@ function setup() {
     new URL("../migrations/0020_internal_sop_library.sql", import.meta.url),
     "utf8",
   ));
+  database.exec(`
+    CREATE TABLE work_context_sop_links(
+      context_kind TEXT NOT NULL,
+      context_id TEXT NOT NULL,
+      sop_id TEXT NOT NULL,
+      revision_id TEXT NOT NULL,
+      PRIMARY KEY(context_kind,context_id,sop_id)
+    );
+  `);
   const insertStaff = database.prepare(
     "INSERT INTO staff_users(id,email,display_name) VALUES (?,?,?)",
   );
@@ -250,6 +264,27 @@ describe("internal SOP routes", () => {
     );
     mocks.requireMutationSecurity.mockReset().mockResolvedValue(undefined);
     mocks.auditAddress.mockReset().mockResolvedValue("hashed-address");
+    mocks.readAuthorizedWorkContextSopRevision.mockReset().mockImplementation(async (
+      env: any,
+      _principal: unknown,
+      kind: string,
+      contextId: string,
+      slug: string,
+      revisionId: string,
+    ) => {
+      const row = await env.OPS_DB.prepare(`SELECT d.id,d.slug,d.status,d.version,d.created_at,d.updated_at,
+        r.id revision_id,r.sop_id,r.revision_number,r.parent_revision_id,r.change_kind,
+        r.title,r.purpose,r.markdown_body,r.rendered_html,r.toc_json,r.sanitizer_version,
+        r.author_id,r.author_email,r.author_display_name,r.created_at revision_created_at,
+        r.published_at revision_published_at
+        FROM sop_documents d JOIN sop_revisions r ON r.sop_id=d.id
+        JOIN work_context_sop_links l ON l.sop_id=d.id AND l.revision_id=r.id
+        WHERE d.slug=? AND r.id=? AND r.published_at IS NOT NULL
+          AND l.context_kind=? AND l.context_id=?`)
+        .bind(slug, revisionId, kind, contextId).first();
+      if (!row) throw new HTTPException(404, { message: "Pinned SOP revision not found" });
+      return row;
+    });
   });
 
   it("creates, revises, publishes, archives, and restores through immutable history", async () => {
@@ -484,6 +519,57 @@ describe("internal SOP routes", () => {
       revision: { revisionNumber: 2, changeKind: "published" },
     });
     expect(detailBody.sop.revision.html).toContain("<h1");
+
+    const pinnedRevisionId = (await publish.clone().json() as any).sop.publishedRevision.id as string;
+    state.database.prepare(`INSERT INTO work_context_sop_links(
+      context_kind,context_id,sop_id,revision_id
+    ) VALUES ('project','project-1',?,?)`).run(id, pinnedRevisionId);
+    const pinned = await worker.fetch(
+      request(`/api/sops/pilot-field-guide/revisions/${pinnedRevisionId}?contextKind=project&contextId=project-1`, "staff"),
+      state.env,
+      executionCtx,
+    );
+    expect(pinned.status).toBe(200);
+    expect(pinned.headers.get("ETag")).toBe(`"sop-revision-${pinnedRevisionId}"`);
+    expect(pinned.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(await pinned.json()).toMatchObject({
+      sop: {
+        slug: "pilot-field-guide",
+        status: "published",
+        revision: { id: pinnedRevisionId, revisionNumber: 2 },
+      },
+    });
+
+    const archive = await worker.fetch(jsonRequest(
+      `/api/admin/sops/${id}/archive`,
+      "admin",
+      "POST",
+      { expectedVersion: 2 },
+      '"sop-2"',
+    ), state.env, executionCtx);
+    expect(archive.status).toBe(200);
+    const retained = await worker.fetch(
+      request(`/api/sops/pilot-field-guide/revisions/${pinnedRevisionId}?contextKind=project&contextId=project-1`, "staff"),
+      state.env,
+      executionCtx,
+    );
+    expect(retained.status).toBe(200);
+    expect(await retained.json()).toMatchObject({
+      sop: { status: "archived", revision: { id: pinnedRevisionId } },
+    });
+    state.database.prepare(`DELETE FROM work_context_sop_links
+      WHERE context_kind='project' AND context_id='project-1' AND revision_id=?`)
+      .run(pinnedRevisionId);
+    expect((await worker.fetch(
+      request(`/api/sops/pilot-field-guide/revisions/${pinnedRevisionId}?contextKind=project&contextId=project-1`, "staff"),
+      state.env,
+      executionCtx,
+    )).status).toBe(404);
+    expect((await worker.fetch(
+      request(`/api/sops/pilot-field-guide/revisions/${crypto.randomUUID()}?contextKind=project&contextId=project-1`, "staff"),
+      state.env,
+      executionCtx,
+    )).status).toBe(404);
 
     expect((await worker.fetch(
       request("/api/admin/sops", "staff"),

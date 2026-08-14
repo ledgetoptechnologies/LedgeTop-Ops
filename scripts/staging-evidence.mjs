@@ -136,6 +136,17 @@ export function validateEvidence(evidence, options = {}) {
       errors.push(`external gate ${gate} needs current referenced staging evidence`);
     }
   }
+  const accessEnrollment = externalGates.workspaceAccessEnrollment ?? {};
+  if (accessEnrollment.mode !== "dedicated_workspace_reconciler") errors.push("workspace Access enrollment must use the dedicated workspace reconciler");
+  for (const proof of ["clientGroupIsolated", "enrollmentBeforeEmail", "perInvitationReceiptEnforced", "receiptBindsWorkspaceAndEmailHash", "receiptRevocationRaceVerified", "multiWorkspaceRetention", "lastEligibilityRevocation", "staffGroupUnchanged"]) {
+    if (accessEnrollment[proof] !== true) errors.push(`workspace Access enrollment must prove ${proof}`);
+  }
+  if (!populated(accessEnrollment.processorEvidenceRef)) errors.push("workspace Access enrollment needs dedicated processor evidence");
+  const attachmentCors = externalGates.requestAttachmentR2CorsAndLeastPrivilege ?? {};
+  if (attachmentCors.corsArtifact !== "docs/staging/request-attachments-r2-cors.json") errors.push("request attachment gate must identify the reviewed staging CORS artifact");
+  for (const proof of ["allowedOriginPutVerified", "outOfScopeOriginDenied", "leastPrivilegeCredentialVerified"]) {
+    if (attachmentCors[proof] !== true) errors.push(`request attachment gate must prove ${proof}`);
+  }
 
   for (const app of apps) {
     const secretEvidence = evidence.secrets?.[app] ?? {};

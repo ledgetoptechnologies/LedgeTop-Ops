@@ -4,7 +4,7 @@ import type { Env } from "./types";
 const MAX_BODY_BYTES = 128 * 1024;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/;
-const PUBLIC_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const PUBLIC_ID = /^(?=.{1,128}$)(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const QUESTION_ID = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 

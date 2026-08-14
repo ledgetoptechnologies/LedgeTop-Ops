@@ -206,7 +206,16 @@ describe("catalog producer contract parser", () => {
 
   it("accepts the shared zero-question fixture and enforces every compatibility bound", () => {
     const valid = compatibilityFixture.validItems[0]!;
+    expect(compatibilityFixture.producerPolicy).toMatchObject({
+      publishedEntryTypes: ["service"], feesPublished: false, bundlesPublished: false,
+    });
     expect(() => parseCatalogProjectionDelivery(envelope("event", "parser-shared-fixture", 1, { event: { action: "upsert", item: valid } }), applicationKey)).not.toThrow();
+    for (const specimen of compatibilityFixture.invalidItems) {
+      expect(
+        () => parseCatalogProjectionDelivery(envelope("event", `parser-${specimen.name}`, 1, { event: { action: "upsert", item: specimen.item } }), applicationKey),
+        specimen.name,
+      ).toThrow();
+    }
     for (const invalid of [
       { ...valid, displayOrder: -1 },
       { ...valid, displayOrder: 1_000_001 },

@@ -66,6 +66,7 @@ import {
   workspaceMembershipManagementEnabled,
 } from "./workspace-memberships";
 import { invitationEmailDeliveryEnabled } from "./invitation-email";
+import { portalHierarchyRelationsEnabled } from "./hierarchy-relations";
 import {
   resolveProjectAlphaPricingAuthorizationContext,
   type ProjectAlphaPricingAuthorizationContextResolver,
@@ -250,7 +251,15 @@ const workspaceInvitationBody = z.object({
   organizationWide: z.boolean().optional(),
   confirmOrganizationWide: z.boolean().optional(),
   capabilities: z.array(z.enum(["workspace.view", "delivery.view", "request.create"])).min(1).max(3),
-}).strict();
+}).strict().superRefine((input, context) => {
+  if (input.targetScope?.type === "organization" && input.confirmOrganizationWide !== true) {
+    context.addIssue({
+      code: "custom",
+      path: ["confirmOrganizationWide"],
+      message: "Organization-wide invitations require explicit confirmation",
+    });
+  }
+});
 
 const cloudflareClientIdentityProvider: ResolveClientPrincipal =
   resolveCloudflareClientPrincipal;
@@ -419,6 +428,9 @@ export function createClientPortalRouter(
           requestAttachmentsAvailable(c.env),
         workspaceHierarchyV2: portalHierarchyV2Enabled(c.env),
         workspaceMembershipManagement: workspaceMembershipManagementEnabled(c.env),
+        hierarchyScopedInvitations:
+          workspaceMembershipManagementEnabled(c.env) &&
+          portalHierarchyRelationsEnabled(c.env),
         invitationEmailDelivery: invitationEmailDeliveryEnabled(c.env),
         delegatedShares: clientDelegatedShareCreationCapability(c.env).enabled,
         viewBilling: session.canViewBilling,
@@ -728,13 +740,17 @@ export function createClientPortalRouter(
     if (!(await authorizeProject(c, "delivery.view", projectId.data)))
       throw new HTTPException(404, { message: "Project not found" });
     const cursor = c.req.query("cursor") || null;
-    if (cursor && cursor.length > 1000)
+    if (cursor && cursor.length > 4096)
       throw new HTTPException(400, { message: "Cursor is invalid" });
+    const folder = c.req.query("folder") || null;
+    if (folder && folder.length > 4096)
+      throw new HTTPException(400, { message: "Folder is invalid" });
     const page = await repository.listProjectFiles(
       c.env,
       c.get("clientSession"),
       projectId.data,
       cursor,
+      folder,
     );
     if (!page) throw new HTTPException(404, { message: "Project not found" });
     return c.json(page);

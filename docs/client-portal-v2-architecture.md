@@ -50,9 +50,11 @@ credential is accepted as PA integration authority.
 - One global verified identity may hold independent memberships in several
   workspaces. Their dashboards, searches, notifications, and data never merge.
 - PA supports multiple organization administrators, department heads scoped to
-  one department, and project managers scoped to one project. Organization
-  administrators may appoint department heads/project managers; department
-  heads may appoint project managers; project managers may add members only.
+  one department, and project managers scoped to one project. PA staff appoint
+  and replace those PA-backed managers through the audited PA authority screen.
+  A portal manager may invite ordinary LTDS-local guests only inside a scope
+  where the manager already holds `member.manage`; invitations never grant
+  `member.manage` or create another PA-backed manager.
 - Client-invited members and subcontractors may remain LTDS-local guests. They
   are not silently added to PA's CRM. Promotion to a management role requires
   an explicit PA portal principal/entitlement.
@@ -154,12 +156,27 @@ uses a workspace-wide read as a shortcut. A project completed by PA retains
 access for 30 days after `completedAt`, then fails closed. PA reopening the
 project publishes `active` with `completedAt: null`, which restores the
 underlying unexpired grants without rewriting or resurrecting revoked grants.
+PA maps `not_started`, `active`, and `overdue` to wire-level `active`.
+`completed` requires an authoritative PA `completed_at`; `updated_at` is not a
+substitute. `cancelled` is an entity deactivation/tombstone that closes the
+project graph immediately rather than receiving the 30-day completed grace.
 
 Client managers can create only `client_invitation` guest memberships within a
 scope where they already hold `member.manage`. The invit-able capability set
 does not include `member.manage`; PA-backed manager designation remains a PA
 staff-controlled entitlement and cannot be created or transferred in the
 client portal.
+
+Migration `0132_portal_v2_legacy_member_bridges.sql` is the temporary cutover
+adapter for LTDS-local guests. Invitation acceptance atomically creates one
+account-local synthetic repository identity per `(workspace, v2 identity)`;
+that synthetic issuer is never accepted as an authentication principal. Every
+legacy project, file, and request route still intersects the repository session
+with the live v2 membership and exact entitlement, so a project invitation
+cannot see a sibling project. Suspension or revocation disables the bridge
+immediately, while another workspace keeps its separate bridge and access.
+Remove this adapter only after the resource repository is fully workspace-v2
+native.
 
 ## Versioned, sanitized Service Library resource
 
@@ -210,6 +227,9 @@ Contract rules:
   monotonic across the activation and later incremental events.
 - Only active, explicitly portal-requestable service selections are projected.
   Project Alpha decides what is requestable before publishing it.
+- Catalog schema v2 publishes only PA `entry_type=service` rows. Fees and
+  bundles remain PA-only; LTDS must not flatten bundle composition or infer
+  package pricing until a later versioned contract defines those semantics.
 - Each item has 0–10 client-safe questions. Allowed wire types are `text`,
   `number`, `boolean`, `select`, and `multi-select`, with bounded lengths,
   options, minimums, and maximums. Questions cannot contain executable code,
@@ -361,8 +381,10 @@ current catalog, calculates actual draft lines using PA business rules, and
 snapshots those rules into the draft.
 
 The response contains only the draft quote public ID, command receipt ID,
-status/version, and a same-origin relative PA editor path or an allowlisted PA
-URL. LTDS stores the verified reference and opens PA's native editor. The
+status/version, and the exact public-ID path
+`/quotes/{encodeURIComponent(draftQuote.publicId)}/edit`. Numeric query-string editor routes and
+absolute URLs are rejected. LTDS stores the verified reference and opens PA's
+native editor. The
 command must never approve, send, publish, sign, invoice, charge, or notify a
 client. A retryable failure leaves the LTDS request unlinked and safe to retry.
 
@@ -420,7 +442,8 @@ so the write path can be disabled without breaking request intake.
 
 - Contract fixtures validate schema versions, enum values, decimal strings,
   public IDs, pagination, complete generations, tombstones, and unknown fields.
-- Catalog tests cover inactive/non-requestable services, package projection,
+- Catalog tests cover inactive/non-requestable services, rejection of fees and
+  bundles under the flat v2 contract,
   changed versions, interrupted pagination, stale responses, and last-known-good
   recovery.
 - Request tests cover one through ten services, duplicate rejection, material

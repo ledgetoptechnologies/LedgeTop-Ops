@@ -48,6 +48,18 @@ export const STAGING_CLIENT_PORTAL = Object.freeze({
   groupName: "LTDS Client Portal Staging Testers",
 });
 
+export const STAGING_REQUEST_ATTACHMENT_R2_CORS = Object.freeze({
+  rules: Object.freeze([Object.freeze({
+    allowed: Object.freeze({
+      origins: Object.freeze([`https://${STAGING_HOSTS.client}`]),
+      methods: Object.freeze(["PUT"]),
+      headers: Object.freeze(["content-type"]),
+    }),
+    exposeHeaders: Object.freeze(["etag"]),
+    maxAgeSeconds: 300,
+  })]),
+});
+
 export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
   delivery: Object.freeze([
     "0096_client_portal_foundation.sql",
@@ -85,6 +97,8 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0129_portal_hierarchy_relations.sql",
     "0130_client_delegated_share_provisioning.sql",
     "0131_video_thumbnail_recovery_backfill.sql",
+    "0132_portal_v2_legacy_member_bridges.sql",
+    "0133_portal_invitation_access_enrollment_receipts.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -96,6 +110,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0020_internal_sop_library.sql",
     "0021_project_alpha_sync_hardening.sql",
     "0022_r2_operation_retries.sql",
+    "0023_project_task_sop_links.sql",
   ]),
 });
 
@@ -114,6 +129,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
+    "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY",
     "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED",
     "CLIENT_DELEGATED_SHARES_ENABLED",
     "CLOUD_TRANSFER_DROPBOX_ENABLED",
@@ -123,6 +139,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
   operations: Object.freeze([
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED",
+    "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED",
     "DIRECT_DELIVERY_UPLOADS_ENABLED",
     "DROPBOX_IMPORT_ENABLED",
@@ -179,6 +196,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "false",
     CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "false",
     CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "false",
+    CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: "false",
     CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: "false",
     CLIENT_DELEGATED_SHARES_ENABLED: "false",
     CLIENT_DELEGATED_SHARE_KEY_ID: "staging-v1",
@@ -200,6 +218,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     APPLICATION_KEY: "ltds_ops_staging",
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "false",
     CLIENT_DELEGATED_SHARE_SIGNER_ENABLED: "false",
+    CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "false",
     DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED: "false",
     DIRECT_DELIVERY_UPLOADS_ENABLED: "false",
     DROPBOX_IMPORT_ENABLED: "false",

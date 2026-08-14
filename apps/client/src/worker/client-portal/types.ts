@@ -67,8 +67,21 @@ export interface ClientPortalFile {
   downloadPath: string;
 }
 
+export interface ClientPortalFolder {
+  id: string;
+  name: string;
+}
+
+export interface ClientPortalBreadcrumb {
+  id: string | null;
+  name: string;
+}
+
 export interface ClientFilePage {
   files: ClientPortalFile[];
+  folders?: ClientPortalFolder[];
+  breadcrumbs?: ClientPortalBreadcrumb[];
+  folderId?: string | null;
   prefix: string;
   cursor: string | null;
 }
@@ -287,7 +300,7 @@ export interface ClientPortalRepository {
   resolveSession(env: Env, principal: VerifiedClientPrincipal): Promise<ClientPortalSession | null>;
   listProjects(env: Env, session: ClientPortalSession): Promise<ClientProject[]>;
   getProject(env: Env, session: ClientPortalSession, projectId: string): Promise<ClientProject | null>;
-  listProjectFiles(env: Env, session: ClientPortalSession, projectId: string, cursor?: string | null): Promise<ClientFilePage | null>;
+  listProjectFiles(env: Env, session: ClientPortalSession, projectId: string, cursor?: string | null, folderId?: string | null): Promise<ClientFilePage | null>;
   listPastDeliveries(env: Env, session: ClientPortalSession, cursor?: string | null): Promise<ClientFilePage>;
   listProjectFileLocations(env: Env, session: ClientPortalSession, projectId: string): Promise<DeliveryLocationCollection | null>;
   listPastDeliveryLocations(env: Env, session: ClientPortalSession): Promise<DeliveryLocationCollection>;

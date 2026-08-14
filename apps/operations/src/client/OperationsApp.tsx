@@ -21,6 +21,7 @@ import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
+import { WorkContextSops } from "./WorkContextSops";
 import { ImageLocationMap } from "./ImageLocationMap";
 import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { activeShareLoadError, createShareLoadDeadline } from "./share-load-deadline";
@@ -55,6 +56,8 @@ interface Session {
     };
     deliveryJobsRoot?: { enabled: boolean };
     shareDirectoryRecipients?: { enabled: boolean };
+    delegatedShareProvisioning?: { enabled: boolean };
+    clientWorkspaceManagerRecovery?: { enabled: boolean };
   };
 }
 interface ActiveDeliveryShare {
@@ -1054,6 +1057,13 @@ function Projects({ session }: { session: Session }) {
                   ? `Starts ${new Date(project.start_date).toLocaleDateString()}`
                   : "No project date"}
               </small>
+              <WorkContextSops
+                kind="project"
+                contextId={project.id}
+                initialLinks={project.sopLinks}
+                initialVersion={project.sopLinkVersion}
+                canManage={project.canManageSops}
+              />
               {project.r2_prefix && <code>{project.r2_prefix}</code>}
               {session.user.isAdministrator &&
                 allowed(session.user, "delivery.browse") && (
@@ -1198,6 +1208,13 @@ function Tasks() {
                     <small>
                       {task.assigned_name || "Unassigned"} · {date(task.due_at)}
                     </small>
+                    <WorkContextSops
+                      kind="task"
+                      contextId={task.id}
+                      initialLinks={task.sopLinks}
+                      initialVersion={task.sopLinkVersion}
+                      canManage={task.canManageSops}
+                    />
                   </article>
                 ))}
               {data &&
@@ -1501,7 +1518,7 @@ function Delivery({ session }: { session: Session }) {
         <ShareDialog
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
-          canProvisionDelegated={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
+          canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           close={() => setPreview(null)}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           changed={() => setShareRevision((value) => value + 1)}
@@ -2425,7 +2442,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
         <ShareDialog
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
-          canProvisionDelegated={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
+          canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           close={() => setPreview(null)}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           changed={() => {}}
@@ -3313,7 +3330,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         <ShareDialog
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
-          canProvisionDelegated={session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
+          canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           close={() => setPreview(null)}
           changed={() => {
@@ -5345,6 +5362,80 @@ function DelegatedShareAdministration() {
   </Card>;
 }
 
+type ClientWorkspaceRecoveryState = {
+  workspaces: Array<{
+    id: string;
+    displayName: string;
+    members: Array<{ identityId: string; email: string | null; status: "active" | "suspended" | "revoked"; source: string; manager: boolean }>;
+  }>;
+};
+
+function ClientWorkspaceManagerRecovery() {
+  const state = useLoad(() => api<ClientWorkspaceRecoveryState>("/api/admin/client-workspaces/recovery"), []);
+  const [workspaceId, setWorkspaceId] = useState("");
+  const [targetIdentityId, setTargetIdentityId] = useState("");
+  const [previousManagerIdentityId, setPreviousManagerIdentityId] = useState("");
+  const [suspendPrevious, setSuspendPrevious] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const workspace = state.data?.workspaces.find(item => item.id === workspaceId) ?? state.data?.workspaces[0];
+  useEffect(() => {
+    if (!workspaceId && state.data?.workspaces[0]) setWorkspaceId(state.data.workspaces[0].id);
+  }, [state.data, workspaceId]);
+  useEffect(() => {
+    if (!workspace) return;
+    const outgoing = workspace.members.find(member => member.manager && member.status === "active");
+    const replacement = workspace.members.find(member => member.identityId !== outgoing?.identityId && member.status !== "revoked");
+    setPreviousManagerIdentityId(outgoing?.identityId ?? "");
+    setTargetIdentityId(replacement?.identityId ?? "");
+    setSuspendPrevious(false);
+  }, [workspace?.id]);
+  const submit = async () => {
+    if (!workspace || !targetIdentityId || busy) return;
+    if (suspendPrevious && previousManagerIdentityId
+      && !confirm("Transfer manager authority and suspend the outgoing manager immediately?")) return;
+    setBusy(true); setMessage("");
+    try {
+      await api(`/api/admin/client-workspaces/${encodeURIComponent(workspace.id)}/manager-transfer`, {
+        method: "POST",
+        body: JSON.stringify({ targetIdentityId, previousManagerIdentityId: previousManagerIdentityId || undefined, suspendPrevious }),
+      });
+      setMessage(suspendPrevious
+        ? "Manager authority transferred and the outgoing local member was suspended."
+        : "Manager authority transferred. Existing managers remain active.");
+      await state.reload();
+    } catch (caught) { setMessage((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+  return <Card title="Client workspace manager recovery">
+    <p>Appoint a replacement before offboarding a client contact. Project Alpha-managed contacts must still be removed at the source.</p>
+    <ErrorLine error={state.error} />
+    {state.data?.workspaces.length ? <div className="delegated-share-admin-list">
+      <label>Client workspace<select value={workspace?.id ?? ""} onChange={event => setWorkspaceId(event.target.value)} disabled={busy}>
+        {state.data.workspaces.map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}
+      </select></label>
+      {workspace && <>
+        <label>Replacement manager<select value={targetIdentityId} onChange={event => setTargetIdentityId(event.target.value)} disabled={busy}>
+          <option value="" disabled>Choose a workspace member</option>
+          {workspace.members.filter(member => member.identityId !== previousManagerIdentityId && member.status !== "revoked"
+            && (member.source !== "project_alpha" || (member.manager && member.status === "active"))).map(member =>
+            <option key={member.identityId} value={member.identityId}>{member.email || "Verified portal user"} ({member.status})</option>)}
+        </select></label>
+        <label>Outgoing manager<select value={previousManagerIdentityId} onChange={event => setPreviousManagerIdentityId(event.target.value)} disabled={busy}>
+          <option value="">Keep all current managers</option>
+          {workspace.members.filter(member => member.manager && member.status === "active").map(member =>
+            <option key={member.identityId} value={member.identityId}>{member.email || "Verified portal user"}</option>)}
+        </select></label>
+        <label className="check"><input type="checkbox" checked={suspendPrevious} disabled={busy || !previousManagerIdentityId}
+          onChange={event => setSuspendPrevious(event.target.checked)} /> Suspend the outgoing local member after the transfer</label>
+        <button type="button" className="button-orange" disabled={busy || !targetIdentityId}
+          onClick={() => void submit()}>{busy ? "Transferring…" : "Transfer manager authority"}</button>
+      </>}
+    </div> : !state.error && <EmptyState title="No recoverable client workspaces" detail="No active client workspace members are available for transfer." />}
+    {message && <div className="notice" role="status">{message}</div>}
+  </Card>;
+}
+
 function Administration({ session }: { session: Session }) {
   const [message, setMessage] = useState("");
   const audit = useLoad(
@@ -5398,7 +5489,8 @@ function Administration({ session }: { session: Session }) {
           </ul>
         </Card>
       </div>
-      {session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <DelegatedShareAdministration />}
+      {session.capabilities?.clientWorkspaceManagerRecovery?.enabled === true && allowed(session.user, "operations.manage") && <ClientWorkspaceManagerRecovery />}
+      {session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <DelegatedShareAdministration />}
       {allowed(session.user, "audit.view") && (
         <Card title="Audit history">
           <ErrorLine error={audit.error} />
