@@ -154,7 +154,9 @@ Worker owns the existing thumbnail Queue/DLQ and a private RPC-only
 private R2 derivative after reauthorization. The Container has no public route,
 internet access, or source credentials and is capped at one `standard-1`
 instance. It renders still images with libvips and the first PDF page with
-Poppler. Video and Office/document media remain type-specific icons.
+Poppler. Office/document media remain type-specific icons. Video queue signals
+are acknowledged without a Container claim or source read; their D1 rows stay
+pending for the separate authenticated TrueNAS renderer API.
 
 Operations waits 15 minutes for an optional TrueNAS prebuilt registration on
 raw server/rclone R2 events; direct browser/staff enqueue keeps a 30-second
@@ -172,6 +174,14 @@ The internal endpoint requires both Cloudflare Access service-token headers and
 `THUMBNAIL_INGEST_SECRET`; it never accepts a browser/user session as renderer
 authority.
 
+The TrueNAS queue worker uses the sibling
+`/api/internal/thumbnail-renderer/v1` API to claim pending video rows, proxy an
+exact ETag-bound source through the Worker, upload a bounded WebP, and complete
+the row. Its heartbeat, failure, and completion calls must echo the opaque
+`leaseId` returned by `/claim`; stale attempt tokens are rejected. Include this
+path in the same narrowly scoped TrueNAS Service Auth application and validate
+the exact client contract in staging before routing a new Worker version.
+
 Create a path-specific self-hosted Access application for
 `https://ops.ledgetopdroneservices.com/api/internal/thumbnail-ingest/v1` with a
 Service Auth policy that includes only a dedicated TrueNAS service token. Enter
@@ -185,7 +195,8 @@ bucket-scoped R2 Object Read credential for HEAD requests; rclone alone owns
 prebuilt writes.
 
 Stream remains available for private playback of existing Stream assets, but
-the thumbnail path does not send video to Stream or extract video frames.
+the thumbnail path never sends a source to Stream. The TrueNAS renderer
+extracts a local frame for the private R2 thumbnail derivative.
 
 Delivery uses the Stream binding to generate one-hour signed tokens for existing
 Stream assets. Original R2 objects remain the authorized download source.
@@ -207,6 +218,24 @@ npx.cmd wrangler secret put R2_SECRET_ACCESS_KEY
 ```
 
 These credentials sign direct browser download URLs only. Delivery's normal R2 reads use the `DATA_BUCKET` binding, and preview SHA identities do not use these secrets.
+
+For the default-off client request attachment flow, create a separate R2 API
+credential with Object Read & Write access scoped only to the private
+`client-data` bucket. The Worker uses it only to sign short-lived multipart PUT
+tickets for opaque objects under
+`_ltds/quarantine/request-attachments/`; do not reuse or broaden the preceding
+download-only credential:
+
+```powershell
+Set-Location apps/client
+npx.cmd wrangler secret put CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID
+npx.cmd wrangler secret put CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY
+```
+
+Keep `CLIENT_REQUEST_ATTACHMENTS_ENABLED=false` unless these dedicated secrets,
+the exact-origin attachment CORS policy, quarantine lifecycle, scanner, and
+end-to-end staging validation are all present. Missing dedicated credentials
+must return unavailable even when the generic download credential is set.
 
 Create a separate least-privilege R2 credential for the Operations Worker's
 public Incoming multipart flow. Scope Object Read & Write to `ltds-incoming`;
@@ -339,6 +368,27 @@ Keep `CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED=false` until the invitation
 email outbox has a transactional sender/scrubber, Access enrollment is proven,
 and Operations has tested manager-recovery controls. This gate is deliberately
 independent from read-only hierarchy activation.
+
+Invitation mail uses Cloudflare Email Service's native Worker binding, not an
+API token. Onboard the staging sender domain in Email Service, then configure a
+binding restricted to the one reviewed sender:
+
+```jsonc
+"send_email": [{
+  "name": "CLIENT_PORTAL_INVITATION_EMAIL",
+  "allowed_sender_addresses": ["portal@staging.example.com"]
+}]
+```
+
+Set `CLIENT_PORTAL_INVITATION_FROM` to that exact address and optionally set
+`CLIENT_PORTAL_INVITATION_FROM_NAME`. Keep
+`CLIENT_PORTAL_INVITATION_EMAIL_ENABLED=false` until a controlled staging
+invite proves delivery, Access login with the invited email, immediate URL
+fragment removal, acceptance, replay denial for another identity, revocation,
+lease recovery, transient retry, permanent failure, and token scrubbing. Do
+not use `remote: true` during ordinary local development because it sends real
+mail. The production config intentionally omits the binding until this gate is
+approved; a missing binding always disables the processor.
 
 The Project Alpha pricing preview is a separate outbound Client Worker
 integration. Set `PROJECT_ALPHA_PRICING_HINT_URL` to the exact HTTPS endpoint,

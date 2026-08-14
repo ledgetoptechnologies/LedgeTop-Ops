@@ -44,7 +44,7 @@ async function mockAuthorizedPortal(
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (request.method() === "GET" && path === "/api/client/session") {
-      await route.fulfill({ json: { account, capabilities: { manageTeam: true, viewBilling: false, requestV2, requestAttachments } } });
+      await route.fulfill({ json: { account, capabilities: { manageTeam: true, viewBilling: false, requestV2, requestAttachments, invitationEmailDelivery: true } } });
     } else if (request.method() === "GET" && path === "/api/client/map-config") {
       await route.fulfill({ json: { mapboxPublicToken } });
     } else if (request.method() === "GET" && path === "/api/client/projects") {
@@ -165,6 +165,44 @@ async function navigatePortal(page: Page, label: "Projects" | "Deliveries" | "Re
   }
 }
 
+test("workspace-v2 selection scopes every authenticated resource request and switches without a full refresh", async ({ page }) => {
+  const observed: Array<{ path: string; workspace: string | undefined }> = [];
+  await page.route("**/api/client/**", async route => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    const workspace = request.headers()["x-ltds-workspace-id"];
+    observed.push({ path, workspace });
+    if (path === "/api/client/session") {
+      await route.fulfill({ json: { account: { id: "", displayName: workspace === "workspace-b" ? "Beta" : "Alpha" }, capabilities: { workspaceHierarchyV2: true } } });
+    } else if (path === "/api/client/v2/workspaces") {
+      expect(workspace).toBeUndefined();
+      await route.fulfill({ json: { workspaces: [
+        { id: "workspace-a", rootType: "organization", rootPublicId: "pa-org-a", displayName: "Alpha" },
+        { id: "workspace-b", rootType: "standalone_client", rootPublicId: "pa-client-b", displayName: "Beta" },
+      ] } });
+    } else if (path === "/api/client/projects") {
+      await route.fulfill({ json: { projects: [{ ...projects[0], id: workspace === "workspace-b" ? "project-b" : "project-a", projectName: workspace === "workspace-b" ? "Beta Site" : "North Site" }] } });
+    } else if (path === "/api/client/service-requests") {
+      await route.fulfill({ json: { requests: [] } });
+    } else if (path === "/api/client/map-config") {
+      await route.fulfill({ json: { mapboxPublicToken: null } });
+    } else if (path === "/api/client/notifications") {
+      await route.fulfill({ json: { notifications: [], unreadCount: 0, cursor: null } });
+    } else await route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  await page.goto("/portal");
+  await expect(page.getByRole("heading", { name: "Welcome, Alpha" })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Client workspace" })).toHaveValue("workspace-a");
+  expect(observed.filter(item => ["/api/client/projects", "/api/client/service-requests", "/api/client/map-config", "/api/client/notifications"].includes(item.path)).every(item => item.workspace === "workspace-a")).toBe(true);
+
+  await page.getByRole("combobox", { name: "Client workspace" }).selectOption("workspace-b");
+  await expect(page.getByRole("heading", { name: "Welcome, Beta" })).toBeVisible();
+  await expect(page.getByText("Beta Site")).toBeVisible();
+  expect(observed.filter(item => item.path === "/api/client/projects").at(-1)?.workspace).toBe("workspace-b");
+  await expect(page).toHaveURL(/\/portal$/);
+});
+
 test("authorized portal supports project, delivery, and request workflows", async ({ page }) => {
   await mockAuthorizedPortal(page);
   await page.goto("/portal");
@@ -232,7 +270,7 @@ test("workspace team UI defaults to project access and gates workspace-wide invi
   await page.route("**/api/client/**", async route => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
-    if (path === "/api/client/session") return route.fulfill({ json: { account, capabilities: { manageTeam: true, workspaceHierarchyV2: true, workspaceMembershipManagement: true, viewBilling: false, requestV2: true, requestAttachments: false } } });
+    if (path === "/api/client/session") return route.fulfill({ json: { account, capabilities: { manageTeam: true, workspaceHierarchyV2: true, workspaceMembershipManagement: true, invitationEmailDelivery: true, viewBilling: false, requestV2: true, requestAttachments: false } } });
     if (path === "/api/client/v2/workspaces") return route.fulfill({ json: { workspaces: [{ id: "workspace-a", rootType: "organization", rootPublicId: "org-a", displayName: "Acme" }] } });
     if (path === "/api/client/v2/workspaces/workspace-a/hierarchy") return route.fulfill({ json: { entries: [{ type: "project", publicId: "pa-project-a", parentPublicId: "org-a", displayName: "North Site", sourceVersion: "1" }] } });
     if (path === "/api/client/v2/workspaces/workspace-a/access") return route.fulfill({ json: { members: [{ identityId: "member-a", email: "manager@example.test", status: "active", manager: true, source: "project_alpha" }], invitations } });
@@ -252,7 +290,10 @@ test("workspace team UI defaults to project access and gates workspace-wide invi
   await expect(page.getByRole("alert")).toContainText("current and future projects");
   await page.getByLabel("I understand and want to grant workspace-wide access.").check();
   await expect(page.getByRole("button", { name: "Send invitation" })).toBeEnabled();
-  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  const overflow = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("body *")]
+    .filter(element => { const rect = element.getBoundingClientRect(); return rect.right > window.innerWidth + 1 || rect.left < -1; })
+    .map(element => ({ className: element.className, tag: element.tagName, left: element.getBoundingClientRect().left, right: element.getBoundingClientRect().right })));
+  expect(overflow).toEqual([]);
 });
 
 for (const width of [320, 390, 768]) {

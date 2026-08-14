@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   createPortalChangeRequest,
   createPortalServiceRequest,
@@ -16,7 +16,7 @@ import {
   type PortalRequest,
   type PortalServiceRequestInput,
 } from "../src/client/portal-api";
-import { neutralMapLocation, requestMapKml } from "../src/client/MapAreaSelector";
+import { neutralMapLocation } from "../src/client/MapAreaSelector";
 import { clientPortalPath, clientProjectPath, clientRequestNewPath, parseClientPortalRoute } from "../src/client/portal-route";
 
 describe("client portal browser routing", () => {
@@ -47,6 +47,10 @@ describe("client portal browser routing", () => {
 });
 
 describe("client portal browser API boundary", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it("does not request account-scoped data before session verification succeeds", async () => {
     let resolveSession!: (value: { account: { id: string; displayName: string }; capabilities: { manageTeam: boolean } }) => void;
     const pendingSession = new Promise<{ account: { id: string; displayName: string }; capabilities: { manageTeam: boolean } }>(resolve => { resolveSession = resolve; });
@@ -63,7 +67,7 @@ describe("client portal browser API boundary", () => {
     await Promise.resolve();
     expect(calls).toEqual(["/api/client/session"]);
     resolveSession({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false } });
-    await expect(bootstrap).resolves.toEqual({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false, workspaceHierarchyV2: false, workspaceMembershipManagement: false }, projects: [], requests: [], mapboxPublicToken: null });
+    await expect(bootstrap).resolves.toEqual({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false, workspaceHierarchyV2: false, workspaceMembershipManagement: false, invitationEmailDelivery: false }, projects: [], requests: [], mapboxPublicToken: null, workspaces: [], selectedWorkspaceId: null });
     expect(calls).toEqual(["/api/client/session", "/api/client/projects", "/api/client/service-requests", "/api/client/map-config"]);
   });
 
@@ -116,6 +120,25 @@ describe("client portal browser API boundary", () => {
     expect(body.parentRequestId).toBe("request a");
   });
 
+  it("selects one authorized v2 workspace before loading scoped portal resources", async () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) };
+    vi.stubGlobal("window", { sessionStorage: storage });
+    storage.setItem("ltds.client.workspace.v2", "workspace-stale");
+    const calls: string[] = [];
+    const request = vi.fn(async <T>(url: string): Promise<T> => {
+      calls.push(url);
+      if (url === "/api/client/session") return { account: { id: "", displayName: "" }, capabilities: { workspaceHierarchyV2: true } } as T;
+      if (url === "/api/client/v2/workspaces") return { workspaces: [{ id: "workspace-a", rootType: "organization", rootPublicId: "pa-org-a", displayName: "Alpha" }] } as T;
+      if (url === "/api/client/projects") return { projects: [] } as T;
+      if (url === "/api/client/service-requests") return { requests: [] } as T;
+      return { mapboxPublicToken: null } as T;
+    }) as PortalRequest;
+    await expect(loadPortalBootstrap(request)).resolves.toMatchObject({ selectedWorkspaceId: "workspace-a", workspaces: [{ id: "workspace-a" }] });
+    expect(storage.getItem("ltds.client.workspace.v2")).toBe("workspace-a");
+    expect(calls).toEqual(["/api/client/session", "/api/client/v2/workspaces", "/api/client/projects", "/api/client/service-requests", "/api/client/map-config"]);
+  });
+
   it("uses versioned, idempotent draft writes and submission without browser pricing fields", async () => {
     const draftInput = {
       projectId: "project-a", requestType: "service" as const, title: "Map the site", details: "Create an orthomosaic.", location: null,
@@ -158,14 +181,8 @@ describe("client portal browser API boundary", () => {
   });
 });
 
-describe("request map export", () => {
+describe("request map location", () => {
   it("uses a neutral coordinate label when nearby-place lookup is unavailable", () => {
     expect(neutralMapLocation([-88.071234, 44.501234])).toBe("Near 44.5012, -88.0712");
-  });
-  it("exports points and a polygon as portable KML", () => {
-    const kml = requestMapKml({ type: "Polygon", coordinates: [[[-88, 44], [-87, 44], [-87, 45], [-88, 44]]] }, [{ longitude: -88.1, latitude: 44.5 }]);
-    expect(kml).toContain("<name>Point 1</name>");
-    expect(kml).toContain("-88.1,44.5,0");
-    expect(kml).toContain("<name>Requested area</name>");
   });
 });

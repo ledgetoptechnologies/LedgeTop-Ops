@@ -6,6 +6,7 @@ import { matchesEtag } from "./prepared-images";
 const MAX_THUMBNAIL_BYTES = 128 * 1024;
 const MAX_IMAGE_THUMBNAIL_INPUT_BYTES = 512 * 1024 * 1024;
 const MAX_PDF_THUMBNAIL_INPUT_BYTES = 256 * 1024 * 1024;
+const MAX_VIDEO_THUMBNAIL_INPUT_BYTES = 10 * 1024 * 1024 * 1024;
 
 export interface ThumbnailJobRow {
   source_etag: string;
@@ -30,6 +31,7 @@ export function isThumbnailCandidate(
 ): boolean {
   const limit = kind === "image" ? MAX_IMAGE_THUMBNAIL_INPUT_BYTES
     : kind === "pdf" ? MAX_PDF_THUMBNAIL_INPUT_BYTES
+    : kind === "video" ? MAX_VIDEO_THUMBNAIL_INPUT_BYTES
     : 0;
   return limit > 0 && (sourceSize === undefined || (sourceSize > 0 && sourceSize <= limit));
 }

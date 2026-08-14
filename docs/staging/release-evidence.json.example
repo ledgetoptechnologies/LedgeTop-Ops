@@ -140,7 +140,22 @@
         "0108_thumbnail_backfill_runs.sql",
         "0109_image_asset_locations.sql",
         "0110_thumbnail_backfill_jobs_scope.sql",
-        "0111_thumbnail_render_provenance.sql"
+        "0111_thumbnail_render_provenance.sql",
+        "0112_public_share_location_privacy.sql",
+        "0114_delivery_share_prefix_lookup.sql",
+        "0115_client_workspace_notifications.sql",
+        "0116_incoming_upload_hardening.sql",
+        "0117_service_request_v2.sql",
+        "0118_staff_work_area_revisions.sql",
+        "0119_client_request_attachments.sql",
+        "0120_project_alpha_draft_quote_receipts.sql",
+        "0121_client_workspace_hierarchy_v2.sql",
+        "0122_project_alpha_service_catalog_projection.sql",
+        "0123_portal_v2_membership_management.sql",
+        "0124_client_delegated_public_shares.sql",
+        "0125_project_alpha_portal_projection.sql",
+        "0126_delivery_share_recipient_snapshots.sql",
+        "0127_portal_invitation_secret_scrub.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -164,6 +179,20 @@
     },
     "productionUnchanged": false
   },
+  "externalGates": {
+    "projectAlphaPortalProjection": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "projectAlphaCatalogProjection": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "projectAlphaPricingHints": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "projectAlphaDraftQuotes": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "requestAttachmentScanner": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "requestAttachmentR2CorsAndLeastPrivilege": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "workspaceInvitationEmail": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "workspaceAccessEnrollment": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "workspaceStaffRecovery": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "delegatedShareSignerBinding": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "delegatedSharePublicAuthorization": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "projectionParityAndAlerts": { "ready": false, "verifiedAt": "<ISO_8601_TIMESTAMP>", "evidenceRef": "<EVIDENCE_REFERENCE>" }
+  },
   "secrets": {
     "delivery": {
       "names": [
@@ -171,7 +200,15 @@
         "DELIVERY_ACCESS_CODE_PEPPER",
         "AUDIT_IP_SECRET",
         "R2_ACCESS_KEY_ID",
-        "R2_SECRET_ACCESS_KEY"
+        "R2_SECRET_ACCESS_KEY",
+        "PROJECT_ALPHA_CATALOG_HMAC_SECRET",
+        "PROJECT_ALPHA_PORTAL_HMAC_SECRET",
+        "PROJECT_ALPHA_PRICING_HINT_API_KEY",
+        "PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET",
+        "CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET",
+        "CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID",
+        "CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY",
+        "CLIENT_DELEGATED_SHARE_SESSION_SECRET"
       ],
       "verifiedAt": "<ISO_8601_TIMESTAMP>",
       "source": "<wrangler-secret-list|reviewed-secrets-file>",
@@ -186,6 +223,8 @@
         "DELIVERY_ACCESS_CODE_PEPPER",
         "AUDIT_IP_SECRET",
         "PROJECT_ALPHA_API_KEY",
+        "PROJECT_ALPHA_DRAFT_QUOTE_API_KEY",
+        "PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET",
         "R2_ACCESS_KEY_ID",
         "R2_SECRET_ACCESS_KEY",
         "R2_DELIVERY_UPLOAD_ACCESS_KEY_ID",

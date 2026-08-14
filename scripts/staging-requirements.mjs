@@ -10,8 +10,23 @@ export const APP_SOURCE_DIRS = Object.freeze({
 });
 
 export const REQUIRED_STAGING_SECRETS = Object.freeze({
-  delivery: Object.freeze(["DELIVERY_SESSION_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]),
-  operations: Object.freeze(["OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "PROJECT_ALPHA_API_KEY", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "R2_DELIVERY_UPLOAD_ACCESS_KEY_ID", "R2_DELIVERY_UPLOAD_SECRET_ACCESS_KEY", "TURNSTILE_SITE_KEY", "TURNSTILE_SECRET", "INCOMING_SESSION_SECRET", "INCOMING_ACCESS_CODE_PEPPER", "INCOMING_PICKUP_SECRET", "THUMBNAIL_INGEST_SECRET"]),
+  delivery: Object.freeze([
+    "DELIVERY_SESSION_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET",
+    "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+    "PROJECT_ALPHA_CATALOG_HMAC_SECRET", "PROJECT_ALPHA_PORTAL_HMAC_SECRET",
+    "PROJECT_ALPHA_PRICING_HINT_API_KEY", "PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET",
+    "CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET",
+    "CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID", "CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY",
+    "CLIENT_DELEGATED_SHARE_SESSION_SECRET",
+  ]),
+  operations: Object.freeze([
+    "OPERATIONS_SESSION_SECRET", "DELIVERY_TOKEN_SECRET", "DELIVERY_ACCESS_CODE_PEPPER",
+    "AUDIT_IP_SECRET", "PROJECT_ALPHA_API_KEY", "PROJECT_ALPHA_DRAFT_QUOTE_API_KEY",
+    "PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY",
+    "R2_DELIVERY_UPLOAD_ACCESS_KEY_ID", "R2_DELIVERY_UPLOAD_SECRET_ACCESS_KEY",
+    "TURNSTILE_SITE_KEY", "TURNSTILE_SECRET", "INCOMING_SESSION_SECRET",
+    "INCOMING_ACCESS_CODE_PEPPER", "INCOMING_PICKUP_SECRET", "THUMBNAIL_INGEST_SECRET",
+  ]),
   "ops-sync": Object.freeze(["CF_ACCESS_GROUP_API_TOKEN", "PROJECT_ALPHA_WEBHOOK_HMAC_SECRET"]),
 });
 
@@ -50,6 +65,21 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0109_image_asset_locations.sql",
     "0110_thumbnail_backfill_jobs_scope.sql",
     "0111_thumbnail_render_provenance.sql",
+    "0112_public_share_location_privacy.sql",
+    "0114_delivery_share_prefix_lookup.sql",
+    "0115_client_workspace_notifications.sql",
+    "0116_incoming_upload_hardening.sql",
+    "0117_service_request_v2.sql",
+    "0118_staff_work_area_revisions.sql",
+    "0119_client_request_attachments.sql",
+    "0120_project_alpha_draft_quote_receipts.sql",
+    "0121_client_workspace_hierarchy_v2.sql",
+    "0122_project_alpha_service_catalog_projection.sql",
+    "0123_portal_v2_membership_management.sql",
+    "0124_client_delegated_public_shares.sql",
+    "0125_project_alpha_portal_projection.sql",
+    "0126_delivery_share_recipient_snapshots.sql",
+    "0127_portal_invitation_secret_scrub.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -63,6 +93,51 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0022_r2_operation_retries.sql",
   ]),
 });
+
+// Every additive capability must be present and false in a release-preparation
+// configuration. A later, separately approved activation packet may turn on
+// one flag only after its matching external gate has current staging evidence.
+export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
+  delivery: Object.freeze([
+    "CLIENT_PORTAL_ENABLED",
+    "CLIENT_PORTAL_REQUEST_V2_ENABLED",
+    "PROJECT_ALPHA_CATALOG_SYNC_ENABLED",
+    "PROJECT_ALPHA_PORTAL_SYNC_ENABLED",
+    "PROJECT_ALPHA_PRICING_HINTS_ENABLED",
+    "CLIENT_REQUEST_ATTACHMENTS_ENABLED",
+    "CLIENT_PORTAL_TEAM_ENABLED",
+    "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
+    "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
+    "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED",
+    "CLIENT_DELEGATED_SHARES_ENABLED",
+    "CLOUD_TRANSFER_DROPBOX_ENABLED",
+    "CLOUD_TRANSFER_GOOGLE_ENABLED",
+    "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED",
+  ]),
+  operations: Object.freeze([
+    "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
+    "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED",
+    "DIRECT_DELIVERY_UPLOADS_ENABLED",
+    "DROPBOX_IMPORT_ENABLED",
+    "R2_PURGE_ENABLED",
+  ]),
+  "ops-sync": Object.freeze([]),
+});
+
+export const REQUIRED_EXTERNAL_GATES = Object.freeze([
+  "projectAlphaPortalProjection",
+  "projectAlphaCatalogProjection",
+  "projectAlphaPricingHints",
+  "projectAlphaDraftQuotes",
+  "requestAttachmentScanner",
+  "requestAttachmentR2CorsAndLeastPrivilege",
+  "workspaceInvitationEmail",
+  "workspaceAccessEnrollment",
+  "workspaceStaffRecovery",
+  "delegatedShareSignerBinding",
+  "delegatedSharePublicAuthorization",
+  "projectionParityAndAlerts",
+]);
 
 export const STAGING_ACCESS_AUDS = Object.freeze({
   delivery: "f6942c97e306d81d206c94746dc731413d5e59461b35d9b213f13fdf96b62835",
@@ -79,6 +154,19 @@ export const STAGING_STATIC_VARS = Object.freeze({
     CLIENT_ACCESS_TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
     R2_S3_ENDPOINT: "https://846c924bf17bf4f3dd15c97a4c5d1d51.r2.cloudflarestorage.com",
     R2_BUCKET_NAME: "client-data-staging",
+    CLIENT_PORTAL_REQUEST_V2_ENABLED: "false",
+    PROJECT_ALPHA_CATALOG_SYNC_ENABLED: "false",
+    PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "false",
+    PROJECT_ALPHA_PRICING_HINTS_ENABLED: "false",
+    CLIENT_REQUEST_ATTACHMENTS_ENABLED: "false",
+    CLIENT_PORTAL_TEAM_ENABLED: "false",
+    CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "false",
+    CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "false",
+    CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: "false",
+    CLIENT_DELEGATED_SHARES_ENABLED: "false",
+    CLOUD_TRANSFER_DROPBOX_ENABLED: "false",
+    CLOUD_TRANSFER_GOOGLE_ENABLED: "false",
+    CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED: "false",
   }),
   operations: Object.freeze({
     TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
@@ -91,6 +179,11 @@ export const STAGING_STATIC_VARS = Object.freeze({
     THUMBNAIL_DLQ_NAME: "ltds-thumbnail-jobs-staging-dlq",
     THUMBNAIL_INGEST_EXPECTED_HOST: STAGING_HOSTS.operations,
     APPLICATION_KEY: "ltds_ops_staging",
+    PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "false",
+    DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED: "false",
+    DIRECT_DELIVERY_UPLOADS_ENABLED: "false",
+    DROPBOX_IMPORT_ENABLED: "false",
+    R2_PURGE_ENABLED: "false",
   }),
   "ops-sync": Object.freeze({
     TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",

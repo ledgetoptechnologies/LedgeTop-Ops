@@ -1,12 +1,31 @@
-export function parseDeliveryRoute(pathname: string, hash: string): { publicId: string; secret: string } {
+export type DeliveryNamespace = "staff" | "client-delegated";
+
+export function parseDeliveryRoute(
+  pathname: string,
+  hash: string,
+  namespace: DeliveryNamespace = "staff",
+): { publicId: string; secret: string } {
   const segments = pathname.split("/").filter(Boolean);
-  const publicId = segments.length === 2 && segments[0] === "s" ? segments[1] || "" : "";
+  const expectedRoot = namespace === "client-delegated" ? "client-share" : "s";
+  const publicId = segments.length === 2 && segments[0] === expectedRoot ? segments[1] || "" : "";
   if (!publicId) return { publicId: "", secret: "" };
   let fragment = "";
   if (hash.startsWith("#") && hash.length > 1) {
     try { fragment = decodeURIComponent(hash.slice(1)); } catch { fragment = ""; }
   }
   return { publicId, secret: fragment || (publicId.length > 30 ? publicId : "") };
+}
+
+export function consumeDeliveryRoute(
+  location: Pick<Location, "pathname" | "search" | "hash">,
+  history: Pick<History, "state" | "replaceState">,
+  namespace: DeliveryNamespace = "staff",
+): { publicId: string; secret: string } {
+  const route = parseDeliveryRoute(location.pathname, location.hash, namespace);
+  if (route.secret && location.hash) {
+    history.replaceState(history.state, "", `${location.pathname}${location.search}`);
+  }
+  return route;
 }
 
 export type DeliveryBrowseView = "grid" | "list";
@@ -31,12 +50,22 @@ export function parseDeliveryBrowseState(search: string, fallbackView: DeliveryB
   };
 }
 
-export function deliveryBrowsePath(publicId: string, state: DeliveryBrowseState): string {
+export function deliveryBrowsePath(
+  publicId: string,
+  state: DeliveryBrowseState,
+  namespace: DeliveryNamespace = "staff",
+): string {
   const params = new URLSearchParams();
   if (state.folderId) params.set("folder", state.folderId);
   if (state.fileId) params.set("file", state.fileId);
   params.set("view", state.view);
-  return `/s/${encodeURIComponent(publicId)}?${params.toString()}`;
+  const root = namespace === "client-delegated" ? "/client-share" : "/s";
+  return `${root}/${encodeURIComponent(publicId)}?${params.toString()}`;
+}
+
+export function deliveryApiBase(publicId: string, namespace: DeliveryNamespace = "staff"): string {
+  const root = namespace === "client-delegated" ? "/client-share/api/shares" : "/api/public/shares";
+  return `${root}/${encodeURIComponent(publicId)}`;
 }
 
 export interface DeliverySessionResult {

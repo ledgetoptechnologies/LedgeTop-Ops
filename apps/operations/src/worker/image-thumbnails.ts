@@ -8,7 +8,7 @@ export const THUMBNAIL_WIDTH = 320;
 export const THUMBNAIL_HEIGHT = 240;
 export const THUMBNAIL_MAX_INPUT_BYTES = 512 * 1024 * 1024;
 export const PDF_THUMBNAIL_MAX_INPUT_BYTES = 256 * 1024 * 1024;
-/** Retained for compatibility only; video rendering is disabled in this release. */
+/** Video rendering is performed only by the authenticated TrueNAS renderer. */
 export const VIDEO_THUMBNAIL_MAX_INPUT_BYTES = 10 * 1024 * 1024 * 1024;
 export const THUMBNAIL_MAX_OUTPUT_BYTES = 128 * 1024;
 export const THUMBNAIL_MAX_DELIVERY_ATTEMPTS = 6;
@@ -18,12 +18,6 @@ export const THUMBNAIL_PREBUILT_GRACE_SECONDS = 15 * 60;
 
 const THUMBNAIL_LEASE_MINUTES = 5;
 const SUPPORTED_IMAGE_EXTENSIONS = new Set(["avif", "gif", "heic", "heif", "jpeg", "jpg", "png", "webp"]);
-// Keep this deliberately limited to unambiguous video extensions. Video
-// thumbnails are disabled for this release, so either a video filename or a
-// declared video MIME type must win over otherwise image-like metadata.
-const DISABLED_VIDEO_EXTENSIONS = new Set([
-  "3g2", "3gp", "avi", "flv", "m2ts", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "ogv", "vob", "webm", "wmv",
-]);
 const SUPPORTED_IMAGE_CONTENT_TYPES = new Set([
   "image/avif",
   "image/gif",
@@ -203,18 +197,25 @@ export function supportedThumbnailSource(key: string, contentType?: string): boo
   return thumbnailSourceKind(key, contentType) !== null;
 }
 
-export function videoThumbnailSourceDisabled(key: string, contentType?: string): boolean {
-  const normalizedType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
-  return normalizedType?.startsWith("video/") === true || DISABLED_VIDEO_EXTENSIONS.has(extension(key));
+export function videoThumbnailSourceDisabled(_key: string, _contentType?: string): boolean {
+  // Video jobs are intentionally enabled for the separate TrueNAS renderer.
+  return false;
 }
 
 export function thumbnailSourceKind(key: string, contentType?: string): ThumbnailSourceKind | null {
   const normalizedType = contentType?.split(";", 1)[0]?.trim().toLowerCase();
   const sourceExtension = extension(key);
-  if (videoThumbnailSourceDisabled(key, normalizedType)) return null;
+  // Treat either an authoritative video MIME or an unambiguous video suffix as
+  // video before considering image/PDF fallbacks. This prevents mismatched
+  // metadata from routing video bytes into the Cloudflare image renderer.
+  const videoIdentity = normalizedType?.startsWith("video/") === true || SUPPORTED_VIDEO_EXTENSIONS.has(sourceExtension);
+  if (videoIdentity) {
+    return ((normalizedType && SUPPORTED_VIDEO_CONTENT_TYPES.has(normalizedType)) || SUPPORTED_VIDEO_EXTENSIONS.has(sourceExtension))
+      ? "video"
+      : null;
+  }
   if (sourceExtension === "pdf" || normalizedType === "application/pdf") return "pdf";
   if ((normalizedType && SUPPORTED_IMAGE_CONTENT_TYPES.has(normalizedType)) || SUPPORTED_IMAGE_EXTENSIONS.has(sourceExtension)) return "image";
-  if ((normalizedType && SUPPORTED_VIDEO_CONTENT_TYPES.has(normalizedType)) || SUPPORTED_VIDEO_EXTENSIONS.has(sourceExtension)) return "video";
   return null;
 }
 
@@ -514,17 +515,6 @@ async function claimJob(env: Env, sourceKey: string, sourceEtag: string): Promis
   return claim?.attempt_count ?? null;
 }
 
-async function rejectDisabledVideoJob(env: Env, sourceKey: string, sourceEtag: string): Promise<void> {
-  await env.DELIVERY_DB.prepare(`/* thumbnail.video-disabled */
-    UPDATE image_thumbnail_jobs
-    SET status='failed',thumbnail_etag=NULL,thumbnail_size=NULL,
-      error_code='video_thumbnail_disabled',error_message='Video thumbnail rendering is disabled for this release',
-      lease_until=NULL,failed_at=datetime('now'),updated_at=datetime('now')
-    WHERE source_key=? AND source_etag=? AND status IN ('pending','processing')`)
-    .bind(sourceKey, sourceEtag)
-    .run();
-}
-
 async function failJob(
   env: Env,
   sourceKey: string,
@@ -649,7 +639,7 @@ export async function recoverTransientThumbnailFailures(env: Env, limit = 25): P
   const rows = await env.DELIVERY_DB.prepare(`/* thumbnail.recovery-due */
     SELECT source_key,source_etag,source_size FROM image_thumbnail_jobs
     WHERE status='failed'
-      AND error_code IN ('thumbnail_processing_error','queue_publish_failed')
+      AND error_code IN ('thumbnail_processing_error','queue_publish_failed','video_thumbnail_disabled')
       AND attempt_count<?
       AND failed_at IS NOT NULL AND datetime(failed_at)<=datetime('now','-15 minutes')
     ORDER BY failed_at,source_key LIMIT ?`)
@@ -666,7 +656,7 @@ export async function recoverTransientThumbnailFailures(env: Env, limit = 25): P
         error_code=NULL,error_message=NULL,lease_until=NULL,failed_at=NULL,dead_lettered_at=NULL,
         queue_published_at=NULL,updated_at=datetime('now')
       WHERE source_key=? AND source_etag=? AND status='failed'
-        AND error_code IN ('thumbnail_processing_error','queue_publish_failed') AND attempt_count<?`)
+        AND error_code IN ('thumbnail_processing_error','queue_publish_failed','video_thumbnail_disabled') AND attempt_count<?`)
       .bind(row.source_key, cleanEtag(row.source_etag), THUMBNAIL_MAX_RECOVERY_ATTEMPTS).run();
     if (claimed.meta.changes !== 1) continue;
     try {
@@ -725,7 +715,7 @@ export async function recoverExpiredThumbnailLeases(
     const source = indexed && !trashed ? await env.DATA_BUCKET.head(row.source_key) : null;
     const current = Boolean(indexed && source && !isMovedSourceMarker(source) &&
       cleanEtag(indexed.etag) === sourceEtag && indexed.size === row.source_size &&
-      (indexed.media_kind === "image" || indexed.media_kind === "pdf") &&
+      (indexed.media_kind === "image" || indexed.media_kind === "pdf" || indexed.media_kind === "video") &&
       cleanEtag(source.httpEtag) === sourceEtag && source.size === row.source_size &&
       thumbnailSourceEligible(row.source_key, source.size, source.httpMetadata?.contentType));
 
@@ -755,7 +745,7 @@ export async function recoverExpiredThumbnailLeases(
         AND (lease_until IS NULL OR datetime(lease_until)<=datetime('now')) AND attempt_count<?
         AND EXISTS (SELECT 1 FROM file_index f WHERE f.r2_key=image_thumbnail_jobs.source_key
           AND trim(f.etag,'"')=image_thumbnail_jobs.source_etag AND f.size=image_thumbnail_jobs.source_size
-          AND f.media_kind IN ('image','pdf'))
+          AND f.media_kind IN ('image','pdf','video'))
         AND NOT EXISTS (SELECT 1 FROM delivery_tombstones t WHERE t.restored_at IS NULL
           AND (t.physical_key=image_thumbnail_jobs.source_key OR
             (t.tombstone_kind='prefix' AND substr(image_thumbnail_jobs.source_key,1,length(t.physical_key))=t.physical_key)))`)
@@ -1023,13 +1013,20 @@ async function processThumbnailJobAttempt(
     return { outcome: "obsolete" };
   }
 
-  if (videoThumbnailSourceDisabled(message.sourceKey, sourceHead.httpMetadata?.contentType)) {
-    if (currentThumbnail) await rejectDisabledVideoJob(env, message.sourceKey, sourceEtag);
+  const sourceKind = thumbnailSourceKind(message.sourceKey, sourceHead.httpMetadata?.contentType);
+
+  // The Cloudflare queue consumer is the image/PDF fallback. Video jobs must
+  // remain pending, unclaimed, and body-unread so the authenticated TrueNAS
+  // /claim worker can lease and render them. Acknowledging this queue message
+  // avoids a retry storm while durable D1 state remains the TrueNAS work queue.
+  if (sourceKind === "video") {
     if (currentLocation) await deleteImageLocation(env, message.sourceKey, sourceEtag);
-    return { outcome: "failed", errorCode: "video_thumbnail_disabled" };
+    return currentThumbnail
+      ? { outcome: "pending", thumbnailKey: currentThumbnail.thumbnail_key }
+      : { outcome: "obsolete" };
   }
 
-  if (currentLocation || thumbnailSourceKind(message.sourceKey, sourceHead.httpMetadata?.contentType) === "image") {
+  if (currentLocation || sourceKind === "image") {
     try {
       await processImageLocation(env, {
         sourceKey: message.sourceKey,
@@ -1048,7 +1045,6 @@ async function processThumbnailJobAttempt(
 
   if (!currentThumbnail) return { outcome: "obsolete" };
   const thumbnailKey = currentThumbnail.thumbnail_key;
-  const sourceKind = thumbnailSourceKind(message.sourceKey, sourceHead.httpMetadata?.contentType);
   if (!sourceKind || !thumbnailSourceWithinInputLimit(sourceKind, sourceHead.size)) {
     const claimAttempt = await claimJob(env, message.sourceKey, sourceEtag);
     if (claimAttempt !== null) {
@@ -1205,8 +1201,7 @@ export async function consumeThumbnailJobs(batch: MessageBatch<unknown>, env: En
     try {
       const finalAttempt = queueMessage.attempts >= THUMBNAIL_MAX_DELIVERY_ATTEMPTS;
       const result = await processThumbnailJob(env, queueMessage.body, { finalAttempt });
-      if (result.outcome === "retry" ||
-        (result.outcome === "failed" && finalAttempt && result.errorCode !== "video_thumbnail_disabled")) {
+      if (result.outcome === "retry" || (result.outcome === "failed" && finalAttempt)) {
         queueMessage.retry({ delaySeconds: retryDelay(queueMessage.attempts) });
       } else {
         queueMessage.ack();

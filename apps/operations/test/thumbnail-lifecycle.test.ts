@@ -180,16 +180,17 @@ describe("thumbnail lifecycle cleanup", () => {
     }
   });
 
-  it("requeues only bounded images and PDFs when a trashed path is restored", async () => {
+  it("requeues bounded images, PDFs, and TrueNAS videos when a trashed path is restored", async () => {
     store("Jobs/Clients/Restore/photo.jpg", "image");
     store("Jobs/Clients/Restore/report.pdf", "pdf", "application/pdf", PDF_THUMBNAIL_MAX_INPUT_BYTES);
     store("Jobs/Clients/Restore/clip.mov", "video", "video/quicktime");
     store("Jobs/Clients/Restore/too-large.jpg", "large", "image/jpeg", THUMBNAIL_MAX_INPUT_BYTES + 1);
     store("Jobs/Clients/Restore/archive.zip", "zip", "application/zip");
-    await expect(enqueueThumbnailsForPath(env, "Jobs/Clients/Restore/", true)).resolves.toBe(2);
+    await expect(enqueueThumbnailsForPath(env, "Jobs/Clients/Restore/", true)).resolves.toBe(3);
     expect(sends).toEqual([
       { kind: THUMBNAIL_JOB_KIND, sourceKey: "Jobs/Clients/Restore/photo.jpg", sourceEtag: "image" },
       { kind: THUMBNAIL_JOB_KIND, sourceKey: "Jobs/Clients/Restore/report.pdf", sourceEtag: "pdf" },
+      { kind: THUMBNAIL_JOB_KIND, sourceKey: "Jobs/Clients/Restore/clip.mov", sourceEtag: "video" },
     ]);
   });
 

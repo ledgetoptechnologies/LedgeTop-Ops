@@ -13,7 +13,7 @@
   ],
   "limits": { "cpu_ms": 300000, "subrequests": 25000 },
   "triggers": { "crons": ["15 * * * *"] },
-  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/api/*", "/s/*", "/health"] },
+  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/", "/api/*", "/s/*", "/client-share/*", "/health"] },
   "vars": {
     "PUBLIC_BASE_URL": "https://<CLIENT_PORTAL_STAGING_HOST>",
     "EXPECTED_HOST": "<DELIVERY_STAGING_HOST>",
@@ -21,6 +21,23 @@
     "TEAM_DOMAIN": "https://<ACCESS_TEAM_DOMAIN>",
     "POLICY_AUD": "<DELIVERY_STAGING_ACCESS_AUD>",
     "CLIENT_PORTAL_ENABLED": "false",
+    "CLIENT_PORTAL_REQUEST_V2_ENABLED": "false",
+    "PROJECT_ALPHA_CATALOG_SYNC_ENABLED": "false",
+    "PROJECT_ALPHA_PORTAL_SYNC_ENABLED": "false",
+    "PROJECT_ALPHA_PRICING_HINTS_ENABLED": "false",
+    "PROJECT_ALPHA_PRICING_HINT_URL": "",
+    "PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN": "",
+    "PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY": "",
+    "PROJECT_ALPHA_PRICING_HINT_CURRENCIES": "USD",
+    "CLIENT_REQUEST_ATTACHMENTS_ENABLED": "false",
+    "CLIENT_PORTAL_TEAM_ENABLED": "false",
+    "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "false",
+    "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED": "false",
+    "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED": "false",
+    "CLIENT_PORTAL_INVITATION_FROM": "",
+    "CLIENT_PORTAL_INVITATION_FROM_NAME": "LTDS Client Portal",
+    "CLIENT_DELEGATED_SHARES_ENABLED": "false",
+    "CLIENT_DELEGATED_SHARE_KEY_ID": "staging-v1",
     "CLIENT_PORTAL_ORIGIN": "https://<CLIENT_PORTAL_STAGING_HOST>",
     "CLIENT_ACCESS_TEAM_DOMAIN": "https://<ACCESS_TEAM_DOMAIN>",
     "CLIENT_ACCESS_AUD": "<DEDICATED_CLIENT_PORTAL_STAGING_ACCESS_AUD>",
@@ -38,9 +55,13 @@
     "GOOGLE_CLOUD_PROJECT_NUMBER": ""
   },
   "secrets": {
-    "required": ["DELIVERY_SESSION_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"]
+    "required": ["DELIVERY_SESSION_SECRET", "DELIVERY_ACCESS_CODE_PEPPER", "AUDIT_IP_SECRET", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY", "PROJECT_ALPHA_CATALOG_HMAC_SECRET", "PROJECT_ALPHA_PORTAL_HMAC_SECRET", "PROJECT_ALPHA_PRICING_HINT_API_KEY", "PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET", "CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET", "CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID", "CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY", "CLIENT_DELEGATED_SHARE_SESSION_SECRET"]
   },
   "observability": { "enabled": true, "head_sampling_rate": 1 },
+  "send_email": [{
+    "name": "CLIENT_PORTAL_INVITATION_EMAIL",
+    "allowed_sender_addresses": ["portal@<STAGING_EMAIL_DOMAIN>"]
+  }],
   "ratelimits": [
     { "name": "ACCESS_CODE_RATE_LIMITER", "namespace_id": "<STAGING_RATE_LIMIT_1>", "simple": { "limit": 10, "period": 60 } },
     { "name": "PUBLIC_SESSION_RATE_LIMITER", "namespace_id": "<STAGING_RATE_LIMIT_2>", "simple": { "limit": 20, "period": 60 } },

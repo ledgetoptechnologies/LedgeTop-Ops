@@ -47,6 +47,7 @@ interface WorkspaceRow {
   pa_organization_public_id: string | null;
   pa_client_public_id: string | null;
   display_name: string;
+  legacy_account_id?: string | null;
 }
 interface EntitlementRow {
   effect: "allow" | "deny";
@@ -61,6 +62,20 @@ function portalDb(env: Env): D1Database {
 
 export function portalHierarchyV2Enabled(env: Env): boolean {
   return env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED === "true";
+}
+
+export const PORTAL_WORKSPACE_HEADER = "X-LTDS-Workspace-Id";
+
+export interface EffectivePortalWorkspaceContext {
+  workspaceId: string;
+  identityId: string;
+  rootType: WorkspaceRow["root_type"];
+  rootPublicId: string;
+  legacyAccountId: string;
+  legacyIdentityId: string;
+  displayName: string;
+  role: "manager" | "member";
+  canViewBilling: boolean;
 }
 
 function validPrincipalPart(value: string): boolean {
@@ -85,7 +100,7 @@ async function activeWorkspace(
   workspaceId: string,
 ): Promise<WorkspaceRow | null> {
   return portalDb(env).prepare(`
-    SELECT w.id,w.root_type,w.pa_organization_public_id,w.pa_client_public_id,w.display_name
+    SELECT w.id,w.root_type,w.pa_organization_public_id,w.pa_client_public_id,w.display_name,w.legacy_account_id
     FROM portal_v2_workspaces w
     JOIN portal_v2_workspace_memberships m
       ON m.workspace_id=w.id AND m.identity_id=? AND m.status='active' AND m.revoked_at IS NULL
@@ -93,6 +108,163 @@ async function activeWorkspace(
     WHERE w.id=? AND w.status='active'`)
     .bind(identityId, workspaceId)
     .first<WorkspaceRow>();
+}
+
+/**
+ * Resolves the one workspace selected by the browser into the existing LTDS
+ * account/resource namespace. Selection is never ambient server state: callers
+ * must send the opaque workspace ID on every request and this adapter rechecks
+ * identity, membership, root generation, workspace.view, and the exact local
+ * account/identity bridge every time. Workspaces without an explicit local
+ * bridge fail closed until their resources have been projected.
+ */
+export async function resolveEffectivePortalWorkspaceContext(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  workspaceId: string,
+): Promise<EffectivePortalWorkspaceContext | null> {
+  if (!portalHierarchyV2Enabled(env) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceId)) return null;
+  const identity = await resolveGlobalIdentity(env, principal);
+  if (!identity) return null;
+  const workspace = await activeWorkspace(env, identity.id, workspaceId);
+  if (!workspace?.legacy_account_id || !(await activeRootExists(env, workspace))) return null;
+  if (!(await authorizePortalWorkspaceCapability(
+    env,
+    principal,
+    workspaceId,
+    "workspace.view",
+    { scopeType: "workspace", publicId: workspaceId },
+  ))) return null;
+  const legacy = await portalDb(env).prepare(`
+    SELECT i.id identity_id,m.role,m.can_view_billing
+    FROM client_accounts account
+    JOIN client_identity_links i
+      ON i.account_id=account.id AND i.issuer=? AND i.subject=? AND i.revoked_at IS NULL
+    JOIN client_account_members m
+      ON m.account_id=account.id AND m.identity_id=i.id AND m.revoked_at IS NULL
+    WHERE account.id=? AND account.status='active'`)
+    .bind(principal.issuer, principal.subject, workspace.legacy_account_id)
+    .first<{ identity_id: string; role: "manager" | "member"; can_view_billing: number }>();
+  if (!legacy) return null;
+  return {
+    workspaceId,
+    identityId: identity.id,
+    rootType: workspace.root_type,
+    rootPublicId: workspace.pa_organization_public_id ?? workspace.pa_client_public_id!,
+    legacyAccountId: workspace.legacy_account_id,
+    legacyIdentityId: legacy.identity_id,
+    displayName: workspace.display_name,
+    role: legacy.role,
+    canViewBilling: legacy.can_view_billing === 1,
+  };
+}
+
+export async function authorizeEffectiveWorkspaceRoot(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  context: EffectivePortalWorkspaceContext,
+  capability: PortalWorkspaceCapability,
+): Promise<boolean> {
+  return authorizePortalWorkspaceCapability(env, principal, context.workspaceId, capability, {
+    scopeType: "workspace",
+    publicId: context.workspaceId,
+  });
+}
+
+/** Intersects a v2 entitlement with the existing active local project grant. */
+export async function authorizeEffectiveWorkspaceProject(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  context: EffectivePortalWorkspaceContext,
+  capability: "delivery.view" | "request.create",
+  localProjectId: string,
+): Promise<boolean> {
+  const project = await portalDb(env).prepare(`
+    SELECT project.project_alpha_project_id public_id
+    FROM client_project_grants grant_record
+    JOIN projects project ON project.id=grant_record.project_id AND project.active=1
+    WHERE grant_record.account_id=? AND grant_record.project_id=?
+      AND grant_record.revoked_at IS NULL
+      AND project.project_alpha_project_id IS NOT NULL`)
+    .bind(context.legacyAccountId, localProjectId)
+    .first<{ public_id: string }>();
+  if (!project) return false;
+  return authorizePortalWorkspaceCapability(env, principal, context.workspaceId, capability, {
+    scopeType: "project",
+    publicId: project.public_id,
+  });
+}
+
+export async function authorizeEffectiveWorkspaceRequest(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  context: EffectivePortalWorkspaceContext,
+  requestId: string,
+): Promise<boolean> {
+  const request = await portalDb(env).prepare(`SELECT project_id FROM client_service_requests
+    WHERE id=? AND account_id=?`).bind(requestId, context.legacyAccountId).first<{ project_id: string | null }>();
+  if (!request) return false;
+  return request.project_id
+    ? authorizeEffectiveWorkspaceProject(env, principal, context, "request.create", request.project_id)
+    : authorizeEffectiveWorkspaceRoot(env, principal, context, "request.create");
+}
+
+export async function authorizeEffectiveWorkspaceDraft(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  context: EffectivePortalWorkspaceContext,
+  draftId: string,
+): Promise<boolean> {
+  const draft = await portalDb(env).prepare(`SELECT project_id FROM client_service_request_drafts
+    WHERE id=? AND account_id=?`).bind(draftId, context.legacyAccountId).first<{ project_id: string | null }>();
+  if (!draft) return false;
+  return draft.project_id
+    ? authorizeEffectiveWorkspaceProject(env, principal, context, "request.create", draft.project_id)
+    : authorizeEffectiveWorkspaceRoot(env, principal, context, "request.create");
+}
+
+export async function authorizeEffectiveWorkspaceNotification(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  context: EffectivePortalWorkspaceContext,
+  notificationId: string,
+): Promise<boolean> {
+  const row = await portalDb(env).prepare(`
+    SELECT notification.source_type,request.project_id,
+      association.scope_type folder_scope_type,association.project_id folder_project_id,
+      binding.id folder_binding_id
+    FROM client_portal_notifications notification
+    LEFT JOIN client_service_requests request
+      ON notification.source_type='service_request' AND request.id=notification.source_id
+        AND request.account_id=notification.account_id
+    LEFT JOIN client_folder_associations association
+      ON notification.source_type='folder_grant' AND association.logical_grant_id=notification.source_id
+        AND association.account_id=notification.account_id AND association.revoked_at IS NULL
+    LEFT JOIN portal_v2_folder_bindings binding
+      ON binding.workspace_id=? AND binding.r2_prefix=association.r2_prefix
+        AND binding.status='active' AND binding.revoked_at IS NULL
+    WHERE notification.id=? AND notification.account_id=?
+      AND notification.recipient_identity_id=? AND notification.dismissed_at IS NULL
+    ORDER BY association.grant_version DESC LIMIT 1`)
+    .bind(context.workspaceId, notificationId, context.legacyAccountId, context.legacyIdentityId)
+    .first<{
+      source_type: "service_request" | "folder_grant";
+      project_id: string | null;
+      folder_scope_type: "project" | "client" | null;
+      folder_project_id: string | null;
+      folder_binding_id: string | null;
+    }>();
+  if (!row) return false;
+  if (row.source_type === "service_request") {
+    return row.project_id
+      ? authorizeEffectiveWorkspaceProject(env, principal, context, "request.create", row.project_id)
+      : authorizeEffectiveWorkspaceRoot(env, principal, context, "request.create");
+  }
+  if (!row.folder_binding_id) return false;
+  return authorizePortalWorkspaceCapability(env, principal, context.workspaceId, "delivery.view", {
+    scopeType: "folder",
+    publicId: row.folder_binding_id,
+  });
 }
 
 async function activeRootExists(env: Env, workspace: WorkspaceRow): Promise<boolean> {
@@ -373,5 +545,13 @@ export async function acceptPortalWorkspaceInvitation(
   ]);
   const acceptedBy = await portalDb(env).prepare("SELECT accepted_by_identity_id FROM portal_v2_invitations WHERE id=?")
     .bind(invitation.id).first("accepted_by_identity_id");
+  // Migration 0127 performs this atomically with the invitation update. Keep
+  // the idempotent write here as defense in depth during rolling upgrades.
+  if (acceptedBy === identity.id) {
+    await portalDb(env).prepare(`UPDATE portal_v2_invitation_email_outbox SET
+      payload_json='{"redacted":true}',status=CASE WHEN status='sent' THEN 'sent' ELSE 'cancelled' END,
+      lease_expires_at=NULL,last_error_code=NULL,updated_at=datetime('now') WHERE invitation_id=?`)
+      .bind(invitation.id).run();
+  }
   return acceptedBy === identity.id ? "accepted" : "denied";
 }

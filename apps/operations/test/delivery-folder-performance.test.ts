@@ -1,6 +1,6 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { deliveryBrowseRevision, listDeliveryFolder, searchDeliveryItems } from "../src/worker/delivery";
+import { deliveryBrowseRevision, listDeliveryFolder, listDeliveryFolderMedia, searchDeliveryItems } from "../src/worker/delivery";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const principal:StaffPrincipal={
@@ -42,11 +42,13 @@ describe("Delivery folder-only listing performance",()=>{
       CREATE TABLE staff_permission_overrides(staff_id TEXT NOT NULL,permission_key TEXT NOT NULL,effect TEXT NOT NULL,scope TEXT NOT NULL,division_id TEXT);
       CREATE TABLE project_folders(project_id TEXT PRIMARY KEY,division_id TEXT NOT NULL,r2_prefix TEXT NOT NULL);
       CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT);`);
-    await applySql(deliveryDb,`CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,uploaded_at TEXT NOT NULL,content_type TEXT,media_kind TEXT NOT NULL);
+    await applySql(deliveryDb,`CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,uploaded_at TEXT NOT NULL,content_type TEXT,media_kind TEXT NOT NULL,stream_uid TEXT,stream_status TEXT);
       CREATE TABLE delivery_tombstones(id TEXT PRIMARY KEY,physical_key TEXT NOT NULL,tombstone_kind TEXT NOT NULL,deleted_by TEXT,deleted_at TEXT,purge_after TEXT,restored_by TEXT,restored_at TEXT);
       CREATE TABLE projects(id TEXT PRIMARY KEY,r2_prefix TEXT NOT NULL,active INTEGER NOT NULL);
       CREATE TABLE shares(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,r2_prefix TEXT,revoked_at TEXT,expires_at TEXT);
-      CREATE TABLE file_aliases(physical_key TEXT PRIMARY KEY,display_name TEXT NOT NULL);`);
+      CREATE TABLE file_aliases(physical_key TEXT PRIMARY KEY,display_name TEXT NOT NULL);
+      CREATE TABLE image_thumbnail_jobs(source_key TEXT PRIMARY KEY,source_etag TEXT NOT NULL,thumbnail_key TEXT NOT NULL,
+        thumbnail_etag TEXT,thumbnail_size INTEGER,status TEXT NOT NULL,error_code TEXT);`);
   });
 
   beforeEach(async()=>{
@@ -60,7 +62,7 @@ describe("Delivery folder-only listing performance",()=>{
     ]);
     await deliveryDb.batch([
       deliveryDb.prepare("DELETE FROM file_aliases"),deliveryDb.prepare("DELETE FROM shares"),deliveryDb.prepare("DELETE FROM projects"),
-      deliveryDb.prepare("DELETE FROM delivery_tombstones"),deliveryDb.prepare("DELETE FROM file_index"),
+      deliveryDb.prepare("DELETE FROM delivery_tombstones"),deliveryDb.prepare("DELETE FROM file_index"),deliveryDb.prepare("DELETE FROM image_thumbnail_jobs"),
     ]);
   });
 
@@ -70,7 +72,7 @@ describe("Delivery folder-only listing performance",()=>{
     const trackedOps={prepare(sql:string){if(sql.includes("SELECT rp.permission_key"))grantQueries.push(sql);return opsDb.prepare(sql);}};
     return {
       OPS_DB:{withSession(){return trackedOps;},prepare(sql:string){return opsDb.prepare(sql);}},
-      DELIVERY_DB:{prepare(sql:string){deliveryQueries.push(sql);return deliveryDb.prepare(sql);}},
+      DELIVERY_DB:{prepare(sql:string){deliveryQueries.push(sql);return deliveryDb.prepare(sql);},batch(statements:D1PreparedStatement[]){return deliveryDb.batch(statements);}},
       DATA_BUCKET:{list,head,get},
     } as unknown as Env;
   }
@@ -215,6 +217,27 @@ describe("Delivery folder-only listing performance",()=>{
     expect(head).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();
     expect(deliveryQueries).toEqual([]);
+  });
+
+  it("hydrates a ready video thumbnail and Stream state without reading either object body",async()=>{
+    const key="Jobs/Clients/Acme/flight.mov";
+    const object={...r2Object(key),size:8192,httpMetadata:{contentType:"video/quicktime"}} as R2Object;
+    await deliveryDb.batch([
+      deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'video')")
+        .bind(key,"etag-a",8192,"2026-08-07T12:00:00.000Z","video/quicktime"),
+      deliveryDb.prepare(`INSERT INTO image_thumbnail_jobs(source_key,source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status)
+        VALUES(?,?,?,?,?,'ready')`).bind(key,"etag-a","_ltds/thumbnails/video.webp","thumb-video",123),
+    ]);
+    list.mockResolvedValue({objects:[object],delimitedPrefixes:[],truncated:false});
+
+    const result=await listDeliveryFolderMedia(environment(),principal,"Jobs/Clients/Acme/");
+
+    expect(result.items).toEqual([expect.objectContaining({
+      thumbnailState:"ready",thumbnailUrl:expect.stringMatching(/\/thumbnail$/),previewStatus:"processing",
+    })]);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(head).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
   });
 
   it("searches indexed Jobs content without exposing hidden namespaces or out-of-scope roots",async()=>{

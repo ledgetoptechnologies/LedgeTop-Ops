@@ -208,7 +208,9 @@ export async function revokeWorkspaceInvitation(env: Env, principal: VerifiedCli
     WHERE id=? AND workspace_id=? AND status='pending' AND revoked_at IS NULL`).bind(invitationId, workspaceId).run();
   if (changed.meta.changes !== 1) return false;
   await database.batch([
-    database.prepare(`UPDATE portal_v2_invitation_email_outbox SET status='cancelled',updated_at=datetime('now') WHERE invitation_id=? AND status IN ('pending','failed')`).bind(invitationId),
+    database.prepare(`UPDATE portal_v2_invitation_email_outbox SET
+      status=CASE WHEN status='sent' THEN 'sent' ELSE 'cancelled' END,payload_json='{"redacted":true}',
+      lease_expires_at=NULL,last_error_code=NULL,updated_at=datetime('now') WHERE invitation_id=?`).bind(invitationId),
     database.prepare(`INSERT INTO portal_v2_membership_audit(id,workspace_id,actor_identity_id,action,invitation_id)
       VALUES (?,?,?,'invitation.revoked',?)`).bind(crypto.randomUUID(), workspaceId, actor.id, invitationId),
   ]);

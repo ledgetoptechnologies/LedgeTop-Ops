@@ -82,8 +82,18 @@ describe("thumbnail route authorization", () => {
   });
 
   it.each([
-    ["Edited/flight.mov", "video/quicktime", 4096, []],
-    ["Edited/flight.mp4", "video/mp4", 4096, []],
+    ["Edited/flight.mov", "video/quicktime"],
+    ["Edited/flight.mp4", "video/mp4"],
+  ] as const)("serves an authorized TrueNAS video thumbnail without reading the video body: %s", async (relativePath, contentType) => {
+    const value = await fixture("ready", { relativePath, contentType, sourceSize: 4096 });
+    const response = await worker.fetch(new Request(`https://client.example${value.path}`, { headers: { Cookie: value.cookie } }), value.env, value.ctx);
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe("thumb");
+    expect(value.reads).toEqual([`head:${value.sourceKey}`, `head:${thumbnailKey}`, `get:${thumbnailKey}`]);
+    expect(value.reads).not.toContain(`get:${value.sourceKey}`);
+  });
+
+  it.each([
     ["Edited/huge.pdf", "application/pdf", 256 * 1024 * 1024 + 1, [`head:${share.r2_prefix}Edited/huge.pdf`]],
     ["Edited/huge.jpg", "image/jpeg", 512 * 1024 * 1024 + 1, [`head:${share.r2_prefix}Edited/huge.jpg`]],
   ] as const)("denies unsupported or oversized thumbnails without reading an original body: %s", async (relativePath, contentType, sourceSize, expectedReads) => {
@@ -150,8 +160,9 @@ describe("thumbnail route authorization", () => {
         return statements.map(statement => {
           if (statement.query.includes("FROM image_thumbnail_jobs")) {
             thumbnailQueries.push(String(statement.values[0]));
+            const key = String(statement.values[0]);
             return { results: [{
-              source_etag: '"pdf-source"',
+              source_etag: key === videoKey ? '"video-source"' : '"pdf-source"',
               thumbnail_key: thumbnailKey,
               thumbnail_etag: '"thumb"',
               thumbnail_size: 5,
@@ -193,7 +204,7 @@ describe("thumbnail route authorization", () => {
     const video = manifest.items.find(item => item.name === "flight.mov");
     expect(pdf).toMatchObject({ kind: "pdf", thumbnailState: "pending", thumbnailFallbackKind: "pdf" });
     expect(pdf).not.toHaveProperty("thumbnailUrl");
-    expect(video).toMatchObject({ kind: "video", thumbnailState: "not_applicable", thumbnailFallbackKind: "video" });
+    expect(video).toMatchObject({ kind: "video", thumbnailState: "pending", thumbnailFallbackKind: "video" });
     expect(video).not.toHaveProperty("thumbnailUrl");
     expect(thumbnailQueries).toEqual([]);
 
@@ -208,8 +219,8 @@ describe("thumbnail route authorization", () => {
     const videoPatch = media.items.find(item => item.id === video?.id);
     expect(pdfPatch).toMatchObject({ thumbnailState: "ready", thumbnailFallbackKind: "pdf" });
     expect(pdfPatch?.thumbnailUrl).toMatch(/\/items\/.+\/thumbnail$/);
-    expect(videoPatch).toMatchObject({ previewStatus: "processing", thumbnailState: "not_applicable", thumbnailFallbackKind: "video" });
-    expect(videoPatch).not.toHaveProperty("thumbnailUrl");
-    expect(thumbnailQueries).toEqual([pdfKey]);
+    expect(videoPatch).toMatchObject({ previewStatus: "processing", thumbnailState: "ready", thumbnailFallbackKind: "video" });
+    expect(videoPatch?.thumbnailUrl).toMatch(/\/items\/.+\/thumbnail$/);
+    expect(thumbnailQueries).toEqual([pdfKey, videoKey]);
   });
 });

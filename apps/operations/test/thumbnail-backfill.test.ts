@@ -172,7 +172,7 @@ describe("thumbnail metadata backfill", () => {
     const fresh = object("Jobs/Clients/Acme/fresh.jpg", "fresh");
     const oversizedImage = object("Jobs/Clients/Acme/oversized.jpg", "large-image", "image/jpeg", THUMBNAIL_MAX_INPUT_BYTES + 1);
     const oversizedPdf = object("Jobs/Clients/Acme/oversized.pdf", "large-pdf", "application/pdf", PDF_THUMBNAIL_MAX_INPUT_BYTES + 1);
-    const unsupported = object("Jobs/Clients/Acme/clip.mov", "video", "video/quicktime");
+    const truenasVideo = object("Jobs/Clients/Acme/clip.mov", "video", "video/quicktime");
     const derived = object("Jobs/Clients/Acme/_ltds/derived.jpg", "derived");
     const trashed = object("Jobs/Clients/Acme/trashed.png", "trashed", "image/png");
     const unindexed = object("Jobs/Clients/Acme/unindexed.webp", "unindexed", "image/webp");
@@ -182,10 +182,10 @@ describe("thumbnail metadata backfill", () => {
     const pending = object("Jobs/Clients/Acme/pending.jpg", "pending");
     const failed = object("Jobs/Clients/Acme/failed.jpg", "failed");
     const outside = object("Archive/never-inventoried.jpg", "outside");
-    for (const item of [rootJobs, rootPdf, fresh, oversizedImage, oversizedPdf, unsupported, derived, trashed, unindexed, staleIndex, ready, staleReady, pending, failed, outside]) {
+    for (const item of [rootJobs, rootPdf, fresh, oversizedImage, oversizedPdf, truenasVideo, derived, trashed, unindexed, staleIndex, ready, staleReady, pending, failed, outside]) {
       objects.set(item.key, item);
     }
-    for (const item of [rootJobs, rootPdf, fresh, oversizedImage, oversizedPdf, unsupported, derived, trashed, ready, staleReady, pending, failed]) await indexSource(item);
+    for (const item of [rootJobs, rootPdf, fresh, oversizedImage, oversizedPdf, truenasVideo, derived, trashed, ready, staleReady, pending, failed]) await indexSource(item);
     await indexSource(staleIndex, '"older-etag"');
     await db.prepare(`INSERT INTO delivery_tombstones(id,physical_key,tombstone_kind,restored_at)
       VALUES('trash',?,'exact',NULL)`).bind(trashed.key).run();
@@ -205,9 +205,9 @@ describe("thumbnail metadata backfill", () => {
       cursor: null,
       page_count: 1,
       discovered_count: 14,
-      eligible_count: 7,
-      queued_count: 4,
-      skipped_count: 7,
+      eligible_count: 8,
+      queued_count: 5,
+      skipped_count: 6,
       ready_count: 1,
       failed_dlq_count: 1,
       pending_count: 1,

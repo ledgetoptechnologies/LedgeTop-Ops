@@ -85,10 +85,17 @@ function signerConfiguration(env: Env): { host: string; bucket: string; accessKe
     env.CLIENT_REQUEST_ATTACHMENTS_ENABLED !== "true" ||
     !env.CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET ||
     env.CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET.length < 32 ||
-    !env.R2_BUCKET_NAME || !env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY ||
+    !env.R2_BUCKET_NAME ||
+    !env.CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID ||
+    !env.CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY ||
     !/^[a-f0-9]{32}\.r2\.cloudflarestorage\.com$/i.test(endpoint.hostname)
   ) throw new HTTPException(503, { message: "Request attachments are not configured" });
-  return { host: endpoint.host, bucket: env.R2_BUCKET_NAME, accessKeyId: env.R2_ACCESS_KEY_ID, secretAccessKey: env.R2_SECRET_ACCESS_KEY };
+  return {
+    host: endpoint.host,
+    bucket: env.R2_BUCKET_NAME,
+    accessKeyId: env.CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID,
+    secretAccessKey: env.CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY,
+  };
 }
 
 export function requestAttachmentsAvailable(env: Env): boolean {

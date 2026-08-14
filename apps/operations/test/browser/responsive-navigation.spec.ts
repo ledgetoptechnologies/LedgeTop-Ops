@@ -20,7 +20,7 @@ async function mockSession(page: Page, permissions: string[]) {
 
 const allNavigationPermissions = ["dashboard.view", "operations.view", "operations.manage", "sops.view", "airspace.view", "delivery.browse", "team.view", "administration.view"];
 
-test("desktop navigation exposes canonical client requests and independently authorizes Manage items", async ({ page }) => {
+test("desktop navigation exposes canonical client requests and independently authorizes Administration items", async ({ page }) => {
   await mockSession(page, allNavigationPermissions);
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");
@@ -36,7 +36,7 @@ test("desktop navigation exposes canonical client requests and independently aut
   await page.goForward();
   await expect(page).toHaveURL(/\/operations\/client-requests$/);
 
-  await primary.getByRole("button", { name: "Manage" }).click();
+  await primary.getByRole("button", { name: "Administration" }).click();
   await expect(primary.getByRole("link", { name: "Team" })).toBeVisible();
   await expect(primary.getByRole("link", { name: "Administration" })).toBeVisible();
 });
@@ -46,7 +46,7 @@ test("Team remains visible without Administration permission", async ({ page }) 
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");
   const primary = page.getByRole("navigation", { name: "Primary navigation" });
-  await primary.getByRole("button", { name: "Manage" }).click();
+  await primary.getByRole("button", { name: "Administration" }).click();
   await expect(primary.getByRole("link", { name: "Team" })).toBeVisible();
   await expect(primary.getByRole("link", { name: "Administration" })).toHaveCount(0);
 });
@@ -62,6 +62,7 @@ for (const width of [320, 390, 768]) {
     await trigger.click();
     const drawer = page.getByRole("dialog", { name: "Navigation" });
     await expect(drawer).toBeVisible();
+    await expect(drawer.locator(".ops-mobile-nav-label")).toHaveText("Administration");
     await expect(drawer.getByRole("link", { name: "Dashboard" })).toBeFocused();
     await expect(drawer.getByRole("link", { name: "Client Requests" })).toHaveCSS("min-height", "44px");
     await drawer.getByRole("link", { name: "Administration" }).focus();

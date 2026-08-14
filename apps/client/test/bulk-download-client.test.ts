@@ -142,4 +142,24 @@ describe("Retry-After parsing", () => {
       retryAfterMs: 9_000,
     });
   });
+
+  it("sends the selected opaque workspace only to authenticated client APIs", async () => {
+    const values = new Map<string, string>();
+    const storage = { getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key) };
+    vi.stubGlobal("window", { sessionStorage: storage });
+    storage.setItem("ltds.client.workspace.v2", "workspace-a");
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ ok: true }), { headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await requestJson("/api/client/projects");
+    await requestJson("/api/client/v2/workspaces");
+    await requestJson("/api/public/shares/public-a/manifest");
+
+    const first = new Headers((fetchMock.mock.calls[0]?.[1] as RequestInit).headers);
+    const second = new Headers((fetchMock.mock.calls[1]?.[1] as RequestInit).headers);
+    const third = new Headers((fetchMock.mock.calls[2]?.[1] as RequestInit).headers);
+    expect(first.get("X-LTDS-Workspace-Id")).toBe("workspace-a");
+    expect(second.has("X-LTDS-Workspace-Id")).toBe(false);
+    expect(third.has("X-LTDS-Workspace-Id")).toBe(false);
+  });
 });

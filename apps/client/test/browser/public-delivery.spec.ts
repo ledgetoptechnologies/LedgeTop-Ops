@@ -5,7 +5,7 @@ const folderId = "Zm9sZGVy";
 const rootImage = { id: "cm9vdC5qcGc", name: "Root photo.jpg", kind: "image", size: 1024, uploadedAt: "2026-08-01T12:00:00Z", previewUrl: "/media/root.svg", sourceUrl: "/media/root.svg", downloadUrl: "/api/public/shares/public/items/cm9vdC5qcGc/download", thumbnailState: "pending", thumbnailFallbackKind: "image" };
 const folderImage = { ...rootImage, id: "Zm9sZGVyL3Bob3RvLmpwZw", name: "Folder photo.jpg", previewUrl: "/media/folder.svg", sourceUrl: "/media/folder.svg", downloadUrl: "/api/public/shares/public/items/Zm9sZGVyL3Bob3RvLmpwZw/download" };
 const rootPdf = { id: "cmVwb3J0LnBkZg", name: "Report.pdf", kind: "pdf", size: 2048, uploadedAt: "2026-08-01T12:00:00Z", sourceUrl: "/media/report.pdf", downloadUrl: "/api/public/shares/public/items/cmVwb3J0LnBkZg/download", thumbnailState: "pending", thumbnailFallbackKind: "pdf" };
-const rootVideo = { id: "ZmxpZ2h0Lm1wNA", name: "Flight.mp4", kind: "video", size: 4096, uploadedAt: "2026-08-01T12:00:00Z", sourceUrl: "/media/flight.mp4", downloadUrl: "/api/public/shares/public/items/ZmxpZ2h0Lm1wNA/download", thumbnailState: "not_applicable", thumbnailFallbackKind: "video", previewStatus: "processing" };
+const rootVideo = { id: "ZmxpZ2h0Lm1wNA", name: "Flight.mp4", kind: "video", size: 4096, uploadedAt: "2026-08-01T12:00:00Z", sourceUrl: "/media/flight.mp4", downloadUrl: "/api/public/shares/public/items/ZmxpZ2h0Lm1wNA/download", thumbnailState: "pending", thumbnailFallbackKind: "video", previewStatus: "processing" };
 const share = { publicId: "public", label: null, clientName: "Acme", projectName: "North Site", expiresAt: null };
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800"><rect width="1200" height="800" fill="#e65e22"/></svg>`;
 
@@ -19,7 +19,14 @@ async function mockShare(page: Page, mediaGate?: Promise<void>, locationResponse
   await page.route("**/api/public/shares/public/manifest/media**", async route => {
     if (mediaGate) await mediaGate;
     const folder = new URL(route.request().url()).searchParams.get("folder"); const item = folder ? folderImage : rootImage;
-    await route.fulfill({ json: { items: [{ id: item.id, thumbnailUrl: `/thumb/${item.id}.svg`, thumbnailState: "ready", thumbnailFallbackKind: "image" }] } });
+    const extras = folder ? [] : rootExtras.filter(extra => ["image", "pdf", "video"].includes(String(extra.kind)));
+    await route.fulfill({ json: { items: [item, ...extras].map(candidate => ({
+      id: candidate.id,
+      thumbnailUrl: `/thumb/${candidate.id}.svg`,
+      thumbnailState: "ready",
+      thumbnailFallbackKind: candidate.kind,
+      ...(candidate.kind === "video" ? { previewStatus: "processing" } : {}),
+    })) } });
   });
   await page.route("**/api/public/shares/public/download-summary**", route => {
     const inFolder = new URL(route.request().url()).searchParams.get("folder") === folderId;
@@ -202,6 +209,8 @@ test("public photo map is progressive, responsive, and absent without opted-in G
 
 test("image viewer matches Operations interaction and keeps PDF/video controls unchanged", async ({ page }) => {
   await mockShare(page, undefined, undefined, [rootPdf, rootVideo]); await page.goto("/s/public?view=grid");
+  const videoCard = page.locator(".item-card").filter({ hasText: "Flight.mp4" });
+  await expect(videoCard.locator(`img[src="/thumb/${rootVideo.id}.svg"]`)).toBeVisible();
   const trigger = page.getByRole("button", { name: "Preview Root photo.jpg" }); await trigger.click();
   const dialog = page.getByRole("dialog", { name: "Preview Root photo.jpg" }); await expect(dialog).toBeFocused();
   const download = dialog.getByRole("link", { name: "Download Root photo.jpg" }); await expect(download).toHaveAttribute("href", rootImage.downloadUrl);
@@ -217,16 +226,84 @@ test("image viewer matches Operations interaction and keeps PDF/video controls u
   await page.keyboard.press("Escape"); await expect(page.getByRole("dialog")).toHaveCount(0); await expect(trigger).toBeFocused();
 });
 
-test("client-share namespace never boots the staff public delivery application", async ({ page }) => {
+test("image viewer supports a real two-touch pinch gesture and keeps the image bounded", async ({ page }) => {
+  await mockShare(page); await page.goto("/s/public?view=grid");
+  await page.getByRole("button", { name: "Preview Root photo.jpg" }).click();
+  const zoom = page.locator(".zoomable-delivery-image");
+  const image = zoom.locator("img");
+  const box = await zoom.boundingBox();
+  expect(box).not.toBeNull();
+
+  const center = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [
+      { id: 1, x: center.x - 40, y: center.y },
+      { id: 2, x: center.x + 40, y: center.y },
+    ],
+  });
+  await cdp.send("Input.dispatchTouchEvent", {
+    type: "touchMove",
+    touchPoints: [
+      { id: 1, x: center.x - 100, y: center.y },
+      { id: 2, x: center.x + 100, y: center.y },
+    ],
+  });
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+
+  await expect(image).toHaveAttribute("style", /scale\(2\.5\)/);
+  for (let index = 0; index < 5; index += 1) {
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ id: 1, x: center.x, y: center.y }] });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchMove", touchPoints: [{ id: 1, x: center.x + 200, y: center.y + 200 }] });
+    await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  }
+  const transform = await image.getAttribute("style");
+  expect(transform).toMatch(/translate\((-?\d+(?:\.\d+)?)px, (-?\d+(?:\.\d+)?)px\) scale\((\d+(?:\.\d+)?)\)/);
+  const [, rawX, rawY, rawScale] = transform!.match(/translate\((-?\d+(?:\.\d+)?)px, (-?\d+(?:\.\d+)?)px\) scale\((\d+(?:\.\d+)?)\)/)!;
+  const scale = Number(rawScale);
+  expect(Math.abs(Number(rawX)) + Math.abs(Number(rawY))).toBeGreaterThan(0);
+  expect(Math.abs(Number(rawX))).toBeLessThanOrEqual(box!.width * (scale - 1) / 2 + 1);
+  expect(Math.abs(Number(rawY))).toBeLessThanOrEqual(box!.height * (scale - 1) / 2 + 1);
+});
+
+test("client-share uses the isolated API shell on desktop and mobile", async ({ page }) => {
   let staffPublicRequests = 0;
+  let delegatedSessionSecret = "";
   await page.route("**/api/public/**", async route => {
     staffPublicRequests += 1;
     await route.fulfill({ status: 418, body: "staff route must not be called" });
   });
-  await page.goto("/client-share/clientpublicid0000000001#fragment-secret-must-not-be-read");
-  await expect(page.getByRole("heading", { name: "This client share link is not available yet" })).toBeVisible();
-  await expect(page.locator("[data-client-share-unavailable]")).toBeVisible();
+  await page.route("**/client-share/api/shares/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname.endsWith("/session")) {
+      delegatedSessionSecret = (await route.request().postDataJSON()).secret;
+      return route.fulfill({ json: { publicId: "clientpublicid0000000001", canonicalPath: "/client-share/clientpublicid0000000001" } });
+    }
+    if (url.pathname.endsWith("/manifest/media")) return route.fulfill({ json: { items: [] } });
+    if (url.pathname.endsWith("/download-summary")) return route.fulfill({ json: { fileCount: 1, totalBytes: 1024, knownBytes: 1024, unknownSizeCount: 0 } });
+    if (url.pathname.endsWith("/locations")) return route.fulfill({ json: { locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null } });
+    if (url.pathname.endsWith("/manifest")) {
+      if (url.pathname.includes("/malformed/")) return route.fulfill({ status: 404, json: { error: "Not found" } });
+      return route.fulfill({ json: {
+        share: { publicId: "clientpublicid0000000001", label: "Client shared", clientName: "Client-shared delivery", projectName: "Approved files", expiresAt: "2026-09-01T00:00:00Z" },
+        folder: { id: "", name: "Approved files", breadcrumbs: [] },
+        items: [{ id: "cGhvdG8uanBn", name: "photo.jpg", kind: "image", size: 1024, uploadedAt: "2026-08-01T12:00:00Z", previewUrl: "/client-share/api/shares/clientpublicid0000000001/items/cGhvdG8uanBn/source", downloadUrl: "/client-share/api/shares/clientpublicid0000000001/items/cGhvdG8uanBn/download" }],
+        nextCursor: null,
+        capabilities: { cloudTransfer: { dropbox: false, googleDrive: false, googlePicker: false } },
+      } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  const fragment = "fragment-secret-must-be-long-and-one-time-0001";
+  await page.goto(`/client-share/clientpublicid0000000001#${fragment}`);
+  await expect(page.getByRole("heading", { name: "Approved files" })).toBeVisible();
+  await expect(page.getByText("photo.jpg", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Download photo.jpg" })).toHaveAttribute("href", /^\/client-share\/api\/shares\//);
+  expect(delegatedSessionSecret).toBe(fragment);
+  expect(new URL(page.url()).pathname).toBe("/client-share/clientpublicid0000000001");
+  expect(new URL(page.url()).hash).toBe("");
   await page.goto("/client-share/malformed");
-  await expect(page.locator("[data-client-share-unavailable]")).toBeVisible();
+  await expect(page.getByText("Delivery unavailable", { exact: true })).toBeVisible();
   expect(staffPublicRequests).toBe(0);
 });

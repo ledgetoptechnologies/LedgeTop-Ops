@@ -75,7 +75,9 @@ describe("request attachment D1 and direct-R2 lifecycle", () => {
     env = { DELIVERY_DB: db, DATA_BUCKET: bucket, CLIENT_PORTAL_ENABLED: "true", CLIENT_PORTAL_REQUEST_V2_ENABLED: "true",
       CLIENT_REQUEST_ATTACHMENTS_ENABLED: "true", CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET: "s".repeat(32), CLIENT_PORTAL_ORIGIN: origin,
       ENVIRONMENT: "development", R2_S3_ENDPOINT: "https://846c924bf17bf4f3dd15c97a4c5d1d51.r2.cloudflarestorage.com",
-      R2_BUCKET_NAME: "client-data", R2_ACCESS_KEY_ID: "access", R2_SECRET_ACCESS_KEY: "secret".repeat(8) } as Env;
+      R2_BUCKET_NAME: "client-data", CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID: "attachment-access",
+      CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY: "attachment-secret".repeat(4),
+      R2_ACCESS_KEY_ID: "download-only-access", R2_SECRET_ACCESS_KEY: "download-only-secret".repeat(4) } as Env;
   }, 30_000);
 
   afterAll(async () => { await miniflare.dispose(); });

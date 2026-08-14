@@ -14,11 +14,21 @@ The source lifecycle is:
 2. Operations updates `file_index`, records an ETag/size-bound D1 job, and
    publishes `image-thumbnail.v1` to `ltds-thumbnail-jobs`. At-least-once event
    and queue delivery converge on the same current-version job.
+   The Cloudflare queue consumer may render still images and PDFs as a
+   fallback, but it acknowledges video queue signals without claiming the D1
+   row or reading source bytes. The pending row remains available exclusively
+   to the authenticated TrueNAS claim path.
 3. The TrueNAS thumbnail queue worker polls the Operations renderer API
    (`/api/internal/thumbnail-renderer/v1/claim`) over HTTPS. The Worker proxies
    all R2 reads and writes through its binding; the TrueNAS container needs no
    R2 S3 credentials. The claim API uses the `incoming.` subdomain which
-   bypasses Cloudflare Access.
+   bypasses Cloudflare Access. Claim source/upload URLs carry an
+   HMAC-authenticated token bound to the exact source ETag, thumbnail key, and
+   claim attempt. The D1 lease still expires after five minutes unless a
+   heartbeat extends it, and a stale attempt cannot operate on a newer claim.
+   The renderer must echo the claim's `leaseId` on heartbeat, failure, and
+   completion requests; those state transitions are rejected if a newer
+   attempt has reclaimed the row.
 4. The worker downloads the source through the Worker's R2 proxy, renders a
    metadata-stripped WebP (exactly `320x240`, at most 128 KiB), uploads it
    back through the Worker's R2 proxy, and reports completion. The Worker
@@ -117,6 +127,8 @@ secrets.
 - Delivery Worker migrations through `0111_thumbnail_render_provenance.sql`
 - `videoThumbnailSourceDisabled()` returns false (video thumbnails enabled)
 - Client delivery Worker includes "video" in thumbnail lookups
+- Focused tests prove the Cloudflare consumer leaves video pending while the
+  authenticated `/claim` endpoint leases it as `mediaKind: video`
 
 ## Failure, rollback and cost
 

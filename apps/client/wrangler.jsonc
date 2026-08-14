@@ -42,6 +42,11 @@
     "CLIENT_PORTAL_TEAM_ENABLED": "false",
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "false",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED": "false",
+    "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED": "false",
+    "CLIENT_PORTAL_INVITATION_FROM": "",
+    "CLIENT_PORTAL_INVITATION_FROM_NAME": "LTDS Client Portal",
+    "CLIENT_DELEGATED_SHARES_ENABLED": "false",
+    "CLIENT_DELEGATED_SHARE_KEY_ID": "v1",
     "CLIENT_PORTAL_ORIGIN": "https://client.ledgetopdroneservices.com",
     "CLIENT_ACCESS_TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "CLIENT_ACCESS_AUD": "0fa9c4453634e4c74d4522e2d44407a49701320b06d8f21d8a58efa21e5f947f",
@@ -112,6 +117,13 @@
       "database_name": "client-data",
       "database_id": "7f40a7b7-c3ec-470e-a626-e798867f71f8",
       "migrations_dir": "migrations"
+    }
+  ],
+  "services": [
+    {
+      "binding": "CLIENT_DELEGATED_SHARE_SIGNER",
+      "service": "ltds-ops",
+      "entrypoint": "ClientDelegatedShareSigner"
     }
   ],
   "stream": { "binding": "STREAM" }

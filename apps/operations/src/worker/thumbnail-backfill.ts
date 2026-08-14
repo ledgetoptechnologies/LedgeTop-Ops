@@ -17,6 +17,7 @@ const RESUMABLE_LEGACY_FAILURES = new Set([
   "images_quota_exceeded",
   "input_too_large",
   "renderer_unavailable",
+  "video_thumbnail_disabled",
 ]);
 
 export type ThumbnailBackfillMode = "dry_run" | "enqueue";
@@ -115,7 +116,7 @@ async function resetLegacyFailure(env: Env, job: BackfillJob): Promise<void> {
       lease_until=NULL,failed_at=NULL,dead_lettered_at=NULL,queue_published_at=NULL,
       thumbnail_provider=NULL,thumbnail_profile=NULL,updated_at=datetime('now')
     WHERE source_key=? AND source_etag=? AND status='failed'
-      AND error_code IN ('images_quota_exceeded','input_too_large','renderer_unavailable')`)
+      AND error_code IN ('images_quota_exceeded','input_too_large','renderer_unavailable','video_thumbnail_disabled')`)
     .bind(job.source_key, job.source_etag).run();
 }
 

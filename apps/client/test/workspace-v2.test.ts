@@ -8,8 +8,11 @@ import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types"
 import {
   acceptPortalWorkspaceInvitation,
   authorizePortalWorkspaceCapability,
+  authorizeEffectiveWorkspaceNotification,
+  authorizeEffectiveWorkspaceProject,
   hashPortalInvitationToken,
   listPortalWorkspaces,
+  resolveEffectivePortalWorkspaceContext,
 } from "../src/worker/client-portal/workspace-v2";
 import {
   createWorkspaceInvitation,
@@ -53,7 +56,9 @@ describe("client workspace hierarchy v2", () => {
         PRIMARY KEY(account_id,identity_id),FOREIGN KEY(identity_id,account_id) REFERENCES client_identity_links(id,account_id)
       );
       CREATE TABLE projects(
-        id TEXT PRIMARY KEY,project_alpha_project_id TEXT,project_name TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1
+        id TEXT PRIMARY KEY,project_alpha_project_id TEXT,external_ref TEXT,client_name TEXT NOT NULL DEFAULT 'Client',project_name TEXT NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1,status TEXT,summary TEXT,site_address TEXT,service_address TEXT,project_contact_name TEXT,
+        project_contact_email TEXT,project_contact_phone TEXT,next_milestone TEXT,source_updated_at TEXT
       );
       CREATE TABLE client_project_grants(
         account_id TEXT NOT NULL,project_id TEXT NOT NULL,can_request_service INTEGER NOT NULL DEFAULT 0,
@@ -66,7 +71,15 @@ describe("client workspace hierarchy v2", () => {
       );
       CREATE TABLE client_folder_associations(
         id TEXT PRIMARY KEY,scope_type TEXT NOT NULL,project_id TEXT,account_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,
-        created_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT (datetime('now')),revoked_at TEXT
+        created_by TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT (datetime('now')),revoked_at TEXT,
+        logical_grant_id TEXT,grant_version INTEGER NOT NULL DEFAULT 1
+      );
+      CREATE TABLE client_service_requests(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,project_id TEXT,created_by_identity_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'submitted');
+      CREATE TABLE client_service_request_drafts(id TEXT PRIMARY KEY,account_id TEXT NOT NULL,project_id TEXT,created_by_identity_id TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'draft');
+      CREATE TABLE client_portal_notifications(
+        id TEXT PRIMARY KEY,account_id TEXT NOT NULL,recipient_identity_id TEXT NOT NULL,event_type TEXT NOT NULL,
+        source_type TEXT NOT NULL,source_id TEXT NOT NULL,dedupe_key TEXT NOT NULL,title TEXT NOT NULL,body TEXT NOT NULL,
+        action_path TEXT,read_at TEXT,dismissed_at TEXT,created_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
     `.replace(/\s*\n\s*/g, " "));
     await db.batch([
@@ -93,6 +106,9 @@ describe("client workspace hierarchy v2", () => {
       CLIENT_PORTAL_ENABLED: "true",
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
       CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "true",
+      CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: "true",
+      CLIENT_PORTAL_INVITATION_FROM: "portal@example.test",
+      CLIENT_PORTAL_INVITATION_EMAIL: { send: async (_message: EmailMessageBuilder) => ({ messageId: "test-only" }) },
       CLIENT_PORTAL_ORIGIN: "https://client.test",
       ENVIRONMENT: "development",
     } as Env;
@@ -187,12 +203,128 @@ describe("client workspace hierarchy v2", () => {
       scopeType: "workspace", publicId: "workspace-account-a",
     })).toBe(false);
     const router = createClientPortalRouter({ resolvePrincipal: async () => v2Only, repository: d1ClientPortalRepository });
-    expect((await router.request("https://client.test/session", {}, env)).status).toBe(403);
+    const bootstrap = await router.request("https://client.test/session", {}, env);
+    expect(bootstrap.status).toBe(200);
+    expect(await bootstrap.json()).toMatchObject({ account: { id: "" }, capabilities: { workspaceHierarchyV2: true } });
     expect((await router.request("https://client.test/projects", {}, env)).status).toBe(403);
     const response = await router.request("https://client.test/v2/workspaces", {}, env);
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ workspaces: [{ id: "workspace-b" }] });
   });
+
+  it("resolves one selected workspace and intersects local resources with scoped v2 allows and denies", async () => {
+    const context = await resolveEffectivePortalWorkspaceContext(env, principal, "workspace-account-a");
+    expect(context).toMatchObject({
+      workspaceId: "workspace-account-a",
+      legacyAccountId: "account-a",
+      legacyIdentityId: "identity-one",
+    });
+    if (!context) throw new Error("workspace context not resolved");
+    expect(await authorizeEffectiveWorkspaceProject(env, principal, context, "delivery.view", "project-a")).toBe(true);
+    await db.prepare(`INSERT INTO portal_v2_entitlements
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,source_type,status)
+      VALUES ('cutover-deny-project','workspace-account-a','identity-one','delivery.view','deny','project','pa-project-a',99,'operations','active')`).run();
+    expect(await authorizeEffectiveWorkspaceProject(env, principal, context, "delivery.view", "project-a")).toBe(false);
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='cutover-deny-project'").run();
+
+    await addWorkspaceB();
+    expect(await resolveEffectivePortalWorkspaceContext(env, principal, "workspace-b")).toBeNull();
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET status='suspended' WHERE workspace_id='workspace-account-a' AND identity_id='identity-one'").run();
+    expect(await resolveEffectivePortalWorkspaceContext(env, principal, "workspace-account-a")).toBeNull();
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET status='active' WHERE workspace_id='workspace-account-a' AND identity_id='identity-one'").run();
+  });
+
+  it("scopes notification access to the selected workspace and its live resource entitlement", async () => {
+    const context = await resolveEffectivePortalWorkspaceContext(env, principal, "workspace-account-a");
+    if (!context) throw new Error("workspace context not resolved");
+    await db.batch([
+      db.prepare("INSERT INTO client_service_requests(id,account_id,project_id,created_by_identity_id) VALUES ('request-a','account-a','project-a','identity-one')"),
+      db.prepare(`INSERT INTO client_portal_notifications
+        (id,account_id,recipient_identity_id,event_type,source_type,source_id,dedupe_key,title,body)
+        VALUES ('notice-a','account-a','identity-one','request_status','service_request','request-a','notice-a','Updated','Request updated')`),
+    ]);
+    expect(await authorizeEffectiveWorkspaceNotification(env, principal, context, "notice-a")).toBe(true);
+    await db.prepare(`INSERT INTO portal_v2_entitlements
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,source_type,status)
+      VALUES ('cutover-deny-notice','workspace-account-a','identity-one','request.create','deny','project','pa-project-a',99,'operations','active')`).run();
+    expect(await authorizeEffectiveWorkspaceNotification(env, principal, context, "notice-a")).toBe(false);
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='cutover-deny-notice'").run();
+  });
+
+  it("requires workspace selection on cutover legacy resource routes while preserving exact flag-off behavior", async () => {
+    const router = createClientPortalRouter({ resolvePrincipal: async () => principal, repository: d1ClientPortalRepository });
+    const selected = await router.request("https://client.test/projects", {
+      headers: { "X-LTDS-Workspace-Id": "workspace-account-a" },
+    }, env);
+    expect(selected.status).toBe(200);
+    expect(await selected.json()).toMatchObject({ projects: [{ id: "project-a" }] });
+    expect((await router.request("https://client.test/projects", {}, env)).status).toBe(403);
+    expect((await router.request("https://client.test/projects", {
+      headers: { "X-LTDS-Workspace-Id": "workspace-b" },
+    }, env)).status).toBe(403);
+    const legacy = await router.request("https://client.test/projects", {}, {
+      ...env,
+      CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "false",
+    });
+    expect(legacy.status).toBe(200);
+    expect(await legacy.json()).toMatchObject({ projects: [{ id: "project-a" }] });
+  });
+
+  it("does not let legacy team routes bypass a workspace-v2 member.manage deny", async () => {
+    await db.prepare(`INSERT INTO portal_v2_entitlements
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,source_type,status)
+      VALUES ('cutover-deny-member-manage','workspace-account-a','identity-one','member.manage','deny','workspace','workspace-account-a',99,'operations','active')`).run();
+    const router = createClientPortalRouter({ resolvePrincipal: async () => principal, repository: d1ClientPortalRepository });
+    const selected = { "X-LTDS-Workspace-Id": "workspace-account-a" };
+    const mutationHeaders = { ...selected, Origin: "https://client.test", "Content-Type": "application/json" };
+    const before = await db.prepare("SELECT COUNT(*) count FROM portal_v2_invitations").first<number>("count");
+
+    expect((await router.request("https://client.test/team", { headers: selected }, {
+      ...env, CLIENT_PORTAL_TEAM_ENABLED: "true",
+    })).status).toBe(403);
+    expect((await router.request("https://client.test/team/invitations", {
+      method: "POST", headers: mutationHeaders,
+      body: JSON.stringify({ email: "blocked@example.test", role: "member", projectIds: ["project-a"] }),
+    }, { ...env, CLIENT_PORTAL_TEAM_ENABLED: "true" })).status).toBe(403);
+    expect((await router.request("https://client.test/team/members/identity-one", {
+      method: "DELETE", headers: mutationHeaders,
+    }, { ...env, CLIENT_PORTAL_TEAM_ENABLED: "true" })).status).toBe(403);
+    expect((await router.request("https://client.test/team/invitations/invite-a", {
+      method: "DELETE", headers: mutationHeaders,
+    }, { ...env, CLIENT_PORTAL_TEAM_ENABLED: "true" })).status).toBe(403);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_invitations").first<number>("count")).toBe(before);
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='cutover-deny-member-manage'").run();
+  });
+
+  it("applies the selected-workspace draft guard to every request and attachment subroute", async () => {
+    await db.prepare("INSERT INTO client_service_request_drafts(id,account_id,project_id,created_by_identity_id) VALUES ('draft-a','account-a','project-a','identity-one')").run();
+    await db.prepare(`INSERT INTO portal_v2_entitlements
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,source_type,status)
+      VALUES ('cutover-deny-draft','workspace-account-a','identity-one','request.create','deny','project','pa-project-a',100,'operations','active')`).run();
+    const router = createClientPortalRouter({ resolvePrincipal: async () => principal, repository: d1ClientPortalRepository });
+    const headers = { "X-LTDS-Workspace-Id": "workspace-account-a", Origin: "https://client.test" };
+    const paths: Array<[string, string]> = [
+      ["GET", "/service-request-drafts/draft-a"],
+      ["GET", "/service-request-drafts/draft-a/attachments"],
+      ["POST", "/service-request-drafts/draft-a/attachments"],
+      ["GET", "/service-request-drafts/draft-a/attachments/attachment-a"],
+      ["POST", "/service-request-drafts/draft-a/attachments/attachment-a/part-ticket"],
+      ["PUT", "/service-request-drafts/draft-a/attachments/attachment-a/parts/1"],
+      ["POST", "/service-request-drafts/draft-a/attachments/attachment-a/complete"],
+      ["DELETE", "/service-request-drafts/draft-a/attachments/attachment-a"],
+      ["PUT", "/service-request-drafts/draft-a"],
+      ["GET", "/service-request-drafts/draft-a/pricing-hint"],
+      ["POST", "/service-request-drafts/draft-a/submit"],
+    ];
+    for (const [method, path] of paths) {
+      const response = await router.request(`https://client.test${path}`, { method, headers }, {
+        ...env,
+        CLIENT_PORTAL_REQUEST_V2_ENABLED: "true",
+      });
+      expect(response.status, `${method} ${path}`).toBe(404);
+    }
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='cutover-deny-draft'").run();
+  }, 30_000);
 
   it("accepts only hashed, unexpired, email-bound invitations and makes same-identity replay idempotent", async () => {
     const token = "A".repeat(48);
@@ -274,6 +406,8 @@ describe("client workspace hierarchy v2", () => {
     expect(await acceptPortalWorkspaceInvitation(env, { ...invited, email: "mismatch@example.test" }, token)).toBe("denied");
     expect(await acceptPortalWorkspaceInvitation(env, invited, token)).toBe("accepted");
     expect(await acceptPortalWorkspaceInvitation(env, invited, token)).toBe("replayed");
+    expect(await db.prepare("SELECT payload_json FROM portal_v2_invitation_email_outbox WHERE invitation_id=?")
+      .bind(result.invitation.id).first("payload_json")).toBe('{"redacted":true}');
     expect(await acceptPortalWorkspaceInvitation(env, { ...invited, subject: "attacker" }, token)).toBe("denied");
     expect(await authorizePortalWorkspaceCapability(env, invited, "workspace-account-a", "delivery.view", { scopeType: "project", publicId: "pa-project-a" })).toBe(true);
     expect(await authorizePortalWorkspaceCapability(env, invited, "workspace-account-a", "member.manage", { scopeType: "workspace", publicId: "workspace-account-a" })).toBe(false);
@@ -285,6 +419,8 @@ describe("client workspace hierarchy v2", () => {
     const revokedPayload = await db.prepare("SELECT payload_json FROM portal_v2_invitation_email_outbox WHERE invitation_id=?")
       .bind(revoked.invitation.id).first<string>("payload_json");
     expect(await revokeWorkspaceInvitation(env, principal, "workspace-account-a", revoked.invitation.id)).toBe(true);
+    expect(await db.prepare("SELECT status,payload_json FROM portal_v2_invitation_email_outbox WHERE invitation_id=?")
+      .bind(revoked.invitation.id).first()).toMatchObject({ status: "cancelled", payload_json: '{"redacted":true}' });
     expect(await acceptPortalWorkspaceInvitation(env, { issuer, subject: "revoked", email: "revoked@example.test" }, (JSON.parse(revokedPayload!) as { token: string }).token)).toBe("denied");
 
     const expired = await createWorkspaceInvitation(env, principal, "workspace-account-a", {
@@ -331,6 +467,13 @@ describe("client workspace hierarchy v2", () => {
       body: JSON.stringify({ email: "route@example.test", projectPublicId: "pa-project-a", capabilities: ["delivery.view"] }),
     }, { ...env, CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "false" });
     expect(disabled.status).toBe(404);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_invitation_email_outbox").first<number>("count")).toBe(outboxBefore);
+
+    const deliveryDisabled = await router.request("https://client.test/v2/workspaces/workspace-account-a/invitations", {
+      method: "POST", headers: { Origin: "https://client.test", "Content-Type": "application/json", "Idempotency-Key": "route-email-disabled-0001" },
+      body: JSON.stringify({ email: "route@example.test", projectPublicId: "pa-project-a", capabilities: ["delivery.view"] }),
+    }, { ...env, CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: "false" });
+    expect(deliveryDisabled.status).toBe(503);
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_invitation_email_outbox").first<number>("count")).toBe(outboxBefore);
 
     const forbiddenOrigin = await router.request("https://client.test/v2/workspaces/workspace-account-a/invitations", {

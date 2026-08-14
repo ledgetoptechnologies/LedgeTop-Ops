@@ -412,3 +412,61 @@ export const BRAND = {
 export function hasPermission(permissions: readonly string[], permission: Permission): boolean {
   return permissions.includes(permission);
 }
+
+/**
+ * Serializable, versioned contract for the private Client -> Operations
+ * service binding. Storage prefixes and Operations secrets are deliberately
+ * absent. Operations independently resolves and reauthorizes every opaque ID.
+ */
+export interface ClientDelegatedShareSignerRequestV1 {
+  protocolVersion: 1;
+  workspaceId: string;
+  delegationId: string;
+  expectedDelegationVersion: number;
+  createdByIdentityId: string;
+  entitlementId: string;
+  expectedEntitlementVersion: number;
+  folderBindingId: string;
+  expectedBindingSourceVersion: string;
+  folderTargetId: string;
+  label: string | null;
+  expiresAt: string;
+  accessCode?: string;
+  idempotencyKey: string;
+}
+
+export interface ClientDelegatedShareSignerSuccessV1 {
+  ok: true;
+  protocolVersion: 1;
+  receiptId: string;
+  replayed: boolean;
+  share: {
+    id: string;
+    publicId: string;
+    /** Client links use a namespace distinct from staff `/s/` links. */
+    path: string;
+    /** The bearer is only present as a URL fragment, never as a standalone field. */
+    shareUrl: string;
+    label: string | null;
+    status: "active";
+    passwordProtected: boolean;
+    expiresAt: string;
+    createdAt: string;
+  };
+}
+
+export interface ClientDelegatedShareSignerFailureV1 {
+  ok: false;
+  protocolVersion: 1;
+  code: "invalid_request" | "denied" | "idempotency_conflict" | "configuration_error";
+}
+
+export type ClientDelegatedShareSignerResultV1 =
+  | ClientDelegatedShareSignerSuccessV1
+  | ClientDelegatedShareSignerFailureV1;
+
+export interface ClientDelegatedShareSignerBinding {
+  createClientDelegatedShare(
+    request: ClientDelegatedShareSignerRequestV1,
+  ): Promise<ClientDelegatedShareSignerResultV1>;
+}

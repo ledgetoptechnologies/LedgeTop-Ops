@@ -43,7 +43,6 @@ const expectedPublicRoutes = [
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/preview",
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/source",
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/thumbnail",
-  "POST /api/client-public/shares/:publicId/session",
   "POST /api/internal/client-request-attachments/:attachmentId/scanned",
   "POST /api/internal/project-alpha/catalog-v2",
   "POST /api/internal/project-alpha/portal-v2",
@@ -82,7 +81,7 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "d1c93787dd73b20c95ff9753c8b60fb932d1f14f302793e6b05869466a48560f");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "ba2f99b9d4710d81d21768c82f07dafb7293dd440b677327f5e3bfd065c69a8c");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -105,6 +104,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_REQUEST_ATTACHMENTS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_V2_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_INVITATION_EMAIL_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_DELEGATED_SHARES_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_SYNC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PRICING_HINTS_ENABLED, "false");
@@ -116,6 +117,11 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     database_id: "7f40a7b7-c3ec-470e-a626-e798867f71f8",
     migrations_dir: "migrations",
   }]);
+  assert.deepEqual(config.services, [{
+    binding: "CLIENT_DELEGATED_SHARE_SIGNER",
+    service: "ltds-ops",
+    entrypoint: "ClientDelegatedShareSigner",
+  }]);
   assert.equal(config.images, undefined);
   assert.deepEqual(config.stream, { binding: "STREAM" });
   assert.deepEqual(config.workflows, [
@@ -125,10 +131,12 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.deepEqual(config.ratelimits.map((item) => [item.name, item.namespace_id, item.simple.limit]), expectedRateLimits);
 });
 
-test("public route, host-guard, health, and cookie contracts remain unchanged", () => {
+test("public route, host-guard, health, and isolated cookie contracts remain reviewed", () => {
   const worker = read("apps/client/src/worker/index.ts");
   const security = read("apps/client/src/worker/security.ts");
+  const delegated = read("apps/client/src/worker/client-portal/delegated-shares.ts");
   assert.deepEqual(publicRoutes(worker), expectedPublicRoutes);
+  assert(worker.includes('app.route("/client-share/api", createClientDelegatedPublicRouter())'));
   assert(worker.includes('const COOKIE_NAME = "__Host-ltds_delivery";'));
   assert(worker.includes('service: "ltds-delivery"'));
   assert(worker.includes("requestHostAllowed(c.req.url,c.env)"));
@@ -136,6 +144,9 @@ test("public route, host-guard, health, and cookie contracts remain unchanged", 
   assert.equal(worker.match(/12 \* 60 \* 60 \* 1000/g)?.length, 2);
   assert(security.includes('`__Host-ltds_delivery=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`'));
   assert(!security.includes("Domain="));
+  assert(delegated.includes('CLIENT_DELEGATED_SHARE_COOKIE = "__Secure-ltds_client_share"'));
+  assert(delegated.includes("Path=/client-share/;"));
+  assert(!delegated.includes("Domain="));
 });
 
 test("Operations and staging find the canonical client migration history", () => {

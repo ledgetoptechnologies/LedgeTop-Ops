@@ -1,12 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const apps = ["delivery", "operations", "ops-sync"];
 const markers = /<[^>]+>|CHANGE[_-]?ME|REPLACE[_-]?ME|example\.invalid/i;
-const disabled = ["CLIENT_PORTAL_ENABLED", "CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED", "DROPBOX_IMPORT_ENABLED", "DIRECT_DELIVERY_UPLOADS_ENABLED", "R2_PURGE_ENABLED"];
 const readJson = (file) => JSON.parse(fs.readFileSync(file, "utf8"));
 const mapped = (entries = [], key) => new Map(entries.map((item) => [item.binding, item[key]]));
 const routeHosts = (config) => (config.routes ?? []).map((route) => typeof route === "string" ? route : route.pattern);
@@ -69,7 +68,9 @@ export function validateApp(app, staging, production) {
     if (new Set(declaredSecrets).size !== declaredSecrets.length) errors.push(`${app} secrets.required contains duplicates`);
   }
   if (vars.ENVIRONMENT !== "staging") errors.push(`${app} must set ENVIRONMENT=staging`);
-  for (const flag of disabled) if (flag in (production.vars ?? {}) && vars[flag] !== "false") errors.push(`${app} must explicitly set ${flag}=false`);
+  for (const flag of REQUIRED_DISABLED_FEATURE_FLAGS[app] ?? []) {
+    if (vars[flag] !== "false") errors.push(`${app} must explicitly set ${flag}=false`);
+  }
   if (app === "ops-sync") for (const key of ["CF_ACCESS_GROUP_ID", "CF_ACCESS_GROUP_NAME"]) complete(vars[key], `${app} vars.${key}`, errors);
   for (const key of Object.keys(production.vars ?? {})) {
     if (!/(?:EXPECTED_HOST|BASE_URL|_AUD)$/.test(key)) continue;

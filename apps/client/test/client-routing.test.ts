@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { deliveryBrowsePath, openDeliveryRoute, parseDeliveryBrowseState, parseDeliveryRoute } from "../src/client/route";
+import { describe, expect, it, vi } from "vitest";
+import { consumeDeliveryRoute, deliveryBrowsePath, openDeliveryRoute, parseDeliveryBrowseState, parseDeliveryRoute } from "../src/client/route";
 
 describe("delivery client routing", () => {
   it("treats the public root as an informational landing page", () => {
@@ -34,6 +34,23 @@ describe("delivery client routing", () => {
   it("does not interpret unrelated paths or malformed fragments as share credentials", () => {
     expect(parseDeliveryRoute("/unrelated/path", "#%zz")).toEqual({ publicId: "", secret: "" });
     expect(parseDeliveryRoute("/s/public-id/extra", "#private-secret")).toEqual({ publicId: "", secret: "" });
+  });
+
+  it("removes a staff or delegated bearer fragment synchronously while preserving query state", () => {
+    const replaceState = vi.fn();
+    expect(consumeDeliveryRoute(
+      { pathname: "/s/public-id", search: "?folder=opaque", hash: "#private-secret" } as Location,
+      { state: { key: 1 }, replaceState } as unknown as History,
+    )).toEqual({ publicId: "public-id", secret: "private-secret" });
+    expect(replaceState).toHaveBeenCalledWith({ key: 1 }, "", "/s/public-id?folder=opaque");
+
+    replaceState.mockClear();
+    expect(consumeDeliveryRoute(
+      { pathname: "/client-share/client-id", search: "", hash: "#client-secret" } as Location,
+      { state: null, replaceState } as unknown as History,
+      "client-delegated",
+    )).toEqual({ publicId: "client-id", secret: "client-secret" });
+    expect(replaceState).toHaveBeenCalledWith(null, "", "/client-share/client-id");
   });
 
   it("round-trips only opaque folder/file references and the selected view", () => {

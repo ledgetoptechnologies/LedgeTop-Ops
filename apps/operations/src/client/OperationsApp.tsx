@@ -269,7 +269,7 @@ export function OperationsApp() {
         <nav className="ops-desktop-nav" aria-label="Primary navigation">
           {primaryNavigation.map((item) => navigationLink(item))}
           {!!manageNavigation.length && <div className="ops-manage-menu" ref={manageMenu}>
-            <button ref={manageTrigger} type="button" aria-expanded={manageOpen} aria-controls="ops-manage-menu" className={manageNavigation.some((item) => item.page === page) ? "active" : ""} onClick={() => setManageOpen((open) => !open)}>Manage</button>
+            <button ref={manageTrigger} type="button" aria-expanded={manageOpen} aria-controls="ops-manage-menu" className={manageNavigation.some((item) => item.page === page) ? "active" : ""} onClick={() => setManageOpen((open) => !open)}>Administration</button>
             {manageOpen && <div id="ops-manage-menu" className="ops-manage-popover">{manageNavigation.map((item) => navigationLink(item))}</div>}
           </div>}
         </nav>
@@ -288,7 +288,7 @@ export function OperationsApp() {
       {mobileNavOpen && <div className="ops-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
         <div ref={mobileNavPanel} id="ops-mobile-navigation" className="ops-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">
           <header><strong>Navigation</strong><button type="button" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); }}>Close</button></header>
-          <nav aria-label="Mobile primary navigation">{primaryNavigation.map((item) => navigationLink(item, true))}{!!manageNavigation.length && <span className="ops-mobile-nav-label">Manage</span>}{manageNavigation.map((item) => navigationLink(item, true))}</nav>
+          <nav aria-label="Mobile primary navigation">{primaryNavigation.map((item) => navigationLink(item, true))}{!!manageNavigation.length && <span className="ops-mobile-nav-label">Administration</span>}{manageNavigation.map((item) => navigationLink(item, true))}</nav>
         </div>
       </div>}
       <main className="ops-main">

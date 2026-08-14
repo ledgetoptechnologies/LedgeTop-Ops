@@ -17,8 +17,10 @@ const configuredEnv = {
   CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET: "s".repeat(32),
   R2_S3_ENDPOINT: "https://846c924bf17bf4f3dd15c97a4c5d1d51.r2.cloudflarestorage.com",
   R2_BUCKET_NAME: "client-data",
-  R2_ACCESS_KEY_ID: "access",
-  R2_SECRET_ACCESS_KEY: "secret".repeat(8),
+  CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID: "attachment-access",
+  CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY: "attachment-secret".repeat(4),
+  R2_ACCESS_KEY_ID: "download-only-access",
+  R2_SECRET_ACCESS_KEY: "download-only-secret".repeat(4),
 } as Env;
 
 describe("client request attachment policy", () => {
@@ -42,6 +44,15 @@ describe("client request attachment policy", () => {
   it("fails closed without the feature flag, scanner secret, or signer configuration", () => {
     expect(requestAttachmentsAvailable({ ...configuredEnv, CLIENT_REQUEST_ATTACHMENTS_ENABLED: "false" })).toBe(false);
     expect(requestAttachmentsAvailable({ ...configuredEnv, CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET: "" })).toBe(false);
+    expect(requestAttachmentsAvailable({ ...configuredEnv, CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID: "" })).toBe(false);
+    expect(requestAttachmentsAvailable({ ...configuredEnv, CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY: "" })).toBe(false);
+    expect(requestAttachmentsAvailable({
+      ...configuredEnv,
+      CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID: undefined,
+      CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY: undefined,
+      R2_ACCESS_KEY_ID: "legacy-write-capable-key",
+      R2_SECRET_ACCESS_KEY: "legacy-write-capable-secret",
+    })).toBe(false);
     expect(requestAttachmentsAvailable({ ...configuredEnv, R2_S3_ENDPOINT: "https://example.com" })).toBe(false);
     expect(requestAttachmentsAvailable(configuredEnv)).toBe(true);
   });
@@ -54,10 +65,23 @@ describe("client request attachment policy", () => {
     expect(url.searchParams.get("uploadId")).toBe("upload-a");
     expect(url.searchParams.get("partNumber")).toBe("2");
     expect(url.searchParams.get("X-Amz-Expires")).toBe("300");
+    expect(url.searchParams.get("X-Amz-Credential")).toBe("attachment-access/20260813/auto/s3/aws4_request");
     expect(url.searchParams.get("X-Amz-SignedHeaders")).toBe("content-length;content-type;host");
     expect(ticket.expiresAt).toBe("2026-08-13T12:05:00.000Z");
     const other = await presignRequestAttachmentPart({ env: configuredEnv, key: "_ltds/quarantine/request-attachments/b/object", uploadId: "upload-b", partNumber: 2, contentLength: 7, contentType: "application/pdf", now });
     expect(other.url).not.toBe(ticket.url);
+    const changedDownloadCredential = await presignRequestAttachmentPart({
+      env: { ...configuredEnv, R2_ACCESS_KEY_ID: "other-download-key", R2_SECRET_ACCESS_KEY: "other-download-secret" },
+      key: "_ltds/quarantine/request-attachments/a/object", uploadId: "upload-a", partNumber: 2,
+      contentLength: 7, contentType: "application/pdf", now,
+    });
+    expect(changedDownloadCredential.url).toBe(ticket.url);
+    const changedAttachmentCredential = await presignRequestAttachmentPart({
+      env: { ...configuredEnv, CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID: "other-attachment-key" },
+      key: "_ltds/quarantine/request-attachments/a/object", uploadId: "upload-a", partNumber: 2,
+      contentLength: 7, contentType: "application/pdf", now,
+    });
+    expect(changedAttachmentCredential.url).not.toBe(ticket.url);
   });
 });
 

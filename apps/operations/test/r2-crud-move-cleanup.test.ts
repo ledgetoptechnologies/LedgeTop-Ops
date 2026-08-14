@@ -361,7 +361,7 @@ describe("R2 move location cleanup", () => {
     expect(await opsDb.prepare("SELECT COUNT(*) count FROM r2_event_suppressions").first()).toEqual({ count: 0 });
   });
 
-  it.each(["copy", "move"] as const)("preserves video/mp4 metadata with icon-only thumbnail policy after %s", async kind => {
+  it.each(["copy", "move"] as const)("preserves video/mp4 metadata and queues TrueNAS thumbnail work after %s", async kind => {
     const videoSource = "Jobs/Clients/Acme/Old/flight.mp4";
     const videoTarget = "Jobs/Clients/Other/New/flight.mp4";
     await seedJob(kind, "fail", videoSource, videoTarget, "video/mp4", "video");
@@ -373,7 +373,12 @@ describe("R2 move location cleanup", () => {
     expect((await value.dataBucket.head(videoTarget))?.httpMetadata.contentType).toBe("video/mp4");
     expect(await deliveryDb.prepare("SELECT content_type,media_kind FROM file_index WHERE r2_key=?")
       .bind(videoTarget).first()).toEqual({ content_type: "video/mp4", media_kind: "video" });
-    expect(vi.mocked(enqueueThumbnailJob)).not.toHaveBeenCalled();
+    expect(vi.mocked(enqueueThumbnailJob)).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(enqueueThumbnailJob).mock.calls[0]?.[1]).toMatchObject({
+      sourceKey: videoTarget,
+      sourceEtag: '"etag-target"',
+      sourceSize: 4,
+    });
     if (kind === "move") expect(isMovedSourceMarker((await value.dataBucket.head(videoSource))!)).toBe(true);
     else expect((await value.dataBucket.head(videoSource))?.httpEtag).toBe('"etag-source"');
   });

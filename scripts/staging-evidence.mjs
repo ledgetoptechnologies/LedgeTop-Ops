@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_EXTERNAL_GATES, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultEvidence = path.join(root, ".backups", "staging-release-evidence.json");
@@ -126,6 +126,15 @@ export function validateEvidence(evidence, options = {}) {
     if (migration.appliedToStaging !== true || !populated(migration.listEvidenceRef) || !populated(migration.applyEvidenceRef)) errors.push(`${app} staging migrations must be applied and evidenced`);
   }
   if (migrations.productionUnchanged !== true) errors.push("production migrations must be confirmed unchanged");
+
+  const externalGates = evidence.externalGates ?? {};
+  for (const gate of REQUIRED_EXTERNAL_GATES) {
+    const result = externalGates[gate] ?? {};
+    if (result.ready !== true) errors.push(`external gate ${gate} must be confirmed ready`);
+    if (!recentDate(result.verifiedAt, now) || !populated(result.evidenceRef)) {
+      errors.push(`external gate ${gate} needs current referenced staging evidence`);
+    }
+  }
 
   for (const app of apps) {
     const secretEvidence = evidence.secrets?.[app] ?? {};

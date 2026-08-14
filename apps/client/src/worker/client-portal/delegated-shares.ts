@@ -1,10 +1,14 @@
 import { HTTPException } from "hono/http-exception";
+import type {
+  ClientDelegatedShareSignerRequestV1,
+  ClientDelegatedShareSignerSuccessV1,
+} from "@ltds/shared";
 import type { Env } from "../types";
-import { constantTimeEqual, hmac } from "../security";
+import { constantTimeEqual, hmac, sha256 } from "../security";
 import type { VerifiedClientPrincipal } from "./types";
 import { authorizePortalWorkspaceCapability, portalHierarchyV2Enabled } from "./workspace-v2";
 
-export const CLIENT_DELEGATED_SHARE_COOKIE = "__Host-ltds_client_share";
+export const CLIENT_DELEGATED_SHARE_COOKIE = "__Secure-ltds_client_share";
 export const CLIENT_DELEGATED_SHARE_PATH_PREFIX = "/client-share/";
 const CLIENT_SHARE_SESSION_CONTEXT = "client-delegated-share:v1";
 
@@ -17,9 +21,11 @@ interface DelegationPolicyRow {
   verified_email: string | null;
   entitlement_id: string;
   entitlement_version: number;
+  delegation_version: number;
   folder_binding_id: string;
   folder_binding_source_version: string;
   live_binding_source_version: string | null;
+  binding_r2_prefix: string;
   root_relative_prefix: string;
   root_binding_source_version: string;
   root_staff_approved: number;
@@ -37,10 +43,28 @@ export interface AuthorizedClientShareDelegation {
   delegationId: string;
   workspaceId: string;
   identityId: string;
+  delegationVersion: number;
+  entitlementId: string;
+  entitlementVersion: number;
   folderBindingId: string;
+  folderBindingSourceVersion: string;
   folderTargetId: string;
   maximumLinkLifetimeSeconds: number;
   requirePassword: boolean;
+  /** Server-only physical scope. Never serialize this value to a client. */
+  deliveryPrefix: string;
+}
+
+export interface AuthorizedClientDelegatedPublicDelivery extends AuthorizedClientShareDelegation {
+  shareId: string;
+  publicId: string;
+  shareVersion: number;
+  tokenHash: string;
+  label: string | null;
+  passwordHash: string | null;
+  passwordSalt: string | null;
+  passwordAlgorithm: string | null;
+  shareExpiresAt: string;
 }
 
 export interface ClientDelegatedShareSummary {
@@ -69,6 +93,15 @@ function delegatedShareDb(env: Pick<Env, "DELIVERY_DB">): D1Database {
 
 function opaqueId(value: string): boolean {
   return /^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/.test(value);
+}
+
+function canonicalR2Prefix(value: string): string | null {
+  if (value.length < 2 || value.length > 1000 || value !== value.normalize("NFC")) return null;
+  if (value.startsWith("/") || !value.endsWith("/") || value.includes("//")) return null;
+  if (value.includes("\\") || value.includes("%") || /[\u0000-\u001f\u007f]/.test(value)) return null;
+  const segments = value.slice(0, -1).split("/");
+  if (segments.some(segment => !segment || segment === "." || segment === "..")) return null;
+  return `${segments.join("/")}/`;
 }
 
 /** Internal-only canonicalization. Relative prefixes never cross a client API. */
@@ -117,9 +150,9 @@ async function delegationPolicyRow(
   return delegatedShareDb(env).prepare(`
     SELECT delegation.id delegation_id,delegation.workspace_id,delegation.identity_id,
       identity.issuer,identity.subject,identity.verified_email,
-      delegation.entitlement_id,delegation.entitlement_version,
+      delegation.entitlement_id,delegation.entitlement_version,delegation.delegation_version,
       delegation.folder_binding_id,delegation.folder_binding_source_version,
-      binding.source_version live_binding_source_version,
+      binding.source_version live_binding_source_version,binding.r2_prefix binding_r2_prefix,
       root.relative_prefix root_relative_prefix,root.binding_source_version root_binding_source_version,
       root.staff_exact_root_approved root_staff_approved,
       target.id target_id,target.relative_prefix target_relative_prefix,
@@ -174,6 +207,8 @@ async function authorizeDelegationRow(
   if (!delegatedTargetContained(row.root_relative_prefix, row.target_relative_prefix, row.allow_exact_root === 1)) return null;
   if (row.target_relative_prefix === "" && row.target_staff_approved !== 1) return null;
   if (row.root_relative_prefix === "" && row.root_staff_approved !== 1) return null;
+  const bindingPrefix = canonicalR2Prefix(row.binding_r2_prefix);
+  if (!bindingPrefix) return null;
 
   const principal: VerifiedClientPrincipal = {
     issuer: row.issuer,
@@ -189,10 +224,15 @@ async function authorizeDelegationRow(
     delegationId: row.delegation_id,
     workspaceId: row.workspace_id,
     identityId: row.identity_id,
+    delegationVersion: row.delegation_version,
+    entitlementId: row.entitlement_id,
+    entitlementVersion: row.entitlement_version,
     folderBindingId: row.folder_binding_id,
+    folderBindingSourceVersion: row.folder_binding_source_version,
     folderTargetId: row.target_id,
     maximumLinkLifetimeSeconds: row.maximum_link_lifetime_seconds,
     requirePassword: row.require_password === 1,
+    deliveryPrefix: `${bindingPrefix}${row.target_relative_prefix}`,
   };
 }
 
@@ -216,27 +256,134 @@ export async function authorizeClientDelegatedPublicShare(
   publicId: string,
   shareVersion: number,
 ): Promise<AuthorizedClientShareDelegation | null> {
-  if (!portalHierarchyV2Enabled(env) || !/^[A-Za-z0-9][A-Za-z0-9_-]{19,63}$/.test(publicId)) return null;
-  if (!Number.isSafeInteger(shareVersion) || shareVersion < 1) return null;
-  const share = await delegatedShareDb(env).prepare(`SELECT delegation_id,workspace_id,created_by_identity_id,folder_target_id
-    FROM client_delegated_shares WHERE public_id=? AND share_version=? AND status='active'
-      AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')`)
-    .bind(publicId, shareVersion)
-    .first<{ delegation_id: string; workspace_id: string; created_by_identity_id: string; folder_target_id: string }>();
+  const delivery = await authorizeClientDelegatedPublicDelivery(env, { publicId, shareVersion }, false);
+  if (!delivery) return null;
+  const { shareId: _shareId, publicId: _publicId, shareVersion: _shareVersion, tokenHash: _tokenHash,
+    label: _label, passwordHash: _passwordHash, passwordSalt: _passwordSalt,
+    passwordAlgorithm: _passwordAlgorithm, shareExpiresAt: _shareExpiresAt, ...authorization } = delivery;
+  return authorization;
+}
+
+/** Resolves a delegated bearer to an exact live delivery scope on every request. */
+export async function authorizeClientDelegatedPublicDelivery(
+  env: Env,
+  input: { publicId: string; shareVersion: number; expectedShareId?: string },
+  enforceFeatureFlag = true,
+): Promise<AuthorizedClientDelegatedPublicDelivery | null> {
+  if ((enforceFeatureFlag && env.CLIENT_DELEGATED_SHARES_ENABLED !== "true") || !portalHierarchyV2Enabled(env) ||
+      !/^[A-Za-z0-9][A-Za-z0-9_-]{19,63}$/.test(input.publicId)) return null;
+  if (!Number.isSafeInteger(input.shareVersion) || input.shareVersion < 1 ||
+      (input.expectedShareId !== undefined && !opaqueId(input.expectedShareId))) return null;
+  const share = await delegatedShareDb(env).prepare(`SELECT id,public_id,delegation_id,workspace_id,
+      created_by_identity_id,folder_target_id,share_version,token_hash,label,password_hash,password_salt,
+      password_algorithm,expires_at
+    FROM client_delegated_shares WHERE public_id=? AND share_version=?
+      AND (? IS NULL OR id=?) AND status='active' AND revoked_at IS NULL
+      AND datetime(expires_at)>datetime('now')`)
+    .bind(input.publicId, input.shareVersion, input.expectedShareId ?? null, input.expectedShareId ?? null)
+    .first<{
+      id: string; public_id: string; delegation_id: string; workspace_id: string;
+      created_by_identity_id: string; folder_target_id: string; share_version: number;
+      token_hash: string; label: string | null; password_hash: string | null;
+      password_salt: string | null; password_algorithm: string | null; expires_at: string;
+    }>();
   if (!share) return null;
   const row = await delegationPolicyRow(env, share.workspace_id, share.delegation_id, share.folder_target_id);
   // The creator is immutable audit provenance, not ongoing ownership. Staff may
   // adopt the same delegation to a replacement manager; live authorization is
   // always the delegation's current exact identity and entitlement version.
-  return row ? authorizeDelegationRow(env, row) : null;
+  const authorization = row ? await authorizeDelegationRow(env, row) : null;
+  if (!authorization) return null;
+  return {
+    ...authorization,
+    shareId: share.id,
+    publicId: share.public_id,
+    shareVersion: share.share_version,
+    tokenHash: share.token_hash,
+    label: share.label,
+    passwordHash: share.password_hash,
+    passwordSalt: share.password_salt,
+    passwordAlgorithm: share.password_algorithm,
+    shareExpiresAt: share.expires_at,
+  };
 }
 
-/** No creation path is enabled until the Operations signer RPC is implemented and contract-tested. */
-export function clientDelegatedShareCreationCapability(_env: Env): {
-  enabled: false;
-  reason: "operations-signer-binding-required";
-} {
-  return { enabled: false, reason: "operations-signer-binding-required" };
+export type ClientDelegatedShareCreationCapability =
+  | { enabled: true }
+  | { enabled: false; reason: "feature-disabled" | "operations-signer-binding-required" };
+
+/** Both the explicit rollout flag and the private named-entrypoint binding are required. */
+export function clientDelegatedShareCreationCapability(env: Env): ClientDelegatedShareCreationCapability {
+  if (env.CLIENT_DELEGATED_SHARES_ENABLED !== "true")
+    return { enabled: false, reason: "feature-disabled" };
+  if (!env.CLIENT_DELEGATED_SHARE_SIGNER ||
+      typeof env.CLIENT_DELEGATED_SHARE_SIGNER.createClientDelegatedShare !== "function")
+    return { enabled: false, reason: "operations-signer-binding-required" };
+  return { enabled: true };
+}
+
+function validSignerSuccess(value: unknown): value is ClientDelegatedShareSignerSuccessV1 {
+  if (!value || typeof value !== "object") return false;
+  const result = value as Partial<ClientDelegatedShareSignerSuccessV1>;
+  const share = result.share;
+  return result.ok === true && result.protocolVersion === 1 && typeof result.replayed === "boolean" &&
+    typeof result.receiptId === "string" && opaqueId(result.receiptId) && Boolean(share) &&
+    typeof share?.id === "string" && opaqueId(share.id) &&
+    typeof share.publicId === "string" && /^[A-Za-z0-9][A-Za-z0-9_-]{19,63}$/.test(share.publicId) &&
+    typeof share.path === "string" && typeof share.shareUrl === "string" &&
+    (share.label === null || (typeof share.label === "string" && share.label.length >= 1 && share.label.length <= 160)) &&
+    share.status === "active" && typeof share.passwordProtected === "boolean" &&
+    typeof share.expiresAt === "string" && Number.isFinite(Date.parse(share.expiresAt)) &&
+    typeof share.createdAt === "string" && Number.isFinite(Date.parse(share.createdAt));
+}
+
+/**
+ * Treat the RPC response as untrusted until it is tied back to the signer row,
+ * bearer hash and exact request. The event ID is deterministic so an HTTP retry
+ * cannot create duplicate audit records after a successful signer call.
+ */
+export async function verifyAndRecordClientDelegatedShareSignerResult(
+  env: Env,
+  delegation: AuthorizedClientShareDelegation,
+  request: ClientDelegatedShareSignerRequestV1,
+  value: unknown,
+): Promise<ClientDelegatedShareSignerSuccessV1 | null> {
+  if (!validSignerSuccess(value)) return null;
+  const expectedPath = `${CLIENT_DELEGATED_SHARE_PATH_PREFIX}${encodeURIComponent(value.share.publicId)}`;
+  if (value.share.path !== expectedPath || value.share.label !== request.label ||
+      value.share.expiresAt !== request.expiresAt) return null;
+  let url: URL;
+  try { url = new URL(value.share.shareUrl); } catch { return null; }
+  const configured = env.CLIENT_PORTAL_ORIGIN || env.PUBLIC_BASE_URL;
+  let expectedOrigin: string;
+  try { expectedOrigin = new URL(configured).origin; } catch { return null; }
+  const secret = url.hash.slice(1);
+  if (url.origin !== expectedOrigin || url.pathname !== expectedPath || url.search ||
+      !/^[A-Za-z0-9_-]{43}$/.test(secret)) return null;
+
+  const row = await delegatedShareDb(env).prepare(`SELECT token_hash FROM client_delegated_shares
+    WHERE id=? AND public_id=? AND workspace_id=? AND delegation_id=?
+      AND created_by_identity_id=? AND folder_target_id=? AND signer_receipt_id=?
+      AND idempotency_key=? AND share_version=1 AND status='active'
+      AND revoked_at IS NULL AND expires_at=? AND label IS ?`)
+    .bind(
+      value.share.id, value.share.publicId, request.workspaceId, request.delegationId,
+      delegation.identityId, request.folderTargetId, value.receiptId,
+      request.idempotencyKey, request.expiresAt, request.label,
+    ).first<{ token_hash: string }>();
+  if (!row || !constantTimeEqual(row.token_hash, await sha256(secret))) return null;
+
+  const eventId = `client-share-event-${(await sha256(JSON.stringify([
+    request.workspaceId, delegation.identityId, request.idempotencyKey,
+  ]))).slice(0, 43)}`;
+  await delegatedShareDb(env).prepare(`INSERT OR IGNORE INTO client_delegated_share_events
+    (id,workspace_id,delegation_id,share_id,actor_type,actor_id,event_type,request_idempotency_key,details_json)
+    VALUES (?,?,?,?,? ,?,'client_share.created',?,'{}')`)
+    .bind(
+      eventId, request.workspaceId, request.delegationId, value.share.id,
+      "client", delegation.identityId, request.idempotencyKey,
+    ).run();
+  return value;
 }
 
 export async function consumeClientDelegatedShareRate(
@@ -313,8 +460,8 @@ export async function revokeClientDelegatedShare(
   ))) return "denied";
   const prior = await delegatedShareDb(env).prepare(`SELECT id FROM client_delegated_share_events
     WHERE workspace_id=? AND actor_type='client' AND actor_id=?
-      AND event_type='client_share.revoked' AND request_idempotency_key=?`)
-    .bind(workspaceId, identityId, idempotencyKey).first<{ id: string }>();
+      AND share_id=? AND event_type='client_share.revoked' AND request_idempotency_key=?`)
+    .bind(workspaceId, identityId, shareId, idempotencyKey).first<{ id: string }>();
   if (prior) return "replayed";
   const result = await delegatedShareDb(env).prepare(`UPDATE client_delegated_shares
     SET status='revoked',revoked_at=datetime('now'),revoked_by_identity_id=?,

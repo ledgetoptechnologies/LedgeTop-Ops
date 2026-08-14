@@ -1,4 +1,4 @@
-import { timingSafeEqual } from "./crypto";
+import { base64Url, hmac, timingSafeEqual } from "./crypto";
 import { presignR2Get } from "./r2-signing";
 import {
   THUMBNAIL_HEIGHT,
@@ -14,6 +14,11 @@ import type { Env } from "./types";
 
 const RENDERER_API_PREFIX = "/api/internal/thumbnail-renderer/v1";
 const MANAGED_PREFIX = "_ltds/derivatives/thumbnails/v1/managed/";
+const RENDERER_LEASE_TOKEN_MAX_MS = 24 * 60 * 60 * 1000;
+// This API writes directly to the managed-key contract (rather than the
+// manifest-backed prebuilt TrueNAS contract), so retain the managed provider
+// value used by authorized thumbnail reads even though TrueNAS performs the
+// decode.
 const PROVIDER = "cloudflare-container";
 
 interface ClaimResponse {
@@ -34,6 +39,21 @@ interface CompleteRequest {
   thumbnailKey?: unknown;
   thumbnailEtag?: unknown;
   thumbnailSize?: unknown;
+}
+
+interface RendererAttemptRequest {
+  leaseId?: unknown;
+  sourceKey?: unknown;
+  errorCode?: unknown;
+  errorMessage?: unknown;
+}
+
+interface RendererAttemptJob {
+  source_etag: string;
+  source_size: number;
+  thumbnail_key: string;
+  attempt_count: number;
+  lease_until: string | null;
 }
 
 function json(value: unknown, status: number): Response {
@@ -186,7 +206,6 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
   }
 
   // Atomically claim the job (set to processing, lease for 5 minutes)
-  const leaseId = crypto.randomUUID();
   const leaseUntil = new Date(Date.now() + 5 * 60 * 1000).toISOString();
   const attemptCount = job.attempt_count + 1;
 
@@ -206,6 +225,18 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
   // and uploads via PUT /thumbnail/{leaseId}?key=...
   // The Worker proxies R2 through its binding - no S3 credentials needed on TrueNAS.
   const thumbnailKey = job.thumbnail_key;
+  const leaseId = await createRendererLease(env, {
+    v: 1,
+    sourceKey: job.source_key,
+    sourceEtag: cleanThumbnailEtag(job.source_etag),
+    sourceSize: job.source_size,
+    thumbnailKey,
+    attemptCount,
+    // The database lease remains five minutes and must be extended by
+    // heartbeat. The attempt-bound token lasts longer so a heartbeat does not
+    // invalidate the source/upload URLs during a large video render.
+    expiresAt: Date.now() + RENDERER_LEASE_TOKEN_MAX_MS,
+  });
 
   // For videos: generate a presigned R2 GET URL so ffmpeg can read directly
   // from R2 with HTTP Range (only pulls ~10-40MB, not the full file).
@@ -246,15 +277,27 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
  * Stream the R2 source object to the TrueNAS worker.
  * Supports HTTP Range requests for video seeking.
  */
-async function handleSourceDownload(request: Request, env: Env, _leaseId: string): Promise<Response> {
+async function handleSourceDownload(request: Request, env: Env, leaseId: string): Promise<Response> {
   const sourceKey = new URL(request.url).searchParams.get("key");
   if (!sourceKey) return json({ error: "missing_key" }, 400);
+
+  // The renderer bearer is never a bucket-wide read capability. Restrict each
+  // proxy read to the exact current source of an unexpired processing lease.
+  const job = await env.DELIVERY_DB.prepare(`SELECT source_etag,source_size,thumbnail_key,attempt_count
+    FROM image_thumbnail_jobs WHERE source_key=? AND status='processing'
+      AND lease_until IS NOT NULL AND datetime(lease_until)>datetime('now')`)
+    .bind(sourceKey).first<{ source_etag: string; source_size: number; thumbnail_key: string; attempt_count: number }>();
+  if (!job || !(await verifyRendererLease(env, leaseId, {
+    sourceKey, sourceEtag: job.source_etag, sourceSize: job.source_size,
+    thumbnailKey: job.thumbnail_key, attemptCount: job.attempt_count,
+  }))) return json({ error: "source_not_found" }, 404);
 
   const rangeHeader = request.headers.get("Range");
 
   // HEAD the object to get its full size for Content-Range
   const head = await env.DATA_BUCKET.head(sourceKey);
-  if (!head) return json({ error: "source_not_found" }, 404);
+  if (!head || cleanThumbnailEtag(head.httpEtag) !== cleanThumbnailEtag(job.source_etag) || head.size !== job.source_size)
+    return json({ error: "source_not_found" }, 404);
   const totalSize = head.size;
 
   if (rangeHeader) {
@@ -262,15 +305,22 @@ async function handleSourceDownload(request: Request, env: Env, _leaseId: string
     const match = /^bytes=(\d+)-(\d*)$/.exec(rangeHeader);
     if (match) {
       const start = parseInt(match[1]!, 10);
-      const end = match[2] ? parseInt(match[2], 10) : totalSize - 1;
+      const requestedEnd = match[2] ? parseInt(match[2], 10) : totalSize - 1;
+      if (!Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd) || start < 0 || start >= totalSize || requestedEnd < start)
+        return json({ error: "range_not_satisfiable" }, 416);
+      const end = Math.min(requestedEnd, totalSize - 1);
+      const length = end - start + 1;
 
-      const object = await env.DATA_BUCKET.get(sourceKey, { onlyIf: new Headers({ Range: `bytes=${start}-${end}` }) });
+      const object = await env.DATA_BUCKET.get(sourceKey, {
+        onlyIf: { etagMatches: cleanThumbnailEtag(job.source_etag) },
+        range: { offset: start, length },
+      });
       if (!object || !("body" in object)) return json({ error: "range_not_satisfiable" }, 416);
 
       const headers = new Headers();
       headers.set("Content-Type", object.httpMetadata?.contentType || "application/octet-stream");
       headers.set("ETag", object.httpEtag);
-      headers.set("Content-Length", String(object.size));
+      headers.set("Content-Length", String(length));
       headers.set("Content-Range", `bytes ${start}-${end}/${totalSize}`);
       headers.set("Accept-Ranges", "bytes");
       headers.set("Cache-Control", "private, no-store");
@@ -279,7 +329,7 @@ async function handleSourceDownload(request: Request, env: Env, _leaseId: string
   }
 
   // Full download (no Range header)
-  const object = await env.DATA_BUCKET.get(sourceKey);
+  const object = await env.DATA_BUCKET.get(sourceKey, { onlyIf: { etagMatches: cleanThumbnailEtag(job.source_etag) } });
   if (!object || !("body" in object)) return json({ error: "source_not_found" }, 404);
 
   const headers = new Headers();
@@ -294,12 +344,21 @@ async function handleSourceDownload(request: Request, env: Env, _leaseId: string
 /**
  * Receive the rendered thumbnail from the TrueNAS worker and store it in R2.
  */
-async function handleThumbnailUpload(request: Request, env: Env, _leaseId: string): Promise<Response> {
+async function handleThumbnailUpload(request: Request, env: Env, leaseId: string): Promise<Response> {
   const thumbnailKey = new URL(request.url).searchParams.get("key");
   if (!thumbnailKey) return json({ error: "missing_key" }, 400);
   if (!thumbnailKey.startsWith("_ltds/thumbnails/") && !thumbnailKey.startsWith("_ltds/derivatives/thumbnails/")) {
     return json({ error: "invalid_key" }, 400);
   }
+
+  const job = await env.DELIVERY_DB.prepare(`SELECT source_key,source_etag,source_size,attempt_count FROM image_thumbnail_jobs
+    WHERE thumbnail_key=? AND status='processing' AND lease_until IS NOT NULL
+      AND datetime(lease_until)>datetime('now')`)
+    .bind(thumbnailKey).first<{ source_key: string; source_etag: string; source_size: number; attempt_count: number }>();
+  if (!job || !(await verifyRendererLease(env, leaseId, {
+    sourceKey: job.source_key, sourceEtag: job.source_etag, sourceSize: job.source_size,
+    thumbnailKey, attemptCount: job.attempt_count,
+  }))) return json({ error: "job_not_found" }, 404);
 
   // Read body (max 128KB)
   const reader = request.body?.getReader();
@@ -325,14 +384,7 @@ async function handleThumbnailUpload(request: Request, env: Env, _leaseId: strin
 
   // Look up the source etag from the lease so we can embed it in the thumbnail's customMetadata.
   // getThumbnailForAuthorizedSource requires customMetadata.sourceEtag to match the source.
-  const sourceKey = thumbnailKey.replace(/^_ltds\/thumbnails\/v2\//, "");
-  // The thumbnail key is a hash, not the source key. We need to find the job.
-  // Use the lease ID from the path to find the source etag.
-  const job = await env.DELIVERY_DB.prepare(
-    `SELECT source_etag FROM image_thumbnail_jobs WHERE thumbnail_key=? AND status='processing'`
-  ).bind(thumbnailKey).first<{ source_etag: string }>();
-
-  const sourceEtag = job ? cleanThumbnailEtag(job.source_etag) : "";
+  const sourceEtag = cleanThumbnailEtag(job.source_etag);
 
   const stored = await env.DATA_BUCKET.put(thumbnailKey, bytes, {
     httpMetadata: { contentType: "image/webp", cacheControl: "private, no-store" },
@@ -363,32 +415,42 @@ async function handleComplete(request: Request, env: Env): Promise<Response> {
   const thumbnailEtag = body.thumbnailEtag ? cleanThumbnailEtag(String(body.thumbnailEtag)) : null;
   const thumbnailSize = typeof body.thumbnailSize === "number" ? body.thumbnailSize : null;
 
-  if (!thumbnailKey || !thumbnailEtag || !thumbnailSize) {
+  if (!leaseId || !thumbnailKey || !thumbnailEtag || !thumbnailSize) {
     return json({ error: "invalid_request" }, 400);
   }
 
-  // Verify the thumbnail exists in R2
+  // Find the job for this thumbnail key
+  const job = await env.DELIVERY_DB.prepare(
+    `SELECT source_key, source_etag, source_size, status, attempt_count, lease_until
+     FROM image_thumbnail_jobs WHERE thumbnail_key=?`
+  ).bind(thumbnailKey).first<{ source_key: string; source_etag: string; source_size: number; status: string; attempt_count: number; lease_until: string | null }>();
+
+  if (!job) return json({ error: "job_not_found" }, 404);
+  if (job.status === "ready") return json({ status: "already_ready" }, 200);
+  if (job.status !== "processing" || !job.lease_until || Date.parse(job.lease_until) <= Date.now() ||
+    !(await verifyRendererLease(env, leaseId, {
+      sourceKey: job.source_key, sourceEtag: job.source_etag, sourceSize: job.source_size,
+      thumbnailKey, attemptCount: job.attempt_count,
+    }))) return json({ error: "job_not_found" }, 404);
+
+  // Verify the thumbnail only after authorizing the exact current attempt so
+  // stale or forged leases cannot probe managed object keys.
   const thumbHead = await env.DATA_BUCKET.head(thumbnailKey);
   if (!thumbHead || cleanThumbnailEtag(thumbHead.httpEtag) !== thumbnailEtag ||
     thumbHead.size !== thumbnailSize || thumbHead.httpMetadata?.contentType !== "image/webp") {
     return json({ error: "thumbnail_not_found" }, 409);
   }
 
-  // Find the job for this thumbnail key
-  const job = await env.DELIVERY_DB.prepare(
-    `SELECT source_key, source_etag, source_size, status FROM image_thumbnail_jobs WHERE thumbnail_key=?`
-  ).bind(thumbnailKey).first<{ source_key: string; source_etag: string; source_size: number; status: string }>();
-
-  if (!job) return json({ error: "job_not_found" }, 404);
-  if (job.status === "ready") return json({ status: "already_ready" }, 200);
-
   // Verify the source still exists
   const sourceHead = await env.DATA_BUCKET.head(job.source_key);
-  if (!sourceHead || cleanThumbnailEtag(sourceHead.httpEtag) !== cleanThumbnailEtag(job.source_etag)) {
-    await env.DELIVERY_DB.prepare(
+  if (!sourceHead || cleanThumbnailEtag(sourceHead.httpEtag) !== cleanThumbnailEtag(job.source_etag) ||
+    sourceHead.size !== job.source_size) {
+    const failed = await env.DELIVERY_DB.prepare(
       `UPDATE image_thumbnail_jobs SET status='failed', error_code='source_changed', updated_at=datetime('now')
-       WHERE source_key=? AND source_etag=?`
-    ).bind(job.source_key, job.source_etag).run();
+       WHERE source_key=? AND source_etag=? AND thumbnail_key=? AND status='processing'
+         AND attempt_count=? AND lease_until IS NOT NULL AND datetime(lease_until)>datetime('now')`
+    ).bind(job.source_key, job.source_etag, thumbnailKey, job.attempt_count).run();
+    if (failed.meta.changes !== 1) return json({ error: "job_not_found" }, 404);
     return json({ error: "source_changed" }, 409);
   }
 
@@ -399,35 +461,64 @@ async function handleComplete(request: Request, env: Env): Promise<Response> {
   if (!validWebp(thumbBytes)) return json({ error: "invalid_thumbnail" }, 400);
 
   // Mark the job as ready
-  await env.DELIVERY_DB.prepare(
+  const completed = await env.DELIVERY_DB.prepare(
     `UPDATE image_thumbnail_jobs SET status='ready', thumbnail_etag=?, thumbnail_size=?,
      thumbnail_provider=?, thumbnail_profile=?, lease_until=NULL,
      ready_at=datetime('now'), error_code=NULL, error_message=NULL, updated_at=datetime('now')
-     WHERE source_key=? AND source_etag=?`
-  ).bind(thumbnailEtag, thumbnailSize, PROVIDER, THUMBNAIL_RENDER_PROFILE, job.source_key, job.source_etag).run();
+     WHERE source_key=? AND source_etag=? AND thumbnail_key=? AND status='processing'
+       AND attempt_count=? AND lease_until IS NOT NULL AND datetime(lease_until)>datetime('now')`
+  ).bind(
+    thumbnailEtag, thumbnailSize, PROVIDER, THUMBNAIL_RENDER_PROFILE,
+    job.source_key, job.source_etag, thumbnailKey, job.attempt_count,
+  ).run();
+  if (completed.meta.changes !== 1) return json({ error: "job_not_found" }, 404);
 
   return json({ status: "ready" }, 200);
+}
+
+async function currentRendererAttempt(
+  env: Env,
+  sourceKey: string,
+  leaseId: string,
+): Promise<RendererAttemptJob | null> {
+  const job = await env.DELIVERY_DB.prepare(`SELECT source_etag,source_size,thumbnail_key,attempt_count,lease_until
+    FROM image_thumbnail_jobs WHERE source_key=? AND status='processing'
+      AND lease_until IS NOT NULL AND datetime(lease_until)>datetime('now')`)
+    .bind(sourceKey).first<RendererAttemptJob>();
+  if (!job || !(await verifyRendererLease(env, leaseId, {
+    sourceKey,
+    sourceEtag: job.source_etag,
+    sourceSize: job.source_size,
+    thumbnailKey: job.thumbnail_key,
+    attemptCount: job.attempt_count,
+  }))) return null;
+  return job;
 }
 
 /**
  * Heartbeat - extend a lease.
  */
 async function handleHeartbeat(request: Request, env: Env): Promise<Response> {
-  let body: Record<string, unknown>;
+  let body: RendererAttemptRequest;
   try {
-    body = await boundedJson(request);
+    body = await boundedJson(request) as RendererAttemptRequest;
   } catch {
     return json({ error: "invalid_request" }, 400);
   }
 
   const sourceKey = typeof body.sourceKey === "string" ? body.sourceKey : null;
-  if (!sourceKey) return json({ error: "invalid_request" }, 400);
+  const leaseId = typeof body.leaseId === "string" ? body.leaseId : null;
+  if (!sourceKey || !leaseId) return json({ error: "invalid_request" }, 400);
+  const job = await currentRendererAttempt(env, sourceKey, leaseId);
+  if (!job) return json({ error: "job_not_found" }, 404);
 
   const leaseUntil = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-  await env.DELIVERY_DB.prepare(
+  const heartbeat = await env.DELIVERY_DB.prepare(
     `UPDATE image_thumbnail_jobs SET lease_until=?, updated_at=datetime('now')
-     WHERE source_key=? AND status='processing'`
-  ).bind(leaseUntil, sourceKey).run();
+     WHERE source_key=? AND source_etag=? AND thumbnail_key=? AND status='processing'
+       AND attempt_count=? AND lease_until IS NOT NULL AND datetime(lease_until)>datetime('now')`
+  ).bind(leaseUntil, sourceKey, job.source_etag, job.thumbnail_key, job.attempt_count).run();
+  if (heartbeat.meta.changes !== 1) return json({ error: "job_not_found" }, 404);
 
   return json({ status: "ok" }, 200);
 }
@@ -436,32 +527,34 @@ async function handleHeartbeat(request: Request, env: Env): Promise<Response> {
  * Fail - report a failed job.
  */
 async function handleFail(request: Request, env: Env): Promise<Response> {
-  let body: Record<string, unknown>;
+  let body: RendererAttemptRequest;
   try {
-    body = await boundedJson(request);
+    body = await boundedJson(request) as RendererAttemptRequest;
   } catch {
     return json({ error: "invalid_request" }, 400);
   }
 
   const sourceKey = typeof body.sourceKey === "string" ? body.sourceKey : null;
+  const leaseId = typeof body.leaseId === "string" ? body.leaseId : null;
   const errorCode = typeof body.errorCode === "string" ? body.errorCode : "render_failed";
   const errorMessage = typeof body.errorMessage === "string" ? body.errorMessage.slice(0, 240) : "Render failed";
 
-  if (!sourceKey) return json({ error: "invalid_request" }, 400);
-
-  const job = await env.DELIVERY_DB.prepare(
-    `SELECT attempt_count FROM image_thumbnail_jobs WHERE source_key=? AND status='processing'`
-  ).bind(sourceKey).first<{ attempt_count: number }>();
-
+  if (!sourceKey || !leaseId) return json({ error: "invalid_request" }, 400);
+  const job = await currentRendererAttempt(env, sourceKey, leaseId);
   if (!job) return json({ error: "job_not_found" }, 404);
 
   const terminal = job.attempt_count >= 6;
-  await env.DELIVERY_DB.prepare(
+  const failed = await env.DELIVERY_DB.prepare(
     `UPDATE image_thumbnail_jobs SET status=?, error_code=?, error_message=?, lease_until=NULL,
      ${terminal ? "failed_at=datetime('now')," : "queue_published_at=datetime('now'),"}
      updated_at=datetime('now')
-     WHERE source_key=? AND status='processing'`
-  ).bind(terminal ? "failed" : "pending", errorCode, errorMessage, sourceKey).run();
+     WHERE source_key=? AND source_etag=? AND thumbnail_key=? AND status='processing'
+       AND attempt_count=? AND lease_until IS NOT NULL AND datetime(lease_until)>datetime('now')`
+  ).bind(
+    terminal ? "failed" : "pending", errorCode, errorMessage,
+    sourceKey, job.source_etag, job.thumbnail_key, job.attempt_count,
+  ).run();
+  if (failed.meta.changes !== 1) return json({ error: "job_not_found" }, 404);
 
   return json({ status: terminal ? "failed" : "retrying" }, 200);
 }
@@ -489,4 +582,51 @@ async function createR2PresignedUrl(
   // R2 S3 credentials (separate bucket-scoped key) to sign requests.
   // This keeps the R2 secret out of the Worker env and on TrueNAS only.
   return endpoint;
+}
+
+interface RendererLease {
+  v: 1;
+  sourceKey: string;
+  sourceEtag: string;
+  sourceSize: number;
+  thumbnailKey: string;
+  attemptCount: number;
+  expiresAt: number;
+}
+
+function decodeBase64Url(value: string): Uint8Array {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("invalid_lease");
+  const raw = atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "="));
+  const bytes = new Uint8Array(raw.length);
+  for (let index = 0; index < raw.length; index += 1) bytes[index] = raw.charCodeAt(index);
+  return bytes;
+}
+
+async function createRendererLease(env: Env, lease: RendererLease): Promise<string> {
+  const encoded = base64Url(new TextEncoder().encode(JSON.stringify(lease)));
+  return `v1.${encoded}.${await hmac(env.THUMBNAIL_INGEST_SECRET || "", `thumbnail-renderer-lease:v1:${encoded}`)}`;
+}
+
+async function verifyRendererLease(
+  env: Env,
+  leaseId: string | null,
+  expected: Omit<RendererLease, "v" | "expiresAt">,
+): Promise<boolean> {
+  if (!leaseId || leaseId.length > 4096) return false;
+  const match = /^v1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/.exec(leaseId);
+  if (!match) return false;
+  const [encoded, signature] = [match[1]!, match[2]!];
+  let lease: RendererLease;
+  try {
+    lease = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(decodeBase64Url(encoded))) as RendererLease;
+  } catch {
+    return false;
+  }
+  return timingSafeEqual(
+    await hmac(env.THUMBNAIL_INGEST_SECRET || "", `thumbnail-renderer-lease:v1:${encoded}`),
+    signature,
+  ) && lease.v === 1 && lease.expiresAt > Date.now() &&
+    lease.sourceKey === expected.sourceKey && cleanThumbnailEtag(lease.sourceEtag) === cleanThumbnailEtag(expected.sourceEtag) &&
+    lease.sourceSize === expected.sourceSize && lease.thumbnailKey === expected.thumbnailKey &&
+    lease.attemptCount === expected.attemptCount;
 }

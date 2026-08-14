@@ -190,7 +190,7 @@ export async function listDeliveryFolderMedia(env:Env,principal:StaffPrincipal,p
     if(!thumbnailEligible(object)&&kind!=="video")return[];
     return[{id:encodeRef(object.key),key:object.key,kind,etag:object.httpEtag}];
   });
-  const thumbnails=candidates.filter(candidate=>candidate.kind!=="video"),videos=candidates.filter(candidate=>candidate.kind==="video");
+  const thumbnails=candidates,videos=candidates.filter(candidate=>candidate.kind==="video");
   const [thumbnailRows,videoRows]=await Promise.all([
     thumbnails.length?env.DELIVERY_DB.batch(thumbnails.map(candidate=>env.DELIVERY_DB.prepare("SELECT source_etag,thumbnail_key,status,error_code FROM image_thumbnail_jobs WHERE source_key=?").bind(candidate.key))):[],
     videos.length?env.DELIVERY_DB.batch(videos.map(candidate=>env.DELIVERY_DB.prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(candidate.key))):[],
@@ -198,11 +198,11 @@ export async function listDeliveryFolderMedia(env:Env,principal:StaffPrincipal,p
   const thumbnailById=new Map(thumbnails.map((candidate,index)=>[candidate.id,thumbnailRows[index]?.results[0] as ThumbnailJobRow|undefined]));
   const videoById=new Map(videos.map((candidate,index)=>[candidate.id,videoRows[index]?.results[0] as {stream_uid?:string;stream_status?:string}|undefined]));
   return{items:candidates.map(candidate=>{
+    const state=thumbnailStateForObject(candidate.etag,thumbnailById.get(candidate.id));
     if(candidate.kind==="video"){
       const row=videoById.get(candidate.id);
-      return{id:candidate.id,previewStatus:row?.stream_status==="ready"&&row.stream_uid?"ready":row?.stream_status==="error"?"unavailable":"processing"};
+      return{id:candidate.id,thumbnailState:state.state,thumbnailErrorCode:state.errorCode,...(state.state==="ready"?{thumbnailUrl:`/api/delivery/items/${candidate.id}/thumbnail`}:{}),previewStatus:row?.stream_status==="ready"&&row.stream_uid?"ready":row?.stream_status==="error"?"unavailable":"processing"};
     }
-    const state=thumbnailStateForObject(candidate.etag,thumbnailById.get(candidate.id));
     return{id:candidate.id,thumbnailState:state.state,thumbnailErrorCode:state.errorCode,...(state.state==="ready"?{thumbnailUrl:`/api/delivery/items/${candidate.id}/thumbnail`}:{})};
   })};
 }

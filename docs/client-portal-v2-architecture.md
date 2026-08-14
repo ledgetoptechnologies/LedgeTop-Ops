@@ -73,10 +73,10 @@ credential is accepted as PA integration authority.
   remain bounded by the workspace's live source grant. They are workspace-owned,
   not creator-owned. Named-user security uses authenticated membership rather
   than a recipient label on a bearer link.
-- The client namespace uses `__Host-ltds_client_share` and the
-  `client-delegated-share:v1` signing context. Staff delivery cookies are not
-  accepted, and the disabled client-share shell never starts the staff
-  DeliveryApp or calls `/api/public`.
+- The client namespace uses the path-scoped Secure cookie
+  `__Secure-ltds_client_share` and the `client-delegated-share:v1` signing
+  context. Staff delivery cookies are not accepted, and the delegated
+  DeliveryApp namespace never calls the staff `/api/public` surface.
 - Client APIs carry only opaque staff-provisioned folder target IDs. Every
   public request rechecks live identity, membership, PA hierarchy and deny
   precedence, the exact entitlement/delegation versions, binding version,

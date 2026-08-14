@@ -88,8 +88,13 @@ This feature is fail-closed. Keep `CLIENT_PORTAL_REQUEST_V2_ENABLED` and
 quarantine objects and authenticates scan receipts with the 32+ character
 `CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET`. Apply
 `apps/client/r2-request-attachments-cors.json`, use least-privilege R2
-credentials, configure an R2 lifecycle backstop for
+Object Read & Write credentials stored only as
+`CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID` and
+`CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY`, configure an R2 lifecycle backstop for
 `_ltds/quarantine/request-attachments/`, and alert on cleanup/scanner failures.
+The attachment signer never falls back to the Client Worker's generic
+`R2_ACCESS_KEY_ID`/`R2_SECRET_ACCESS_KEY`; those remain read-only download
+credentials and must not be broadened or reused for uploads.
 
 There is no simulated clean verdict: without scanner configuration upload
 initialization returns 503, and drafts containing uploading, quarantined, or
@@ -551,6 +556,9 @@ issuer/subject; email alone never authorizes. Member removal is a recoverable
 suspension that leaves child grants available for reassignment and refuses to
 orphan the last active manager. The staff transfer/recovery function is not
 exposed until an Operations caller enforces `client.accounts.manage`.
+Migration `0127_portal_invitation_secret_scrub.sql` adds the terminal-state D1
+trigger that atomically cancels a leased delivery and redacts its plaintext
+token whenever an invitation is accepted, revoked, or explicitly expired.
 
 Migration `0124_client_delegated_public_shares.sql` adds the disabled delegation
 foundation without touching staff `shares`. It models staff-provisioned opaque
@@ -578,9 +586,13 @@ Do not enable the flag until all of these gates have evidence:
   ingestion job with replay/out-of-order handling and parity monitoring.
 - Operations has deliberately bound every workspace root and delivery prefix;
   accounts without exactly one PA root remain on the legacy path.
-- A transactional email adapter claims the invitation outbox, sends the
-  one-time link without logging it, and scrubs the sent payload. The checked-in
-  code queues delivery only and sends no real email.
+- The native Email Service binding is present in the isolated staging config,
+  its sender domain and exact sender address are onboarded/restricted, and the
+  default-off transactional processor is proven. It leases a bounded batch,
+  retries only transient failures with exponential backoff, rechecks live
+  invitation state immediately before handoff, and scrubs the plaintext token
+  after send, cancellation, acceptance, expiry, or permanent failure. Never
+  log `payload_json`, message bodies, or invitation URLs.
 - Operations exposes the transfer/recovery seam only behind
   `client.accounts.manage`/administrator authorization, with a reviewed restore
   workflow. The client Worker cannot call that seam.
@@ -590,6 +602,16 @@ Do not enable the flag until all of these gates have evidence:
   staging.
 - A separate security review approves any future `/client-share/` delegation
   chain. The existing Operations `/s/` authority cannot be reused.
+
+Invitation links use
+`/portal/invitations/accept#token=<secret>`. The fragment keeps the token out of
+the HTTP request and referrer; the acceptance screen replaces the current
+history entry without the fragment before it calls the authenticated API. The
+backend still requires the exact Access-verified email, an unexpired pending
+invitation, and the stored token hash. Replays by the same issuer/subject are
+idempotent; a different email or subject is denied. Email delivery does not
+provision Cloudflare Access by itself, so the Access enrollment gate remains a
+separate release requirement.
 
 ## Provider-neutral future integration
 

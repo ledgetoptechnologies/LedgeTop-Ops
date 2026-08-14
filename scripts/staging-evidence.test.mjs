@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { validateEvidence } from "./staging-evidence.mjs";
-import { REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { REQUIRED_EXTERNAL_GATES, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const now = Date.parse("2026-07-30T12:30:00Z");
 const digest = (value) => crypto.createHash("sha256").update(value).digest("hex").toUpperCase();
@@ -56,6 +56,11 @@ function fixture(base) {
       operations: { expected: [...REQUIRED_STAGING_MIGRATIONS.operations], appliedToStaging: true, listEvidenceRef: "ticket:migrations:operations:list", applyEvidenceRef: "ticket:migrations:operations:apply" },
       productionUnchanged: true,
     },
+    externalGates: Object.fromEntries(REQUIRED_EXTERNAL_GATES.map((gate) => [gate, {
+      ready: true,
+      verifiedAt: "2026-07-30T12:00:00Z",
+      evidenceRef: `ticket:gate:${gate}`,
+    }])),
     secrets: Object.fromEntries(Object.entries(REQUIRED_STAGING_SECRETS).map(([app, names]) => [app, { names: [...names], verifiedAt: "2026-07-30T12:00:00Z", source: "reviewed-secrets-file", workerIsNew: true, remoteNames: [], evidenceRef: `ticket:secrets:${app}` }])),
     backups: {
       delivery: { path: ".backups/delivery.sql", databaseName: STAGING_INVENTORY.delivery.d1_databases[0].database_name, databaseId: STAGING_INVENTORY.delivery.d1_databases[0].database_id, generatedAt: "2026-07-30T12:00:00Z", bytes: backupBody.length, sha256: digest(backupBody), confirmedIntentionallyEmpty: false },
@@ -99,4 +104,13 @@ test("fails closed on client Access reuse, public-share bypass drift, and missin
   for (const expected of ["must not reuse", "public paths", "migration set", "must not bypass"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
+});
+test("fails closed when any portal-v2 external dependency lacks current evidence", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-gate-"));
+  const { evidence, configs, configHashes } = fixture(base);
+  evidence.externalGates.delegatedShareSignerBinding.ready = false;
+  evidence.externalGates.requestAttachmentScanner.evidenceRef = "";
+  const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now });
+  assert(errors.some((error) => error.includes("delegatedShareSignerBinding")), errors.join(" | "));
+  assert(errors.some((error) => error.includes("requestAttachmentScanner")), errors.join(" | "));
 });

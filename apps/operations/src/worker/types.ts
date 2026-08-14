@@ -11,6 +11,8 @@ export type Env = Omit<Cloudflare.Env, "DIRECT_DELIVERY_UPLOADS_ENABLED" | "R2_P
   PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET?: string;
   /** Enables staff public-share recipient lookup from the PA portal projection. */
   DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED?: string;
+  /** Defense-in-depth gate for the private Client -> Operations share signer RPC. */
+  CLIENT_DELEGATED_SHARE_SIGNER_ENABLED?: string;
   OPERATIONS_SESSION_SECRET: string;
   DELIVERY_TOKEN_SECRET: string;
   DELIVERY_PREVIOUS_TOKEN_SECRET?: string;

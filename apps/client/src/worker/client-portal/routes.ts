@@ -1,6 +1,7 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { isMovedSourceMarker } from "@ltds/shared";
+import type { ClientDelegatedShareSignerRequestV1 } from "@ltds/shared";
 import { z } from "zod";
 import type { Env } from "../types";
 import { d1ClientPortalRepository } from "./repository";
@@ -35,9 +36,18 @@ import {
 } from "./request-attachments";
 import {
   acceptPortalWorkspaceInvitation,
+  authorizePortalWorkspaceCapability,
+  authorizeEffectiveWorkspaceDraft,
+  authorizeEffectiveWorkspaceNotification,
+  authorizeEffectiveWorkspaceProject,
+  authorizeEffectiveWorkspaceRequest,
+  authorizeEffectiveWorkspaceRoot,
+  type EffectivePortalWorkspaceContext,
   listPortalWorkspaceHierarchy,
   listPortalWorkspaces,
+  PORTAL_WORKSPACE_HEADER,
   portalHierarchyV2Enabled,
+  resolveEffectivePortalWorkspaceContext,
 } from "./workspace-v2";
 import {
   authorizeClientShareDelegation,
@@ -45,6 +55,7 @@ import {
   consumeClientDelegatedShareRate,
   listClientDelegatedShares,
   revokeClientDelegatedShare,
+  verifyAndRecordClientDelegatedShareSignerResult,
 } from "./delegated-shares";
 import {
   createWorkspaceInvitation,
@@ -53,6 +64,7 @@ import {
   suspendWorkspaceMember,
   workspaceMembershipManagementEnabled,
 } from "./workspace-memberships";
+import { invitationEmailDeliveryEnabled } from "./invitation-email";
 
 interface ClientPortalDependencies {
   resolvePrincipal?: ResolveClientPrincipal;
@@ -63,7 +75,9 @@ interface ClientPortalDependencies {
 type ClientPortalVariables = {
   clientSession: ClientPortalSession;
   clientPrincipal: VerifiedClientPrincipal;
+  clientWorkspace: EffectivePortalWorkspaceContext | null;
 };
+type ClientPortalContext = Context<{ Bindings: Env; Variables: ClientPortalVariables }>;
 
 const MAX_SERVICE_REQUEST_BYTES = 16 * 1024;
 const MAX_SERVICE_REQUEST_DRAFT_BYTES = 48 * 1024;
@@ -344,12 +358,28 @@ export function createClientPortalRouter(
       throw new HTTPException(401, {
         message: "Client authentication is required",
       });
-    const session = await repository.resolveSession(c.env, principal);
+    let session = await repository.resolveSession(c.env, principal);
     const workspaceV2Request = /\/v2\/(?:workspaces|invitations)(?:\/|$)/.test(c.req.path);
-    if (!session && !(portalHierarchyV2Enabled(c.env) && workspaceV2Request))
-      throw new HTTPException(403, {
-        message: "Client access is not provisioned",
-      });
+    let workspace: EffectivePortalWorkspaceContext | null = null;
+    if (portalHierarchyV2Enabled(c.env) && !workspaceV2Request) {
+      const selectedWorkspace = c.req.header(PORTAL_WORKSPACE_HEADER);
+      const sessionBootstrap = c.req.path.endsWith("/session") && !selectedWorkspace;
+      if (!sessionBootstrap) {
+        workspace = selectedWorkspace
+          ? await resolveEffectivePortalWorkspaceContext(c.env, principal, selectedWorkspace)
+          : null;
+        if (!workspace) throw new HTTPException(403, { message: "Select an authorized client workspace" });
+        session = {
+          accountId: workspace.legacyAccountId,
+          identityId: workspace.legacyIdentityId,
+          displayName: workspace.displayName,
+          role: workspace.role,
+          canViewBilling: workspace.canViewBilling,
+        };
+      }
+    }
+    if (!session && !(portalHierarchyV2Enabled(c.env) && (workspaceV2Request || c.req.path.endsWith("/session"))))
+      throw new HTTPException(403, { message: "Client access is not provisioned" });
     // Workspace-v2 can resolve a global identity that deliberately has no
     // single legacy account. The sentinel is unreachable from legacy routes.
     c.set("clientSession", session ?? {
@@ -360,6 +390,7 @@ export function createClientPortalRouter(
       canViewBilling: false,
     });
     c.set("clientPrincipal", principal);
+    c.set("clientWorkspace", workspace);
     await next();
   });
 
@@ -370,6 +401,7 @@ export function createClientPortalRouter(
       capabilities: {
         manageTeam:
           c.env.CLIENT_PORTAL_TEAM_ENABLED === "true" &&
+          !portalHierarchyV2Enabled(c.env) &&
           session.role === "manager",
         requestV2: c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED === "true",
         requestAttachments:
@@ -377,6 +409,7 @@ export function createClientPortalRouter(
           requestAttachmentsAvailable(c.env),
         workspaceHierarchyV2: portalHierarchyV2Enabled(c.env),
         workspaceMembershipManagement: workspaceMembershipManagementEnabled(c.env),
+        invitationEmailDelivery: invitationEmailDeliveryEnabled(c.env),
         delegatedShares: clientDelegatedShareCreationCapability(c.env).enabled,
         viewBilling: session.canViewBilling,
       },
@@ -390,6 +423,46 @@ export function createClientPortalRouter(
     if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
     return c.json({ workspaces: await listPortalWorkspaces(c.env, c.get("clientPrincipal")) });
   });
+
+  function selectedWorkspace(c: { get(name: "clientWorkspace"): EffectivePortalWorkspaceContext | null }): EffectivePortalWorkspaceContext | null {
+    return c.get("clientWorkspace");
+  }
+
+  async function requireLegacyTeamManagement(c: ClientPortalContext): Promise<void> {
+    if (!portalHierarchyV2Enabled(c.env)) return;
+    const workspace = selectedWorkspace(c);
+    if (!workspace || !workspaceMembershipManagementEnabled(c.env) ||
+      !(await authorizePortalWorkspaceCapability(
+        c.env,
+        c.get("clientPrincipal"),
+        workspace.workspaceId,
+        "member.manage",
+        { scopeType: "workspace", publicId: workspace.workspaceId },
+      ))) {
+      throw new HTTPException(403, { message: "Team management is not permitted" });
+    }
+  }
+
+  async function authorizeProject(
+    c: ClientPortalContext,
+    capability: "delivery.view" | "request.create",
+    projectId: string,
+  ): Promise<boolean> {
+    const workspace = selectedWorkspace(c);
+    return !workspace || authorizeEffectiveWorkspaceProject(
+      c.env, c.get("clientPrincipal"), workspace, capability, projectId,
+    );
+  }
+
+  async function authorizeRoot(
+    c: ClientPortalContext,
+    capability: "delivery.view" | "request.create",
+  ): Promise<boolean> {
+    const workspace = selectedWorkspace(c);
+    return !workspace || authorizeEffectiveWorkspaceRoot(
+      c.env, c.get("clientPrincipal"), workspace, capability,
+    );
+  }
 
   router.post("/v2/workspaces/:workspaceId/activate", async (c) => {
     if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
@@ -437,10 +510,10 @@ export function createClientPortalRouter(
     const input = delegatedShareCreateBody.safeParse(await readBoundedJson(c.req.raw, 4096));
     if (!workspaceId.success || !key.success || !input.success)
       throw new HTTPException(400, { message: "Delegated share request is invalid" });
-    // Capability is intentionally hard-disabled. Check it before delegation
-    // authorization or durable rate accounting so unavailable creation has no
-    // D1 mutation and cannot be mistaken for a partially queued share.
-    if (!clientDelegatedShareCreationCapability(c.env).enabled)
+    // Check rollout and the named Operations binding before authorization or
+    // durable rate accounting. An unavailable signer creates no partial row.
+    const creation = clientDelegatedShareCreationCapability(c.env);
+    if (!creation.enabled)
       throw new HTTPException(503, { message: "Client share creation is not configured" });
     const delegation = await authorizeClientShareDelegation(
       c.env, c.get("clientPrincipal"), workspaceId.data,
@@ -449,9 +522,46 @@ export function createClientPortalRouter(
     if (!delegation) throw new HTTPException(404, { message: "Share delegation not found" });
     if (!(await consumeClientDelegatedShareRate(c.env, workspaceId.data, delegation.identityId, "create")))
       throw new HTTPException(429, { message: "Too many share requests" });
-    // Unreachable while the capability is disabled. The future implementation
-    // must call the internal Operations signer and persist its receipt here.
-    throw new HTTPException(503, { message: "Client share creation is not configured" });
+    const signerRequest: ClientDelegatedShareSignerRequestV1 = {
+      protocolVersion: 1,
+      workspaceId: workspaceId.data,
+      delegationId: delegation.delegationId,
+      expectedDelegationVersion: delegation.delegationVersion,
+      createdByIdentityId: delegation.identityId,
+      entitlementId: delegation.entitlementId,
+      expectedEntitlementVersion: delegation.entitlementVersion,
+      folderBindingId: delegation.folderBindingId,
+      expectedBindingSourceVersion: delegation.folderBindingSourceVersion,
+      folderTargetId: delegation.folderTargetId,
+      label: input.data.label?.trim() ?? null,
+      expiresAt: new Date(input.data.expiresAt).toISOString(),
+      ...(input.data.accessCode ? { accessCode: input.data.accessCode } : {}),
+      idempotencyKey: key.data,
+    };
+    let signerResult: unknown;
+    try {
+      signerResult = await c.env.CLIENT_DELEGATED_SHARE_SIGNER!.createClientDelegatedShare(signerRequest);
+    } catch {
+      throw new HTTPException(503, { message: "Client share creation is temporarily unavailable" });
+    }
+    if (!signerResult || typeof signerResult !== "object" || !("ok" in signerResult))
+      throw new HTTPException(503, { message: "Client share creation is temporarily unavailable" });
+    if (signerResult.ok !== true) {
+      const code = "code" in signerResult ? signerResult.code : null;
+      if (code === "invalid_request") throw new HTTPException(400, { message: "Delegated share request is invalid" });
+      if (code === "idempotency_conflict") throw new HTTPException(409, { message: "Idempotency-Key was already used for a different share request" });
+      if (code === "denied") throw new HTTPException(404, { message: "Share delegation not found" });
+      throw new HTTPException(503, { message: "Client share creation is temporarily unavailable" });
+    }
+    const verified = await verifyAndRecordClientDelegatedShareSignerResult(
+      c.env, delegation, signerRequest, signerResult,
+    );
+    if (!verified)
+      throw new HTTPException(503, { message: "Client share creation is temporarily unavailable" });
+    return c.json({
+      share: verified.share,
+      replayed: verified.replayed,
+    }, 201);
   });
 
   router.delete("/v2/workspaces/:workspaceId/delegated-shares/:shareId", async (c) => {
@@ -480,6 +590,7 @@ export function createClientPortalRouter(
 
   router.post("/v2/workspaces/:workspaceId/invitations", async (c) => {
     if (!workspaceMembershipManagementEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    if (!invitationEmailDeliveryEnabled(c.env)) throw new HTTPException(503, { message: "Invitation email is not configured" });
     requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
@@ -530,7 +641,19 @@ export function createClientPortalRouter(
     const cursor = c.req.query("cursor") || null;
     if (cursor && !opaqueId.safeParse(cursor).success)
       throw new HTTPException(400, { message: "Cursor is invalid" });
-    return c.json(await repository.listNotifications(c.env, c.get("clientSession"), cursor));
+    const page = await repository.listNotifications(c.env, c.get("clientSession"), cursor);
+    const workspace = selectedWorkspace(c);
+    if (!workspace) return c.json(page);
+    const authorized = (await Promise.all(page.notifications.map(async notification => ({
+      notification,
+      allowed: await authorizeEffectiveWorkspaceNotification(
+        c.env, c.get("clientPrincipal"), workspace, notification.id,
+      ),
+    })))).filter(result => result.allowed).map(result => result.notification);
+    // The legacy repository has already enforced recipient/account ownership;
+    // v2 adds the selected-workspace entitlement intersection. Never report a
+    // broader unread count than this authorized page.
+    return c.json({ notifications: authorized, unreadCount: authorized.filter(item => !item.readAt).length, cursor: page.cursor });
   });
 
   router.patch("/notifications/:notificationId", async (c) => {
@@ -539,21 +662,36 @@ export function createClientPortalRouter(
     const value = notificationActionBody.safeParse(await readBoundedJson(c.req.raw));
     if (!notificationId.success || !value.success)
       throw new HTTPException(400, { message: "Notification update is invalid" });
+    const workspace = selectedWorkspace(c);
+    if (workspace && !(await authorizeEffectiveWorkspaceNotification(
+      c.env, c.get("clientPrincipal"), workspace, notificationId.data,
+    ))) throw new HTTPException(404, { message: "Notification not found" });
     if (!(await repository.updateNotification(c.env, c.get("clientSession"), notificationId.data, value.data.action)))
       throw new HTTPException(404, { message: "Notification not found" });
     return c.json({ success: true });
   });
 
-  router.get("/projects", async (c) =>
-    c.json({
-      projects: await repository.listProjects(c.env, c.get("clientSession")),
-    }),
-  );
+  router.get("/projects", async (c) => {
+    const projects = await repository.listProjects(c.env, c.get("clientSession"));
+    if (!selectedWorkspace(c)) return c.json({ projects });
+    const authorized = await Promise.all(projects.map(async project => {
+      const [delivery, request] = await Promise.all([
+        authorizeProject(c, "delivery.view", project.id),
+        authorizeProject(c, "request.create", project.id),
+      ]);
+      return { project: { ...project, canRequestService: project.canRequestService && request }, visible: delivery || request };
+    }));
+    return c.json({ projects: authorized.filter(item => item.visible).map(item => item.project) });
+  });
 
   router.get("/projects/:projectId", async (c) => {
     const projectId = opaqueId.safeParse(c.req.param("projectId"));
     if (!projectId.success)
       throw new HTTPException(404, { message: "Project not found" });
+    if (!(await Promise.all([
+      authorizeProject(c, "delivery.view", projectId.data),
+      authorizeProject(c, "request.create", projectId.data),
+    ])).some(Boolean)) throw new HTTPException(404, { message: "Project not found" });
     const project = await repository.getProject(
       c.env,
       c.get("clientSession"),
@@ -567,6 +705,8 @@ export function createClientPortalRouter(
   router.get("/projects/:projectId/files", async (c) => {
     const projectId = opaqueId.safeParse(c.req.param("projectId"));
     if (!projectId.success)
+      throw new HTTPException(404, { message: "Project not found" });
+    if (!(await authorizeProject(c, "delivery.view", projectId.data)))
       throw new HTTPException(404, { message: "Project not found" });
     const cursor = c.req.query("cursor") || null;
     if (cursor && cursor.length > 1000)
@@ -585,6 +725,8 @@ export function createClientPortalRouter(
     const projectId = opaqueId.safeParse(c.req.param("projectId"));
     if (!projectId.success)
       throw new HTTPException(404, { message: "Project not found" });
+    if (!(await authorizeProject(c, "delivery.view", projectId.data)))
+      throw new HTTPException(404, { message: "Project not found" });
     const locations = await repository.listProjectFileLocations(
       c.env,
       c.get("clientSession"),
@@ -596,6 +738,8 @@ export function createClientPortalRouter(
   });
 
   router.get("/past-deliveries", async (c) => {
+    if (!(await authorizeRoot(c, "delivery.view")))
+      throw new HTTPException(404, { message: "Delivery archive not found" });
     const cursor = c.req.query("cursor") || null;
     if (cursor && cursor.length > 1000)
       throw new HTTPException(400, { message: "Cursor is invalid" });
@@ -608,12 +752,11 @@ export function createClientPortalRouter(
     );
   });
 
-  router.get("/past-delivery-locations", async (c) =>
-    c.json(await repository.listPastDeliveryLocations(
-      c.env,
-      c.get("clientSession"),
-    )),
-  );
+  router.get("/past-delivery-locations", async (c) => {
+    if (!(await authorizeRoot(c, "delivery.view")))
+      throw new HTTPException(404, { message: "Delivery archive not found" });
+    return c.json(await repository.listPastDeliveryLocations(c.env, c.get("clientSession")));
+  });
 
   async function authorizedFile(c: any, disposition: "inline" | "attachment") {
     const fileId = c.req.param("fileId");
@@ -621,6 +764,12 @@ export function createClientPortalRouter(
     const projectId = projectValue ? opaqueId.safeParse(projectValue) : null;
     if (projectId && !projectId.success)
       throw new HTTPException(404, { message: "File not found" });
+    if (projectId?.success) {
+      if (!(await authorizeProject(c, "delivery.view", projectId.data)))
+        throw new HTTPException(404, { message: "File not found" });
+    } else if (!(await authorizeRoot(c, "delivery.view"))) {
+      throw new HTTPException(404, { message: "File not found" });
+    }
     const file = await repository.getAuthorizedFile(
       c.env,
       c.get("clientSession"),
@@ -673,6 +822,8 @@ export function createClientPortalRouter(
     const projectId = opaqueId.safeParse(c.req.param("projectId"));
     if (!projectId.success)
       throw new HTTPException(404, { message: "Project not found" });
+    if (!(await authorizeProject(c, "delivery.view", projectId.data)))
+      throw new HTTPException(404, { message: "Project not found" });
     return c.json({
       deliveries: await repository.listDeliveries(
         c.env,
@@ -690,6 +841,8 @@ export function createClientPortalRouter(
     const shareId = opaqueId.safeParse(c.req.param("shareId"));
     if (!projectId.success || !shareId.success)
       throw new HTTPException(404, { message: "Delivery not found" });
+    if (!(await authorizeProject(c, "delivery.view", projectId.data)))
+      throw new HTTPException(404, { message: "Delivery not found" });
     const handoff = await repository.getDeliveryHandoff(
       c.env,
       c.get("clientSession"),
@@ -701,19 +854,26 @@ export function createClientPortalRouter(
     return c.redirect(`/s/${encodeURIComponent(handoff.publicId)}`, 302);
   });
 
-  router.get("/service-requests", async (c) =>
-    c.json({
-      requests: await repository.listServiceRequests(
-        c.env,
-        c.get("clientSession"),
-      ),
-    }),
-  );
+  router.get("/service-requests", async (c) => {
+    const requests = await repository.listServiceRequests(c.env, c.get("clientSession"));
+    if (!selectedWorkspace(c)) return c.json({ requests });
+    const authorized = await Promise.all(requests.map(async request => ({
+      request,
+      allowed: request.projectId
+        ? await authorizeProject(c, "request.create", request.projectId)
+        : await authorizeRoot(c, "request.create"),
+    })));
+    return c.json({ requests: authorized.filter(item => item.allowed).map(item => item.request) });
+  });
 
   router.get("/service-requests/:requestId", async (c) => {
     const requestId = opaqueId.safeParse(c.req.param("requestId"));
     if (!requestId.success)
       throw new HTTPException(404, { message: "Service request not found" });
+    const workspace = selectedWorkspace(c);
+    if (workspace && !(await authorizeEffectiveWorkspaceRequest(
+      c.env, c.get("clientPrincipal"), workspace, requestId.data,
+    ))) throw new HTTPException(404, { message: "Service request not found" });
     const request = await repository.getServiceRequest(
       c.env,
       c.get("clientSession"),
@@ -728,6 +888,9 @@ export function createClientPortalRouter(
     if (c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
     const requestId = opaqueId.safeParse(c.req.param("requestId"));
     if (!requestId.success) throw new HTTPException(404, { message: "Service request not found" });
+    const workspace = selectedWorkspace(c);
+    if (workspace && !(await authorizeEffectiveWorkspaceRequest(c.env, c.get("clientPrincipal"), workspace, requestId.data)))
+      throw new HTTPException(404, { message: "Service request not found" });
     const rows = await listSubmittedRequestAttachments(c.env, c.get("clientSession"), requestId.data);
     if (!rows) throw new HTTPException(404, { message: "Service request not found" });
     return c.json({ attachments: rows.map(row => ({ id: row.id, name: row.original_name,
@@ -741,6 +904,9 @@ export function createClientPortalRouter(
     const requestId = opaqueId.safeParse(c.req.param("requestId"));
     const attachmentId = opaqueId.safeParse(c.req.param("attachmentId"));
     if (!requestId.success || !attachmentId.success) throw new HTTPException(404, { message: "Attachment not found" });
+    const workspace = selectedWorkspace(c);
+    if (workspace && !(await authorizeEffectiveWorkspaceRequest(c.env, c.get("clientPrincipal"), workspace, requestId.data)))
+      throw new HTTPException(404, { message: "Attachment not found" });
     const row = await getSubmittedRequestAttachment(c.env, c.get("clientSession"), requestId.data, attachmentId.data);
     if (!row) throw new HTTPException(404, { message: "Attachment not found" });
     const object = await c.env.DATA_BUCKET.get(row.object_key);
@@ -767,6 +933,12 @@ export function createClientPortalRouter(
   });
   router.use("/service-request-drafts/*", async (c, next) => {
     if (c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
+    const workspace = selectedWorkspace(c);
+    const relative = c.req.path.split("/service-request-drafts/", 2)[1] ?? "";
+    const draftId = opaqueId.safeParse(relative.split("/", 1)[0]);
+    if (workspace && (!draftId.success || !(await authorizeEffectiveWorkspaceDraft(
+      c.env, c.get("clientPrincipal"), workspace, draftId.data,
+    )))) throw new HTTPException(404, { message: "Service request draft not found" });
     await next();
   });
 
@@ -785,6 +957,10 @@ export function createClientPortalRouter(
       throw new HTTPException(400, { message: "A valid draft and Idempotency-Key header are required" });
     if (!repository.createServiceRequestDraft)
       throw new HTTPException(503, { message: "Service request drafts are not configured" });
+    if (parsed.data.projectId
+      ? !(await authorizeProject(c, "request.create", parsed.data.projectId))
+      : !(await authorizeRoot(c, "request.create")))
+      throw new HTTPException(404, { message: "Project not found" });
     const result = await repository.createServiceRequestDraft(c.env, c.get("clientSession"), {
       ...parsed.data,
       areaGeoJson: validateRequestArea(parsed.data.areaGeoJson),
@@ -800,6 +976,9 @@ export function createClientPortalRouter(
     const draftId = opaqueId.safeParse(c.req.param("draftId"));
     if (!draftId.success || !repository.getServiceRequestDraft)
       throw new HTTPException(404, { message: "Service request draft not found" });
+    const workspace = selectedWorkspace(c);
+    if (workspace && !(await authorizeEffectiveWorkspaceDraft(c.env, c.get("clientPrincipal"), workspace, draftId.data)))
+      throw new HTTPException(404, { message: "Service request draft not found" });
     const draft = await repository.getServiceRequestDraft(c.env, c.get("clientSession"), draftId.data);
     if (!draft) throw new HTTPException(404, { message: "Service request draft not found" });
     return c.json({ draft });
@@ -808,6 +987,9 @@ export function createClientPortalRouter(
   router.get("/service-request-drafts/:draftId/attachments", async (c) => {
     const draftId = opaqueId.safeParse(c.req.param("draftId"));
     if (!draftId.success) throw new HTTPException(404, { message: "Service request draft not found" });
+    const workspace = selectedWorkspace(c);
+    if (workspace && !(await authorizeEffectiveWorkspaceDraft(c.env, c.get("clientPrincipal"), workspace, draftId.data)))
+      throw new HTTPException(404, { message: "Service request draft not found" });
     const rows = await listRequestAttachments(c.env, c.get("clientSession"), draftId.data);
     if (!rows) throw new HTTPException(404, { message: "Service request draft not found" });
     return c.json({ attachments: rows.map(row => ({
@@ -822,6 +1004,9 @@ export function createClientPortalRouter(
     const input = attachmentInitBody.safeParse(await readBoundedJson(c.req.raw));
     if (!draftId.success) throw new HTTPException(404, { message: "Service request draft not found" });
     if (!input.success) throw new HTTPException(400, { message: "The attachment upload is invalid" });
+    const workspace = selectedWorkspace(c);
+    if (workspace && !(await authorizeEffectiveWorkspaceDraft(c.env, c.get("clientPrincipal"), workspace, draftId.data)))
+      throw new HTTPException(404, { message: "Service request draft not found" });
     const initialized = await initializeRequestAttachment(c.env, c.get("clientSession"), draftId.data, input.data);
     return c.json({ attachmentId: initialized.row.id, name: initialized.row.original_name,
       contentType: initialized.row.content_type, size: initialized.row.declared_size,
@@ -911,6 +1096,10 @@ export function createClientPortalRouter(
       throw new HTTPException(400, { message: "A valid draft, Idempotency-Key, and numeric If-Match header are required" });
     if (!repository.saveServiceRequestDraft)
       throw new HTTPException(503, { message: "Service request drafts are not configured" });
+    if (parsed.data.projectId
+      ? !(await authorizeProject(c, "request.create", parsed.data.projectId))
+      : !(await authorizeRoot(c, "request.create")))
+      throw new HTTPException(404, { message: "Project not found" });
     const result = await repository.saveServiceRequestDraft(c.env, c.get("clientSession"), draftId.data, version.data, {
       ...parsed.data,
       areaGeoJson: validateRequestArea(parsed.data.areaGeoJson),
@@ -967,6 +1156,7 @@ export function createClientPortalRouter(
   router.get("/team", async (c) => {
     if (c.env.CLIENT_PORTAL_TEAM_ENABLED !== "true")
       throw new HTTPException(404, { message: "Not found" });
+    await requireLegacyTeamManagement(c);
     const session = c.get("clientSession");
     const [members, invitations] = await Promise.all([
       repository.listMembers(c.env, session),
@@ -982,6 +1172,7 @@ export function createClientPortalRouter(
   router.post("/team/invitations", async (c) => {
     if (c.env.CLIENT_PORTAL_TEAM_ENABLED !== "true")
       throw new HTTPException(404, { message: "Not found" });
+    await requireLegacyTeamManagement(c);
     const portalOrigin = configuredPortalOrigin(c.env);
     requireSameRequestOrigin(c.req.raw, portalOrigin);
     const limiter = c.env.PUBLIC_BULK_RATE_LIMITER;
@@ -1016,6 +1207,7 @@ export function createClientPortalRouter(
   router.delete("/team/members/:identityId", async (c) => {
     if (c.env.CLIENT_PORTAL_TEAM_ENABLED !== "true")
       throw new HTTPException(404, { message: "Not found" });
+    await requireLegacyTeamManagement(c);
     const portalOrigin = configuredPortalOrigin(c.env);
     requireSameRequestOrigin(c.req.raw, portalOrigin);
     const identityId = opaqueId.safeParse(c.req.param("identityId"));
@@ -1034,6 +1226,7 @@ export function createClientPortalRouter(
   router.delete("/team/invitations/:invitationId", async (c) => {
     if (c.env.CLIENT_PORTAL_TEAM_ENABLED !== "true")
       throw new HTTPException(404, { message: "Not found" });
+    await requireLegacyTeamManagement(c);
     const portalOrigin = configuredPortalOrigin(c.env);
     requireSameRequestOrigin(c.req.raw, portalOrigin);
     const invitationId = opaqueId.safeParse(c.req.param("invitationId"));
@@ -1081,6 +1274,10 @@ export function createClientPortalRouter(
       throw new HTTPException(400, {
         message: "The service request is invalid",
       });
+    if (parsed.data.projectId
+      ? !(await authorizeProject(c, "request.create", parsed.data.projectId))
+      : !(await authorizeRoot(c, "request.create")))
+      throw new HTTPException(404, { message: "Project not found or service requests are not permitted" });
     const result = await repository.createServiceRequest(
       c.env,
       c.get("clientSession"),
@@ -1134,6 +1331,10 @@ export function createClientPortalRouter(
       .safeParse(c.req.header("If-Match"));
     if (!requestId.success)
       throw new HTTPException(404, { message: "Service request not found" });
+    const workspace = selectedWorkspace(c);
+    if (workspace && !(await authorizeEffectiveWorkspaceRequest(
+      c.env, c.get("clientPrincipal"), workspace, requestId.data,
+    ))) throw new HTTPException(404, { message: "Service request not found" });
     if (!parsedKey.success || !expectedUpdatedAt.success)
       throw new HTTPException(400, {
         message: "Valid Idempotency-Key and If-Match headers are required",
@@ -1145,6 +1346,10 @@ export function createClientPortalRouter(
       throw new HTTPException(400, {
         message: "The service request is invalid",
       });
+    if (parsed.data.projectId
+      ? !(await authorizeProject(c, "request.create", parsed.data.projectId))
+      : !(await authorizeRoot(c, "request.create")))
+      throw new HTTPException(404, { message: "Project not found" });
     const request = await repository.updateServiceRequest(
       c.env,
       c.get("clientSession"),
@@ -1178,6 +1383,9 @@ export function createClientPortalRouter(
     const parsedKey = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     if (!parentId.success)
       throw new HTTPException(404, { message: "Service request not found" });
+    const workspace = selectedWorkspace(c);
+    if (workspace && !(await authorizeEffectiveWorkspaceRequest(c.env, c.get("clientPrincipal"), workspace, parentId.data)))
+      throw new HTTPException(404, { message: "Service request not found" });
     if (!parsedKey.success)
       throw new HTTPException(400, {
         message: "A valid Idempotency-Key header is required",
@@ -1189,6 +1397,10 @@ export function createClientPortalRouter(
       throw new HTTPException(400, {
         message: "The change request is invalid",
       });
+    if (parsed.data.projectId
+      ? !(await authorizeProject(c, "request.create", parsed.data.projectId))
+      : !(await authorizeRoot(c, "request.create")))
+      throw new HTTPException(404, { message: "Project not found" });
     const result = await repository.createChangeRequest(
       c.env,
       c.get("clientSession"),
@@ -1229,6 +1441,10 @@ export function createClientPortalRouter(
     const parsedKey = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     if (!requestId.success)
       throw new HTTPException(404, { message: "Service request not found" });
+    const workspace = selectedWorkspace(c);
+    if (workspace && !(await authorizeEffectiveWorkspaceRequest(
+      c.env, c.get("clientPrincipal"), workspace, requestId.data,
+    ))) throw new HTTPException(404, { message: "Service request not found" });
     if (!parsedKey.success)
       throw new HTTPException(400, {
         message: "A valid Idempotency-Key header is required",

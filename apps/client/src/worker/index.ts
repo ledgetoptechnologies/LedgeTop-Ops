@@ -24,9 +24,10 @@ import { listDownloadableObjects, summarizeDownloadableObjects } from "./downloa
 import { listPublicShareLocations, resolvePublicShareLocation } from "./public-locations";
 import { createClientPortalRouter } from "./client-portal/routes";
 import { acceptRequestAttachmentScanReceipt, cleanupExpiredRequestAttachments, readRequestAttachmentScanReceipt } from "./client-portal/request-attachments";
-import { clientDelegatedShareCreationCapability } from "./client-portal/delegated-shares";
+import { createClientDelegatedPublicRouter } from "./client-delegated-public";
 import { handleProjectAlphaCatalogRequest } from "./project-alpha-catalog";
 import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
+import { processInvitationEmailBatch } from "./client-portal/invitation-email";
 export { friendlyBulkFailure } from "./bulk-download-errors";
 
 type Variables = { share: ShareRow };
@@ -68,7 +69,10 @@ async function googlePickerCredential(env:CloudTransferEnv,authorizationId:strin
 }
 
 export function framePolicyForPath(path: string, method = "GET"): { frameAncestors: "'self'" | "'none'"; xFrameOptions: "SAMEORIGIN" | "DENY" } {
-  const inlinePdf = (method === "GET" || method === "HEAD") && /^\/api\/public\/shares\/[^/]+\/items\/[^/]+\/pdf$/.test(path);
+  const inlinePdf = (method === "GET" || method === "HEAD") && (
+    /^\/api\/public\/shares\/[^/]+\/items\/[^/]+\/pdf$/.test(path) ||
+    /^\/client-share\/api\/shares\/[^/]+\/items\/[^/]+\/pdf$/.test(path)
+  );
   return inlinePdf
     ? { frameAncestors: "'self'", xFrameOptions: "SAMEORIGIN" }
     : { frameAncestors: "'none'", xFrameOptions: "DENY" };
@@ -303,15 +307,10 @@ export async function serveAppShell(request: Request, assets: Pick<Fetcher, "fet
 
 app.get("/s/:publicId", c => serveAppShell(c.req.raw, c.env.ASSETS));
 
-// Client-delegated bearer links have a deliberately separate visible and API
-// namespace. Creation/session exchange stays unavailable until the internal
-// Operations signer binding is implemented; staff `/s` credentials are never
-// accepted here.
+// Client-delegated bearer links have a deliberately separate visible, cookie,
+// signing and API namespace. Staff `/s` credentials are never accepted here.
 app.get("/client-share/:publicId", c => serveAppShell(c.req.raw, c.env.ASSETS));
-app.post("/api/client-public/shares/:publicId/session", c => {
-  const capability = clientDelegatedShareCreationCapability(c.env);
-  return c.json({ error: "Client share links are not available", code: capability.reason }, 503);
-});
+app.route("/client-share/api", createClientDelegatedPublicRouter());
 
 app.post("/api/public/shares/:routeId/session", async c => {
   await enforceRateLimit(c, c.env.PUBLIC_SESSION_RATE_LIMITER, "session");
@@ -429,7 +428,7 @@ app.get("/api/public/shares/:publicId/manifest/media", async c => {
     const base = `/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${id}`;
     return [{ id, key: object.key, kind, etag: object.httpEtag, size: object.size, contentType: object.httpMetadata?.contentType, base }];
   });
-  const db = primaryDb(c.env); const thumbnailCandidates = candidates.filter(candidate => candidate.kind !== "video"); const videoCandidates = candidates.filter(candidate => candidate.kind === "video");
+  const db = primaryDb(c.env); const thumbnailCandidates = candidates; const videoCandidates = candidates.filter(candidate => candidate.kind === "video");
   const [thumbnailRecords, videoRecords] = await Promise.all([
     thumbnailCandidates.length ? db.batch(thumbnailCandidates.map(candidate => db.prepare("SELECT source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status FROM image_thumbnail_jobs WHERE source_key=?").bind(candidate.key))) : [],
     videoCandidates.length ? db.batch(videoCandidates.map(candidate => db.prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(candidate.key))) : [],
@@ -560,7 +559,7 @@ app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/thumbnail",
   const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
   await assertNotTrashed(c.env, key);
   const kind = kindForKey(key);
-  if (kind !== "image" && kind !== "pdf")
+  if (kind !== "image" && kind !== "pdf" && kind !== "video")
     throw new HTTPException(409, { message: "Thumbnail is not available for this file type", cause: { code: "THUMBNAIL_NOT_APPLICABLE" } });
   return serveAuthorizedThumbnail(c.env, key, { method: c.req.method, ifNoneMatch: c.req.header("If-None-Match"), kind });
 });
@@ -800,4 +799,4 @@ app.onError((error, c) => {
   return c.json({ error: status >= 500 ? "An unexpected error occurred" : error.message,...(code?{code}:{}) }, status);
 });
 
-export default { fetch: app.fetch, scheduled: (_event, env, ctx) => ctx.waitUntil(Promise.all([cleanupTemporaryZips(env),cleanupExpiredRequestAttachments(env),env.CLOUD_TRANSFER_TOKEN_SECRET?cleanupCloudTransfers(cloudEnv(env),{dropbox:createCloudProviderAdapter("dropbox",cloudEnv(env)),google:createCloudProviderAdapter("google",cloudEnv(env))}):Promise.resolve()]).then(()=>undefined)) } satisfies ExportedHandler<Env>;
+export default { fetch: app.fetch, scheduled: (_event, env, ctx) => ctx.waitUntil(Promise.all([cleanupTemporaryZips(env),cleanupExpiredRequestAttachments(env),processInvitationEmailBatch(env),env.CLOUD_TRANSFER_TOKEN_SECRET?cleanupCloudTransfers(cloudEnv(env),{dropbox:createCloudProviderAdapter("dropbox",cloudEnv(env)),google:createCloudProviderAdapter("google",cloudEnv(env))}):Promise.resolve()]).then(()=>undefined)) } satisfies ExportedHandler<Env>;

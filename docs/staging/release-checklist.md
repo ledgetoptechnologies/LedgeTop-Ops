@@ -34,10 +34,20 @@ not become active deployments.
 - reviewed commit SHA and current build-control evidence;
 - D1 export paths and SHA-256 checksums.
 
-`CLIENT_PORTAL_ENABLED` must be `false`; `CLIENT_PORTAL_ORIGIN` and
+`CLIENT_PORTAL_ENABLED` and every feature listed in
+`REQUIRED_DISABLED_FEATURE_FLAGS` must be explicitly `false`;
+`CLIENT_PORTAL_ORIGIN` and
 `PUBLIC_BASE_URL` must both be the client staging origin. `CLIENT_ACCESS_AUD`
 must be the new portal app audience, never `POLICY_AUD`, `OPERATIONS_AUD`, or
 `CF_ACCESS_AUD`.
+
+The invitation-mail gate also requires an onboarded staging Email Service
+domain, `CLIENT_PORTAL_INVITATION_EMAIL` restricted with
+`allowed_sender_addresses`, and an exact matching
+`CLIENT_PORTAL_INVITATION_FROM`. Keep the email feature flag false during
+preflight; enable it only for the controlled acceptance test after the evidence
+packet and Access enrollment gate are approved. No local or staging command may
+use a remote email binding unintentionally.
 
 Copy `docs/staging/release-evidence.json.example` to the ignored path
 `.backups/staging-release-evidence.json`. Record only booleans, identifiers,
@@ -54,6 +64,14 @@ Delivery:
 - `AUDIT_IP_SECRET`
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
+- `PROJECT_ALPHA_CATALOG_HMAC_SECRET`
+- `PROJECT_ALPHA_PORTAL_HMAC_SECRET`
+- `PROJECT_ALPHA_PRICING_HINT_API_KEY`
+- `PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET`
+- `CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET`
+- `CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID`
+- `CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY`
+- `CLIENT_DELEGATED_SHARE_SESSION_SECRET`
 
 Operations:
 
@@ -62,6 +80,8 @@ Operations:
 - `DELIVERY_ACCESS_CODE_PEPPER`
 - `AUDIT_IP_SECRET`
 - `PROJECT_ALPHA_API_KEY`
+- `PROJECT_ALPHA_DRAFT_QUOTE_API_KEY`
+- `PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET`
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 - `R2_DELIVERY_UPLOAD_ACCESS_KEY_ID`
@@ -71,6 +91,7 @@ Operations:
 - `INCOMING_SESSION_SECRET`
 - `INCOMING_ACCESS_CODE_PEPPER`
 - `INCOMING_PICKUP_SECRET`
+- `THUMBNAIL_INGEST_SECRET`
 
 Ops Sync:
 
@@ -111,8 +132,9 @@ return it to the intended reviewed state and record the deployed value. Client
 Portal, public-share, and Incoming identities remain denied in either state.
 
 The example evidence intentionally fails until the client Access/public-path
-contract, migrations, end-to-end tests, and final default-off state are
-recorded. Do not mark future or inferred results true.
+contract, migrations, end-to-end tests, final default-off state, and every
+portal-v2 external dependency in `REQUIRED_EXTERNAL_GATES` are recorded. Do not
+mark future or inferred results true.
 
 ## Read-only backup and migration preflight
 
@@ -150,7 +172,9 @@ npm.cmd run staging:evidence:check
 Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
-`0111_thumbnail_render_provenance.sql` and Operations
+`0112_public_share_location_privacy.sql`, then `0114_delivery_share_prefix_lookup.sql`
+through `0127_portal_invitation_secret_scrub.sql` (`0113` is intentionally
+reserved), and Operations
 `0014_staff_acl_controls.sql` through
 `0022_r2_operation_retries.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
@@ -162,7 +186,11 @@ five-minute notification consumer; `0106`/`0107`/`0108` must be present before
 thumbnail jobs or cleanup; `0109` must be present before photo location
 extraction or map routes run; `0110` must be present before a `Jobs/` backfill
 run; `0111` must precede prebuilt registration, Container fallback activation,
-or exact-ETag derivative reconciliation; `0017` must be present before job-brief routes; `0018`/`0019` must precede
+or exact-ETag derivative reconciliation. Migrations `0112` and `0114`-`0127`
+must precede public location privacy, indexed share lookup, client notification,
+request-v2, attachment, workspace hierarchy, membership, delegated-share,
+catalog/hierarchy projection, and directory-recipient activation. `0017` must
+be present before job-brief routes; `0018`/`0019` must precede
 browser-upload and conflict-resolution routes; `0020` must precede the internal
 SOP library; `0021` must precede Project Alpha sync hardening; and `0022` must
 precede bounded R2 retry state. Worker
@@ -187,8 +215,12 @@ Upload synthetic supported media in both `Jobs/Clients/` and another authorized
 `Jobs/` folder and verify the same queue lifecycle. Inject one transient
 processing failure and prove exactly one bounded second lifecycle; permanent
 oversize and invalid/encrypted cases must remain icon-only. Supported PDFs must
-render page one; video, Office, audio and archive files must remain icon-only
-with zero renderer source read. Prove the 15-minute raw server/rclone prebuilt
+render page one. Office, audio, and archive files remain icon-only. A video
+queue signal must leave its D1 row pending with zero Cloudflare Container
+source reads, then the authenticated TrueNAS `/claim` path must lease, render,
+upload, and complete it. Prove that heartbeat/fail/complete echo the claim's
+`leaseId`, and that an older attempt cannot mutate a reclaimed row. Prove the
+15-minute raw server/rclone prebuilt
 grace, the 30-second direct-upload grace, and private Container fallback
 independently. Do not enable a delete-authoritative TrueNAS
 source sync until browser/team prefixes are disjoint and excluded by path; R2

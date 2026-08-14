@@ -2616,3 +2616,4 @@ export { IncomingUploadLifecycleWorkflow } from "./incoming";
 export { DropboxImportWorkflow } from "./dropbox-import";
 export { ThumbnailRendererContainer } from "./thumbnail-renderer-container";
 export { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";
+export { ClientDelegatedShareSigner } from "./client-delegated-share-signer";

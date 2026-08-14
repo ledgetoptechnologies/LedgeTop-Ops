@@ -1,7 +1,9 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import migration from "../migrations/0124_client_delegated_public_shares.sql?raw";
-import { createSessionCookie, parseCookie } from "../src/worker/security";
+import { createSessionCookie, parseCookie, sha256 } from "../src/worker/security";
+import { encodeItemRef } from "../src/worker/files";
+import { createClientDelegatedPublicRouter } from "../src/worker/client-delegated-public";
 import {
   authorizeClientDelegatedPublicShare,
   authorizeClientShareDelegation,
@@ -57,7 +59,7 @@ describe("client-delegated public share foundation", () => {
         status TEXT NOT NULL,revoked_at TEXT,UNIQUE(issuer,subject));
       CREATE TABLE portal_v2_workspaces(
         id TEXT PRIMARY KEY,root_type TEXT NOT NULL,pa_organization_public_id TEXT,
-        pa_client_public_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL);
+        pa_client_public_id TEXT,legacy_account_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL);
       CREATE TABLE portal_v2_workspace_memberships(
         id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,identity_id TEXT NOT NULL,
         source_type TEXT NOT NULL,status TEXT NOT NULL,expires_at TEXT,revoked_at TEXT,
@@ -80,6 +82,14 @@ describe("client-delegated public share foundation", () => {
         id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,owner_scope_type TEXT NOT NULL,
         owner_public_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,source_version TEXT,
         status TEXT NOT NULL,revoked_at TEXT,UNIQUE(id,workspace_id));
+      CREATE TABLE delivery_tombstones(
+        physical_key TEXT PRIMARY KEY,tombstone_kind TEXT NOT NULL,restored_at TEXT);
+      CREATE TABLE file_aliases(physical_key TEXT PRIMARY KEY,display_name TEXT NOT NULL);
+      CREATE TABLE image_thumbnail_jobs(
+        source_key TEXT PRIMARY KEY,source_etag TEXT,thumbnail_key TEXT,thumbnail_etag TEXT,
+        thumbnail_size INTEGER,status TEXT);
+      CREATE TABLE file_index(
+        r2_key TEXT PRIMARY KEY,stream_uid TEXT,stream_status TEXT);
     `);
     await applySql(db, migration);
     await db.prepare("PRAGMA foreign_keys=ON").run();
@@ -171,6 +181,91 @@ describe("client-delegated public share foundation", () => {
     await db.prepare("UPDATE client_share_folder_targets SET binding_source_version='binding-v1' WHERE id=?").bind(childTargetId).run();
   });
 
+  it("calls the private signer only after authorization and records a verified idempotent receipt", async () => {
+    const signerCalls: unknown[] = [];
+    const signerSecret = "s".repeat(43);
+    const signerShareId = "client-share-route-0001";
+    const signerPublicId = "cs_clientroutepublic0001";
+    const signerReceiptId = "client-share-signer-route-0001";
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000).toISOString();
+    const binding = {
+      createClientDelegatedShare: async (request: any) => {
+        signerCalls.push(request);
+        await db.prepare(`INSERT OR IGNORE INTO client_delegated_shares
+          (id,public_id,workspace_id,delegation_id,created_by_identity_id,folder_target_id,
+           token_hash,share_version,label,expires_at,status,signer_receipt_id,idempotency_key,request_fingerprint)
+          VALUES (?,?,?,?,?,?,?,1,?,?,'active',?,?,?)`)
+          .bind(
+            signerShareId, signerPublicId, request.workspaceId, request.delegationId,
+            request.createdByIdentityId, request.folderTargetId, await sha256(signerSecret),
+            request.label, request.expiresAt, signerReceiptId, request.idempotencyKey, "r".repeat(43),
+          ).run();
+        return {
+          ok: true as const,
+          protocolVersion: 1 as const,
+          receiptId: signerReceiptId,
+          replayed: false,
+          share: {
+            id: signerShareId,
+            publicId: signerPublicId,
+            path: `/client-share/${signerPublicId}`,
+            shareUrl: `https://client.test/client-share/${signerPublicId}#${signerSecret}`,
+            label: request.label,
+            status: "active" as const,
+            passwordProtected: false,
+            expiresAt: request.expiresAt,
+            createdAt: new Date().toISOString(),
+          },
+        };
+      },
+    };
+    const repository = {
+      resolveSession: async () => ({
+        accountId: "legacy-account", identityId, displayName: "Organization",
+        role: "manager", canViewBilling: false,
+      }),
+    } as unknown as ClientPortalRepository;
+    const router = createClientPortalRouter({ resolvePrincipal: async () => principal, repository });
+    const response = await router.request(
+      `https://client.test/v2/workspaces/${workspaceId}/delegated-shares`,
+      {
+        method: "POST",
+        headers: {
+          Origin: "https://client.test",
+          "Content-Type": "application/json",
+          "Idempotency-Key": "create-route-success-0001",
+        },
+        body: JSON.stringify({ delegationId, folderTargetId: childTargetId, expiresAt }),
+      },
+      {
+        ...env,
+        CLIENT_PORTAL_ENABLED: "true",
+        CLIENT_PORTAL_ORIGIN: "https://client.test",
+        CLIENT_DELEGATED_SHARES_ENABLED: "true",
+        CLIENT_DELEGATED_SHARE_SIGNER: binding,
+      },
+    );
+    expect(response.status).toBe(201);
+    const body = await response.json<any>();
+    expect(body.share).toMatchObject({ id: signerShareId, path: `/client-share/${signerPublicId}` });
+    expect(JSON.stringify(body)).not.toContain("clients/private/project");
+    expect(signerCalls).toEqual([expect.objectContaining({
+      protocolVersion: 1,
+      workspaceId,
+      createdByIdentityId: identityId,
+      expectedDelegationVersion: 1,
+      expectedEntitlementVersion: 7,
+      expectedBindingSourceVersion: "binding-v1",
+    })]);
+    expect(await db.prepare(`SELECT COUNT(*) count FROM client_delegated_share_events
+      WHERE share_id=? AND event_type='client_share.created'`).bind(signerShareId).first("count")).toBe(1);
+    await db.batch([
+      db.prepare("DELETE FROM client_delegated_share_events WHERE share_id=?").bind(signerShareId),
+      db.prepare("DELETE FROM client_delegated_shares WHERE id=?").bind(signerShareId),
+      db.prepare("DELETE FROM client_delegated_share_rate_windows WHERE action='create'")
+    ]);
+  });
+
   it("rejects cross-workspace delegation and share references at the database boundary", async () => {
     await db.batch([
       db.prepare(`INSERT INTO portal_v2_workspaces
@@ -218,6 +313,135 @@ describe("client-delegated public share foundation", () => {
       .bind(workspaceId, identityId).run();
   });
 
+  it("serves only the live delegated subtree through the isolated cookie and API namespace", async () => {
+    const bearerSecret = "delegated-browser-fragment-secret-000000000001";
+    await db.prepare("UPDATE client_delegated_shares SET token_hash=? WHERE id=?")
+      .bind(await sha256(bearerSecret), shareId).run();
+    const root = "clients/private/project/deliverables/photos/";
+    const objects = new Map<string, { bytes: Uint8Array; type: string; uploaded: Date; etag: string }>([
+      [`${root}visible.jpg`, { bytes: new TextEncoder().encode("visible-image"), type: "image/jpeg", uploaded: new Date("2026-08-01T12:00:00Z"), etag: '"visible-etag"' }],
+      [`${root}_ltds/hidden.jpg`, { bytes: new TextEncoder().encode("hidden"), type: "image/jpeg", uploaded: new Date("2026-08-01T12:00:00Z"), etag: '"hidden-etag"' }],
+      [`${root}deleted.jpg`, { bytes: new TextEncoder().encode("deleted"), type: "image/jpeg", uploaded: new Date("2026-08-01T12:00:00Z"), etag: '"deleted-etag"' }],
+      ["clients/private/project/deliverables/sibling/secret.pdf", { bytes: new TextEncoder().encode("sibling"), type: "application/pdf", uploaded: new Date("2026-08-01T12:00:00Z"), etag: '"sibling-etag"' }],
+    ]);
+    const r2Object = (key: string, value: (typeof objects extends Map<string, infer V> ? V : never)) => ({
+      key, size: value.bytes.byteLength, uploaded: value.uploaded, httpEtag: value.etag,
+      httpMetadata: { contentType: value.type }, customMetadata: {},
+      writeHttpMetadata(headers: Headers) { headers.set("Content-Type", value.type); },
+    });
+    const bucket = {
+      async list(options: { prefix: string; delimiter?: string }) {
+        const listed = [...objects.entries()].filter(([key]) => key.startsWith(options.prefix));
+        const direct = listed.filter(([key]) => !key.slice(options.prefix.length).includes("/"));
+        const prefixes = [...new Set(listed.flatMap(([key]) => {
+          const rest = key.slice(options.prefix.length); const slash = rest.indexOf("/");
+          return slash < 0 ? [] : [`${options.prefix}${rest.slice(0, slash + 1)}`];
+        }))];
+        return { objects: direct.map(([key, value]) => r2Object(key, value)), delimitedPrefixes: prefixes,
+          truncated: false, cursor: undefined };
+      },
+      async head(key: string) { const value = objects.get(key); return value ? r2Object(key, value) : null; },
+      async get(key: string) { const value = objects.get(key); return value ? { ...r2Object(key, value), body: value.bytes } : null; },
+    } as unknown as R2Bucket;
+    const allow = { success: true } as RateLimitOutcome;
+    const limiter = { limit: async () => allow } as RateLimit;
+    const sessionSecret = "client-share-session-secret-must-be-unique-0001";
+    await db.prepare("INSERT INTO delivery_tombstones(physical_key,tombstone_kind) VALUES (?,'exact')")
+      .bind(`${root}deleted.jpg`).run();
+    const router = createClientDelegatedPublicRouter();
+    const requestEnv = {
+      ...env,
+      DATA_BUCKET: bucket,
+      CLIENT_DELEGATED_SHARES_ENABLED: "true",
+      CLIENT_DELEGATED_SHARE_SESSION_SECRET: sessionSecret,
+      CLIENT_DELEGATED_SHARE_KEY_ID: "client-v1",
+      DELIVERY_ACCESS_CODE_PEPPER: "access-code-pepper-must-be-at-least-32",
+      AUDIT_IP_SECRET: "audit-secret-must-be-at-least-32-characters",
+      PUBLIC_SESSION_RATE_LIMITER: limiter,
+      ACCESS_CODE_RATE_LIMITER: limiter,
+      PUBLIC_MANIFEST_RATE_LIMITER: limiter,
+      PUBLIC_MEDIA_RATE_LIMITER: limiter,
+      PUBLIC_THUMBNAIL_RATE_LIMITER: limiter,
+      PUBLIC_DOWNLOAD_RATE_LIMITER: limiter,
+      PUBLIC_STREAM_RATE_LIMITER: limiter,
+    } as Env;
+    const executionCtx = { waitUntil(promise: Promise<unknown>) { void promise; }, passThroughOnException() {} } as ExecutionContext;
+    const sessionResponse = await router.request(`https://client.test/shares/${publicId}/session`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ secret: bearerSecret }),
+    }, requestEnv, executionCtx);
+    expect(sessionResponse.status).toBe(200);
+    expect(await sessionResponse.json()).toEqual({ publicId, canonicalPath: `/client-share/${publicId}` });
+    const setCookie = sessionResponse.headers.get("Set-Cookie")!;
+    expect(setCookie).toContain("Path=/client-share/");
+    const cookie = `${CLIENT_DELEGATED_SHARE_COOKIE}=${parseCookie(setCookie, CLIENT_DELEGATED_SHARE_COOKIE)}`;
+
+    const staffCookie = await createSessionCookie(sessionSecret, "client-v1", shareId, 1, Date.now() + 60_000);
+    expect((await router.request(`https://client.test/shares/${publicId}/manifest`, {
+      headers: { Cookie: staffCookie },
+    }, requestEnv, executionCtx)).status).toBe(401);
+
+    const manifestResponse = await router.request(`https://client.test/shares/${publicId}/manifest`, {
+      headers: { Cookie: cookie },
+    }, requestEnv, executionCtx);
+    expect(manifestResponse.status).toBe(200);
+    const manifestBody = await manifestResponse.json<any>();
+    expect(manifestBody.items).toEqual([expect.objectContaining({
+      name: "visible.jpg",
+      downloadUrl: expect.stringMatching(/^\/client-share\/api\/shares\//),
+    })]);
+    expect(JSON.stringify(manifestBody)).not.toContain("clients/private");
+    expect(JSON.stringify(manifestBody)).not.toContain("hidden.jpg");
+    expect(JSON.stringify(manifestBody)).not.toContain("deleted.jpg");
+
+    const visibleRef = encodeItemRef("visible.jpg");
+    const download = await router.request(
+      `https://client.test/shares/${publicId}/items/${visibleRef}/download`, { headers: { Cookie: cookie } }, requestEnv, executionCtx,
+    );
+    expect(download.status).toBe(200);
+    expect(await download.text()).toBe("visible-image");
+    expect(download.headers.get("Content-Disposition")).toContain("attachment");
+    const hidden = await router.request(
+      `https://client.test/shares/${publicId}/items/${encodeItemRef("_ltds/hidden.jpg")}/download`,
+      { headers: { Cookie: cookie } }, requestEnv, executionCtx,
+    );
+    expect(hidden.status).toBe(404);
+    const deleted = await router.request(
+      `https://client.test/shares/${publicId}/items/${encodeItemRef("deleted.jpg")}/download`,
+      { headers: { Cookie: cookie } }, requestEnv, executionCtx,
+    );
+    expect(deleted.status).toBe(404);
+    const sibling = await router.request(
+      `https://client.test/shares/${publicId}/items/${encodeItemRef("../sibling/secret.pdf")}/download`,
+      { headers: { Cookie: cookie } }, requestEnv, executionCtx,
+    );
+    expect(sibling.status).toBeGreaterThanOrEqual(400);
+
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET status='revoked',revoked_at=datetime('now') WHERE workspace_id=? AND identity_id=?")
+      .bind(workspaceId, identityId).run();
+    expect((await router.request(`https://client.test/shares/${publicId}/manifest`, {
+      headers: { Cookie: cookie },
+    }, requestEnv, executionCtx)).status).toBe(404);
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET status='active',revoked_at=NULL WHERE workspace_id=? AND identity_id=?")
+      .bind(workspaceId, identityId).run();
+    await db.prepare("UPDATE portal_v2_folder_bindings SET source_version='binding-v2' WHERE id=?").bind(bindingId).run();
+    expect((await router.request(`https://client.test/shares/${publicId}/manifest`, {
+      headers: { Cookie: cookie },
+    }, requestEnv, executionCtx)).status).toBe(404);
+    await db.prepare("UPDATE portal_v2_folder_bindings SET source_version='binding-v1' WHERE id=?").bind(bindingId).run();
+    await db.prepare("UPDATE client_share_delegations SET status='revoked',revoked_at=datetime('now') WHERE id=?")
+      .bind(delegationId).run();
+    expect((await router.request(`https://client.test/shares/${publicId}/manifest`, {
+      headers: { Cookie: cookie },
+    }, requestEnv, executionCtx)).status).toBe(404);
+    await db.prepare("UPDATE client_share_delegations SET status='active',revoked_at=NULL WHERE id=?")
+      .bind(delegationId).run();
+    await db.prepare("UPDATE client_delegated_shares SET share_version=2 WHERE id=?").bind(shareId).run();
+    expect((await router.request(`https://client.test/shares/${publicId}/manifest`, {
+      headers: { Cookie: cookie },
+    }, requestEnv, executionCtx)).status).toBe(404);
+    await db.prepare("UPDATE client_delegated_shares SET share_version=1 WHERE id=?").bind(shareId).run();
+  }, 30_000);
+
   it("keeps links workspace-owned across reviewed delegate replacement and revokes idempotently", async () => {
     const listed = await listClientDelegatedShares(env, principal, workspaceId);
     expect(listed).toEqual([expect.objectContaining({ publicId, path: `/client-share/${publicId}` })]);
@@ -249,9 +473,17 @@ describe("client-delegated public share foundation", () => {
     expect(await listClientDelegatedShares(env, principal, workspaceId)).toEqual([]);
     expect(await listClientDelegatedShares(env, otherPrincipal, workspaceId))
       .toEqual([expect.objectContaining({ publicId })]);
+    const secondShareId = "client-share-000002";
+    await db.prepare(`INSERT INTO client_delegated_shares
+      (id,public_id,workspace_id,delegation_id,created_by_identity_id,folder_target_id,
+       token_hash,share_version,expires_at,status,idempotency_key,request_fingerprint)
+      VALUES (?,'clientpublicid0000000002',?,?,?,?,?,1,datetime('now','+1 day'),'active','create-key-00000002',?)`)
+      .bind(secondShareId, workspaceId, delegationId, identityId, childTargetId, "u".repeat(43), "g".repeat(43)).run();
     expect(await revokeClientDelegatedShare(env, principal, workspaceId, shareId, "revoke-key-000001")).toBe("denied");
     expect(await revokeClientDelegatedShare(env, otherPrincipal, workspaceId, shareId, "revoke-key-000001")).toBe("revoked");
     expect(await revokeClientDelegatedShare(env, otherPrincipal, workspaceId, shareId, "revoke-key-000001")).toBe("replayed");
+    expect(await revokeClientDelegatedShare(env, otherPrincipal, workspaceId, secondShareId, "revoke-key-000001")).toBe("revoked");
+    expect(await db.prepare("SELECT status FROM client_delegated_shares WHERE id=?").bind(secondShareId).first("status")).toBe("revoked");
     expect(await authorizeClientDelegatedPublicShare(env, publicId, 1)).toBeNull();
   }, 20_000);
 

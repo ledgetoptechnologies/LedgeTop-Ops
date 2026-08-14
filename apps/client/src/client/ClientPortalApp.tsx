@@ -22,6 +22,7 @@ import {
   loadPortalProjectFileLocations,
   loadPortalProjectFiles,
   loadPortalNotifications,
+  setPortalWorkspaceSelection,
   loadPortalPricingHint,
   loadPortalRequestAttachment,
   loadPortalServiceCatalog,
@@ -1373,7 +1374,7 @@ function ProjectWorkspace({
   );
 }
 
-function WorkspaceTeamPanel() {
+function WorkspaceTeamPanel({ invitationEmailDelivery }: { invitationEmailDelivery: boolean }) {
   const [workspaces, setWorkspaces] = useState<PortalWorkspace[]>([]);
   const [workspaceId, setWorkspaceId] = useState("");
   const [projects, setProjects] = useState<PortalWorkspaceEntry[]>([]);
@@ -1416,7 +1417,7 @@ function WorkspaceTeamPanel() {
 
   const invite = async (event: FormEvent) => {
     event.preventDefault();
-    if (!workspaceId || (!organizationWide && !projectId)) return;
+    if (!invitationEmailDelivery || !workspaceId || (!organizationWide && !projectId)) return;
     setBusy(true); setError("");
     try {
       await invitePortalWorkspaceMember(workspaceId, {
@@ -1435,13 +1436,14 @@ function WorkspaceTeamPanel() {
     {workspaces.length > 1 && <label>Workspace<select value={workspaceId} onChange={event => void selectWorkspace(event.target.value)} disabled={busy}>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.displayName}</option>)}</select></label>}
     <form onSubmit={invite} className="portal-team-invite-form">
       <h3>Invite a project collaborator</h3>
+      {!invitationEmailDelivery && <div className="portal-info-notice" role="status"><strong>Invitation email is not active yet.</strong><p>Existing access can be reviewed and revoked, but a new invitation cannot be created until LTDS finishes the email and sign-in rollout.</p></div>}
       <p className="portal-copy">Access defaults to one project. Invitees authenticate with the exact email address below.</p>
-      <label>Email address<input type="email" required maxLength={320} value={email} onChange={event => setEmail(event.target.value)} /></label>
-      {!organizationWide && <label>Project<select required value={projectId} onChange={event => setProjectId(event.target.value)}><option value="" disabled>Select a project</option>{projects.map(project => <option key={project.publicId} value={project.publicId}>{project.displayName}</option>)}</select></label>}
-      <label className="portal-check"><input type="checkbox" checked={canRequest} onChange={event => setCanRequest(event.target.checked)} /> Allow this person to submit service requests for the selected scope</label>
-      <label className="portal-check portal-wide-access"><input type="checkbox" checked={organizationWide} onChange={event => { setOrganizationWide(event.target.checked); setWideConfirmed(false); }} /> Give access across this entire client workspace</label>
+      <label>Email address<input type="email" required maxLength={320} disabled={!invitationEmailDelivery} value={email} onChange={event => setEmail(event.target.value)} /></label>
+      {!organizationWide && <label>Project<select required disabled={!invitationEmailDelivery} value={projectId} onChange={event => setProjectId(event.target.value)}><option value="" disabled>Select a project</option>{projects.map(project => <option key={project.publicId} value={project.publicId}>{project.displayName}</option>)}</select></label>}
+      <label className="portal-check"><input type="checkbox" disabled={!invitationEmailDelivery} checked={canRequest} onChange={event => setCanRequest(event.target.checked)} /> Allow this person to submit service requests for the selected scope</label>
+      <label className="portal-check portal-wide-access"><input type="checkbox" disabled={!invitationEmailDelivery} checked={organizationWide} onChange={event => { setOrganizationWide(event.target.checked); setWideConfirmed(false); }} /> Give access across this entire client workspace</label>
       {organizationWide && <div className="portal-danger-disclosure" role="alert"><strong>Broader access</strong><p>This person will be able to see current and future projects across the workspace.</p><label className="portal-check"><input type="checkbox" required checked={wideConfirmed} onChange={event => setWideConfirmed(event.target.checked)} /> I understand and want to grant workspace-wide access.</label></div>}
-      <button className="button-primary" disabled={busy || (!organizationWide && !projectId) || (organizationWide && !wideConfirmed)}>{busy ? "Saving…" : "Send invitation"}</button>
+      <button className="button-primary" disabled={!invitationEmailDelivery || busy || (!organizationWide && !projectId) || (organizationWide && !wideConfirmed)}>{busy ? "Saving…" : "Send invitation"}</button>
       {error && <p className="portal-form-error" role="alert">{error}</p>}
     </form>
     <div className="portal-team-lists">
@@ -1468,6 +1470,7 @@ export function ClientPortalApp({
     change: boolean;
   } | null>(null);
   const [requestNotice, setRequestNotice] = useState<string | null>(null);
+  const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null);
   const mobileNavPanel = useRef<HTMLDivElement>(null);
@@ -1578,6 +1581,26 @@ export function ClientPortalApp({
     );
 
   const { account, projects, mapboxPublicToken, capabilities } = gate.data;
+  const workspaces = gate.data.workspaces ?? [];
+  const selectedWorkspaceId = gate.data.selectedWorkspaceId ?? null;
+  const switchWorkspace = async (workspaceId: string) => {
+    if (workspaceId === selectedWorkspaceId) return;
+    setSwitchingWorkspace(true);
+    setPortalWorkspaceSelection(workspaceId);
+    try {
+      const data = await loadPortalBootstrap();
+      setRequests(data.requests);
+      setProjectId(null);
+      setPage("dashboard");
+      window.history.pushState({}, "", clientPortalPath("dashboard"));
+      setGate({ status: "ready", data });
+    } catch (caught) {
+      setPortalWorkspaceSelection(selectedWorkspaceId);
+      window.alert((caught as Error).message || "This workspace could not be opened.");
+    } finally {
+      setSwitchingWorkspace(false);
+    }
+  };
   const onSaved = (saved: PortalServiceRequest) => {
     setRequests((current) => [
       saved,
@@ -1916,7 +1939,7 @@ export function ClientPortalApp({
               Contact LTDS
             </a>
           </Card>
-          {capabilities.workspaceMembershipManagement && <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel /></Card>}
+          {capabilities.workspaceMembershipManagement && <Card title="Team access" className="portal-team-card"><WorkspaceTeamPanel invitationEmailDelivery={capabilities.invitationEmailDelivery} /></Card>}
         </div>
       </>
     );
@@ -1925,6 +1948,19 @@ export function ClientPortalApp({
     <div className="client-portal">
       <header className="client-portal-header">
         <Brand product="Client portal" />
+        {capabilities.workspaceHierarchyV2 && workspaces.length > 1 && (
+          <label className="portal-workspace-switcher">
+            <span>Workspace</span>
+            <select
+              aria-label="Client workspace"
+              value={selectedWorkspaceId ?? ""}
+              disabled={switchingWorkspace}
+              onChange={event => void switchWorkspace(event.target.value)}
+            >
+              {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.displayName}</option>)}
+            </select>
+          </label>
+        )}
         <nav className="client-portal-top-nav" aria-label="Client portal">
           {navigation.map((item) => (
             <a

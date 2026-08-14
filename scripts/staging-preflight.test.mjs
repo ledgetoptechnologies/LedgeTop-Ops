@@ -3,8 +3,9 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { validateApp, validateCrossApp, validateFiles } from "./staging-preflight.mjs";
-import { APP_SOURCE_DIRS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
 
 const clone = (value) => JSON.parse(JSON.stringify(value));
 function stagingConfig(app) {
@@ -132,5 +133,23 @@ test("fails closed on client portal activation, origin, and audience reuse", () 
   const errors = validateApp("delivery", staging, production);
   for (const expected of ["CLIENT_PORTAL_ENABLED", "client portal and public origins", "must not reuse"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
+  }
+});
+test("requires every portal-v2 and Operations capability to be explicitly false", () => {
+  for (const app of ["delivery", "operations"]) {
+    for (const flag of REQUIRED_DISABLED_FEATURE_FLAGS[app]) {
+      const staging = stagingConfig(app);
+      delete staging.vars[flag];
+      const errors = validateApp(app, staging, productionFrom(staging));
+      assert(errors.some((error) => error.includes(flag)), `${app}.${flag}: ${errors.join(" | ")}`);
+    }
+  }
+});
+test("checked-in staging examples enumerate the same flags and secret manifests as the gate", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  for (const [app, example] of [["delivery", "delivery.wrangler.json.example"], ["operations", "operations.wrangler.json.example"]]) {
+    const config = JSON.parse(fs.readFileSync(path.join(root, "docs", "staging", example), "utf8"));
+    assert.deepEqual(new Set(config.secrets.required), new Set(REQUIRED_STAGING_SECRETS[app]));
+    for (const flag of REQUIRED_DISABLED_FEATURE_FLAGS[app]) assert.equal(config.vars[flag], "false", `${example}.${flag}`);
   }
 });

@@ -1,4 +1,4 @@
-import { requestJson } from "./bulk-download";
+import { requestJson, selectClientWorkspaceId, selectedClientWorkspaceId } from "./bulk-download";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 
 export interface PortalCapabilities {
@@ -8,6 +8,7 @@ export interface PortalCapabilities {
   requestAttachments: boolean;
   workspaceHierarchyV2: boolean;
   workspaceMembershipManagement: boolean;
+  invitationEmailDelivery: boolean;
 }
 
 export interface PortalAccount {
@@ -126,6 +127,8 @@ export interface PortalBootstrap {
   projects: PortalProject[];
   requests: PortalServiceRequest[];
   mapboxPublicToken: string | null;
+  workspaces?: PortalWorkspace[];
+  selectedWorkspaceId?: string | null;
 }
 
 export interface PortalNotification {
@@ -173,6 +176,17 @@ export async function loadPortalBootstrap(
     account: PortalAccount;
     capabilities?: Partial<PortalCapabilities>;
   }>("/api/client/session");
+  let workspaces: PortalWorkspace[] = [];
+  let selectedWorkspaceId: string | null = null;
+  if (session.capabilities?.workspaceHierarchyV2 === true) {
+    workspaces = await loadPortalWorkspaces(request);
+    const prior = selectedClientWorkspaceId();
+    selectedWorkspaceId = workspaces.some(workspace => workspace.id === prior)
+      ? prior
+      : workspaces[0]?.id ?? null;
+    selectClientWorkspaceId(selectedWorkspaceId);
+    if (!selectedWorkspaceId) throw new Error("No authorized client workspace is available");
+  }
   const [projects, requests, mapConfig] = await Promise.all([
     request<{ projects: PortalProject[] }>("/api/client/projects"),
     request<{ requests: PortalServiceRequest[] }>(
@@ -189,11 +203,18 @@ export async function loadPortalBootstrap(
       requestAttachments: session.capabilities?.requestAttachments === true,
       workspaceHierarchyV2: session.capabilities?.workspaceHierarchyV2 === true,
       workspaceMembershipManagement: session.capabilities?.workspaceMembershipManagement === true,
+      invitationEmailDelivery: session.capabilities?.invitationEmailDelivery === true,
     },
     projects: projects.projects,
     requests: requests.requests,
     mapboxPublicToken: mapConfig.mapboxPublicToken,
+    workspaces,
+    selectedWorkspaceId,
   };
+}
+
+export function setPortalWorkspaceSelection(workspaceId: string | null): void {
+  selectClientWorkspaceId(workspaceId);
 }
 
 export async function loadPortalProjectFiles(

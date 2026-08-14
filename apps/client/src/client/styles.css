@@ -723,7 +723,7 @@
   background: #080808;
   padding: .65rem max(1rem, calc((100vw - 1320px) / 2));
   display: grid;
-  grid-template-columns: auto 1fr auto auto;
+  grid-template-columns: auto minmax(150px, 230px) 1fr auto auto;
   align-items: center;
   gap: clamp(1rem, 3vw, 3rem);
   border-bottom: 1px solid #ffffff17;
@@ -791,6 +791,9 @@
 .portal-mobile-nav-backdrop { display: none; }
 
 .portal-notification-center { position: relative; justify-self: end; }
+.portal-workspace-switcher { display: grid; gap: 2px; min-width: 150px; color: #fff; font-size: 11px; line-height: 1.1; }
+.portal-workspace-switcher select { min-width: 150px; max-width: 230px; padding: 7px 30px 7px 9px; border: 1px solid #ffffff42; border-radius: 8px; background: #1c252c; color: #fff; font: inherit; }
+.portal-workspace-switcher select:focus-visible { outline: 3px solid #ee500752; outline-offset: 2px; }
 .portal-notification-bell { position: relative; width: 42px; height: 42px; border: 1px solid #ffffff30; border-radius: 999px; background: #1c252c; color: #fff; cursor: pointer; }
 .portal-notification-bell:focus-visible { outline: 3px solid #ee500752; outline-offset: 2px; }
 .portal-notification-count { position: absolute; top: -6px; right: -7px; min-width: 19px; height: 19px; padding: 0 5px; display: grid; place-items: center; border-radius: 99px; background: #c43d05; color: #fff; font: 700 11px/1 sans-serif; }
@@ -1575,10 +1578,12 @@
 }
 
 @media (max-width: 960px) {
-  .client-portal-header { grid-template-columns: auto 1fr auto; min-height: 68px; gap: .7rem; }
+  .client-portal-header { grid-template-columns: auto minmax(0, 1fr) auto auto; min-height: 68px; gap: .7rem; }
   .client-portal-top-nav, .portal-account-button { display: none; }
-  .portal-notification-center { grid-column: 2; grid-row: 1; margin-right: 0; justify-self: end; }
-  .portal-nav-trigger { display: grid; place-items: center; grid-column: 3; grid-row: 1; }
+  .portal-workspace-switcher { grid-column: 2; grid-row: 1; min-width: 0; }
+  .portal-workspace-switcher select { min-width: 0; width: 100%; max-width: none; }
+  .portal-notification-center { grid-column: 3; grid-row: 1; margin-right: 0; justify-self: end; }
+  .portal-nav-trigger { display: grid; place-items: center; grid-column: 4; grid-row: 1; }
   .portal-notification-panel { position: fixed; top: 70px; right: 12px; left: 12px; width: auto; max-height: calc(100dvh - 90px); }
   .portal-mobile-nav-backdrop { position: fixed; z-index: 100; inset: 0; display: flex; justify-content: flex-end; background: #071018a8; }
   .portal-mobile-nav { width: min(360px, calc(100vw - 32px)); height: 100dvh; overflow-y: auto; box-sizing: border-box; padding: 1rem; background: #11181d; color: #fff; box-shadow: -16px 0 50px #0007; }
@@ -1626,10 +1631,8 @@
   .client-portal-header .ltds-brand { gap: .45rem; font-size: .84rem; }
   .client-portal-header .ltds-brand img { width: 40px; height: 40px; }
   .client-portal-header .ltds-brand small { font-size: .58rem; letter-spacing: .09em; }
-}
-
-@media (max-width: 340px) {
   .client-portal-header .ltds-brand > span { display: none; }
+  .portal-workspace-switcher > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 }
 
 @media (max-width: 680px) {

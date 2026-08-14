@@ -73,7 +73,7 @@ describe("authorized thumbnail delivery", () => {
     expect(thumbnailFieldsForObject("Jobs/Clients/Synthetic/report.pdf", "pdf", "/api/items/pdf", '"current"', ready, 4096, "application/pdf"))
       .toEqual({ thumbnailState: "ready", thumbnailFallbackKind: "pdf", thumbnailUrl: "/api/items/pdf/thumbnail" });
     expect(thumbnailFieldsForObject("Jobs/Clients/Synthetic/flight.mp4", "video", "/api/items/video", '"current"', ready, 4096, "video/mp4"))
-      .toEqual({ thumbnailState: "not_applicable", thumbnailFallbackKind: "video" });
+      .toEqual({ thumbnailState: "ready", thumbnailFallbackKind: "video", thumbnailUrl: "/api/items/video/thumbnail" });
     expect(thumbnailFieldsForObject("Jobs/Clients/Synthetic/huge.pdf", "pdf", "/api/items/huge", '"current"', null, 256 * 1024 * 1024 + 1, "application/pdf"))
       .toEqual({ thumbnailState: "not_applicable", thumbnailFallbackKind: "pdf" });
   });

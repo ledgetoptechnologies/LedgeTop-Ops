@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
+import { validateRequestArea } from "../src/worker/client-portal/request-area";
 import {
   calculateRequestAreaSquareMeters,
   sanitizeServiceQuestions,
@@ -68,6 +69,18 @@ describe("service request v2 validation", () => {
     expect(area).toBeGreaterThan(880_000);
     expect(area).toBeLessThan(900_000);
     expect(calculateRequestAreaSquareMeters(null)).toBeNull();
+  });
+
+  it.each([
+    { latitude: 0, expectedSquareMeters: 12_363_718_145 },
+    { latitude: 45, expectedSquareMeters: 8_666_174_571 },
+    { latitude: 80, expectedSquareMeters: 2_040_679_782 },
+  ])("matches the spherical area of a one-degree bounded rectangle at $latitude degrees", ({ latitude, expectedSquareMeters }) => {
+    const rectangle = {
+      type: "Polygon" as const,
+      coordinates: [[[0, latitude], [1, latitude], [1, latitude + 1], [0, latitude + 1], [0, latitude]]] as [number, number][][],
+    };
+    expect(calculateRequestAreaSquareMeters(validateRequestArea(rectangle))).toBeCloseTo(expectedSquareMeters, -3);
   });
 
   it("accepts only sanitized catalog questions and schema-conforming answers", () => {

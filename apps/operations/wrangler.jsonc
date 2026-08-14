@@ -29,6 +29,7 @@
     "PROJECT_ALPHA_BASE_URL": "https://project-alpha.ledgetopdroneservices.com",
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED": "false",
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED": "false",
+    "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED": "false",
     "APPLICATION_KEY": "ltds_ops",
     "TFR_REGION": "WI",
     "DISPLAY_TIMEZONE": "America/Chicago",

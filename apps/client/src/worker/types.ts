@@ -1,3 +1,5 @@
+import type { ClientDelegatedShareSignerBinding } from "@ltds/shared";
+
 export interface Env {
   DELIVERY_DB: D1Database;
   DATA_BUCKET: R2Bucket;
@@ -41,13 +43,18 @@ export interface Env {
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
   /** Client invitation/member mutations. Independent from read-only hierarchy rollout. */
   CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED?: string;
+  /** Native Cloudflare Email Service delivery for the invitation outbox. Default-off. */
+  CLIENT_PORTAL_INVITATION_EMAIL_ENABLED?: string;
+  CLIENT_PORTAL_INVITATION_EMAIL?: SendEmail;
+  CLIENT_PORTAL_INVITATION_FROM?: string;
+  CLIENT_PORTAL_INVITATION_FROM_NAME?: string;
   /**
    * Client-delegated public links remain unavailable until an internal
    * Operations signer service binding is contract-tested. Never bind the
    * Operations DELIVERY_TOKEN_SECRET into this Worker.
-   */
+  */
   CLIENT_DELEGATED_SHARES_ENABLED?: string;
-  CLIENT_DELEGATED_SHARE_SIGNER?: Fetcher;
+  CLIENT_DELEGATED_SHARE_SIGNER?: ClientDelegatedShareSignerBinding;
   CLIENT_DELEGATED_SHARE_SESSION_SECRET?: string;
   CLIENT_DELEGATED_SHARE_KEY_ID?: string;
   /**
@@ -72,6 +79,9 @@ export interface Env {
   /** Default-off until a real scanner consumes quarantine objects and signs receipts. */
   CLIENT_REQUEST_ATTACHMENTS_ENABLED?: string;
   CLIENT_REQUEST_ATTACHMENT_SCANNER_SECRET?: string;
+  /** Dedicated R2 Object Read & Write credential used only to sign attachment part PUTs. */
+  CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID?: string;
+  CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY?: string;
   BULK_DOWNLOAD_WORKFLOW: Workflow;
   CLOUD_TRANSFER_WORKFLOW: Workflow;
   CLOUD_TRANSFER_DROPBOX_ENABLED?: string;

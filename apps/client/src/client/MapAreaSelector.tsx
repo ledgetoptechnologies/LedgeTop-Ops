@@ -26,12 +26,6 @@ function featureData(pois: PortalPoi[], vertices: Point[], selectedPoiIndex: num
   };
 }
 
-export function requestMapKml(areaGeoJson: PortalAreaGeoJson | null, pois: PortalPoi[]): string {
-  const placemarks = pois.map((poi, index) => `<Placemark><name>Point ${index + 1}</name><Point><coordinates>${poi.longitude},${poi.latitude},0</coordinates></Point></Placemark>`).join("");
-  const polygon = areaGeoJson ? `<Placemark><name>Requested area</name><Polygon><outerBoundaryIs><LinearRing><coordinates>${areaGeoJson.coordinates[0]!.map(([lng, lat]) => `${lng},${lat},0`).join(" ")}</coordinates></LinearRing></outerBoundaryIs></Polygon></Placemark>` : "";
-  return `<?xml version="1.0" encoding="UTF-8"?><kml xmlns="http://www.opengis.net/kml/2.2"><Document><name>LTDS service request</name>${placemarks}${polygon}</Document></kml>`;
-}
-
 function locationError(error: GeolocationPositionError): string {
   if (error.code === error.PERMISSION_DENIED) return "Location permission was declined. You can still search an address or add points on the map.";
   if (error.code === error.TIMEOUT) return "Location lookup timed out. Try again or search an address.";

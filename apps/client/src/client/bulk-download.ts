@@ -21,6 +21,21 @@ export interface BulkDownloadResponse {
   error?: { code?: string; message?: string } | null;
 }
 
+const CLIENT_WORKSPACE_STORAGE_KEY = "ltds.client.workspace.v2";
+
+export function selectedClientWorkspaceId(): string | null {
+  if (typeof window === "undefined" || !window.sessionStorage) return null;
+  const value = window.sessionStorage.getItem(CLIENT_WORKSPACE_STORAGE_KEY);
+  return value && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value) ? value : null;
+}
+
+export function selectClientWorkspaceId(value: string | null): void {
+  if (typeof window === "undefined" || !window.sessionStorage) return;
+  if (value && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(value))
+    window.sessionStorage.setItem(CLIENT_WORKSPACE_STORAGE_KEY, value);
+  else window.sessionStorage.removeItem(CLIENT_WORKSPACE_STORAGE_KEY);
+}
+
 export function parseRetryAfter(value: string | null, now = Date.now()): number | undefined {
   if (!value) return undefined;
   const seconds = Number(value);
@@ -37,7 +52,12 @@ function requestErrorMessage(body: RequestErrorBody): string {
 }
 
 export async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { credentials: "same-origin", ...init });
+  const headers = new Headers(init?.headers);
+  const workspaceId = url.startsWith("/api/client/") && !url.startsWith("/api/client/v2/")
+    ? selectedClientWorkspaceId()
+    : null;
+  if (workspaceId) headers.set("X-LTDS-Workspace-Id", workspaceId);
+  const response = await fetch(url, { credentials: "same-origin", ...init, headers });
   const body = await response.json().catch(() => ({})) as RequestErrorBody & T;
   if (!response.ok) {
     throw Object.assign(new Error(requestErrorMessage(body)), {

@@ -53,21 +53,13 @@ and warns that Bypass disables Access enforcement in
 
 1. Run `npm.cmd run staging:check:test`, the repository tests, and build from
    the pinned commit. Record all config hashes.
-2. Export both staging D1 databases. List migrations and confirm only Delivery
-   `0096`–`0109` and Operations `0014`–`0018` are newly expected for the current
-   combined release; `0096`–`0106` and `0014`–`0017` were the original
-   portal-only milestone. Client `0100` is required because a portal delivery grant must
-   not make `share_version` a foreign-key parent that blocks existing
-   rotation/revocation updates; authorization still compares the recorded
-   version and fails closed after rotation. Client `0103` adds the request
-   workspace and `0104` adds revisions, immutable operational-estimate versions,
-   and the rebuilt notification dedupe contract. Client `0105` adds direct
-   client-folder grants, `0106` adds thumbnail jobs, `0107`/`0108` add cleanup
-   and resumable backfill, `0109` adds minimal version-bound image locations,
-   Operations `0017` adds job briefs, and `0018` adds
-   authenticated browser-upload intent/session state.
+2. Export both staging D1 databases. List migrations and confirm the exact
+   Delivery release set `0096`-`0112` and `0114`-`0127` plus Operations
+   `0014`-`0022`. Migration `0113` is intentionally reserved and absent. The
+   release evidence validator compares the complete filename sets; do not
+   shorten them to a range or infer success from a local migration run.
 3. After migration approval, apply Delivery migrations first and Operations
-   `0014`–`0018` second. Record the list/apply output and confirm production
+   `0014`-`0022` second. Record the list/apply output and confirm production
    migration state was not touched.
 4. Upload a version with the portal false and inspect routes, bindings, vars,
    and secret names. Deploy only that reviewed version after deployment
@@ -88,6 +80,26 @@ and warns that Bypass disables Access enforcement in
    exact Access/public-path contract, migration evidence, and test evidence are
    all recorded.
 
+## Independent portal-v2 activation gates
+
+Release preparation keeps every new capability explicitly `false`. Before any
+flag is enabled, the evidence packet must include a current, referenced staging
+result for every dependency below, even when Project Alpha or an infrastructure
+operator owns that dependency:
+
+- complete Project Alpha hierarchy and Service Library projection, pricing
+  hints, and draft-quote command contracts;
+- a real malware scanner plus quarantine lifecycle and alert ownership;
+- attachment-specific R2 credentials, exact-origin CORS, and an out-of-scope
+  PUT denial test;
+- invitation email delivery, verified Access enrollment, and staff manager
+  recovery;
+- the private Operations delegated-share signer binding and complete public
+  authorization path;
+- projection parity/staleness monitors and alerts.
+
+`staging:evidence:check` rejects a packet that omits any one of these gates.
+
 ## Rollback
 
 Stop on unexpected access, cross-account data, missing password challenge,
@@ -101,7 +113,7 @@ route drift.
 3. Remove traffic from `client-staging` only after `delivery-staging` health
    and public-share checks pass. Disable (do not silently repurpose) the client
    portal and public Bypass Access apps.
-4. Do not reverse migrations 0096–0109 or 0014–0018. Use a
+4. Do not reverse any migration in the recorded release set. Use a
    reviewed forward fix. Do not delete D1/R2 data, queues, workflows, secrets,
    groups, or audit/outbox evidence during incident handling.
 5. Re-run public-share and Delivery health checks and record the final route,

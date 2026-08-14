@@ -174,7 +174,7 @@ class FakeThumbnailDb {
         if (sql.includes("thumbnail.recovery-claim")) {
           const [sourceKey, sourceEtag, maxAttempts] = values as [string, string, number];
           if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag &&
-            db.job.status === "failed" && ["thumbnail_processing_error", "queue_publish_failed"].includes(db.job.error_code || "") &&
+            db.job.status === "failed" && ["thumbnail_processing_error", "queue_publish_failed", "video_thumbnail_disabled"].includes(db.job.error_code || "") &&
             db.job.attempt_count < maxAttempts) {
             db.job.status = "pending";
             db.job.attempt_count += 1;
@@ -218,7 +218,7 @@ class FakeThumbnailDb {
           if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.source_size === sourceSize &&
             db.job.status === "processing" && db.leaseExpired && db.job.attempt_count < maxAttempts &&
             !db.indexMissing && db.indexedEtag === sourceEtag && db.indexedSize === sourceSize &&
-            ["image", "pdf"].includes(db.indexedMediaKind)) {
+            ["image", "pdf", "video"].includes(db.indexedMediaKind)) {
             db.job.status = "pending";
             db.job.error_code = null;
             db.job.error_message = null;
@@ -285,7 +285,7 @@ class FakeThumbnailDb {
         if (sql.includes("thumbnail.recovery-due")) {
           const [maxAttempts, limit] = values as [number, number];
           const eligible = db.job?.status === "failed" &&
-            ["thumbnail_processing_error", "queue_publish_failed"].includes(db.job.error_code || "") &&
+            ["thumbnail_processing_error", "queue_publish_failed", "video_thumbnail_disabled"].includes(db.job.error_code || "") &&
             db.job.attempt_count < maxAttempts
             ? [{ source_key: db.job.source_key, source_etag: db.job.source_etag, source_size: db.job.source_size }]
             : [];
@@ -384,7 +384,7 @@ function fixture(options: {
   db.indexedEtag = options.indexEtag || sourceEtag;
   db.indexedSize = options.size ?? 4096;
   db.indexedContentType = options.contentType || "image/jpeg";
-  db.indexedMediaKind = db.indexedContentType === "application/pdf" ? "pdf" : "image";
+  db.indexedMediaKind = db.indexedContentType.startsWith("video/") ? "video" : db.indexedContentType === "application/pdf" ? "pdf" : "image";
   db.job = {
     source_key: sourceKey,
     source_etag: sourceEtag,
@@ -509,21 +509,22 @@ describe("private server thumbnail pipeline", () => {
     expect(canonicalThumbnailSourceKey("Jobs\\Internal\\photo.jpg")).toBe(false);
   });
 
-  it("uses one strict image and PDF eligibility policy while keeping all video on icon fallback", () => {
+  it("uses one strict image, PDF, and TrueNAS-video eligibility policy", () => {
     expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/photo.jpg", 1024, "image/jpeg")).toBe(true);
     expect(thumbnailSourceEligible("Jobs/Internal/source.tiff", THUMBNAIL_MAX_INPUT_BYTES, "image/tiff")).toBe(true);
     expect(thumbnailSourceEligible("Jobs/Internal/source.bmp", THUMBNAIL_MAX_INPUT_BYTES + 1, "image/bmp")).toBe(false);
     expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/report.pdf", PDF_THUMBNAIL_MAX_INPUT_BYTES, "application/pdf")).toBe(true);
     expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/report.pdf", PDF_THUMBNAIL_MAX_INPUT_BYTES + 1, "application/pdf")).toBe(false);
-    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mp4", 1024, "video/mp4")).toBe(false);
-    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mov", 1024, "video/quicktime")).toBe(false);
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mp4", 1024, "video/mp4")).toBe(true);
+    expect(thumbnailSourceEligible("Jobs/Clients/Synthetic/flight.mov", 1024, "video/quicktime")).toBe(true);
     expect(thumbnailSourceKind("Jobs/Internal/report.pdf", "application/pdf")).toBe("pdf");
     expect(thumbnailSourceKind("Jobs/Internal/photo.jpg", "image/jpeg")).toBe("image");
-    expect(thumbnailSourceKind("Jobs/Internal/clip.mp4", "video/mp4")).toBeNull();
-    expect(thumbnailSourceKind("Jobs/Internal/disguised.jpg", "video/mp4")).toBeNull();
-    expect(thumbnailSourceKind("Jobs/Internal/disguised.mp4", "image/jpeg")).toBeNull();
-    expect(videoThumbnailSourceDisabled("Jobs/Internal/disguised.jpg", "video/mp4; codecs=avc1")).toBe(true);
-    expect(videoThumbnailSourceDisabled("Jobs/Internal/disguised.mp4", "image/jpeg")).toBe(true);
+    expect(thumbnailSourceKind("Jobs/Internal/clip.mp4", "video/mp4")).toBe("video");
+    expect(thumbnailSourceKind("Jobs/Internal/disguised.jpg", "video/mp4")).toBe("video");
+    expect(thumbnailSourceKind("Jobs/Internal/disguised.mp4", "image/jpeg")).toBe("video");
+    expect(thumbnailSourceKind("Jobs/Internal/unsupported.jpg", "video/x-unknown-codec")).toBeNull();
+    expect(videoThumbnailSourceDisabled("Jobs/Internal/disguised.jpg", "video/mp4; codecs=avc1")).toBe(false);
+    expect(videoThumbnailSourceDisabled("Jobs/Internal/disguised.mp4", "image/jpeg")).toBe(false);
   });
 
   it("renders an eligible PDF through the same private Container boundary", async () => {
@@ -571,12 +572,15 @@ describe("private server thumbnail pipeline", () => {
     expect(value.db.job).toMatchObject({ status: "failed", error_code: "input_too_large" });
   });
 
-  it("rejects a legacy video row before claim or source-body/renderer access", async () => {
+  it("leaves a video row pending for TrueNAS without claim or source-body/Container access", async () => {
     const value = fixture({ sourceKey: "Jobs/Clients/Synthetic/flight.mp4", contentType: "video/mp4" });
 
-    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({ outcome: "failed", errorCode: "video_thumbnail_disabled" });
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({
+      outcome: "pending",
+      thumbnailKey: value.db.job?.thumbnail_key,
+    });
     expect(value.db.claims).toBe(0);
-    expect(value.db.job).toMatchObject({ status: "failed", attempt_count: 0, error_code: "video_thumbnail_disabled" });
+    expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 0, error_code: null });
     expect(value.getKeys).toEqual([]);
     expect(value.renderThumbnail).not.toHaveBeenCalled();
   });
@@ -584,7 +588,7 @@ describe("private server thumbnail pipeline", () => {
   it.each([
     ["Jobs/Clients/Synthetic/flight.mp4", "image/jpeg"],
     ["Jobs/Clients/Synthetic/disguised.jpg", "video/mp4"],
-  ])("rejects video identity at enqueue before registration or publish: %s", async (sourceKey, contentType) => {
+  ])("registers and publishes video identity for the TrueNAS claim queue: %s", async (sourceKey, contentType) => {
     const value = fixture({ sourceKey, contentType });
     value.db.job = undefined;
 
@@ -593,15 +597,15 @@ describe("private server thumbnail pipeline", () => {
       sourceEtag: value.message.sourceEtag,
       sourceSize: 4096,
       contentType,
-    })).rejects.toThrow("Video thumbnail jobs are disabled");
-    expect(value.db.job).toBeUndefined();
-    expect(value.send).not.toHaveBeenCalled();
+    })).resolves.toEqual({ enqueued: true, state: "pending" });
+    expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 0 });
+    expect(value.send).toHaveBeenCalledOnce();
   });
 
   it.each([
     ["Jobs/Clients/Synthetic/flight.mp4", "image/jpeg"],
     ["Jobs/Clients/Synthetic/disguised.jpg", "video/mp4"],
-  ])("acks a forged video queue job without claim, retry, body read, or renderer handoff: %s", async (sourceKey, contentType) => {
+  ])("acks a video queue signal while preserving pending TrueNAS work: %s", async (sourceKey, contentType) => {
     const value = fixture({ sourceKey, contentType });
     const queue = queueBatch(value.message, THUMBNAIL_MAX_DELIVERY_ATTEMPTS);
 
@@ -610,7 +614,7 @@ describe("private server thumbnail pipeline", () => {
     expect(queue.ack).toHaveBeenCalledOnce();
     expect(queue.retry).not.toHaveBeenCalled();
     expect(value.db.claims).toBe(0);
-    expect(value.db.job).toMatchObject({ status: "failed", attempt_count: 0, error_code: "video_thumbnail_disabled" });
+    expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 0, error_code: null });
     expect(value.getKeys).toEqual([]);
     expect(value.renderThumbnail).not.toHaveBeenCalled();
   });
@@ -875,6 +879,32 @@ describe("private server thumbnail pipeline", () => {
     expect(value.getKeys).toEqual([]);
     expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 7, error_code: null, dead_lettered: false });
     expect(value.db.job?.queue_published_at).toBeTruthy();
+  });
+
+  it("recovers a video row failed by the disabled release into pending TrueNAS work", async () => {
+    const value = fixture({ sourceKey: "Jobs/Clients/Synthetic/legacy.mov", contentType: "video/quicktime" });
+    Object.assign(value.db.job!, {
+      status: "failed",
+      attempt_count: 0,
+      error_code: "video_thumbnail_disabled",
+      error_message: "Video thumbnail rendering is disabled for this release",
+    });
+
+    await expect(recoverTransientThumbnailFailures(value.env)).resolves.toBe(1);
+    expect(value.send).toHaveBeenCalledWith(value.message);
+    expect(value.getKeys).toEqual([]);
+    expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 1, error_code: null });
+  });
+
+  it("requeues an expired TrueNAS video lease without reading or Container rendering", async () => {
+    const value = fixture({ sourceKey: "Jobs/Clients/Synthetic/flight.mp4", contentType: "video/mp4" });
+    Object.assign(value.db.job!, { status: "processing", attempt_count: 2 });
+
+    await expect(recoverExpiredThumbnailLeases(value.env)).resolves.toMatchObject({ scanned: 1, queued: 1 });
+    expect(value.send).toHaveBeenCalledWith(value.message);
+    expect(value.getKeys).toEqual([]);
+    expect(value.renderThumbnail).not.toHaveBeenCalled();
+    expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 2 });
   });
 
   it("never republishes permanent or recovery-exhausted thumbnail failures", async () => {
