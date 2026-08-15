@@ -38,6 +38,13 @@ describe("thumbnail deployment contract", () => {
     expect(migration).not.toMatch(/preview|medium|large/i);
   });
 
+  it("re-enables Operations thumbnails when deferred media state supplies a URL", () => {
+    const start = operationsUi.indexOf("function OperationsThumbnail");
+    const thumbnail = operationsUi.slice(start, operationsUi.indexOf("function FolderCard(", start));
+    expect(thumbnail).toContain("useState(!item.thumbnailUrl)");
+    expect(thumbnail).toContain("useEffect(() => setFailed(!item.thumbnailUrl), [item.id, item.thumbnailUrl])");
+  });
+
   it("durably retires replaced and deleted versions with bounded cleanup visibility", () => {
     for (const value of ["image_thumbnail_cleanup_jobs", "attempt_count", "next_attempt_at", "error_code", "completed_at", "trg_image_thumbnail_retire_update", "trg_image_thumbnail_retire_delete"]) {
       expect(cleanupMigration).toContain(value);

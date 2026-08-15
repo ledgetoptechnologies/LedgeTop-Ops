@@ -3991,6 +3991,7 @@ function FileCardV2({ item, preview }: { item: any; preview: () => void }) {
 }
 function OperationsThumbnail({ item }: { item: DeliveryItem }) {
   const [failed, setFailed] = useState(!item.thumbnailUrl);
+  useEffect(() => setFailed(!item.thumbnailUrl), [item.id, item.thumbnailUrl]);
   const fallback = item.thumbnailFallbackKind === "pdf" ? "PDF" : item.thumbnailFallbackKind === "archive" ? "ZIP" : item.thumbnailFallbackKind === "spreadsheet" ? "Sheet" : item.thumbnailFallbackKind === "document" ? "Doc" : item.thumbnailFallbackKind || item.kind || "File";
   const status = item.thumbnailState === "pending"
     ? "Thumbnail processing\u2026"
