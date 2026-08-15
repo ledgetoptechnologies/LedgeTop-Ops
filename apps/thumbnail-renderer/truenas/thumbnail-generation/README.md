@@ -4,11 +4,10 @@
 version-controlled script to copy into the FFmpeg container at
 `/scripts/thumbnail-queue-worker.sh`.
 
-The script accepts the retired Incoming renderer URL only as a migration aid
-and immediately replaces it with the canonical Operations renderer endpoint.
-It requires the dedicated renderer bearer. Cloudflare Access service-token
-values are optional and are sent only when both are configured. `/scratch`
-must be a Docker `tmpfs` mount.
+The machine-facing renderer endpoint is on the Incoming hostname and requires
+the dedicated renderer bearer. The Access-protected Operations hostname is
+also accepted only when both Cloudflare Access service-token values are
+configured. `/scratch` must be a Docker `tmpfs` mount.
 
 Videos are not downloaded as complete files. A loopback-only range proxy holds
 the validated, short-lived R2 GET URL and streams only FFprobe/FFmpeg's requested
@@ -23,5 +22,11 @@ secret fields:
 - `LTDSTHUMB_API_TOKEN` (or `THUMBNAIL_INGEST_SECRET`)
 - `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` (optional paired values)
 
-The canonical API base is
-`https://ops.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1`.
+The normal API base is
+`https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1`.
+
+Run `npm run test:video-worker-container` from `apps/thumbnail-renderer` to
+exercise the worker in the pinned FFmpeg container against local mock HTTPS
+claim, R2-range, upload, heartbeat, and completion endpoints. The smoke test
+uses synthetic eight-second and four-second videos and writes only to a
+disposable container tmpfs.

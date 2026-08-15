@@ -79,7 +79,7 @@ function authorized(request: Request, env: Env): boolean {
 }
 
 function expectedHost(env: Env): string {
-  return (env.THUMBNAIL_INGEST_EXPECTED_HOST || "").trim().toLowerCase();
+  return (env.THUMBNAIL_RENDERER_EXPECTED_HOST || env.THUMBNAIL_INGEST_EXPECTED_HOST || "").trim().toLowerCase();
 }
 
 /**

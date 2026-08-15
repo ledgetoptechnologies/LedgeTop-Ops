@@ -66,6 +66,8 @@ export type Env = Omit<
   THUMBNAIL_INGEST_SECRET?: string;
   /** Exact Operations edge hostname accepted by the ingest endpoint. */
   THUMBNAIL_INGEST_EXPECTED_HOST?: string;
+  /** Exact machine-facing hostname accepted by the TrueNAS renderer API. */
+  THUMBNAIL_RENDERER_EXPECTED_HOST?: string;
   ALERT_EMAIL?: SendEmail;
   ALERT_FROM?: string;
   ALERT_TO?: string;

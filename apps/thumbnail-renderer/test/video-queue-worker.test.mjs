@@ -19,12 +19,15 @@ test("video queue worker has valid Bash syntax", (t) => {
   assert.equal(result.status, 0, result.stderr || result.stdout);
 });
 
-test("video queue worker is pinned to the private Operations origin", () => {
-  assert.match(script, /readonly EXPECTED_API_BASE="https:\/\/ops\.ledgetopdroneservices\.com\/api\/internal\/thumbnail-renderer\/v1"/);
-  assert.match(script, /readonly LEGACY_API_BASE="https:\/\/incoming\.ledgetopdroneservices\.com\/api\/internal\/thumbnail-renderer\/v1"/);
-  assert.match(script, /legacy Incoming renderer endpoint detected; using canonical Operations endpoint/);
-  assert.match(script, /LTDSTHUMB_API_BASE="\$EXPECTED_API_BASE"/);
+test("video queue worker is pinned to approved renderer origins", () => {
+  assert.match(script, /readonly EXPECTED_API_BASE="https:\/\/incoming\.ledgetopdroneservices\.com\/api\/internal\/thumbnail-renderer\/v1"/);
+  assert.match(script, /readonly ACCESS_API_BASE="https:\/\/ops\.ledgetopdroneservices\.com\/api\/internal\/thumbnail-renderer\/v1"/);
   assert.match(script, /LTDSTHUMB_API_BASE" == "\$EXPECTED_API_BASE"/);
+  assert.match(script, /LTDSTHUMB_API_BASE" == "\$ACCESS_API_BASE"/);
+  assert.match(script, /the Operations renderer endpoint requires CF_ACCESS_CLIENT_ID/);
+  assert.match(script, /base = urlsplit\(sys\.argv\[1\]\)/);
+  assert.match(script, /parsed\.hostname != base\.hostname/);
+  assert.match(script, /\/api\/internal\/thumbnail-renderer\/v1\/thumbnail\//);
   assert.match(script, /CF-Access-Client-Id: \$CF_ACCESS_CLIENT_ID/);
   assert.match(script, /CF-Access-Client-Secret: \$CF_ACCESS_CLIENT_SECRET/);
   assert.match(script, /if \[\[ -n "\$CF_ACCESS_CLIENT_ID" \]\]; then/);
@@ -74,7 +77,9 @@ test("every attempt callback serializes the opaque lease id safely", () => {
 test("heartbeat begins immediately, repeats every 60 seconds, and guards work", () => {
   assert.match(script, /readonly HEARTBEAT_SECONDS=60\b/);
   const start = script.slice(script.indexOf("start_heartbeat()"), script.indexOf("fail_job()"));
-  assert.ok(start.indexOf("heartbeat_once") < start.indexOf("while sleep \"$HEARTBEAT_SECONDS\""));
+  assert.ok(start.indexOf("heartbeat_once") < start.indexOf("while true"));
+  assert.match(start, /printf '%s' "\$sleep_pid" >"\$HEARTBEAT_SLEEP_PID_FILE"/);
+  assert.match(script, /kill -TERM "\$sleep_pid"/);
   assert.match(script, /run_guarded _raw_ops_upload/);
   assert.match(script, /run_guarded timeout[^\n]*\n\s+ffprobe/s);
   assert.match(script, /run_guarded timeout --signal=TERM/);

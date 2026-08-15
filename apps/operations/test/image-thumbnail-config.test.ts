@@ -25,7 +25,7 @@ describe("thumbnail deployment contract", () => {
     expect(config.queues.producers).toContainEqual({ binding: "THUMBNAIL_QUEUE", queue: "ltds-thumbnail-jobs" });
     expect(config.queues.consumers).toContainEqual(expect.objectContaining({ queue: "ltds-thumbnail-jobs", max_retries: 5, dead_letter_queue: "ltds-thumbnail-jobs-dlq" }));
     expect(config.queues.consumers).toContainEqual(expect.objectContaining({ queue: "ltds-thumbnail-jobs-dlq" }));
-    expect(config.vars).toMatchObject({ FILE_EVENTS_QUEUE_NAME: "ltds-file-events", THUMBNAIL_QUEUE_NAME: "ltds-thumbnail-jobs", THUMBNAIL_DLQ_NAME: "ltds-thumbnail-jobs-dlq", THUMBNAIL_INGEST_EXPECTED_HOST: "ops.ledgetopdroneservices.com" });
+    expect(config.vars).toMatchObject({ FILE_EVENTS_QUEUE_NAME: "ltds-file-events", THUMBNAIL_QUEUE_NAME: "ltds-thumbnail-jobs", THUMBNAIL_DLQ_NAME: "ltds-thumbnail-jobs-dlq", THUMBNAIL_INGEST_EXPECTED_HOST: "ops.ledgetopdroneservices.com", THUMBNAIL_RENDERER_EXPECTED_HOST: "incoming.ledgetopdroneservices.com" });
     expect(clientConfig).not.toHaveProperty("images");
   });
 

@@ -5,8 +5,8 @@
 # lease, and one heartbeat process keep cancellation and cleanup deterministic.
 set -Eeuo pipefail
 
-readonly EXPECTED_API_BASE="https://ops.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1"
-readonly LEGACY_API_BASE="https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1"
+readonly EXPECTED_API_BASE="https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1"
+readonly ACCESS_API_BASE="https://ops.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1"
 readonly MAX_SOURCE_BYTES=10737418240 # exactly 10 * 1024 * 1024 * 1024
 readonly MAX_OUTPUT_BYTES=131072      # exactly 128 KiB
 readonly MAX_STREAM_BYTES=536870912   # 512 MiB aggregate upstream reads per job
@@ -31,16 +31,15 @@ valid_secret() {
   [[ -n "$1" && "$1" != *$'\r'* && "$1" != *$'\n'* ]]
 }
 
-if [[ "$LTDSTHUMB_API_BASE" == "$LEGACY_API_BASE" ]]; then
-  log "legacy Incoming renderer endpoint detected; using canonical Operations endpoint"
-  LTDSTHUMB_API_BASE="$EXPECTED_API_BASE"
-fi
-[[ "$LTDSTHUMB_API_BASE" == "$EXPECTED_API_BASE" ]] ||
-  die "LTDSTHUMB_API_BASE must be the canonical Operations renderer endpoint"
+[[ "$LTDSTHUMB_API_BASE" == "$EXPECTED_API_BASE" || "$LTDSTHUMB_API_BASE" == "$ACCESS_API_BASE" ]] ||
+  die "LTDSTHUMB_API_BASE must be an approved renderer endpoint"
 valid_secret "$LTDSTHUMB_API_TOKEN" || die "LTDSTHUMB_API_TOKEN (or THUMBNAIL_INGEST_SECRET) is required"
 if [[ -n "$CF_ACCESS_CLIENT_ID" || -n "$CF_ACCESS_CLIENT_SECRET" ]]; then
   valid_secret "$CF_ACCESS_CLIENT_ID" || die "CF_ACCESS_CLIENT_ID must be set with CF_ACCESS_CLIENT_SECRET"
   valid_secret "$CF_ACCESS_CLIENT_SECRET" || die "CF_ACCESS_CLIENT_SECRET must be set with CF_ACCESS_CLIENT_ID"
+fi
+if [[ "$LTDSTHUMB_API_BASE" == "$ACCESS_API_BASE" && -z "$CF_ACCESS_CLIENT_ID" ]]; then
+  die "the Operations renderer endpoint requires CF_ACCESS_CLIENT_ID and CF_ACCESS_CLIENT_SECRET"
 fi
 [[ "$LTDSTHUMB_IDLE_SECONDS" =~ ^[0-9]+$ ]] && (( LTDSTHUMB_IDLE_SECONDS >= 1 && LTDSTHUMB_IDLE_SECONDS <= 3600 )) ||
   die "LTDSTHUMB_IDLE_SECONDS must be an integer from 1 through 3600"
@@ -63,6 +62,7 @@ STOP_REQUESTED=0
 CURRENT_JOB_DIR=""
 STALE_MARKER=""
 HEARTBEAT_PID=""
+HEARTBEAT_SLEEP_PID_FILE=""
 ACTIVE_PID=""
 STREAM_PROXY_PID=""
 STREAM_PROXY_URL=""
@@ -71,10 +71,17 @@ LAST_HTTP_BODY=""
 
 stop_heartbeat() {
   if [[ -n "$HEARTBEAT_PID" ]]; then
+    if [[ -n "$HEARTBEAT_SLEEP_PID_FILE" && -s "$HEARTBEAT_SLEEP_PID_FILE" ]]; then
+      local sleep_pid=""
+      sleep_pid=$(<"$HEARTBEAT_SLEEP_PID_FILE")
+      [[ "$sleep_pid" =~ ^[0-9]+$ ]] && kill -TERM "$sleep_pid" 2>/dev/null || true
+    fi
     kill -TERM "$HEARTBEAT_PID" 2>/dev/null || true
     wait "$HEARTBEAT_PID" 2>/dev/null || true
     HEARTBEAT_PID=""
   fi
+  [[ -n "$HEARTBEAT_SLEEP_PID_FILE" ]] && rm -f -- "$HEARTBEAT_SLEEP_PID_FILE"
+  return 0
 }
 
 stop_active_command() {
@@ -105,6 +112,7 @@ cleanup_job() {
   fi
   CURRENT_JOB_DIR=""
   STALE_MARKER=""
+  HEARTBEAT_SLEEP_PID_FILE=""
 }
 
 request_stop() {
@@ -162,15 +170,16 @@ resolve_ops_url() {
   python3 -c '
 import sys
 from urllib.parse import urljoin, urlsplit
-origin = "https://ops.ledgetopdroneservices.com"
-value = urljoin(origin, sys.argv[1])
+base = urlsplit(sys.argv[1])
+value = urljoin(sys.argv[1] + "/", sys.argv[2])
 parsed = urlsplit(value)
-if parsed.scheme != "https" or parsed.hostname != "ops.ledgetopdroneservices.com" or parsed.username or parsed.password:
+if (parsed.scheme != "https" or parsed.hostname != base.hostname or parsed.port is not None or
+        parsed.username or parsed.password or parsed.fragment):
     raise SystemExit(1)
-if not parsed.path.startswith("/api/internal/thumbnail-renderer/v1/"):
+if not parsed.path.startswith("/api/internal/thumbnail-renderer/v1/thumbnail/"):
     raise SystemExit(1)
 print(value)
-' "$1"
+' "$LTDSTHUMB_API_BASE" "$1"
 }
 
 validate_presigned_url() {
@@ -305,7 +314,12 @@ start_heartbeat() {
     return 1
   fi
   (
-    while sleep "$HEARTBEAT_SECONDS"; do
+    while true; do
+      sleep "$HEARTBEAT_SECONDS" &
+      local sleep_pid=$!
+      printf '%s' "$sleep_pid" >"$HEARTBEAT_SLEEP_PID_FILE"
+      wait "$sleep_pid" || exit 0
+      rm -f -- "$HEARTBEAT_SLEEP_PID_FILE"
       if ! heartbeat_once "$source_key" "$lease_id"; then
         mark_stale
         log "claim abandoned: heartbeat was not accepted"
@@ -318,6 +332,7 @@ start_heartbeat() {
 
 fail_job() {
   local source_key="$1" lease_id="$2" code="$3" message="$4" payload result
+  log "video thumbnail failed ($code)"
   payload=$(json_fail_payload "$source_key" "$lease_id" "$code" "$message") || return 1
   if ! ops_json_call POST "$LTDSTHUMB_API_BASE/fail" "$payload"; then
     mark_stale
@@ -550,6 +565,7 @@ process_one() {
   CURRENT_JOB_DIR=$(mktemp -d "$LTDSTHUMB_SCRATCH_DIR/video-job.XXXXXX")
   chmod 700 -- "$CURRENT_JOB_DIR"
   STALE_MARKER="$CURRENT_JOB_DIR/lease-stale"
+  HEARTBEAT_SLEEP_PID_FILE="$CURRENT_JOB_DIR/heartbeat-sleep-pid"
 
   local claim_rc=0
   claim_once || claim_rc=$?
