@@ -6,6 +6,7 @@
 set -Eeuo pipefail
 
 readonly EXPECTED_API_BASE="https://ops.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1"
+readonly LEGACY_API_BASE="https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1"
 readonly MAX_SOURCE_BYTES=10737418240 # exactly 10 * 1024 * 1024 * 1024
 readonly MAX_OUTPUT_BYTES=131072      # exactly 128 KiB
 readonly HEARTBEAT_SECONDS=60
@@ -29,6 +30,10 @@ valid_secret() {
   [[ -n "$1" && "$1" != *$'\r'* && "$1" != *$'\n'* ]]
 }
 
+if [[ "$LTDSTHUMB_API_BASE" == "$LEGACY_API_BASE" ]]; then
+  log "legacy Incoming renderer endpoint detected; using canonical Operations endpoint"
+  LTDSTHUMB_API_BASE="$EXPECTED_API_BASE"
+fi
 [[ "$LTDSTHUMB_API_BASE" == "$EXPECTED_API_BASE" ]] ||
   die "LTDSTHUMB_API_BASE must be the canonical Operations renderer endpoint"
 valid_secret "$LTDSTHUMB_API_TOKEN" || die "LTDSTHUMB_API_TOKEN (or THUMBNAIL_INGEST_SECRET) is required"
@@ -40,12 +45,14 @@ valid_secret "$CF_ACCESS_CLIENT_SECRET" || die "CF_ACCESS_CLIENT_SECRET is requi
   (( LTDSTHUMB_RENDER_TIMEOUT_SECONDS >= 30 && LTDSTHUMB_RENDER_TIMEOUT_SECONDS <= 840 )) ||
   die "LTDSTHUMB_RENDER_TIMEOUT_SECONDS must be an integer from 30 through 840"
 
-for dependency in curl python3 ffmpeg ffprobe timeout flock mktemp stat df tail tr; do
+for dependency in curl python3 ffmpeg ffprobe timeout flock mktemp stat; do
   require_command "$dependency"
 done
 
 mkdir -p -- "$LTDSTHUMB_SCRATCH_DIR"
 chmod 700 -- "$LTDSTHUMB_SCRATCH_DIR" 2>/dev/null || true
+[[ "$(stat -f -c '%T' -- "$LTDSTHUMB_SCRATCH_DIR" 2>/dev/null || true)" == "tmpfs" ]] ||
+  die "LTDSTHUMB_SCRATCH_DIR must be a tmpfs RAM mount"
 exec 9>"$LTDSTHUMB_SCRATCH_DIR/.video-queue-worker.lock"
 flock -n 9 || die "another video queue worker already holds the scratch lock"
 
@@ -54,6 +61,8 @@ CURRENT_JOB_DIR=""
 STALE_MARKER=""
 HEARTBEAT_PID=""
 ACTIVE_PID=""
+STREAM_PROXY_PID=""
+STREAM_PROXY_URL=""
 LAST_HTTP_STATUS=""
 LAST_HTTP_BODY=""
 
@@ -75,8 +84,18 @@ stop_active_command() {
   fi
 }
 
+stop_stream_proxy() {
+  if [[ -n "$STREAM_PROXY_PID" ]]; then
+    kill -TERM "$STREAM_PROXY_PID" 2>/dev/null || true
+    wait "$STREAM_PROXY_PID" 2>/dev/null || true
+    STREAM_PROXY_PID=""
+    STREAM_PROXY_URL=""
+  fi
+}
+
 cleanup_job() {
   stop_active_command
+  stop_stream_proxy
   stop_heartbeat
   if [[ -n "$CURRENT_JOB_DIR" && -d "$CURRENT_JOB_DIR" ]]; then
     rm -rf -- "$CURRENT_JOB_DIR"
@@ -89,6 +108,7 @@ request_stop() {
   STOP_REQUESTED=1
   log "shutdown requested"
   stop_active_command
+  stop_stream_proxy
   stop_heartbeat
 }
 
@@ -202,23 +222,6 @@ _raw_ops_upload() {
   return "$rc"
 }
 
-_raw_source_download() {
-  local url="$1" source_mode="$2" output_file="$3" error_file="$4"
-  local args=(
-    --disable --silent --show-error --fail --max-redirs 0
-    --proto '=https' --proto-redir '=https' --connect-timeout 10
-    --request GET --output "$output_file"
-  )
-  if [[ "$source_mode" == "operations_proxy" ]]; then
-    args+=(
-      --header "Authorization: Bearer $LTDSTHUMB_API_TOKEN"
-      --header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID"
-      --header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
-    )
-  fi
-  curl "${args[@]}" "$url" 2>"$error_file"
-}
-
 lease_is_live() {
   [[ -n "$HEARTBEAT_PID" && -n "$STALE_MARKER" && ! -e "$STALE_MARKER" ]] &&
     kill -0 "$HEARTBEAT_PID" 2>/dev/null
@@ -270,14 +273,6 @@ ops_upload_call() {
   LAST_HTTP_STATUS=$(<"$status_file")
   LAST_HTTP_BODY=$(<"$body_file")
   rm -f -- "$body_file" "$status_file"
-}
-
-download_source() {
-  local url="$1" source_mode="$2" output_file="$3"
-  local error_file="$CURRENT_JOB_DIR/download-error"
-  : >"$error_file"
-  chmod 600 -- "$error_file"
-  run_guarded _raw_source_download "$url" "$source_mode" "$output_file" "$error_file"
 }
 
 heartbeat_once() {
@@ -341,29 +336,151 @@ if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
 ' "$input_file"
 }
 
+start_stream_proxy() {
+  local source_url="$1" port_file="$CURRENT_JOB_DIR/stream-proxy-port"
+  rm -f -- "$port_file"
+  REMOTE_SOURCE_URL="$source_url" python3 -c '
+import http.server, os, re, sys, urllib.error, urllib.request
+
+remote_url = os.environ.pop("REMOTE_SOURCE_URL")
+port_file = sys.argv[1]
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+opener = urllib.request.build_opener(NoRedirect)
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
+
+    def log_message(self, _format, *_args):
+        pass
+
+    def do_HEAD(self):
+        self.forward(False)
+
+    def do_GET(self):
+        self.forward(True)
+
+    def forward(self, include_body):
+        if self.path != "/source":
+            self.send_error(404)
+            return
+        headers = {"Accept-Encoding": "identity"}
+        range_value = self.headers.get("Range")
+        if range_value:
+            if not re.fullmatch(r"bytes=\d+-\d*", range_value):
+                self.send_error(416)
+                return
+            headers["Range"] = range_value
+        elif not include_body:
+            # The R2 URL is signed for GET, so satisfy a local HEAD with a
+            # one-byte GET and synthesize the full length from Content-Range.
+            headers["Range"] = "bytes=0-0"
+        request = urllib.request.Request(remote_url, headers=headers, method="GET")
+        try:
+            response = opener.open(request, timeout=30)
+        except urllib.error.HTTPError as error:
+            self.send_response(error.code)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        except Exception:
+            self.send_error(502)
+            return
+        with response:
+            self.send_response(response.status if include_body else 200)
+            for name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag"):
+                value = response.headers.get(name)
+                if not include_body and name == "Content-Length":
+                    content_range = response.headers.get("Content-Range", "")
+                    match = re.fullmatch(r"bytes \d+-\d+/(\d+)", content_range)
+                    value = match.group(1) if match else value
+                if not include_body and name == "Content-Range":
+                    continue
+                if value is not None:
+                    self.send_header(name, value)
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            if not include_body:
+                return
+            try:
+                while True:
+                    chunk = response.read(262144)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+class Server(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+
+server = Server(("127.0.0.1", 0), Handler)
+with open(port_file, "x", encoding="ascii") as handle:
+    handle.write(str(server.server_port))
+os.chmod(port_file, 0o600)
+server.serve_forever(poll_interval=0.2)
+' "$port_file" &
+  STREAM_PROXY_PID=$!
+
+  local wait_count=0 port=""
+  while [[ ! -s "$port_file" ]]; do
+    kill -0 "$STREAM_PROXY_PID" 2>/dev/null || return 1
+    sleep 0.1
+    wait_count=$((wait_count + 1))
+    (( wait_count < 100 )) || return 1
+  done
+  port=$(<"$port_file")
+  [[ "$port" =~ ^[0-9]+$ ]] && (( port >= 1024 && port <= 65535 )) || return 1
+  STREAM_PROXY_URL="http://127.0.0.1:${port}/source"
+}
+
+probe_video_seek() {
+  local stream_url="$1" duration_file="$CURRENT_JOB_DIR/video-duration" rc=0 duration
+  rm -f -- "$duration_file"
+  run_guarded timeout --signal=TERM --kill-after=10s 60 \
+    ffprobe -v error -protocol_whitelist http,tcp \
+    -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \
+    "$stream_url" >"$duration_file" || rc=$?
+  (( rc == 0 )) || return "$rc"
+  duration=$(<"$duration_file")
+  VIDEO_SEEK=$(python3 -c '
+import math, sys
+try:
+    duration = float(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+if not math.isfinite(duration) or duration <= 0:
+    raise SystemExit(1)
+print("5" if duration >= 5 else format(duration / 2, ".6f"))
+' "$duration")
+}
+
 render_video() {
-  local source_file="$1" output_file="$2" seek quality output_size
-  for seek in 5 1 0; do
-    for quality in 75 60 45 30; do
-      rm -f -- "$output_file"
-      local seek_args=()
-      (( seek > 0 )) && seek_args=(-ss "$seek")
-      local rc=0
-      run_guarded timeout --signal=TERM --kill-after=10s "$LTDSTHUMB_RENDER_TIMEOUT_SECONDS" \
-        ffmpeg -hide_banner -loglevel quiet -nostdin -y \
-        "${seek_args[@]}" -protocol_whitelist file,pipe -i "$source_file" -map 0:v:0 -frames:v 1 -an -sn -dn \
-        -map_metadata -1 -map_chapters -1 \
-        -vf "scale=320:240:force_original_aspect_ratio=increase,crop=320:240,setsar=1" \
-        -c:v libwebp -compression_level 6 -q:v "$quality" "$output_file" || rc=$?
-      if (( rc != 0 )); then
-        (( rc == 75 )) && return 75
-        continue
-      fi
-      output_size=$(stat -c '%s' -- "$output_file" 2>/dev/null || printf '0')
-      if (( output_size > 0 && output_size <= MAX_OUTPUT_BYTES )) && valid_webp "$output_file"; then
-        return 0
-      fi
-    done
+  local stream_url="$1" output_file="$2" quality output_size rc=0
+  VIDEO_SEEK=""
+  probe_video_seek "$stream_url" || rc=$?
+  (( rc == 0 )) || return "$rc"
+  log "rendering one frame at ${VIDEO_SEEK}s via bounded HTTP range reads"
+  for quality in 75 60 45 30; do
+    rm -f -- "$output_file"
+    rc=0
+    run_guarded timeout --signal=TERM --kill-after=10s "$LTDSTHUMB_RENDER_TIMEOUT_SECONDS" \
+      ffmpeg -hide_banner -loglevel quiet -nostdin -y \
+      -ss "$VIDEO_SEEK" -protocol_whitelist http,tcp -i "$stream_url" \
+      -map 0:v:0 -frames:v 1 -an -sn -dn -map_metadata -1 -map_chapters -1 \
+      -vf "scale=320:240:force_original_aspect_ratio=increase,crop=320:240,setsar=1" \
+      -c:v libwebp -compression_level 6 -q:v "$quality" "$output_file" || rc=$?
+    if (( rc != 0 )); then
+      (( rc == 75 )) && return 75
+      continue
+    fi
+    output_size=$(stat -c '%s' -- "$output_file" 2>/dev/null || printf '0')
+    if (( output_size > 0 && output_size <= MAX_OUTPUT_BYTES )) && valid_webp "$output_file"; then
+      return 0
+    fi
   done
   return 1
 }
@@ -445,50 +562,23 @@ process_one() {
     return 20
   fi
 
-  local download_url source_mode
+  local stream_url
   if [[ -n "$presigned_url" ]] && validate_presigned_url "$presigned_url"; then
-    download_url="$presigned_url"
-    source_mode="presigned"
+    stream_url="$presigned_url"
   else
-    download_url=$(resolve_ops_url "$source_url" 2>/dev/null || true)
-    source_mode="operations_proxy"
-    if [[ -z "$download_url" ]]; then
-      fail_job "$source_key" "$lease_id" source_url_unavailable "Claim did not provide a valid lease-bound source URL" || true
-      cleanup_job
-      return 20
-    fi
+    fail_job "$source_key" "$lease_id" presigned_url_unavailable "Claim did not provide a valid range-streaming URL" || true
+    cleanup_job
+    return 20
   fi
 
-  local available_bytes required_bytes source_file="$CURRENT_JOB_DIR/source.video"
-  available_bytes=$(df --output=avail -B1 "$CURRENT_JOB_DIR" | tail -n 1 | tr -d '[:space:]')
-  required_bytes=$(( source_size + MAX_OUTPUT_BYTES + 16777216 ))
-  if [[ ! "$available_bytes" =~ ^[0-9]+$ ]] || (( available_bytes < required_bytes )); then
-    fail_job "$source_key" "$lease_id" insufficient_space "Scratch space cannot hold the claimed video safely" || true
-    cleanup_job
-    return 20
-  fi
-  local download_rc=0
-  download_source "$download_url" "$source_mode" "$source_file" || download_rc=$?
-  if (( download_rc == 75 )); then
-    log "attempt stopped because its lease became stale"
-    cleanup_job
-    return 20
-  fi
-  if (( download_rc != 0 )); then
-    fail_job "$source_key" "$lease_id" download_failed "The claimed video could not be downloaded" || true
-    cleanup_job
-    return 20
-  fi
-  local downloaded_size
-  downloaded_size=$(stat -c '%s' -- "$source_file" 2>/dev/null || printf '0')
-  if [[ "$downloaded_size" != "$source_size" ]]; then
-    fail_job "$source_key" "$lease_id" download_incomplete "The claimed video byte count did not match" || true
+  if ! start_stream_proxy "$stream_url"; then
+    fail_job "$source_key" "$lease_id" stream_proxy_failed "The RAM-only range proxy could not start" || true
     cleanup_job
     return 20
   fi
 
   local thumbnail_file="$CURRENT_JOB_DIR/thumbnail.webp" render_rc=0 thumbnail_size
-  render_video "$source_file" "$thumbnail_file" || render_rc=$?
+  render_video "$STREAM_PROXY_URL" "$thumbnail_file" || render_rc=$?
   if (( render_rc == 75 )); then
     log "attempt stopped because its lease became stale"
     cleanup_job

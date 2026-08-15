@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import test from "node:test";
 
-const scriptUrl = new URL("../bin/truenas-video-queue-worker.sh", import.meta.url);
+const scriptUrl = new URL("../truenas/thumbnail-generation/thumbnail-queue-worker.sh", import.meta.url);
 const script = await readFile(scriptUrl, "utf8");
 
 test("video queue worker has valid Bash syntax", (t) => {
@@ -21,27 +21,35 @@ test("video queue worker has valid Bash syntax", (t) => {
 
 test("video queue worker is pinned to the private Operations origin", () => {
   assert.match(script, /readonly EXPECTED_API_BASE="https:\/\/ops\.ledgetopdroneservices\.com\/api\/internal\/thumbnail-renderer\/v1"/);
-  assert.doesNotMatch(script, /incoming\.ledgetopdroneservices\.com/);
+  assert.match(script, /readonly LEGACY_API_BASE="https:\/\/incoming\.ledgetopdroneservices\.com\/api\/internal\/thumbnail-renderer\/v1"/);
+  assert.match(script, /legacy Incoming renderer endpoint detected; using canonical Operations endpoint/);
+  assert.match(script, /LTDSTHUMB_API_BASE="\$EXPECTED_API_BASE"/);
   assert.match(script, /LTDSTHUMB_API_BASE" == "\$EXPECTED_API_BASE"/);
   assert.match(script, /CF-Access-Client-Id: \$CF_ACCESS_CLIENT_ID/);
   assert.match(script, /CF-Access-Client-Secret: \$CF_ACCESS_CLIENT_SECRET/);
   assert.match(script, /Authorization: Bearer \$LTDSTHUMB_API_TOKEN/);
 });
 
-test("video queue worker can claim only videos and enforces exact byte limits", () => {
+test("video queue worker claims only videos and range-streams from a validated R2 URL", () => {
   assert.match(script, /\/claim\?includeKind=video/);
   assert.doesNotMatch(script, /excludeKind=video/);
   assert.match(script, /readonly MAX_SOURCE_BYTES=10737418240\b/);
   assert.match(script, /readonly MAX_OUTPUT_BYTES=131072\b/);
   assert.match(script, /"\$media_kind" != "video"/);
-  assert.match(script, /source_url_unavailable/);
-  assert.match(script, /json_string "\$LAST_HTTP_BODY" r2SourceUrl/);
-  assert.match(script, /download_url=\$\(resolve_ops_url "\$source_url"/);
-  assert.match(script, /_raw_source_download/);
-  assert.match(script, /--disable --silent --show-error --fail --max-redirs 0/);
-  assert.match(script, /--proto '=https' --proto-redir '=https'/);
-  assert.match(script, /--header "CF-Access-Client-Secret: \$CF_ACCESS_CLIENT_SECRET"/);
-  assert.match(script, /downloaded_size.*!= "\$source_size"/s);
+  assert.match(script, /presigned_url_unavailable/);
+  assert.match(script, /validate_presigned_url "\$presigned_url"/);
+  assert.ok(script.includes('\\.r2\\.cloudflarestorage\\.com'));
+  assert.match(script, /REMOTE_SOURCE_URL="\$source_url" python3/);
+  assert.match(script, /Server\(\("127\.0\.0\.1", 0\), Handler\)/);
+  assert.match(script, /STREAM_PROXY_URL="http:\/\/127\.0\.0\.1:\$\{port\}\/source"/);
+  assert.match(script, /ffprobe -v error -protocol_whitelist http,tcp/);
+  assert.match(script, /-ss "\$VIDEO_SEEK" -protocol_whitelist http,tcp -i "\$stream_url"/);
+  assert.doesNotMatch(script, /_raw_source_download/);
+  assert.doesNotMatch(script, /download_source/);
+  assert.doesNotMatch(script, /source\.video/);
+  assert.match(script, /LTDSTHUMB_SCRATCH_DIR must be a tmpfs RAM mount/);
+  assert.match(script, /duration >= 5/);
+  assert.match(script, /duration \/ 2/);
 });
 
 test("every attempt callback serializes the opaque lease id safely", () => {
@@ -59,7 +67,7 @@ test("heartbeat begins immediately, repeats every 60 seconds, and guards work", 
   const start = script.slice(script.indexOf("start_heartbeat()"), script.indexOf("fail_job()"));
   assert.ok(start.indexOf("heartbeat_once") < start.indexOf("while sleep \"$HEARTBEAT_SECONDS\""));
   assert.match(script, /run_guarded _raw_ops_upload/);
-  assert.match(script, /run_guarded _raw_source_download/);
+  assert.match(script, /run_guarded timeout[^\n]*\n\s+ffprobe/s);
   assert.match(script, /run_guarded timeout --signal=TERM/);
   assert.match(script, /lease_is_live \|\| return 75/);
   assert.match(script, /mark_stale\n\s+log "claim abandoned: heartbeat was not accepted"/);
@@ -71,11 +79,12 @@ test("upload is a bounded WebP and process cleanup is deterministic", () => {
   assert.match(script, /--upload-file "\$input_file"/);
   assert.match(script, /mktemp -d "\$LTDSTHUMB_SCRATCH_DIR\/video-job\.XXXXXX"/);
   assert.match(script, /flock -n 9/);
-  assert.match(script, /stop_active_command\n\s+stop_heartbeat/);
+  assert.match(script, /stop_active_command\n\s+stop_stream_proxy\n\s+stop_heartbeat/);
   assert.match(script, /-frames:v 1/);
   assert.match(script, /-map_metadata -1 -map_chapters -1/);
   assert.match(script, /ffmpeg -hide_banner -loglevel quiet/);
-  assert.match(script, /-protocol_whitelist file,pipe -i "\$source_file"/);
-  assert.doesNotMatch(script, /ffmpeg[^\n]*https?:/);
+  assert.match(script, /-protocol_whitelist http,tcp -i "\$stream_url"/);
+  assert.doesNotMatch(script, /ffmpeg[^\n]*REMOTE_SOURCE_URL/);
+  assert.doesNotMatch(script, /ffmpeg[^\n]*r2PresignedUrl/);
   assert.doesNotMatch(script, /ffmpeg[^\n]*-loglevel (?:error|warning|info|verbose|debug|trace)/);
 });

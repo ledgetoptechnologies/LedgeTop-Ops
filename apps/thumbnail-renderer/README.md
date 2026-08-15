@@ -28,7 +28,7 @@ separate authenticated TrueNAS queue worker claims pending video jobs from
 `/api/internal/thumbnail-renderer/v1`. Do not point this pre-generator at that
 claim API or treat its video skip as disabling the queue-worker pipeline. The
 version-controlled replacement for the standalone container script is
-[`bin/truenas-video-queue-worker.sh`](bin/truenas-video-queue-worker.sh); deploy
+[`truenas/thumbnail-generation/thumbnail-queue-worker.sh`](truenas/thumbnail-generation/thumbnail-queue-worker.sh); deploy
 that file verbatim rather than copying the retired out-of-repository script.
 
 ## TrueNAS SCALE installation (UI only)
