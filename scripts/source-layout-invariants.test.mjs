@@ -11,6 +11,14 @@ const read = (relative) => fs.readFileSync(path.join(root, relative), "utf8");
 const readJson = (relative) => JSON.parse(read(relative));
 const normalizedSha256 = (relative) => crypto.createHash("sha256").update(read(relative).replace(/\r\n/g, "\n")).digest("hex");
 
+const projectAlphaCompatibilityFixtures = [
+  "packages/shared/fixtures/project-alpha-portal-v2.json",
+  "packages/shared/fixtures/project-alpha-portal-relations-v3.json",
+  "packages/shared/fixtures/project-alpha-catalog-v2.json",
+  "packages/shared/fixtures/project-alpha-pricing-hint-v1.json",
+  "packages/shared/fixtures/project-alpha-draft-quote-v1.json",
+];
+
 const expectedRateLimits = [
   ["ACCESS_CODE_RATE_LIMITER", "19462026", 10],
   ["PUBLIC_SESSION_RATE_LIMITER", "19462027", 20],
@@ -155,6 +163,21 @@ test("Operations and staging find the canonical client migration history", () =>
   assert.equal(readJson("apps/operations/wrangler.jsonc").d1_databases.find((item) => item.binding === "DELIVERY_DB").migrations_dir, "../client/migrations");
   assert(read("scripts/staging-requirements.mjs").includes('migrations_dir: "../client/migrations"'));
   assert(read("docs/staging/operations.wrangler.json.example").includes('"migrations_dir": "../client/migrations"'));
+});
+
+test("the Project Alpha handoff stays pinned to the reviewed compatibility corpus", () => {
+  const prompt = read("docs/project-alpha-client-portal-agent-prompt.md");
+  assert(prompt.includes("Project Alpha commit `60e735265e0d50ef880fde33e058d213a8b70c4b`"));
+  assert(prompt.includes("LTDS-Ops.git` commit\n`bc16d053ba78f838e3dd97d17d114321233ac50b`"));
+
+  for (const fixture of projectAlphaCompatibilityFixtures) {
+    const fixtureName = path.basename(fixture);
+    const digest = normalizedSha256(fixture);
+    assert(
+      prompt.includes(`\`${fixture}\`:\n  \`${digest}\``),
+      `${fixtureName} digest in the Project Alpha handoff is stale`,
+    );
+  }
 });
 
 test("the TrueNAS thumbnail runbooks retain the production edge and lease contract", () => {
