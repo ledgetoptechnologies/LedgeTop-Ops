@@ -9,6 +9,7 @@ readonly EXPECTED_API_BASE="https://ops.ledgetopdroneservices.com/api/internal/t
 readonly LEGACY_API_BASE="https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1"
 readonly MAX_SOURCE_BYTES=10737418240 # exactly 10 * 1024 * 1024 * 1024
 readonly MAX_OUTPUT_BYTES=131072      # exactly 128 KiB
+readonly MAX_STREAM_BYTES=536870912   # 512 MiB aggregate upstream reads per job
 readonly HEARTBEAT_SECONDS=60
 
 : "${LTDSTHUMB_API_BASE:=$EXPECTED_API_BASE}"
@@ -37,8 +38,10 @@ fi
 [[ "$LTDSTHUMB_API_BASE" == "$EXPECTED_API_BASE" ]] ||
   die "LTDSTHUMB_API_BASE must be the canonical Operations renderer endpoint"
 valid_secret "$LTDSTHUMB_API_TOKEN" || die "LTDSTHUMB_API_TOKEN (or THUMBNAIL_INGEST_SECRET) is required"
-valid_secret "$CF_ACCESS_CLIENT_ID" || die "CF_ACCESS_CLIENT_ID is required"
-valid_secret "$CF_ACCESS_CLIENT_SECRET" || die "CF_ACCESS_CLIENT_SECRET is required"
+if [[ -n "$CF_ACCESS_CLIENT_ID" || -n "$CF_ACCESS_CLIENT_SECRET" ]]; then
+  valid_secret "$CF_ACCESS_CLIENT_ID" || die "CF_ACCESS_CLIENT_ID must be set with CF_ACCESS_CLIENT_SECRET"
+  valid_secret "$CF_ACCESS_CLIENT_SECRET" || die "CF_ACCESS_CLIENT_SECRET must be set with CF_ACCESS_CLIENT_ID"
+fi
 [[ "$LTDSTHUMB_IDLE_SECONDS" =~ ^[0-9]+$ ]] && (( LTDSTHUMB_IDLE_SECONDS >= 1 && LTDSTHUMB_IDLE_SECONDS <= 3600 )) ||
   die "LTDSTHUMB_IDLE_SECONDS must be an integer from 1 through 3600"
 [[ "$LTDSTHUMB_RENDER_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] &&
@@ -188,11 +191,13 @@ _raw_ops_json() {
     --silent --show-error --max-redirs 0 --connect-timeout 10 --max-time 30
     --request "$method"
     --header "Authorization: Bearer $LTDSTHUMB_API_TOKEN"
-    --header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID"
-    --header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
     --header "Accept: application/json"
     --output "$body_file" --write-out '%{http_code}'
   )
+  if [[ -n "$CF_ACCESS_CLIENT_ID" ]]; then
+    args+=(--header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
+    args+=(--header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
+  fi
   if [[ -n "$payload" ]]; then
     args+=(--header "Content-Type: application/json" --data-binary "$payload")
   else
@@ -206,18 +211,21 @@ _raw_ops_json() {
 _raw_ops_upload() {
   local url="$1" input_file="$2" input_size="$3" body_file="$4" status_file="$5"
   local status rc=0
-  status=$(curl
+  local args=(
     --silent --show-error --max-redirs 0 --connect-timeout 10 --max-time 120
     --request PUT
     --header "Authorization: Bearer $LTDSTHUMB_API_TOKEN"
-    --header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID"
-    --header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET"
     --header "Accept: application/json"
     --header "Content-Type: image/webp"
     --header "Content-Length: $input_size"
     --upload-file "$input_file"
     --output "$body_file" --write-out '%{http_code}'
-    "$url") || rc=$?
+  )
+  if [[ -n "$CF_ACCESS_CLIENT_ID" ]]; then
+    args+=(--header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
+    args+=(--header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
+  fi
+  status=$(curl "${args[@]}" "$url") || rc=$?
   printf '%s' "$status" >"$status_file"
   return "$rc"
 }
@@ -338,12 +346,20 @@ if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
 
 start_stream_proxy() {
   local source_url="$1" port_file="$CURRENT_JOB_DIR/stream-proxy-port"
-  rm -f -- "$port_file"
-  REMOTE_SOURCE_URL="$source_url" python3 -c '
-import http.server, os, re, sys, urllib.error, urllib.request
+  local source_url_file="$CURRENT_JOB_DIR/stream-source-url"
+  rm -f -- "$port_file" "$source_url_file"
+  (umask 077; printf '%s' "$source_url" >"$source_url_file")
+  python3 -c '
+import http.server, os, re, sys, threading, urllib.error, urllib.request
 
-remote_url = os.environ.pop("REMOTE_SOURCE_URL")
 port_file = sys.argv[1]
+source_url_file = sys.argv[2]
+max_stream_bytes = int(sys.argv[3])
+with open(source_url_file, "r", encoding="utf-8") as handle:
+    remote_url = handle.read()
+os.unlink(source_url_file)
+budget_lock = threading.Lock()
+bytes_forwarded = 0
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -364,6 +380,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.forward(True)
 
     def forward(self, include_body):
+        global bytes_forwarded
         if self.path != "/source":
             self.send_error(404)
             return
@@ -410,6 +427,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     chunk = response.read(262144)
                     if not chunk:
                         break
+                    with budget_lock:
+                        if bytes_forwarded + len(chunk) > max_stream_bytes:
+                            self.close_connection = True
+                            return
+                        bytes_forwarded += len(chunk)
                     self.wfile.write(chunk)
             except (BrokenPipeError, ConnectionResetError):
                 pass
@@ -422,7 +444,7 @@ with open(port_file, "x", encoding="ascii") as handle:
     handle.write(str(server.server_port))
 os.chmod(port_file, 0o600)
 server.serve_forever(poll_interval=0.2)
-' "$port_file" &
+' "$port_file" "$source_url_file" "$MAX_STREAM_BYTES" &
   STREAM_PROXY_PID=$!
 
   local wait_count=0 port=""
@@ -438,12 +460,15 @@ server.serve_forever(poll_interval=0.2)
 }
 
 probe_video_seek() {
-  local stream_url="$1" duration_file="$CURRENT_JOB_DIR/video-duration" rc=0 duration
+  local stream_url="$1" demuxer="$2" timeout_seconds="$3"
+  local duration_file="$CURRENT_JOB_DIR/video-duration" rc=0 duration
+  local -a input_options=(-f "$demuxer")
+  [[ "$demuxer" == "mov" ]] && input_options+=(-enable_drefs 0 -use_absolute_path 0)
   rm -f -- "$duration_file"
-  run_guarded timeout --signal=TERM --kill-after=10s 60 \
+  run_guarded timeout --signal=TERM --kill-after=10s "$timeout_seconds" \
     ffprobe -v error -protocol_whitelist http,tcp \
     -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 \
-    "$stream_url" >"$duration_file" || rc=$?
+    "${input_options[@]}" "$stream_url" >"$duration_file" || rc=$?
   (( rc == 0 )) || return "$rc"
   duration=$(<"$duration_file")
   VIDEO_SEEK=$(python3 -c '
@@ -459,17 +484,27 @@ print("5" if duration >= 5 else format(duration / 2, ".6f"))
 }
 
 render_video() {
-  local stream_url="$1" output_file="$2" quality output_size rc=0
+  local stream_url="$1" output_file="$2" demuxer="$3"
+  local quality output_size rc=0 remaining probe_timeout
+  local render_deadline=$(( $(date +%s) + LTDSTHUMB_RENDER_TIMEOUT_SECONDS ))
+  local -a input_options=(-f "$demuxer")
+  [[ "$demuxer" == "mov" ]] && input_options+=(-enable_drefs 0 -use_absolute_path 0)
   VIDEO_SEEK=""
-  probe_video_seek "$stream_url" || rc=$?
+  remaining=$(( render_deadline - $(date +%s) ))
+  (( remaining > 0 )) || return 124
+  probe_timeout=$remaining
+  (( probe_timeout > 60 )) && probe_timeout=60
+  probe_video_seek "$stream_url" "$demuxer" "$probe_timeout" || rc=$?
   (( rc == 0 )) || return "$rc"
   log "rendering one frame at ${VIDEO_SEEK}s via bounded HTTP range reads"
   for quality in 75 60 45 30; do
+    remaining=$(( render_deadline - $(date +%s) ))
+    (( remaining > 0 )) || return 124
     rm -f -- "$output_file"
     rc=0
-    run_guarded timeout --signal=TERM --kill-after=10s "$LTDSTHUMB_RENDER_TIMEOUT_SECONDS" \
+    run_guarded timeout --signal=TERM --kill-after=10s "$remaining" \
       ffmpeg -hide_banner -loglevel quiet -nostdin -y \
-      -ss "$VIDEO_SEEK" -protocol_whitelist http,tcp -i "$stream_url" \
+      -ss "$VIDEO_SEEK" -protocol_whitelist http,tcp "${input_options[@]}" -i "$stream_url" \
       -map 0:v:0 -frames:v 1 -an -sn -dn -map_metadata -1 -map_chapters -1 \
       -vf "scale=320:240:force_original_aspect_ratio=increase,crop=320:240,setsar=1" \
       -c:v libwebp -compression_level 6 -q:v "$quality" "$output_file" || rc=$?
@@ -577,8 +612,19 @@ process_one() {
     return 20
   fi
 
+  local demuxer=""
+  case "${source_key,,}" in
+    *.mp4|*.mov) demuxer="mov" ;;
+    *.mkv) demuxer="matroska" ;;
+    *)
+      fail_job "$source_key" "$lease_id" unsupported_video_extension "Video key did not have an approved container extension" || true
+      cleanup_job
+      return 20
+      ;;
+  esac
+
   local thumbnail_file="$CURRENT_JOB_DIR/thumbnail.webp" render_rc=0 thumbnail_size
-  render_video "$STREAM_PROXY_URL" "$thumbnail_file" || render_rc=$?
+  render_video "$STREAM_PROXY_URL" "$thumbnail_file" "$demuxer" || render_rc=$?
   if (( render_rc == 75 )); then
     log "attempt stopped because its lease became stale"
     cleanup_job

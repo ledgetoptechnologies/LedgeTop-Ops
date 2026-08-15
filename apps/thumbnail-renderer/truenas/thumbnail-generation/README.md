@@ -6,8 +6,9 @@ version-controlled script to copy into the FFmpeg container at
 
 The script accepts the retired Incoming renderer URL only as a migration aid
 and immediately replaces it with the canonical Operations renderer endpoint.
-It requires the dedicated renderer bearer plus the two Cloudflare Access
-service-token values. `/scratch` must be a Docker `tmpfs` mount.
+It requires the dedicated renderer bearer. Cloudflare Access service-token
+values are optional and are sent only when both are configured. `/scratch`
+must be a Docker `tmpfs` mount.
 
 Videos are not downloaded as complete files. A loopback-only range proxy holds
 the validated, short-lived R2 GET URL and streams only FFprobe/FFmpeg's requested
@@ -20,8 +21,7 @@ Configure these runtime values using the TrueNAS application environment or
 secret fields:
 
 - `LTDSTHUMB_API_TOKEN` (or `THUMBNAIL_INGEST_SECRET`)
-- `CF_ACCESS_CLIENT_ID`
-- `CF_ACCESS_CLIENT_SECRET`
+- `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` (optional paired values)
 
 The canonical API base is
 `https://ops.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1`.

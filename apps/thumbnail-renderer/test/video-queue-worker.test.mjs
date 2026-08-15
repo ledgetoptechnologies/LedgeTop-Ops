@@ -27,6 +27,8 @@ test("video queue worker is pinned to the private Operations origin", () => {
   assert.match(script, /LTDSTHUMB_API_BASE" == "\$EXPECTED_API_BASE"/);
   assert.match(script, /CF-Access-Client-Id: \$CF_ACCESS_CLIENT_ID/);
   assert.match(script, /CF-Access-Client-Secret: \$CF_ACCESS_CLIENT_SECRET/);
+  assert.match(script, /if \[\[ -n "\$CF_ACCESS_CLIENT_ID" \]\]; then/);
+  assert.doesNotMatch(script, /CF_ACCESS_CLIENT_ID is required/);
   assert.match(script, /Authorization: Bearer \$LTDSTHUMB_API_TOKEN/);
 });
 
@@ -35,15 +37,22 @@ test("video queue worker claims only videos and range-streams from a validated R
   assert.doesNotMatch(script, /excludeKind=video/);
   assert.match(script, /readonly MAX_SOURCE_BYTES=10737418240\b/);
   assert.match(script, /readonly MAX_OUTPUT_BYTES=131072\b/);
+  assert.match(script, /readonly MAX_STREAM_BYTES=536870912\b/);
   assert.match(script, /"\$media_kind" != "video"/);
   assert.match(script, /presigned_url_unavailable/);
   assert.match(script, /validate_presigned_url "\$presigned_url"/);
   assert.ok(script.includes('\\.r2\\.cloudflarestorage\\.com'));
-  assert.match(script, /REMOTE_SOURCE_URL="\$source_url" python3/);
+  assert.match(script, /printf '%s' "\$source_url" >"\$source_url_file"/);
+  assert.doesNotMatch(script, /REMOTE_SOURCE_URL/);
+  assert.match(script, /os\.unlink\(source_url_file\)/);
+  assert.match(script, /bytes_forwarded \+ len\(chunk\) > max_stream_bytes/);
   assert.match(script, /Server\(\("127\.0\.0\.1", 0\), Handler\)/);
   assert.match(script, /STREAM_PROXY_URL="http:\/\/127\.0\.0\.1:\$\{port\}\/source"/);
   assert.match(script, /ffprobe -v error -protocol_whitelist http,tcp/);
-  assert.match(script, /-ss "\$VIDEO_SEEK" -protocol_whitelist http,tcp -i "\$stream_url"/);
+  assert.match(script, /input_options=\(-f "\$demuxer"\)/);
+  assert.match(script, /-enable_drefs 0 -use_absolute_path 0/);
+  assert.match(script, /-ss "\$VIDEO_SEEK" -protocol_whitelist http,tcp "\$\{input_options\[@\]\}" -i "\$stream_url"/);
+  assert.match(script, /render_deadline=.*LTDSTHUMB_RENDER_TIMEOUT_SECONDS/);
   assert.doesNotMatch(script, /_raw_source_download/);
   assert.doesNotMatch(script, /download_source/);
   assert.doesNotMatch(script, /source\.video/);
@@ -83,7 +92,7 @@ test("upload is a bounded WebP and process cleanup is deterministic", () => {
   assert.match(script, /-frames:v 1/);
   assert.match(script, /-map_metadata -1 -map_chapters -1/);
   assert.match(script, /ffmpeg -hide_banner -loglevel quiet/);
-  assert.match(script, /-protocol_whitelist http,tcp -i "\$stream_url"/);
+  assert.match(script, /-protocol_whitelist http,tcp "\$\{input_options\[@\]\}" -i "\$stream_url"/);
   assert.doesNotMatch(script, /ffmpeg[^\n]*REMOTE_SOURCE_URL/);
   assert.doesNotMatch(script, /ffmpeg[^\n]*r2PresignedUrl/);
   assert.doesNotMatch(script, /ffmpeg[^\n]*-loglevel (?:error|warning|info|verbose|debug|trace)/);
