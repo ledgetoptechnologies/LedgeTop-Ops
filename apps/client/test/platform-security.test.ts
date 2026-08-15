@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 vi.mock("cloudflare:workers", () => ({ WorkflowEntrypoint: class {} }));
-import { decodeItemRef, encodeItemRef, isHiddenKey, keyWithinRoot, parseRange, prefixHasVisibleContent, type VisibleContentBucket } from "../src/worker/files";
+import { decodeItemRef, encodeItemRef, indexedImmediateChildVisibility, isHiddenKey, keyWithinRoot, parseRange, prefixHasBrowsableEntry, prefixHasVisibleContent, streamPlayerUrl, type VisibleContentBucket } from "../src/worker/files";
 import { createSessionCookie, presignR2Get, verifyRotatingSessionCookie, verifySessionCookie } from "../src/worker/security";
 import { hashAccessCode } from "../../operations/src/worker/crypto";
 import { verifyAccessCode } from "../src/worker/security";
@@ -97,6 +97,16 @@ describe("shared folder availability",()=>{
   it("finds visible content recursively",async()=>{await expect(prefixHasVisibleContent(bucket({"jobs/client/":{folders:["jobs/client/edited/"]},"jobs/client/edited/":{objects:["jobs/client/edited/photo.jpg"]}}),"jobs/client/")).resolves.toBe(true);});
   it("does not treat dump, reserved metadata, previews, or folder markers as client content",async()=>{await expect(prefixHasVisibleContent(bucket({"jobs/client/":{objects:["jobs/client/"],folders:["jobs/client/dump/","jobs/client/_ltds/","jobs/client/.previews/"]}}),"jobs/client/")).resolves.toBe(false);expect(isHiddenKey("jobs/client/_ltds/index.json")).toBe(true);expect(isHiddenKey("jobs/client/.previews/hash/preview.webp")).toBe(true);});
   it("does not treat move markers or marker-only child folders as visible content",async()=>{const marker={ltdsMoveMarker:"ltds-moved-source-v1"};await expect(prefixHasVisibleContent(bucket({"jobs/client/":{objects:[{key:"jobs/client/old.jpg",customMetadata:marker}],folders:["jobs/client/child/"]},"jobs/client/child/":{objects:[{key:"jobs/client/child/old.jpg",customMetadata:marker}]}}),"jobs/client/")).resolves.toBe(false);});
+  it("opens a browsable child without scanning its descendants",async()=>{const calls:string[]=[];const source=bucket({"jobs/client/":{folders:["jobs/client/edited/"]},"jobs/client/edited/":{folders:["jobs/client/edited/photos/"]},"jobs/client/edited/photos/":{objects:["jobs/client/edited/photos/photo.jpg"]}});const counted:VisibleContentBucket={async list(options){calls.push(options.prefix);return source.list(options);}};await expect(prefixHasBrowsableEntry(counted,"jobs/client/")).resolves.toBe(true);expect(calls).toEqual(["jobs/client/"]);});
+  it("does not treat hidden immediate entries or move markers as browsable",async()=>{const marker={ltdsMoveMarker:"ltds-moved-source-v1"};await expect(prefixHasBrowsableEntry(bucket({"jobs/client/":{objects:[{key:"jobs/client/old.jpg",customMetadata:marker}],folders:["jobs/client/_ltds/","jobs/client/.previews/","jobs/client/dump/"]}}),"jobs/client/")).resolves.toBe(false);});
+});
+
+describe("indexed public folder visibility",()=>{
+  it("uses both file and thumbnail indexes and keeps unknown prefixes closed",async()=>{let sql="";const db={prepare(query:string){sql=query;return{bind(){return this;},async all(){return{results:[{prefix:"jobs/client/photos/",has_index:1,is_visible:1}]};}};}} as unknown as D1Database;const result=await indexedImmediateChildVisibility(db,["jobs/client/photos/","jobs/client/private/"]);expect(sql).toContain("FROM file_index");expect(sql).toContain("FROM image_thumbnail_jobs");expect(result.indexed).toEqual(new Set(["jobs/client/photos/"]));expect(result.visible).toEqual(new Set(["jobs/client/photos/"]));expect(result.visible.has("jobs/client/private/")).toBe(false);});
+});
+
+describe("Cloudflare Stream player",()=>{
+  it("requests visible playback controls, seeking metadata, and dark letterboxing",()=>{const url=new URL(streamPlayerUrl("customer-code","signed-token"));expect(url.hostname).toBe("customer-customer-code.cloudflarestream.com");expect(url.pathname).toBe("/signed-token/iframe");expect(Object.fromEntries(url.searchParams)).toEqual({controls:"true",preload:"metadata",letterboxColor:"#0d141a"});});
 });
 
 describe("shared folder unavailability grace",()=>{

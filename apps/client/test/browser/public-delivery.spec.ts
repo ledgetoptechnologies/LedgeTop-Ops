@@ -5,7 +5,7 @@ const folderId = "Zm9sZGVy";
 const rootImage = { id: "cm9vdC5qcGc", name: "Root photo.jpg", kind: "image", size: 1024, uploadedAt: "2026-08-01T12:00:00Z", previewUrl: "/media/root.svg", sourceUrl: "/media/root.svg", downloadUrl: "/api/public/shares/public/items/cm9vdC5qcGc/download", thumbnailState: "pending", thumbnailFallbackKind: "image" };
 const folderImage = { ...rootImage, id: "Zm9sZGVyL3Bob3RvLmpwZw", name: "Folder photo.jpg", previewUrl: "/media/folder.svg", sourceUrl: "/media/folder.svg", downloadUrl: "/api/public/shares/public/items/Zm9sZGVyL3Bob3RvLmpwZw/download" };
 const rootPdf = { id: "cmVwb3J0LnBkZg", name: "Report.pdf", kind: "pdf", size: 2048, uploadedAt: "2026-08-01T12:00:00Z", sourceUrl: "/media/report.pdf", downloadUrl: "/api/public/shares/public/items/cmVwb3J0LnBkZg/download", thumbnailState: "pending", thumbnailFallbackKind: "pdf" };
-const rootVideo = { id: "ZmxpZ2h0Lm1wNA", name: "Flight.mp4", kind: "video", size: 4096, uploadedAt: "2026-08-01T12:00:00Z", sourceUrl: "/media/flight.mp4", downloadUrl: "/api/public/shares/public/items/ZmxpZ2h0Lm1wNA/download", thumbnailState: "pending", thumbnailFallbackKind: "video", previewStatus: "processing" };
+const rootVideo = { id: "ZmxpZ2h0Lm1wNA", name: "Flight.mp4", kind: "video", size: 4096, uploadedAt: "2026-08-01T12:00:00Z", sourceUrl: "/media/flight.mp4", downloadUrl: "/api/public/shares/public/items/ZmxpZ2h0Lm1wNA/download", thumbnailState: "pending", thumbnailFallbackKind: "video", previewStatus: "ready" };
 const share = { publicId: "public", label: null, clientName: "Acme", projectName: "North Site", expiresAt: null };
 const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800"><rect width="1200" height="800" fill="#e65e22"/></svg>`;
 
@@ -25,7 +25,7 @@ async function mockShare(page: Page, mediaGate?: Promise<void>, locationResponse
       thumbnailUrl: `/thumb/${candidate.id}.svg`,
       thumbnailState: "ready",
       thumbnailFallbackKind: candidate.kind,
-      ...(candidate.kind === "video" ? { previewStatus: "processing" } : {}),
+      ...(candidate.kind === "video" ? { previewStatus: "previewStatus" in candidate && candidate.previewStatus === "ready" ? "ready" : "processing" } : {}),
     })) } });
   });
   await page.route("**/api/public/shares/public/download-summary**", route => {
@@ -38,6 +38,8 @@ async function mockShare(page: Page, mediaGate?: Promise<void>, locationResponse
   await page.route("**/media/*.svg", route => route.fulfill({ contentType: "image/svg+xml", body: svg }));
   await page.route("**/media/report.pdf", route => route.fulfill({ contentType: "application/pdf", body: "%PDF-1.4\n%%EOF" }));
   await page.route("**/media/flight.mp4", route => route.fulfill({ contentType: "video/mp4", body: "" }));
+  await page.route("**/api/public/shares/public/items/*/stream-ticket", route => route.fulfill({ json: { url: "/media/player.html" } }));
+  await page.route("**/media/player.html", route => route.fulfill({ contentType: "text/html", body: "<!doctype html><video controls><track kind=\"captions\"></video>" }));
   await page.route("**/thumb/*.svg", route => route.fulfill({ contentType: "image/svg+xml", body: svg }));
 }
 
@@ -211,8 +213,10 @@ test("image viewer matches Operations interaction and keeps PDF/video controls u
   await mockShare(page, undefined, undefined, [rootPdf, rootVideo]); await page.goto("/s/public?view=grid");
   const videoCard = page.locator(".item-card").filter({ hasText: "Flight.mp4" });
   await expect(videoCard.locator(`img[src="/thumb/${rootVideo.id}.svg"]`)).toBeVisible();
+  await expect(videoCard.getByText("Preparing preview…")).toHaveCount(0);
   const trigger = page.getByRole("button", { name: "Preview Root photo.jpg" }); await trigger.click();
   const dialog = page.getByRole("dialog", { name: "Preview Root photo.jpg" }); await expect(dialog).toBeFocused();
+  await expect(dialog.locator(".preview-stage")).toHaveCSS("background-color", "rgb(13, 20, 26)");
   const download = dialog.getByRole("link", { name: "Download Root photo.jpg" }); await expect(download).toHaveAttribute("href", rootImage.downloadUrl);
   const zoom = dialog.locator(".zoomable-delivery-image"); const box = await zoom.boundingBox(); expect(box).not.toBeNull();
   await page.mouse.move(box!.x + box!.width * .25, box!.y + box!.height * .25); await page.mouse.wheel(0, -120);
@@ -222,6 +226,9 @@ test("image viewer matches Operations interaction and keeps PDF/video controls u
   await page.keyboard.press("ArrowRight"); await expect(page.getByRole("dialog", { name: "Preview Report.pdf" })).toBeVisible();
   await expect(page.locator(".pdf-preview")).toBeVisible(); await expect(page.getByRole("button", { name: "Fit" })).toHaveCount(0);
   await page.keyboard.press("ArrowRight"); await expect(page.getByRole("dialog", { name: "Preview Flight.mp4" })).toBeVisible();
+  const streamPlayer = page.locator(".video-preview iframe"); await expect(streamPlayer).toBeVisible();
+  await expect(streamPlayer).toHaveAttribute("allow", /picture-in-picture/);
+  await expect(page.frameLocator(".video-preview iframe").locator("video")).toHaveAttribute("controls", "");
   await expect(page.locator(".zoomable-delivery-image")).toHaveCount(0); await expect(page.getByRole("button", { name: "Fit" })).toHaveCount(0);
   await page.keyboard.press("Escape"); await expect(page.getByRole("dialog")).toHaveCount(0); await expect(trigger).toBeFocused();
 });

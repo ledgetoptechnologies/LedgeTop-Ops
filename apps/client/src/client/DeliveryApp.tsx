@@ -514,7 +514,7 @@ function ItemCard({ item, selectionMode, selected, onToggle, onFolder, onPreview
     <button className="item-visual" onClick={event => { event.stopPropagation(); if (selectionMode) event.preventDefault(); action(); }} aria-label={`${selectionMode ? selected ? "Deselect" : "Select" : item.kind === "folder" ? "Open" : "Preview"} ${item.name}`}>
     {selectionMode && <span className="selection-checkbox" aria-hidden="true">{selected ? "✓" : ""}</span>}
     {item.thumbnailUrl ? <Thumbnail item={item} /> : item.kind === "folder" ? <span className="folder-shape" /> : <span className="file-kind">{iconFor(item)}</span>}
-    {item.kind === "video" && <span className="play">▶</span>}{item.kind === "video" && item.previewStatus === "processing" && <span className="media-status">Preparing preview…</span>}
+    {item.kind === "video" && <span className="play">▶</span>}{item.kind === "video" && !item.thumbnailUrl && item.previewStatus === "processing" && <span className="media-status">Preparing preview…</span>}
   </button><div className="item-info"><strong title={item.name}>{item.name}</strong><span>{formatBytes(item.size)}{item.uploadedAt ? ` · ${new Date(item.uploadedAt).toLocaleDateString()}` : ""}</span></div>
     {!selectionMode && item.downloadUrl && <a className="download-chip" href={item.downloadUrl} aria-label={`Download ${item.name}`}>Download</a>}
   </article>;

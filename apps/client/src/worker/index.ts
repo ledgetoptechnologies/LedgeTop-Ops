@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { secureHeaders } from "hono/secure-headers";
 import { isMovedSourceMarker, type DeliveryItem, type DeliveryManifest } from "@ltds/shared";
-import { decodeItemRef, encodeItemRef, indexedImmediateChildVisibility, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasVisibleContent, safeFileName, visibleImmediateChildPrefixes } from "./files";
+import { decodeItemRef, encodeItemRef, indexedImmediateChildVisibility, isHiddenKey, keyWithinRoot, kindForKey, mimeForKey, normalizeRoot, parseRange, prefixHasBrowsableEntry, safeFileName, streamPlayerUrl } from "./files";
 import { createSessionCookie, hmac, parseCookie, randomSecret, sha256, verifyAccessCode, verifyRotatingSessionCookie } from "./security";
 import { matchesEtag } from "./prepared-images";
 import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
@@ -161,7 +161,7 @@ export async function markUnavailableFolder(env:{DELIVERY_DB:PublicIdDatabase},s
 }
 
 async function requireAvailableFolder(env:Env,share:ShareRow):Promise<void>{
-  if(!(await prefixHasVisibleContent(env.DATA_BUCKET,share.r2_prefix)))await markUnavailableFolder(env,share);
+  if(!(await prefixHasBrowsableEntry(env.DATA_BUCKET,share.r2_prefix)))await markUnavailableFolder(env,share);
   if(share.unavailable_since)await sessionDb(env.DELIVERY_DB).prepare("UPDATE shares SET unavailable_since=NULL WHERE id=? AND revoked_at IS NULL").bind(share.id).run();
 }
 
@@ -271,19 +271,17 @@ function isTrashed(tombstones: Tombstone[], key: string): boolean {
   return tombstones.some(tombstone => tombstone.tombstone_kind === "exact" ? tombstone.physical_key === key : key.startsWith(tombstone.physical_key));
 }
 
-async function visiblePublicChildPrefixes(env:Env,prefix:string,candidates:readonly string[],tombstones:Tombstone[]):Promise<Set<string>>{
-  let indexed=new Set<string>(),visible=new Set<string>();
+async function visiblePublicChildPrefixes(env:Env,candidates:readonly string[]):Promise<Set<string>>{
+  const visible=new Set<string>();
   try{
     const state=await indexedImmediateChildVisibility(primaryDb(env),candidates);
-    indexed=state.indexed;visible=state.visible;
+    for(const candidate of state.visible)visible.add(candidate);
   }catch(error){
     console.warn(JSON.stringify({event:"public-manifest.folder-index-visibility-fallback",candidateCount:candidates.length,message:error instanceof Error?error.message:"unknown"}));
   }
-  const unindexed=candidates.filter(candidate=>!indexed.has(candidate));
-  if(unindexed.length){
-    const fallback=await visibleImmediateChildPrefixes(env.DATA_BUCKET,prefix,unindexed,object=>!isTrashed(tombstones,object.key));
-    for(const candidate of fallback)visible.add(candidate);
-  }
+  // Fail closed for a prefix absent from both visibility indexes. Recursively
+  // probing it would make folder-open time scale with the full subtree, while
+  // showing it optimistically could disclose stale/tombstoned folder names.
   return visible;
 }
 
@@ -388,7 +386,7 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   const aliases = await loadAliases(c.env, aliasKeys);
   const items: DeliveryItem[] = [];
   const candidateFolders=listed.delimitedPrefixes.filter(folderPrefix=>!isHiddenKey(folderPrefix)&&!isTrashed(tombstones,folderPrefix));
-  const visibleFolders=await visiblePublicChildPrefixes(c.env,prefix,candidateFolders,tombstones);
+  const visibleFolders=await visiblePublicChildPrefixes(c.env,candidateFolders);
   for (const folderPrefix of listed.delimitedPrefixes) {
     if (!visibleFolders.has(folderPrefix)) continue;
     const relative = folderPrefix.slice(root.length).replace(/\/$/, ""); if (!relative) continue;
@@ -550,7 +548,7 @@ async function createStreamTicket(c: any): Promise<{ url: string; expiresAt: str
   if (row?.stream_status !== "ready" || !row.stream_uid || !c.env.STREAM_CUSTOMER_CODE) throw new HTTPException(404, { message: "Video preview unavailable" });
   const token = await c.env.STREAM.video(row.stream_uid).generateToken();
   c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, "preview.viewed", itemRef));
-  return { url: `https://customer-${c.env.STREAM_CUSTOMER_CODE}.cloudflarestream.com/${token}/iframe`, expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() };
+  return { url: streamPlayerUrl(c.env.STREAM_CUSTOMER_CODE, token), expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() };
 }
 
 app.post("/api/public/shares/:publicId/items/:itemRef/stream-ticket", async c => c.json(await createStreamTicket(c)));

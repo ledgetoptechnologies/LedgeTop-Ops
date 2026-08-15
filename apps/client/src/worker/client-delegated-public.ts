@@ -12,7 +12,7 @@ import {
   normalizeRoot,
   parseRange,
   safeFileName,
-  visibleImmediateChildPrefixes,
+  streamPlayerUrl,
 } from "./files";
 import { listDownloadableObjects, summarizeDownloadableObjects } from "./downloadable-files";
 import { matchesEtag } from "./prepared-images";
@@ -129,15 +129,11 @@ async function loadAliases(env: Env, keys: string[]): Promise<Map<string, string
 
 async function visibleChildPrefixes(
   env: Env,
-  prefix: string,
   candidates: readonly string[],
-  tombstones: Tombstone[],
 ): Promise<Set<string>> {
-  let indexed = new Set<string>();
   const visible = new Set<string>();
   try {
     const state = await indexedImmediateChildVisibility(db(env), candidates);
-    indexed = state.indexed;
     for (const value of state.visible) visible.add(value);
   } catch (error) {
     console.warn(JSON.stringify({
@@ -146,16 +142,8 @@ async function visibleChildPrefixes(
       message: error instanceof Error ? error.message : "unknown",
     }));
   }
-  const fallbackCandidates = candidates.filter(candidate => !indexed.has(candidate));
-  if (fallbackCandidates.length) {
-    const fallback = await visibleImmediateChildPrefixes(
-      env.DATA_BUCKET,
-      prefix,
-      fallbackCandidates,
-      object => !isTrashed(tombstones, object.key),
-    );
-    for (const candidate of fallback) visible.add(candidate);
-  }
+  // Fail closed when neither visibility index knows the prefix. This avoids
+  // both recursive subtree scans and disclosure of stale folder names.
   return visible;
 }
 
@@ -303,7 +291,7 @@ export function createClientDelegatedPublicRouter(): Hono<{ Bindings: Env; Varia
     const items: DeliveryItem[] = [];
     const candidateFolders = listed.delimitedPrefixes.filter(folderPrefix =>
       folderPrefix.startsWith(prefix) && !isHiddenKey(folderPrefix) && !isTrashed(tombstones, folderPrefix));
-    const visibleFolders = await visibleChildPrefixes(c.env, prefix, candidateFolders, tombstones);
+    const visibleFolders = await visibleChildPrefixes(c.env, candidateFolders);
     for (const folderPrefix of listed.delimitedPrefixes) {
       if (!visibleFolders.has(folderPrefix)) continue;
       const relative = folderPrefix.slice(root.length).replace(/\/$/, "");
@@ -485,7 +473,7 @@ export function createClientDelegatedPublicRouter(): Hono<{ Bindings: Env; Varia
       throw new HTTPException(404, { message: "Video preview unavailable" });
     const token = await c.env.STREAM.video(row.stream_uid).generateToken();
     c.executionCtx.waitUntil(audit(c.env, c.req.raw, share, "client_share.preview.viewed", itemRef));
-    return c.json({ url: `https://customer-${c.env.STREAM_CUSTOMER_CODE}.cloudflarestream.com/${token}/iframe`,
+    return c.json({ url: streamPlayerUrl(c.env.STREAM_CUSTOMER_CODE, token),
       expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() });
   });
 
@@ -494,7 +482,7 @@ export function createClientDelegatedPublicRouter(): Hono<{ Bindings: Env; Varia
     const key = keyWithinRoot(share.deliveryPrefix, decodeItemRef(c.req.param("itemRef")));
     await assertVisibleObject(c.env, key);
     const kind = kindForKey(key);
-    if (kind !== "image" && kind !== "pdf")
+    if (kind !== "image" && kind !== "pdf" && kind !== "video")
       throw new HTTPException(409, { message: "Thumbnail is not available for this file type" });
     return serveAuthorizedThumbnail(c.env, key, {
       method: c.req.method, ifNoneMatch: c.req.header("If-None-Match"), kind,

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import migration from "../migrations/0124_client_delegated_public_shares.sql?raw";
 import provisioningMigration from "../migrations/0130_client_delegated_share_provisioning.sql?raw";
 import { createSessionCookie, parseCookie, sha256 } from "../src/worker/security";
-import { encodeItemRef } from "../src/worker/files";
+import { encodeItemRef, indexedImmediateChildVisibility } from "../src/worker/files";
 import { createClientDelegatedPublicRouter } from "../src/worker/client-delegated-public";
 import {
   authorizeClientDelegatedPublicShare,
@@ -160,6 +160,20 @@ describe("client-delegated public share foundation", () => {
       ENVIRONMENT: "development",
     } as Env;
   }, 30_000);
+
+  it("resolves unindexed media folders from thumbnail jobs without exposing tombstoned folders", async () => {
+    await db.batch([
+      db.prepare("INSERT INTO image_thumbnail_jobs(source_key,source_etag,thumbnail_key,status) VALUES (?,?,?,'ready')")
+        .bind("clients/fast/photos/photo.jpg", "etag-a", "_ltds/thumbnails/fast-a.webp"),
+      db.prepare("INSERT INTO image_thumbnail_jobs(source_key,source_etag,thumbnail_key,status) VALUES (?,?,?,'ready')")
+        .bind("clients/private/deleted/photo.jpg", "etag-b", "_ltds/thumbnails/fast-b.webp"),
+      db.prepare("INSERT INTO delivery_tombstones(physical_key,tombstone_kind) VALUES (?,'prefix')")
+        .bind("clients/private/deleted/"),
+    ]);
+    const result = await indexedImmediateChildVisibility(db, ["clients/fast/", "clients/private/deleted/", "clients/unknown/"]);
+    expect(result.indexed).toEqual(new Set(["clients/fast/", "clients/private/deleted/"]));
+    expect(result.visible).toEqual(new Set(["clients/fast/"]));
+  });
 
   afterAll(async () => miniflare.dispose());
 

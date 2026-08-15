@@ -102,6 +102,28 @@ export async function visibleImmediateChildPrefixes(bucket:VisibleContentBucket,
   return new Set([...visible].filter(value=>allowed.has(value)));
 }
 
+/**
+ * Checks whether a public share root has an immediate entry that can be
+ * browsed. Unlike `prefixHasVisibleContent`, this deliberately never descends
+ * into child folders, so opening a share cannot scale with its entire tree.
+ */
+export async function prefixHasBrowsableEntry(bucket: VisibleContentBucket, rootValue: string): Promise<boolean> {
+  const root = normalizeRoot(rootValue);
+  let cursor: string | undefined;
+  do {
+    const listed = await bucket.list({ prefix: root, delimiter: "/", limit: 1000, cursor, include: ["customMetadata"] });
+    if (listed.objects.some(object => object.key !== root && !object.key.endsWith("/") && !isHiddenKey(object.key) && !isMovedSourceMarker(object))) return true;
+    if (listed.delimitedPrefixes.some(prefix => !isHiddenKey(prefix))) return true;
+    cursor = listed.truncated ? listed.cursor : undefined;
+  } while (cursor);
+  return false;
+}
+
+export function streamPlayerUrl(customerCode: string, token: string): string {
+  const options = new URLSearchParams({ controls: "true", preload: "metadata", letterboxColor: "#0d141a" });
+  return `https://customer-${customerCode}.cloudflarestream.com/${token}/iframe?${options.toString()}`;
+}
+
 const INDEX_VISIBILITY_BATCH = 40;
 
 function prefixUpperBound(prefix:string):string{return`${prefix.slice(0,-1)}0`;}
@@ -129,6 +151,14 @@ export async function indexedImmediateChildVisibility(db:D1Database,candidates:r
             AND instr(lower('/'||indexed_file.r2_key||'/'),'/.previews/')=0
             AND instr(lower('/'||indexed_file.r2_key||'/'),'/dump/')=0
           LIMIT 1
+        ) OR EXISTS (
+          SELECT 1 FROM image_thumbnail_jobs indexed_thumbnail
+          WHERE indexed_thumbnail.source_key>=c.prefix AND indexed_thumbnail.source_key<c.upper_bound
+            AND indexed_thumbnail.source_key<>c.prefix AND substr(indexed_thumbnail.source_key,-1,1)<>'/'
+            AND instr(lower('/'||indexed_thumbnail.source_key||'/'),'/_ltds/')=0
+            AND instr(lower('/'||indexed_thumbnail.source_key||'/'),'/.previews/')=0
+            AND instr(lower('/'||indexed_thumbnail.source_key||'/'),'/dump/')=0
+          LIMIT 1
         ) has_index,
         EXISTS (
           SELECT 1 FROM file_index file
@@ -141,6 +171,20 @@ export async function indexedImmediateChildVisibility(db:D1Database,candidates:r
               SELECT 1 FROM delivery_tombstones tombstone WHERE tombstone.restored_at IS NULL AND (
                 (tombstone.tombstone_kind='exact' AND tombstone.physical_key=file.r2_key) OR
                 (tombstone.tombstone_kind='prefix' AND substr(file.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key)
+              )
+            )
+          LIMIT 1
+        ) OR EXISTS (
+          SELECT 1 FROM image_thumbnail_jobs thumbnail
+          WHERE thumbnail.source_key>=c.prefix AND thumbnail.source_key<c.upper_bound
+            AND thumbnail.source_key<>c.prefix AND substr(thumbnail.source_key,-1,1)<>'/'
+            AND instr(lower('/'||thumbnail.source_key||'/'),'/_ltds/')=0
+            AND instr(lower('/'||thumbnail.source_key||'/'),'/.previews/')=0
+            AND instr(lower('/'||thumbnail.source_key||'/'),'/dump/')=0
+            AND NOT EXISTS (
+              SELECT 1 FROM delivery_tombstones tombstone WHERE tombstone.restored_at IS NULL AND (
+                (tombstone.tombstone_kind='exact' AND tombstone.physical_key=thumbnail.source_key) OR
+                (tombstone.tombstone_kind='prefix' AND substr(thumbnail.source_key,1,length(tombstone.physical_key))=tombstone.physical_key)
               )
             )
           LIMIT 1
