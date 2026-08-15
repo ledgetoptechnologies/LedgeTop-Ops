@@ -177,6 +177,12 @@ proof, and the complete disabled-flag set for each deployed Worker. A generic
 `ready` statement cannot satisfy an external gate; every named proof in
 `REQUIRED_EXTERNAL_GATE_PROOFS` must be current and referenced.
 
+For this checklist, `idempotentReapplyPassed` is specifically a second
+`wrangler d1 migrations apply` against the same `d1_migrations` ledger that
+returns `No migrations to apply`. Do not execute migration SQL files directly
+for this proof: ledger-once historical migrations intentionally contain SQLite
+DDL without a safe raw-SQL replay form.
+
 `activationPlan.requestedFlags` is empty for this release preparation. Any
 later staging activation is validated against
 `FEATURE_FLAG_ACTIVATION_POLICIES`; flags marked prohibited require their own

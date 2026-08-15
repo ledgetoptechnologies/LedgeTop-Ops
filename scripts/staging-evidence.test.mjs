@@ -249,3 +249,18 @@ test("pre-deployment preparation and post-deployment verification remain non-cir
   assert.equal(verify.includes("validateEvidenceFile"), true);
   assert.equal(verify.includes('"staging:release:prepare"'), true);
 });
+
+test("migration reapply evidence uses Wrangler's ledger instead of replaying raw SQL", () => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  for (const relative of [
+    ["docs", "staging", "client-portal-rollout.md"],
+    ["docs", "staging", "release-checklist.md"],
+  ]) {
+    const document = fs.readFileSync(path.join(root, ...relative), "utf8");
+    assert.match(document, /idempotentReapplyPassed/);
+    assert.match(document, /wrangler d1 migrations apply/);
+    assert.match(document, /No migrations to apply/);
+    assert.match(document, /(?:raw SQL files a second time|migration SQL files directly)/i);
+    assert.match(document, /(?:Do not|Never)/);
+  }
+});

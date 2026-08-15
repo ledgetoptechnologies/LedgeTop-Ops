@@ -61,6 +61,13 @@ and warns that Bypass disables Access enforcement in
 3. After migration approval, apply Delivery migrations first and Operations
    `0014`-`0023` second. Record the list/apply output and confirm production
    migration state was not touched.
+   In this release packet, `idempotentReapplyPassed` means rerunning
+   `wrangler d1 migrations apply` against the same database and migration
+   ledger returns `No migrations to apply`. It does **not** mean executing the
+   raw SQL files a second time. Several historical migrations are deliberately
+   ledger-once because SQLite does not support idempotent forms for every
+   `ALTER TABLE` or `CREATE TABLE` operation. Never bypass `d1_migrations` to
+   manufacture reapply evidence.
 4. Upload a version with the portal false and inspect routes, bindings, vars,
    and secret names. Deploy only that reviewed version after deployment
    approval.
