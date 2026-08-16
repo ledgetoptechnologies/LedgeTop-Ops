@@ -5666,13 +5666,10 @@ function ClientAccountRootActivation() {
   const [message, setMessage] = useState("");
   const unlinked = state.data?.accounts.filter(account => account.status === "active" && account.activationState === "unlinked") ?? [];
   const account = unlinked.find(item => item.id === accountId) ?? unlinked[0];
-  const source = state.data?.sources.find(item => item.clientId === sourceId) ?? state.data?.sources[0];
+  const source = state.data?.sources.find(item => item.clientId === sourceId);
   useEffect(() => {
     if (!accountId && unlinked[0]) setAccountId(unlinked[0].id);
   }, [accountId, unlinked]);
-  useEffect(() => {
-    if (!sourceId && state.data?.sources[0]) setSourceId(state.data.sources[0].clientId);
-  }, [sourceId, state.data?.sources]);
 
   const activate = async () => {
     if (!account || !source || busy || state.data?.workspaceMigrationApplied) return;
@@ -5706,6 +5703,7 @@ function ClientAccountRootActivation() {
         {unlinked.map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}
       </select></label>
       <label>Project Alpha client<select value={source?.clientId ?? ""} disabled={busy} onChange={event => setSourceId(event.target.value)}>
+        <option value="" disabled>Select a Project Alpha client</option>
         {state.data.sources.map(item => <option key={item.clientId} value={item.clientId}>
           {item.organizationName ? `${item.organizationName} · ${item.clientName}` : `${item.clientName} · standalone`}
         </option>)}

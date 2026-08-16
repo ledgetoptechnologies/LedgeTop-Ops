@@ -52,7 +52,9 @@ test("administrator links the reviewed Project Alpha root on desktop and mobile"
   const card = page.locator("section.ltds-card").filter({ has: heading });
   await expect(card).toBeVisible();
   await expect(page.getByLabel("Legacy client account")).toHaveValue("account-a");
-  await expect(page.getByLabel("Project Alpha client")).toHaveValue("pa-client-a");
+  await expect(page.getByLabel("Project Alpha client")).toHaveValue("");
+  await expect(page.getByRole("button", { name: "Link Project Alpha root" })).toBeDisabled();
+  await page.getByLabel("Project Alpha client").selectOption("pa-client-a");
   await expect(card.locator(".notice.full")).toContainText("Effective workspace root: Acme Organization · pa-org-a");
   await page.getByRole("button", { name: "Link Project Alpha root" }).click();
   await expect(page.getByText(/Project Alpha root linked and audited/)).toBeVisible();
