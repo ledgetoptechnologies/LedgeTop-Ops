@@ -22,8 +22,9 @@ the user separately authorizes it.
 Your objective is to implement Project Alpha's half of the LTDS Client Portal
 v2 contract. The exact reviewed LTDS compatibility source is
 `https://github.com/ledgetoptechnologies/LTDS-Ops.git` commit
-`bc16d053ba78f838e3dd97d17d114321233ac50b`; do not substitute a branch tip or
-another checkout. Treat that commit's repository-relative
+`b1ee064d8e9a78ff1fbc43c671bff4c2c58d4c38`; this is the exact reviewed LTDS
+implementation commit supplied with this handoff; do not substitute a branch tip
+or another checkout. Treat that commit's repository-relative
 `docs/client-portal-v2-architecture.md`, `docs/project-alpha.md`, and the five
 fixture files below as normative. Verify these SHA-256 values before editing:
 
@@ -53,6 +54,48 @@ LTDS authorization audit. Do not add a Project Alpha client-facing login or
 reuse PA public project links/entity links as LTDS authorization.
 
 Implement this as additive, default-off, independently gated capabilities:
+
+0. **Authenticated Delivery audience and revocation contract**
+   - LTDS migration `0136_portal_v2_identity_denials.sql` owns global,
+     workspace, hierarchy, folder, and contact denials. Project Alpha does not
+     create, revoke, restore, or mirror those records. PA must publish enough
+     current hierarchy, principal, and entitlement state for LTDS to evaluate a
+     denial against the current lineage on every request.
+   - LTDS migration `0137_authenticated_delivery_grants.sql` owns staff-created
+     authenticated folder grants. A grant targets one opaque PA organization,
+     department, client, project, or principal and captures the selected PA
+     source version plus the LTDS folder-binding source version. It is distinct
+     from Operations `/s/...` bearer shares and client-owned
+     `/client-share/...` bearer shares.
+   - Group grants are dynamic: LTDS intersects the current verified identity,
+     active workspace membership, current `delivery.view` entitlement, current
+     hierarchy/lineage, current entity/source versions, folder binding, and
+     applicable denial on every request. PA must not publish a static email
+     recipient list as authorization. A newly entitled verified member may
+     qualify without rewriting the LTDS grant; a moved, tombstoned, revoked,
+     denied, expired, or source-stale member must stop qualifying immediately.
+   - Exact-person grants additionally require the same current PA principal
+     public ID/source version to remain bound to the same LTDS-verified
+     identity. PA email is nomination/display metadata only. Changing an email
+     must never transfer the principal public ID or entitlement to another
+     Cloudflare Access subject.
+   - PA must publish `delivery.view` at the narrowest intended organization,
+     department, client, project, or workspace scope. Allow and deny precedence
+     must be deterministic. A folder grant never widens a PA entitlement; it
+     only associates that folder with an audience already authorized for its
+     current owner scope.
+   - Entity moves, tombstones, project cancellation, entitlement revocation,
+     identity unbinding, and principal source-version changes must emit ordered
+     authoritative state that makes the old LTDS authorization fail closed on
+     the next request. Replay or an older generation must never reactivate it.
+   - LTDS revoke is terminal history. Restore creates a new grant version only
+     after revalidating current PA identity, hierarchy, entitlement, source
+     versions, expiry, and deny state. A restored PA entity or entitlement does
+     not by itself resurrect an old LTDS grant.
+   - A client-created public share remains subordinate to its current live
+     authenticated source grant. PA removal or revocation must therefore cause
+     LTDS to suspend the descendant bearer path without PA learning or storing
+     the bearer token.
 
 1. **Stable hierarchy and explicit portal authority**
    - Ensure organization, department, department-contact assignment, client,
