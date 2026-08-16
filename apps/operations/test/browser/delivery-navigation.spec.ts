@@ -629,6 +629,52 @@ test("1200 immediate children paint in 150-item pages with one page request in f
   await expect(page.getByText("Asset 1200.jpg",{exact:true})).toBeVisible();
 });
 
+test("folder cards render before advisory thumbnail and video state hydration completes", async ({ page }) => {
+  const media = deferred();
+  const mediaRequested = deferred();
+  let thumbnailRequests = 0;
+  await page.route("**/api/**", async route => {
+    const url = new URL(route.request().url());
+    if (url.pathname === "/api/session") return route.fulfill({ json: {
+      user: { id: "staff-deferred-media", email: "staff@example.test", displayName: "Staff", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["delivery.browse"], divisions: [] },
+      csrfToken: "csrf-deferred-media", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null,
+      capabilities: { deliveryJobsRoot: { enabled: true } },
+    } });
+    if (url.pathname === "/api/delivery/access-revision") return route.fulfill({ json: { revision: `dbr_${"c".repeat(43)}` } });
+    if (url.pathname === "/api/delivery/folders") return route.fulfill({ json: {
+      prefix: "Jobs/Clients/Acme/Current/", folders: [], files: [{
+        id: "video-one", physicalKey: "Jobs/Clients/Acme/Current/flight.mp4", name: "flight.mp4", displayName: "flight.mp4",
+        kind: "video", size: 8192, uploadedAt: "2026-08-16T12:00:00.000Z", thumbnailState: "pending",
+        thumbnailFallbackKind: "video", previewStatus: "processing", sourceUrl: "/api/delivery/items/video-one/source",
+        downloadUrl: "/api/delivery/items/video-one/download",
+      }], nextCursor: null, mediaHydrated: false,
+    } });
+    if (url.pathname === "/api/delivery/folders/media") {
+      mediaRequested.release();
+      await media.promise;
+      return route.fulfill({ json: { items: [{ id: "video-one", thumbnailState: "ready", thumbnailUrl: "/api/delivery/items/video-one/thumbnail", previewStatus: "ready" }] } }).catch(() => {});
+    }
+    if (url.pathname === "/api/delivery/items/video-one/thumbnail") {
+      thumbnailRequests += 1;
+      return route.fulfill({ contentType: "image/svg+xml", body: '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="navy"/></svg>' });
+    }
+    if (url.pathname === "/api/delivery/folders/locations") return route.fulfill({ json: { points: [], imageCount: 0, truncated: false } });
+    if (url.pathname === "/api/delivery/shares") return route.fulfill({ json: { shares: [] } });
+    if (url.pathname === "/api/delivery/thumbnail-queue") return route.fulfill({ json: { pending: 0, processing: 0, total: 0 } });
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  await page.goto("/delivery/Acme/Current");
+  await mediaRequested.promise;
+  await expect(page.getByRole("button", { name: "Open flight.mp4" })).toBeVisible();
+  await expect(page.getByText("flight.mp4", { exact: true })).toBeVisible();
+  expect(thumbnailRequests).toBe(0);
+
+  media.release();
+  await expect.poll(() => thumbnailRequests).toBeGreaterThan(0);
+  await expect(page.getByRole("img", { name: "flight.mp4 thumbnail" })).toBeVisible();
+});
+
 test("a failed page prefetch keeps loaded cards visible and exposes a working retry",async({page})=>{
   let pageTwoAttempts=0;
   await page.addInitScript(()=>Object.defineProperty(window,"IntersectionObserver",{value:undefined,configurable:true}));

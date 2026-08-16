@@ -239,7 +239,7 @@ describe("Delivery folder-only listing performance",()=>{
     expect(get).not.toHaveBeenCalled();
   });
 
-  it("hydrates a full 150-file page with bounded listing-scoped queries instead of per-item D1 reads",async()=>{
+  it("returns a full 150-file page before bounded advisory media hydration",async()=>{
     const objects=Array.from({length:DELIVERY_FOLDER_PAGE_SIZE},(_,index)=>{
       const video=index%3===0,key=`Jobs/Clients/Acme/asset-${String(index).padStart(3,"0")}.${video?"mp4":"jpg"}`;
       return{...r2Object(key),httpMetadata:{contentType:video?"video/mp4":"image/jpeg"}} as R2Object;
@@ -258,14 +258,23 @@ describe("Delivery folder-only listing performance",()=>{
     }
     list.mockResolvedValue({objects,delimitedPrefixes:[],truncated:true,cursor:"page-two"});
 
-    const result=await listDeliveryFolder(environment(),principal,"Jobs/Clients/Acme/");
+    const env=environment();
+    const result=await listDeliveryFolder(env,principal,"Jobs/Clients/Acme/");
 
     expect(result.files).toHaveLength(DELIVERY_FOLDER_PAGE_SIZE);
-    expect(result.files.every(file=>file.thumbnailState==="ready")).toBe(true);
-    expect(result.files.filter(file=>file.kind==="video").every(file=>file.previewStatus==="ready")).toBe(true);
-    expect(result.mediaHydrated).toBe(true);
+    expect(result.files.every(file=>file.thumbnailState==="pending")).toBe(true);
+    expect(result.files.filter(file=>file.kind==="video").every(file=>file.previewStatus==="processing")).toBe(true);
+    expect(result.mediaHydrated).toBe(false);
     expect(result.nextCursor).toBe("page-two");
     expect(list).toHaveBeenCalledTimes(1);
+    expect(deliveryQueries.filter(sql=>sql.includes("FROM image_thumbnail_jobs WHERE source_key IN"))).toHaveLength(0);
+    expect(deliveryQueries.filter(sql=>sql.includes("FROM file_index WHERE r2_key IN"))).toHaveLength(0);
+
+    const hydrated=await listDeliveryFolderMedia(env,principal,"Jobs/Clients/Acme/");
+    expect(hydrated.items).toHaveLength(DELIVERY_FOLDER_PAGE_SIZE);
+    expect(hydrated.items.every(item=>item.thumbnailState==="ready")).toBe(true);
+    expect(hydrated.items.filter(item=>item.previewStatus!==undefined).every(item=>item.previewStatus==="ready")).toBe(true);
+    expect(list).toHaveBeenCalledTimes(2);
     expect(deliveryQueries.filter(sql=>sql.includes("FROM image_thumbnail_jobs WHERE source_key IN"))).toHaveLength(2);
     expect(deliveryQueries.filter(sql=>sql.includes("FROM file_index WHERE r2_key IN"))).toHaveLength(2);
     expect(deliveryQueries.filter(sql=>sql.includes("WHERE source_key=?"))).toHaveLength(0);
