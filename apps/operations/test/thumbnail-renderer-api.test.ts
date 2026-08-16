@@ -14,6 +14,7 @@ function videoClaimFixture() {
     attempt_count: 0,
     status: "pending",
     lease_until: null as string | null,
+    thumbnail_provider: null as string | null,
   };
   const queries: string[] = [];
   const prepare = vi.fn((sql: string) => {
@@ -50,10 +51,10 @@ function videoClaimFixture() {
           return { meta: { changes: current ? 1 : 0 } };
         }
         if (sql.includes("SET status='ready'")) {
-          const [, , , , sourceKey, sourceEtag, thumbnailKey, attemptCount] = values as [string, number, string, string, string, string, string, number];
+          const [, , provider, , sourceKey, sourceEtag, thumbnailKey, attemptCount] = values as [string, number, string, string, string, string, string, number];
           const current = job.status === "processing" && sourceKey === job.source_key && sourceEtag === job.source_etag &&
             thumbnailKey === job.thumbnail_key && attemptCount === job.attempt_count;
-          if (current) { job.status = "ready"; job.lease_until = null; }
+          if (current) { job.status = "ready"; job.lease_until = null; job.thumbnail_provider = provider; }
           return { meta: { changes: current ? 1 : 0 } };
         }
         if (sql.includes("SET status=?")) {
@@ -121,6 +122,50 @@ describe("private TrueNAS thumbnail renderer API", () => {
     expect(initialLeaseMs).toBeGreaterThanOrEqual(15 * 60 * 1000);
     expect(initialLeaseMs).toBeLessThan(15 * 60 * 1000 + 2_000);
     expect(value.queries.some(sql => sql.includes("source.media_kind='video'") && sql.includes("INDEXED BY idx_file_index_kind"))).toBe(true);
+  });
+
+  it("records successful renderer completions as TrueNAS provenance", async () => {
+    const value = videoClaimFixture();
+    const bytes = validWebpBytes();
+    const claimEnv = {
+      THUMBNAIL_INGEST_EXPECTED_HOST: HOST,
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare: value.prepare },
+      DATA_BUCKET: { head: value.head },
+    } as never;
+    const claimed = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/claim?includeKind=video`,
+      { method: "POST", headers: { Authorization: `Bearer ${SECRET}` } },
+    ), claimEnv);
+    const claim = await claimed!.json() as { leaseId: string; thumbnailKey: string };
+    const head = vi.fn(async (key: string) => key === claim.thumbnailKey ? {
+      httpEtag: '"thumbnail-etag"', size: bytes.byteLength,
+      httpMetadata: { contentType: "image/webp" },
+    } : { httpEtag: '"video-etag"', size: 4096, httpMetadata: { contentType: "video/quicktime" } });
+    const response = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/complete`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${SECRET}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          leaseId: claim.leaseId,
+          thumbnailKey: claim.thumbnailKey,
+          thumbnailEtag: "thumbnail-etag",
+          thumbnailSize: bytes.byteLength,
+        }),
+      },
+    ), {
+      THUMBNAIL_INGEST_EXPECTED_HOST: HOST,
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare: value.prepare },
+      DATA_BUCKET: {
+        head,
+        get: vi.fn(async () => ({ body: new ReadableStream(), arrayBuffer: async () => bytes.buffer })),
+      },
+    } as never);
+
+    expect(response?.status).toBe(200);
+    expect(await response!.json()).toEqual({ status: "ready" });
+    expect(value.job.thumbnail_provider).toBe("ltds-truenas");
   });
 
   it("drives an idle video claim from the video index instead of an image-only pending backlog", async () => {

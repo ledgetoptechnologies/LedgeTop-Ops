@@ -17,11 +17,10 @@ const MANAGED_PREFIX = "_ltds/derivatives/thumbnails/v1/managed/";
 const RENDERER_LEASE_TOKEN_MAX_MS = 24 * 60 * 60 * 1000;
 const RENDERER_DEFAULT_LEASE_MS = 5 * 60 * 1000;
 const RENDERER_VIDEO_INITIAL_LEASE_MS = 15 * 60 * 1000;
-// This API writes directly to the managed-key contract (rather than the
-// manifest-backed prebuilt TrueNAS contract), so retain the managed provider
-// value used by authorized thumbnail reads even though TrueNAS performs the
-// decode.
-const PROVIDER = "cloudflare-container";
+// This lease/upload/completion API is exclusively the external TrueNAS
+// renderer boundary. Cloudflare Container jobs complete through
+// image-thumbnails.ts; the managed object-key layout is shared by both paths.
+const PROVIDER = "ltds-truenas";
 
 interface ClaimResponse {
   leaseId?: string;
