@@ -1,9 +1,12 @@
 import { readFileSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { describe, expect, it } from "vitest";
 
 const config = JSON.parse(readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
 const migration = readFileSync(new URL("../../client/migrations/0106_image_thumbnail_jobs.sql", import.meta.url), "utf8");
 const cleanupMigration = readFileSync(new URL("../../client/migrations/0107_thumbnail_cleanup_jobs.sql", import.meta.url), "utf8");
+const backfillMigration = readFileSync(new URL("../../client/migrations/0108_thumbnail_backfill_runs.sql", import.meta.url), "utf8");
+const claimIndexMigration = readFileSync(new URL("../../client/migrations/0139_thumbnail_claim_queue_index.sql", import.meta.url), "utf8");
 const clientConfig = JSON.parse(readFileSync(new URL("../../client/wrangler.jsonc", import.meta.url), "utf8"));
 const crud = readFileSync(new URL("../src/worker/r2-crud.ts", import.meta.url), "utf8");
 const sourceDelete = readFileSync(new URL("../src/worker/source-delete.ts", import.meta.url), "utf8");
@@ -49,6 +52,19 @@ describe("thumbnail deployment contract", () => {
     for (const value of ["image_thumbnail_cleanup_jobs", "attempt_count", "next_attempt_at", "error_code", "completed_at", "trg_image_thumbnail_retire_update", "trg_image_thumbnail_retire_delete"]) {
       expect(cleanupMigration).toContain(value);
     }
+  });
+
+  it("indexes the remaining general pending claim order", () => {
+    expect(claimIndexMigration).toContain("idx_image_thumbnail_jobs_pending_queue");
+    expect(claimIndexMigration).toContain("ON image_thumbnail_jobs(queue_published_at, source_key)");
+    expect(claimIndexMigration).toContain("WHERE status = 'pending'");
+    const database = new DatabaseSync(":memory:");
+    database.exec(migration);
+    database.exec(backfillMigration);
+    database.exec(claimIndexMigration);
+    const indexes = database.prepare("PRAGMA index_list('image_thumbnail_jobs')").all() as Array<{ name: string; partial: number }>;
+    expect(indexes).toContainEqual(expect.objectContaining({ name: "idx_image_thumbnail_jobs_pending_queue", partial: 1 }));
+    database.close();
   });
 
   it("wires cleanup into move, trash, restore, and expiry without original fallback", () => {

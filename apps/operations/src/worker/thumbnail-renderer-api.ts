@@ -164,11 +164,6 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
   // work intended for the Cloudflare queue consumer.
   const includeKind = new URL(request.url).searchParams.get("includeKind") || "";
   if (includeKind && includeKind !== "video") return json({ error: "invalid_request" }, 400);
-  const includeClause = includeKind === "video"
-    ? `AND EXISTS (SELECT 1 FROM file_index f WHERE f.r2_key=image_thumbnail_jobs.source_key
-        AND trim(f.etag,'"')=image_thumbnail_jobs.source_etag
-        AND f.size=image_thumbnail_jobs.source_size AND f.media_kind='video')`
-    : "";
   // Allow excluding a media kind (e.g. excludeKind=video to only claim photos)
   const excludeKind = new URL(request.url).searchParams.get("excludeKind") || "";
   const excludeClause = excludeKind === "video"
@@ -177,16 +172,31 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
     ? "AND (source_key LIKE '%.MP4' OR source_key LIKE '%.mp4' OR source_key LIKE '%.MOV' OR source_key LIKE '%.mov' OR source_key LIKE '%.MKV' OR source_key LIKE '%.mkv')"
     : "";
 
-  // Find the next pending job
-  const job = await env.DELIVERY_DB.prepare(
-    `SELECT source_key, source_etag, source_size, thumbnail_key, attempt_count
-     FROM image_thumbnail_jobs
-     WHERE status = 'pending'
-       AND (lease_until IS NULL OR lease_until < datetime('now'))
-       ${includeClause}
-       ${excludeClause}
-     ORDER BY queue_published_at ASC
-     LIMIT 1`
+  // For the video-only TrueNAS worker, drive the lookup from file_index's
+  // existing media-kind index. The previous correlated EXISTS started from
+  // every pending thumbnail job; an image-only backfill could therefore make
+  // an idle video claim scan and sort the entire pending image backlog. CROSS
+  // JOIN deliberately pins SQLite's loop order to the selective video index,
+  // then performs a primary-key lookup for only those source keys.
+  const job = await env.DELIVERY_DB.prepare(includeKind === "video"
+    ? `SELECT job.source_key,job.source_etag,job.source_size,job.thumbnail_key,job.attempt_count
+       FROM file_index AS source INDEXED BY idx_file_index_kind
+       CROSS JOIN image_thumbnail_jobs AS job
+       WHERE source.media_kind='video'
+         AND job.source_key=source.r2_key
+         AND trim(source.etag,'"')=job.source_etag
+         AND source.size=job.source_size
+         AND job.status='pending'
+         AND (job.lease_until IS NULL OR job.lease_until < datetime('now'))
+       ORDER BY job.queue_published_at ASC
+       LIMIT 1`
+    : `SELECT source_key,source_etag,source_size,thumbnail_key,attempt_count
+       FROM image_thumbnail_jobs
+       WHERE status='pending'
+         AND (lease_until IS NULL OR lease_until < datetime('now'))
+         ${excludeClause}
+       ORDER BY queue_published_at ASC
+       LIMIT 1`
   ).first<{ source_key: string; source_etag: string; source_size: number; thumbnail_key: string; attempt_count: number }>();
 
   if (!job) return json({ status: "idle" }, 200);

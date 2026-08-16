@@ -88,6 +88,8 @@ export type Env = Omit<
   AUTHENTICATED_DELIVERY_GRANTS_ENABLED?: string;
   /** Default-off LTDS authorization/control-plane integration with the self-hosted Viewer. */
   VIEWER_INTEGRATION_ENABLED?: string;
+  /** Default-off staff creation and revocation of bearer public Viewer links. */
+  VIEWER_PUBLIC_SHARES_ENABLED?: string;
   VIEWER_BASE_URL?: string;
   VIEWER_SERVICE_KEY_ID?: string;
   VIEWER_SERVICE_HMAC_SECRET?: string;

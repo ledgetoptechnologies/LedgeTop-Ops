@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { dispatchThumbnailRendererApi } from "../src/worker/thumbnail-renderer-api";
 
 const HOST = "incoming.example.test";
@@ -21,7 +22,7 @@ function videoClaimFixture() {
     const statement = {
       bind(...input: unknown[]) { values = input; return statement; },
       async first() {
-        if (sql.includes("FROM image_thumbnail_jobs") && sql.includes("ORDER BY queue_published_at")) {
+        if (sql.includes("image_thumbnail_jobs") && sql.includes("ORDER BY") && sql.includes("queue_published_at")) {
           return job.status === "pending" ? { ...job } : null;
         }
         if (sql.includes("FROM image_thumbnail_jobs") && sql.includes("status='processing'")) {
@@ -119,7 +120,61 @@ describe("private TrueNAS thumbnail renderer API", () => {
     const initialLeaseMs = Date.parse(value.job.lease_until!) - claimStartedAt;
     expect(initialLeaseMs).toBeGreaterThanOrEqual(15 * 60 * 1000);
     expect(initialLeaseMs).toBeLessThan(15 * 60 * 1000 + 2_000);
-    expect(value.queries.some(sql => sql.includes("f.media_kind='video'"))).toBe(true);
+    expect(value.queries.some(sql => sql.includes("source.media_kind='video'") && sql.includes("INDEXED BY idx_file_index_kind"))).toBe(true);
+  });
+
+  it("drives an idle video claim from the video index instead of an image-only pending backlog", async () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec(`CREATE TABLE image_thumbnail_jobs(
+      source_key TEXT PRIMARY KEY,source_etag TEXT NOT NULL,source_size INTEGER NOT NULL,
+      thumbnail_key TEXT NOT NULL,attempt_count INTEGER NOT NULL,status TEXT NOT NULL,
+      lease_until TEXT,queue_published_at TEXT);
+      CREATE TABLE file_index(
+        r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,
+        media_kind TEXT NOT NULL,stream_status TEXT);
+      CREATE INDEX idx_file_index_kind ON file_index(media_kind,stream_status);`);
+    const insertJob = database.prepare("INSERT INTO image_thumbnail_jobs VALUES(?,?,?,?,0,'pending',NULL,?)");
+    const insertFile = database.prepare("INSERT INTO file_index VALUES(?,?,?,'image',NULL)");
+    database.exec("BEGIN");
+    for (let index = 0; index < 25_000; index += 1) {
+      const key = `Jobs/Clients/Backfill/image-${String(index).padStart(5, "0")}.jpg`;
+      insertJob.run(key, `etag-${index}`, 4096, `_ltds/derivatives/thumbnails/v1/managed/${index}.webp`, String(index));
+      insertFile.run(key, `etag-${index}`, 4096);
+    }
+    database.exec("COMMIT");
+
+    let candidateSql = "";
+    const prepare = (sql: string) => {
+      candidateSql = sql;
+      const statement = database.prepare(sql);
+      let values: SQLInputValue[] = [];
+      return {
+        bind(...input: SQLInputValue[]) { values = input; return this; },
+        async first() { return statement.get(...values) || null; },
+      };
+    };
+    const head = vi.fn();
+    const started = performance.now();
+    const response = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/claim?includeKind=video`,
+      { method: "POST", headers: { Authorization: `Bearer ${SECRET}` } },
+    ), {
+      THUMBNAIL_INGEST_EXPECTED_HOST: HOST,
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare },
+      DATA_BUCKET: { head },
+    } as never);
+    const elapsedMs = performance.now() - started;
+    expect(response?.status).toBe(200);
+    expect(await response!.json()).toEqual({ status: "idle" });
+    expect(head).not.toHaveBeenCalled();
+    expect(elapsedMs).toBeLessThan(2_000);
+    const plan = database.prepare(`EXPLAIN QUERY PLAN ${candidateSql}`).all() as Array<{ detail: string }>;
+    const sourceLoop = plan.findIndex(row => row.detail.includes("idx_file_index_kind"));
+    const jobLoop = plan.findIndex(row => row.detail.includes("image_thumbnail_jobs"));
+    expect(sourceLoop).toBeGreaterThanOrEqual(0);
+    expect(jobLoop).toBeGreaterThan(sourceLoop);
+    database.close();
   });
 
   it("rejects claim access before D1 or R2 without the renderer secret", async () => {

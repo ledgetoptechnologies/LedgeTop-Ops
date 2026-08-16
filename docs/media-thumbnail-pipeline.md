@@ -31,7 +31,7 @@ The source lifecycle is:
    pending video row remains available to the authenticated TrueNAS queue
    worker.
 3. The queue worker polls
-   `https://ops.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1/claim`.
+   `https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1/claim?includeKind=video`.
    A claim is bound to the exact source key, source ETag, source size, derivative
    key, and attempt number. Its opaque `leaseId` is required by every subsequent
    source, upload, heartbeat, failure, and completion operation.
@@ -46,41 +46,41 @@ The source lifecycle is:
 
 ## Canonical edge and authentication policy
 
-Both private TrueNAS APIs use only the Operations origin:
+The two private TrueNAS APIs intentionally use different edge policies:
 
 - `https://ops.ledgetopdroneservices.com/api/internal/thumbnail-ingest/v1`
-- `https://ops.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1/*`
+- `https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1/*`
 
-Cloudflare Access must cover both prefixes with a Service Auth policy containing
-only the dedicated TrueNAS service token. Every request must pass the Access
-edge check with `CF-Access-Client-Id` and `CF-Access-Client-Secret` and then pass
-the Worker application check with `Authorization: Bearer
-<THUMBNAIL_INGEST_SECRET>`. A staff browser session, either credential by itself,
-or a token used by rclone, Wrangler, Project Alpha, or Incoming is insufficient.
+Cloudflare Access covers the prebuilt ingest prefix on Operations with a Service
+Auth policy containing only the dedicated TrueNAS service token. Those requests
+must pass both Access (`CF-Access-Client-Id` and `CF-Access-Client-Secret`) and
+the Worker bearer check (`Authorization: Bearer <THUMBNAIL_INGEST_SECRET>`).
 
-`incoming.ledgetopdroneservices.com` intentionally exposes selected public
-incoming-request routes and is not the renderer origin. Because Operations is a
-shared Worker and its internal dispatcher recognizes configured Operations and
-Incoming hosts, the edge configuration must explicitly block or Access-protect
-both internal thumbnail prefixes on `incoming.`. Never rely on the application
-bearer alone there, and never configure a TrueNAS client to use `incoming.`.
+The video renderer is a machine endpoint on Incoming and must answer directly,
+without an Access login redirect. It still requires the independent, at least
+32-character Worker bearer before any D1 or R2 operation. Restrict and rate-limit
+the exact renderer prefix at the edge; do not expose it on any additional host.
+The Access-protected Operations renderer alias is accepted only when the queue
+worker is also configured with the paired Access service-token values.
 
 The Worker has no `workers.dev` or preview URL. Keep those routes disabled and
 reject any new hostname until its edge policy is reviewed.
 
 ## TrueNAS queue-worker protocol
 
-The queue worker is maintained outside this repository. Its implementation is
-acceptable only if it follows this contract exactly.
+The canonical queue worker is version controlled at
+`apps/thumbnail-renderer/truenas/thumbnail-generation/thumbnail-queue-worker.sh`.
+Any deployed copy must follow this contract exactly.
 
-All Operations-origin requests send the three authentication headers described
-above. JSON requests also send `Content-Type: application/json`. Resolve returned
-relative URLs against `https://ops.ledgetopdroneservices.com`; do not rewrite
-their path, query, or opaque lease token.
+All renderer requests send the Worker bearer. The Operations alias additionally
+sends both Access service-token headers. JSON requests also send
+`Content-Type: application/json`. Resolve returned relative URLs against the
+configured renderer API origin; do not rewrite their path, query, or opaque
+lease token.
 
 | Operation | Request and required data | Accepted result |
 | --- | --- | --- |
-| Claim | `POST /api/internal/thumbnail-renderer/v1/claim` | `200 {"status":"idle"}` or `200` with `status`, `leaseId`, `sourceKey`, `sourceEtag`, `sourceSize`, `mediaKind`, `thumbnailKey`, `r2SourceUrl`, optional `r2PresignedUrl`, and `r2UploadUrl` |
+| Claim | `POST /api/internal/thumbnail-renderer/v1/claim?includeKind=video` | `200 {"status":"idle"}` or `200` with `status`, `leaseId`, `sourceKey`, `sourceEtag`, `sourceSize`, `mediaKind`, `thumbnailKey`, `r2SourceUrl`, optional `r2PresignedUrl`, and `r2UploadUrl` |
 | Source | `GET` the returned `r2SourceUrl`; Range is supported | `200` full body or `206` for one valid byte range |
 | Upload | `PUT` the returned `r2UploadUrl` with one static WebP no larger than 128 KiB | `200` with the stored clean `etag` and `size` |
 | Heartbeat | `POST .../heartbeat` with `{"sourceKey":"<exact claim value>","leaseId":"<opaque claim value>"}` | `200 {"status":"ok"}` |

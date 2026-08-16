@@ -146,9 +146,11 @@ test("requires shared staging resources to agree", () => {
   const configs = { delivery: stagingConfig("delivery"), operations: stagingConfig("operations"), "ops-sync": stagingConfig("ops-sync") };
   configs.operations.d1_databases[1].database_id = "wrong";
   configs.delivery.services[0].service = "wrong-ops-staging";
+  configs.delivery.services[1].entrypoint = "WrongViewerIssuer";
   const errors = validateCrossApp(configs);
   assert(errors.some((error) => error.includes("DELIVERY_DB")));
   assert(errors.some((error) => error.includes("delegated-share signer")));
+  assert(errors.some((error) => error.includes("Viewer session issuer")));
 });
 test("resolves logical delivery staging files from apps/client", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-staging-layout-"));

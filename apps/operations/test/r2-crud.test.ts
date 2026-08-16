@@ -92,6 +92,8 @@ describe("Operations R2 CRUD boundaries", () => {
     expect(requiresAdministratorForMutation("DELETE","/api/client-portal/accounts/account-1/folder-grants/grant-1")).toBe(false);
     expect(requiresAdministratorForMutation("POST","/api/delivery/items/item-1/stream-ticket")).toBe(false);
     expect(requiresAdministratorForMutation("POST","/api/delivery/incoming-link/rotate")).toBe(false);
+    expect(requiresAdministratorForMutation("POST","/api/viewer/models/model-1/shares")).toBe(false);
+    expect(requiresAdministratorForMutation("DELETE","/api/viewer/shares/share-1")).toBe(false);
     expect(requiresAdministratorForMutation("PUT","/api/operations/operation-1/job-brief")).toBe(false);
     expect(requiresAdministratorForMutation("POST","/api/operations/operation-1/job-brief/attachments/upload")).toBe(false);
     expect(requiresAdministratorForMutation("POST","/api/operations/operation-1/job-brief/attachments/reference")).toBe(false);
@@ -104,6 +106,8 @@ describe("Operations R2 CRUD boundaries", () => {
     expect(requiresAdministratorForMutation("DELETE","/api/delivery/shares/share%2F1")).toBe(true);
     expect(requiresAdministratorForMutation("POST","/api/delivery/items/item%2F1/stream-ticket")).toBe(true);
     expect(requiresAdministratorForMutation("POST","/api/delivery/shares/share-1")).toBe(true);
+    expect(requiresAdministratorForMutation("POST","/api/viewer/models/model%2F1/shares")).toBe(true);
+    expect(requiresAdministratorForMutation("DELETE","/api/viewer/shares/share%2F1")).toBe(true);
     expect(requiresAdministratorForMutation("POST","/api/client-portal/accounts/account%2F1/folder-grants")).toBe(true);
     expect(requiresAdministratorForMutation("DELETE","/api/client-portal/accounts/account-1/folder-grants/grant%2F1")).toBe(true);
     expect(requiresAdministratorForMutation("POST","/API/delivery/shares")).toBe(true);

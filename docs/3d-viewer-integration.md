@@ -171,9 +171,18 @@ the exact global permission:
 
 - `GET /api/viewer` and session creation require `viewer.view`;
 - association create/refresh/revoke requires `viewer.manage`;
-- reserved explicit permissions are `viewer.share.create`,
-  `viewer.share.revoke`, and `viewer.import`; broad project or integration
-  permissions do not imply them.
+- `GET /api/viewer/models/:modelId/shares` requires `viewer.view`;
+- `POST /api/viewer/models/:modelId/shares` requires the exact global
+  `viewer.share.create` permission;
+- `DELETE /api/viewer/shares/:shareId` requires the exact global
+  `viewer.share.revoke` permission;
+- `viewer.import` remains separately reserved; broad project, Viewer-manage,
+  or integration permissions do not imply any public-share or import right.
+
+Every share mutation also passes the common same-origin CSRF middleware,
+requires a bounded `Idempotency-Key`, and creates a redacted Operations audit
+event. Audit details contain the model, expiry, password-present flag, and
+permissions, but never the password, raw token, or bearer URL.
 
 Client routes are `GET /api/portal/projects/:projectId/models` and
 `POST /api/portal/projects/:projectId/models/:associationId/session`. The
@@ -184,12 +193,18 @@ generation and lineage, `delivery.view` allowance, explicit entitlement
 denials, identity denials, association/source version, and pinned Viewer model
 version before issuing or renewing.
 
-Keep `VIEWER_INTEGRATION_ENABLED`, `CLIENT_VIEWER_SESSION_ISSUER_ENABLED`, and
-`CLIENT_VIEWER_ENABLED` false until coordinated staging verification. Client
+Keep `VIEWER_INTEGRATION_ENABLED`, `VIEWER_PUBLIC_SHARES_ENABLED`,
+`CLIENT_VIEWER_SESSION_ISSUER_ENABLED`, and `CLIENT_VIEWER_ENABLED` false until
+coordinated staging verification. `VIEWER_PUBLIC_SHARES_ENABLED` is a separate
+Operations kill switch and has no effect unless `VIEWER_INTEGRATION_ENABLED`
+is also true. Client
 issuance also requires `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=true`. The only
 shared service secret is `VIEWER_SERVICE_HMAC_SECRET`, stored on Operations;
 `VIEWER_BASE_URL` must be a bare HTTPS origin and `VIEWER_SERVICE_KEY_ID` must
-match the Viewer key configuration.
+match the Viewer key configuration. The service endpoint must answer directly
+without an HTTP redirect: Operations rejects redirects so its HMAC headers
+cannot be forwarded to another destination. Viewer JSON metadata responses are
+bounded to 2 MiB and are never edge-cached by the service client.
 
 ## Public shares
 
@@ -200,6 +215,19 @@ expiry, revocation, model/version lifecycle, and permissions. Access-code
 verification is rate-limited. Public errors distinguish expiry, revocation,
 access-code requirements, removed models, and retryable service failures
 without making arbitrary identifiers enumerable.
+
+Operations creates only `latest` public shares with a required expiry between
+five minutes and 30 days. Staff can add an optional label, an optional password
+of at least eight characters, and explicitly opt into download permission.
+Measure and camera tools remain enabled for demo links. The create response
+shows the Viewer `viewUrl` once so staff can copy it. Subsequent list responses
+contain metadata only and cannot recover the bearer URL; losing it requires a
+new link. Revocation takes effect in the Viewer immediately.
+
+Cloudflare Access authenticates the staff member on Operations. The self-hosted
+Viewer does not need a second human-admin login for this flow: Operations calls
+the Viewer service API with the HMAC service credential, while the recipient
+uses only the separately scoped public-share URL (and password, when set).
 
 ## Rollout gate
 

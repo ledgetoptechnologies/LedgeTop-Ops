@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerModelSummary, type ViewerSessionGrant } from "@ltds/shared";
+import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerModelSummary, type ViewerPublicShareSummary, type ViewerSessionGrant } from "@ltds/shared";
 import { Brand, Card, EmptyState, Loading, StatusPill, ViewerEmbed } from "@ltds/ui";
 import { ApiError, api, setCsrf } from "./api";
 import { generateSecureAccessCode } from "./access-code";
@@ -5893,9 +5893,16 @@ interface ViewerProjectOption {
 }
 interface ViewerAdminData {
   enabled: boolean;
+  publicSharesEnabled: boolean;
   models: ViewerModelSummary[];
   projects: ViewerProjectOption[];
   associations: ViewerAssociation[];
+}
+
+function viewerShareExpiryValue(days = 7): string {
+  const value = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
+  value.setSeconds(0, 0);
+  return new Date(value.getTime() - value.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
 function ViewerModels({ session }: { session: Session }) {
@@ -5905,7 +5912,18 @@ function ViewerModels({ session }: { session: Session }) {
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState("");
   const [opened, setOpened] = useState<{ association: ViewerAssociation; session: ViewerSessionGrant } | null>(null);
+  const [shareModelId, setShareModelId] = useState("");
+  const [shares, setShares] = useState<ViewerPublicShareSummary[]>([]);
+  const [sharesLoaded, setSharesLoaded] = useState(false);
+  const [shareLabel, setShareLabel] = useState("");
+  const [shareExpiry, setShareExpiry] = useState(() => viewerShareExpiryValue());
+  const [sharePassword, setSharePassword] = useState("");
+  const [shareDownload, setShareDownload] = useState(false);
+  const [createdShareUrl, setCreatedShareUrl] = useState("");
+  const [shareMessage, setShareMessage] = useState("");
   const canManage = allowed(session.user, "viewer.manage");
+  const canCreateShare = allowed(session.user, "viewer.share.create");
+  const canRevokeShare = allowed(session.user, "viewer.share.revoke");
   const readyModels = useMemo(
     () => data?.models.filter(model => model.available && model.status === "ready" && model.activeVersion) ?? [],
     [data?.models],
@@ -5913,8 +5931,16 @@ function ViewerModels({ session }: { session: Session }) {
 
   useEffect(() => {
     if (!modelId && readyModels[0]) setModelId(readyModels[0].id);
+    if (!shareModelId && readyModels[0]) setShareModelId(readyModels[0].id);
     if (!projectId && data?.projects[0]) setProjectId(data.projects[0].id);
-  }, [data, modelId, projectId, readyModels]);
+  }, [data, modelId, projectId, readyModels, shareModelId]);
+
+  useEffect(() => {
+    setShares([]);
+    setSharesLoaded(false);
+    setCreatedShareUrl("");
+    setShareMessage("");
+  }, [shareModelId]);
 
   const associate = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -5958,6 +5984,63 @@ function ViewerModels({ session }: { session: Session }) {
     finally { setBusy(false); }
   };
 
+  const loadShares = async () => {
+    if (!shareModelId || busy) return;
+    setBusy(true); setActionError(""); setShareMessage("");
+    try {
+      const value = await api<{ shares: ViewerPublicShareSummary[] }>(
+        `/api/viewer/models/${encodeURIComponent(shareModelId)}/shares`,
+      );
+      setShares(value.shares); setSharesLoaded(true);
+    } catch (caught) { setActionError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const createPublicShare = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!shareModelId || !shareExpiry || busy) return;
+    setBusy(true); setActionError(""); setShareMessage(""); setCreatedShareUrl("");
+    try {
+      const created = await api<{ share: ViewerPublicShareSummary; viewUrl: string }>(
+        `/api/viewer/models/${encodeURIComponent(shareModelId)}/shares`,
+        {
+          method: "POST",
+          headers: { "Idempotency-Key": crypto.randomUUID() },
+          body: JSON.stringify({
+            label: shareLabel.trim() || null,
+            expiresAt: new Date(shareExpiry).toISOString(),
+            ...(sharePassword ? { password: sharePassword } : {}),
+            permissions: { view: true, measure: true, cameras: true, download: shareDownload },
+          }),
+        },
+      );
+      setShares(current => [created.share, ...current.filter(share => share.id !== created.share.id)]);
+      setSharesLoaded(true);
+      setCreatedShareUrl(created.viewUrl);
+      setSharePassword("");
+      setShareMessage("Demo link created. Copy it now—the bearer URL cannot be recovered from the share list.");
+    } catch (caught) { setActionError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const revokePublicShare = async (share: ViewerPublicShareSummary) => {
+    if (!window.confirm(`Revoke ${share.label || "this demo link"}? Anyone using it will lose access immediately.`)) return;
+    setBusy(true); setActionError(""); setShareMessage("");
+    try {
+      const value = await api<{ share: ViewerPublicShareSummary }>(
+        `/api/viewer/shares/${encodeURIComponent(share.id)}`,
+        {
+          method: "DELETE",
+          headers: { "Idempotency-Key": crypto.randomUUID() },
+          body: JSON.stringify({ reason: "Revoked by Operations staff" }),
+        },
+      );
+      setShares(current => current.map(item => item.id === value.share.id ? value.share : item));
+      setShareMessage("Demo link revoked.");
+    } catch (caught) { setActionError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
   if (loading && !data) return <Loading />;
   if (opened) return <ViewerEmbed
     modelId={opened.association.viewerModelId}
@@ -5990,6 +6073,41 @@ function ViewerModels({ session }: { session: Session }) {
           <div>{association.state === "active" && <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void open(association)}>Open model</button>}{canManage && association.state === "active" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revoke(association)}>Remove access</button>}</div>
         </article>)}</div>}
     </Card>}
+    {data?.enabled && data.publicSharesEnabled && <Card title="Public demo links">
+      <div className="viewer-share-toolbar">
+        <label>Viewer model<select value={shareModelId} onChange={event => setShareModelId(event.target.value)}>
+          {!readyModels.length && <option value="">No ready Viewer models</option>}
+          {readyModels.map(model => <option key={model.id} value={model.id}>{model.title} ({model.provider})</option>)}
+        </select></label>
+        <button type="button" className="button-ghost" disabled={busy || !shareModelId} onClick={() => void loadShares()}>{busy ? "Loading…" : "Load links"}</button>
+      </div>
+      {canCreateShare && <form className="viewer-share-form" onSubmit={createPublicShare}>
+        <label>Label (optional)<input maxLength={120} value={shareLabel} onChange={event => setShareLabel(event.target.value)} placeholder="Client review or demo" /></label>
+        <label>Expires<input type="datetime-local" required value={shareExpiry} min={viewerShareExpiryValue(5 / 1440)} max={viewerShareExpiryValue(30)} onChange={event => setShareExpiry(event.target.value)} /></label>
+        <label>Password (optional)<input type="password" minLength={8} maxLength={128} autoComplete="new-password" value={sharePassword} onChange={event => setSharePassword(event.target.value)} placeholder="At least 8 characters" /></label>
+        <label className="viewer-share-check"><input type="checkbox" checked={shareDownload} onChange={event => setShareDownload(event.target.checked)} /> Allow model download</label>
+        <button type="submit" className="button-orange" disabled={busy || !shareModelId || !shareExpiry}>{busy ? "Creating…" : "Create demo link"}</button>
+      </form>}
+      {createdShareUrl && <div className="viewer-created-share" role="status">
+        <label>New demo link<input readOnly value={createdShareUrl} onFocus={event => event.currentTarget.select()} /></label>
+        <button type="button" className="button-orange button-small" onClick={() => void navigator.clipboard.writeText(createdShareUrl).then(() => setShareMessage("Demo link copied."), () => setShareMessage("Select and copy the link manually."))}>Copy link</button>
+        <a className="button-ghost button-small" href={createdShareUrl} target="_blank" rel="noreferrer">Open link</a>
+      </div>}
+      {shareMessage && <div className="notice" role="status">{shareMessage}</div>}
+      {sharesLoaded && (shares.length ? <div className="viewer-share-list">{shares.map(share => {
+        const expired = Boolean(share.expiresAt && Date.parse(share.expiresAt) <= Date.now());
+        const status = share.revokedAt ? "revoked" : expired ? "expired" : "active";
+        return <article key={share.id}>
+          <div><StatusPill tone={status === "active" ? "success" : status === "expired" ? "warning" : "danger"}>{status}</StatusPill>
+            <h3>{share.label || "Unlabeled demo link"}</h3>
+            <p>{share.hasPassword ? "Password protected" : "No password"} · expires {date(share.expiresAt)}</p>
+            <small>{share.accessCount} access{share.accessCount === 1 ? "" : "es"}{share.lastAccessedAt ? ` · last ${date(share.lastAccessedAt)}` : ""}</small>
+          </div>
+          {status === "active" && canRevokeShare && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revokePublicShare(share)}>Revoke link</button>}
+        </article>;
+      })}</div> : <EmptyState title="No demo links" detail="Create an expiring link above. Existing links cannot reveal their bearer URL." />)}
+    </Card>}
+    {data?.enabled && !data.publicSharesEnabled && (canCreateShare || canRevokeShare) && <Card><EmptyState title="Public Viewer links are disabled" detail="Enable the separate public-share rollout gate after the Viewer hostname, rate limits, and public-route policy are verified." /></Card>}
   </div>;
 }
 

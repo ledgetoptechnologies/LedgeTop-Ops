@@ -89,10 +89,12 @@ export function requiresAdministratorForMutation(method:string,path:string):bool
   const streamTicket=normalizedMethod==="POST"&&parts.length===5&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="items"&&delegatedRouteToken(parts[3])&&parts[4]==="stream-ticket";
   const incomingLink=parts.length>=3&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="incoming-link";
   const dropboxImport=parts.length>=3&&parts[0]==="api"&&parts[1]==="dropbox-import";
+  const viewerPublicShareCreate=normalizedMethod==="POST"&&parts.length===5&&parts[0]==="api"&&parts[1]==="viewer"&&parts[2]==="models"&&delegatedRouteToken(parts[3])&&parts[4]==="shares";
+  const viewerPublicShareRevoke=normalizedMethod==="DELETE"&&parts.length===4&&parts[0]==="api"&&parts[1]==="viewer"&&parts[2]==="shares"&&delegatedRouteToken(parts[3]);
   const jobBrief=parts[0]==="api"&&parts[1]==="operations"&&delegatedRouteToken(parts[2])&&parts[3]==="job-brief"&&(
     (normalizedMethod==="PUT"&&parts.length===4)||
     (normalizedMethod==="PUT"&&parts.length===5&&parts[4]==="sops")||
     (normalizedMethod==="POST"&&parts.length===6&&parts[4]==="attachments"&&["upload","reference"].includes(parts[5]||""))
   );
-  return !shareCreate&&!shareRevoke&&!internalFolderGrantCreate&&!internalFolderGrantRevoke&&!streamTicket&&!incomingLink&&!dropboxImport&&!jobBrief;
+  return !shareCreate&&!shareRevoke&&!internalFolderGrantCreate&&!internalFolderGrantRevoke&&!streamTicket&&!incomingLink&&!dropboxImport&&!viewerPublicShareCreate&&!viewerPublicShareRevoke&&!jobBrief;
 }

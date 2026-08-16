@@ -36,6 +36,7 @@
     "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED": "false",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED": "false",
     "VIEWER_INTEGRATION_ENABLED": "false",
+    "VIEWER_PUBLIC_SHARES_ENABLED": "false",
     "VIEWER_BASE_URL": "https://viewer.ledgetopdroneservices.com",
     "VIEWER_SERVICE_KEY_ID": "ops-v1",
     "CLIENT_VIEWER_SESSION_ISSUER_ENABLED": "false",

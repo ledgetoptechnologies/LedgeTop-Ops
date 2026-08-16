@@ -178,6 +178,10 @@ export function validateCrossApp(configs) {
   if (delegatedSigner?.service !== configs.operations.name || delegatedSigner?.entrypoint !== "ClientDelegatedShareSigner") {
     errors.push("delivery delegated-share signer must target the Operations staging Worker and named signer entrypoint");
   }
+  const viewerSessionIssuer = (configs.delivery.services ?? []).find((service) => service.binding === "VIEWER_SESSION_ISSUER");
+  if (viewerSessionIssuer?.service !== configs.operations.name || viewerSessionIssuer?.entrypoint !== "ViewerSessionIssuer") {
+    errors.push("delivery Viewer session issuer must target the Operations staging Worker and named issuer entrypoint");
+  }
   return errors;
 }
 

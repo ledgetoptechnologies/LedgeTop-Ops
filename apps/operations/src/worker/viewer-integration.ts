@@ -4,6 +4,7 @@ import {
   ViewerServiceClient,
   ViewerServiceError,
   viewerServiceConfigured,
+  type Permission,
   type ViewerAudience,
   type ViewerModelSummary,
   type ViewerSessionGrant,
@@ -21,6 +22,23 @@ const opaqueId = z.string().min(1).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_-]*$/)
 const idempotencyKey = z.string().min(16).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/);
 const associationInput = z.object({ projectId: opaqueId, viewerModelId: opaqueId }).strict();
 const revokeInput = z.object({ reason: z.string().trim().min(1).max(240) }).strict();
+const publicShareInput = z.object({
+  label: z.string().trim().max(120).nullable().optional(),
+  expiresAt: z.iso.datetime({ offset: true }),
+  password: z.string().min(8).max(128).optional(),
+  permissions: z.object({
+    view: z.literal(true),
+    measure: z.boolean().default(true),
+    cameras: z.boolean().default(true),
+    download: z.boolean().default(false),
+  }).strict().default({ view: true, measure: true, cameras: true, download: false }),
+}).strict().superRefine((value, context) => {
+  const expiry = Date.parse(value.expiresAt), now = Date.now();
+  if (expiry < now + 5 * 60 * 1000)
+    context.addIssue({ code: "custom", path: ["expiresAt"], message: "Expiry must be at least five minutes in the future" });
+  if (expiry > now + 30 * 24 * 60 * 60 * 1000)
+    context.addIssue({ code: "custom", path: ["expiresAt"], message: "Expiry cannot be more than 30 days in the future" });
+});
 
 interface AssociationRow {
   id: string;
@@ -58,7 +76,11 @@ function primaryDeliveryDb(env: Env): D1Database {
   return db.withSession?.("first-primary") ?? db;
 }
 
-async function requireGlobalViewer(env: Env, principal: StaffPrincipal, permission: "viewer.view" | "viewer.manage"): Promise<void> {
+async function requireGlobalViewer(
+  env: Env,
+  principal: StaffPrincipal,
+  permission: Extract<Permission, "viewer.view" | "viewer.manage" | "viewer.share.create" | "viewer.share.revoke">,
+): Promise<void> {
   const scope = await sqlScope(env, principal, permission);
   if (!scope.global || scope.deniedGlobal)
     throw new HTTPException(403, { message: `Global ${permission} permission required` });
@@ -66,6 +88,12 @@ async function requireGlobalViewer(env: Env, principal: StaffPrincipal, permissi
 
 export function viewerIntegrationEnabled(env: Pick<Env, "VIEWER_INTEGRATION_ENABLED">): boolean {
   return env.VIEWER_INTEGRATION_ENABLED === "true";
+}
+
+export function viewerPublicSharesEnabled(
+  env: Pick<Env, "VIEWER_INTEGRATION_ENABLED" | "VIEWER_PUBLIC_SHARES_ENABLED">,
+): boolean {
+  return viewerIntegrationEnabled(env) && env.VIEWER_PUBLIC_SHARES_ENABLED === "true";
 }
 
 export function viewerServiceClient(env: Env, fetcher: typeof fetch = fetch): ViewerServiceClient {
@@ -270,19 +298,27 @@ export async function issueViewerSession(input: {
 function viewerError(error: unknown): never {
   if (error instanceof HTTPException) throw error;
   if (error instanceof ViewerServiceError)
-    throw new HTTPException(error.status as 404 | 503, { message: error.message });
+    throw new HTTPException(error.status as 404 | 409 | 503, { message: error.message });
   throw error;
 }
 
 export function registerViewerIntegrationRoutes(app: ViewerApp): void {
   app.get("/api/viewer", async c => {
     await requireGlobalViewer(c.env, c.get("principal"), "viewer.view");
-    if (!viewerIntegrationEnabled(c.env)) return c.json({ enabled: false, models: [], projects: [], associations: [] });
+    if (!viewerIntegrationEnabled(c.env)) return c.json({
+      enabled: false, publicSharesEnabled: false, models: [], projects: [], associations: [],
+    });
     try {
       const [models, projects, associations] = await Promise.all([
         viewerServiceClient(c.env).listModels(), listProjectOptions(c.env), listAssociations(c.env),
       ]);
-      return c.json({ enabled: true, models, projects, associations });
+      return c.json({
+        enabled: true,
+        publicSharesEnabled: viewerPublicSharesEnabled(c.env),
+        models,
+        projects,
+        associations,
+      });
     } catch (error) { return viewerError(error); }
   });
 
@@ -387,6 +423,81 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
       return c.json(await issueViewerSession({
         env: c.env, actorId: principal.id, audience: "ops", association, idempotencyKey: key.data,
       }), 201);
+    } catch (error) { return viewerError(error); }
+  });
+
+  app.get("/api/viewer/models/:modelId/shares", async c => {
+    const principal = c.get("principal");
+    await requireGlobalViewer(c.env, principal, "viewer.view");
+    if (!viewerPublicSharesEnabled(c.env))
+      throw new HTTPException(404, { message: "Viewer public shares are not enabled" });
+    const modelId = opaqueId.safeParse(c.req.param("modelId"));
+    if (!modelId.success) throw new HTTPException(400, { message: "Viewer model is invalid" });
+    try {
+      return c.json({ shares: await viewerServiceClient(c.env).listPublicShares(modelId.data) });
+    } catch (error) { return viewerError(error); }
+  });
+
+  app.post("/api/viewer/models/:modelId/shares", async c => {
+    const principal = c.get("principal");
+    await requireGlobalViewer(c.env, principal, "viewer.share.create");
+    if (!viewerPublicSharesEnabled(c.env))
+      throw new HTTPException(404, { message: "Viewer public shares are not enabled" });
+    const modelId = opaqueId.safeParse(c.req.param("modelId"));
+    const value = publicShareInput.safeParse(await c.req.json().catch(() => null));
+    const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    if (!modelId.success || !value.success || !key.success)
+      throw new HTTPException(400, { message: value.success ? "Viewer public-share request is invalid" : value.error.issues[0]?.message || "Viewer public-share request is invalid" });
+    try {
+      const client = viewerServiceClient(c.env);
+      const model = (await client.listModels()).find(item => item.id === modelId.data);
+      if (!model?.available || model.status !== "ready" || !model.activeVersion)
+        throw new HTTPException(404, { message: "Ready 3D model not found" });
+      const created = await client.createPublicShare({
+        modelId: model.id,
+        idempotencyKey: key.data,
+        createdBy: `ops:${principal.id}`.slice(0, 200),
+        label: value.data.label,
+        expiresAt: value.data.expiresAt,
+        password: value.data.password,
+        permissions: value.data.permissions,
+      });
+      await c.env.OPS_DB.batch([await auditStatement(
+        c.env, c.req.raw, principal, "viewer.share.created", "viewer_public_share", created.share.id, null,
+        {
+          viewerModelId: model.id,
+          viewerModelVersionId: model.activeVersion.id,
+          label: created.share.label,
+          expiresAt: created.share.expiresAt,
+          passwordProtected: created.share.hasPassword,
+          permissions: created.share.permissions,
+        },
+      )]);
+      return c.json({ share: created.share, viewUrl: created.viewUrl }, 201);
+    } catch (error) { return viewerError(error); }
+  });
+
+  app.delete("/api/viewer/shares/:shareId", async c => {
+    const principal = c.get("principal");
+    await requireGlobalViewer(c.env, principal, "viewer.share.revoke");
+    if (!viewerPublicSharesEnabled(c.env))
+      throw new HTTPException(404, { message: "Viewer public shares are not enabled" });
+    const shareId = opaqueId.safeParse(c.req.param("shareId"));
+    const value = revokeInput.safeParse(await c.req.json().catch(() => null));
+    const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    if (!shareId.success || !value.success || !key.success)
+      throw new HTTPException(400, { message: "Viewer public-share revocation is invalid" });
+    try {
+      const share = await viewerServiceClient(c.env).revokePublicShare({
+        shareId: shareId.data,
+        idempotencyKey: key.data,
+        reason: value.data.reason,
+      });
+      await c.env.OPS_DB.batch([await auditStatement(
+        c.env, c.req.raw, principal, "viewer.share.revoked", "viewer_public_share", share.id, null,
+        { viewerModelId: share.modelId, reason: value.data.reason },
+      )]);
+      return c.json({ share });
     } catch (error) { return viewerError(error); }
   });
 }

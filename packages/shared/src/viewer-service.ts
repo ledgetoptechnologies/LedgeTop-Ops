@@ -25,6 +25,38 @@ export interface ViewerSessionGrant {
   embedUrl: string;
 }
 
+export interface ViewerPublicSharePermissions {
+  view: boolean;
+  measure: boolean;
+  cameras: boolean;
+  download: boolean;
+}
+
+export interface ViewerPublicShareSummary {
+  id: string;
+  modelId: string;
+  versionPolicy: "latest";
+  modelVersionId: string | null;
+  hasPassword: boolean;
+  permissions: ViewerPublicSharePermissions;
+  label: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  revokedBy: string | null;
+  revokeReason: string | null;
+  accessCount: number;
+  lastAccessedAt: string | null;
+}
+
+export interface ViewerPublicShareCreation {
+  share: ViewerPublicShareSummary;
+  viewUrl: string;
+  embedUrl: string;
+}
+
 export interface ViewerServiceConfiguration {
   baseUrl: string;
   keyId: string;
@@ -39,7 +71,8 @@ export class ViewerServiceError extends Error {
       | "invalid_configuration"
       | "unavailable"
       | "invalid_response"
-      | "not_found",
+      | "not_found"
+      | "conflict",
     readonly status = 503,
   ) {
     super(message);
@@ -147,14 +180,96 @@ function model(value: unknown): ViewerModelSummary | null {
   };
 }
 
-function assertSameViewerOrigin(value: unknown, origin: string): string | null {
+function assertViewerUrl(value: unknown, origin: string, expectedPath: string): string | null {
   if (typeof value !== "string") return null;
   try {
     const url = new URL(value);
-    return url.origin === origin && url.protocol === "https:" ? url.toString() : null;
+    return url.origin === origin && url.protocol === "https:" &&
+      !url.username && !url.password && url.pathname === expectedPath && !url.search && !url.hash
+      ? url.toString()
+      : null;
   } catch {
     return null;
   }
+}
+
+const MAX_VIEWER_JSON_BYTES = 2 * 1024 * 1024;
+
+async function boundedJson(response: Response): Promise<unknown> {
+  const declaredLength = Number(response.headers.get("Content-Length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_VIEWER_JSON_BYTES)
+    throw new ViewerServiceError("3D Viewer returned an oversized response", "invalid_response");
+  if (!response.body)
+    throw new ViewerServiceError("3D Viewer returned an invalid response", "invalid_response");
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const result = await reader.read();
+    if (result.done) break;
+    total += result.value.byteLength;
+    if (total > MAX_VIEWER_JSON_BYTES) {
+      await reader.cancel();
+      throw new ViewerServiceError("3D Viewer returned an oversized response", "invalid_response");
+    }
+    chunks.push(result.value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  } catch {
+    throw new ViewerServiceError("3D Viewer returned an invalid response", "invalid_response");
+  }
+}
+
+function nullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function nullableDate(value: unknown): value is string | null {
+  return value === null || (typeof value === "string" && Number.isFinite(Date.parse(value)));
+}
+
+function publicShare(value: unknown): ViewerPublicShareSummary | null {
+  const row = record(value), sharePermissions = record(row?.permissions);
+  if (!row || !sharePermissions || typeof row.id !== "string" || typeof row.modelId !== "string" ||
+    row.versionPolicy !== "latest" || !nullableString(row.modelVersionId) ||
+    typeof row.hasPassword !== "boolean" || typeof row.createdBy !== "string" ||
+    !nullableString(row.label) || !nullableString(row.revokedBy) || !nullableString(row.revokeReason) ||
+    !nullableDate(row.expiresAt) || !nullableDate(row.revokedAt) || !nullableDate(row.lastAccessedAt) ||
+    typeof row.createdAt !== "string" || !Number.isFinite(Date.parse(row.createdAt)) ||
+    typeof row.updatedAt !== "string" || !Number.isFinite(Date.parse(row.updatedAt)) ||
+    !Number.isSafeInteger(row.accessCount) || (row.accessCount as number) < 0 ||
+    typeof sharePermissions.view !== "boolean" || typeof sharePermissions.measure !== "boolean" ||
+    typeof sharePermissions.cameras !== "boolean" || typeof sharePermissions.download !== "boolean") return null;
+  return {
+    id: row.id,
+    modelId: row.modelId,
+    versionPolicy: "latest",
+    modelVersionId: row.modelVersionId,
+    hasPassword: row.hasPassword,
+    permissions: {
+      view: sharePermissions.view,
+      measure: sharePermissions.measure,
+      cameras: sharePermissions.cameras,
+      download: sharePermissions.download,
+    },
+    label: row.label,
+    createdBy: row.createdBy,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    expiresAt: row.expiresAt,
+    revokedAt: row.revokedAt,
+    revokedBy: row.revokedBy,
+    revokeReason: row.revokeReason,
+    accessCount: row.accessCount as number,
+    lastAccessedAt: row.lastAccessedAt,
+  };
 }
 
 export class ViewerServiceClient {
@@ -189,11 +304,15 @@ export class ViewerServiceClient {
           ...(body ? { "Content-Type": "application/json" } : {}),
           ...(init.idempotencyKey ? { "Idempotency-Key": init.idempotencyKey } : {}),
         },
+        cache: "no-store",
+        redirect: "error",
         signal: controller.signal,
       });
       if (response.status === 404) throw new ViewerServiceError("3D model not found", "not_found", 404);
+      if (response.status === 409)
+        throw new ViewerServiceError("3D Viewer request conflicts with an earlier request", "conflict", 409);
       if (!response.ok) throw new ViewerServiceError("3D Viewer is temporarily unavailable", "unavailable", 503);
-      return await response.json();
+      return await boundedJson(response);
     } catch (error) {
       if (error instanceof ViewerServiceError) throw error;
       throw new ViewerServiceError("3D Viewer is temporarily unavailable", "unavailable", 503);
@@ -230,10 +349,12 @@ export class ViewerServiceClient {
       permissions: input.permissions || { view: true, measure: true, cameras: true, download: false },
     });
     const payload = record(await this.request(path, { method: "POST", body, idempotencyKey: input.idempotencyKey }));
-    const redeemUrl = assertSameViewerOrigin(payload?.redeemUrl, this.origin);
-    const embedUrl = assertSameViewerOrigin(payload?.embedUrl, this.origin);
+    const grant = typeof payload?.grant === "string" ? payload.grant : "";
+    const redeemUrl = assertViewerUrl(payload?.redeemUrl, this.origin, "/api/v1/sessions/redeem");
+    const embedUrl = assertViewerUrl(payload?.embedUrl, this.origin, `/session/${encodeURIComponent(grant)}`);
     if (!payload || typeof payload.grant !== "string" ||
       !/^[0-9a-f-]{36}$/i.test(payload.grant) ||
+      payload.modelVersionId !== input.modelVersionId ||
       typeof payload.grantExpiresAt !== "string" || !Number.isFinite(Date.parse(payload.grantExpiresAt)) ||
       typeof payload.sessionTtlSeconds !== "number" || !Number.isInteger(payload.sessionTtlSeconds) ||
       payload.sessionTtlSeconds < 60 || payload.sessionTtlSeconds > 3600 || !redeemUrl || !embedUrl)
@@ -245,5 +366,68 @@ export class ViewerServiceClient {
       redeemUrl,
       embedUrl,
     };
+  }
+
+
+  async listPublicShares(modelId: string): Promise<ViewerPublicShareSummary[]> {
+    const path = `/api/v1/models/${encodeURIComponent(modelId)}/shares`;
+    const payload = record(await this.request(path));
+    if (!payload || !Array.isArray(payload.shares))
+      throw new ViewerServiceError("3D Viewer returned an invalid public-share list", "invalid_response");
+    const shares = payload.shares.map(publicShare);
+    if (shares.some(item => item === null))
+      throw new ViewerServiceError("3D Viewer returned an invalid public-share list", "invalid_response");
+    return shares as ViewerPublicShareSummary[];
+  }
+
+  async createPublicShare(input: {
+    modelId: string;
+    idempotencyKey: string;
+    createdBy: string;
+    label?: string | null;
+    expiresAt?: string | null;
+    password?: string;
+    permissions?: { view: true; measure?: boolean; cameras?: boolean; download?: boolean };
+  }): Promise<ViewerPublicShareCreation> {
+    const path = `/api/v1/models/${encodeURIComponent(input.modelId)}/shares`;
+    const body = JSON.stringify({
+      versionPolicy: "latest",
+      createdBy: input.createdBy,
+      label: input.label || null,
+      expiresAt: input.expiresAt || null,
+      ...(input.password ? { password: input.password } : {}),
+      permissions: input.permissions || { view: true, measure: true, cameras: true, download: false },
+    });
+    const payload = record(await this.request(path, { method: "POST", body, idempotencyKey: input.idempotencyKey }));
+    const share = publicShare(payload?.share);
+    const token = typeof payload?.token === "string" ? payload.token : "";
+    const viewUrl = assertViewerUrl(payload?.viewUrl, this.origin, `/view/${encodeURIComponent(token)}`);
+    const embedUrl = assertViewerUrl(payload?.embedUrl, this.origin, `/embed/${encodeURIComponent(token)}`);
+    const expectedPermissions = input.permissions || { view: true, measure: true, cameras: true, download: false };
+    const expiryMatches = input.expiresAt
+      ? share?.expiresAt !== null && Date.parse(share?.expiresAt || "") === Date.parse(input.expiresAt)
+      : share?.expiresAt === null;
+    if (!payload || !share || !viewUrl || !embedUrl || share.modelId !== input.modelId ||
+      share.modelVersionId !== null || !expiryMatches || share.hasPassword !== Boolean(input.password) ||
+      share.permissions.view !== true || share.permissions.measure !== (expectedPermissions.measure !== false) ||
+      share.permissions.cameras !== (expectedPermissions.cameras !== false) ||
+      share.permissions.download !== (expectedPermissions.download === true) ||
+      token.length < 20 || token.length > 512 || !/^[A-Za-z0-9_-]+$/.test(token))
+      throw new ViewerServiceError("3D Viewer returned an invalid public share", "invalid_response");
+    return { share, viewUrl, embedUrl };
+  }
+
+  async revokePublicShare(input: {
+    shareId: string;
+    idempotencyKey: string;
+    reason: string;
+  }): Promise<ViewerPublicShareSummary> {
+    const path = `/api/v1/shares/${encodeURIComponent(input.shareId)}`;
+    const body = JSON.stringify({ reason: input.reason });
+    const payload = record(await this.request(path, { method: "DELETE", body, idempotencyKey: input.idempotencyKey }));
+    const share = publicShare(payload?.share);
+    if (!share || share.id !== input.shareId || !share.revokedAt)
+      throw new ViewerServiceError("3D Viewer returned an invalid revoked share", "invalid_response");
+    return share;
   }
 }

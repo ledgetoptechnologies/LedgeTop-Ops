@@ -171,13 +171,14 @@ required for prebuilt registration, so they fail closed to the private Container
 fallback. Do not enable an undocumented S3 checksum-mode HEAD header, accept a
 composite checksum, or weaken source ETag checks to make prebuilt registration
 succeed.
-Both internal thumbnail prefixes require the Cloudflare Access service-token
-headers `CF-Access-Client-Id` and `CF-Access-Client-Secret` at the edge and
-`THUMBNAIL_INGEST_SECRET` at the Worker. Neither a browser/user session nor
-either credential by itself is renderer authority.
+The prebuilt ingest prefix on Operations requires the Cloudflare Access
+service-token headers `CF-Access-Client-Id` and `CF-Access-Client-Secret` plus
+`THUMBNAIL_INGEST_SECRET` at the Worker. The video renderer uses the separate
+Incoming machine endpoint and requires the Worker bearer before any D1 or R2
+operation; it must answer directly rather than redirect to an Access login.
 
 The TrueNAS queue worker uses the sibling
-`/api/internal/thumbnail-renderer/v1` API on the exact Operations hostname to
+`/api/internal/thumbnail-renderer/v1` API on the exact Incoming hostname to
 claim pending video rows, download one exact ETag-bound source into isolated
 scratch, upload a bounded WebP, and complete the row. Its heartbeat, failure, and completion calls must
 echo the opaque `leaseId` returned by `/claim`; stale attempt tokens are
@@ -190,31 +191,28 @@ signed lease token. See the [authoritative queue-worker protocol](media-thumbnai
 for the payloads and large-video behavior. Give the worker at least 12 GiB of
 private scratch so the 10 GiB upper bound plus derivative and safety margin fit.
 
-Create path-specific self-hosted Access coverage for both exact prefixes on
-`ops.ledgetopdroneservices.com`:
+Create path-specific self-hosted Access coverage for the ingest prefix on
+`ops.ledgetopdroneservices.com`. Keep the renderer prefix on Incoming restricted
+to its machine route, bearer check, and edge rate limits. The Access application
+needs only this path:
 
 - `/api/internal/thumbnail-ingest/v1*`
-- `/api/internal/thumbnail-renderer/v1*`
 
-Use a Service Auth policy that includes only one dedicated TrueNAS service
-token. If the dashboard cannot express both exact prefixes in one application,
-create two path-specific applications with the same dedicated Service Auth
-policy; do not broaden coverage to all Operations routes. Enter that token's
-client ID/secret only in the two TrueNAS clients as `CF_ACCESS_CLIENT_ID` and
-`CF_ACCESS_CLIENT_SECRET`. Set a separate random Operations runtime secret named
-`THUMBNAIL_INGEST_SECRET` and enter the same value only in those clients. Keep
-`THUMBNAIL_INGEST_EXPECTED_HOST` equal to
-`ops.ledgetopdroneservices.com`.
+Use a Service Auth policy that includes only one dedicated TrueNAS prebuilt
+service token; do not broaden coverage to all Operations routes. Enter that
+token's client ID/secret only in the prebuilt client. Set a separate random
+Operations runtime secret named `THUMBNAIL_INGEST_SECRET` and enter the same
+bearer only in the prebuilt and video-renderer clients. Keep
+`THUMBNAIL_INGEST_EXPECTED_HOST=ops.ledgetopdroneservices.com` and
+`THUMBNAIL_RENDERER_EXPECTED_HOST=incoming.ledgetopdroneservices.com`.
 
 The shared Worker also serves the public Incoming hostname. Explicitly block or
-Access-protect both internal thumbnail prefixes on
-`incoming.ledgetopdroneservices.com`; never configure a TrueNAS client to use
-that hostname. This edge rule is required because the application dispatcher
-recognizes configured Operations and Incoming hosts before normal route
-handling. Do not reuse staff Access, Worker/Wrangler, rclone, Project Alpha, or
-Incoming credentials. Give only the prebuilt broker a separate bucket-scoped R2
-Object Read credential for HEAD requests; rclone alone owns prebuilt writes. The
-video queue worker receives no R2 S3 credential.
+Access-protect the ingest prefix there, but allow the exact renderer prefix to
+reach its Worker bearer check without an interactive redirect. Do not reuse
+staff Access, Worker/Wrangler, rclone, Project Alpha, or Incoming credentials.
+Give only the prebuilt broker a separate bucket-scoped R2 Object Read credential
+for HEAD requests; rclone alone owns prebuilt writes. The video queue worker
+receives no R2 S3 credential.
 
 Stream remains available for private playback of existing Stream assets, but
 the thumbnail path never sends a source to Stream. The TrueNAS renderer
@@ -523,17 +521,21 @@ npx.cmd wrangler secret put VIEWER_SERVICE_HMAC_SECRET --name ltds-ops
 ```
 
 Set `VIEWER_BASE_URL` to the bare HTTPS Viewer origin and
-`VIEWER_SERVICE_KEY_ID` to the matching Viewer key ID. Keep
-`VIEWER_INTEGRATION_ENABLED=false` and
+`VIEWER_SERVICE_KEY_ID` to the matching Viewer key ID. That origin must return
+the Viewer service response directly rather than redirecting to another host or
+login page; Operations deliberately rejects redirects to protect its HMAC
+request headers. Keep
+`VIEWER_INTEGRATION_ENABLED=false`, `VIEWER_PUBLIC_SHARES_ENABLED=false`, and
 `CLIENT_VIEWER_SESSION_ISSUER_ENABLED=false`. In Client, bind
 `VIEWER_SESSION_ISSUER` to Operations entrypoint `ViewerSessionIssuer` and keep
 `CLIENT_VIEWER_ENABLED=false`. Apply Client migration
 `0138_viewer_model_associations.sql` and Operations migration
 `0026_viewer_permissions.sql`, deploy both Workers, and verify the shared HMAC
 fixture, model-version pinning, authorization denial, renewal, and mobile embed
-in staging before enabling Operations first, its client issuer second, and the
-Client UI last. Roll back by disabling the Client UI and issuer gates; no model
-asset is stored or proxied by LTDS.
+in staging before enabling Operations first, public demo shares only after the
+Viewer public-route policy is verified, its client issuer second, and the Client
+UI last. Roll back by disabling the Client UI, issuer, and public-share gates;
+no model asset is stored or proxied by LTDS.
 
 ## 9. Migrations and Workflow rollout
 

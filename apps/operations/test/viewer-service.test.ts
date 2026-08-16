@@ -8,6 +8,24 @@ import {
 } from "@ltds/shared";
 
 const secret = "viewer-shared-secret-32-characters-minimum";
+const share = {
+  id: "share-one",
+  modelId: "model-one",
+  versionPolicy: "latest",
+  modelVersionId: null,
+  hasPassword: true,
+  permissions: { view: true, measure: true, cameras: true, download: false },
+  label: "Client demo",
+  createdBy: "ops:staff-one",
+  createdAt: "2026-08-16T12:00:00.000Z",
+  updatedAt: "2026-08-16T12:00:00.000Z",
+  expiresAt: "2026-08-23T12:00:00.000Z",
+  revokedAt: null,
+  revokedBy: null,
+  revokeReason: null,
+  accessCount: 0,
+  lastAccessedAt: null,
+};
 
 describe("Viewer service client", () => {
   it("matches the exact-path and exact-body HMAC golden fixture", async () => {
@@ -54,10 +72,13 @@ describe("Viewer service client", () => {
         authorizationExpiresAt: "2026-08-15T05:30:00.000Z",
       });
       expect(init?.headers).toMatchObject({ "Idempotency-Key": "viewer-session-key-0001" });
+      expect(init?.redirect).toBe("error");
+      expect(init?.cache).toBe("no-store");
       return Response.json({
         grant: "00000000-0000-4000-8000-000000000001",
         grantExpiresAt: "2026-08-15T05:01:00.000Z",
         sessionTtlSeconds: 900,
+        modelVersionId: "version-one",
         redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem",
         embedUrl: "https://evil.example.test/embed/one",
       }, { status: 201 });
@@ -70,6 +91,23 @@ describe("Viewer service client", () => {
     })).rejects.toBeInstanceOf(ViewerServiceError);
   });
 
+  it("rejects a session grant for any model version other than the pinned request", async () => {
+    const fetcher = vi.fn(async () => Response.json({
+      grant: "00000000-0000-4000-8000-000000000001",
+      grantExpiresAt: "2026-08-15T05:01:00.000Z",
+      sessionTtlSeconds: 900,
+      modelVersionId: "version-two",
+      redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem",
+      embedUrl: "https://viewer.example.test/session/00000000-0000-4000-8000-000000000001",
+    }, { status: 201 }));
+    const client = new ViewerServiceClient({ baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret }, fetcher as typeof fetch);
+    await expect(client.createSession({
+      modelId: "model-one", modelVersionId: "version-one", subject: "client:identity-one",
+      audience: "client", idempotencyKey: "viewer-session-key-0002",
+      authorizationExpiresAt: "2026-08-15T05:30:00.000Z",
+    })).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
   it("fails closed when the model catalog does not use the canonical string status", async () => {
     const fetcher = vi.fn(async () => Response.json({ models: [{
       id: "model-one", title: "Point cloud", provider: "webodm", status: 40,
@@ -77,5 +115,104 @@ describe("Viewer service client", () => {
     }] }));
     const client = new ViewerServiceClient({ baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret }, fetcher as typeof fetch);
     await expect(client.listModels()).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("creates, lists, and revokes public shares without returning the raw token", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = new URL(String(input));
+      if (url.pathname === "/api/v1/models/model-one/shares" && init?.method === "POST") {
+        expect(init.headers).toMatchObject({ "Idempotency-Key": "viewer-share-create-0001" });
+        expect(init.redirect).toBe("error");
+        expect(init.cache).toBe("no-store");
+        expect(JSON.parse(String(init.body))).toMatchObject({
+          versionPolicy: "latest",
+          createdBy: "ops:staff-one",
+          password: "correct horse battery staple",
+          expiresAt: "2026-08-23T12:00:00.000Z",
+        });
+        return Response.json({
+          share,
+          token: "a-secure-token-that-is-not-forwarded",
+          viewUrl: "https://viewer.example.test/view/a-secure-token-that-is-not-forwarded",
+          embedUrl: "https://viewer.example.test/embed/a-secure-token-that-is-not-forwarded",
+        }, { status: 201 });
+      }
+      if (url.pathname === "/api/v1/models/model-one/shares") return Response.json({ shares: [share] });
+      if (url.pathname === "/api/v1/shares/share-one" && init?.method === "DELETE") {
+        expect(init.headers).toMatchObject({ "Idempotency-Key": "viewer-share-revoke-0001" });
+        expect(JSON.parse(String(init.body))).toEqual({ reason: "Demo complete" });
+        return Response.json({ share: {
+          ...share,
+          revokedAt: "2026-08-17T12:00:00.000Z",
+          revokedBy: "ops-v1",
+          revokeReason: "Demo complete",
+        } });
+      }
+      return new Response(null, { status: 404 });
+    });
+    const client = new ViewerServiceClient({ baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret }, fetcher as typeof fetch);
+    expect(await client.listPublicShares("model-one")).toEqual([share]);
+    const created = await client.createPublicShare({
+      modelId: "model-one",
+      idempotencyKey: "viewer-share-create-0001",
+      createdBy: "ops:staff-one",
+      label: "Client demo",
+      expiresAt: "2026-08-23T12:00:00.000Z",
+      password: "correct horse battery staple",
+    });
+    expect(created).toEqual({
+      share,
+      viewUrl: "https://viewer.example.test/view/a-secure-token-that-is-not-forwarded",
+      embedUrl: "https://viewer.example.test/embed/a-secure-token-that-is-not-forwarded",
+    });
+    expect(created).not.toHaveProperty("token");
+    await expect(client.revokePublicShare({
+      shareId: "share-one", idempotencyKey: "viewer-share-revoke-0001", reason: "Demo complete",
+    })).resolves.toMatchObject({ id: "share-one", revokedAt: "2026-08-17T12:00:00.000Z" });
+  });
+
+  it("rejects a cross-origin public share URL", async () => {
+    const fetcher = vi.fn(async () => Response.json({
+      share,
+      token: "a-secure-token-that-is-not-forwarded",
+      viewUrl: "https://evil.example.test/view/a-secure-token-that-is-not-forwarded",
+      embedUrl: "https://viewer.example.test/embed/a-secure-token-that-is-not-forwarded",
+    }, { status: 201 }));
+    const client = new ViewerServiceClient({ baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret }, fetcher as typeof fetch);
+    await expect(client.createPublicShare({
+      modelId: "model-one", idempotencyKey: "viewer-share-create-0002", createdBy: "ops:staff-one",
+      expiresAt: "2026-08-23T12:00:00.000Z",
+    })).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("rejects same-origin capability URLs that do not contain the returned token", async () => {
+    const fetcher = vi.fn(async () => Response.json({
+      share,
+      token: "a-secure-token-that-is-not-forwarded",
+      viewUrl: "https://viewer.example.test/admin-login.html",
+      embedUrl: "https://viewer.example.test/embed/a-secure-token-that-is-not-forwarded",
+    }, { status: 201 }));
+    const client = new ViewerServiceClient({ baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret }, fetcher as typeof fetch);
+    await expect(client.createPublicShare({
+      modelId: "model-one", idempotencyKey: "viewer-share-create-0003", createdBy: "ops:staff-one",
+      expiresAt: "2026-08-23T12:00:00.000Z",
+    })).rejects.toMatchObject({ code: "invalid_response" });
+  });
+
+  it("bounds Viewer metadata responses and preserves idempotency conflicts", async () => {
+    const oversized = vi.fn(async () => new Response("{}", {
+      headers: { "Content-Type": "application/json", "Content-Length": String(2 * 1024 * 1024 + 1) },
+    }));
+    const oversizedClient = new ViewerServiceClient({ baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret }, oversized as typeof fetch);
+    await expect(oversizedClient.listModels()).rejects.toMatchObject({ code: "invalid_response" });
+
+    const conflict = vi.fn(async () => Response.json(
+      { error: "Idempotency-Key was already used for a different request" },
+      { status: 409 },
+    ));
+    const conflictClient = new ViewerServiceClient({ baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret }, conflict as typeof fetch);
+    await expect(conflictClient.revokePublicShare({
+      shareId: "share-one", idempotencyKey: "viewer-share-revoke-0002", reason: "Demo complete",
+    })).rejects.toMatchObject({ code: "conflict", status: 409 });
   });
 });

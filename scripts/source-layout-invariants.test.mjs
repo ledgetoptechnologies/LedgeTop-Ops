@@ -89,7 +89,7 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "8f31a0c92622913dc0b63225fea2b6784444b09e261472095a500793ba9100f4");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "07c5197769c31a035a844dd6485d8733a5ef6e0194d0a118efc0c8ff8eaa5160");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -113,6 +113,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_V2_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED, "false");
   assert.equal(config.vars.AUTHENTICATED_DELIVERY_GRANTS_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_VIEWER_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_INVITATION_EMAIL_ENABLED, "false");
@@ -129,11 +130,18 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     database_id: "7f40a7b7-c3ec-470e-a626-e798867f71f8",
     migrations_dir: "migrations",
   }]);
-  assert.deepEqual(config.services, [{
-    binding: "CLIENT_DELEGATED_SHARE_SIGNER",
-    service: "ltds-ops",
-    entrypoint: "ClientDelegatedShareSigner",
-  }]);
+  assert.deepEqual(config.services, [
+    {
+      binding: "CLIENT_DELEGATED_SHARE_SIGNER",
+      service: "ltds-ops",
+      entrypoint: "ClientDelegatedShareSigner",
+    },
+    {
+      binding: "VIEWER_SESSION_ISSUER",
+      service: "ltds-ops",
+      entrypoint: "ViewerSessionIssuer",
+    },
+  ]);
   assert.equal(config.images, undefined);
   assert.deepEqual(config.stream, { binding: "STREAM" });
   assert.deepEqual(config.workflows, [
@@ -219,7 +227,8 @@ test("the TrueNAS thumbnail runbooks retain the production edge and lease contra
     assert(document.includes("five minutes") || document.includes("five-minute"));
   }
 
-  assert(flatRunbook.includes("Never rely on the application bearer alone there"));
+  assert(flatRunbook.includes("must answer directly, without an Access login redirect"));
+  assert(flatRunbook.includes("independent, at least 32-character Worker bearer"));
   assert(flatRunbook.includes("A stale or reclaimed attempt receives `404`"));
   assert(flatRunbook.includes("Video eligibility is at most `10 * 1024 * 1024 * 1024` bytes"));
   assert(flatRunbook.includes("`r2PresignedUrl` valid for 900 seconds"));
@@ -227,5 +236,5 @@ test("the TrueNAS thumbnail runbooks retain the production edge and lease contra
   assert(flatRunbook.includes("`file,pipe` protocols enabled"));
   assert(flatRunbook.includes("This repository has no `.github/workflows/deploy-workers.yml`"));
   assert(!runbook.includes("`.github/workflows/deploy-workers.yml` auto-deploys"));
-  assert(flatSetup.includes("Explicitly block or Access-protect both internal thumbnail prefixes on `incoming.ledgetopdroneservices.com`"));
+  assert(flatSetup.includes("Explicitly block or Access-protect the ingest prefix there, but allow the exact renderer prefix"));
 });
