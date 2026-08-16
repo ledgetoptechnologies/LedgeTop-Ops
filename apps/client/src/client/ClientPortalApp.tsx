@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { Brand, Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
+import { Brand, Card, EmptyState, Loading, StatusPill, ViewerEmbed } from "@ltds/ui";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
@@ -22,6 +22,8 @@ import {
   loadPortalPastDeliveryLocations,
   loadPortalProjectFileLocations,
   loadPortalProjectFolderFiles,
+  loadPortalViewerModels,
+  createPortalViewerSession,
   loadPortalNotifications,
   setPortalWorkspaceSelection,
   loadPortalPricingHint,
@@ -59,6 +61,8 @@ import {
   type PortalRequestAttachmentStatus,
   type PortalNotification,
   type PortalProject,
+  type PortalViewerModel,
+  type PortalViewerSession,
   type PortalServiceRequest,
   type PortalServiceCatalogItem,
   type PortalServiceDraft,
@@ -148,7 +152,7 @@ function PortalNotificationCenter() {
 }
 
 type TopPage = "dashboard" | "projects" | "deliveries" | "requests" | "account";
-type WorkspaceTab = "overview" | "files" | "requests";
+type WorkspaceTab = "overview" | "files" | "models" | "requests";
 type PortalGate =
   | { status: "loading" }
   | { status: "blocked"; title: string; detail: string }
@@ -1714,12 +1718,61 @@ function LegacyServiceRequestForm({
   );
 }
 
+function ProjectViewerModels({ projectId }: { projectId: string }) {
+  const [models, setModels] = useState<PortalViewerModel[] | null>(null);
+  const [selected, setSelected] = useState<PortalViewerModel | null>(null);
+  const [session, setSession] = useState<PortalViewerSession | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let active = true;
+    setModels(null); setSelected(null); setSession(null); setError("");
+    loadPortalViewerModels(projectId)
+      .then(value => { if (active) setModels(value); })
+      .catch(caught => { if (active) { setModels([]); setError((caught as Error).message); } });
+    return () => { active = false; };
+  }, [projectId]);
+
+  const requestSession = useCallback((associationId: string) =>
+    createPortalViewerSession(projectId, associationId, crypto.randomUUID()), [projectId]);
+
+  const open = async (model: PortalViewerModel) => {
+    setBusy(true); setError("");
+    try {
+      const next = await requestSession(model.associationId);
+      setSelected(model); setSession(next);
+    } catch (caught) { setError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  if (selected && session) return <ViewerEmbed
+    modelId={selected.modelId}
+    title={selected.title}
+    session={session}
+    renew={() => requestSession(selected.associationId)}
+    onClose={() => { setSelected(null); setSession(null); }}
+  />;
+  if (!models) return <Card title="3D models"><Loading /></Card>;
+  return <Card title="3D models">
+    {error && <div className="notice error" role="alert">{error}</div>}
+    {!models.length ? <EmptyState title="No 3D models available" detail="Your LTDS team has not associated a 3D model with this project." /> :
+      <div className="portal-viewer-model-grid">{models.map(model => <article key={model.associationId}>
+        <div><span>Interactive model</span><h3>{model.title}</h3><p>{model.provider} · secure Viewer session</p></div>
+        <button type="button" className="button-orange" disabled={busy} onClick={() => void open(model)}>
+          {busy ? "Opening…" : "Open 3D model"}
+        </button>
+      </article>)}</div>}
+  </Card>;
+}
+
 function ProjectWorkspace({
   project,
   requests,
   mapboxPublicToken,
   requestV2,
   requestAttachments,
+  viewer,
   onSaved,
   onBack,
 }: {
@@ -1728,13 +1781,15 @@ function ProjectWorkspace({
   mapboxPublicToken: string | null;
   requestV2: boolean;
   requestAttachments: boolean;
+  viewer: boolean;
   onSaved: (request: PortalServiceRequest) => void;
   onBack: () => void;
 }) {
   const readLocation = () => {
     const params = new URLSearchParams(window.location.search);
     const requestedTab = params.get("tab");
-    const nextTab: WorkspaceTab = requestedTab === "files" || requestedTab === "requests" ? requestedTab : "overview";
+    const nextTab: WorkspaceTab = requestedTab === "files" || requestedTab === "requests" ||
+      (requestedTab === "models" && viewer) ? requestedTab : "overview";
     const candidateFolder = nextTab === "files" ? params.get("folder") : null;
     return { tab: nextTab, folderId: candidateFolder && candidateFolder.length <= 4096 ? candidateFolder : null };
   };
@@ -1762,7 +1817,7 @@ function ProjectWorkspace({
     updateFromLocation();
     window.addEventListener("popstate", updateFromLocation);
     return () => window.removeEventListener("popstate", updateFromLocation);
-  }, [project.id]);
+  }, [project.id, viewer]);
   const navigateTab = (nextTab: WorkspaceTab) => {
     const url = new URL(clientProjectPath(project.id), window.location.origin);
     if (nextTab !== "overview") url.searchParams.set("tab", nextTab);
@@ -1794,7 +1849,7 @@ function ProjectWorkspace({
         </StatusPill>
       </section>
       <nav className="portal-workspace-tabs" aria-label="Project workspace">
-        {(["overview", "files", "requests"] as WorkspaceTab[]).map((item) => (
+        {(["overview", "files", ...(viewer ? ["models" as const] : []), "requests"] as WorkspaceTab[]).map((item) => (
           <button
             key={item}
             aria-current={tab === item ? "page" : undefined}
@@ -1881,6 +1936,7 @@ function ProjectWorkspace({
           />
         </Card>
       )}
+      {tab === "models" && viewer && <ProjectViewerModels projectId={project.id} />}
       {tab === "requests" && (
         <>
           <Card title="Request additional service" className="portal-request-card">
@@ -2370,6 +2426,7 @@ export function ClientPortalApp({
         mapboxPublicToken={mapboxPublicToken}
         requestV2={capabilities.requestV2}
         requestAttachments={capabilities.requestAttachments}
+        viewer={capabilities.viewer}
         onSaved={onSaved}
         onBack={() => navigate("projects")}
       />

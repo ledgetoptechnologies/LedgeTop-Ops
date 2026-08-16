@@ -86,6 +86,13 @@ export type Env = Omit<
   CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED?: string;
   /** Default-off explicit authenticated folder-grant management. */
   AUTHENTICATED_DELIVERY_GRANTS_ENABLED?: string;
+  /** Default-off LTDS authorization/control-plane integration with the self-hosted Viewer. */
+  VIEWER_INTEGRATION_ENABLED?: string;
+  VIEWER_BASE_URL?: string;
+  VIEWER_SERVICE_KEY_ID?: string;
+  VIEWER_SERVICE_HMAC_SECRET?: string;
+  /** Default-off private Client -> Operations Viewer session issuer. */
+  CLIENT_VIEWER_SESSION_ISSUER_ENABLED?: string;
   MAPBOX_PUBLIC_TOKEN?: string;
   SUA_GATEWAY_USER?: string;
   SUA_GATEWAY_PASSWORD?: string;

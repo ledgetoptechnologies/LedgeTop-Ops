@@ -510,7 +510,32 @@ npx.cmd wrangler secret put DROPBOX_IMPORT_TOKEN_SECRET
 
 Set `DROPBOX_CLIENT_ID` and `DROPBOX_IMPORT_ENABLED` in `apps/operations/wrangler.jsonc`. Register the callback `https://ops.ledgetopdroneservices.com/api/dropbox-import/oauth/callback` in the Dropbox API application. Apply migration `0013_dropbox_import.sql` to the `ltds-ops` D1 database. The `ltds-dropbox-import` Workflow binding is created on deploy.
 
-## 8. Migrations and Workflow rollout
+## 8. Private 3D Viewer integration
+
+The Client Worker reaches the Viewer only through the private Operations
+`ViewerSessionIssuer` service binding. Do not add the Viewer service credential
+to Client variables, browser assets, or build variables. Provision the matching
+32-byte-or-longer HMAC secret interactively on Operations:
+
+```powershell
+Set-Location apps/operations
+npx.cmd wrangler secret put VIEWER_SERVICE_HMAC_SECRET --name ltds-ops
+```
+
+Set `VIEWER_BASE_URL` to the bare HTTPS Viewer origin and
+`VIEWER_SERVICE_KEY_ID` to the matching Viewer key ID. Keep
+`VIEWER_INTEGRATION_ENABLED=false` and
+`CLIENT_VIEWER_SESSION_ISSUER_ENABLED=false`. In Client, bind
+`VIEWER_SESSION_ISSUER` to Operations entrypoint `ViewerSessionIssuer` and keep
+`CLIENT_VIEWER_ENABLED=false`. Apply Client migration
+`0138_viewer_model_associations.sql` and Operations migration
+`0026_viewer_permissions.sql`, deploy both Workers, and verify the shared HMAC
+fixture, model-version pinning, authorization denial, renewal, and mobile embed
+in staging before enabling Operations first, its client issuer second, and the
+Client UI last. Roll back by disabling the Client UI and issuer gates; no model
+asset is stored or proxied by LTDS.
+
+## 9. Migrations and Workflow rollout
 
 Export both production D1 databases before migration. Apply Delivery migrations
 to `client-data` first because the new Operations Worker depends on Delivery
@@ -563,11 +588,11 @@ job before production rollout.
 
 The 20 GB ZIP limit and 10,000-object R2 CRUD limit require the Workers Paid Workflow step allowance. Do not enable those production limits on a Free-plan account; reduce the application limits or upgrade first.
 
-## 9. Email alerts
+## 10. Email alerts
 
 Onboard the sending domain in Cloudflare Email Service, add an `EMAIL` send-email binding to `ltds-ops`, and set non-empty `ALERT_FROM` and `ALERT_TO`. Until all three are present, alerts deliberately remain disabled. Send a staging reconciliation alert and verify delivery before enabling production automation.
 
-## 10. Current provisioned resources
+## 11. Current provisioned resources
 
 - Ops D1: `ltds-ops` / `6ebf7514-d306-4615-ae56-ad869c874dbd`
 - Delivery D1: `client-data` / `7f40a7b7-c3ec-470e-a626-e798867f71f8`

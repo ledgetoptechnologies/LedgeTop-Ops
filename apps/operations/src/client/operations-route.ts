@@ -1,7 +1,7 @@
-export type OperationsPage="dashboard"|"operations"|"client-requests"|"sops"|"airspace"|"delivery"|"team"|"administration";
+export type OperationsPage="dashboard"|"operations"|"client-requests"|"sops"|"airspace"|"delivery"|"viewer"|"team"|"administration";
 export type OperationsSection="operations"|"projects"|"tasks"|"client-requests";
 
-const PAGES:OperationsPage[]=["dashboard","operations","client-requests","sops","airspace","delivery","team","administration"];
+const PAGES:OperationsPage[]=["dashboard","operations","client-requests","sops","airspace","delivery","viewer","team","administration"];
 
 export function pathPage(pathname:string):OperationsPage{
   const parts=pathname.split("/").filter(Boolean), value=parts[0];

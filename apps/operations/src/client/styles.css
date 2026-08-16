@@ -1357,6 +1357,25 @@ tbody tr:last-child td { border: 0; }
   .request-attachment-error button { width: 100%; min-height: 44px; }
 }
 
+.viewer-admin-layout { display: grid; gap: 1rem; }
+.viewer-association-form { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr) auto; align-items: end; gap: .85rem; }
+.viewer-association-form label { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 800; }
+.viewer-association-form select { width: 100%; min-width: 0; padding: .7rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+.viewer-association-help { margin: .8rem 0 0; color: var(--muted); font-size: .8rem; }
+.viewer-association-list { display: grid; gap: .75rem; }
+.viewer-association-list article { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem; border: 1px solid var(--line); border-radius: 10px; background: #f8fafb; }
+.viewer-association-list article > div:first-child { min-width: 0; }
+.viewer-association-list h3 { margin: .35rem 0 .15rem; overflow-wrap: anywhere; }
+.viewer-association-list p, .viewer-association-list small { margin: 0; color: var(--muted); }
+.viewer-association-list article > div:last-child { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
+@media (max-width: 760px) {
+  .viewer-association-form { grid-template-columns: 1fr; }
+  .viewer-association-form button { width: 100%; min-height: 44px; }
+  .viewer-association-list article { align-items: stretch; flex-direction: column; }
+  .viewer-association-list article > div:last-child { display: grid; grid-template-columns: 1fr; }
+  .viewer-association-list article button { width: 100%; min-height: 44px; }
+}
+
 /* ---------------------------------------------------------------------------
    Job brief panel
    --------------------------------------------------------------------------- */

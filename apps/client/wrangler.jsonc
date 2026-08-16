@@ -43,6 +43,7 @@
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "false",
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED": "false",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED": "false",
+    "CLIENT_VIEWER_ENABLED": "false",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED": "false",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED": "false",
     "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY": "false",
@@ -128,6 +129,11 @@
       "binding": "CLIENT_DELEGATED_SHARE_SIGNER",
       "service": "ltds-ops",
       "entrypoint": "ClientDelegatedShareSigner"
+    },
+    {
+      "binding": "VIEWER_SESSION_ISSUER",
+      "service": "ltds-ops",
+      "entrypoint": "ViewerSessionIssuer"
     }
   ],
   "stream": { "binding": "STREAM" }

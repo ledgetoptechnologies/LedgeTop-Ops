@@ -1,3 +1,5 @@
+import type { ViewerSessionGrant } from "./viewer-service";
+
 export const PERMISSIONS = [
   "dashboard.view",
   "operations.view",
@@ -32,7 +34,14 @@ export const PERMISSIONS = [
   "integrations.manage",
   "audit.view",
   "administration.view",
+  "viewer.view",
+  "viewer.manage",
+  "viewer.share.create",
+  "viewer.share.revoke",
+  "viewer.import",
 ] as const;
+
+export * from "./viewer-service";
 
 export type Permission = (typeof PERMISSIONS)[number];
 export type PermissionScope = "global" | "division" | "assigned" | "own";
@@ -470,4 +479,29 @@ export interface ClientDelegatedShareSignerBinding {
   createClientDelegatedShare(
     request: ClientDelegatedShareSignerRequestV1,
   ): Promise<ClientDelegatedShareSignerResultV1>;
+}
+
+export interface ClientViewerSessionRequestV1 {
+  protocolVersion: 1;
+  workspaceId: string;
+  identityId: string;
+  legacyAccountId: string;
+  legacyIdentityId: string;
+  principalIssuer: string;
+  principalSubject: string;
+  projectId: string;
+  associationId: string;
+  idempotencyKey: string;
+}
+
+export type ClientViewerSessionResultV1 =
+  | ({ ok: true; protocolVersion: 1 } & ViewerSessionGrant)
+  | {
+      ok: false;
+      protocolVersion: 1;
+      code: "invalid_request" | "denied" | "not_found" | "configuration_error" | "temporarily_unavailable";
+    };
+
+export interface ViewerSessionIssuerBinding {
+  issueClientViewerSession(request: ClientViewerSessionRequestV1): Promise<ClientViewerSessionResultV1>;
 }

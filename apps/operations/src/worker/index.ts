@@ -168,6 +168,7 @@ import {
   validateStaffRequestArea,
   validateStaffRequestPois,
 } from "./request-area-revision";
+import { registerViewerIntegrationRoutes } from "./viewer-integration";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -254,6 +255,7 @@ const lockedSecurityHeaders = secureHeaders({
     ],
     workerSrc: ["blob:"],
     mediaSrc: ["'self'", "blob:"],
+    frameSrc: ["'self'", "https://viewer.ledgetopdroneservices.com", "https://viewer-staging.ledgetopdroneservices.com"],
     frameAncestors: ["'none'"],
     baseUri: ["'none'"],
     objectSrc: ["'none'"],
@@ -1293,6 +1295,7 @@ registerWorkContextSopRoutes(app);
 registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
+registerViewerIntegrationRoutes(app);
 
 app.get("/api/tasks", async (c) => {
   const principal = c.get("principal");
@@ -2999,3 +3002,4 @@ export { DropboxImportWorkflow } from "./dropbox-import";
 export { ThumbnailRendererContainer } from "./thumbnail-renderer-container";
 export { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";
 export { ClientDelegatedShareSigner } from "./client-delegated-share-signer";
+export { ViewerSessionIssuer } from "./viewer-session-issuer";

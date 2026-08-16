@@ -1,7 +1,7 @@
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { isMovedSourceMarker } from "@ltds/shared";
-import type { ClientDelegatedShareSignerRequestV1 } from "@ltds/shared";
+import type { ClientDelegatedShareSignerRequestV1, ClientViewerSessionRequestV1 } from "@ltds/shared";
 import { z } from "zod";
 import type { Env } from "../types";
 import { serveAuthorizedThumbnail } from "../thumbnails";
@@ -236,6 +236,7 @@ const pricingHint = z.discriminatedUnion("kind", [
   }).strict().refine(value => value.maximumMinor >= value.minimumMinor),
 ]);
 const notificationActionBody = z.object({ action: z.enum(["read", "dismiss"]) }).strict();
+const viewerAssociationId = opaqueId;
 const attachmentInitBody = z.object({
   clientUploadId: idempotencyKey,
   name: z.string().min(1).max(255),
@@ -447,6 +448,8 @@ export function createClientPortalRouter(
           portalHierarchyRelationsEnabled(c.env),
         invitationEmailDelivery: invitationEmailDeliveryEnabled(c.env),
         delegatedShares: clientDelegatedShareCreationCapability(c.env).enabled,
+        viewer: c.env.CLIENT_VIEWER_ENABLED === "true" &&
+          portalHierarchyV2Enabled(c.env) && Boolean(c.env.VIEWER_SESSION_ISSUER),
         viewBilling: session.canViewBilling,
       },
     });
@@ -819,6 +822,76 @@ export function createClientPortalRouter(
     if (!(await authorizeRoot(c, "delivery.view")))
       throw new HTTPException(404, { message: "Delivery archive not found" });
     return c.json(await repository.listPastDeliveryLocations(c.env, c.get("clientSession")));
+  });
+
+  router.get("/projects/:projectId/models", async (c) => {
+    if (c.env.CLIENT_VIEWER_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
+    const projectId = opaqueId.safeParse(c.req.param("projectId"));
+    if (!projectId.success || !(await authorizeProject(c, "delivery.view", projectId.data)))
+      throw new HTTPException(404, { message: "Project not found" });
+    const rows = await c.env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT
+      association.id,association.model_title,association.model_provider,
+      association.viewer_model_id,association.viewer_model_version_id,association.updated_at
+      FROM viewer_model_associations association
+      JOIN projects project ON project.id=association.project_id AND project.active=1
+        AND project.project_alpha_project_id=association.project_alpha_project_id
+        AND project.source_updated_at=association.project_source_version
+      WHERE association.project_id=? AND association.state='active' AND association.revoked_at IS NULL
+        AND association.model_status='ready'
+      ORDER BY association.model_title COLLATE NOCASE,association.id LIMIT 101`)
+      .bind(projectId.data).all<{
+        id: string; model_title: string; model_provider: string; viewer_model_id: string;
+        viewer_model_version_id: string; updated_at: string;
+      }>();
+    if (rows.results.length > 100) throw new HTTPException(503, { message: "Too many 3D models are associated with this project" });
+    return c.json({ models: rows.results.map(row => ({
+      associationId: row.id,
+      title: row.model_title,
+      provider: row.model_provider,
+      modelId: row.viewer_model_id,
+      modelVersionId: row.viewer_model_version_id,
+      updatedAt: row.updated_at,
+    })) });
+  });
+
+  router.post("/projects/:projectId/models/:associationId/session", async (c) => {
+    if (c.env.CLIENT_VIEWER_ENABLED !== "true" || !c.env.VIEWER_SESSION_ISSUER)
+      throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const projectId = opaqueId.safeParse(c.req.param("projectId"));
+    const associationId = viewerAssociationId.safeParse(c.req.param("associationId"));
+    const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    const workspace = selectedWorkspace(c);
+    if (!projectId.success || !associationId.success || !key.success || !workspace ||
+      !(await authorizeProject(c, "delivery.view", projectId.data)))
+      throw new HTTPException(404, { message: "3D model not found" });
+    const principal = c.get("clientPrincipal");
+    const request: ClientViewerSessionRequestV1 = {
+      protocolVersion: 1,
+      workspaceId: workspace.workspaceId,
+      identityId: workspace.identityId,
+      legacyAccountId: workspace.legacyAccountId,
+      legacyIdentityId: workspace.legacyIdentityId,
+      principalIssuer: principal.issuer,
+      principalSubject: principal.subject,
+      projectId: projectId.data,
+      associationId: associationId.data,
+      idempotencyKey: key.data,
+    };
+    const result = await c.env.VIEWER_SESSION_ISSUER.issueClientViewerSession(request);
+    if (!result.ok) {
+      if (result.code === "invalid_request") throw new HTTPException(400, { message: "Viewer session request is invalid" });
+      if (result.code === "denied" || result.code === "not_found")
+        throw new HTTPException(404, { message: "3D model not found" });
+      throw new HTTPException(503, { message: "3D Viewer is temporarily unavailable" });
+    }
+    return c.json({
+      grant: result.grant,
+      grantExpiresAt: result.grantExpiresAt,
+      sessionTtlSeconds: result.sessionTtlSeconds,
+      redeemUrl: result.redeemUrl,
+      embedUrl: result.embedUrl,
+    }, 201);
   });
 
   async function resolveAuthorizedFile(c: any) {

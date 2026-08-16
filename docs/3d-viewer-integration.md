@@ -1,6 +1,13 @@
 # 3D Viewer integration boundary
 
-Status: **contract foundation only; not enabled or deployed**.
+Status: **implemented behind default-off rollout gates; not enabled or deployed**.
+
+The LTDS side now includes the signed service client, deny-by-default model to
+project associations, explicit staff permissions, private Client-to-Operations
+session issuance, Operations and Client Portal UI, and in-place iframe session
+renewal. Delivery migration `0138_viewer_model_associations.sql` and Operations
+migration `0026_viewer_permissions.sql` must be applied before either gate is
+enabled.
 
 The 3D Viewer remains an independently deployed service and repository. LTDS
 Operations owns people, verified identities, hierarchy, projects, permissions,
@@ -85,10 +92,20 @@ Every mutation also requires an `Idempotency-Key` and stores its canonical
 request fingerprint and result. Same key/same fingerprint returns the original
 result; same key/different fingerprint returns `409`.
 
-## Minimum API v1 responsibilities
+## Implemented API v1 contract
 
-Exact response schemas must be frozen with shared fixtures before enablement,
-but the boundary exposes these responsibilities:
+Operations signs and calls these Viewer endpoints:
+
+- `GET /api/v1/models` returns `{ models: [...] }`. A usable item has canonical
+  string `status: "ready"`, `available: true`, and an `activeVersion.id`.
+- `POST /api/v1/models/:id/sessions` requires `Idempotency-Key` and exact JSON
+  fields `subject`, `audience`, `modelVersionId`, `authorizationExpiresAt`, and
+  bounded `permissions`. It returns a one-time grant, its expiry, session TTL,
+  redeem URL, and embed URL. LTDS accepts only same-origin HTTPS URLs.
+- `POST /api/v1/sessions/redeem` is called directly by the embedded Viewer, not
+  by an LTDS Worker.
+
+The Viewer separately owns these responsibilities:
 
 - bounded model list/detail and import status;
 - create/renew a one-time internal session grant for an already-authorized
@@ -98,8 +115,9 @@ but the boundary exposes these responsibilities:
 - unregister a model without deleting WebODM/Terra source data;
 - liveness/readiness and redacted audit/diagnostic correlation.
 
-An internal session request includes model ID, opaque LTDS subject, audience,
-bounded permissions, expiration, and correlation ID. The Viewer returns a
+An internal session request includes model ID, immutable active model-version
+ID, opaque LTDS subject, audience, bounded permissions, the upstream
+authorization expiry, and an idempotency key. The Viewer returns a
 single-use grant with a very short redemption window. Redemption creates an
 approximately 30-minute Viewer session. LTDS silently renews only after
 reauthorizing the current identity, hierarchy, source grant/association,
@@ -136,6 +154,43 @@ redeeming or serving a session. Authorization defaults to deny in both systems.
 - Clear protected Viewer state immediately on a definitive authorization,
   revocation, source-removal, or deny decision.
 
+The embedded renewal protocol is versioned. Every message includes
+`version: 1`; the parent validates both the exact Viewer origin and the exact
+iframe `contentWindow`. Viewer emits `ltds-viewer:ready` and
+`ltds-viewer:session-expiring`; LTDS responds with
+`ltds-viewer:renew-session`. Viewer acknowledges with
+`ltds-viewer:session-renewed` or `ltds-viewer:session-renewal-failed`. Missing
+acknowledgements retry with bounded backoff only until the current session
+expires, then fail closed. The iframe remains mounted so camera, layer, and LOD
+loader state survive successful renewal.
+
+## LTDS routes, permissions, and gates
+
+Operations routes require an authenticated staff session, mutation CSRF, and
+the exact global permission:
+
+- `GET /api/viewer` and session creation require `viewer.view`;
+- association create/refresh/revoke requires `viewer.manage`;
+- reserved explicit permissions are `viewer.share.create`,
+  `viewer.share.revoke`, and `viewer.import`; broad project or integration
+  permissions do not imply them.
+
+Client routes are `GET /api/portal/projects/:projectId/models` and
+`POST /api/portal/projects/:projectId/models/:associationId/session`. The
+Client Worker never receives the Viewer HMAC secret. It calls the private
+Operations `ViewerSessionIssuer` service binding, which rechecks the exact
+Access issuer/subject, workspace membership, account/project grant, directory
+generation and lineage, `delivery.view` allowance, explicit entitlement
+denials, identity denials, association/source version, and pinned Viewer model
+version before issuing or renewing.
+
+Keep `VIEWER_INTEGRATION_ENABLED`, `CLIENT_VIEWER_SESSION_ISSUER_ENABLED`, and
+`CLIENT_VIEWER_ENABLED` false until coordinated staging verification. Client
+issuance also requires `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=true`. The only
+shared service secret is `VIEWER_SERVICE_HMAC_SECRET`, stored on Operations;
+`VIEWER_BASE_URL` must be a bare HTTPS origin and `VIEWER_SERVICE_KEY_ID` must
+match the Viewer key configuration.
+
 ## Public shares
 
 Viewer public shares use a Viewer-specific URL, token audience/cookie path,
@@ -166,7 +221,7 @@ LTDS and Viewer commits:
 - feature flags remain off until migrations, secrets, routes, DNS/origin
   protection, CORS, rate limits, monitoring, and operator rollback are ready.
 
-The current separate Viewer worktree contains early registry, version, import,
-service-HMAC, session-grant, and audit foundations. They are not an LTDS release
-dependency and must be reviewed and completed in the Viewer repository before
-this contract is enabled.
+Enablement still requires a reviewed Viewer deployment at a matching commit,
+the shared HMAC golden fixture, and desktop/mobile staging evidence. Do not
+infer remote migration, secret, binding, DNS, or origin readiness from the
+repository implementation.

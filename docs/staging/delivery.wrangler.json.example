@@ -40,6 +40,7 @@
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED": "false",
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED": "false",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED": "false",
+    "CLIENT_VIEWER_ENABLED": "false",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED": "false",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED": "false",
     "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY": "false",
@@ -82,7 +83,10 @@
   ],
   "r2_buckets": [{ "binding": "DATA_BUCKET", "bucket_name": "client-data-staging" }],
   "d1_databases": [{ "binding": "DELIVERY_DB", "database_name": "client-data-staging", "database_id": "b6f653ab-9acd-4421-9ad0-207754b59aeb", "migrations_dir": "migrations" }],
-  "services": [{ "binding": "CLIENT_DELEGATED_SHARE_SIGNER", "service": "ltds-ops-staging", "entrypoint": "ClientDelegatedShareSigner" }],
+  "services": [
+    { "binding": "CLIENT_DELEGATED_SHARE_SIGNER", "service": "ltds-ops-staging", "entrypoint": "ClientDelegatedShareSigner" },
+    { "binding": "VIEWER_SESSION_ISSUER", "service": "ltds-ops-staging", "entrypoint": "ViewerSessionIssuer" }
+  ],
   "stream": { "binding": "STREAM" },
   "workflows": [
     { "name": "ltds-bulk-download-staging", "binding": "BULK_DOWNLOAD_WORKFLOW", "class_name": "BulkDownloadWorkflow" },

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser } from "@ltds/shared";
-import { Brand, Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
+import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerModelSummary, type ViewerSessionGrant } from "@ltds/shared";
+import { Brand, Card, EmptyState, Loading, StatusPill, ViewerEmbed } from "@ltds/ui";
 import { ApiError, api, setCsrf } from "./api";
 import { generateSecureAccessCode } from "./access-code";
 import {
@@ -124,6 +124,7 @@ const NAV: Array<{
   { page: "sops", label: "SOP Library", permissions: ["sops.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
   { page: "delivery", label: "Delivery", permissions: ["delivery.browse"] },
+  { page: "viewer", label: "3D Models", permissions: ["viewer.view"] },
 ];
 const MANAGE_NAV: typeof NAV = [
   { page: "team", label: "Team", permissions: ["team.view"] },
@@ -309,6 +310,9 @@ export function OperationsApp() {
         {page === "delivery" && allowed(session.user, "delivery.browse") && (
           <DeliveryHub {...props} />
         )}{" "}
+        {page === "viewer" && allowed(session.user, "viewer.view") && (
+          <ViewerModels session={session} />
+        )}{" "}
         {page === "team" && allowed(session.user, "team.view") && (
           <Team {...props} />
         )}{" "}
@@ -346,6 +350,10 @@ function PageHeading({ page }: { page: Page }) {
     delivery: [
       "Client delivery",
       "Browse the live R2 hierarchy and create secure client links.",
+    ],
+    viewer: [
+      "3D Models",
+      "Open Viewer models and manage explicit client-project associations.",
     ],
     team: [
       "Team",
@@ -5862,6 +5870,127 @@ function PortalIdentityDenyAdministration() {
       })}
     </div> : <EmptyState title="No identity denials" detail="Emergency identity denials will appear here with immutable history." />}
   </Card>;
+}
+
+interface ViewerAssociation {
+  id: string;
+  projectId: string;
+  projectName: string;
+  clientName: string;
+  viewerModelId: string;
+  viewerModelVersionId: string;
+  modelTitle: string;
+  modelProvider: string;
+  state: "active" | "revoked" | "source_stale";
+  updatedAt: string;
+}
+interface ViewerProjectOption {
+  id: string;
+  project_alpha_project_id: string;
+  project_name: string;
+  client_name: string;
+  source_updated_at: string;
+}
+interface ViewerAdminData {
+  enabled: boolean;
+  models: ViewerModelSummary[];
+  projects: ViewerProjectOption[];
+  associations: ViewerAssociation[];
+}
+
+function ViewerModels({ session }: { session: Session }) {
+  const { data, error, reload, loading } = useLoad(() => api<ViewerAdminData>("/api/viewer"), []);
+  const [modelId, setModelId] = useState("");
+  const [projectId, setProjectId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState("");
+  const [opened, setOpened] = useState<{ association: ViewerAssociation; session: ViewerSessionGrant } | null>(null);
+  const canManage = allowed(session.user, "viewer.manage");
+  const readyModels = useMemo(
+    () => data?.models.filter(model => model.available && model.status === "ready" && model.activeVersion) ?? [],
+    [data?.models],
+  );
+
+  useEffect(() => {
+    if (!modelId && readyModels[0]) setModelId(readyModels[0].id);
+    if (!projectId && data?.projects[0]) setProjectId(data.projects[0].id);
+  }, [data, modelId, projectId, readyModels]);
+
+  const associate = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!modelId || !projectId || busy) return;
+    setBusy(true); setActionError("");
+    try {
+      await api("/api/viewer/associations", {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ projectId, viewerModelId: modelId }),
+      });
+      await reload();
+    } catch (caught) { setActionError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const revoke = async (association: ViewerAssociation) => {
+    if (!window.confirm(`Remove ${association.modelTitle} from ${association.projectName}?`)) return;
+    setBusy(true); setActionError("");
+    try {
+      await api(`/api/viewer/associations/${encodeURIComponent(association.id)}`, {
+        method: "DELETE",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ reason: "Removed by Operations administrator" }),
+      });
+      if (opened?.association.id === association.id) setOpened(null);
+      await reload();
+    } catch (caught) { setActionError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const requestSession = useCallback((associationId: string) => api<ViewerSessionGrant>(
+    `/api/viewer/associations/${encodeURIComponent(associationId)}/session`,
+    { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } },
+  ), []);
+
+  const open = async (association: ViewerAssociation) => {
+    setBusy(true); setActionError("");
+    try { setOpened({ association, session: await requestSession(association.id) }); }
+    catch (caught) { setActionError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  if (loading && !data) return <Loading />;
+  if (opened) return <ViewerEmbed
+    modelId={opened.association.viewerModelId}
+    title={opened.association.modelTitle}
+    session={opened.session}
+    renew={() => requestSession(opened.association.id)}
+    onClose={() => setOpened(null)}
+  />;
+  return <div className="viewer-admin-layout">
+    <ErrorLine error={error || actionError} />
+    {data && !data.enabled && <Card><EmptyState title="3D Viewer is disabled" detail="Enable the Viewer integration only after its URL, service key, routes, and database migration are ready." /></Card>}
+    {data?.enabled && canManage && <Card title="Associate a model with a client project">
+      <form className="viewer-association-form" onSubmit={associate}>
+        <label>Viewer model<select value={modelId} onChange={event => setModelId(event.target.value)} required>
+          {!readyModels.length && <option value="">No ready Viewer models</option>}
+          {readyModels.map(model => <option key={model.id} value={model.id}>{model.title} ({model.provider})</option>)}
+        </select></label>
+        <label>Client project<select value={projectId} onChange={event => setProjectId(event.target.value)} required>
+          {!data.projects.length && <option value="">No synchronized client projects</option>}
+          {data.projects.map(project => <option key={project.id} value={project.id}>{project.client_name} · {project.project_name}</option>)}
+        </select></label>
+        <button type="submit" className="button-orange" disabled={busy || !modelId || !projectId}>{busy ? "Saving…" : "Associate model"}</button>
+      </form>
+      <p className="viewer-association-help">Client access remains denied until this explicit association and the client’s live project entitlement both authorize it.</p>
+    </Card>}
+    {data?.enabled && <Card title="Project model access">
+      {!data.associations.length ? <EmptyState title="No model associations" detail="Associate a ready Viewer model with an active client project to make it available." /> :
+        <div className="viewer-association-list">{data.associations.map(association => <article key={association.id}>
+          <div><StatusPill tone={association.state === "active" ? "success" : association.state === "source_stale" ? "warning" : "danger"}>{association.state.replace("_", " ")}</StatusPill><h3>{association.modelTitle}</h3><p>{association.clientName} · {association.projectName}</p><small>{association.modelProvider} · model version {association.viewerModelVersionId}</small></div>
+          <div>{association.state === "active" && <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void open(association)}>Open model</button>}{canManage && association.state === "active" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revoke(association)}>Remove access</button>}</div>
+        </article>)}</div>}
+    </Card>}
+  </div>;
 }
 
 function Administration({ session }: { session: Session }) {

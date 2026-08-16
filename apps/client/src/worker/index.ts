@@ -106,7 +106,7 @@ function primaryDb(env: Pick<Env, "DELIVERY_DB">): D1Database {
 const lockedSecurityHeaders = secureHeaders({
   contentSecurityPolicy: {
     defaultSrc: ["'self'"], imgSrc: ["'self'", "https://ledgetopdroneservices.com", "https://*.cloudflarestream.com", "data:", "blob:"], styleSrc: ["'self'", "'unsafe-inline'"],
-    scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com", "https://*.r2.cloudflarestorage.com", "https://api.mapbox.com", "https://events.mapbox.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com"], workerSrc: ["blob:"], frameAncestors: ["'none'"],
+    scriptSrc: ["'self'"], connectSrc: ["'self'", "https://*.cloudflarestream.com", "https://*.r2.cloudflarestorage.com", "https://api.mapbox.com", "https://events.mapbox.com"], mediaSrc: ["'self'", "https://*.cloudflarestream.com", "blob:"], frameSrc: ["'self'", "https://*.cloudflarestream.com", "https://viewer.ledgetopdroneservices.com", "https://viewer-staging.ledgetopdroneservices.com"], workerSrc: ["blob:"], frameAncestors: ["'none'"],
     baseUri: ["'none'"], objectSrc: ["'none'"], formAction: ["'self'"],
   },
   referrerPolicy: "no-referrer",

@@ -11,6 +11,7 @@ export interface PortalCapabilities {
   hierarchyScopedInvitations: boolean;
   invitationEmailDelivery: boolean;
   delegatedShares: boolean;
+  viewer: boolean;
 }
 
 export interface PortalAccount {
@@ -222,6 +223,7 @@ export async function loadPortalBootstrap(
       hierarchyScopedInvitations: session.capabilities?.hierarchyScopedInvitations === true,
       invitationEmailDelivery: session.capabilities?.invitationEmailDelivery === true,
       delegatedShares: session.capabilities?.delegatedShares === true,
+      viewer: session.capabilities?.viewer === true,
     },
     projects: projects.projects,
     requests: requests.requests,
@@ -229,6 +231,44 @@ export async function loadPortalBootstrap(
     workspaces,
     selectedWorkspaceId,
   };
+}
+
+export interface PortalViewerModel {
+  associationId: string;
+  title: string;
+  provider: string;
+  modelId: string;
+  modelVersionId: string;
+  updatedAt: string;
+}
+
+export interface PortalViewerSession {
+  grant: string;
+  grantExpiresAt: string;
+  sessionTtlSeconds: number;
+  redeemUrl: string;
+  embedUrl: string;
+}
+
+export async function loadPortalViewerModels(
+  projectId: string,
+  request: PortalRequest = requestJson,
+): Promise<PortalViewerModel[]> {
+  return (await request<{ models: PortalViewerModel[] }>(
+    `/api/client/projects/${encodeURIComponent(projectId)}/models`,
+  )).models;
+}
+
+export async function createPortalViewerSession(
+  projectId: string,
+  associationId: string,
+  idempotency: string,
+  request: PortalRequest = requestJson,
+): Promise<PortalViewerSession> {
+  return request<PortalViewerSession>(
+    `/api/client/projects/${encodeURIComponent(projectId)}/models/${encodeURIComponent(associationId)}/session`,
+    { method: "POST", headers: { "Idempotency-Key": idempotency } },
+  );
 }
 
 export function setPortalWorkspaceSelection(workspaceId: string | null): void {
