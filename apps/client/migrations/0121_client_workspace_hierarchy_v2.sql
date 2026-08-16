@@ -229,8 +229,11 @@ CREATE TABLE IF NOT EXISTS portal_v2_folder_bindings (
 CREATE INDEX IF NOT EXISTS idx_portal_v2_folder_owner
   ON portal_v2_folder_bindings(workspace_id, owner_scope_type, owner_public_id, status);
 
--- Safe legacy projection. Only accounts already carrying exactly one stable PA
--- public ID are eligible. Nothing is inferred from a name, contact, or email.
+-- Safe legacy projection. An organization-owned client account may retain both
+-- its concrete PA client ID (needed by legacy project/request authorization)
+-- and its organization ID. That is still exactly one effective workspace root:
+-- the organization wins. A PA client without an organization is a standalone
+-- client root. Nothing is inferred from a name, contact, or email.
 INSERT OR IGNORE INTO portal_v2_identities
   (id, issuer, subject, verified_email, status, revoked_at, created_at, updated_at)
 SELECT id, issuer, subject, email,
@@ -242,9 +245,11 @@ INSERT OR IGNORE INTO portal_v2_workspaces
   (id, root_type, pa_organization_public_id, pa_client_public_id, legacy_account_id, display_name, status, created_at, updated_at)
 SELECT 'workspace-' || id,
   CASE WHEN project_alpha_organization_id IS NOT NULL THEN 'organization' ELSE 'standalone_client' END,
-  project_alpha_organization_id, project_alpha_client_id, id, display_name, status, created_at, updated_at
+  project_alpha_organization_id,
+  CASE WHEN project_alpha_organization_id IS NULL THEN project_alpha_client_id ELSE NULL END,
+  id, display_name, status, created_at, updated_at
 FROM client_accounts
-WHERE (project_alpha_organization_id IS NOT NULL) != (project_alpha_client_id IS NOT NULL);
+WHERE project_alpha_organization_id IS NOT NULL OR project_alpha_client_id IS NOT NULL;
 
 INSERT OR IGNORE INTO portal_v2_workspace_memberships
   (id, workspace_id, identity_id, source_type, status, revoked_at, created_at, updated_at)

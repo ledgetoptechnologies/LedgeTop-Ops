@@ -145,6 +145,10 @@ import {
   listClientWorkspaceManagerRecovery,
   transferClientWorkspaceManager,
 } from "./client-workspace-manager-recovery";
+import {
+  activateClientAccountRoot,
+  listClientAccountRootActivation,
+} from "./client-account-root-activation";
 import { requestAreaKml, requestAreaKmlFilename } from "./request-area-kml";
 import {
   createPortalIdentityDenial,
@@ -412,6 +416,10 @@ const clientFolderGrantSchema = z
     notificationMode: z.enum(["off", "added", "removed", "both"]).optional(),
   })
   .strict();
+const clientAccountRootActivationSchema = z.object({
+  projectAlphaClientId: z.string().trim().min(1).max(128),
+  expectedUpdatedAt: z.string().trim().min(1).max(64),
+}).strict();
 const delegatedShareTargetSchema = z.object({
   workspaceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
   folderBindingId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{15,127}$/),
@@ -842,6 +850,20 @@ app.get("/api/client-portal/accounts", async (c) => {
     )
     .all();
   return c.json({ accounts: rows.results });
+});
+app.get("/api/admin/client-account-activation", async (c) => {
+  await requireGlobal(c.env, c.get("principal"), "operations.manage");
+  return c.json(await listClientAccountRootActivation(c.env));
+});
+app.post("/api/admin/client-account-activation/:accountId", async (c) => {
+  const principal = c.get("principal");
+  await requireGlobal(c.env, principal, "operations.manage");
+  return c.json(await activateClientAccountRoot(
+    c.env,
+    principal,
+    c.req.param("accountId"),
+    await body(c, clientAccountRootActivationSchema),
+  ));
 });
 app.get("/api/client-portal/source-accounts", async (c) => {
   await requireGlobal(c.env, c.get("principal"), "operations.manage");

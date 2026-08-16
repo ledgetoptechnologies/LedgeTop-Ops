@@ -538,6 +538,69 @@ identity, active workspace membership, a complete active directory generation,
 an active source entity, and an explicit capability. A matching deny wins.
 Email and `primary_contact` are presentation data and never grant access.
 
+### Existing-account Project Alpha root activation
+
+An existing legacy account must be linked **before** migration `0121` is
+applied. Operations Administration exposes the bounded **Client account Project
+Alpha activation** card for this one-time transition. It lists only active PA
+clients whose active organization ancestry is internally consistent. The
+operator chooses the concrete PA client; LTDS derives the one effective root:
+
+- when the PA client belongs to an active organization, the workspace root is
+  that organization while the legacy account retains the concrete client ID
+  needed by project and service-request authorization;
+- when the PA client has no organization, the workspace root is the standalone
+  client itself.
+
+The mutation requires an Operations administrator with global
+`operations.manage`, request-origin/CSRF validation, an optimistic account
+version, an unlinked active account, and a source root not assigned to another
+account. It writes `client.account.project_alpha_root_linked` to `audit_log`.
+It is idempotent for the exact same source and refuses automatic remapping.
+Once `portal_v2_workspaces` exists, the endpoint refuses late linking because
+updating only the legacy row would leave identities, memberships, directory,
+entitlements, bindings, and the checkpoint incomplete.
+
+Production activation order:
+
+1. Keep `CLIENT_PORTAL_HIERARCHY_V2_ENABLED`, `CLIENT_VIEWER_ENABLED`,
+   Operations `VIEWER_INTEGRATION_ENABLED`, and
+   `CLIENT_VIEWER_SESSION_ISSUER_ENABLED` false. Confirm the latest PA sync is
+   healthy and the selected client/organization public IDs are stable opaque
+   IDs. Take a D1 export or record a D1 Time Travel restore bookmark.
+2. In Operations Administration, review the displayed effective root and link
+   the unrooted legacy account. Confirm exactly one
+   `client.account.project_alpha_root_linked` audit event exists. Do not edit
+   the IDs with ad-hoc SQL.
+3. Apply the reviewed Client migration set beginning with `0121`. Its legacy
+   backfill creates `workspace-<legacy-account-id>`, stores only the derived
+   organization or standalone-client root in `portal_v2_workspaces`, and
+   projects the existing verified identities, memberships, project grants,
+   folder bindings, and explicit entitlements. A legacy account with neither
+   PA ID remains unprojected by design.
+4. Before any flag changes, verify the new workspace has one non-null root
+   column, its `legacy_account_id` is exact, it has one complete active
+   directory generation/checkpoint, expected active memberships and explicit
+   `workspace.view`/`delivery.view` grants, and `PRAGMA foreign_key_check`
+   returns no rows. An Administration state of `projection missing` is a stop
+   condition requiring a reviewed repair.
+5. For the authoritative PA hierarchy rollout, PA must publish the same exact
+   workspace ID (`workspace-<legacy-account-id>`) and root descriptor in a
+   complete signed snapshot. Activate the snapshot and verify its root,
+   project ancestry, principal binding, entitlements, source sequence, and
+   checkpoint before replacing the legacy generation.
+6. Enable the hierarchy read path first and exercise workspace selection,
+   project delivery, denial, and revocation on desktop and mobile. Viewer
+   activation remains separate: apply Client `0138` and Operations `0026`,
+   verify the Viewer Tunnel/readiness and shared HMAC contract, enable
+   Operations Viewer integration and client-session issuance, associate one
+   ready model with an authorized project, then enable `CLIENT_VIEWER_ENABLED`.
+   `VIEWER_PUBLIC_SHARES_ENABLED` is not required for authenticated client
+   viewing and remains a separate rollout.
+7. Rollback is flag-first: turn the Client Viewer/session issuer and hierarchy
+   flags back off. Do not erase or remap the audited PA root. Investigate and
+   fix forward from the preserved shadow projection.
+
 Invitation and member mutations have a second independent gate,
 `CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED`, also checked in as `false`.
 

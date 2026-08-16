@@ -99,6 +99,7 @@ describe("client workspace hierarchy v2", () => {
     `.replace(/\s*\n\s*/g, " "));
     await db.batch([
       db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_organization_id) VALUES ('account-a','Alpha Org','active','pa-org-a')"),
+      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES ('account-org-client','Organization client','active','pa-client-org','pa-org-shared')"),
       db.prepare("INSERT INTO client_accounts(id,display_name,status) VALUES ('account-unrooted','No stable PA root','active')"),
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES ('identity-one','account-a',?,?,?)")
         .bind(issuer, principal.subject, principal.email),
@@ -161,8 +162,14 @@ describe("client workspace hierarchy v2", () => {
   }
 
   it("upgrades only rooted legacy accounts, backfills explicit grants, and retains foreign-key integrity", async () => {
-    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspaces").first("count")).toBe(1);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspaces").first("count")).toBe(2);
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspaces WHERE legacy_account_id='account-unrooted'").first("count")).toBe(0);
+    expect(await db.prepare(`SELECT root_type,pa_organization_public_id,pa_client_public_id
+      FROM portal_v2_workspaces WHERE legacy_account_id='account-org-client'`).first()).toEqual({
+      root_type: "organization",
+      pa_organization_public_id: "pa-org-shared",
+      pa_client_public_id: null,
+    });
     expect(await authorizePortalWorkspaceCapability(env, principal, "workspace-account-a", "request.create", {
       scopeType: "project", publicId: "pa-project-a",
     })).toBe(true);

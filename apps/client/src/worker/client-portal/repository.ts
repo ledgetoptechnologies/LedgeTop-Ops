@@ -226,7 +226,12 @@ function fromBase64Url(value: string): Uint8Array | null {
   try {
     const padding = "=".repeat((4 - (value.length % 4)) % 4);
     const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/") + padding);
-    return Uint8Array.from(binary, character => character.charCodeAt(0));
+    const bytes = Uint8Array.from(binary, character => character.charCodeAt(0));
+    // atob accepts aliases with non-zero trailing pad bits. Requiring the
+    // canonical spelling keeps every authenticated ciphertext bound to one
+    // opaque URL and prevents equivalent handles from bypassing equality,
+    // replay, or cache-key checks elsewhere in the portal.
+    return base64Url(bytes) === value ? bytes : null;
   } catch {
     return null;
   }

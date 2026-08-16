@@ -5637,6 +5637,97 @@ type ClientWorkspaceRecoveryState = {
   }>;
 };
 
+type ClientAccountRootActivationState = {
+  workspaceMigrationApplied: boolean;
+  accounts: Array<{
+    id: string;
+    displayName: string;
+    status: string;
+    projectAlphaClientId: string | null;
+    projectAlphaOrganizationId: string | null;
+    updatedAt: string;
+    activationState: "unlinked" | "linked" | "projection_missing" | "projected";
+  }>;
+  sources: Array<{
+    clientId: string;
+    clientName: string;
+    organizationId: string | null;
+    organizationName: string | null;
+    rootType: "organization" | "standalone_client";
+    rootPublicId: string;
+  }>;
+};
+
+function ClientAccountRootActivation() {
+  const state = useLoad(() => api<ClientAccountRootActivationState>("/api/admin/client-account-activation"), []);
+  const [accountId, setAccountId] = useState("");
+  const [sourceId, setSourceId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const unlinked = state.data?.accounts.filter(account => account.status === "active" && account.activationState === "unlinked") ?? [];
+  const account = unlinked.find(item => item.id === accountId) ?? unlinked[0];
+  const source = state.data?.sources.find(item => item.clientId === sourceId) ?? state.data?.sources[0];
+  useEffect(() => {
+    if (!accountId && unlinked[0]) setAccountId(unlinked[0].id);
+  }, [accountId, unlinked]);
+  useEffect(() => {
+    if (!sourceId && state.data?.sources[0]) setSourceId(state.data.sources[0].clientId);
+  }, [sourceId, state.data?.sources]);
+
+  const activate = async () => {
+    if (!account || !source || busy || state.data?.workspaceMigrationApplied) return;
+    const rootLabel = source.rootType === "organization"
+      ? `${source.organizationName || "Project Alpha organization"} (${source.rootPublicId})`
+      : `${source.clientName} (${source.rootPublicId})`;
+    if (!confirm(`Permanently link ${account.displayName} to ${source.clientName}? Its one workspace root will be ${rootLabel}. Automatic remapping is prohibited.`)) return;
+    setBusy(true); setMessage("");
+    try {
+      await api(`/api/admin/client-account-activation/${encodeURIComponent(account.id)}`, {
+        method: "POST",
+        body: JSON.stringify({
+          projectAlphaClientId: source.clientId,
+          expectedUpdatedAt: account.updatedAt,
+        }),
+      });
+      setMessage("Project Alpha root linked and audited. Apply Client migration 0121 next so the workspace-v2 shadow projection is created from this exact root.");
+      setAccountId("");
+      await state.reload();
+    } catch (caught) { setMessage((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  return <Card title="Client account Project Alpha activation">
+    <p>One-time bridge for an existing legacy Client account. Select the concrete Project Alpha client; an active parent organization becomes the single workspace root, otherwise the client is the standalone root.</p>
+    <ErrorLine error={state.error} />
+    {state.data?.workspaceMigrationApplied ? <div className="notice" role="status">
+      Migration 0121 is already present. Pre-migration linking is closed; any account marked projection missing requires a reviewed repair, not a direct remap.
+    </div> : unlinked.length && state.data?.sources.length ? <div className="form-grid">
+      <label>Legacy client account<select value={account?.id ?? ""} disabled={busy} onChange={event => setAccountId(event.target.value)}>
+        {unlinked.map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}
+      </select></label>
+      <label>Project Alpha client<select value={source?.clientId ?? ""} disabled={busy} onChange={event => setSourceId(event.target.value)}>
+        {state.data.sources.map(item => <option key={item.clientId} value={item.clientId}>
+          {item.organizationName ? `${item.organizationName} · ${item.clientName}` : `${item.clientName} · standalone`}
+        </option>)}
+      </select></label>
+      {source && <div className="notice full" role="status"><strong>Effective workspace root:</strong>{" "}
+        {source.rootType === "organization" ? source.organizationName : source.clientName} · <code>{source.rootPublicId}</code>
+      </div>}
+      <button type="button" className="button-orange" disabled={busy || !account || !source} onClick={() => void activate()}>
+        {busy ? "Linking…" : "Link Project Alpha root"}
+      </button>
+    </div> : state.data && <EmptyState title="No account is ready for activation" detail={
+      state.data.sources.length ? "Every active legacy account is already linked." : "No active, internally consistent Project Alpha client is available."
+    } />}
+    {message && <div className="notice" role="status">{message}</div>}
+    {!!state.data?.accounts.length && <div className="delegated-share-admin-list">
+      {state.data.accounts.map(item => <section className="delegated-share-admin-row" key={item.id}>
+        <span><strong>{item.displayName}</strong><small>{item.activationState.replace("_", " ")}{item.projectAlphaClientId ? ` · PA client ${item.projectAlphaClientId}` : ""}{item.projectAlphaOrganizationId ? ` · PA organization ${item.projectAlphaOrganizationId}` : ""}</small></span>
+      </section>)}
+    </div>}
+  </Card>;
+}
+
 function ClientWorkspaceManagerRecovery() {
   const state = useLoad(() => api<ClientWorkspaceRecoveryState>("/api/admin/client-workspaces/recovery"), []);
   const [workspaceId, setWorkspaceId] = useState("");
@@ -6164,6 +6255,7 @@ function Administration({ session }: { session: Session }) {
           </ul>
         </Card>
       </div>
+      {session.user.isAdministrator && allowed(session.user, "operations.manage") && <ClientAccountRootActivation />}
       {session.capabilities?.clientWorkspaceManagerRecovery?.enabled === true && allowed(session.user, "operations.manage") && <ClientWorkspaceManagerRecovery />}
       {session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <DelegatedShareAdministration />}
       {session.capabilities?.portalIdentityDenials?.enabled === true && session.user.isAdministrator && <PortalIdentityDenyAdministration />}
