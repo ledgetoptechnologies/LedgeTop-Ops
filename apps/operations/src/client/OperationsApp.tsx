@@ -26,6 +26,7 @@ import { TeamAssignedWork } from "./TeamAssignedWork";
 import { ImageLocationMap } from "./ImageLocationMap";
 import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { activeShareLoadError, createShareLoadDeadline } from "./share-load-deadline";
+import { ViewerProcessingPanel } from "./ViewerProcessingPanel";
 import {
   activateDeliveryFolderCache,
   deactivateDeliveryFolderCache,
@@ -6006,8 +6007,10 @@ function ViewerModels({ session }: { session: Session }) {
   const [sharesLoaded, setSharesLoaded] = useState(false);
   const [shareLabel, setShareLabel] = useState("");
   const [shareExpiry, setShareExpiry] = useState(() => viewerShareExpiryValue());
+  const [shareNeverExpires, setShareNeverExpires] = useState(false);
   const [sharePassword, setSharePassword] = useState("");
   const [shareDownload, setShareDownload] = useState(false);
+  const [shareDisplayUnits, setShareDisplayUnits] = useState<"imperial" | "metric">("imperial");
   const [createdShareUrl, setCreatedShareUrl] = useState("");
   const [shareMessage, setShareMessage] = useState("");
   const canManage = allowed(session.user, "viewer.manage");
@@ -6087,7 +6090,8 @@ function ViewerModels({ session }: { session: Session }) {
 
   const createPublicShare = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!shareModelId || !shareExpiry || busy) return;
+    if (!shareModelId || (!shareNeverExpires && !shareExpiry) || busy) return;
+    if (shareNeverExpires && !window.confirm("Create a link that never expires? It will remain active until explicitly revoked.")) return;
     setBusy(true); setActionError(""); setShareMessage(""); setCreatedShareUrl("");
     try {
       const created = await api<{ share: ViewerPublicShareSummary; viewUrl: string }>(
@@ -6097,7 +6101,8 @@ function ViewerModels({ session }: { session: Session }) {
           headers: { "Idempotency-Key": crypto.randomUUID() },
           body: JSON.stringify({
             label: shareLabel.trim() || null,
-            expiresAt: new Date(shareExpiry).toISOString(),
+            expiresAt: shareNeverExpires ? null : new Date(shareExpiry).toISOString(),
+            displayUnits: shareDisplayUnits,
             ...(sharePassword ? { password: sharePassword } : {}),
             permissions: { view: true, measure: true, cameras: true, download: shareDownload },
           }),
@@ -6140,6 +6145,7 @@ function ViewerModels({ session }: { session: Session }) {
   />;
   return <div className="viewer-admin-layout">
     <ErrorLine error={error || actionError} />
+    <ViewerProcessingPanel />
     {data && !data.enabled && <Card><EmptyState title="3D Viewer is disabled" detail="Enable the Viewer integration only after its URL, service key, routes, and database migration are ready." /></Card>}
     {data?.enabled && canManage && <Card title="Associate a model with a client project">
       <form className="viewer-association-form" onSubmit={associate}>
@@ -6162,7 +6168,7 @@ function ViewerModels({ session }: { session: Session }) {
           <div>{association.state === "active" && <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void open(association)}>Open model</button>}{canManage && association.state === "active" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revoke(association)}>Remove access</button>}</div>
         </article>)}</div>}
     </Card>}
-    {data?.enabled && data.publicSharesEnabled && <Card title="Public demo links">
+    {data?.enabled && data.publicSharesEnabled && <section id="viewer-public-shares"><Card title="Public demo links">
       <div className="viewer-share-toolbar">
         <label>Viewer model<select value={shareModelId} onChange={event => setShareModelId(event.target.value)}>
           {!readyModels.length && <option value="">No ready Viewer models</option>}
@@ -6172,10 +6178,12 @@ function ViewerModels({ session }: { session: Session }) {
       </div>
       {canCreateShare && <form className="viewer-share-form" onSubmit={createPublicShare}>
         <label>Label (optional)<input maxLength={120} value={shareLabel} onChange={event => setShareLabel(event.target.value)} placeholder="Client review or demo" /></label>
-        <label>Expires<input type="datetime-local" required value={shareExpiry} min={viewerShareExpiryValue(5 / 1440)} max={viewerShareExpiryValue(30)} onChange={event => setShareExpiry(event.target.value)} /></label>
+        <label>Expires<input type="datetime-local" required={!shareNeverExpires} disabled={shareNeverExpires} value={shareExpiry} min={viewerShareExpiryValue(5 / 1440)} max={viewerShareExpiryValue(30)} onChange={event => setShareExpiry(event.target.value)} /></label>
+        <label className="viewer-share-check"><input type="checkbox" checked={shareNeverExpires} onChange={event => setShareNeverExpires(event.target.checked)} /> Never expires</label>
         <label>Password (optional)<input type="password" minLength={8} maxLength={128} autoComplete="new-password" value={sharePassword} onChange={event => setSharePassword(event.target.value)} placeholder="At least 8 characters" /></label>
+        <label>Measurement units<select value={shareDisplayUnits} onChange={event => setShareDisplayUnits(event.target.value as "imperial" | "metric")}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
         <label className="viewer-share-check"><input type="checkbox" checked={shareDownload} onChange={event => setShareDownload(event.target.checked)} /> Allow model download</label>
-        <button type="submit" className="button-orange" disabled={busy || !shareModelId || !shareExpiry}>{busy ? "Creating…" : "Create demo link"}</button>
+        <button type="submit" className="button-orange" disabled={busy || !shareModelId || (!shareNeverExpires && !shareExpiry)}>{busy ? "Creating…" : "Create demo link"}</button>
       </form>}
       {createdShareUrl && <div className="viewer-created-share" role="status">
         <label>New demo link<input readOnly value={createdShareUrl} onFocus={event => event.currentTarget.select()} /></label>
@@ -6189,13 +6197,13 @@ function ViewerModels({ session }: { session: Session }) {
         return <article key={share.id}>
           <div><StatusPill tone={status === "active" ? "success" : status === "expired" ? "warning" : "danger"}>{status}</StatusPill>
             <h3>{share.label || "Unlabeled demo link"}</h3>
-            <p>{share.hasPassword ? "Password protected" : "No password"} · expires {date(share.expiresAt)}</p>
+            <p>{share.hasPassword ? "Password protected" : "No password"} · {share.expiresAt ? `expires ${date(share.expiresAt)}` : "never expires"} · {share.displayUnits === "metric" ? "metric" : "imperial"}</p>
             <small>{share.accessCount} access{share.accessCount === 1 ? "" : "es"}{share.lastAccessedAt ? ` · last ${date(share.lastAccessedAt)}` : ""}</small>
           </div>
           {status === "active" && canRevokeShare && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revokePublicShare(share)}>Revoke link</button>}
         </article>;
       })}</div> : <EmptyState title="No demo links" detail="Create an expiring link above. Existing links cannot reveal their bearer URL." />)}
-    </Card>}
+    </Card></section>}
     {data?.enabled && !data.publicSharesEnabled && (canCreateShare || canRevokeShare) && <Card><EmptyState title="Public Viewer links are disabled" detail="Enable the separate public-share rollout gate after the Viewer hostname, rate limits, and public-route policy are verified." /></Card>}
   </div>;
 }

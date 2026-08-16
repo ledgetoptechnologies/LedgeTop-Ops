@@ -263,11 +263,12 @@ export async function createPortalViewerSession(
   projectId: string,
   associationId: string,
   idempotency: string,
+  displayUnits: "imperial" | "metric" = "imperial",
   request: PortalRequest = requestJson,
 ): Promise<PortalViewerSession> {
   return request<PortalViewerSession>(
     `/api/client/projects/${encodeURIComponent(projectId)}/models/${encodeURIComponent(associationId)}/session`,
-    { method: "POST", headers: { "Idempotency-Key": idempotency } },
+    { method: "POST", headers: { "Idempotency-Key": idempotency }, body: JSON.stringify({ displayUnits }) },
   );
 }
 

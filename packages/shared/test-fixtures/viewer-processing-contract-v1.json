@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "adminGrant": {
+    "secret": "viewer-shared-secret-32-characters-minimum",
+    "keyId": "ops-v1",
+    "method": "POST",
+    "path": "/api/v1/admin-grants",
+    "timestamp": 1800000000,
+    "nonce": "grant-nonce-1234567890",
+    "body": "{\"subject\":\"ops:staff-one\",\"permissions\":[\"viewer.projects.read\",\"viewer.datasets.read\",\"viewer.processing.read\",\"viewer.providers.read\",\"viewer.datasets.write\"],\"authorizationExpiresAt\":\"2027-01-15T08:30:00.000Z\",\"displayUnits\":\"imperial\"}",
+    "contentSha256": "133fc1c1e56d7b479cac4443d762ca933d2301eb1be3dd1f1ee50d62d6d25b0f",
+    "signature": "KTOOeax479XBC8UaQZLPAJ2sUTPQjnFC_naeX53YHR8"
+  },
+  "processingEvent": {
+    "secret": "viewer-event-secret-32-characters-minimum",
+    "keyId": "viewer-v1",
+    "method": "POST",
+    "path": "/api/viewer/events",
+    "timestamp": 1800000001,
+    "nonce": "event-nonce-1234567890",
+    "body": "{\"schemaVersion\":1,\"eventId\":\"event-ready-0001\",\"type\":\"processing.ready_for_review\",\"occurredAt\":\"2027-01-15T08:01:00.000Z\",\"projectId\":\"project-one\",\"taskId\":\"task-one\",\"attemptId\":\"attempt-one\",\"requestedBySubject\":\"ops:staff-one\",\"status\":\"ready_for_review\",\"reviewUrl\":\"https://viewer.example.test/review/attempt-one\"}",
+    "contentSha256": "6005ec4b9f6119fd7659162d8e12b08dd2a135629ec2fda41f178e49cd427627",
+    "signature": "PzQ-so8PN2gW0ZkDNxVjvD5R0gx2V7A3unvXbQJGfpw"
+  }
+}

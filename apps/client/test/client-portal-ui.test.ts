@@ -3,6 +3,7 @@ import {
   createPortalChangeRequest,
   createPortalServiceRequest,
   createPortalServiceDraft,
+  createPortalViewerSession,
   checkpointPortalAttachmentPart,
   completePortalRequestAttachment,
   initializePortalRequestAttachment,
@@ -216,6 +217,18 @@ describe("client portal browser API boundary", () => {
       { etag: "a".repeat(32), size: 8 },
       { parts: [{ partNumber: 1, etag: "a".repeat(32) }] },
     ]);
+  });
+});
+
+describe("client Viewer unit preference", () => {
+  it.each(["imperial", "metric"] as const)("sends %s in every session request", async displayUnits => {
+    const mockRequest = vi.fn(async (_path: string, init?: RequestInit) => ({
+      grant: "grant", grantExpiresAt: "2026-08-16T12:01:00Z", sessionTtlSeconds: 900,
+      redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem",
+      embedUrl: "https://viewer.example.test/session/grant",
+    }));
+    await createPortalViewerSession("project-one", "association-one", "viewer-session-key-0001", displayUnits, mockRequest as unknown as PortalRequest);
+    expect(JSON.parse(String(mockRequest.mock.calls[0]![1]?.body))).toEqual({ displayUnits });
   });
 });
 

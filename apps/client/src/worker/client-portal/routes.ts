@@ -861,8 +861,10 @@ export function createClientPortalRouter(
     const projectId = opaqueId.safeParse(c.req.param("projectId"));
     const associationId = viewerAssociationId.safeParse(c.req.param("associationId"));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    const sessionPreference = z.object({ displayUnits: z.enum(["imperial", "metric"]).default("imperial") })
+      .strict().safeParse(await c.req.json().catch(() => ({})));
     const workspace = selectedWorkspace(c);
-    if (!projectId.success || !associationId.success || !key.success || !workspace ||
+    if (!projectId.success || !associationId.success || !key.success || !sessionPreference.success || !workspace ||
       !(await authorizeProject(c, "delivery.view", projectId.data)))
       throw new HTTPException(404, { message: "3D model not found" });
     const principal = c.get("clientPrincipal");
@@ -877,6 +879,7 @@ export function createClientPortalRouter(
       projectId: projectId.data,
       associationId: associationId.data,
       idempotencyKey: key.data,
+      displayUnits: sessionPreference.data.displayUnits,
     };
     const result = await c.env.VIEWER_SESSION_ISSUER.issueClientViewerSession(request);
     if (!result.ok) {

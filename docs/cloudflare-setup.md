@@ -518,6 +518,7 @@ to Client variables, browser assets, or build variables. Provision the matching
 ```powershell
 Set-Location apps/operations
 npx.cmd wrangler secret put VIEWER_SERVICE_HMAC_SECRET --name ltds-ops
+npx.cmd wrangler secret put VIEWER_EVENT_HMAC_SECRET --name ltds-ops
 ```
 
 Set `VIEWER_BASE_URL` to the bare HTTPS Viewer origin and
@@ -525,13 +526,19 @@ Set `VIEWER_BASE_URL` to the bare HTTPS Viewer origin and
 the Viewer service response directly rather than redirecting to another host or
 login page; Operations deliberately rejects redirects to protect its HMAC
 request headers. Keep
-`VIEWER_INTEGRATION_ENABLED=false`, `VIEWER_PUBLIC_SHARES_ENABLED=false`, and
+`VIEWER_INTEGRATION_ENABLED=false`, `VIEWER_PROCESSING_ENABLED=false`,
+`VIEWER_PUBLIC_SHARES_ENABLED=false`, and
 `CLIENT_VIEWER_SESSION_ISSUER_ENABLED=false`. In Client, bind
 `VIEWER_SESSION_ISSUER` to Operations entrypoint `ViewerSessionIssuer` and keep
 `CLIENT_VIEWER_ENABLED=false`. Apply Client migration
 `0138_viewer_model_associations.sql` and Operations migration
-`0026_viewer_permissions.sql`, deploy both Workers, and verify the shared HMAC
-fixture, model-version pinning, authorization denial, renewal, and mobile embed
+`0026_viewer_permissions.sql` plus `0027_viewer_processing_control_plane.sql`,
+deploy both Workers, and verify both shared HMAC/route fixtures, reverse callback
+key overlap and durable notification outbox, direct browser upload/CORS/CSP,
+storage recovery/preflight, provider-outage viewing independence, rate limits,
+and resumable upload recovery before enabling processing. Separately verify the
+existing internal-session HMAC fixture, model-version pinning, authorization
+denial, renewal, and mobile embed
 in staging before enabling Operations first, public demo shares only after the
 Viewer public-route policy is verified, its client issuer second, and the Client
 UI last. Roll back by disabling the Client UI, issuer, and public-share gates;

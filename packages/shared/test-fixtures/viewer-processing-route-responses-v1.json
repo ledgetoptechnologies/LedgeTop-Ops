@@ -1,0 +1,136 @@
+{
+  "schemaVersion": 1,
+  "projects": {
+    "projects": [{
+      "id": "project-one", "displayName": "North site", "description": null,
+      "metadata": {}, "defaultUnits": "imperial", "status": "active", "createdBy": "ops:staff-one",
+      "createdAt": "2027-01-15T08:00:00.000Z", "updatedAt": "2027-01-15T08:00:00.000Z", "archivedAt": null
+    }],
+    "nextCursor": null
+  },
+  "datasets": {
+    "datasets": [{
+      "id": "dataset-one", "projectId": "project-one", "displayName": "Flight 1", "description": null,
+      "sourceType": "upload", "storageMode": "managed", "rootKey": "datasets", "relativePath": "project-one/dataset-one",
+      "status": "finalized", "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fileCount": 12, "byteSize": 1048576, "metadata": {}, "createdBy": "ops:staff-one",
+      "createdAt": "2027-01-15T08:00:00.000Z", "updatedAt": "2027-01-15T08:10:00.000Z",
+      "finalizedAt": "2027-01-15T08:10:00.000Z", "archivedAt": null, "trashedAt": null
+    }],
+    "nextCursor": null
+  },
+  "tasks": {
+    "tasks": [{
+      "id": "task-one", "projectId": "project-one", "datasetId": "dataset-one", "displayName": "Map flight 1",
+      "description": null, "status": "processing", "activeAttemptId": "attempt-one", "publishedModelId": null,
+      "metadata": {}, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z",
+      "updatedAt": "2027-01-15T08:12:00.000Z", "archivedAt": null,
+      "latestAttempt": {
+        "id": "attempt-one", "taskId": "task-one", "attemptNumber": 1, "providerId": "provider-one",
+        "providerTaskId": "42", "presetId": null, "options": {}, "status": "running", "progress": 0.4,
+        "providerOutputCursor": 0, "capabilityFingerprint": null, "errorCode": null, "errorMessage": null, "resultModelId": null,
+        "resultModelVersionId": null, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z",
+        "updatedAt": "2027-01-15T08:12:00.000Z", "startedAt": "2027-01-15T08:11:30.000Z",
+        "upstreamCompletedAt": null, "ingestedAt": null, "completedAt": null
+      }
+    }],
+    "nextCursor": null
+  },
+  "taskDetail": {
+    "task": {
+      "id": "task-one", "projectId": "project-one", "datasetId": "dataset-one", "displayName": "Map flight 1",
+      "description": null, "status": "processing", "activeAttemptId": "attempt-one", "publishedModelId": null,
+      "metadata": {}, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z",
+      "updatedAt": "2027-01-15T08:12:00.000Z", "archivedAt": null,
+      "latestAttempt": {
+        "id": "attempt-one", "taskId": "task-one", "attemptNumber": 1, "providerId": "provider-one",
+        "providerTaskId": "42", "presetId": null, "options": {}, "status": "running", "progress": 0.4,
+        "providerOutputCursor": 0, "capabilityFingerprint": null, "errorCode": null, "errorMessage": null, "resultModelId": null,
+        "resultModelVersionId": null, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z",
+        "updatedAt": "2027-01-15T08:12:00.000Z", "startedAt": "2027-01-15T08:11:30.000Z",
+        "upstreamCompletedAt": null, "ingestedAt": null, "completedAt": null
+      }
+    }
+  },
+  "taskPatched": {
+    "task": {
+      "id": "task-one", "projectId": "project-one", "datasetId": "dataset-one", "displayName": "Renamed map flight",
+      "description": "Updated catalog text", "status": "processing", "activeAttemptId": "attempt-one", "publishedModelId": null,
+      "metadata": {}, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z",
+      "updatedAt": "2027-01-15T08:20:00.000Z", "archivedAt": null,
+      "latestAttempt": null
+    }
+  },
+  "providers": {
+    "providers": [{
+      "id": "provider-one", "type": "clusterodm", "displayName": "Local ClusterODM", "endpoint": "http://192.168.50.80:30048",
+      "enabled": true, "admissionLimit": 4, "activeAttempts": 1, "capabilities": null, "capabilityFingerprint": null,
+      "lastHealth": "healthy", "lastHealthAt": "2027-01-15T08:00:00.000Z",
+      "createdAt": "2027-01-15T07:00:00.000Z", "updatedAt": "2027-01-15T08:00:00.000Z"
+    }],
+    "nextCursor": null
+  },
+  "presets": { "presets": [{ "id": "preset-one", "displayName": "Balanced", "options": { "dsm": true }, "builtIn": true, "providerType": null, "capabilityFingerprint": null }] },
+  "attemptDetail": {
+    "attempt": {
+      "id": "attempt-one", "taskId": "task-one", "attemptNumber": 1, "providerId": "provider-one",
+      "providerTaskId": "42", "presetId": null, "options": {}, "status": "running", "progress": 0.4,
+      "providerOutputCursor": 0, "capabilityFingerprint": null, "errorCode": null, "errorMessage": null, "resultModelId": null,
+      "resultModelVersionId": null, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z",
+      "updatedAt": "2027-01-15T08:12:00.000Z", "startedAt": "2027-01-15T08:11:30.000Z",
+      "upstreamCompletedAt": null, "ingestedAt": null, "completedAt": null
+    },
+    "logs": [{ "level": "info", "message": "Processing image set", "created_at": "2027-01-15T08:12:00.000Z" }]
+  },
+  "operations": {
+    "uploadFinalizeAccepted": {
+      "status": 202,
+      "headers": { "Location": "/api/v1/operations/11111111-1111-4111-8111-111111111111", "Retry-After": "2" },
+      "body": { "operation": {
+        "id": "11111111-1111-4111-8111-111111111111", "type": "upload_finalize", "subject": "ops:staff-one",
+        "datasetId": "22222222-2222-4222-8222-222222222222", "uploadId": "33333333-3333-4333-8333-333333333333",
+        "status": "queued", "progress": 0, "result": null, "errorCode": null, "errorMessage": null,
+        "createdAt": "2027-01-15T08:15:00.000Z", "updatedAt": "2027-01-15T08:15:00.000Z", "completedAt": null
+      } }
+    },
+    "importAdoptAccepted": {
+      "status": 202,
+      "headers": { "Location": "/api/v1/operations/44444444-4444-4444-8444-444444444444", "Retry-After": "2" },
+      "body": { "operation": {
+        "id": "44444444-4444-4444-8444-444444444444", "type": "import_adopt", "subject": "ops:staff-one",
+        "datasetId": "55555555-5555-4555-8555-555555555555", "uploadId": null,
+        "status": "queued", "progress": 0, "result": null, "errorCode": null, "errorMessage": null,
+        "createdAt": "2027-01-15T08:16:00.000Z", "updatedAt": "2027-01-15T08:16:00.000Z", "completedAt": null
+      } }
+    },
+    "uploadFinalizeSucceeded": { "operation": {
+      "id": "11111111-1111-4111-8111-111111111111", "type": "upload_finalize", "subject": "ops:staff-one",
+      "datasetId": "22222222-2222-4222-8222-222222222222", "uploadId": "33333333-3333-4333-8333-333333333333",
+      "status": "succeeded", "progress": 1,
+      "result": { "dataset": {
+        "id": "22222222-2222-4222-8222-222222222222", "projectId": "66666666-6666-4666-8666-666666666666",
+        "displayName": "Flight 2", "description": null, "sourceType": "upload", "storageMode": "managed",
+        "rootKey": "datasets", "relativePath": "66666666-6666-4666-8666-666666666666/22222222-2222-4222-8222-222222222222",
+        "status": "finalized", "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "fileCount": 12, "byteSize": 1048576, "metadata": {}, "createdBy": "ops:staff-one",
+        "createdAt": "2027-01-15T08:00:00.000Z", "updatedAt": "2027-01-15T08:18:00.000Z",
+        "finalizedAt": "2027-01-15T08:18:00.000Z", "archivedAt": null, "trashedAt": null
+      } },
+      "errorCode": null, "errorMessage": null, "createdAt": "2027-01-15T08:15:00.000Z",
+      "updatedAt": "2027-01-15T08:18:00.000Z", "completedAt": "2027-01-15T08:18:00.000Z"
+    } }
+  },
+  "storage": {
+    "storage": {
+      "datasets": { "available": 900, "total": 1000, "reserve": 100, "required": 50, "ok": true },
+      "models": { "available": 900, "total": 1000, "reserve": 100, "required": 50, "ok": true },
+      "cache": { "available": 900, "total": 1000, "reserve": 100, "required": 50, "ok": true },
+      "trash": { "available": 900, "total": 1000, "reserve": 100, "required": 50, "ok": true }
+    },
+    "trash": { "items": [{
+      "id": "trash-one", "entityType": "dataset", "entityId": "dataset-old", "rootKey": "datasets",
+      "relativePath": "project-one/dataset-old", "byteSize": 99, "purgeAfter": "2027-02-15T08:00:00.000Z",
+      "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:00:00.000Z", "permanentlyDeletedAt": null
+    }], "nextCursor": null, "totalCount": 1, "totalBytes": 99 }
+  }
+}

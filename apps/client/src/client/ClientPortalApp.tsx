@@ -80,6 +80,7 @@ import {
   type PortalDelegatedShareCreated,
   type PortalDelegatedShareTarget,
 } from "./portal-api";
+import { readClientViewerUnits, writeClientViewerUnits } from "./viewer-units-preference";
 import {
   clientPortalPath,
   clientProjectPath,
@@ -1724,6 +1725,9 @@ function ProjectViewerModels({ projectId }: { projectId: string }) {
   const [session, setSession] = useState<PortalViewerSession | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  // The client portal does not yet expose a server-backed profile preference;
+  // keep this explicit browser-only fallback scoped to Viewer measurements.
+  const [displayUnits, setDisplayUnits] = useState<"imperial" | "metric">(readClientViewerUnits);
 
   useEffect(() => {
     let active = true;
@@ -1735,7 +1739,7 @@ function ProjectViewerModels({ projectId }: { projectId: string }) {
   }, [projectId]);
 
   const requestSession = useCallback((associationId: string) =>
-    createPortalViewerSession(projectId, associationId, crypto.randomUUID()), [projectId]);
+    createPortalViewerSession(projectId, associationId, crypto.randomUUID(), displayUnits), [displayUnits, projectId]);
 
   const open = async (model: PortalViewerModel) => {
     setBusy(true); setError("");
@@ -1756,6 +1760,12 @@ function ProjectViewerModels({ projectId }: { projectId: string }) {
   if (!models) return <Card title="3D models"><Loading /></Card>;
   return <Card title="3D models">
     {error && <div className="notice error" role="alert">{error}</div>}
+    <label className="portal-viewer-units">Measurement units<select value={displayUnits} onChange={event => {
+      const next = event.target.value as "imperial" | "metric";
+      // The active page keeps the preference in memory even when privacy
+      // settings or quota make browser persistence unavailable.
+      setDisplayUnits(next); writeClientViewerUnits(next);
+    }}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
     {!models.length ? <EmptyState title="No 3D models available" detail="Your LTDS team has not associated a 3D model with this project." /> :
       <div className="portal-viewer-model-grid">{models.map(model => <article key={model.associationId}>
         <div><span>Interactive model</span><h3>{model.title}</h3><p>{model.provider} · secure Viewer session</p></div>

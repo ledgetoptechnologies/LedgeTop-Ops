@@ -173,6 +173,14 @@ import {
   validateStaffRequestPois,
 } from "./request-area-revision";
 import { registerViewerIntegrationRoutes } from "./viewer-integration";
+import {
+  registerViewerProcessingRoutes,
+  processViewerProcessingNotifications,
+  pruneViewerEventNonces,
+  viewerMachineEventRequest,
+  viewerProcessingEnabled,
+} from "./viewer-processing";
+import { defaultViewerUnits, resolveViewerUnits } from "./viewer-units";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -256,8 +264,10 @@ const lockedSecurityHeaders = secureHeaders({
       "https://*.r2.cloudflarestorage.com",
       "https://api.mapbox.com",
       "https://events.mapbox.com",
+      "https://viewer.ledgetopdroneservices.com",
+      "https://viewer-staging.ledgetopdroneservices.com",
     ],
-    workerSrc: ["blob:"],
+    workerSrc: ["'self'", "blob:"],
     mediaSrc: ["'self'", "blob:"],
     frameSrc: ["'self'", "https://viewer.ledgetopdroneservices.com", "https://viewer-staging.ledgetopdroneservices.com"],
     frameAncestors: ["'none'"],
@@ -305,6 +315,10 @@ app.use("*", async (c, next) => {
   }
 });
 app.use("/api/*", async (c, next) => {
+  if (viewerMachineEventRequest(c.req.method, c.req.path)) {
+    await next();
+    return;
+  }
   const principal = await authenticateStaff(c.req.raw, c.env),
     administrator = await isAdministrator(c.env, principal);
   c.set("principal", principal);
@@ -617,10 +631,11 @@ app.get("/health", (c) => c.json({ status: "ok", service: "ltds-ops" }));
 app.get("/api/session", async (c) => {
   const principal = c.get("principal"),
     administrator = c.get("administrator");
-  const [permissions, globalScope, deliveryBrowseScope] = await Promise.all([
+  const [permissions, globalScope, deliveryBrowseScope, displayUnits] = await Promise.all([
     permissionKeys(c.env, principal),
     sqlScope(c.env, principal, "dashboard.view"),
     sqlScope(c.env, principal, "delivery.browse"),
+    resolveViewerUnits(c.env, principal.id),
   ]);
   const divisions =
     administrator && globalScope.global
@@ -647,6 +662,7 @@ app.get("/api/session", async (c) => {
     timezone: c.env.DISPLAY_TIMEZONE,
     mapStyleUrl: c.env.MAP_STYLE_URL || null,
     mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null,
+    units: { default: defaultViewerUnits(c.env), resolved: displayUnits },
     capabilities: {
       dropboxImport: dropboxImportCapability(c.env),
       incomingUploads: incomingUploadsCapability(c.env),
@@ -668,6 +684,9 @@ app.get("/api/session", async (c) => {
       },
       authenticatedDeliveryGrants: {
         enabled: authenticatedDeliveryGrantsEnabled(c.env),
+      },
+      viewerProcessing: {
+        enabled: viewerProcessingEnabled(c.env),
       },
     },
   });
@@ -1318,6 +1337,7 @@ registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerViewerIntegrationRoutes(app);
+registerViewerProcessingRoutes(app);
 
 app.get("/api/tasks", async (c) => {
   const principal = c.get("principal");
@@ -2925,6 +2945,7 @@ async function scheduled(
         processClientPortalRequestNotifications(env),
         processClientFolderGrantNotifications(env),
         processClientFolderChangeNotifications(env),
+        processViewerProcessingNotifications(env),
       ]);
     } catch (error) {
       console.error(
@@ -2993,6 +3014,7 @@ async function scheduled(
   );
   if (env.DROPBOX_IMPORT_TOKEN_SECRET)
     ctx.waitUntil(cleanupDropboxImports(env));
+  ctx.waitUntil(pruneViewerEventNonces(env));
 }
 async function fetch(
   request: Request,

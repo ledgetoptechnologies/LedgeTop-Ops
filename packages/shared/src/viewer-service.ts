@@ -25,6 +25,270 @@ export interface ViewerSessionGrant {
   embedUrl: string;
 }
 
+export type ViewerDisplayUnits = "imperial" | "metric";
+
+export type ViewerProcessingPermission =
+  | "viewer.projects.read"
+  | "viewer.projects.write"
+  | "viewer.datasets.read"
+  | "viewer.datasets.write"
+  | "viewer.datasets.import"
+  | "viewer.processing.read"
+  | "viewer.processing.write"
+  | "viewer.processing.publish"
+  | "viewer.providers.read"
+  | "viewer.providers.write"
+  | "viewer.storage.purge";
+
+export interface ViewerAdminSessionGrant {
+  grant: string;
+  grantExpiresAt: string;
+  sessionTtlSeconds: number;
+  redeemUrl: string;
+}
+
+export interface ViewerAdminSession {
+  accessToken: string;
+  session: {
+    id: string;
+    subject: string;
+    permissions: ViewerProcessingPermission[];
+    expiresAt: string;
+  };
+  units: { default: "imperial"; resolved: ViewerDisplayUnits };
+}
+
+export type ViewerAssetOwnership = "managed" | "adopted" | "external_reference";
+export type ViewerDatasetState = "draft" | "uploading" | "finalizing" | "finalized" | "archived" | "trashed";
+export interface ViewerProcessingProject {
+  id: string;
+  displayName: string;
+  description?: string | null;
+  metadata?: Record<string, unknown>;
+  defaultUnits: ViewerDisplayUnits;
+  status: "active" | "archived";
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+export interface ViewerDatasetSummary {
+  id: string;
+  projectId: string;
+  displayName: string;
+  description: string | null;
+  sourceType: string;
+  storageMode: ViewerAssetOwnership;
+  rootKey: string | null;
+  relativePath: string | null;
+  status: ViewerDatasetState;
+  manifestSha256: string | null;
+  fileCount: number;
+  byteSize: number;
+  metadata: Record<string, unknown>;
+  createdBy: string;
+  finalizedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+  trashedAt: string | null;
+}
+export interface ViewerProviderSummary {
+  id: string;
+  displayName: string;
+  type: "nodeodm" | "clusterodm";
+  endpoint: string;
+  enabled: boolean;
+  admissionLimit: number;
+  activeAttempts: number;
+  capabilities: ViewerProviderCapabilities | null;
+  capabilityFingerprint: string | null;
+  lastHealth: "healthy" | "degraded" | "unavailable" | "unknown" | null;
+  lastHealthAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface ViewerProcessingPreset {
+  id: string;
+  displayName: string;
+  builtIn: boolean;
+  options: Record<string, unknown>;
+  providerType: "nodeodm" | "clusterodm" | null;
+  capabilityFingerprint: string | null;
+}
+export interface ViewerProviderCapabilityOption {
+  name: string;
+  type: "int" | "float" | "string" | "bool";
+  domain: unknown;
+  help: string;
+  value: unknown;
+}
+export interface ViewerProviderCapabilities {
+  apiVersion: string;
+  engine: string;
+  engineVersion: string;
+  maxImages: number | null;
+  maxParallelTasks: number | null;
+  taskQueueCount: number | null;
+  totalMemory: number | null;
+  availableMemory: number | null;
+  cpuCores: number | null;
+  providerType: "nodeodm" | "clusterodm";
+  testedBaseline: string;
+  compatibilityWarning: string | null;
+  options: ViewerProviderCapabilityOption[];
+}
+export type ViewerProcessingAttemptState =
+  | "pending" | "admitted" | "initializing" | "uploading" | "committed"
+  | "queued_upstream" | "running" | "ingesting" | "derivatives" | "ready_for_review"
+  | "published" | "failed" | "cancelled";
+export interface ViewerProcessingAttempt {
+  id: string;
+  taskId: string;
+  attemptNumber: number;
+  providerId: string;
+  providerTaskId: string | null;
+  presetId: string | null;
+  options: Record<string, unknown>;
+  status: ViewerProcessingAttemptState;
+  progress: number | null;
+  providerOutputCursor: number | null;
+  capabilityFingerprint: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  resultModelId: string | null;
+  resultModelVersionId: string | null;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  upstreamCompletedAt: string | null;
+  ingestedAt: string | null;
+  completedAt: string | null;
+}
+export interface ViewerProcessingTask {
+  id: string;
+  projectId: string;
+  datasetId: string;
+  displayName: string;
+  status: "draft" | "queued" | "processing" | "ready_for_review" | "published" | "failed" | "cancelled" | "archived";
+  activeAttemptId: string | null;
+  latestAttempt: ViewerProcessingAttempt | null;
+  publishedModelId: string | null;
+  description: string | null;
+  metadata: Record<string, unknown>;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+}
+export interface ViewerProcessingAttemptDetail {
+  attempt: ViewerProcessingAttempt;
+  logs: Array<{ level: string; message: string; created_at: string }>;
+}
+export interface ViewerStorageVolume {
+  available: number;
+  total: number;
+  reserve: number;
+  required: number;
+  ok: boolean;
+}
+export interface ViewerTrashEntry {
+  id: string;
+  entityType: "dataset";
+  entityId: string;
+  rootKey: string;
+  relativePath: string;
+  byteSize: number;
+  purgeAfter: string;
+  createdBy: string;
+  createdAt: string;
+  permanentlyDeletedAt: string | null;
+}
+export interface ViewerStorageSummary {
+  storage: {
+    datasets: ViewerStorageVolume;
+    models: ViewerStorageVolume;
+    cache: ViewerStorageVolume;
+    trash: ViewerStorageVolume;
+  };
+  trash: {
+    items: ViewerTrashEntry[];
+    nextCursor: string | null;
+    totalCount: number;
+    totalBytes: number;
+  };
+}
+export interface ViewerDatasetUploadGrant {
+  upload: {
+    id: string;
+    datasetId: string;
+    status: string;
+    chunkSize: number;
+    expiresAt: string;
+    files: Array<{
+      id: string;
+      relativePath: string;
+      byteSize: number;
+      sha256: string;
+      chunkCount: number;
+      completedChunks: number[];
+      missingChunks: number[];
+    }>;
+  };
+  uploadToken: string;
+}
+export interface ViewerDatasetImportPreview {
+  previewToken: string;
+  expiresAt: string;
+  preview: {
+    rootKey: "dataset_import" | "terra_import" | "webodm";
+    relativePath: string;
+    fileCount: number;
+    byteSize: number;
+    files: Array<{ relativePath: string; byteSize: number }>;
+    truncated: boolean;
+    sameFilesystem: boolean;
+    destinationSpace: { availableBytes: number; reserveBytes: number; sufficient: boolean };
+  };
+}
+
+export type ViewerDurableOperationType = "upload_finalize" | "import_adopt";
+export type ViewerDurableOperationStatus = "queued" | "leased" | "succeeded" | "failed" | "cancelled";
+export interface ViewerDurableOperation {
+  id: string;
+  type: ViewerDurableOperationType;
+  subject: string;
+  datasetId: string;
+  uploadId: string | null;
+  status: ViewerDurableOperationStatus;
+  progress: number;
+  result: { dataset: ViewerDatasetSummary } | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export interface ViewerDurableOperationResponse {
+  operation: ViewerDurableOperation;
+}
+
+export interface ViewerProcessingEventV1 {
+  schemaVersion: 1;
+  eventId: string;
+  type: "processing.ready_for_review" | "processing.failed";
+  occurredAt: string;
+  projectId: string;
+  taskId: string;
+  attemptId: string;
+  requestedBySubject: string;
+  status: string;
+  error?: { code: string; message: string };
+  reviewUrl?: string;
+}
+
 export interface ViewerPublicSharePermissions {
   view: boolean;
   measure: boolean;
@@ -49,6 +313,7 @@ export interface ViewerPublicShareSummary {
   revokeReason: string | null;
   accessCount: number;
   lastAccessedAt: string | null;
+  displayUnits?: ViewerDisplayUnits | null;
 }
 
 export interface ViewerPublicShareCreation {
@@ -246,7 +511,8 @@ function publicShare(value: unknown): ViewerPublicShareSummary | null {
     typeof row.updatedAt !== "string" || !Number.isFinite(Date.parse(row.updatedAt)) ||
     !Number.isSafeInteger(row.accessCount) || (row.accessCount as number) < 0 ||
     typeof sharePermissions.view !== "boolean" || typeof sharePermissions.measure !== "boolean" ||
-    typeof sharePermissions.cameras !== "boolean" || typeof sharePermissions.download !== "boolean") return null;
+    typeof sharePermissions.cameras !== "boolean" || typeof sharePermissions.download !== "boolean" ||
+    (row.displayUnits !== undefined && row.displayUnits !== null && row.displayUnits !== "imperial" && row.displayUnits !== "metric")) return null;
   return {
     id: row.id,
     modelId: row.modelId,
@@ -269,6 +535,7 @@ function publicShare(value: unknown): ViewerPublicShareSummary | null {
     revokeReason: row.revokeReason,
     accessCount: row.accessCount as number,
     lastAccessedAt: row.lastAccessedAt,
+    ...(row.displayUnits === "imperial" || row.displayUnits === "metric" ? { displayUnits: row.displayUnits } : {}),
   };
 }
 
@@ -338,6 +605,7 @@ export class ViewerServiceClient {
     audience: ViewerAudience;
     idempotencyKey: string;
     authorizationExpiresAt: string;
+    displayUnits?: ViewerDisplayUnits;
     permissions?: { view: true; measure?: boolean; cameras?: boolean; download?: boolean };
   }): Promise<ViewerSessionGrant> {
     const path = `/api/v1/models/${encodeURIComponent(input.modelId)}/sessions`;
@@ -346,6 +614,7 @@ export class ViewerServiceClient {
       audience: input.audience,
       modelVersionId: input.modelVersionId,
       authorizationExpiresAt: input.authorizationExpiresAt,
+      displayUnits: input.displayUnits || "imperial",
       permissions: input.permissions || { view: true, measure: true, cameras: true, download: false },
     });
     const payload = record(await this.request(path, { method: "POST", body, idempotencyKey: input.idempotencyKey }));
@@ -368,6 +637,42 @@ export class ViewerServiceClient {
     };
   }
 
+  async createAdminGrant(input: {
+    subject: string;
+    permissions: ViewerProcessingPermission[];
+    authorizationExpiresAt: string;
+    displayUnits: ViewerDisplayUnits;
+    idempotencyKey: string;
+  }): Promise<ViewerAdminSessionGrant> {
+    const path = "/api/v1/admin-grants";
+    const body = JSON.stringify({
+      subject: input.subject,
+      permissions: input.permissions,
+      authorizationExpiresAt: input.authorizationExpiresAt,
+      displayUnits: input.displayUnits,
+    });
+    const payload = record(await this.request(path, {
+      method: "POST", body, idempotencyKey: input.idempotencyKey,
+    }));
+    const grant = typeof payload?.grant === "string" ? payload.grant : "";
+    const redeemUrl = assertViewerUrl(
+      payload?.redeemUrl,
+      this.origin,
+      "/api/v1/admin-sessions/redeem",
+    );
+    if (!payload || !/^[A-Za-z0-9_-]{20,512}$/.test(grant) || !redeemUrl ||
+      typeof payload.grantExpiresAt !== "string" || !Number.isFinite(Date.parse(payload.grantExpiresAt)) ||
+      typeof payload.sessionTtlSeconds !== "number" || !Number.isInteger(payload.sessionTtlSeconds) ||
+      payload.sessionTtlSeconds < 60 || payload.sessionTtlSeconds > 3600)
+      throw new ViewerServiceError("3D Viewer returned an invalid administrative grant", "invalid_response");
+    return {
+      grant,
+      grantExpiresAt: payload.grantExpiresAt,
+      sessionTtlSeconds: payload.sessionTtlSeconds,
+      redeemUrl,
+    };
+  }
+
 
   async listPublicShares(modelId: string): Promise<ViewerPublicShareSummary[]> {
     const path = `/api/v1/models/${encodeURIComponent(modelId)}/shares`;
@@ -386,6 +691,7 @@ export class ViewerServiceClient {
     createdBy: string;
     label?: string | null;
     expiresAt?: string | null;
+    displayUnits?: ViewerDisplayUnits;
     password?: string;
     permissions?: { view: true; measure?: boolean; cameras?: boolean; download?: boolean };
   }): Promise<ViewerPublicShareCreation> {
@@ -395,6 +701,7 @@ export class ViewerServiceClient {
       createdBy: input.createdBy,
       label: input.label || null,
       expiresAt: input.expiresAt || null,
+      displayUnits: input.displayUnits || "imperial",
       ...(input.password ? { password: input.password } : {}),
       permissions: input.permissions || { view: true, measure: true, cameras: true, download: false },
     });

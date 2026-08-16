@@ -20,6 +20,7 @@ const requestSchema = z.object({
   projectId: opaqueId,
   associationId: opaqueId,
   idempotencyKey: z.string().min(16).max(128).regex(/^[A-Za-z0-9][A-Za-z0-9._:-]*$/),
+  displayUnits: z.enum(["imperial", "metric"]),
 }).strict();
 
 function db(env: Env): D1Database {
@@ -181,6 +182,7 @@ export async function issueClientViewerSession(
       audience: "client",
       association,
       idempotencyKey: parsed.data.idempotencyKey,
+      displayUnits: parsed.data.displayUnits,
     });
     return { ok: true, protocolVersion: 1, ...grant };
   } catch (error) {

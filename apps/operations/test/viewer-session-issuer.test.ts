@@ -20,6 +20,7 @@ const request: ClientViewerSessionRequestV1 = {
   projectId: "project-one",
   associationId: "association-one",
   idempotencyKey: "viewer-session-key-0001",
+  displayUnits: "imperial",
 };
 
 async function applySql(database: D1Database, sql: string): Promise<void> {

@@ -1880,3 +1880,5 @@
   .portal-viewer-model-grid article { align-items: stretch; flex-direction: column; }
   .portal-viewer-model-grid article button { width: 100%; min-height: 44px; }
 }
+.portal-viewer-units { display: grid; gap: .35rem; max-width: 220px; margin: 0 0 1rem; color: var(--muted); font-size: .8rem; font-weight: 800; }
+.portal-viewer-units select { min-height: 44px; padding: .65rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); }

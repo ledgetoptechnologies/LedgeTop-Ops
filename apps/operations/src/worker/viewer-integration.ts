@@ -6,6 +6,7 @@ import {
   viewerServiceConfigured,
   type Permission,
   type ViewerAudience,
+  type ViewerDisplayUnits,
   type ViewerModelSummary,
   type ViewerSessionGrant,
 } from "@ltds/shared";
@@ -14,6 +15,7 @@ import { sqlScope } from "./acl";
 import { sha256 } from "./crypto";
 import { auditStatement } from "./request-security";
 import type { Env, StaffPrincipal } from "./types";
+import { resolveViewerUnits } from "./viewer-units";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
 type ViewerApp = Hono<{ Bindings: Env; Variables: Variables }>;
@@ -24,8 +26,9 @@ const associationInput = z.object({ projectId: opaqueId, viewerModelId: opaqueId
 const revokeInput = z.object({ reason: z.string().trim().min(1).max(240) }).strict();
 const publicShareInput = z.object({
   label: z.string().trim().max(120).nullable().optional(),
-  expiresAt: z.iso.datetime({ offset: true }),
+  expiresAt: z.iso.datetime({ offset: true }).nullable(),
   password: z.string().min(8).max(128).optional(),
+  displayUnits: z.enum(["imperial", "metric"]).default("imperial"),
   permissions: z.object({
     view: z.literal(true),
     measure: z.boolean().default(true),
@@ -33,6 +36,7 @@ const publicShareInput = z.object({
     download: z.boolean().default(false),
   }).strict().default({ view: true, measure: true, cameras: true, download: false }),
 }).strict().superRefine((value, context) => {
+  if (value.expiresAt === null) return;
   const expiry = Date.parse(value.expiresAt), now = Date.now();
   if (expiry < now + 5 * 60 * 1000)
     context.addIssue({ code: "custom", path: ["expiresAt"], message: "Expiry must be at least five minutes in the future" });
@@ -248,12 +252,14 @@ export async function issueViewerSession(input: {
   audience: ViewerAudience;
   association: AssociationRow;
   idempotencyKey: string;
+  displayUnits?: ViewerDisplayUnits;
 }): Promise<ViewerSessionGrant> {
   const requestFingerprint = await sha256(JSON.stringify({
     associationId: input.association.id,
     associationVersion: input.association.association_version,
     viewerModelId: input.association.viewer_model_id,
     viewerModelVersionId: input.association.viewer_model_version_id,
+    displayUnits: input.displayUnits || "imperial",
   }));
   const db = primaryDeliveryDb(input.env);
   const client = viewerServiceClient(input.env);
@@ -284,6 +290,7 @@ export async function issueViewerSession(input: {
     audience: input.audience,
     idempotencyKey: input.idempotencyKey,
     authorizationExpiresAt,
+    displayUnits: input.displayUnits || "imperial",
     permissions: { view: true, measure: true, cameras: true, download: false },
   });
   await db.prepare(`INSERT INTO viewer_session_issuance_receipts
@@ -422,6 +429,7 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
     try {
       return c.json(await issueViewerSession({
         env: c.env, actorId: principal.id, audience: "ops", association, idempotencyKey: key.data,
+        displayUnits: await resolveViewerUnits(c.env, principal.id),
       }), 201);
     } catch (error) { return viewerError(error); }
   });
@@ -459,6 +467,7 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
         createdBy: `ops:${principal.id}`.slice(0, 200),
         label: value.data.label,
         expiresAt: value.data.expiresAt,
+        displayUnits: value.data.displayUnits,
         password: value.data.password,
         permissions: value.data.permissions,
       });

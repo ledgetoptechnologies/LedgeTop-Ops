@@ -88,11 +88,22 @@ export type Env = Omit<
   AUTHENTICATED_DELIVERY_GRANTS_ENABLED?: string;
   /** Default-off LTDS authorization/control-plane integration with the self-hosted Viewer. */
   VIEWER_INTEGRATION_ENABLED?: string;
+  /** Default-off administrative dataset and processing control plane. */
+  VIEWER_PROCESSING_ENABLED?: string;
   /** Default-off staff creation and revocation of bearer public Viewer links. */
   VIEWER_PUBLIC_SHARES_ENABLED?: string;
   VIEWER_BASE_URL?: string;
   VIEWER_SERVICE_KEY_ID?: string;
   VIEWER_SERVICE_HMAC_SECRET?: string;
+  /** Key id expected on signed Viewer -> Operations processing events. */
+  VIEWER_EVENT_KEY_ID?: string;
+  /** Separate HMAC secret for Viewer -> Operations event callbacks. */
+  VIEWER_EVENT_HMAC_SECRET?: string;
+  /** Previous callback key accepted only during an explicit rotation window. */
+  VIEWER_EVENT_PREVIOUS_KEY_ID?: string;
+  VIEWER_EVENT_PREVIOUS_HMAC_SECRET?: string;
+  /** Installation display-unit default; invalid or absent values fail to imperial. */
+  DEFAULT_UNITS?: string;
   /** Default-off private Client -> Operations Viewer session issuer. */
   CLIENT_VIEWER_SESSION_ISSUER_ENABLED?: string;
   MAPBOX_PUBLIC_TOKEN?: string;

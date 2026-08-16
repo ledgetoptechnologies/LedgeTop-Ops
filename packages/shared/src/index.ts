@@ -1,4 +1,4 @@
-import type { ViewerSessionGrant } from "./viewer-service";
+import type { ViewerDisplayUnits, ViewerSessionGrant } from "./viewer-service";
 
 export const PERMISSIONS = [
   "dashboard.view",
@@ -39,6 +39,10 @@ export const PERMISSIONS = [
   "viewer.share.create",
   "viewer.share.revoke",
   "viewer.import",
+  "viewer.datasets.manage",
+  "viewer.processing.manage",
+  "viewer.publish",
+  "viewer.storage.purge",
 ] as const;
 
 export * from "./viewer-service";
@@ -492,6 +496,7 @@ export interface ClientViewerSessionRequestV1 {
   projectId: string;
   associationId: string;
   idempotencyKey: string;
+  displayUnits: ViewerDisplayUnits;
 }
 
 export type ClientViewerSessionResultV1 =

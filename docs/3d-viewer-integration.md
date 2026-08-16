@@ -216,8 +216,10 @@ verification is rate-limited. Public errors distinguish expiry, revocation,
 access-code requirements, removed models, and retryable service failures
 without making arbitrary identifiers enumerable.
 
-Operations creates only `latest` public shares with a required expiry between
-five minutes and 30 days. Staff can add an optional label, an optional password
+Operations creates only `latest` public shares with either an expiry between
+five minutes and 30 days or an explicit `null` expiry meaning never expires.
+The latter requires a separate warning and confirmation and remains active
+until revoked. Staff can add an optional label, an optional password
 of at least eight characters, and explicitly opt into download permission.
 Measure and camera tools remain enabled for demo links. The create response
 shows the Viewer `viewUrl` once so staff can copy it. Subsequent list responses
@@ -228,6 +230,11 @@ Cloudflare Access authenticates the staff member on Operations. The self-hosted
 Viewer does not need a second human-admin login for this flow: Operations calls
 the Viewer service API with the HMAC service credential, while the recipient
 uses only the separately scoped public-share URL (and password, when set).
+
+Dataset ingestion, processing-provider administration, direct browser uploads,
+reverse event callbacks, and storage recovery are specified separately in
+[3d-processing-control-plane.md](3d-processing-control-plane.md). Provider
+failure must not affect this published-model viewing path.
 
 ## Rollout gate
 
