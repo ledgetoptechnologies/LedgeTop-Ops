@@ -70,6 +70,7 @@ function environment(
 
 const controls = {
   allOperations: false,
+  sopAssignment: false,
   deliveryBrowse: true,
   deliveryLinkCreate: false,
   deliveryLinkRevoke: false,
@@ -99,10 +100,10 @@ describe("staff access-control route", () => {
     expect(response.status).toBe(200);
     expect(state.batchCount()).toBe(1);
     const inserts = state.prepared.filter(call => call.sql.startsWith("INSERT INTO staff_permission_overrides"));
-    expect(inserts).toHaveLength(7);
+    expect(inserts).toHaveLength(8);
     expect(inserts.find(call => call.values[2] === "delivery.browse")?.values[3]).toBe("allow");
     expect(inserts.filter(call => call.values[2] !== "delivery.browse").every(call => call.values[3] === "deny")).toBe(true);
-    expect(state.prepared.filter(call => call.sql.startsWith("DELETE FROM staff_permission_overrides"))).toHaveLength(7);
+    expect(state.prepared.filter(call => call.sql.startsWith("DELETE FROM staff_permission_overrides"))).toHaveLength(8);
   });
 
   it("rejects self-edit and protected-owner edits before writing a batch", async () => {

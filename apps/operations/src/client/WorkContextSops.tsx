@@ -11,6 +11,7 @@ export interface WorkContextSopLink {
   publishedAt: string;
   linkedAt: string;
   archived: boolean;
+  publicationState: "current" | "superseded" | "archived" | "unpublished";
   href: string;
 }
 
@@ -70,21 +71,21 @@ export function WorkContextSops({
       title: string;
       purpose: string;
       revisionNumber: number;
-      archived: boolean;
+      publicationState: WorkContextSopLink["publicationState"];
     }>();
     for (const item of available) values.set(item.publishedRevisionId, {
       revisionId: item.publishedRevisionId,
       title: item.title,
       purpose: item.purpose,
       revisionNumber: item.publishedRevisionNumber,
-      archived: false,
+      publicationState: "current",
     });
     for (const item of links) if (!values.has(item.revisionId)) values.set(item.revisionId, {
       revisionId: item.revisionId,
       title: item.title,
       purpose: item.purpose,
       revisionNumber: item.revisionNumber,
-      archived: item.archived,
+      publicationState: item.publicationState,
     });
     return [...values.values()].sort((left, right) => left.title.localeCompare(right.title));
   }, [available, links]);
@@ -124,7 +125,7 @@ export function WorkContextSops({
           {links.map(link => (
             <a key={link.revisionId} href={link.href}>
               <span>{link.title}</span>
-              <small>Revision {link.revisionNumber}{link.archived ? " · archived" : ""}</small>
+              <small>Revision {link.revisionNumber}{link.publicationState === "current" ? "" : ` · ${link.publicationState}`}</small>
             </a>
           ))}
         </nav>
@@ -157,7 +158,7 @@ export function WorkContextSops({
                     />
                     <span>
                       <strong>{choice.title}</strong>
-                      <small>Revision {choice.revisionNumber}{choice.archived ? " · archived; retained until removed" : ""} · {choice.purpose}</small>
+                      <small>Revision {choice.revisionNumber}{choice.publicationState === "current" ? "" : ` · ${choice.publicationState}; retained until removed`} · {choice.purpose}</small>
                     </span>
                   </label>
                 )) : <small>No published SOPs are available.</small>}

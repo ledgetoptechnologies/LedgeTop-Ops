@@ -364,6 +364,7 @@ describe("client-delegated public share foundation", () => {
     const root = "clients/private/project/deliverables/photos/";
     const objects = new Map<string, { bytes: Uint8Array; type: string; uploaded: Date; etag: string }>([
       [`${root}visible.jpg`, { bytes: new TextEncoder().encode("visible-image"), type: "image/jpeg", uploaded: new Date("2026-08-01T12:00:00Z"), etag: '"visible-etag"' }],
+      [`${root}flight.mp4`, { bytes: new TextEncoder().encode("video-source"), type: "video/mp4", uploaded: new Date("2026-08-01T12:01:00Z"), etag: '"video-etag"' }],
       [`${root}_ltds/hidden.jpg`, { bytes: new TextEncoder().encode("hidden"), type: "image/jpeg", uploaded: new Date("2026-08-01T12:00:00Z"), etag: '"hidden-etag"' }],
       [`${root}deleted.jpg`, { bytes: new TextEncoder().encode("deleted"), type: "image/jpeg", uploaded: new Date("2026-08-01T12:00:00Z"), etag: '"deleted-etag"' }],
       ["clients/private/project/deliverables/sibling/secret.pdf", { bytes: new TextEncoder().encode("sibling"), type: "application/pdf", uploaded: new Date("2026-08-01T12:00:00Z"), etag: '"sibling-etag"' }],
@@ -373,8 +374,10 @@ describe("client-delegated public share foundation", () => {
       httpMetadata: { contentType: value.type }, customMetadata: {},
       writeHttpMetadata(headers: Headers) { headers.set("Content-Type", value.type); },
     });
+    const listOptions:Array<{prefix:string;delimiter?:string;limit?:number;cursor?:string}>=[];
     const bucket = {
-      async list(options: { prefix: string; delimiter?: string }) {
+      async list(options: { prefix: string; delimiter?: string;limit?:number;cursor?:string }) {
+        listOptions.push({...options});
         const listed = [...objects.entries()].filter(([key]) => key.startsWith(options.prefix));
         const direct = listed.filter(([key]) => !key.slice(options.prefix.length).includes("/"));
         const prefixes = [...new Set(listed.flatMap(([key]) => {
@@ -395,6 +398,10 @@ describe("client-delegated public share foundation", () => {
     await db.batch([
       db.prepare(`INSERT INTO file_index(r2_key,etag,media_kind,size,uploaded_at,content_type)
         VALUES (?,'visible-etag','image',13,'2026-08-01T12:00:00Z','image/jpeg')`).bind(`${root}visible.jpg`),
+      db.prepare(`INSERT INTO file_index(r2_key,etag,media_kind,size,uploaded_at,content_type,stream_uid,stream_status)
+        VALUES (?,'video-etag','video',12,'2026-08-01T12:01:00Z','video/mp4','stream-flight','ready')`).bind(`${root}flight.mp4`),
+      db.prepare(`INSERT INTO image_thumbnail_jobs(source_key,source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status)
+        VALUES (?,'video-etag','_ltds/thumbnails/flight.webp','thumb-flight',64,'ready')`).bind(`${root}flight.mp4`),
       db.prepare(`INSERT INTO image_asset_locations
         (source_key,source_etag,folder_prefix,latitude,longitude,status)
         VALUES (?,'visible-etag',?,44.5133,-88.0133,'ready')`).bind(`${root}visible.jpg`, root),
@@ -436,13 +443,27 @@ describe("client-delegated public share foundation", () => {
     }, requestEnv, executionCtx);
     expect(manifestResponse.status).toBe(200);
     const manifestBody = await manifestResponse.json<any>();
-    expect(manifestBody.items).toEqual([expect.objectContaining({
+    expect(manifestBody.items).toEqual(expect.arrayContaining([expect.objectContaining({
       name: "visible.jpg",
       downloadUrl: expect.stringMatching(/^\/client-share\/api\/shares\//),
-    })]);
+    }),expect.objectContaining({
+      name:"flight.mp4",kind:"video",thumbnailState:"ready",previewStatus:"ready",
+      thumbnailUrl:expect.stringMatching(/\/thumbnail$/),
+    })]));
+    expect(manifestBody.mediaHydrated).toBe(true);
+    expect(manifestResponse.headers.get("Server-Timing")).toContain("manifest;dur=");
+    expect(listOptions[0]).toMatchObject({prefix:root,delimiter:"/",limit:150});
     expect(JSON.stringify(manifestBody)).not.toContain("clients/private");
     expect(JSON.stringify(manifestBody)).not.toContain("hidden.jpg");
     expect(JSON.stringify(manifestBody)).not.toContain("deleted.jpg");
+
+    const mediaResponse=await router.request(`https://client.test/shares/${publicId}/manifest/media`,{
+      headers:{Cookie:cookie},
+    },requestEnv,executionCtx);
+    expect(mediaResponse.status).toBe(200);
+    expect(await mediaResponse.json<any>()).toMatchObject({items:expect.arrayContaining([expect.objectContaining({
+      id:encodeItemRef("flight.mp4"),thumbnailState:"ready",previewStatus:"ready",
+    })])});
 
     const disabledLocations = await router.request(`https://client.test/shares/${publicId}/locations`, {
       headers: { Cookie: cookie },

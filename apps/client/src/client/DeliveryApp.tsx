@@ -14,11 +14,20 @@ import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { ImageLocationMap, type ImageLocationMapAsset } from "./ImageLocationMap";
 
 type Gate = "landing" | "loading" | "code" | "ready" | "error";
-type ErrorView = "unavailable" | "invalid-link";
+type ErrorView = "unavailable" | "invalid-link" | "expired" | "revoked" | "inactive";
 type DownloadSummaryState = { status: "loading" | "ready" | "unavailable"; fileCount?: number; totalBytes?: number | null; knownBytes?: number; unknownSizeCount?: number };
 type MediaPatch = Partial<Pick<DeliveryItem, "thumbnailUrl" | "thumbnailState" | "thumbnailFallbackKind" | "previewStatus">> & { id: string };
 
 const invalidLinkDetail = "This folder has been moved, removed, or is no longer being shared. Contact your Ledge Top Drone Services representative for a current delivery link.";
+const DELIVERY_RENDER_WINDOW = 450;
+const DELIVERY_RENDER_STEP = 150;
+
+const recoverableSessionCodes=new Set(["DELIVERY_SESSION_REQUIRED","DELIVERY_SESSION_EXPIRED","DELIVERY_SESSION_INVALID","SHARE_SESSION_STALE"]);
+
+function isRecoverableSessionFailure(caught:unknown):boolean{
+  const value=caught as RequestError;
+  return value.status===401&&recoverableSessionCodes.has(value.body?.code||"");
+}
 
 function isProtectedDeliveryFailure(caught: unknown): boolean {
   const status = (caught as RequestError).status;
@@ -62,7 +71,12 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
   );
   const initialBrowse = useMemo(() => parseDeliveryBrowseState(location.search, localStorage.getItem("ltds-delivery-view") === "list" ? "list" : "grid"), []);
   const [publicId, setPublicId] = useState(initialRoute.publicId);
-  const [secret, setSecret] = useState(initialRoute.secret);
+  // The fragment is removed from browser history by consumeDeliveryRoute, but
+  // remains in this tab's memory so an active share can safely re-establish a
+  // lost cookie. It is never persisted to local/session storage.
+  const [secret] = useState(initialRoute.secret);
+  const accessCodeCredential=useRef("");
+  const sessionRecovery=useRef<Promise<unknown>|null>(null);
   const [gate, setGate] = useState<Gate>(initialRoute.publicId ? "loading" : "landing");
   const [error, setError] = useState("");
   const [errorView, setErrorView] = useState<ErrorView>("unavailable");
@@ -72,6 +86,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
   const [preview, setPreview] = useState<DeliveryItem | null>(null);
   const [folderLoading, setFolderLoading] = useState(false);
   const [pageLoading, setPageLoading] = useState(false);
+  const [renderStart, setRenderStart] = useState(0);
   const [navigationError, setNavigationError] = useState("");
   const [downloadSummary, setDownloadSummary] = useState<DownloadSummaryState>({ status: "loading" });
   const [locationData, setLocationData] = useState<{ locations: DeliveryLocationCollection; mapboxPublicToken: string | null } | null>(null);
@@ -86,7 +101,15 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
   const authorizedItems = useRef(new Map<string, DeliveryItem>());
   const navigationVersion = useRef(0);
   const navigationRequest = useRef<AbortController | null>(null);
-  const pageRequest = useRef<AbortController | null>(null);
+  const pageRequest = useRef<{
+    folderId: string;
+    cursor: string;
+    controller: AbortController;
+    promise: Promise<DeliveryManifest>;
+  } | null>(null);
+  const prefetchedPage = useRef<{ folderId: string; cursor: string; page: DeliveryManifest } | null>(null);
+  const paginationSentinel = useRef<HTMLDivElement | null>(null);
+  const lastAutoCursor = useRef("");
   const mediaRequests = useRef(new Set<AbortController>());
   const [bulkError, setBulkError] = useState("");
   const [bulkProgress, setBulkProgress] = useState<{ status: string; percent: number | null; message?: string } | null>(null);
@@ -97,17 +120,46 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
   }, [manifest]);
   const apiBase = useCallback((id: string) => deliveryApiBase(id, namespace), [namespace]);
 
+  const createSession=useCallback(async(id:string,accessCode?:string)=>{
+    if(!secret)throw Object.assign(new Error("This delivery session has expired."),{status:401,body:{code:"DELIVERY_SESSION_EXPIRED"}});
+    const result=await requestJson<{publicId:string;canonicalPath:string}>(`${apiBase(id)}/session`,{
+      method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({secret,accessCode}),
+    });
+    if(accessCode)accessCodeCredential.current=accessCode;
+    return result;
+  },[apiBase,secret]);
+
+  const protectedJson=useCallback(async <T,>(url:string,init?:RequestInit):Promise<T>=>{
+    try{return await requestJson<T>(url,init);}
+    catch(caught){
+      if(!isRecoverableSessionFailure(caught)||!secret)throw caught;
+      if(!sessionRecovery.current){
+        sessionRecovery.current=createSession(publicId,accessCodeCredential.current||undefined).finally(()=>{sessionRecovery.current=null;});
+      }
+      await sessionRecovery.current;
+      return requestJson<T>(url,init);
+    }
+  },[createSession,publicId,secret]);
+
   const fetchManifest = useCallback(async (id: string, folderId = "", cursor: string | null = null, signal?: AbortSignal) => {
     const params = new URLSearchParams();
     if (folderId) params.set("folder", folderId);
     if (cursor) params.set("cursor", cursor);
     const query = params.size ? `?${params.toString()}` : "";
-    return requestJson<DeliveryManifest>(`${apiBase(id)}/manifest${query}`, { signal });
-  }, [apiBase]);
+    return protectedJson<DeliveryManifest>(`${apiBase(id)}/manifest${query}`, { signal });
+  }, [apiBase,protectedJson]);
 
   const showRequestError = useCallback((caught: unknown) => {
     const value = caught as RequestError;
-    if (value.status === 410 || value.body?.code === "SHARED_FOLDER_UNAVAILABLE") {
+    if(value.body?.code==="SHARE_EXPIRED"){
+      setErrorView("expired");setError("This delivery link has expired. Contact your Ledge Top Drone Services representative if you need renewed access.");
+    }else if(value.body?.code==="SHARE_REVOKED"){
+      setErrorView("revoked");setError("This delivery link was revoked. Contact your Ledge Top Drone Services representative for a current link.");
+    }else if(value.body?.code==="SHARE_PROJECT_INACTIVE"){
+      setErrorView("inactive");setError("This delivery project is no longer active. Contact your Ledge Top Drone Services representative if you still need access.");
+    }else if(value.body?.code==="SHARE_INVALID"){
+      setErrorView("invalid-link");setError("This delivery link is not valid. Check that you opened the complete link, including its private fragment.");
+    }else if (value.status === 410 || value.body?.code === "SHARED_FOLDER_UNAVAILABLE" || value.body?.code==="SHARE_RESOURCE_REMOVED") {
       setErrorView("invalid-link");
       setError(invalidLinkDetail);
     } else {
@@ -120,7 +172,10 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
   const clearProtectedDelivery = useCallback((caught: unknown) => {
     navigationVersion.current += 1;
     navigationRequest.current?.abort();
-    pageRequest.current?.abort();
+    pageRequest.current?.controller.abort();
+    pageRequest.current = null;
+    prefetchedPage.current = null;
+    lastAutoCursor.current = "";
     for (const request of mediaRequests.current) request.abort();
     mediaRequests.current.clear();
     manifestCache.current.clear();
@@ -132,6 +187,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
     setDownloadSummary({ status: "unavailable" });
     setFolderLoading(false);
     setPageLoading(false);
+    setRenderStart(0);
     showRequestError(caught);
   }, [showRequestError]);
 
@@ -148,12 +204,16 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
     if (cache.size > 40) cache.delete(cache.keys().next().value as string);
   }, [cacheKey]);
 
-  const hydrateMedia = useCallback(async (id: string, folderId: string, cursor: string | null, version: number) => {
-    const params = new URLSearchParams(); if (folderId) params.set("folder", folderId); if (cursor) params.set("cursor", cursor);
+  const hydrateMedia = useCallback(async (id: string, folderId: string, items:DeliveryItem[], version: number) => {
+    const mediaIds=items.filter(item=>item.kind==="image"||item.kind==="pdf"||item.kind==="video").map(item=>item.id);
+    if(!mediaIds.length)return;
+    const params = new URLSearchParams(); if (folderId) params.set("folder", folderId);
     const controller = new AbortController();
     mediaRequests.current.add(controller);
     try {
-      const result = await requestJson<{ items: MediaPatch[] }>(`${apiBase(id)}/manifest/media?${params.toString()}`, { signal: controller.signal });
+      const result = await protectedJson<{ items: MediaPatch[] }>(`${apiBase(id)}/manifest/media${params.size?`?${params.toString()}`:""}`, namespace === "staff" ? {
+        method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({items:mediaIds}),signal:controller.signal,
+      } : { signal: controller.signal });
       if (version !== navigationVersion.current) return;
       setManifest(current => {
         if (!current || current.folder.id !== folderId) return current;
@@ -169,15 +229,15 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
     } finally {
       mediaRequests.current.delete(controller);
     }
-  }, [apiBase, clearProtectedDelivery, rememberManifest]);
+  }, [apiBase, clearProtectedDelivery, namespace, protectedJson, rememberManifest]);
 
   const loadManifest = useCallback(async (id: string, folderId = "", fileId = "") => {
     const version = ++navigationVersion.current;
     const data = await fetchManifest(id, folderId);
     rememberManifest(id, folderId, data);
-    setManifest(data); setFolder(folderId); setPreview(data.items.find(item => item.id === fileId && item.kind !== "folder") || null); setGate("ready");
+    setRenderStart(0); setManifest(data); setFolder(folderId); setPreview(data.items.find(item => item.id === fileId && item.kind !== "folder") || null); setGate("ready");
     history.replaceState({ ltdsDelivery: true }, "", deliveryBrowsePath(id, { folderId, fileId: data.items.some(item => item.id === fileId && item.kind !== "folder") ? fileId : "", view: initialBrowse.view }, namespace));
-    void hydrateMedia(id, folderId, null, version);
+    if ((data as DeliveryManifest & { mediaHydrated?: boolean }).mediaHydrated !== true) void hydrateMedia(id, folderId, data.items, version);
   }, [fetchManifest, hydrateMedia, initialBrowse.fileId, initialBrowse.view, namespace, rememberManifest]);
 
   const exchange = useCallback(async (accessCode?: string) => {
@@ -185,15 +245,11 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
     setError("");
     try {
       const result = await openDeliveryRoute({ publicId, secret, accessCode }, {
-        createSession: route => requestJson<{ publicId: string; canonicalPath: string }>(`${apiBase(route.publicId)}/session`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ secret: route.secret, accessCode: route.accessCode }),
-        }),
+        createSession: route => createSession(route.publicId,route.accessCode),
         loadManifest: id => loadManifest(id, initialBrowse.folderId, initialBrowse.fileId),
       });
       if (!result) return;
-      setPublicId(result.publicId); setSecret("");
+      setPublicId(result.publicId);
     } catch (caught) {
       const value = caught as RequestError;
       if (value.status === 401 && (value.body?.code === "ACCESS_CODE_REQUIRED" || value.body?.code === "ACCESS_CODE_INVALID")) {
@@ -203,7 +259,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
       }
       showRequestError(caught);
     }
-  }, [apiBase, initialBrowse.fileId, initialBrowse.folderId, initialBrowse.view, loadManifest, publicId, secret, showRequestError]);
+  }, [createSession, initialBrowse.fileId, initialBrowse.folderId, initialBrowse.view, loadManifest, publicId, secret, showRequestError]);
 
   useEffect(() => {
     if (parseCloudTransferCallback(location.href)) {
@@ -216,7 +272,11 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
   const navigateToFolder = useCallback(async (folderId = "", options: { history?: "push" | "none"; fileId?: string; scroll?: boolean } = {}) => {
     const version = ++navigationVersion.current;
     navigationRequest.current?.abort();
-    pageRequest.current?.abort();
+    pageRequest.current?.controller.abort();
+    pageRequest.current = null;
+    prefetchedPage.current = null;
+    lastAutoCursor.current = "";
+    setRenderStart(0);
     setPageLoading(false);
     for (const request of mediaRequests.current) request.abort();
     mediaRequests.current.clear();
@@ -249,7 +309,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
         setManifest(fresh); setFolder(folderId); setGate("ready"); setFolderLoading(false);
         if (!cached) commitHistory(fresh);
         else setPreview(fresh.items.find(item => item.id === options.fileId && item.kind !== "folder") || (options.fileId ? authorizedItems.current.get(options.fileId) : undefined) || null);
-        void hydrateMedia(publicId, folderId, null, version);
+        if ((fresh as DeliveryManifest & { mediaHydrated?: boolean }).mediaHydrated !== true) void hydrateMedia(publicId, folderId, fresh.items, version);
       }
     } catch (caught) {
       if (controller.signal.aborted) return;
@@ -265,18 +325,34 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
     }
   }, [cacheKey, clearProtectedDelivery, fetchManifest, hydrateMedia, manifest, namespace, publicId, rememberManifest, showRequestError, view]);
 
+  const requestPage = useCallback((folderId: string, cursor: string) => {
+    const active = pageRequest.current;
+    if (active?.folderId === folderId && active.cursor === cursor) return active.promise;
+    if (active) return null;
+    const controller = new AbortController();
+    const promise = fetchManifest(publicId, folderId, cursor, controller.signal);
+    pageRequest.current = { folderId, cursor, controller, promise };
+    void promise.then(
+      () => { if (pageRequest.current?.promise === promise) pageRequest.current = null; },
+      () => { if (pageRequest.current?.promise === promise) pageRequest.current = null; },
+    );
+    return promise;
+  }, [fetchManifest, publicId]);
+
   const loadMore = useCallback(async () => {
     const cursor = manifest?.nextCursor;
-    if (!cursor || pageLoading || pageRequest.current) return;
+    if (!cursor || pageLoading) return;
     const folderId = manifest.folder.id;
     const version = navigationVersion.current;
-    const controller = new AbortController();
-    pageRequest.current = controller;
     setPageLoading(true);
     setNavigationError("");
     try {
-      const page = await fetchManifest(publicId, folderId, cursor, controller.signal);
-      if (controller.signal.aborted || version !== navigationVersion.current) return;
+      const prepared = prefetchedPage.current;
+      const page = prepared?.folderId === folderId && prepared.cursor === cursor
+        ? prepared.page
+        : await requestPage(folderId, cursor);
+      if (!page || version !== navigationVersion.current) return;
+      if (prefetchedPage.current?.folderId === folderId && prefetchedPage.current.cursor === cursor) prefetchedPage.current = null;
       setManifest(current => {
         if (!current || current.folder.id !== folderId || current.nextCursor !== cursor) return current;
         const ids = new Set(current.items.map(item => item.id));
@@ -285,16 +361,80 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
         next.items.forEach(item => { if (item.kind !== "folder") authorizedItems.current.set(item.id, item); });
         return next;
       });
-      void hydrateMedia(publicId, folderId, cursor, version);
+      if ((page as DeliveryManifest & { mediaHydrated?: boolean }).mediaHydrated !== true) void hydrateMedia(publicId, folderId, page.items, version);
     } catch (caught) {
-      if (controller.signal.aborted || version !== navigationVersion.current) return;
+      if ((caught as Error).name === "AbortError" || version !== navigationVersion.current) return;
       if (isProtectedDeliveryFailure(caught)) clearProtectedDelivery(caught);
       else setNavigationError("More items could not be loaded. Please try again.");
     } finally {
-      if (pageRequest.current === controller) pageRequest.current = null;
-      if (!controller.signal.aborted && version === navigationVersion.current) setPageLoading(false);
+      if (version === navigationVersion.current) setPageLoading(false);
     }
-  }, [clearProtectedDelivery, fetchManifest, hydrateMedia, manifest, pageLoading, publicId, rememberManifest]);
+  }, [clearProtectedDelivery, hydrateMedia, manifest, pageLoading, publicId, rememberManifest, requestPage]);
+
+  useEffect(() => {
+    const cursor = manifest?.nextCursor;
+    if (gate !== "ready" || !cursor || !manifest) return;
+    const folderId = manifest.folder.id;
+    const version = navigationVersion.current;
+    let cancelled = false;
+    const prepare = () => {
+      const request = requestPage(folderId, cursor);
+      if (!request) return;
+      void request.then(page => {
+        if (!cancelled && version === navigationVersion.current) prefetchedPage.current = { folderId, cursor, page };
+      }).catch(caught => {
+        if (!cancelled && (caught as Error).name !== "AbortError" && version === navigationVersion.current) {
+          setNavigationError("The next page could not be prepared. Use Load more to retry.");
+        }
+      });
+    };
+    const idleWindow = window as unknown as {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const requestIdle = idleWindow.requestIdleCallback;
+    const cancelIdle = idleWindow.cancelIdleCallback;
+    const handle = requestIdle
+      ? requestIdle(prepare, { timeout: 1200 })
+      : window.setTimeout(prepare, 120);
+    return () => {
+      cancelled = true;
+      if (cancelIdle && requestIdle) cancelIdle(handle);
+      else window.clearTimeout(handle);
+    };
+  }, [gate, manifest?.folder.id, manifest?.nextCursor, requestPage]);
+
+  useEffect(() => {
+    const cursor = manifest?.nextCursor;
+    const target = paginationSentinel.current;
+    if (!cursor || !target || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(entries => {
+      if (!entries.some(entry => entry.isIntersecting) || lastAutoCursor.current === cursor) return;
+      lastAutoCursor.current = cursor;
+      void loadMore();
+    }, { rootMargin: "700px 0px" });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [loadMore, manifest?.nextCursor]);
+
+  const priorRenderedCount = useRef(0);
+  const priorRenderedFolder = useRef("");
+  useEffect(() => {
+    const folderId = manifest?.folder.id ?? "";
+    const count = manifest?.items.length ?? 0;
+    if (folderId !== priorRenderedFolder.current || count < priorRenderedCount.current) {
+      priorRenderedFolder.current = folderId;
+      setRenderStart(0);
+    } else if (count > priorRenderedCount.current && count > DELIVERY_RENDER_WINDOW) {
+      setRenderStart(count - DELIVERY_RENDER_WINDOW);
+    }
+    priorRenderedCount.current = count;
+  }, [manifest?.folder.id, manifest?.items.length]);
+
+  const renderedItems = useMemo(
+    () => manifest?.items.slice(renderStart, renderStart + DELIVERY_RENDER_WINDOW) ?? [],
+    [manifest?.items, renderStart],
+  );
 
   useEffect(() => {
     const pop = () => {
@@ -312,7 +452,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
     if (gate !== "ready" || !publicId) return;
     const controller = new AbortController(); setDownloadSummary({ status: "loading" });
     const params = manifest?.folder.id ? `?folder=${encodeURIComponent(manifest.folder.id)}` : "";
-    requestJson<{ fileCount: number; totalBytes: number | null; knownBytes: number; unknownSizeCount: number }>(`${apiBase(publicId)}/download-summary${params}`, { signal: controller.signal })
+    protectedJson<{ fileCount: number; totalBytes: number | null; knownBytes: number; unknownSizeCount: number }>(`${apiBase(publicId)}/download-summary${params}`, { signal: controller.signal })
       .then(summary => setDownloadSummary({ status: "ready", ...summary }))
       .catch(error => {
         if (controller.signal.aborted) return;
@@ -320,13 +460,13 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
         else setDownloadSummary({ status: "unavailable" });
       });
     return () => controller.abort();
-  }, [apiBase, clearProtectedDelivery, gate, manifest?.folder.id, publicId]);
+  }, [apiBase, clearProtectedDelivery, gate, manifest?.folder.id, protectedJson, publicId]);
 
   useEffect(() => {
     if (gate !== "ready" || !publicId) return;
     const controller = new AbortController(); setLocationData(null); setLocationLoaded(false);
     const params = folder ? `?folder=${encodeURIComponent(folder)}` : "";
-    requestJson<{ locations: DeliveryLocationCollection; mapboxPublicToken: string | null }>(`${apiBase(publicId)}/locations${params}`, { signal: controller.signal })
+    protectedJson<{ locations: DeliveryLocationCollection; mapboxPublicToken: string | null }>(`${apiBase(publicId)}/locations${params}`, { signal: controller.signal })
       .then(setLocationData)
       .catch(error => {
         if (controller.signal.aborted) return;
@@ -335,7 +475,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
       })
       .finally(() => { if (!controller.signal.aborted) setLocationLoaded(true); });
     return () => controller.abort();
-  }, [apiBase, clearProtectedDelivery, folder, gate, publicId]);
+  }, [apiBase, clearProtectedDelivery, folder, gate, protectedJson, publicId]);
 
   function changeView(next: DeliveryBrowseView) {
     setView(next); localStorage.setItem("ltds-delivery-view", next);
@@ -382,7 +522,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
     bulkRequestActive.current = true;
     setBulkBusy(true); setBulkError(""); setBulkProgress({ status: "Preparing download", percent: null });
     try {
-      let body = await requestJson<BulkDownloadResponse>(`${apiBase(publicId)}/bulk-download`, {
+      let body = await protectedJson<BulkDownloadResponse>(`${apiBase(publicId)}/bulk-download`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Accept": "application/json" },
         body: JSON.stringify(all ? (manifest?.folder.id ? { items: [manifest.folder.id] } : { all: true }) : { items: [...selectedItems] }),
@@ -418,7 +558,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
   if (gate === "loading") return <PublicFrame><DeliveryLoadingSkeleton /></PublicFrame>;
   if (gate === "code") return <PublicFrame><AccessCodeForm onSubmit={exchange} error={error} /></PublicFrame>;
   if (gate === "error" || !manifest) return <PublicFrame><EmptyState
-    title={errorView === "invalid-link" ? "This link is no longer valid" : "Delivery unavailable"}
+    title={errorView === "invalid-link" ? "This link is no longer valid" : errorView === "expired" ? "This link has expired" : errorView === "revoked" ? "This link was revoked" : errorView === "inactive" ? "Project unavailable" : "Delivery unavailable"}
     detail={error || "This link is invalid, expired, or has been revoked."}
   /></PublicFrame>;
 
@@ -433,7 +573,7 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
       scopeLabel="this shared delivery"
       loadAsset={async assetRef => {
         const params = folder ? `?folder=${encodeURIComponent(folder)}` : "";
-        const result = await requestJson<{ item: ImageLocationMapAsset }>(`${apiBase(publicId)}/locations/${encodeURIComponent(assetRef)}${params}`);
+        const result = await protectedJson<{ item: ImageLocationMapAsset }>(`${apiBase(publicId)}/locations/${encodeURIComponent(assetRef)}${params}`);
         authorizedItems.current.set(result.item.id, result.item);
         return result.item;
       }}
@@ -465,10 +605,12 @@ export function DeliveryApp({ namespace = "staff", initialRoute: consumedRoute }
       {navigationError && <p className="bulk-error" role="alert">{navigationError}</p>}
       {bulkError && <p className="bulk-error" role="alert">{bulkError}</p>}
       {bulkProgress && <BulkProgress progress={bulkProgress} />}
+      {renderStart > 0 && <div className="public-delivery-pagination"><button type="button" className="button-ghost" onClick={() => setRenderStart(current => Math.max(0, current - DELIVERY_RENDER_STEP))}>Show earlier items</button></div>}
       {manifest.items.length === 0 ? <EmptyState title="This folder is empty" detail="New synced files will appear here automatically." /> : view === "grid" ?
-        <div className="item-grid">{manifest.items.map(item => <ItemCard key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={openPreview} />)}</div> :
-        <div className="item-list">{manifest.items.map(item => <ItemRow key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={openPreview} />)}</div>}
-      {manifest.nextCursor && <div className="public-delivery-pagination"><button type="button" className="button-ghost" disabled={pageLoading} onClick={() => void loadMore()}>{pageLoading ? "Loading more..." : "Load more"}</button></div>}
+        <div className="item-grid">{renderedItems.map(item => <ItemCard key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={openPreview} />)}</div> :
+        <div className="item-list">{renderedItems.map(item => <ItemRow key={item.id} item={item} selectionMode={selectionMode} selected={selectedItems.has(item.id)} onToggle={toggleSelected} onFolder={openFolder} onPreview={openPreview} />)}</div>}
+      {renderStart + DELIVERY_RENDER_WINDOW < manifest.items.length && <div className="public-delivery-pagination"><button type="button" className="button-ghost" onClick={() => setRenderStart(current => Math.min(manifest.items.length - DELIVERY_RENDER_WINDOW, current + DELIVERY_RENDER_STEP))}>Show later items</button></div>}
+      {manifest.nextCursor && <div ref={paginationSentinel} className="public-delivery-pagination"><button type="button" className="button-ghost" disabled={pageLoading} onClick={() => void loadMore()}>{pageLoading ? "Loading more..." : "Load more"}</button></div>}
       <footer>{manifest.items.length} item{manifest.items.length === 1 ? "" : "s"}{manifest.nextCursor ? " · More items are available" : ""}</footer>
     </section>
     {cloudTransferScope && <CloudTransferDialog publicId={publicId} scope={cloudTransferScope} enabledProviders={cloudProviders} onClose={() => setCloudTransferScope(null)} />}

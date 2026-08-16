@@ -114,6 +114,7 @@ function setup() {
   `);
   ops.exec(readFileSync(new URL("../migrations/0017_operational_job_briefs.sql", import.meta.url), "utf8"));
   ops.exec(readFileSync(new URL("../migrations/0020_internal_sop_library.sql", import.meta.url), "utf8"));
+  ops.exec(readFileSync(new URL("../migrations/0025_sop_assignment_permission.sql", import.meta.url), "utf8"));
   const insertStaff = ops.prepare("INSERT INTO staff_users VALUES (?,?,?,?)");
   for (const value of Object.values(principals)) insertStaff.run(value.id, value.email, value.displayName, value.projectAlphaUserId);
   ops.prepare("INSERT INTO divisions VALUES (?,?)").run("division-flight", "unit-flight");
@@ -199,6 +200,7 @@ describe("operational job brief routes", () => {
       if (permission === "operations.view") return;
       if (permission === "delivery.browse" && (principal.id === principals.admin.id || principal.id === principals.unrelated.id)) return;
       if (principal.id === principals.admin.id && permission === "operations.manage") return;
+      if (principal.id === principals.admin.id && ["sops.view", "sops.assign"].includes(permission)) return;
       throw new HTTPException(403, { message: `Missing permission: ${permission}` });
     });
     mocks.sqlScope.mockReset().mockResolvedValue({ global: true, divisions: [], assigned: true, own: false, deniedDivisions: [], deniedGlobal: false });
@@ -206,6 +208,7 @@ describe("operational job brief routes", () => {
     mocks.hasPermission.mockReset().mockImplementation(async (_env: unknown, principal: { id: string }, permission: string) => {
       if (permission === "operations.manage") return principal.id === principals.admin.id;
       if (permission === "sops.view") return principal.id === principals.admin.id || principal.id === principals.pilot.id;
+      if (permission === "sops.assign") return principal.id === principals.admin.id;
       return false;
     });
     mocks.requireMutationSecurity.mockReset().mockResolvedValue(undefined);
@@ -432,6 +435,7 @@ describe("operational job brief routes", () => {
     expect(pilot.status).toBe(200);
     expect((await pilot.json() as any).brief.sops[0]).toMatchObject({
       revisionId,
+      publicationState: "archived",
       html: expect.stringContaining("80/75 overlap"),
     });
     expect((await worker.fetch(
@@ -439,6 +443,16 @@ describe("operational job brief routes", () => {
       state.env,
       executionCtx,
     )).status).toBe(404);
+
+    const preserved = await worker.fetch(request("/api/operations/operation-1/job-brief/sops", "admin", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 2, revisionIds: [revisionId] }),
+    }), state.env, executionCtx);
+    expect(preserved.status).toBe(200);
+    expect((await preserved.json() as any).brief).toMatchObject({
+      version: 3,
+      sops: [{ revisionId, publicationState: "archived" }],
+    });
 
     const secondSeed = await worker.fetch(request("/api/operations/operation-2/job-brief", "admin", {
       method: "PUT", headers: { "Content-Type": "application/json" },
@@ -451,6 +465,67 @@ describe("operational job brief routes", () => {
     }), state.env, executionCtx);
     expect(archivedLink.status).toBe(409);
     expect(state.ops.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
+  it("lets an assigned operator with sops.assign update SOP pins without broader operations management", async () => {
+    const state = setup();
+    const sopId = "00000000-0000-4000-8000-000000000030";
+    const revisionId = "00000000-0000-4000-8000-000000000031";
+    state.ops.prepare(`INSERT INTO sop_documents
+      (id,slug,status,version,created_by,updated_by) VALUES (?,?,'published',1,?,?)`)
+      .run(sopId, "operator-flight", principals.admin.id, principals.admin.id);
+    state.ops.prepare(`INSERT INTO sop_revisions
+      (id,sop_id,revision_number,change_kind,title,purpose,markdown_body,rendered_html,toc_json,
+        sanitizer_version,author_id,author_email,author_display_name,published_at)
+      VALUES (?,?,1,'published','Operator flight','Assigned guidance','Body','<p>Body</p>','[]',1,?,?,?,datetime('now'))`)
+      .run(revisionId, sopId, principals.admin.id, principals.admin.email, principals.admin.displayName);
+    state.ops.prepare("UPDATE sop_documents SET published_revision_id=? WHERE id=?").run(revisionId, sopId);
+    expect((await worker.fetch(request("/api/operations/operation-1/job-brief", "admin", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 0, items: [] }),
+    }), state.env, executionCtx)).status).toBe(200);
+
+    mocks.requirePermission.mockImplementation(async (_env: unknown, principal: { id: string }, permission: string) => {
+      if (permission === "operations.view") return;
+      if (["sops.view", "sops.assign"].includes(permission) && principal.id === principals.pilot.id) return;
+      if (["operations.manage", "sops.manage"].includes(permission))
+        throw new HTTPException(403, { message: `Missing permission: ${permission}` });
+      throw new HTTPException(403, { message: `Missing permission: ${permission}` });
+    });
+    mocks.hasPermission.mockImplementation(async (_env: unknown, principal: { id: string }, permission: string) => {
+      if (["sops.view", "sops.assign"].includes(permission)) return principal.id === principals.pilot.id;
+      return false;
+    });
+
+    const linked = await worker.fetch(request("/api/operations/operation-1/job-brief/sops", "pilot", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 1, revisionIds: [revisionId] }),
+    }), state.env, executionCtx);
+    expect(linked.status).toBe(200);
+    expect((await linked.json() as any).brief.sops).toMatchObject([{ revisionId }]);
+
+    mocks.requirePermission.mockImplementation(async (_env: unknown, principal: { id: string }, permission: string) => {
+      if (permission === "operations.view" || (permission === "sops.view" && principal.id === principals.pilot.id)) return;
+      throw new HTTPException(403, { message: `Missing permission: ${permission}` });
+    });
+    const explicitlyDenied = await worker.fetch(request("/api/operations/operation-1/job-brief/sops", "pilot", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 2, revisionIds: [] }),
+    }), state.env, executionCtx);
+    expect(explicitlyDenied.status).toBe(403);
+    expect(state.ops.prepare("SELECT version FROM operational_job_briefs WHERE operation_id='operation-1'").get())
+      .toEqual({ version: 2 });
+
+    const broaderEdit = await worker.fetch(request("/api/operations/operation-1/job-brief", "pilot", {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 2, items: [] }),
+    }), state.env, executionCtx);
+    expect(broaderEdit.status).toBe(403);
+    const authoring = await worker.fetch(request("/api/admin/sops", "pilot", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title: "Unauthorized" }),
+    }), state.env, executionCtx);
+    expect(authoring.status).toBe(403);
   });
 
   it("omits pinned SOP content when an assigned pilot has an explicit effective deny", async () => {

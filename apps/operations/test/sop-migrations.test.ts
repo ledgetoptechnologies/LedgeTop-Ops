@@ -101,6 +101,8 @@ describe("internal SOP migration sequence", () => {
        WHERE permission_key LIKE 'sops.%' ORDER BY permission_key,role_id`,
     ).all();
     expect(grants).toEqual([
+      { role_id: "role-admin", permission_key: "sops.assign" },
+      { role_id: "role-owner", permission_key: "sops.assign" },
       { role_id: "role-admin", permission_key: "sops.manage" },
       { role_id: "role-owner", permission_key: "sops.manage" },
       { role_id: "role-admin", permission_key: "sops.view" },
@@ -108,6 +110,15 @@ describe("internal SOP migration sequence", () => {
       { role_id: "role-division-manager", permission_key: "sops.view" },
       { role_id: "role-operator", permission_key: "sops.view" },
       { role_id: "role-owner", permission_key: "sops.view" },
+    ]);
+
+    expect(database.prepare(
+      `SELECT role_id,permission_key FROM role_permissions
+       WHERE permission_key='administration.view' AND role_id IN ('role-owner','role-admin')
+       ORDER BY role_id`,
+    ).all()).toEqual([
+      { role_id: "role-admin", permission_key: "administration.view" },
+      { role_id: "role-owner", permission_key: "administration.view" },
     ]);
   });
 

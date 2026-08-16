@@ -31,11 +31,14 @@ gates below; no item authorizes a production deployment or remote migration.
 - SOPs attach to work, never to a person. Operation job briefs pin immutable
   published revisions, show Quick SOP chips near the heading, retain archived
   pinned guidance, and require both work visibility and `sops.view`.
+- Linking guidance requires the independent scoped `sops.assign` permission;
+  it does not grant SOP authoring or broader Project/Operation/Task management.
+  Team assigned-work links expose only operations already visible to the caller.
 - Project and Task cards expose their own direct Quick SOP chips. Each link is
   pinned to one immutable published revision; it never inherits between a
   Project, Task, Operation, or person. Reads require target visibility plus
-  `sops.view`, while changes additionally require the target's scoped manage
-  permission and optimistic-concurrency version.
+  `sops.view`, while changes additionally require scoped `sops.assign` and an
+  optimistic-concurrency version.
 - Staff request geometry opens read-only. Edit is explicit, versioned,
   reasoned, optimistic-concurrency protected, audited, and preserves the
   original client geometry. Authorized staff can export original or current

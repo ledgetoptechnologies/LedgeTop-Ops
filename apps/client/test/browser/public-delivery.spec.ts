@@ -52,6 +52,41 @@ async function mockMapbox(page: Page) {
   await page.route("https://events.mapbox.com/**", route => route.fulfill({ status: 204, body: "" }));
 }
 
+test("consumes the original fragment once, survives refresh, and opens from the original link in another tab",async({page})=>{
+  let exchanges=0;
+  const install=async(target:Page)=>{
+    await mockShare(target);
+    await target.route("**/api/public/shares/public/session",route=>{exchanges+=1;return route.fulfill({json:{publicId:"public",canonicalPath:"/s/public"},headers:{"Set-Cookie":"__Host-ltds_delivery=test; Path=/; Secure; HttpOnly; SameSite=Lax"}});});
+  };
+  await install(page);
+  await page.goto("/s/public#fragment-secret-that-is-long-enough-for-a-share");
+  await expect(page.getByText("Root photo.jpg")).toBeVisible();
+  await expect(page).toHaveURL(/\/s\/public\?view=grid$/);
+  expect(exchanges).toBe(1);
+  await page.reload();await expect(page.getByText("Root photo.jpg")).toBeVisible();expect(exchanges).toBe(1);
+  const other=await page.context().newPage();await install(other);await other.goto("/s/public");
+  await expect(other.getByText("Root photo.jpg")).toBeVisible();expect(exchanges).toBe(1);
+  await other.goto("/s/public#fragment-secret-that-is-long-enough-for-a-share");
+  await expect(other.getByText("Root photo.jpg")).toBeVisible();expect(exchanges).toBe(2);
+  await other.close();
+});
+
+test("re-exchanges the in-memory fragment once when the first protected request reports an expired session",async({page})=>{
+  let exchanges=0,manifests=0;
+  await mockShare(page);
+  await page.route("**/api/public/shares/public/session",route=>{exchanges+=1;return route.fulfill({json:{publicId:"public",canonicalPath:"/s/public"}});});
+  await page.route("**/api/public/shares/public/manifest**",route=>{
+    if(new URL(route.request().url()).pathname.endsWith("/manifest/media"))return route.fulfill({json:{items:[]}});
+    manifests+=1;
+    if(manifests===1)return route.fulfill({status:401,json:{error:"Delivery session expired",code:"DELIVERY_SESSION_EXPIRED"}});
+    return fulfillManifest(route);
+  });
+  await page.goto("/s/public#fragment-secret-that-is-long-enough-for-a-share");
+  await expect(page.getByText("Root photo.jpg")).toBeVisible();
+  expect(exchanges).toBe(2);expect(manifests).toBe(2);
+  await expect(page).toHaveURL(/\/s\/public\?view=grid$/);
+});
+
 test("folder and file history restore without a document reload", async ({ page }) => {
   await mockShare(page); await page.goto("/s/public?view=grid");
   await page.evaluate(() => (window as unknown as { historySentinel: string }).historySentinel = crypto.randomUUID());
@@ -134,12 +169,12 @@ test("authoritative names paint before media metadata and aggregate independentl
   release(); await expect(page.locator(`img[src="/thumb/${rootImage.id}.svg"]`)).toBeVisible();
 });
 
-test("public pagination paints the first 500 items while page two is delayed and appends 1200 items on demand", async ({ page }) => {
+test("public pagination paints 150 immediately, prefetches one page, and keeps 1200 items in a bounded render window", async ({ page }) => {
   let releasePageTwo!: () => void;
   const pageTwoGate = new Promise<void>(resolve => { releasePageTwo = resolve; });
-  const pages = [500, 500, 200].map((count, pageIndex) => Array.from({ length: count }, (_, index) => ({
+  const pages = Array.from({ length: 8 }, (_, pageIndex) => Array.from({ length: 150 }, (_, index) => ({
     id: `file-${pageIndex}-${index}`,
-    name: `Photo ${pageIndex * 500 + index + 1}.jpg`,
+    name: `Photo ${pageIndex * 150 + index + 1}.jpg`,
     kind: "image",
     size: 1024,
     uploadedAt: "2026-08-01T12:00:00Z",
@@ -155,8 +190,8 @@ test("public pagination paints the first 500 items while page two is delayed and
     const cursor = url.searchParams.get("cursor");
     requested.push(cursor);
     if (cursor === "page-2") await pageTwoGate;
-    const pageIndex = cursor === "page-2" ? 1 : cursor === "page-3" ? 2 : 0;
-    await route.fulfill({ json: { share, folder: { id: "", name: "North Site", breadcrumbs: [] }, items: pages[pageIndex], nextCursor: pageIndex === 0 ? "page-2" : pageIndex === 1 ? "page-3" : null } });
+    const pageIndex = cursor ? Number(cursor.slice("page-".length)) - 1 : 0;
+    await route.fulfill({ json: { share, folder: { id: "", name: "North Site", breadcrumbs: [] }, items: pages[pageIndex], nextCursor: pageIndex < 7 ? `page-${pageIndex + 2}` : null } });
   });
   await page.route("**/api/public/shares/public/download-summary**", route => route.fulfill({ json: { fileCount: 1200, totalBytes: 1200 * 1024, knownBytes: 1200 * 1024, unknownSizeCount: 0 } }));
   await page.route("**/api/public/shares/public/locations**", route => route.fulfill({ json: { locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null } }));
@@ -164,16 +199,24 @@ test("public pagination paints the first 500 items while page two is delayed and
 
   await page.goto("/s/public?view=list");
   await expect(page.getByText("Photo 1.jpg", { exact: true })).toBeVisible();
-  expect(requested).toEqual([null]);
-  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.locator(".item-row")).toHaveCount(150);
+  await expect.poll(() => requested).toEqual([null, "page-2"]);
+  await expect(page.getByText("Photo 151.jpg", { exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "Load more" }).evaluate((button: HTMLButtonElement) => button.click());
   await expect(page.getByText("Photo 1.jpg", { exact: true })).toBeVisible();
   await expect(page.getByRole("button", { name: "Loading more..." })).toBeDisabled();
   releasePageTwo();
-  await expect(page.getByText("Photo 1000.jpg", { exact: true })).toBeVisible();
-  await page.getByRole("button", { name: "Load more" }).click();
+  await expect(page.getByText("Photo 300.jpg", { exact: true })).toBeVisible();
+  for (let pageNumber = 3; pageNumber <= 8; pageNumber += 1) {
+    const button = page.getByRole("button", { name: "Load more" });
+    await expect(button).toBeEnabled();
+    await button.evaluate((element: HTMLButtonElement) => element.click());
+    await expect(page.getByText(`Photo ${pageNumber * 150}.jpg`, { exact: true })).toBeVisible();
+  }
   await expect(page.getByText("Photo 1200.jpg", { exact: true })).toBeVisible();
-  await expect(page.locator(".item-row")).toHaveCount(1200);
-  expect(requested).toEqual([null, "page-2", "page-3"]);
+  await expect(page.locator(".item-row")).toHaveCount(450);
+  await expect(page.getByRole("button", { name: "Show earlier items" })).toBeVisible();
+  expect(requested).toEqual([null, "page-2", "page-3", "page-4", "page-5", "page-6", "page-7", "page-8"]);
 });
 
 test("protected revalidation failure clears cached share content", async ({ page }) => {

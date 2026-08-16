@@ -5,6 +5,7 @@ import membershipMigration from "../migrations/0123_portal_v2_membership_managem
 import legacyBridgeMigration from "../migrations/0132_portal_v2_legacy_member_bridges.sql?raw";
 import accessReceiptMigration from "../migrations/0133_portal_invitation_access_enrollment_receipts.sql?raw";
 import securityFollowupsMigration from "../migrations/0135_security_scan_followups.sql?raw";
+import identityDenialMigration from "../migrations/0136_portal_v2_identity_denials.sql?raw";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
@@ -126,6 +127,10 @@ describe("client workspace hierarchy v2", () => {
       .replace(/^\s*--.*$/gm, "")
       .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
       .replace(/\s*\n\s*/g, " "));
+    await db.exec(identityDenialMigration
+      .replace(/^\s*--.*$/gm, "")
+      .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
+      .replace(/\s*\n\s*/g, " "));
     await db.prepare("PRAGMA foreign_keys=ON").run();
     env = {
       DELIVERY_DB: db,
@@ -225,6 +230,114 @@ describe("client workspace hierarchy v2", () => {
       scopeType: "project", publicId: "pa-project-a",
     })).toBe(false);
     await db.prepare("UPDATE portal_v2_directory_entities SET active=1 WHERE workspace_id='workspace-account-a' AND public_id='pa-org-a'").run();
+  });
+
+  it("applies default-off global and scoped identity denials live, with expiry and audit", async () => {
+    const target = { scopeType: "project" as const, publicId: "pa-project-a" };
+    expect(await authorizePortalWorkspaceCapability(
+      env, principal, "workspace-account-a", "delivery.view", target,
+    )).toBe(true);
+    await db.prepare(`INSERT INTO portal_v2_identity_denials
+      (id,identity_id,scope_type,reason_code,created_by_actor_type,created_by_actor_id)
+      VALUES ('denial-global-one','identity-one','global','incident_hold','staff','staff-a')`).run();
+    // The additive policy must remain inert until its independent rollout flag
+    // is enabled.
+    expect(await authorizePortalWorkspaceCapability(
+      env, principal, "workspace-account-a", "delivery.view", target,
+    )).toBe(true);
+
+    env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED = "true";
+    expect(await authorizePortalWorkspaceCapability(
+      env, principal, "workspace-account-a", "delivery.view", target,
+    )).toBe(false);
+    await db.prepare(`UPDATE portal_v2_identity_denials SET status='revoked',
+      revoked_at=datetime('now'),revoked_by_actor_type='staff',revoked_by_actor_id='staff-b'
+      WHERE id='denial-global-one'`).run();
+    await expect(db.prepare(`UPDATE portal_v2_identity_denials SET status='active',
+      revoked_at=NULL,revoked_by_actor_type=NULL,revoked_by_actor_id=NULL
+      WHERE id='denial-global-one'`).run()).rejects.toThrow(/revoked portal identity denial is immutable/);
+    expect(await authorizePortalWorkspaceCapability(
+      env, principal, "workspace-account-a", "delivery.view", target,
+    )).toBe(true);
+
+    await db.prepare(`INSERT INTO portal_v2_identity_denials
+      (id,identity_id,workspace_id,scope_type,scope_public_id,reason_code,
+       created_by_actor_type,created_by_actor_id)
+      VALUES ('denial-org-one','identity-one','workspace-account-a','organization','pa-org-a',
+        'scope_hold','system','policy-engine')`).run();
+    expect(await authorizePortalWorkspaceCapability(
+      env, principal, "workspace-account-a", "delivery.view", target,
+    )).toBe(false);
+    // An organization denial follows its live descendants, but does not
+    // become an implicit global/workspace denial.
+    expect(await authorizePortalWorkspaceCapability(env, principal, "workspace-account-a", "workspace.view", {
+      scopeType: "workspace", publicId: "workspace-account-a",
+    })).toBe(true);
+    await db.prepare(`UPDATE portal_v2_identity_denials
+      SET valid_from=datetime('now','-2 day'),expires_at=datetime('now','-1 day')
+      WHERE id='denial-org-one'`).run();
+    expect(await authorizePortalWorkspaceCapability(
+      env, principal, "workspace-account-a", "delivery.view", target,
+    )).toBe(true);
+    expect(await db.prepare(`SELECT COUNT(*) count FROM portal_v2_identity_denial_audit
+      WHERE identity_id='identity-one'`).first("count")).toBe(4);
+    await expect(db.prepare("DELETE FROM portal_v2_identity_denials WHERE id='denial-org-one'").run())
+      .rejects.toThrow(/history cannot be deleted/);
+    await expect(db.prepare(`UPDATE portal_v2_identity_denials
+      SET created_by_actor_id='rewritten' WHERE id='denial-org-one'`).run())
+      .rejects.toThrow(/scope and creator are immutable/);
+    await expect(db.prepare(`INSERT INTO portal_v2_identity_denials
+      (id,identity_id,scope_type,reason_code,valid_from,expires_at,created_by_actor_type,created_by_actor_id)
+      VALUES ('denial-malformed','identity-one','global','invalid_window','not-a-date','also-not-a-date','system','test')`).run())
+      .rejects.toThrow();
+    await db.exec(identityDenialMigration
+      .replace(/^\s*--.*$/gm, "")
+      .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
+      .replace(/\s*\n\s*/g, " "));
+    expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+    env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED = "false";
+  });
+
+  it("does not accept an invitation for a denied identity or a stale hierarchy scope", async () => {
+    const blocked: VerifiedClientPrincipal = {
+      issuer, subject: "blocked-subject", email: "blocked@example.test",
+    };
+    const blockedToken = "b".repeat(43);
+    const staleToken = "s".repeat(43);
+    const [blockedHash, staleHash] = await Promise.all([
+      hashPortalInvitationToken(blockedToken), hashPortalInvitationToken(staleToken),
+    ]);
+    await db.batch([
+      db.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status)
+        VALUES ('identity-blocked',?,?,?,'active')`).bind(issuer, blocked.subject, blocked.email),
+      db.prepare(`INSERT INTO portal_v2_invitations
+        (id,workspace_id,token_hash,invited_email,invited_by_identity_id,expires_at)
+        VALUES ('invitation-blocked','workspace-account-a',?,?,'identity-one',datetime('now','+1 day'))`)
+        .bind(blockedHash, blocked.email),
+      db.prepare(`INSERT INTO portal_v2_invitation_entitlements
+        (invitation_id,capability,scope_type,scope_public_id)
+        VALUES ('invitation-blocked','workspace.view','workspace','workspace-account-a')`),
+      db.prepare(`INSERT INTO portal_v2_identity_denials
+        (id,identity_id,scope_type,reason_code,created_by_actor_type,created_by_actor_id)
+        VALUES ('denial-blocked-invite','identity-blocked','global','account_hold','staff','staff-a')`),
+      db.prepare(`INSERT INTO portal_v2_invitations
+        (id,workspace_id,token_hash,invited_email,invited_by_identity_id,expires_at)
+        VALUES ('invitation-stale','workspace-account-a',?,?,'identity-one',datetime('now','+1 day'))`)
+        .bind(staleHash, "stale@example.test"),
+      db.prepare(`INSERT INTO portal_v2_invitation_entitlements
+        (invitation_id,capability,scope_type,scope_public_id)
+        VALUES ('invitation-stale','delivery.view','project','project-no-longer-live')`),
+    ]);
+    env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED = "true";
+    expect(await acceptPortalWorkspaceInvitation(env, blocked, blockedToken)).toBe("denied");
+    expect(await db.prepare("SELECT status FROM portal_v2_invitations WHERE id='invitation-blocked'").first("status"))
+      .toBe("pending");
+    env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED = "false";
+    expect(await acceptPortalWorkspaceInvitation(env, {
+      issuer, subject: "stale-subject", email: "stale@example.test",
+    }, staleToken)).toBe("denied");
+    expect(await db.prepare("SELECT status FROM portal_v2_invitations WHERE id='invitation-stale'").first("status"))
+      .toBe("pending");
   });
 
   it("never derives authorization from email or primary-contact metadata", async () => {

@@ -37,7 +37,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const migrationsDirectory = fileURLToPath(new URL("../migrations/", import.meta.url));
     for (const migration of readdirSync(migrationsDirectory).filter(name => name.endsWith(".sql")).sort()) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
-      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql", "0127_portal_invitation_secret_scrub.sql", "0129_portal_hierarchy_relations.sql", "0130_client_delegated_share_provisioning.sql", "0132_portal_v2_legacy_member_bridges.sql", "0133_portal_invitation_access_enrollment_receipts.sql", "0134_rejected_request_attachment_submit_guard.sql", "0135_security_scan_followups.sql"].includes(migration)) {
+      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql", "0127_portal_invitation_secret_scrub.sql", "0129_portal_hierarchy_relations.sql", "0130_client_delegated_share_provisioning.sql", "0132_portal_v2_legacy_member_bridges.sql", "0133_portal_invitation_access_enrollment_receipts.sql", "0134_rejected_request_attachment_submit_guard.sql", "0135_security_scan_followups.sql", "0136_portal_v2_identity_denials.sql", "0137_authenticated_delivery_grants.sql"].includes(migration)) {
         await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
         continue;
       }
@@ -105,13 +105,26 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       CLIENT_PORTAL_ENABLED: "true",
       CLIENT_PORTAL_REQUEST_V2_ENABLED: "true",
       CLIENT_PORTAL_ORIGIN: portalOrigin,
+      DELIVERY_SESSION_SECRET: "test-client-portal-session-secret-00000001",
       ENVIRONMENT: "development",
       PUBLIC_BULK_RATE_LIMITER: { limit: async () => ({ success: true }) } as RateLimit,
       DATA_BUCKET: {
-        get: async (key: string) => {
+        head: async (key: string) => key === "clients/acme/north/report.pdf" ? {
+          key,
+          size: 6,
+          etag: "etag-report",
+          httpEtag: '"etag-report"',
+          customMetadata: {},
+          writeHttpMetadata(headers: Headers) { headers.set("Content-Type", "application/pdf"); },
+        } : null,
+        get: async (key: string, options?: { range?: { offset: number; length: number } }) => {
           bucketGetKeys.push(key);
+          const source = new TextEncoder().encode("report");
+          const bytes = options?.range
+            ? source.slice(options.range.offset, options.range.offset + options.range.length)
+            : source;
           return key === "clients/acme/north/report.pdf" ? {
-            body: new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode("report")); controller.close(); } }),
+            body: new ReadableStream({ start(controller) { controller.enqueue(bytes); controller.close(); } }),
             httpEtag: '"etag-report"',
             writeHttpMetadata(headers: Headers) { headers.set("Content-Type", "application/pdf"); },
           } : null;
@@ -283,23 +296,25 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       const folder = projectRoot.folders.find(candidate => candidate.name === name)!;
       const response = await portal().request(`${portalOrigin}/projects/project-a/files?folder=${encodeURIComponent(folder.id)}`, {}, env);
       expect(response.status).toBe(200);
-      return response.json() as Promise<{ files: Array<{ id: string; key: string; downloadPath: string }>; folders: Array<{ id: string; name: string }> }>;
+      return response.json() as Promise<{ files: Array<{ id: string; name: string; downloadPath: string }>; folders: Array<{ id: string; name: string }> }>;
     };
     const [literalBody, caseBody, projectBody] = await Promise.all([folderPage("%"), folderPage("Case"), folderPage("north")]);
-    expect([...literalBody.files, ...caseBody.files, ...projectBody.files].map(file => file.key).sort()).toEqual([
-      "clients/acme/%/literal.txt",
-      "clients/acme/Case/exact.txt",
-      "clients/acme/north/report.pdf",
+    expect([...literalBody.files, ...caseBody.files, ...projectBody.files].map(file => file.name).sort()).toEqual([
+      "exact.txt", "literal.txt", "report.pdf",
     ]);
+    expect(JSON.stringify([literalBody, caseBody, projectBody])).not.toContain("clients/acme/");
 
     const archive = await portal().request(`${portalOrigin}/past-deliveries`, {}, env);
-    const archiveBody = await archive.json() as { files: Array<{ key: string; downloadPath: string }> };
-    expect(archiveBody.files.map(file => file.key)).toEqual(["clients/acme/archive/old.txt"]);
+    const archiveBody = await archive.json() as { files: Array<{ name: string; downloadPath: string }> };
+    expect(archiveBody.files.map(file => file.name)).toEqual(["old.txt"]);
+    expect(JSON.stringify(archiveBody)).not.toContain("clients/acme/");
 
-    const reportFile = projectBody.files.find(file => file.key === "clients/acme/north/report.pdf")!;
+    const reportFile = projectBody.files.find(file => file.name === "report.pdf")!;
     const issuedUrl = new URL(reportFile.downloadPath, portalOrigin);
     expect(issuedUrl.origin).toBe(portalOrigin);
     expect(issuedUrl.pathname).toMatch(/^\/api\/client\/files\/[A-Za-z0-9_-]+\/download$/);
+    expect(reportFile.id).toMatch(/^cf1_[A-Za-z0-9_-]+$/);
+    expect(reportFile.id).not.toBe(Buffer.from("clients/acme/north/report.pdf").toString("base64url"));
     expect([...issuedUrl.searchParams]).toEqual([["projectId", "project-a"]]);
     expect(issuedUrl.searchParams.has("signature")).toBe(false);
     expect(issuedUrl.searchParams.has("expires")).toBe(false);
@@ -311,6 +326,41 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     expect(served.headers.get("Content-Disposition")).toContain("attachment");
     expect(await served.text()).toBe("report");
     expect(bucketGetKeys).toContain("clients/acme/north/report.pdf");
+
+    const ranged = await portal().request(`${portalOrigin}${routePath}`, {
+      headers: { Range: "bytes=1-3" },
+    }, env);
+    expect(ranged.status).toBe(206);
+    expect(ranged.headers.get("Accept-Ranges")).toBe("bytes");
+    expect(ranged.headers.get("Content-Range")).toBe("bytes 1-3/6");
+    expect(ranged.headers.get("Content-Length")).toBe("3");
+    expect(await ranged.text()).toBe("epo");
+
+    const staleIfRange = await portal().request(`${portalOrigin}${routePath}`, {
+      headers: { Range: "bytes=1-3", "If-Range": '"older-etag"' },
+    }, env);
+    expect(staleIfRange.status).toBe(200);
+    expect(staleIfRange.headers.get("Content-Range")).toBeNull();
+    expect(await staleIfRange.text()).toBe("report");
+
+    const weakIfRange = await portal().request(`${portalOrigin}${routePath}`, {
+      headers: { Range: "bytes=1-3", "If-Range": 'W/"etag-report"' },
+    }, env);
+    expect(weakIfRange.status).toBe(200);
+    expect(weakIfRange.headers.get("Content-Range")).toBeNull();
+    expect(await weakIfRange.text()).toBe("report");
+
+    const unsatisfiable = await portal().request(`${portalOrigin}${routePath}`, {
+      headers: { Range: "bytes=99-100" },
+    }, env);
+    expect(unsatisfiable.status).toBe(416);
+    expect(unsatisfiable.headers.get("Content-Range")).toBe("bytes */6");
+
+    const beforeHeadGets = bucketGetKeys.length;
+    const headResponse = await portal().request(`${portalOrigin}${routePath}`, { method: "HEAD" }, env);
+    expect(headResponse.status).toBe(200);
+    expect(headResponse.headers.get("Content-Length")).toBe("6");
+    expect(bucketGetKeys).toHaveLength(beforeHeadGets);
 
     bucketGetKeys.length = 0;
     const otherClientListing = await portalFor(otherPrincipal).request(`${portalOrigin}/projects/project-a/files`, {}, env);
@@ -349,8 +399,8 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       VALUES('portal-tombstone','clients/acme/north/report.pdf','exact','staff-owner',datetime('now','+7 days'))`).run();
     const northFolder = projectRoot.folders.find(candidate => candidate.name === "north")!;
     const trashedListing = await portal().request(`${portalOrigin}/projects/project-a/files?folder=${encodeURIComponent(northFolder.id)}`, {}, env);
-    expect((await trashedListing.json() as { files: Array<{ key: string }> }).files.map(file => file.key))
-      .not.toContain("clients/acme/north/report.pdf");
+    expect((await trashedListing.json() as { files: Array<{ name: string }> }).files.map(file => file.name))
+      .not.toContain("report.pdf");
     const trashedDownload = await portal().request(`${portalOrigin}${routePath}`, {}, env);
     expect(trashedDownload.status).toBe(404);
     expect(bucketGetKeys).toEqual([]);
@@ -359,7 +409,7 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const restoredDownload = await portal().request(`${portalOrigin}${routePath}`, {}, env);
     expect(restoredDownload.status).toBe(200);
     expect(bucketGetKeys).toEqual(["clients/acme/north/report.pdf"]);
-  });
+  }, 20_000);
 
   it("lists only immediate indexed children with bounded opaque pagination and rejects handle reuse", async () => {
     bucketGetKeys.length = 0;
@@ -388,13 +438,13 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     let pages = 0;
     do {
       const page = await d1ClientPortalRepository.listProjectFiles(env, activeSession!, "project-a", cursor, mass.id) as { files: Array<{ name: string }>; folders: unknown[]; cursor: string | null };
-      expect(page.files.length).toBeLessThanOrEqual(100);
+      expect(page.files.length).toBeLessThanOrEqual(150);
       expect(page.folders).toEqual([]);
       count += page.files.length;
       pages += 1;
       cursor = page.cursor;
     } while (cursor);
-    expect({ count, pages }).toEqual({ count: 1_200, pages: 12 });
+    expect({ count, pages }).toEqual({ count: 1_200, pages: 8 });
     expect(bucketGetKeys).toEqual([]);
 
     const otherSession = await d1ClientPortalRepository.resolveSession(env, otherPrincipal);

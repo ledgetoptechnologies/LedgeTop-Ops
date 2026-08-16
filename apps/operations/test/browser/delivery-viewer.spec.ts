@@ -2,7 +2,7 @@ import { expect, test, type Page } from "@playwright/test";
 
 type ViewerRequests = { imageSource: number; videoSource: number; thumbnail: number };
 
-async function mockDeliveryViewer(page: Page, administrator = false): Promise<ViewerRequests> {
+async function mockDeliveryViewer(page: Page, administrator = false, readyVideoThumbnail = false): Promise<ViewerRequests> {
   const requests: ViewerRequests = { imageSource: 0, videoSource: 0, thumbnail: 0 };
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
@@ -55,9 +55,10 @@ async function mockDeliveryViewer(page: Page, administrator = false): Promise<Vi
             displayName: "flight.mp4",
             kind: "video",
             size: 8192,
-            thumbnailState: "not_applicable",
+            thumbnailState: readyVideoThumbnail ? "ready" : "not_applicable",
+            thumbnailUrl: readyVideoThumbnail ? "/api/delivery/items/opaque-video/thumbnail" : undefined,
             thumbnailFallbackKind: "video",
-            previewStatus: "unavailable",
+            previewStatus: readyVideoThumbnail ? "processing" : "unavailable",
             sourceUrl: "/api/delivery/items/opaque-video/source",
             downloadUrl: "/api/delivery/items/opaque-video/download",
           },
@@ -94,6 +95,10 @@ async function mockDeliveryViewer(page: Page, administrator = false): Promise<Vi
     if (url.pathname === "/api/delivery/items/opaque-video/source") {
       requests.videoSource += 1;
       await route.fulfill({ status: 200, contentType: "video/mp4", body: "synthetic-video" });
+      return;
+    }
+    if (url.pathname === "/api/delivery/items/opaque-video/thumbnail") {
+      await route.fulfill({status:200,contentType:"image/svg+xml",body:'<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180"><rect width="320" height="180" fill="navy"/></svg>'});
       return;
     }
     await route.fulfill({ status: 404, json: { error: "Not found" } });
@@ -181,6 +186,14 @@ test("video original loads only on activation and a backdrop pointer closes the 
   });
   await expect(viewer).toHaveCount(0);
   await expect(trigger).toBeFocused();
+});
+
+test("a ready video thumbnail is not covered by the preparing-preview overlay",async({page})=>{
+  await mockDeliveryViewer(page,false,true);
+  await page.goto("/delivery");
+  const trigger=page.getByRole("button",{name:"Open flight.mp4"});
+  await expect(trigger.locator("img")).toBeVisible();
+  await expect(trigger.getByText("Preparing preview…",{exact:true})).toHaveCount(0);
 });
 
 test("only Operations administrators see the aggregate thumbnail backlog", async ({ page }) => {

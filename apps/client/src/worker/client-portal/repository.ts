@@ -6,6 +6,7 @@ import {
 import { sha256 } from "../security";
 import type { Env } from "../types";
 import type {
+  AuthorizedClientPortalFile,
   ClientDelivery,
   ClientFilePage,
   ClientPortalFile,
@@ -28,6 +29,10 @@ import {
   saveServiceRequestDraft,
   submitServiceRequestDraft,
 } from "./request-v2";
+import { listAuthorizedAuthenticatedDeliveryPrefixes } from "./authenticated-delivery-grants";
+
+const CLIENT_FILE_PAGE_SIZE = 150;
+const CLIENT_FILE_QUERY_LIMIT = CLIENT_FILE_PAGE_SIZE + 1;
 
 interface ProjectRow {
   id: string;
@@ -185,51 +190,123 @@ function mapProject(row: ProjectRow): ClientProject {
   };
 }
 
-function encodeFileId(key: string): string {
-  const bytes = new TextEncoder().encode(key);
+const FILE_HANDLE_PREFIX = "cf1_";
+const PROJECT_FOLDER_HANDLE_PREFIX = "pf2_";
+const PROJECT_CURSOR_HANDLE_PREFIX = "pc2_";
+const PAST_DELIVERY_CURSOR_HANDLE_PREFIX = "pa1_";
+const HANDLE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+const HANDLE_CONTEXT = new TextEncoder().encode("ltds-client-portal-handle:v1");
+const handleKeyCache = new WeakMap<object, Map<string, Promise<CryptoKey>>>();
+
+function base64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
-  return btoa(binary)
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/, "");
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-function decodeFileId(value: string): string | null {
-  if (!/^[A-Za-z0-9_-]{1,2048}$/.test(value)) return null;
+async function deliveryGrantPrefixes(env: Env, session: ClientPortalSession): Promise<Set<string> | null> {
+  if (env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED !== "true") return null;
+  if (!session.workspaceId || !session.principalIssuer || !session.principalSubject) return new Set();
+  return listAuthorizedAuthenticatedDeliveryPrefixes(env, {
+    issuer: session.principalIssuer,
+    subject: session.principalSubject,
+    email: "",
+  }, session.workspaceId);
+}
+
+function prefixSqlFilter(prefixes: Set<string> | null, column: string): { sql: string; bindings: string[] } {
+  if (prefixes === null) return { sql: "", bindings: [] };
+  const values = [...prefixes];
+  if (!values.length) return { sql: " AND 0", bindings: [] };
+  return { sql: ` AND ${column} IN (${values.map(() => "?").join(",")})`, bindings: values };
+}
+
+function fromBase64Url(value: string): Uint8Array | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
   try {
     const padding = "=".repeat((4 - (value.length % 4)) % 4);
     const binary = atob(value.replace(/-/g, "+").replace(/_/g, "/") + padding);
-    return new TextDecoder().decode(
-      Uint8Array.from(binary, (char) => char.charCodeAt(0)),
-    );
+    return Uint8Array.from(binary, character => character.charCodeAt(0));
   } catch {
     return null;
   }
 }
 
-const PROJECT_FOLDER_HANDLE_PREFIX = "pf1_";
-const PROJECT_CURSOR_HANDLE_PREFIX = "pc1_";
-const HANDLE_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-
-function encodeHandle(prefix: string, values: string[]): string {
-  const bytes = new TextEncoder().encode(JSON.stringify(values));
-  let binary = "";
-  for (const byte of bytes) binary += String.fromCharCode(byte);
-  return `${prefix}${btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")}`;
+function handleEncryptionKey(env: Env, secret: string, purpose: string, slot: "current" | "previous"): Promise<CryptoKey> {
+  let keys = handleKeyCache.get(env as object);
+  if (!keys) {
+    keys = new Map();
+    handleKeyCache.set(env as object, keys);
+  }
+  const cacheKey = `${purpose}:${slot}`;
+  let key = keys.get(cacheKey);
+  if (!key) {
+    key = crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${purpose}\0${secret}`))
+      .then(digest => crypto.subtle.importKey("raw", digest, "AES-GCM", false, ["encrypt", "decrypt"]));
+    keys.set(cacheKey, key);
+  }
+  return key;
 }
 
-function decodeHandle(value: string, prefix: string): string[] | null {
-  if (!value.startsWith(prefix) || value.length > 4096 || !/^[A-Za-z0-9_-]+$/.test(value)) return null;
-  try {
-    const encoded = value.slice(prefix.length);
-    const padding = "=".repeat((4 - (encoded.length % 4)) % 4);
-    const binary = atob(encoded.replace(/-/g, "+").replace(/_/g, "/") + padding);
-    const parsed: unknown = JSON.parse(new TextDecoder().decode(Uint8Array.from(binary, char => char.charCodeAt(0))));
-    return Array.isArray(parsed) && parsed.every(item => typeof item === "string") ? parsed : null;
-  } catch {
-    return null;
+async function encodeHandle(env: Env, prefix: string, purpose: string, values: string[]): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await handleEncryptionKey(env, env.DELIVERY_SESSION_SECRET, purpose, "current");
+  const plaintext = new TextEncoder().encode(JSON.stringify(values));
+  const encrypted = new Uint8Array(await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv, additionalData: HANDLE_CONTEXT },
+    key,
+    plaintext,
+  ));
+  const payload = new Uint8Array(iv.length + encrypted.length);
+  payload.set(iv);
+  payload.set(encrypted, iv.length);
+  return `${prefix}${base64Url(payload)}`;
+}
+
+async function decodeHandle(env: Env, value: string, prefix: string, purpose: string): Promise<string[] | null> {
+  if (!value.startsWith(prefix) || value.length > 4096) return null;
+  const payload = fromBase64Url(value.slice(prefix.length));
+  if (!payload || payload.length <= 28) return null;
+  const iv = payload.slice(0, 12);
+  const encrypted = payload.slice(12);
+  const secrets = [
+    { secret: env.DELIVERY_SESSION_SECRET, slot: "current" as const },
+    { secret: env.DELIVERY_PREVIOUS_SESSION_SECRET, slot: "previous" as const },
+  ].filter((entry, index, all): entry is { secret: string; slot: "current" | "previous" } =>
+    Boolean(entry.secret) && all.findIndex(candidate => candidate.secret === entry.secret) === index);
+  for (const { secret, slot } of secrets) {
+    try {
+      const key = await handleEncryptionKey(env, secret, purpose, slot);
+      const plaintext = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv, additionalData: HANDLE_CONTEXT },
+        key,
+        encrypted,
+      );
+      const parsed: unknown = JSON.parse(new TextDecoder().decode(plaintext));
+      if (Array.isArray(parsed) && parsed.every(item => typeof item === "string")) return parsed;
+    } catch {
+      // Try the previous session secret during an intentional rotation.
+    }
   }
+  return null;
+}
+
+async function encodeFileId(env: Env, key: string): Promise<string> {
+  return encodeHandle(env, FILE_HANDLE_PREFIX, "file", [key]);
+}
+
+/** Internal contract-test helper. The returned value is authenticated and
+ * encrypted; it never exposes the storage key to a browser. */
+export function createClientPortalFileHandle(env: Env, key: string): Promise<string> {
+  return encodeFileId(env, key);
+}
+
+async function decodeFileId(env: Env, value: string): Promise<string | null> {
+  const values = await decodeHandle(env, value, FILE_HANDLE_PREFIX, "file");
+  const key = values?.length === 1 ? values[0]! : "";
+  return key.length > 0 && key.length <= 1000 && !key.startsWith("/") && !key.includes("\\") && !/[\u0000-\u001f\u007f]/.test(key)
+    ? key
+    : null;
 }
 
 function validRelativeFolderPath(value: string): boolean {
@@ -239,12 +316,12 @@ function validRelativeFolderPath(value: string): boolean {
   return segments.every(segment => segment.length > 0 && segment.length <= 255 && segment !== "." && segment !== "..");
 }
 
-function encodeProjectFolderHandle(associationId: string, relativePath: string): string {
-  return encodeHandle(PROJECT_FOLDER_HANDLE_PREFIX, [associationId, relativePath]);
+function encodeProjectFolderHandle(env: Env, associationId: string, relativePath: string): Promise<string> {
+  return encodeHandle(env, PROJECT_FOLDER_HANDLE_PREFIX, "project-folder", [associationId, relativePath]);
 }
 
-function decodeProjectFolderHandle(value: string): { associationId: string; relativePath: string } | null {
-  const values = decodeHandle(value, PROJECT_FOLDER_HANDLE_PREFIX);
+async function decodeProjectFolderHandle(env: Env, value: string): Promise<{ associationId: string; relativePath: string } | null> {
+  const values = await decodeHandle(env, value, PROJECT_FOLDER_HANDLE_PREFIX, "project-folder");
   return values?.length === 2 && HANDLE_ID.test(values[0]!) && validRelativeFolderPath(values[1]!)
     ? { associationId: values[0]!, relativePath: values[1]! }
     : null;
@@ -254,15 +331,15 @@ type ProjectCursor =
   | { kind: "root"; associationId: string }
   | { kind: "folder"; associationId: string; relativePath: string; name: string; entryKind: "file" | "folder" };
 
-function encodeProjectCursor(cursor: ProjectCursor): string {
+function encodeProjectCursor(env: Env, cursor: ProjectCursor): Promise<string> {
   return cursor.kind === "root"
-    ? encodeHandle(PROJECT_CURSOR_HANDLE_PREFIX, ["root", cursor.associationId])
-    : encodeHandle(PROJECT_CURSOR_HANDLE_PREFIX, ["folder", cursor.associationId, cursor.relativePath, cursor.name, cursor.entryKind]);
+    ? encodeHandle(env, PROJECT_CURSOR_HANDLE_PREFIX, "project-cursor", ["root", cursor.associationId])
+    : encodeHandle(env, PROJECT_CURSOR_HANDLE_PREFIX, "project-cursor", ["folder", cursor.associationId, cursor.relativePath, cursor.name, cursor.entryKind]);
 }
 
-function decodeProjectCursor(value: string | null | undefined): ProjectCursor | null {
+async function decodeProjectCursor(env: Env, value: string | null | undefined): Promise<ProjectCursor | null> {
   if (!value) return null;
-  const values = decodeHandle(value, PROJECT_CURSOR_HANDLE_PREFIX);
+  const values = await decodeHandle(env, value, PROJECT_CURSOR_HANDLE_PREFIX, "project-cursor");
   if (values?.length === 2 && values[0] === "root" && HANDLE_ID.test(values[1]!))
     return { kind: "root", associationId: values[1]! };
   if (values?.length === 5 && values[0] === "folder" && HANDLE_ID.test(values[1]!)
@@ -281,13 +358,13 @@ function associationName(prefix: string): string {
   return fileName(prefix.replace(/\/+$/, "")) || "Project files";
 }
 
-function projectBreadcrumbs(association: FolderAssociationRow, relativePath: string) {
+async function projectBreadcrumbs(env: Env, association: FolderAssociationRow, relativePath: string) {
   const breadcrumbs: Array<{ id: string | null; name: string }> = [{ id: null, name: "Project files" }];
-  breadcrumbs.push({ id: encodeProjectFolderHandle(association.id, ""), name: associationName(association.r2_prefix) });
+  breadcrumbs.push({ id: await encodeProjectFolderHandle(env, association.id, ""), name: associationName(association.r2_prefix) });
   let path = "";
   for (const segment of relativePath.split("/").filter(Boolean)) {
     path += `${segment}/`;
-    breadcrumbs.push({ id: encodeProjectFolderHandle(association.id, path), name: segment });
+    breadcrumbs.push({ id: await encodeProjectFolderHandle(env, association.id, path), name: segment });
   }
   return breadcrumbs;
 }
@@ -296,21 +373,24 @@ function fileName(key: string): string {
   return key.split("/").filter(Boolean).pop() || key;
 }
 
-function mapFile(row: FileRow, projectId: string | null): ClientPortalFile {
-  const id = encodeFileId(row.r2_key);
+function mapFile(row: FileRow, projectId: string | null, id: string): ClientPortalFile {
   const base = `/api/client/files/${encodeURIComponent(id)}`;
   const query = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  const kind = ["image", "video", "audio", "pdf", "text"].includes(row.media_kind)
+    ? row.media_kind as ClientPortalFile["kind"]
+    : "other";
   return {
     id,
-    key: row.r2_key,
     name: fileName(row.r2_key),
     size: row.size,
     uploadedAt: row.uploaded_at,
     contentType: row.content_type,
-    previewPath: ["image", "pdf", "text", "audio", "video"].includes(
-      row.media_kind,
-    )
+    kind,
+    previewPath: kind !== "other"
       ? `${base}/preview${query}`
+      : null,
+    thumbnailPath: ["image", "pdf", "video"].includes(kind)
+      ? `${base}/thumbnail${query}`
       : null,
     downloadPath: `${base}/download${query}`,
   };
@@ -474,9 +554,11 @@ const memberProjectConstraint = `
       AND member_grant.project_id=g.project_id AND member_grant.revoked_at IS NULL
   ))`;
 
-const serviceRequestColumns = `r.id,r.project_id,r.parent_request_id,r.request_type,r.title,r.details,r.location_text,r.preferred_start_at,
+const baseServiceRequestColumns = `r.id,r.project_id,r.parent_request_id,r.request_type,r.title,r.details,r.location_text,r.preferred_start_at,
    r.service_category,r.deliverables_text,r.site_contact_name,r.site_contact_email,r.site_contact_phone,
-   r.desired_completion_at,r.latitude,r.longitude,
+   r.desired_completion_at,r.latitude,r.longitude`;
+
+const currentServiceRequestColumns = `${baseServiceRequestColumns},
    CASE WHEN effective_area.id IS NULL THEN r.area_geojson ELSE effective_area.area_geojson END area_geojson,
    CASE WHEN effective_area.id IS NULL THEN r.poi_points_json ELSE effective_area.poi_points_json END poi_points_json,
    effective_area.revision_number work_area_revision_number,
@@ -489,8 +571,23 @@ const serviceRequestColumns = `r.id,r.project_id,r.parent_request_id,r.request_t
    estimate.proposed_fields_json estimate_proposed_fields_json,estimate.client_response_note estimate_client_response_note,
    estimate.updated_at estimate_updated_at`;
 
-const acceptedQuoteJoin = `LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id
+const legacyServiceRequestColumns = `${baseServiceRequestColumns},
+   r.area_geojson,r.poi_points_json,
+   NULL work_area_revision_number,NULL work_area_change_summary,NULL work_area_updated_at,
+   r.status,r.created_at,r.updated_at,
+   quote.document_number quote_document_number,quote.artifact_status quote_status,
+   quote.total_minor quote_total_minor,quote.currency quote_currency,quote.verified_at quote_verified_at,
+   estimate.id estimate_id,estimate.version estimate_version,estimate.scope_text estimate_scope,
+   estimate.estimate_amount_minor,estimate.currency estimate_currency,estimate.status estimate_status,
+   estimate.proposed_fields_json estimate_proposed_fields_json,estimate.client_response_note estimate_client_response_note,
+   estimate.updated_at estimate_updated_at`;
+
+const currentAcceptedQuoteJoin = `LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id
   AND quote.artifact_type='quote' AND quote.superseded_at IS NULL AND quote.scope_stale_at IS NULL
+  AND quote.artifact_status IN ('approved','accepted')`;
+
+const legacyAcceptedQuoteJoin = `LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id
+  AND quote.artifact_type='quote' AND quote.superseded_at IS NULL
   AND quote.artifact_status IN ('approved','accepted')`;
 
 const effectiveAreaJoin = `LEFT JOIN client_service_request_area_revisions effective_area ON effective_area.request_id=r.id
@@ -499,6 +596,43 @@ const effectiveAreaJoin = `LEFT JOIN client_service_request_area_revisions effec
 
 const operationalEstimateJoin = `LEFT JOIN request_operational_estimates estimate ON estimate.request_id=r.id
   AND estimate.status IN ('ready','accepted','change_requested')`;
+
+function missingStaffWorkAreaSchema(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /no such table:\s*client_service_request_area_revisions\b/i.test(message) ||
+    /no such column:\s*(?:quote\.)?scope_stale_at\b/i.test(message);
+}
+
+function serviceRequestReadSql(legacy: boolean): {
+  columns: string;
+  quoteJoin: string;
+  areaJoin: string;
+} {
+  return legacy
+    ? {
+        columns: legacyServiceRequestColumns,
+        quoteJoin: legacyAcceptedQuoteJoin,
+        areaJoin: "",
+      }
+    : {
+        columns: currentServiceRequestColumns,
+        quoteJoin: currentAcceptedQuoteJoin,
+        areaJoin: effectiveAreaJoin,
+      };
+}
+
+async function serviceRequestRead<T>(
+  env: Env,
+  run: (database: D1Database, sql: ReturnType<typeof serviceRequestReadSql>) => Promise<T>,
+): Promise<T> {
+  const database = portalDb(env);
+  try {
+    return await run(database, serviceRequestReadSql(false));
+  } catch (error) {
+    if (!missingStaffWorkAreaSchema(error)) throw error;
+    return run(database, serviceRequestReadSql(true));
+  }
+}
 
 const requestAccessConstraint = `AND (
   (r.project_id IS NULL AND (m.role='manager' OR r.created_by_identity_id=i.id)) OR
@@ -578,19 +712,16 @@ async function getServiceRequestByIdempotency(
   session: ClientPortalSession,
   idempotency: string,
 ): Promise<IdempotentServiceRequestRow | null> {
-  return portalDb(env)
-    .prepare(
-      `
-    SELECT ${serviceRequestColumns},r.request_fingerprint
+  return serviceRequestRead(env, (database, sql) => database.prepare(`
+    SELECT ${sql.columns},r.request_fingerprint
     FROM client_service_requests r
     ${sessionJoin}
-    ${acceptedQuoteJoin}
+    ${sql.quoteJoin}
     ${operationalEstimateJoin}
-    ${effectiveAreaJoin}
-    WHERE r.idempotency_key=? AND r.account_id=a.id ${requestAccessConstraint}`,
-    )
+    ${sql.areaJoin}
+    WHERE r.idempotency_key=? AND r.account_id=a.id ${requestAccessConstraint}`)
     .bind(session.accountId, session.identityId, idempotency)
-    .first<IdempotentServiceRequestRow>();
+    .first<IdempotentServiceRequestRow>());
 }
 
 export const d1ClientPortalRepository: ClientPortalRepository = {
@@ -648,6 +779,8 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       ? {
           accountId: row.account_id,
           identityId: row.identity_id,
+          principalIssuer: principal.issuer,
+          principalSubject: principal.subject,
           displayName: row.display_name,
           role: row.role,
           canViewBilling: row.can_view_billing === 1,
@@ -706,10 +839,12 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
   ): Promise<ClientFilePage | null> {
     const project = await this.getProject(env, session, projectId);
     if (!project) return null;
-    let folder = folderId ? decodeProjectFolderHandle(folderId) : null;
+    const grantPrefixes = await deliveryGrantPrefixes(env, session);
+    const associationGrantFilter = prefixSqlFilter(grantPrefixes, "association.r2_prefix");
+    let folder = folderId ? await decodeProjectFolderHandle(env, folderId) : null;
     let resolvedAssociation: FolderAssociationRow | null = null;
     if (folderId && !folder) return null;
-    const decodedCursor = decodeProjectCursor(cursor);
+    const decodedCursor = await decodeProjectCursor(env, cursor);
     if (cursor && !decodedCursor) return null;
 
     if (!folder) {
@@ -722,26 +857,28 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
         JOIN projects p ON p.id=g.project_id AND p.active=1
         WHERE association.account_id=a.id AND association.scope_type='project' AND association.project_id=?
           AND association.revoked_at IS NULL AND association.id>? ${memberProjectConstraint}
-        ORDER BY association.id LIMIT 101`)
-        .bind(session.accountId, session.identityId, projectId, decodedCursor?.kind === "root" ? decodedCursor.associationId : "")
+          ${associationGrantFilter.sql}
+        ORDER BY association.id LIMIT ${CLIENT_FILE_QUERY_LIMIT}`)
+        .bind(session.accountId, session.identityId, projectId, decodedCursor?.kind === "root" ? decodedCursor.associationId : "",
+          ...associationGrantFilter.bindings)
         .all<FolderAssociationRow>();
       if (!decodedCursor && result.results.length === 1) {
         resolvedAssociation = result.results[0]!;
         folder = { associationId: resolvedAssociation.id, relativePath: "" };
-        folderId = encodeProjectFolderHandle(resolvedAssociation.id, "");
+        folderId = await encodeProjectFolderHandle(env, resolvedAssociation.id, "");
       } else {
-        const page = result.results.slice(0, 100);
+        const page = result.results.slice(0, CLIENT_FILE_PAGE_SIZE);
         return {
           files: [],
-          folders: page.map(association => ({
-            id: encodeProjectFolderHandle(association.id, ""),
+          folders: await Promise.all(page.map(async association => ({
+            id: await encodeProjectFolderHandle(env, association.id, ""),
             name: associationName(association.r2_prefix),
-          })),
+          }))),
           breadcrumbs: [{ id: null, name: "Project files" }],
           folderId: null,
           prefix: "",
-          cursor: result.results.length > 100
-            ? encodeProjectCursor({ kind: "root", associationId: page.at(-1)!.id })
+          cursor: result.results.length > CLIENT_FILE_PAGE_SIZE
+            ? await encodeProjectCursor(env, { kind: "root", associationId: page.at(-1)!.id })
             : null,
         };
       }
@@ -759,8 +896,10 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       JOIN projects p ON p.id=g.project_id AND p.active=1
       WHERE association.id=? AND association.account_id=a.id AND association.scope_type='project'
         AND association.project_id=? AND association.revoked_at IS NULL ${memberProjectConstraint}
+        ${associationGrantFilter.sql}
       LIMIT 1`)
-      .bind(session.accountId, session.identityId, folder.associationId, projectId)
+      .bind(session.accountId, session.identityId, folder.associationId, projectId,
+        ...associationGrantFilter.bindings)
       .first<FolderAssociationRow>();
     if (!association) return null;
 
@@ -797,34 +936,34 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       WHERE lower(entry_name)>lower(?)
         OR (lower(entry_name)=lower(?) AND entry_name>?)
         OR (lower(entry_name)=lower(?) AND entry_name=? AND entry_kind>?)
-      ORDER BY lower(entry_name),entry_name,entry_kind LIMIT 101`)
+      ORDER BY lower(entry_name),entry_name,entry_kind LIMIT ${CLIENT_FILE_QUERY_LIMIT}`)
       .bind(targetPrefix.length + 1, targetPrefix, prefixUpperBound(targetPrefix), association.r2_prefix,
         cursorName, cursorName, cursorName, cursorName, cursorName, cursorKind)
       .all<FileEntryRow>();
-    const page = result.results.slice(0, 100);
-    const files = page.filter((row): row is FileEntryRow & { entry_kind: "file"; r2_key: string; size: number; uploaded_at: string; media_kind: string } =>
+    const page = result.results.slice(0, CLIENT_FILE_PAGE_SIZE);
+    const files = await Promise.all(page.filter((row): row is FileEntryRow & { entry_kind: "file"; r2_key: string; size: number; uploaded_at: string; media_kind: string } =>
       row.entry_kind === "file" && row.r2_key !== null && row.size !== null && row.uploaded_at !== null && row.media_kind !== null)
-      .map(row => mapFile({
+      .map(async row => mapFile({
         r2_key: row.r2_key,
         size: row.size,
         uploaded_at: row.uploaded_at,
         content_type: row.content_type,
         media_kind: row.media_kind,
         association_prefix: row.association_prefix,
-      }, projectId));
-    const folders = page.filter(row => row.entry_kind === "folder").map(row => ({
-      id: encodeProjectFolderHandle(association.id, `${folder.relativePath}${row.entry_name}/`),
+      }, projectId, await encodeFileId(env, row.r2_key))));
+    const folders = await Promise.all(page.filter(row => row.entry_kind === "folder").map(async row => ({
+      id: await encodeProjectFolderHandle(env, association.id, `${folder.relativePath}${row.entry_name}/`),
       name: row.entry_name,
-    }));
+    })));
     const last = page.at(-1);
     return {
       files,
       folders,
-      breadcrumbs: projectBreadcrumbs(association, folder.relativePath),
+      breadcrumbs: await projectBreadcrumbs(env, association, folder.relativePath),
       folderId,
       prefix: "",
-      cursor: result.results.length > 100 && last
-        ? encodeProjectCursor({
+      cursor: result.results.length > CLIENT_FILE_PAGE_SIZE && last
+        ? await encodeProjectCursor(env, {
             kind: "folder",
             associationId: association.id,
             relativePath: folder.relativePath,
@@ -840,6 +979,15 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     session: ClientPortalSession,
     cursor?: string | null,
   ): Promise<ClientFilePage> {
+    const grantPrefixes = await deliveryGrantPrefixes(env, session);
+    const associationGrantFilter = prefixSqlFilter(grantPrefixes, "association.r2_prefix");
+    const decodedCursor = cursor
+      ? await decodeHandle(env, cursor, PAST_DELIVERY_CURSOR_HANDLE_PREFIX, "past-delivery-cursor")
+      : null;
+    if (cursor && (!decodedCursor || decodedCursor.length !== 1)) {
+      return { files: [], prefix: "", cursor: null };
+    }
+    const cursorKey = decodedCursor?.[0] || "";
     const result = await portalDb(env)
       .prepare(
         `
@@ -849,6 +997,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       JOIN file_index f ON substr(f.r2_key,1,length(association.r2_prefix))=association.r2_prefix
       WHERE association.account_id=a.id AND association.scope_type='client' AND association.project_id IS NULL
         AND association.revoked_at IS NULL AND f.r2_key>?
+        ${associationGrantFilter.sql}
         AND f.r2_key NOT LIKE '_ltds/%' AND f.r2_key NOT LIKE '%/_ltds/%'
         AND f.r2_key NOT LIKE '.previews/%' AND f.r2_key NOT LIKE '%/.previews/%'
         AND f.r2_key NOT LIKE 'dump/%' AND f.r2_key NOT LIKE '%/dump/%'
@@ -858,16 +1007,18 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
             AND (tombstone.physical_key=f.r2_key OR
               (tombstone.tombstone_kind='prefix' AND substr(f.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key))
         )
-      ORDER BY f.r2_key LIMIT 101`,
+      ORDER BY f.r2_key LIMIT ${CLIENT_FILE_QUERY_LIMIT}`,
       )
-      .bind(session.accountId, session.identityId, cursor || "")
+      .bind(session.accountId, session.identityId, cursorKey, ...associationGrantFilter.bindings)
       .all<FileRow>();
     const rows = result.results;
-    const page = rows.slice(0, 100);
+    const page = rows.slice(0, CLIENT_FILE_PAGE_SIZE);
     return {
-      files: page.map((row) => mapFile(row, null)),
+      files: await Promise.all(page.map(async row => mapFile(row, null, await encodeFileId(env, row.r2_key)))),
       prefix: "",
-      cursor: rows.length > 100 ? page.at(-1)!.r2_key : null,
+      cursor: rows.length > CLIENT_FILE_PAGE_SIZE
+        ? await encodeHandle(env, PAST_DELIVERY_CURSOR_HANDLE_PREFIX, "past-delivery-cursor", [page.at(-1)!.r2_key])
+        : null,
     };
   },
 
@@ -878,6 +1029,8 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
   ): Promise<DeliveryLocationCollection | null> {
     const project = await this.getProject(env, session, projectId);
     if (!project) return null;
+    const grantPrefixes = await deliveryGrantPrefixes(env, session);
+    const associationGrantFilter = prefixSqlFilter(grantPrefixes, "association.r2_prefix");
     const result = await portalDb(env).prepare(`
       SELECT DISTINCT location.source_key,location.latitude,location.longitude
       FROM client_folder_associations association
@@ -890,6 +1043,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
         ON location.source_key=file.r2_key AND location.source_etag=trim(file.etag,'"') AND location.status='ready'
       WHERE association.account_id=a.id AND association.scope_type='project' AND association.project_id=?
         AND association.revoked_at IS NULL ${memberProjectConstraint}
+        ${associationGrantFilter.sql}
         AND file.media_kind='image'
         AND file.r2_key NOT LIKE '_ltds/%' AND file.r2_key NOT LIKE '%/_ltds/%'
         AND file.r2_key NOT LIKE '.previews/%' AND file.r2_key NOT LIKE '%/.previews/%'
@@ -902,7 +1056,8 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
           )
         )
       ORDER BY location.source_key LIMIT ?`)
-      .bind(session.accountId, session.identityId, projectId, LOCATION_MAP_LIMIT + 1)
+      .bind(session.accountId, session.identityId, projectId,
+        ...associationGrantFilter.bindings, LOCATION_MAP_LIMIT + 1)
       .all<LocationRow>();
     return aggregateDeliveryLocations(result.results, LOCATION_MAP_LIMIT);
   },
@@ -911,6 +1066,8 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     env: Env,
     session: ClientPortalSession,
   ): Promise<DeliveryLocationCollection> {
+    const grantPrefixes = await deliveryGrantPrefixes(env, session);
+    const associationGrantFilter = prefixSqlFilter(grantPrefixes, "association.r2_prefix");
     const result = await portalDb(env).prepare(`
       SELECT DISTINCT location.source_key,location.latitude,location.longitude
       FROM client_folder_associations association
@@ -920,6 +1077,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
         ON location.source_key=file.r2_key AND location.source_etag=trim(file.etag,'"') AND location.status='ready'
       WHERE association.account_id=a.id AND association.scope_type='client' AND association.project_id IS NULL
         AND association.revoked_at IS NULL AND file.media_kind='image'
+        ${associationGrantFilter.sql}
         AND file.r2_key NOT LIKE '_ltds/%' AND file.r2_key NOT LIKE '%/_ltds/%'
         AND file.r2_key NOT LIKE '.previews/%' AND file.r2_key NOT LIKE '%/.previews/%'
         AND file.r2_key NOT LIKE 'dump/%' AND file.r2_key NOT LIKE '%/dump/%'
@@ -931,7 +1089,8 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
           )
         )
       ORDER BY location.source_key LIMIT ?`)
-      .bind(session.accountId, session.identityId, LOCATION_MAP_LIMIT + 1)
+      .bind(session.accountId, session.identityId,
+        ...associationGrantFilter.bindings, LOCATION_MAP_LIMIT + 1)
       .all<LocationRow>();
     return aggregateDeliveryLocations(result.results, LOCATION_MAP_LIMIT);
   },
@@ -941,9 +1100,11 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     session: ClientPortalSession,
     fileId: string,
     projectId?: string | null,
-  ): Promise<ClientPortalFile | null> {
-    const key = decodeFileId(fileId);
+  ): Promise<AuthorizedClientPortalFile | null> {
+    const key = await decodeFileId(env, fileId);
     if (!key) return null;
+    const grantPrefixes = await deliveryGrantPrefixes(env, session);
+    const associationGrantFilter = prefixSqlFilter(grantPrefixes, "association.r2_prefix");
     const scope = projectId ? "project" : "client";
     const row = await portalDb(env)
       .prepare(
@@ -957,6 +1118,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       WHERE association.account_id=a.id AND association.scope_type=?
         AND ${projectId ? "association.project_id=?" : "association.project_id IS NULL"}
         AND association.revoked_at IS NULL
+        ${associationGrantFilter.sql}
         AND NOT EXISTS (
           SELECT 1 FROM delivery_tombstones tombstone
           WHERE tombstone.restored_at IS NULL
@@ -968,11 +1130,11 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       )
       .bind(
         ...(projectId
-          ? [key, session.accountId, session.identityId, scope, projectId]
-          : [key, session.accountId, session.identityId, scope]),
+          ? [key, session.accountId, session.identityId, scope, projectId, ...associationGrantFilter.bindings]
+          : [key, session.accountId, session.identityId, scope, ...associationGrantFilter.bindings]),
       )
       .first<FileRow>();
-    return row ? mapFile(row, projectId || null) : null;
+    return row ? { ...mapFile(row, projectId || null, fileId), storageKey: key } : null;
   },
 
   async listDeliveries(
@@ -1100,21 +1262,18 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     env: Env,
     session: ClientPortalSession,
   ): Promise<ClientServiceRequest[]> {
-    const result = await portalDb(env)
-      .prepare(
-        `
-      SELECT ${serviceRequestColumns}
+    const result = await serviceRequestRead(env, (database, sql) => database.prepare(`
+      SELECT ${sql.columns}
       FROM client_service_requests r
       ${sessionJoin}
-      ${acceptedQuoteJoin}
+      ${sql.quoteJoin}
       ${operationalEstimateJoin}
-      ${effectiveAreaJoin}
+      ${sql.areaJoin}
       WHERE r.account_id=a.id ${requestAccessConstraint}
       ORDER BY r.created_at DESC,r.id DESC
-      LIMIT 100`,
-      )
+      LIMIT 100`)
       .bind(session.accountId, session.identityId)
-      .all<ServiceRequestRow>();
+      .all<ServiceRequestRow>());
     return result.results.map((row) =>
       mapServiceRequest(row, session.canViewBilling),
     );
@@ -1125,19 +1284,16 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     session: ClientPortalSession,
     requestId: string,
   ): Promise<ClientServiceRequest | null> {
-    const row = await portalDb(env)
-      .prepare(
-        `
-      SELECT ${serviceRequestColumns}
+    const row = await serviceRequestRead(env, (database, sql) => database.prepare(`
+      SELECT ${sql.columns}
       FROM client_service_requests r
       ${sessionJoin}
-      ${acceptedQuoteJoin}
+      ${sql.quoteJoin}
       ${operationalEstimateJoin}
-      ${effectiveAreaJoin}
-      WHERE r.id=? AND r.account_id=a.id ${requestAccessConstraint}`,
-      )
+      ${sql.areaJoin}
+      WHERE r.id=? AND r.account_id=a.id ${requestAccessConstraint}`)
       .bind(session.accountId, session.identityId, requestId)
-      .first<ServiceRequestRow>();
+      .first<ServiceRequestRow>());
     return row ? mapServiceRequest(row, session.canViewBilling) : null;
   },
 

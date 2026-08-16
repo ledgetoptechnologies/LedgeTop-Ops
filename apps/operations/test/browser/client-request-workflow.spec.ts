@@ -107,3 +107,35 @@ test("staff deep-link review shows all request evidence and sends an idempotent 
   expect(selectedServicesBox!.x).toBeGreaterThanOrEqual(0);
   expect(selectedServicesBox!.x + selectedServicesBox!.width).toBeLessThanOrEqual(page.viewportSize()!.width + 1);
 });
+
+test("request queue distinguishes a schema update from an empty queue and recovers on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let attempts = 0;
+  await page.route("**/api/**", async route => {
+    const incoming = route.request();
+    const path = new URL(incoming.url()).pathname;
+    if (path === "/api/session") {
+      await route.fulfill({ json: { user: { id: "staff-a", email: "staff@example.com", displayName: "Staff Reviewer", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["dashboard.view", "operations.view", "operations.manage"], divisions: [] }, csrfToken: "csrf-test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {} } });
+    } else if (incoming.method() === "GET" && path === "/api/client-service-requests") {
+      attempts += 1;
+      if (attempts === 1) {
+        await route.fulfill({ status: 503, json: {
+          error: "Client request data is temporarily unavailable while its database update finishes.",
+          code: "CLIENT_REQUEST_SCHEMA_OUTDATED",
+        } });
+      } else {
+        await route.fulfill({ json: { requests: [requestRecord] } });
+      }
+    } else {
+      await route.fulfill({ status: 404, json: { error: "Not found" } });
+    }
+  });
+
+  await page.goto("/operations/client-requests");
+  await expect(page.getByText("Request queue unavailable", { exact: true })).toBeVisible();
+  await expect(page.getByText(/database update has not finished/i)).toBeVisible();
+  await expect(page.getByText("No client requests")).toHaveCount(0);
+  await page.getByRole("button", { name: "Retry queue" }).click();
+  await expect(page.getByText("North site progress flight")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

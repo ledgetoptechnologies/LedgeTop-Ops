@@ -4,6 +4,7 @@ import { isMovedSourceMarker } from "@ltds/shared";
 import type { ClientDelegatedShareSignerRequestV1 } from "@ltds/shared";
 import { z } from "zod";
 import type { Env } from "../types";
+import { serveAuthorizedThumbnail } from "../thumbnails";
 import { d1ClientPortalRepository } from "./repository";
 import type {
   ClientPortalRepository,
@@ -401,6 +402,9 @@ export function createClientPortalRouter(
         session = {
           accountId: workspace.legacyAccountId,
           identityId: workspace.legacyIdentityId,
+          workspaceId: workspace.workspaceId,
+          principalIssuer: principal.issuer,
+          principalSubject: principal.subject,
           displayName: workspace.displayName,
           role: workspace.role,
           canViewBilling: workspace.canViewBilling,
@@ -751,17 +755,20 @@ export function createClientPortalRouter(
   });
 
   router.get("/projects/:projectId/files", async (c) => {
+    const authStarted = performance.now();
     const projectId = opaqueId.safeParse(c.req.param("projectId"));
     if (!projectId.success)
       throw new HTTPException(404, { message: "Project not found" });
     if (!(await authorizeProject(c, "delivery.view", projectId.data)))
       throw new HTTPException(404, { message: "Project not found" });
+    const authDuration = performance.now() - authStarted;
     const cursor = c.req.query("cursor") || null;
     if (cursor && cursor.length > 4096)
       throw new HTTPException(400, { message: "Cursor is invalid" });
     const folder = c.req.query("folder") || null;
     if (folder && folder.length > 4096)
       throw new HTTPException(400, { message: "Folder is invalid" });
+    const listStarted = performance.now();
     const page = await repository.listProjectFiles(
       c.env,
       c.get("clientSession"),
@@ -770,6 +777,7 @@ export function createClientPortalRouter(
       folder,
     );
     if (!page) throw new HTTPException(404, { message: "Project not found" });
+    c.header("Server-Timing", `auth;dur=${authDuration.toFixed(1)}, list;dur=${(performance.now() - listStarted).toFixed(1)}`);
     return c.json(page);
   });
 
@@ -790,18 +798,21 @@ export function createClientPortalRouter(
   });
 
   router.get("/past-deliveries", async (c) => {
+    const authStarted = performance.now();
     if (!(await authorizeRoot(c, "delivery.view")))
       throw new HTTPException(404, { message: "Delivery archive not found" });
+    const authDuration = performance.now() - authStarted;
     const cursor = c.req.query("cursor") || null;
     if (cursor && cursor.length > 1000)
       throw new HTTPException(400, { message: "Cursor is invalid" });
-    return c.json(
-      await repository.listPastDeliveries(
+    const listStarted = performance.now();
+    const page = await repository.listPastDeliveries(
         c.env,
         c.get("clientSession"),
         cursor,
-      ),
-    );
+      );
+    c.header("Server-Timing", `auth;dur=${authDuration.toFixed(1)}, list;dur=${(performance.now() - listStarted).toFixed(1)}`);
+    return c.json(page);
   });
 
   router.get("/past-delivery-locations", async (c) => {
@@ -810,7 +821,7 @@ export function createClientPortalRouter(
     return c.json(await repository.listPastDeliveryLocations(c.env, c.get("clientSession")));
   });
 
-  async function authorizedFile(c: any, disposition: "inline" | "attachment") {
+  async function resolveAuthorizedFile(c: any) {
     const fileId = c.req.param("fileId");
     const projectValue = c.req.query("projectId") || null;
     const projectId = projectValue ? opaqueId.safeParse(projectValue) : null;
@@ -829,6 +840,11 @@ export function createClientPortalRouter(
       projectId?.data || null,
     );
     if (!file) throw new HTTPException(404, { message: "File not found" });
+    return file;
+  }
+
+  async function authorizedFile(c: any, disposition: "inline" | "attachment") {
+    const file = await resolveAuthorizedFile(c);
     const contentType = (file.contentType || "application/octet-stream")
       .split(";", 1)[0]!
       .trim()
@@ -843,12 +859,30 @@ export function createClientPortalRouter(
       /^video\/(?:mp4|mpeg|ogg|quicktime|webm)$/.test(contentType);
     if (disposition === "inline" && (!file.previewPath || !safeInline))
       throw new HTTPException(415, { message: "Preview unavailable" });
-    const object = await c.env.DATA_BUCKET.get(file.key);
-    if (!object || isMovedSourceMarker(object)) throw new HTTPException(404, { message: "File not found" });
+    const head = await c.env.DATA_BUCKET.head(file.storageKey);
+    if (!head || isMovedSourceMarker(head)) throw new HTTPException(404, { message: "File not found" });
+    const rangeHeader = c.req.header("Range");
+    const ifRange = c.req.header("If-Range");
+    let requestedRange: ClientFileRange | undefined;
+    try {
+      requestedRange = clientFileRange(
+        !ifRange || clientFileStrongEtagMatches(ifRange, head.httpEtag) ? rangeHeader : undefined,
+        head.size,
+      );
+    } catch {
+      return new Response(null, {
+        status: 416,
+        headers: {
+          "Accept-Ranges": "bytes",
+          "Content-Range": `bytes */${head.size}`,
+          "Cache-Control": "private, no-store",
+        },
+      });
+    }
     const safeName =
       file.name.replace(/[\r\n"\\]/g, "_").slice(0, 200) || "download";
     const headers = new Headers();
-    object.writeHttpMetadata(headers);
+    head.writeHttpMetadata(headers);
     headers.set(
       "Content-Type",
       disposition === "inline" &&
@@ -863,12 +897,41 @@ export function createClientPortalRouter(
       `${disposition}; filename="${safeName}"; filename*=UTF-8''${encodeURIComponent(file.name)}`,
     );
     headers.set("Cache-Control", "private, no-store");
-    headers.set("ETag", object.httpEtag);
-    return new Response(object.body, { headers });
+    headers.set("ETag", head.httpEtag);
+    headers.set("Accept-Ranges", "bytes");
+    headers.set("X-Content-Type-Options", "nosniff");
+    headers.set("Content-Length", String(requestedRange?.length ?? head.size));
+    if (requestedRange) {
+      headers.set(
+        "Content-Range",
+        `bytes ${requestedRange.offset}-${requestedRange.offset + requestedRange.length - 1}/${head.size}`,
+      );
+    }
+    if (!requestedRange && disposition === "inline" && clientFileEtagMatches(c.req.header("If-None-Match"), head.httpEtag)) {
+      headers.delete("Content-Length");
+      return new Response(null, { status: 304, headers });
+    }
+    if (c.req.method === "HEAD") return new Response(null, { status: requestedRange ? 206 : 200, headers });
+    const object = await c.env.DATA_BUCKET.get(
+      file.storageKey,
+      requestedRange ? { range: requestedRange } : undefined,
+    );
+    if (!object || isMovedSourceMarker(object)) throw new HTTPException(404, { message: "File not found" });
+    return new Response(object.body, { status: requestedRange ? 206 : 200, headers });
   }
 
-  router.get("/files/:fileId/preview", (c) => authorizedFile(c, "inline"));
-  router.get("/files/:fileId/download", (c) => authorizedFile(c, "attachment"));
+  router.on(["GET", "HEAD"], "/files/:fileId/preview", (c) => authorizedFile(c, "inline"));
+  router.on(["GET", "HEAD"], "/files/:fileId/download", (c) => authorizedFile(c, "attachment"));
+  router.on(["GET", "HEAD"], "/files/:fileId/thumbnail", async (c) => {
+    const file = await resolveAuthorizedFile(c);
+    if (!["image", "pdf", "video"].includes(file.kind))
+      throw new HTTPException(415, { message: "Thumbnail unavailable" });
+    return serveAuthorizedThumbnail(c.env, file.storageKey, {
+      method: c.req.method,
+      ifNoneMatch: c.req.header("If-None-Match"),
+      kind: file.kind as "image" | "pdf" | "video",
+    });
+  });
 
   router.get("/projects/:projectId/deliveries", async (c) => {
     const projectId = opaqueId.safeParse(c.req.param("projectId"));
@@ -1578,4 +1641,34 @@ export function createClientPortalRouter(
   });
 
   return router;
+}
+type ClientFileRange = { offset: number; length: number };
+
+function clientFileRange(value: string | undefined, size: number): ClientFileRange | undefined {
+  if (!value) return undefined;
+  if (!Number.isSafeInteger(size) || size <= 0) throw new HTTPException(416);
+  const match = /^bytes=(\d*)-(\d*)$/.exec(value);
+  if (!match || value.includes(",") || (!match[1] && !match[2])) throw new HTTPException(416);
+  if (!match[1]) {
+    const suffix = Number(match[2]);
+    if (!Number.isSafeInteger(suffix) || suffix <= 0) throw new HTTPException(416);
+    return { offset: Math.max(0, size - suffix), length: Math.min(size, suffix) };
+  }
+  const start = Number(match[1]);
+  const end = match[2] ? Number(match[2]) : size - 1;
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(end) || start < 0 || end < start || start >= size)
+    throw new HTTPException(416);
+  return { offset: start, length: Math.min(end, size - 1) - start + 1 };
+}
+
+function clientFileEtagMatches(value: string | undefined, current: string): boolean {
+  if (!value) return false;
+  const clean = (etag: string) => etag.trim().replace(/^W\//, "").replace(/^"|"$/g, "");
+  const expected = clean(current);
+  return value.split(",").some(candidate => candidate.trim() === "*" || clean(candidate) === expected);
+}
+
+function clientFileStrongEtagMatches(value: string, current: string): boolean {
+  const candidate = value.trim();
+  return !candidate.startsWith("W/") && !current.trim().startsWith("W/") && candidate === current.trim();
 }

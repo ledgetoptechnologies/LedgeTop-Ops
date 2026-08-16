@@ -33,6 +33,51 @@ interface Tombstone { physical_key: string; tombstone_kind: "exact" | "prefix"; 
 
 const API_ROOT = "/shares";
 const SESSION_MAX_MS = 12 * 60 * 60 * 1000;
+export const CLIENT_DELEGATED_FOLDER_PAGE_SIZE = 150;
+const MEDIA_LOOKUP_BATCH_SIZE = 75;
+
+interface DelegatedMediaCandidate {
+  id:string;
+  key:string;
+  kind:Exclude<DeliveryItem["kind"],"folder">;
+  etag:string;
+  size:number;
+  contentType?:string;
+  base:string;
+}
+
+async function delegatedMediaPatches(
+  database:D1Database,
+  candidates:readonly DelegatedMediaCandidate[],
+):Promise<Map<string,Partial<DeliveryItem>&{id:string}>>{
+  const thumbnailByKey=new Map<string,ThumbnailJobRow>();
+  const videoByKey=new Map<string,{stream_uid?:string;stream_status?:string}>();
+  for(let offset=0;offset<candidates.length;offset+=MEDIA_LOOKUP_BATCH_SIZE){
+    const batch=candidates.slice(offset,offset+MEDIA_LOOKUP_BATCH_SIZE);
+    if(!batch.length)continue;
+    const keys=batch.map(candidate=>candidate.key),videos=batch.filter(candidate=>candidate.kind==="video");
+    const [thumbnailRows,videoRows]=await Promise.all([
+      database.prepare(`SELECT source_key,source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status
+        FROM image_thumbnail_jobs WHERE source_key IN (${keys.map(()=>"?").join(",")})`).bind(...keys)
+        .all<ThumbnailJobRow&{source_key:string}>(),
+      videos.length?database.prepare(`SELECT r2_key,stream_uid,stream_status FROM file_index
+        WHERE r2_key IN (${videos.map(()=>"?").join(",")})`).bind(...videos.map(candidate=>candidate.key))
+        .all<{r2_key:string;stream_uid?:string;stream_status?:string}>():Promise.resolve({results:[]} as {results:Array<{r2_key:string;stream_uid?:string;stream_status?:string}>}),
+    ]);
+    for(const row of thumbnailRows.results)thumbnailByKey.set(row.source_key,row);
+    for(const row of videoRows.results)videoByKey.set(row.r2_key,row);
+  }
+  return new Map(candidates.map(candidate=>{
+    const video=videoByKey.get(candidate.key);
+    return[candidate.id,{
+      id:candidate.id,
+      ...thumbnailFieldsForObject(candidate.key,candidate.kind,candidate.base,candidate.etag,
+        thumbnailByKey.get(candidate.key),candidate.size,candidate.contentType),
+      ...(candidate.kind==="video"?{previewStatus:video?.stream_status==="ready"&&video.stream_uid
+        ?"ready":video?.stream_status==="error"?"unavailable":"processing"}:{}),
+    }];
+  }));
+}
 
 function db(env: Pick<Env, "DELIVERY_DB">): D1Database {
   const candidate = env.DELIVERY_DB as D1Database & { withSession?: (consistency: "first-primary") => D1Database };
@@ -130,21 +175,29 @@ async function loadAliases(env: Env, keys: string[]): Promise<Map<string, string
 async function visibleChildPrefixes(
   env: Env,
   candidates: readonly string[],
-): Promise<Set<string>> {
+): Promise<{visible:Set<string>;reconciliationNeeded:boolean}> {
   const visible = new Set<string>();
+  let indexed = new Set<string>();
   try {
     const state = await indexedImmediateChildVisibility(db(env), candidates);
+    indexed = state.indexed;
     for (const value of state.visible) visible.add(value);
   } catch (error) {
     console.warn(JSON.stringify({
-      event: "client-share.folder-index-visibility-fallback",
+      event: "client-share.folder-index-reconciliation-needed",
       candidateCount: candidates.length,
-      message: error instanceof Error ? error.message : "unknown",
+      reason: "lookup_failed",
+      errorName: error instanceof Error ? error.name : "unknown",
     }));
   }
+  const unindexed=candidates.filter(candidate=>!indexed.has(candidate));
+  if(unindexed.length)console.warn(JSON.stringify({
+    event:"client-share.folder-index-reconciliation-needed",candidateCount:candidates.length,
+    unindexedCount:unindexed.length,reason:"index_lag",
+  }));
   // Fail closed when neither visibility index knows the prefix. This avoids
   // both recursive subtree scans and disclosure of stale folder names.
-  return visible;
+  return {visible,reconciliationNeeded:unindexed.length>0};
 }
 
 function itemBase(publicId: string, itemRef: string): string {
@@ -271,6 +324,7 @@ export function createClientDelegatedPublicRouter(): Hono<{ Bindings: Env; Varia
   });
 
   router.get(`${API_ROOT}/:publicId/manifest`, async c => {
+    const started=Date.now();
     const share = c.get("delegatedShare");
     const root = normalizeRoot(share.deliveryPrefix);
     const tombstones = await loadTombstones(c.env);
@@ -278,22 +332,33 @@ export function createClientDelegatedPublicRouter(): Hono<{ Bindings: Env; Varia
     const relativeFolder = folderRef ? decodeItemRef(folderRef) : "";
     const prefix = relativeFolder ? `${keyWithinRoot(root, relativeFolder).replace(/\/$/, "")}/` : root;
     const listed = await c.env.DATA_BUCKET.list({
-      prefix, delimiter: "/", limit: 500, cursor: c.req.query("cursor"),
+      prefix, delimiter: "/", limit: CLIENT_DELEGATED_FOLDER_PAGE_SIZE, cursor: c.req.query("cursor"),
       include: ["httpMetadata", "customMetadata"],
     });
+    const listedAt=Date.now();
     const aliasKeys = [root, prefix, ...listed.delimitedPrefixes, ...listed.objects.map(object => object.key)];
     let breadcrumbPhysical = root;
     for (const segment of relativeFolder.split("/").filter(Boolean)) {
       breadcrumbPhysical += `${segment}/`;
       aliasKeys.push(breadcrumbPhysical);
     }
-    const aliases = await loadAliases(c.env, aliasKeys);
+    const mediaCandidates:DelegatedMediaCandidate[]=listed.objects.flatMap(object=>{
+      if(!object.key.startsWith(prefix)||object.key===prefix||object.key.endsWith("/")||
+        isHiddenKey(object.key)||isTrashed(tombstones,object.key)||isMovedSourceMarker(object))return[];
+      const relative=object.key.slice(root.length),id=encodeItemRef(relative),kind=kindForKey(object.key);
+      if(kind!=="image"&&kind!=="pdf"&&kind!=="video")return[];
+      return[{id,key:object.key,kind,etag:object.httpEtag,size:object.size,
+        contentType:object.httpMetadata?.contentType,base:itemBase(share.publicId,id)}];
+    });
     const items: DeliveryItem[] = [];
     const candidateFolders = listed.delimitedPrefixes.filter(folderPrefix =>
       folderPrefix.startsWith(prefix) && !isHiddenKey(folderPrefix) && !isTrashed(tombstones, folderPrefix));
-    const visibleFolders = await visibleChildPrefixes(c.env, candidateFolders);
+    const [aliases,folderVisibility,mediaPatches]=await Promise.all([
+      loadAliases(c.env,aliasKeys),visibleChildPrefixes(c.env,candidateFolders),
+      delegatedMediaPatches(db(c.env),mediaCandidates),
+    ]);
     for (const folderPrefix of listed.delimitedPrefixes) {
-      if (!visibleFolders.has(folderPrefix)) continue;
+      if (!folderVisibility.visible.has(folderPrefix)) continue;
       const relative = folderPrefix.slice(root.length).replace(/\/$/, "");
       if (!relative) continue;
       items.push({ id: encodeItemRef(relative), name: aliases.get(folderPrefix) || relative.split("/").pop() || relative,
@@ -315,6 +380,7 @@ export function createClientDelegatedPublicRouter(): Hono<{ Bindings: Env; Varia
         downloadUrl: `${base}/download`,
         previewStatus: kind === "video" ? "processing" : undefined,
         ...thumbnailFieldsForObject(object.key, kind, base, object.httpEtag, null, object.size, object.httpMetadata?.contentType),
+        ...(mediaPatches.get(id)||{}),
       };
       item.sourceUrl = sourceUrl(base, kind);
       if (kind === "image") {
@@ -334,26 +400,31 @@ export function createClientDelegatedPublicRouter(): Hono<{ Bindings: Env; Varia
     }
     const currentPhysical = relativeFolder ? prefix : root;
     const projectName = share.label || aliases.get(root) || "Shared files";
-    const manifest: DeliveryManifest = {
+    const manifest: DeliveryManifest & {mediaHydrated:true;reconciliationNeeded:boolean} = {
       share: { publicId: share.publicId, label: share.label, clientName: "Client-shared delivery", projectName, expiresAt: share.shareExpiresAt },
       folder: { id: folderRef, name: aliases.get(currentPhysical) || relativeFolder.split("/").pop() || projectName, breadcrumbs },
       items,
       nextCursor: listed.truncated ? listed.cursor : null,
       capabilities: { cloudTransfer: { dropbox: false, googleDrive: false, googlePicker: false } },
+      mediaHydrated:true,
+      reconciliationNeeded:folderVisibility.reconciliationNeeded,
     };
     c.executionCtx.waitUntil(audit(c.env, c.req.raw, share, "client_share.manifest.viewed", folderRef));
+    c.header("Server-Timing",`r2;dur=${Math.max(0,listedAt-started)},hydrate;dur=${Math.max(0,Date.now()-listedAt)},manifest;dur=${Math.max(0,Date.now()-started)}`);
     return c.json(manifest);
   });
 
   router.get(`${API_ROOT}/:publicId/manifest/media`, async c => {
+    const started=Date.now();
     const share = c.get("delegatedShare");
     const root = normalizeRoot(share.deliveryPrefix);
     const tombstones = await loadTombstones(c.env);
     const folderRef = c.req.query("folder") || "";
     const relativeFolder = folderRef ? decodeItemRef(folderRef) : "";
     const prefix = relativeFolder ? `${keyWithinRoot(root, relativeFolder).replace(/\/$/, "")}/` : root;
-    const listed = await c.env.DATA_BUCKET.list({ prefix, delimiter: "/", limit: 500,
+    const listed = await c.env.DATA_BUCKET.list({ prefix, delimiter: "/", limit: CLIENT_DELEGATED_FOLDER_PAGE_SIZE,
       cursor: c.req.query("cursor"), include: ["httpMetadata", "customMetadata"] });
+    const listedAt=Date.now();
     const candidates = listed.objects.flatMap(object => {
       if (!object.key.startsWith(prefix) || object.key === prefix || object.key.endsWith("/") ||
           isHiddenKey(object.key) || isTrashed(tombstones, object.key) || isMovedSourceMarker(object)) return [];
@@ -364,30 +435,9 @@ export function createClientDelegatedPublicRouter(): Hono<{ Bindings: Env; Varia
       return [{ id, key: object.key, kind, etag: object.httpEtag, size: object.size,
         contentType: object.httpMetadata?.contentType, base: itemBase(share.publicId, id) }];
     });
-    const thumbnailCandidates = candidates.filter(candidate => candidate.kind !== "video");
-    const videoCandidates = candidates.filter(candidate => candidate.kind === "video");
-    const database = db(c.env);
-    const [thumbnailRecords, videoRecords] = await Promise.all([
-      thumbnailCandidates.length ? database.batch(thumbnailCandidates.map(candidate => database.prepare(
-        "SELECT source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status FROM image_thumbnail_jobs WHERE source_key=?",
-      ).bind(candidate.key))) : [],
-      videoCandidates.length ? database.batch(videoCandidates.map(candidate => database.prepare(
-        "SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?",
-      ).bind(candidate.key))) : [],
-    ]);
-    const thumbnails = new Map(thumbnailCandidates.map((candidate, index) =>
-      [candidate.id, thumbnailRecords[index]?.results[0] as ThumbnailJobRow | undefined]));
-    const videos = new Map(videoCandidates.map((candidate, index) =>
-      [candidate.id, videoRecords[index]?.results[0] as { stream_uid?: string; stream_status?: string } | undefined]));
-    return c.json({ items: candidates.map(candidate => ({
-      id: candidate.id,
-      ...thumbnailFieldsForObject(candidate.key, candidate.kind, candidate.base, candidate.etag,
-        thumbnails.get(candidate.id), candidate.size, candidate.contentType),
-      ...(candidate.kind === "video" ? {
-        previewStatus: videos.get(candidate.id)?.stream_status === "ready" && videos.get(candidate.id)?.stream_uid
-          ? "ready" : "processing",
-      } : {}),
-    })) });
+    const patches=await delegatedMediaPatches(db(c.env),candidates);
+    c.header("Server-Timing",`r2;dur=${Math.max(0,listedAt-started)},hydrate;dur=${Math.max(0,Date.now()-listedAt)}`);
+    return c.json({items:candidates.map(candidate=>patches.get(candidate.id)!)});
   });
 
   router.get(`${API_ROOT}/:publicId/download-summary`, async c => {

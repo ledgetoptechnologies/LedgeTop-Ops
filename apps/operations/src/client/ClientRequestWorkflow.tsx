@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { RequestMapViewer } from "./RequestMapViewer";
 import { RequestMapEditor, type EditableRequestArea, type EditableRequestPoi } from "./RequestMapEditor";
 import { ClientRequestAttachments } from "./ClientRequestAttachments";
@@ -150,6 +150,17 @@ function tone(status: string): "neutral" | "success" | "warning" | "danger" {
         : "neutral";
 }
 
+function requestQueueError(caught: unknown): string {
+  if (
+    caught instanceof ApiError &&
+    caught.payload.code === "CLIENT_REQUEST_SCHEMA_OUTDATED"
+  )
+    return "The request queue database update has not finished. Retry shortly; submitted requests remain stored.";
+  return caught instanceof Error
+    ? caught.message
+    : "The client request queue could not be loaded.";
+}
+
 export function ClientRequestWorkflow({
   mapToken,
 }: {
@@ -162,10 +173,12 @@ export function ClientRequestWorkflow({
     );
   const pendingOnly =
     new URLSearchParams(location.search).get("status") === "submitted";
-  const load = () =>
-    api<{ requests: ClientRequestRecord[] }>("/api/client-service-requests")
+  const load = () => {
+    setError("");
+    return api<{ requests: ClientRequestRecord[] }>("/api/client-service-requests")
       .then((value) => setRequests(value.requests))
-      .catch((caught) => setError(caught.message));
+      .catch((caught) => setError(requestQueueError(caught)));
+  };
   useEffect(() => {
     void load();
     const pop = () =>
@@ -203,6 +216,18 @@ export function ClientRequestWorkflow({
       />
     );
   if (!requests && !error) return <Loading />;
+  if (!requests)
+    return (
+      <Card title="Client request queue">
+        <EmptyState
+          title="Request queue unavailable"
+          detail={error}
+        />
+        <button type="button" className="button-orange button-small" onClick={() => void load()}>
+          Retry queue
+        </button>
+      </Card>
+    );
   return (
     <>
       <div className="notice managed-notice">

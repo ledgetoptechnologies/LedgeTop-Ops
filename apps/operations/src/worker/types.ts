@@ -80,6 +80,12 @@ export type Env = Omit<
   SMTP_PASSWORD?: string;
   /** Address that receives new client service-request triage notices. */
   CLIENT_REQUEST_TRIAGE_TO?: string;
+  /** Default-off staff mutation surface for portal-v2 identity denials. */
+  CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED?: string;
+  /** Mirrors the client Worker denylist rollout for safe grant recipient checks. */
+  CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED?: string;
+  /** Default-off explicit authenticated folder-grant management. */
+  AUTHENTICATED_DELIVERY_GRANTS_ENABLED?: string;
   MAPBOX_PUBLIC_TOKEN?: string;
   SUA_GATEWAY_USER?: string;
   SUA_GATEWAY_PASSWORD?: string;

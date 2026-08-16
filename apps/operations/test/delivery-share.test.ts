@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { activeShareForPrefix, deriveShareMetadata, resolveAccessCodeChange, resolveDivisionAssociation, resolveShareExpiration } from "../src/worker/delivery";
+import { activeShareForPrefix, deriveShareMetadata, resolveAccessCodeChange, resolveDivisionAssociation, resolveShareExpiration, resolveShareUpdateSecurity } from "../src/worker/delivery";
 import { accessCodeMatches, decryptDeliveryToken, encryptDeliveryToken, hashAccessCode } from "../src/worker/crypto";
 
 describe("delivery share metadata", () => {
@@ -62,6 +62,19 @@ describe("delivery share lifecycle security",()=>{
   it("encrypts a recoverable fragment without allowing a different share to decrypt it",async()=>{const key="k".repeat(48),encrypted=await encryptDeliveryToken("fragment-secret",key,"share-1");expect(encrypted.ciphertext).not.toContain("fragment-secret");await expect(decryptDeliveryToken(encrypted.ciphertext,encrypted.iv,key,"share-1")).resolves.toBe("fragment-secret");await expect(decryptDeliveryToken(encrypted.ciphertext,encrypted.iv,key,"share-2")).rejects.toThrow("must be rotated");});
   it("distinguishes preserve, set, generated, and remove access-code actions",()=>{expect(resolveAccessCodeChange({})).toEqual({kind:"preserve",accessCode:null});expect(resolveAccessCodeChange({accessCode:"client-code"})).toEqual({kind:"set",accessCode:"client-code"});expect(resolveAccessCodeChange({generateAccessCode:true})).toMatchObject({kind:"set"});expect(resolveAccessCodeChange({removeAccessCode:true})).toEqual({kind:"remove",accessCode:null});expect(()=>resolveAccessCodeChange({generateAccessCode:true,accessCode:"client-code"})).toThrow("only one");});
   it("creates an idempotent versioned HMAC access-code verifier instead of CPU-heavy PBKDF2",async()=>{const pepper="p".repeat(48),stored=await hashAccessCode("client-code",pepper);expect(stored.algorithm).toBe("hmac-sha256-v1");expect(stored.iterations).toBe(1);expect(stored.hash).not.toContain("client-code");await expect(accessCodeMatches("client-code",stored.hash,stored.salt,stored.algorithm,pepper)).resolves.toBe(true);await expect(accessCodeMatches("different-code",stored.hash,stored.salt,stored.algorithm,pepper)).resolves.toBe(false);});
+  it("keeps metadata-only edits on the current credential version",()=>{
+    expect(resolveShareUpdateSecurity({accessCodeChanged:false,recipientChanged:false,hasRecoverableSecret:true,publicIdChanged:false})).toEqual({mustRotateCredential:false,versionIncrement:0});
+  });
+  it.each([
+    {accessCodeChanged:true,recipientChanged:false,hasRecoverableSecret:true,publicIdChanged:false},
+    {accessCodeChanged:false,recipientChanged:true,hasRecoverableSecret:true,publicIdChanged:false},
+    {accessCodeChanged:false,recipientChanged:false,hasRecoverableSecret:false,publicIdChanged:false},
+  ])("rotates the bearer credential and security version for $accessCodeChanged/$recipientChanged/$hasRecoverableSecret",input=>{
+    expect(resolveShareUpdateSecurity(input)).toEqual({mustRotateCredential:true,versionIncrement:1});
+  });
+  it("versions a legacy public-id upgrade without rotating a recoverable secret",()=>{
+    expect(resolveShareUpdateSecurity({accessCodeChanged:false,recipientChanged:false,hasRecoverableSecret:true,publicIdChanged:true})).toEqual({mustRotateCredential:false,versionIncrement:1});
+  });
 });
 
 describe("active delivery share lookup", () => {

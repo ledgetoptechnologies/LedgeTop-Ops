@@ -28,12 +28,28 @@ import { createClientDelegatedPublicRouter } from "./client-delegated-public";
 import { handleProjectAlphaCatalogRequest } from "./project-alpha-catalog";
 import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
 import { processInvitationEmailBatch } from "./client-portal/invitation-email";
+import {
+  classifyPublicShareLifecycle,
+  logPublicShareOutcome,
+  publicShareLifecycleException,
+  publicShareSessionExpiresAt,
+  shouldRenewPublicShareSession,
+  temporaryPublicShareException,
+  type PublicShareLifecycleRow,
+} from "./public-share-lifecycle";
 export { friendlyBulkFailure } from "./bulk-download-errors";
 
 type Variables = { share: ShareRow };
 interface Tombstone { physical_key: string; tombstone_kind: "exact" | "prefix"; }
+interface PublicMediaRow {
+  r2_key:string;etag:string|null;size:number|null;content_type:string|null;media_kind:string|null;
+  stream_uid:string|null;stream_status:string|null;source_etag:string|null;thumbnail_key:string|null;
+  thumbnail_etag:string|null;thumbnail_size:number|null;thumbnail_status:ThumbnailJobRow["status"]|null;
+}
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 const COOKIE_NAME = "__Host-ltds_delivery";
+const PUBLIC_DELIVERY_PAGE_SIZE=150;
+const PUBLIC_MEDIA_LOOKUP_CHUNK_SIZE=50;
 
 function cloudEnv(env:Env):CloudTransferEnv{if(!env.CLOUD_TRANSFER_TOKEN_SECRET)throw new HTTPException(503,{message:"Cloud copy is not configured"});return env as CloudTransferEnv;}
 function cloudProvider(value:string):CloudProvider{if(value==="dropbox")return"dropbox";if(value==="google"||value==="google-drive")return"google";throw new HTTPException(404,{message:"Cloud provider not found"});}
@@ -130,39 +146,47 @@ function activeShareSql(extra: string): string {
     WHERE ${extra} AND s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`;
 }
 
-function unavailableShareSql(extra: string): string {
-  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,s.image_location_map_enabled,
-    p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) AS r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id
-    WHERE ${extra} AND s.revoked_at IS NOT NULL AND s.revoked_reason='folder_unavailable'`;
+function lifecycleShareSql(extra: string): string {
+  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,s.recipient_email,s.image_location_map_enabled,
+    COALESCE(p.client_name,'') client_name,COALESCE(p.project_name,'') project_name,COALESCE(s.r2_prefix,p.r2_prefix,'') AS r2_prefix,
+    CASE WHEN p.id IS NULL THEN 0 ELSE 1 END project_exists,COALESCE(p.active,0) project_active
+    FROM shares s LEFT JOIN projects p ON p.id=s.project_id WHERE ${extra}`;
 }
 
-async function findByPublicId(env: Env, publicId: string): Promise<ShareRow | null> {
-  return primaryDb(env).prepare(activeShareSql("s.public_id=?")).bind(publicId).first<ShareRow>();
+async function lifecycleShareQuery(env:Env,sql:string,bindings:unknown[]):Promise<PublicShareLifecycleRow|null>{
+  try{return await primaryDb(env).prepare(sql).bind(...bindings).first<PublicShareLifecycleRow>();}
+  catch{throw temporaryPublicShareException("database");}
 }
 
-async function findBySecret(env: Env, secret: string): Promise<ShareRow | null> {
+async function findByRouteAndSecret(env: Env, routeId:string, secret: string): Promise<PublicShareLifecycleRow | null> {
   if (secret.length < 32 || secret.length > 128) return null;
-  return primaryDb(env).prepare(activeShareSql("s.token_hash=?")).bind(await sha256(secret)).first<ShareRow>();
-}
-
-async function findUnavailableBySecret(env: Env, secret: string): Promise<ShareRow | null> {
-  if (secret.length < 32 || secret.length > 128) return null;
-  return primaryDb(env).prepare(unavailableShareSql("s.token_hash=?")).bind(await sha256(secret)).first<ShareRow>();
+  const hash=await sha256(secret);
+  return routeId.length>30
+    ? lifecycleShareQuery(env,lifecycleShareSql("s.token_hash=?"),[hash])
+    : lifecycleShareQuery(env,lifecycleShareSql("s.public_id=? AND s.token_hash=?"),[routeId,hash]);
 }
 
 export async function markUnavailableFolder(env:{DELIVERY_DB:PublicIdDatabase},share:ShareRow):Promise<never>{
   const db = sessionDb(env.DELIVERY_DB);
-  if(!share.revoked_at){
-    const revoked=await db.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='folder_unavailable' WHERE id=? AND revoked_at IS NULL AND unavailable_since IS NOT NULL AND datetime(unavailable_since)<=datetime('now','-24 hours')").bind(share.id).run();
-    if(revoked.meta.changes)await db.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('system','delivery-worker','share.auto_revoked','share',?,?)").bind(share.id,JSON.stringify({reason:"folder_unavailable",r2Prefix:share.r2_prefix})).run();
-    else await db.prepare("UPDATE shares SET unavailable_since=datetime('now') WHERE id=? AND revoked_at IS NULL AND unavailable_since IS NULL").bind(share.id).run();
-  }
-  throw new HTTPException(410,{message:"This link is no longer valid because the shared folder was moved or removed.",cause:{code:"SHARED_FOLDER_UNAVAILABLE"}});
+  try{
+    if(!share.revoked_at){
+      const revoked=await db.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='folder_unavailable' WHERE id=? AND revoked_at IS NULL AND unavailable_since IS NOT NULL AND datetime(unavailable_since)<=datetime('now','-24 hours')").bind(share.id).run();
+      if(revoked.meta.changes)await db.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('system','delivery-worker','share.auto_revoked','share',?,?)").bind(share.id,JSON.stringify({reason:"folder_unavailable",r2Prefix:share.r2_prefix})).run();
+      else await db.prepare("UPDATE shares SET unavailable_since=datetime('now') WHERE id=? AND revoked_at IS NULL AND unavailable_since IS NULL").bind(share.id).run();
+    }
+  }catch{throw temporaryPublicShareException("database");}
+  throw publicShareLifecycleException("resource_removed");
 }
 
 async function requireAvailableFolder(env:Env,share:ShareRow):Promise<void>{
-  if(!(await prefixHasBrowsableEntry(env.DATA_BUCKET,share.r2_prefix)))await markUnavailableFolder(env,share);
-  if(share.unavailable_since)await sessionDb(env.DELIVERY_DB).prepare("UPDATE shares SET unavailable_since=NULL WHERE id=? AND revoked_at IS NULL").bind(share.id).run();
+  let browsable=false;
+  try{browsable=await prefixHasBrowsableEntry(env.DATA_BUCKET,share.r2_prefix);}
+  catch{throw temporaryPublicShareException("storage");}
+  if(!browsable)await markUnavailableFolder(env,share);
+  if(share.unavailable_since){
+    try{await sessionDb(env.DELIVERY_DB).prepare("UPDATE shares SET unavailable_since=NULL WHERE id=? AND revoked_at IS NULL").bind(share.id).run();}
+    catch{throw temporaryPublicShareException("database");}
+  }
 }
 
 interface PublicIdStatement {
@@ -235,7 +259,7 @@ export function classifyPublicRateLimit(method: string, path: string): PublicRat
   }
   if (method === "GET" && path.endsWith("/download-summary")) return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "download-summary" };
   if (method === "GET" && path.endsWith("/locations")) return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "locations" };
-  if (method === "GET" && path.endsWith("/manifest/media")) return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "manifest-media" };
+  if (method === "POST" && path.endsWith("/manifest/media")) return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "manifest-media" };
   if (path.endsWith("/manifest")) return { binding: "PUBLIC_MANIFEST_RATE_LIMITER", scope: "manifest" };
   if (path.endsWith("/thumbnail")) return { binding: "PUBLIC_THUMBNAIL_RATE_LIMITER", scope: "thumbnail" };
   if (path.endsWith("/stream-ticket")) return { binding: "PUBLIC_STREAM_RATE_LIMITER", scope: "stream" };
@@ -262,8 +286,12 @@ async function loadAliases(env: Env, keys: string[]): Promise<Map<string, string
   return aliases;
 }
 
-async function loadTombstones(env: Env): Promise<Tombstone[]> {
-  const result = await primaryDb(env).prepare("SELECT physical_key,tombstone_kind FROM delivery_tombstones WHERE restored_at IS NULL").all<Tombstone>();
+async function loadTombstones(env: Env, scope: string): Promise<Tombstone[]> {
+  const result = await primaryDb(env).prepare(`SELECT physical_key,tombstone_kind
+    FROM delivery_tombstones WHERE restored_at IS NULL AND (
+      (physical_key>=? AND physical_key<?)
+      OR (tombstone_kind='prefix' AND substr(?,1,length(physical_key))=physical_key)
+    )`).bind(scope, `${scope}\uffff`, scope).all<Tombstone>();
   return result.results;
 }
 
@@ -276,6 +304,8 @@ async function visiblePublicChildPrefixes(env:Env,candidates:readonly string[]):
   try{
     const state=await indexedImmediateChildVisibility(primaryDb(env),candidates);
     for(const candidate of state.visible)visible.add(candidate);
+    const missing=candidates.length-state.indexed.size;
+    if(missing>0)console.info({event:"public_manifest.folder_index_reconciliation_needed",candidateCount:candidates.length,missingIndexCount:missing});
   }catch(error){
     console.warn(JSON.stringify({event:"public-manifest.folder-index-visibility-fallback",candidateCount:candidates.length,message:error instanceof Error?error.message:"unknown"}));
   }
@@ -286,7 +316,7 @@ async function visiblePublicChildPrefixes(env:Env,candidates:readonly string[]):
 }
 
 async function assertNotTrashed(env: Env, key: string): Promise<void> {
-  if (isTrashed(await loadTombstones(env), key)) throw new HTTPException(404, { message: "File not found" });
+  if (isTrashed(await loadTombstones(env, key), key)) throw new HTTPException(404, { message: "File not found" });
 }
 
 function aliasedPath(key: string, root: string, aliases: Map<string, string>): string {
@@ -315,42 +345,66 @@ app.post("/api/public/shares/:routeId/session", async c => {
   const body: { secret?: string; accessCode?: string } = await c.req.json<{ secret?: string; accessCode?: string }>().catch(() => ({}));
   const routeId = c.req.param("routeId");
   const candidateSecret = body.secret || (routeId.length > 30 ? routeId : "");
-  const byPublic = routeId.length <= 30 ? await findByPublicId(c.env, routeId) : null;
-  const share = candidateSecret ? await findBySecret(c.env, candidateSecret) : null;
-  if (!share || (byPublic && byPublic.id !== share.id)) {
-    const unavailable=candidateSecret?await findUnavailableBySecret(c.env,candidateSecret):null;
-    if(unavailable&&(routeId.length>30||unavailable.public_id===routeId))await markUnavailableFolder(c.env,unavailable);
-    throw new HTTPException(404, { message: "This delivery link is invalid, expired, or revoked" });
+  let share = candidateSecret ? await findByRouteAndSecret(c.env,routeId,candidateSecret) : null;
+  if (!share) {
+    throw new HTTPException(404, { message: "This delivery link is invalid.", cause: { code: "SHARE_INVALID" } });
   }
+  c.set("share",share);
+  const lifecycle=classifyPublicShareLifecycle(share);
+  if(lifecycle!=="active")throw publicShareLifecycleException(lifecycle);
   await requireAvailableFolder(c.env,share);
 
   if (share.password_hash && share.password_salt && share.password_iterations) {
-    if (!body.accessCode) return c.json({ error: "Access code required", code: "ACCESS_CODE_REQUIRED" }, 401);
+    if (!body.accessCode){logPublicShareOutcome(c.req.raw,{outcome:"ACCESS_CODE_REQUIRED",status:401,shareId:share.id});return c.json({ error: "Access code required", code: "ACCESS_CODE_REQUIRED" }, 401);}
     const addressHash = await clientHash(c.env, c.req.raw);
     const [shareLimit, clientLimit] = await Promise.all([
       c.env.ACCESS_CODE_RATE_LIMITER.limit({ key: `${share.id}:${addressHash}` }),
       c.env.ACCESS_CODE_RATE_LIMITER.limit({ key: `client:${addressHash}` }),
     ]);
-    if (!shareLimit.success || !clientLimit.success) throw new HTTPException(429, { message: "Too many attempts. Please wait before trying again." });
+    if (!shareLimit.success || !clientLimit.success) throw new HTTPException(429, { message: "Too many attempts. Please wait before trying again.", cause:{code:"ACCESS_CODE_RATE_LIMITED"} });
     let validCode = await verifyAccessCode(body.accessCode, share.password_hash, share.password_salt, share.password_iterations,share.password_algorithm,c.env.DELIVERY_ACCESS_CODE_PEPPER);
     if (!validCode && c.env.DELIVERY_PREVIOUS_ACCESS_CODE_PEPPER) {
       validCode = await verifyAccessCode(body.accessCode, share.password_hash, share.password_salt, share.password_iterations,share.password_algorithm,c.env.DELIVERY_PREVIOUS_ACCESS_CODE_PEPPER);
       if (validCode) {
         const nextSalt = randomSecret(16);
         const nextHash = await hmac(c.env.DELIVERY_ACCESS_CODE_PEPPER, `access-code:v1:${nextSalt}:${body.accessCode}`);
-        await primaryDb(c.env).prepare("UPDATE shares SET password_hash=?,password_salt=?,password_iterations=1,password_algorithm='hmac-sha256-v1',share_version=share_version+1 WHERE id=? AND password_hash=? AND revoked_at IS NULL")
-          .bind(nextHash, nextSalt, share.id, share.password_hash).run();
+        const upgraded = await primaryDb(c.env).prepare("UPDATE shares SET password_hash=?,password_salt=?,password_iterations=1,password_algorithm='hmac-sha256-v1',share_version=share_version+1 WHERE id=? AND password_hash=? AND share_version=? AND revoked_at IS NULL")
+          .bind(nextHash, nextSalt, share.id, share.password_hash, share.share_version).run();
+        if (upgraded.meta.changes) share = {
+          ...share,
+          password_hash: nextHash,
+          password_salt: nextSalt,
+          password_iterations: 1,
+          password_algorithm: "hmac-sha256-v1",
+          share_version: share.share_version + 1,
+        };
       }
     }
     if (!validCode) {
       c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, "unlock.failed"));
+      logPublicShareOutcome(c.req.raw,{outcome:"ACCESS_CODE_INVALID",status:401,shareId:share.id});
       return c.json({ error: "The access code is not correct", code: "ACCESS_CODE_INVALID" }, 401);
     }
+    // Bind the successful access-code check to the exact credential generation.
+    // A concurrent staff code/token rotation must not let an old code mint a
+    // cookie for the newly current share version.
+    const current = await lifecycleShareQuery(c.env,lifecycleShareSql("s.id=? AND s.token_hash=?"),[share.id,share.token_hash]);
+    if (!current
+      || current.share_version !== share.share_version
+      || current.password_hash !== share.password_hash
+      || current.password_salt !== share.password_salt
+      || current.password_iterations !== share.password_iterations
+      || current.password_algorithm !== share.password_algorithm) {
+      throw new HTTPException(401,{message:"The delivery credentials changed. Open the current link and try again.",cause:{code:"SHARE_SESSION_STALE"}});
+    }
+    const currentLifecycle=classifyPublicShareLifecycle(current);
+    if(currentLifecycle!=="active")throw publicShareLifecycleException(currentLifecycle);
+    share=current;
   }
 
-  const route = await ensurePublicId(c.env, share);
-  const shareExpiry = share.expires_at ? new Date(share.expires_at).getTime() : Number.POSITIVE_INFINITY;
-  const expiresAt = Math.min(Date.now() + 12 * 60 * 60 * 1000, shareExpiry);
+  let route:{publicId:string;shareVersion:number};
+  try{route=await ensurePublicId(c.env,share);}catch(error){if(error instanceof HTTPException)throw error;throw temporaryPublicShareException("database");}
+  const expiresAt = publicShareSessionExpiresAt(share.expires_at);
   c.header("Set-Cookie", await createSessionCookie(c.env.DELIVERY_SESSION_SECRET, c.env.SESSION_KEY_ID, share.id,route.shareVersion, expiresAt));
   c.executionCtx.waitUntil(recordFirstAccessNotification(c.env, share));
   c.executionCtx.waitUntil(audit(c.env, c.req.raw, share.id, "session.created"));
@@ -358,29 +412,49 @@ app.post("/api/public/shares/:routeId/session", async c => {
 });
 
 app.use("/api/public/shares/:publicId/*", async (c, next) => {
+  const authStarted=Date.now();
   // The signed cookie is only a transport credential. D1 remains the first
   // primary authorization source for every protected public request.
+  const sessionCookie=parseCookie(c.req.header("Cookie"), COOKIE_NAME);
   const session = await verifyRotatingSessionCookie(
-    parseCookie(c.req.header("Cookie"), COOKIE_NAME),
+    sessionCookie,
     { keyId: c.env.SESSION_KEY_ID, secret: c.env.DELIVERY_SESSION_SECRET },
     c.env.PREVIOUS_SESSION_KEY_ID && c.env.DELIVERY_PREVIOUS_SESSION_SECRET
       ? { keyId: c.env.PREVIOUS_SESSION_KEY_ID, secret: c.env.DELIVERY_PREVIOUS_SESSION_SECRET }
       : null,
   );
-  const share = await primaryDb(c.env).prepare(activeShareSql("s.id=? AND s.public_id=? AND s.share_version=?")).bind(session.shareId, c.req.param("publicId"),session.shareVersion).first<ShareRow>();
-  if (!share){const unavailable=await primaryDb(c.env).prepare(unavailableShareSql("s.id=? AND s.public_id=?")).bind(session.shareId,c.req.param("publicId")).first<ShareRow>();if(unavailable)await markUnavailableFolder(c.env,unavailable);throw new HTTPException(404, { message: "This delivery link is invalid, expired, or revoked" });}
+  const share=await lifecycleShareQuery(c.env,lifecycleShareSql("s.id=? AND s.public_id=?"),[session.shareId,c.req.param("publicId")]);
+  if(!share){
+    const existing=await lifecycleShareQuery(c.env,lifecycleShareSql("s.id=?"),[session.shareId]);
+    if(existing)throw new HTTPException(404,{message:"This delivery link is invalid.",cause:{code:"SHARE_INVALID"}});
+    throw publicShareLifecycleException("resource_removed");
+  }
   c.set("share", share);
+  const lifecycle=classifyPublicShareLifecycle(share);
+  if(lifecycle!=="active")throw publicShareLifecycleException(lifecycle);
+  if(share.share_version!==session.shareVersion)throw new HTTPException(401,{message:"This delivery session is stale.",cause:{code:"SHARE_SESSION_STALE"}});
   const policy = classifyPublicRateLimit(c.req.method, c.req.path);
   await enforceRateLimit(c, c.env[policy.binding], policy.scope);
+  const authDuration=Date.now()-authStarted;
   await next();
+  const timing=c.res.headers.get("Server-Timing");
+  c.header("Server-Timing",`${timing?`${timing}, `:""}auth;dur=${Math.max(0,authDuration)}`);
+  if(shouldRenewPublicShareSession({sessionExpiresAt:session.expiresAt,cookieKeyId:sessionCookie?.split(".",1)[0]||null,currentKeyId:c.env.SESSION_KEY_ID})){
+    c.header("Set-Cookie",await createSessionCookie(c.env.DELIVERY_SESSION_SECRET,c.env.SESSION_KEY_ID,share.id,share.share_version,publicShareSessionExpiresAt(share.expires_at)));
+  }
 });
 
 app.get("/api/public/shares/:publicId/manifest", async c => {
   const started=Date.now();
-  const share = c.get("share"); await requireAvailableFolder(c.env,share); const root = normalizeRoot(share.r2_prefix); const tombstones = await loadTombstones(c.env);
+  const share = c.get("share"); const root = normalizeRoot(share.r2_prefix);
   const folderRef = c.req.query("folder") || ""; const relativeFolder = folderRef ? decodeItemRef(folderRef) : "";
   const prefix = relativeFolder ? `${keyWithinRoot(root, relativeFolder).replace(/\/$/, "")}/` : root;
-  const listed = await c.env.DATA_BUCKET.list({ prefix, delimiter: "/", limit: 500, cursor: c.req.query("cursor"), include: ["httpMetadata", "customMetadata"] });
+  const tombstones = await loadTombstones(c.env,prefix);
+  const storageStarted=Date.now();
+  let listed:R2Objects;
+  try{listed=await c.env.DATA_BUCKET.list({ prefix, delimiter: "/", limit: PUBLIC_DELIVERY_PAGE_SIZE, cursor: c.req.query("cursor"), include: ["httpMetadata", "customMetadata"] });}
+  catch{throw temporaryPublicShareException("storage");}
+  const storageDuration=Date.now()-storageStarted;
   const aliasKeys = [root, prefix, ...listed.delimitedPrefixes, ...listed.objects.map(object => object.key)]; let breadcrumbPhysical = root;
   for (const segment of relativeFolder.split("/").filter(Boolean)) { breadcrumbPhysical += `${segment}/`; aliasKeys.push(breadcrumbPhysical); }
   const aliases = await loadAliases(c.env, aliasKeys);
@@ -407,48 +481,59 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   let physicalBreadcrumb = root;
   for (const segment of relativeFolder.split("/").filter(Boolean)) { built = built ? `${built}/${segment}` : segment; physicalBreadcrumb += `${segment}/`; breadcrumbs.push({ id: encodeItemRef(built), name: aliases.get(physicalBreadcrumb) || segment }); }
   const currentPhysical = relativeFolder ? prefix : root;
+  if(!folderRef&&!c.req.query("cursor")&&!listed.truncated&&items.length===0)await markUnavailableFolder(c.env,share);
   const dropbox=cloudProviderEnabled(c.env,"dropbox"),google=cloudProviderEnabled(c.env,"google"); const manifest: DeliveryManifest = { share: { publicId: share.public_id!, label: share.label, clientName: share.client_name, projectName: aliases.get(root) || share.project_name, expiresAt: share.expires_at }, folder: { id: folderRef, name: aliases.get(currentPhysical) || relativeFolder.split("/").pop() || share.project_name, breadcrumbs }, items, nextCursor: listed.truncated ? listed.cursor : null, capabilities: { cloudTransfer: { dropbox, googleDrive: google, googlePicker: google } } };
   c.executionCtx.waitUntil(Promise.all([audit(c.env, c.req.raw, share.id, "manifest.viewed", folderRef), primaryDb(c.env).prepare("UPDATE shares SET access_count=access_count+1,last_accessed_at=datetime('now') WHERE id=?").bind(share.id).run()]));
-  c.header("Server-Timing",`manifest;dur=${Math.max(0,Date.now()-started)}`);
+  c.header("Server-Timing",`storage;dur=${Math.max(0,storageDuration)}, list;dur=${Math.max(0,Date.now()-started)}`);
   return c.json(manifest);
 });
 
-app.get("/api/public/shares/:publicId/manifest/media", async c => {
+app.post("/api/public/shares/:publicId/manifest/media", async c => {
   const started=Date.now();
-  const share = c.get("share"); await requireAvailableFolder(c.env, share); const root = normalizeRoot(share.r2_prefix); const tombstones = await loadTombstones(c.env);
+  const share = c.get("share"); const root = normalizeRoot(share.r2_prefix);
   const folderRef = c.req.query("folder") || ""; const relativeFolder = folderRef ? decodeItemRef(folderRef) : "";
   const prefix = relativeFolder ? `${keyWithinRoot(root, relativeFolder).replace(/\/$/, "")}/` : root;
-  const listed = await c.env.DATA_BUCKET.list({ prefix, delimiter: "/", limit: 500, cursor: c.req.query("cursor"), include: ["httpMetadata", "customMetadata"] });
-  const candidates = listed.objects.flatMap(object => {
-    if (!object.key.startsWith(prefix) || object.key === prefix || object.key.endsWith("/") || isHiddenKey(object.key) || isTrashed(tombstones, object.key) || isMovedSourceMarker(object)) return [];
-    const relative = object.key.slice(root.length); const id = encodeItemRef(relative); const kind = kindForKey(object.key);
-    if (kind !== "image" && kind !== "pdf" && kind !== "video") return [];
-    const base = `/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${id}`;
-    return [{ id, key: object.key, kind, etag: object.httpEtag, size: object.size, contentType: object.httpMetadata?.contentType, base }];
+  const tombstones = await loadTombstones(c.env,prefix);
+  const body:{items?:unknown}=await c.req.json<{items?:unknown}>().catch(()=>({} as {items?:unknown}));
+  if(!Array.isArray(body.items)||body.items.length>PUBLIC_DELIVERY_PAGE_SIZE)throw new HTTPException(400,{message:"Media item list is invalid"});
+  const requestedItems:unknown[]=body.items;
+  const candidates=[...new Set(requestedItems)].flatMap(value=>{
+    if(typeof value!=="string")return[];
+    let relative:string;try{relative=decodeItemRef(value);}catch{return[];}
+    const key=keyWithinRoot(root,relative),immediate=key.slice(prefix.length);
+    if(!key.startsWith(prefix)||!immediate||immediate.includes("/")||isHiddenKey(key)||isTrashed(tombstones,key))return[];
+    const kind=kindForKey(key);if(kind!=="image"&&kind!=="pdf"&&kind!=="video")return[];
+    return[{id:value,key,kind,base:`/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${encodeURIComponent(value)}`}];
   });
-  const db = primaryDb(c.env); const thumbnailCandidates = candidates; const videoCandidates = candidates.filter(candidate => candidate.kind === "video");
-  const [thumbnailRecords, videoRecords] = await Promise.all([
-    thumbnailCandidates.length ? db.batch(thumbnailCandidates.map(candidate => db.prepare("SELECT source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status FROM image_thumbnail_jobs WHERE source_key=?").bind(candidate.key))) : [],
-    videoCandidates.length ? db.batch(videoCandidates.map(candidate => db.prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(candidate.key))) : [],
-  ]);
-  const thumbnails = new Map(thumbnailCandidates.map((candidate, index) => [candidate.id, thumbnailRecords[index]?.results[0] as ThumbnailJobRow | undefined]));
-  const videos = new Map(videoCandidates.map((candidate, index) => [candidate.id, videoRecords[index]?.results[0] as { stream_uid?: string; stream_status?: string } | undefined]));
-  const response={ items: candidates.map(candidate => {
-    const thumbnail = thumbnails.get(candidate.id); const video = videos.get(candidate.id);
+  const db=primaryDb(c.env),rows:PublicMediaRow[]=[];const databaseStarted=Date.now();
+  for(let offset=0;offset<candidates.length;offset+=PUBLIC_MEDIA_LOOKUP_CHUNK_SIZE){
+    const chunk=candidates.slice(offset,offset+PUBLIC_MEDIA_LOOKUP_CHUNK_SIZE);if(!chunk.length)continue;
+    const result=await db.prepare(`WITH requested(r2_key) AS (VALUES ${chunk.map(()=>"(?)").join(",")})
+      SELECT requested.r2_key,file.etag,file.size,file.content_type,file.media_kind,file.stream_uid,file.stream_status,
+        thumbnail.source_etag,thumbnail.thumbnail_key,thumbnail.thumbnail_etag,thumbnail.thumbnail_size,thumbnail.status thumbnail_status
+      FROM requested LEFT JOIN file_index file ON file.r2_key=requested.r2_key
+      LEFT JOIN image_thumbnail_jobs thumbnail ON thumbnail.source_key=requested.r2_key`).bind(...chunk.map(candidate=>candidate.key)).all<PublicMediaRow>();
+    rows.push(...result.results);
+  }
+  const records=new Map(rows.map(row=>[row.r2_key,row]));
+  const response={ items: candidates.flatMap(candidate => {
+    const row=records.get(candidate.key);if(!row||row.size===null||!row.etag)return[];
+    const thumbnail:ThumbnailJobRow|undefined=row.source_etag&&row.thumbnail_key&&row.thumbnail_status?{source_etag:row.source_etag,thumbnail_key:row.thumbnail_key,thumbnail_etag:row.thumbnail_etag,thumbnail_size:row.thumbnail_size,status:row.thumbnail_status}:undefined;
     return {
       id: candidate.id,
-      ...thumbnailFieldsForObject(candidate.key, candidate.kind, candidate.base, candidate.etag, thumbnail, candidate.size, candidate.contentType),
-      ...(candidate.kind === "video" ? { previewStatus: video?.stream_status === "ready" && video.stream_uid ? "ready" : "processing" } : {}),
+      ...thumbnailFieldsForObject(candidate.key,candidate.kind,candidate.base,row.etag,thumbnail,row.size,row.content_type||undefined),
+      ...(candidate.kind === "video" ? { previewStatus: row.stream_status === "ready" && row.stream_uid ? "ready" : "processing" } : {}),
     };
   }) };
-  c.header("Server-Timing",`media;dur=${Math.max(0,Date.now()-started)}`);
+  c.header("Server-Timing",`database;dur=${Math.max(0,Date.now()-databaseStarted)}, media;dur=${Math.max(0,Date.now()-started)}`);
   return c.json(response);
 });
 
 app.get("/api/public/shares/:publicId/download-summary", async c => {
-  const share = c.get("share"); await requireAvailableFolder(c.env, share); const tombstones = await loadTombstones(c.env);
+  const share = c.get("share"); await requireAvailableFolder(c.env, share);
   const folderRef = c.req.query("folder") || "";
   const prefix = folderRef ? `${keyWithinRoot(share.r2_prefix, decodeItemRef(folderRef))}/` : normalizeRoot(share.r2_prefix);
+  const tombstones = await loadTombstones(c.env,prefix);
   const objects = await listDownloadableObjects(c.env.DATA_BUCKET, prefix, tombstones);
   return c.json(summarizeDownloadableObjects(objects));
 });
@@ -791,10 +876,25 @@ app.get("/", c => c.redirect("/portal", 302));
 
 app.notFound(c => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {
-  const status = error instanceof HTTPException ? error.status : 500;
-  if (status >= 500) console.error(JSON.stringify({ event: "delivery.error", status, message: error instanceof Error ? error.message : "unknown" }));
-  const code=error instanceof Error&&(error.cause as {code?:string}|undefined)?.code;
-  return c.json({ error: status >= 500 ? "An unexpected error occurred" : error.message,...(code?{code}:{}) }, status);
+  const message = error instanceof Error ? error.message : String(error);
+  const schemaOutdated = c.req.path.startsWith("/api/client/") &&
+    /no such (?:table|column):/i.test(message);
+  const status = schemaOutdated
+    ? 503
+    : error instanceof HTTPException
+      ? error.status
+      : 500;
+  const cause=error instanceof Error?error.cause as {code?:string;layer?:"database"|"storage"}|undefined:undefined;
+  const code=cause?.code;
+  const publicShareRequest=c.req.path.startsWith("/api/public/shares/");
+  if(publicShareRequest&&status>=400)logPublicShareOutcome(c.req.raw,{outcome:code||"UNEXPECTED_FAILURE",status,shareId:c.get("share")?.id,layer:cause?.layer});
+  if (status >= 500&&!publicShareRequest) console.error(JSON.stringify({ event: "delivery.error", status, message: error instanceof Error ? error.message : "unknown" }));
+  return c.json(schemaOutdated
+    ? {
+        error: "Client portal data is temporarily unavailable while its database update finishes.",
+        code: "CLIENT_PORTAL_SCHEMA_OUTDATED",
+      }
+    : { error: status >= 500 ? "An unexpected error occurred" : error.message,...(code?{code}:{}) }, status);
 });
 
 export default { fetch: app.fetch, scheduled: (event, env, ctx) => {

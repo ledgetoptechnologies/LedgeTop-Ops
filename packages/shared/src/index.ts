@@ -4,6 +4,7 @@ export const PERMISSIONS = [
   "operations.view_all",
   "operations.manage",
   "sops.view",
+  "sops.assign",
   "sops.manage",
   "projects.view",
   "tasks.view",

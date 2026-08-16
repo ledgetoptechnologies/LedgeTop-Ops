@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -85,6 +86,9 @@ import {
 import { MapAreaSelector } from "./MapAreaSelector";
 import { ImageLocationMap } from "./ImageLocationMap";
 
+const PORTAL_FILE_RENDER_WINDOW = 450;
+const PORTAL_FILE_RENDER_STEP = 150;
+
 function PortalNotificationCenter() {
   const [open, setOpen] = useState(false);
   const [items, setItems] = useState<PortalNotification[]>([]);
@@ -161,6 +165,13 @@ function blockedPortal(
   caught: unknown,
 ): Extract<PortalGate, { status: "blocked" }> {
   const error = caught as RequestError;
+  if (error.body?.code === "CLIENT_PORTAL_SCHEMA_OUTDATED")
+    return {
+      status: "blocked",
+      title: "Portal update in progress",
+      detail:
+        "Your access is valid, but the client portal database update has not finished. Retry shortly or contact LTDS if this continues.",
+    };
   if (error.status === 404)
     return {
       status: "blocked",
@@ -280,18 +291,34 @@ function FileBrowser({
   const [continuationFolderId, setContinuationFolderId] = useState<string | null>(folderId);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [renderStart, setRenderStart] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [retryVersion, setRetryVersion] = useState(0);
   const [locations, setLocations] = useState<DeliveryLocationCollection | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
-  const manualLoadController = useRef<AbortController | null>(null);
+  const [preview, setPreview] = useState<{ file: PortalFile; trigger: HTMLElement | null } | null>(null);
+  const previewDialog = useRef<HTMLElement>(null);
+  const pageRequest = useRef<{
+    folderId: string | null;
+    cursor: string;
+    controller: AbortController;
+    promise: Promise<PortalFilePage>;
+  } | null>(null);
+  const prefetchedPage = useRef<{ folderId: string | null; cursor: string; page: PortalFilePage } | null>(null);
+  const loadMoreSentinel = useRef<HTMLDivElement | null>(null);
+  const lastAutoCursor = useRef("");
+  const browserVersion = useRef(0);
   useEffect(() => {
+    const version = ++browserVersion.current;
     let active = true;
     const controller = new AbortController();
-    manualLoadController.current?.abort();
-    manualLoadController.current = null;
+    pageRequest.current?.controller.abort();
+    pageRequest.current = null;
+    prefetchedPage.current = null;
+    lastAutoCursor.current = "";
     setLoading(true);
     setLoadingMore(false);
+    setRenderStart(0);
     setError(null);
     setFiles([]);
     setFolders([]);
@@ -299,29 +326,14 @@ function FileBrowser({
     setCursor(null);
     setContinuationFolderId(folderId);
     void (async () => {
-      let next: string | null = null;
-      let requestFolderId = folderId;
-      let pageCount = 0;
       try {
-        do {
-          const result = await load(requestFolderId, next, controller.signal);
-          if (!active) return;
-          setFiles(current => pageCount === 0 ? result.files : [...current, ...result.files]);
-          setFolders(current => pageCount === 0 ? (result.folders ?? []) : [...current, ...(result.folders ?? [])]);
-          if (pageCount === 0) {
-            setBreadcrumbs(result.breadcrumbs ?? []);
-            requestFolderId = result.folderId ?? folderId;
-            setContinuationFolderId(requestFolderId);
-            setLoading(false);
-          }
-          next = result.cursor;
-          setCursor(next);
-          pageCount += 1;
-          if (!next || pageCount >= 20) break;
-          setLoadingMore(true);
-          await new Promise<void>(resolve => window.setTimeout(resolve, 0));
-        }
-        while (active && !controller.signal.aborted);
+        const result = await load(folderId, null, controller.signal);
+        if (!active || version !== browserVersion.current) return;
+        setFiles(result.files);
+        setFolders(result.folders ?? []);
+        setBreadcrumbs(result.breadcrumbs ?? []);
+        setContinuationFolderId(result.folderId ?? folderId);
+        setCursor(result.cursor);
       } catch (caught) {
         if (!active || controller.signal.aborted || (caught as Error).name === "AbortError") return;
         const status = (caught as RequestError).status;
@@ -331,9 +343,7 @@ function FileBrowser({
           setBreadcrumbs([]);
           setCursor(null);
         }
-        setError(pageCount === 0
-          ? "Files could not be loaded. Your access may have changed; try again."
-          : "More files could not be loaded. Try again to continue.");
+        setError("Files could not be loaded. Your access may have changed; try again.");
       } finally {
         if (active) {
           setLoading(false);
@@ -344,8 +354,9 @@ function FileBrowser({
     return () => {
       active = false;
       controller.abort();
-      manualLoadController.current?.abort();
-      manualLoadController.current = null;
+      pageRequest.current?.controller.abort();
+      pageRequest.current = null;
+      prefetchedPage.current = null;
     };
   }, [folderId, load, retryVersion]);
   useEffect(() => {
@@ -357,20 +368,61 @@ function FileBrowser({
       .catch(() => { if (active) setLocationError("Image locations could not be loaded."); });
     return () => { active = false; };
   }, [loadLocations]);
-  const more = async () => {
-    if (!cursor || loadingMore) return;
+  useEffect(() => {
+    if (!preview) return;
+    const priorOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    previewDialog.current?.focus();
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      setPreview(null);
+    };
+    window.addEventListener("keydown", keydown);
+    return () => {
+      window.removeEventListener("keydown", keydown);
+      document.body.style.overflow = priorOverflow;
+      preview.trigger?.focus();
+    };
+  }, [preview]);
+  const requestPage = useCallback((requestFolderId: string | null, requestCursor: string) => {
+    const active = pageRequest.current;
+    if (active?.folderId === requestFolderId && active.cursor === requestCursor) return active.promise;
+    if (active) return null;
     const controller = new AbortController();
-    manualLoadController.current?.abort();
-    manualLoadController.current = controller;
+    const promise = load(requestFolderId, requestCursor, controller.signal);
+    pageRequest.current = { folderId: requestFolderId, cursor: requestCursor, controller, promise };
+    void promise.then(
+      () => { if (pageRequest.current?.promise === promise) pageRequest.current = null; },
+      () => { if (pageRequest.current?.promise === promise) pageRequest.current = null; },
+    );
+    return promise;
+  }, [load]);
+  const more = useCallback(async () => {
+    if (!cursor || loadingMore) return;
+    const requestCursor = cursor;
+    const requestFolderId = continuationFolderId;
+    const version = browserVersion.current;
     setLoadingMore(true);
     setError(null);
     try {
-      const result = await load(continuationFolderId, cursor, controller.signal);
-      setFiles((current) => [...current, ...result.files]);
-      setFolders((current) => [...current, ...(result.folders ?? [])]);
+      const prepared = prefetchedPage.current;
+      const result = prepared?.folderId === requestFolderId && prepared.cursor === requestCursor
+        ? prepared.page
+        : await requestPage(requestFolderId, requestCursor);
+      if (!result || version !== browserVersion.current) return;
+      if (prefetchedPage.current?.folderId === requestFolderId && prefetchedPage.current.cursor === requestCursor) prefetchedPage.current = null;
+      setFiles(current => {
+        const ids = new Set(current.map(file => file.id));
+        return [...current, ...result.files.filter(file => !ids.has(file.id))];
+      });
+      setFolders(current => {
+        const ids = new Set(current.map(folder => folder.id));
+        return [...current, ...(result.folders ?? []).filter(folder => !ids.has(folder.id))];
+      });
       setCursor(result.cursor);
     } catch (caught) {
-      if (controller.signal.aborted || (caught as Error).name === "AbortError") return;
+      if ((caught as Error).name === "AbortError" || version !== browserVersion.current) return;
       const status = (caught as RequestError).status;
       if ([401, 403, 404, 410].includes(status ?? 0)) {
         setFiles([]);
@@ -380,12 +432,62 @@ function FileBrowser({
       }
       setError("More files could not be loaded.");
     } finally {
-      if (manualLoadController.current === controller) {
-        manualLoadController.current = null;
-        setLoadingMore(false);
-      }
+      if (version === browserVersion.current) setLoadingMore(false);
     }
-  };
+  }, [continuationFolderId, cursor, loadingMore, requestPage]);
+  useEffect(() => {
+    if (!cursor || loading) return;
+    const requestCursor = cursor;
+    const requestFolderId = continuationFolderId;
+    const version = browserVersion.current;
+    let cancelled = false;
+    const prepare = () => {
+      const request = requestPage(requestFolderId, requestCursor);
+      if (!request) return;
+      void request.then(page => {
+        if (!cancelled && version === browserVersion.current) prefetchedPage.current = { folderId: requestFolderId, cursor: requestCursor, page };
+      }).catch(caught => {
+        if (!cancelled && version === browserVersion.current && (caught as Error).name !== "AbortError") setError("The next page could not be prepared. Use Load more to retry.");
+      });
+    };
+    const idleWindow = window as unknown as {
+      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const requestIdle = idleWindow.requestIdleCallback;
+    const cancelIdle = idleWindow.cancelIdleCallback;
+    const handle = requestIdle
+      ? requestIdle(prepare, { timeout: 1200 })
+      : window.setTimeout(prepare, 120);
+    return () => {
+      cancelled = true;
+      if (cancelIdle && requestIdle) cancelIdle(handle);
+      else window.clearTimeout(handle);
+    };
+  }, [continuationFolderId, cursor, loading, requestPage]);
+  useEffect(() => {
+    const target = loadMoreSentinel.current;
+    if (!cursor || !target || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(entries => {
+      if (!entries.some(entry => entry.isIntersecting) || lastAutoCursor.current === cursor) return;
+      lastAutoCursor.current = cursor;
+      void more();
+    }, { rootMargin: "700px 0px" });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [cursor, more]);
+  const totalEntries = folders.length + files.length;
+  const priorEntryCount = useRef(0);
+  useEffect(() => {
+    if (totalEntries < priorEntryCount.current) setRenderStart(0);
+    else if (totalEntries > priorEntryCount.current && totalEntries > PORTAL_FILE_RENDER_WINDOW) {
+      setRenderStart(totalEntries - PORTAL_FILE_RENDER_WINDOW);
+    }
+    priorEntryCount.current = totalEntries;
+  }, [totalEntries]);
+  const visibleFolders = folders.slice(renderStart, Math.min(folders.length, renderStart + PORTAL_FILE_RENDER_WINDOW));
+  const visibleFileStart = Math.max(0, renderStart - folders.length);
+  const visibleFiles = files.slice(visibleFileStart, visibleFileStart + PORTAL_FILE_RENDER_WINDOW - visibleFolders.length);
   return (
     <div>
       <ImageLocationMap token={mapToken} locations={locations} scopeLabel={locationScopeLabel} />
@@ -403,22 +505,19 @@ function FileBrowser({
         <div className="portal-inline-error" role="alert"><p>{error}</p><button className="button-ghost button-small" onClick={() => setRetryVersion(current => current + 1)}>Try again</button></div>
       ) : files.length === 0 && folders.length === 0 ? (
         <EmptyState title={emptyTitle} detail={emptyDetail} />
-      ) : <div className="portal-file-list">
-        {folders.map((folder) => (
+      ) : <>
+      {renderStart > 0 && <div className="portal-load-more"><button className="button-ghost" onClick={() => setRenderStart(current => Math.max(0, current - PORTAL_FILE_RENDER_STEP))}>Show earlier files</button></div>}
+      <div className="portal-file-list">
+        {visibleFolders.map((folder) => (
           <button key={folder.id} type="button" className="portal-folder-row" title={folder.name} onClick={() => onFolderChange?.(folder.id)}>
             <span className="portal-file-icon" aria-hidden="true">DIR</span>
             <span><strong>{folder.name}</strong><small>Open folder</small></span>
             <span aria-hidden="true">&gt;</span>
           </button>
         ))}
-        {files.map((file) => (
+        {visibleFiles.map((file) => (
           <article key={file.id} className="portal-file-row">
-            <div className="portal-file-icon" aria-hidden="true">
-              {file.contentType?.startsWith("image/")
-                ? "IMG"
-                : file.name.split(".").pop()?.slice(0, 4).toUpperCase() ||
-                  "FILE"}
-            </div>
+            <PortalFileThumbnail file={file} />
             <div>
               <strong>{file.name}</strong>
               <span>
@@ -427,14 +526,13 @@ function FileBrowser({
             </div>
             <div className="portal-file-actions">
               {file.previewPath && (
-                <a
+                <button
+                  type="button"
                   className="button-ghost button-small"
-                  href={file.previewPath}
-                  target="_blank"
-                  rel="noreferrer"
+                  onClick={event => setPreview({ file, trigger: event.currentTarget })}
                 >
                   Preview
-                </a>
+                </button>
               )}
               <a
                 className="button-orange button-small"
@@ -445,14 +543,16 @@ function FileBrowser({
             </div>
           </article>
         ))}
-      </div>}
+      </div>
+      {renderStart + PORTAL_FILE_RENDER_WINDOW < totalEntries && <div className="portal-load-more"><button className="button-ghost" onClick={() => setRenderStart(current => Math.min(totalEntries - PORTAL_FILE_RENDER_WINDOW, current + PORTAL_FILE_RENDER_STEP))}>Show later files</button></div>}
+      </>}
       {error && (files.length > 0 || folders.length > 0) && (
         <p className="portal-message error" role="alert">
           {error}
         </p>
       )}
       {cursor && (
-        <div className="portal-load-more">
+        <div ref={loadMoreSentinel} className="portal-load-more">
           <button
             className="button-ghost"
             onClick={() => void more()}
@@ -462,6 +562,52 @@ function FileBrowser({
           </button>
         </div>
       )}
+      {preview && (
+        <div
+          className="portal-file-preview-backdrop"
+          onMouseDown={event => { if (event.currentTarget === event.target) setPreview(null); }}
+        >
+          <section
+            ref={previewDialog}
+            className="portal-file-preview"
+            role="dialog"
+            aria-modal="true"
+            aria-label={`Preview ${preview.file.name}`}
+            tabIndex={-1}
+          >
+            <header>
+              <div><strong>{preview.file.name}</strong><span>{formatBytes(preview.file.size)}</span></div>
+              <div className="portal-file-preview-actions">
+                <a className="button-orange button-small" href={preview.file.downloadPath}>Download</a>
+                <button type="button" className="button-ghost button-small" onClick={() => setPreview(null)} aria-label="Close preview">Close</button>
+              </div>
+            </header>
+            <div className="portal-file-preview-stage">
+              {preview.file.kind === "image" && <img src={preview.file.previewPath!} alt={preview.file.name} />}
+              {preview.file.kind === "video" && <video src={preview.file.previewPath!} controls playsInline preload="metadata" />}
+              {preview.file.kind === "audio" && <audio src={preview.file.previewPath!} controls preload="metadata" />}
+              {(preview.file.kind === "pdf" || preview.file.kind === "text") && (
+                <iframe src={preview.file.previewPath!} title={`Preview ${preview.file.name}`} />
+              )}
+            </div>
+          </section>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PortalFileThumbnail({ file }: { file: PortalFile }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [file.thumbnailPath]);
+  const label = file.kind === "other"
+    ? file.name.split(".").pop()?.slice(0, 4).toUpperCase() || "FILE"
+    : file.kind.slice(0, 4).toUpperCase();
+  return (
+    <div className="portal-file-icon" aria-hidden="true">
+      {file.thumbnailPath && !failed
+        ? <img src={file.thumbnailPath} alt="" loading="lazy" decoding="async" onError={() => setFailed(true)} />
+        : label}
     </div>
   );
 }
@@ -2016,10 +2162,11 @@ export function ClientPortalApp({
   const [requestNotice, setRequestNotice] = useState<string | null>(null);
   const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [bootstrapRevision, setBootstrapRevision] = useState(0);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null);
   const mobileNavPanel = useRef<HTMLDivElement>(null);
   const pastDeliveryLoader = useMemo(
-    () => (_folderId: string | null, cursor: string | null) => loadPortalPastDeliveries(cursor),
+    () => (_folderId: string | null, cursor: string | null, signal: AbortSignal) => loadPortalPastDeliveries(cursor, undefined, signal),
     [],
   );
   const pastDeliveryLocationLoader = useMemo(
@@ -2042,7 +2189,7 @@ export function ClientPortalApp({
     return () => {
       active = false;
     };
-  }, []);
+  }, [bootstrapRevision]);
   useEffect(() => {
     if (gate.status !== "ready" || !gate.data.capabilities.requestV2) {
       setDrafts([]);
@@ -2137,6 +2284,16 @@ export function ClientPortalApp({
       <PortalBoundary>
         <Card>
           <EmptyState title={gate.title} detail={gate.detail} />
+          <button
+            type="button"
+            className="button-orange"
+            onClick={() => {
+              setGate({ status: "loading" });
+              setBootstrapRevision(value => value + 1);
+            }}
+          >
+            Retry portal
+          </button>
         </Card>
       </PortalBoundary>
     );

@@ -20,7 +20,12 @@ async function fixture(status: "pending" | "failed" | "ready" = "ready", options
       bind(...bound: unknown[]) { values = bound; return statement; },
       async first<T>() {
         if (query.includes("FROM image_thumbnail_jobs")) return { source_etag: '"source"', thumbnail_key: thumbnailKey, thumbnail_etag: status === "ready" ? '"thumb"' : null, thumbnail_size: status === "ready" ? 5 : null, status } as T;
-        if (query.includes("s.id=? AND s.public_id=?")) return options.active !== false && values[1] === share.public_id ? share as T : null;
+        if (query.includes("FROM shares s LEFT JOIN projects")) {
+          if (options.active === false) return null;
+          if (query.includes("s.public_id=?") && !values.includes(share.public_id)) return null;
+          if (query.includes("s.id=?") && !values.includes(share.id)) return null;
+          return share as T;
+        }
         return null;
       },
       async all<T>() { return { results: [] as T[] }; },
@@ -106,7 +111,7 @@ describe("thumbnail route authorization", () => {
 
   it("denies revoked or expired shares and revoked session versions with zero R2 reads", async () => {
     const revoked = await fixture("ready", { active: false });
-    expect((await worker.fetch(new Request(`https://client.example${revoked.path}`, { headers: { Cookie: revoked.cookie } }), revoked.env, revoked.ctx)).status).toBe(404);
+    expect((await worker.fetch(new Request(`https://client.example${revoked.path}`, { headers: { Cookie: revoked.cookie } }), revoked.env, revoked.ctx)).status).toBe(410);
     expect(revoked.reads).toEqual([]);
 
     const staleSession = await fixture("ready", { cookieVersion: share.share_version - 1 });
@@ -115,9 +120,10 @@ describe("thumbnail route authorization", () => {
   });
 
   it("returns the authoritative listing before separately hydrating authorized media state", async () => {
-    const pdfKey = `${share.r2_prefix}Edited/report.pdf`;
-    const videoKey = `${share.r2_prefix}Edited/flight.mov`;
+    const pdfKey = `${share.r2_prefix}report.pdf`;
+    const videoKey = `${share.r2_prefix}flight.mov`;
     const thumbnailQueries: string[] = [];
+    const tombstoneScopes: unknown[][] = [];
     const objects = [
       {
         key: pdfKey,
@@ -145,10 +151,36 @@ describe("thumbnail route authorization", () => {
         get values() { return values; },
         bind(...bound: unknown[]) { values = bound; return statement; },
         async first<T>() {
-          if (query.includes("FROM shares s JOIN projects p") && query.includes("s.id=? AND s.public_id=?")) return share as T;
+          if (query.includes("FROM shares s LEFT JOIN projects") && query.includes("s.id=? AND s.public_id=?")) return share as T;
           return null;
         },
-        async all<T>() { return { results: [] as T[] }; },
+        async all<T>() {
+          if (query.includes("FROM delivery_tombstones")) {
+            tombstoneScopes.push([...values]);
+            return { results: [] as T[] };
+          }
+          if (query.includes("WITH requested(r2_key)")) {
+            thumbnailQueries.push(...values.map(String));
+            return { results: values.map(value => {
+              const key = String(value);
+              return {
+                r2_key: key,
+                etag: key === videoKey ? '"video-source"' : '"pdf-source"',
+                size: key === videoKey ? 8192 : 4096,
+                content_type: key === videoKey ? "video/quicktime" : "application/pdf",
+                media_kind: key === videoKey ? "video" : "pdf",
+                stream_uid: null,
+                stream_status: key === videoKey ? "pending" : null,
+                source_etag: key === videoKey ? '"video-source"' : '"pdf-source"',
+                thumbnail_key: thumbnailKey,
+                thumbnail_etag: '"thumb"',
+                thumbnail_size: 5,
+                thumbnail_status: "ready",
+              };
+            }) as T[] };
+          }
+          return { results: [] as T[] };
+        },
         async run() { return { meta: { changes: 1 } }; },
       };
       return statement;
@@ -173,8 +205,10 @@ describe("thumbnail route authorization", () => {
         });
       },
     };
+    let listCalls = 0;
     const bucket = {
       async list() {
+        listCalls += 1;
         return { objects, delimitedPrefixes: [], truncated: false };
       },
     };
@@ -198,7 +232,7 @@ describe("thumbnail route authorization", () => {
     ), env, ctx);
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("Server-Timing")).toMatch(/^manifest;dur=\d+$/);
+    expect(response.headers.get("Server-Timing")).toMatch(/storage;dur=\d+, list;dur=\d+, auth;dur=\d+/);
     const manifest = await response.json() as { items: Array<Record<string, unknown>> };
     const pdf = manifest.items.find(item => item.name === "report.pdf");
     const video = manifest.items.find(item => item.name === "flight.mov");
@@ -210,10 +244,14 @@ describe("thumbnail route authorization", () => {
 
     const mediaResponse = await worker.fetch(new Request(
       `https://client.example/api/public/shares/${share.public_id}/manifest/media`,
-      { headers: { Cookie: cookie } },
+      {
+        method: "POST",
+        headers: { Cookie: cookie, "Content-Type": "application/json" },
+        body: JSON.stringify({ items: [pdf?.id, video?.id] }),
+      },
     ), env, ctx);
     expect(mediaResponse.status).toBe(200);
-    expect(mediaResponse.headers.get("Server-Timing")).toMatch(/^media;dur=\d+$/);
+    expect(mediaResponse.headers.get("Server-Timing")).toMatch(/database;dur=\d+, media;dur=\d+, auth;dur=\d+/);
     const media = await mediaResponse.json() as { items: Array<Record<string, unknown>> };
     const pdfPatch = media.items.find(item => item.id === pdf?.id);
     const videoPatch = media.items.find(item => item.id === video?.id);
@@ -222,5 +260,10 @@ describe("thumbnail route authorization", () => {
     expect(videoPatch).toMatchObject({ previewStatus: "processing", thumbnailState: "ready", thumbnailFallbackKind: "video" });
     expect(videoPatch?.thumbnailUrl).toMatch(/\/items\/.+\/thumbnail$/);
     expect(thumbnailQueries).toEqual([pdfKey, videoKey]);
+    expect(listCalls).toBe(1);
+    expect(tombstoneScopes).toEqual([
+      [share.r2_prefix, `${share.r2_prefix}\uffff`, share.r2_prefix],
+      [share.r2_prefix, `${share.r2_prefix}\uffff`, share.r2_prefix],
+    ]);
   });
 });

@@ -8,6 +8,11 @@ The [locked release scope](locked-release-scope.md) traces those boundaries to
 the required Operations, Client, delivery, mobile, and external acceptance
 gates.
 
+The separately deployed 3D Viewer integration is defined by the
+[Viewer control/data-plane contract](3d-viewer-integration.md). Model assets
+stream directly from the Viewer infrastructure; they never pass through an
+LTDS Worker.
+
 ## Request boundaries
 
 ```text

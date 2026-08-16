@@ -11,6 +11,7 @@ const EMPLOYEE_PERMISSIONS = new Set<Permission>([
   "projects.view",
   "tasks.view",
   "sops.view",
+  "sops.assign",
   "airspace.view",
   "file_requests.view",
   "file_requests.create",

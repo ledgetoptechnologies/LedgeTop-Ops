@@ -15,7 +15,7 @@ const principal = { id: "staff-target" } as StaffPrincipal;
 
 describe("staff access controls", () => {
   it("keeps the ACL vocabulary constrained to known permissions", () => {
-    for (const permission of ["operations.view", "operations.view_all", "delivery.browse", "delivery.share.create", "delivery.share.revoke", "delivery.share.audit", "team.view", "administration.view"]) {
+    for (const permission of ["operations.view", "operations.view_all", "sops.assign", "delivery.browse", "delivery.share.create", "delivery.share.revoke", "delivery.share.audit", "team.view", "administration.view"]) {
       expect(PERMISSIONS).toContain(permission);
     }
   });
@@ -60,6 +60,7 @@ describe("staff access controls", () => {
     expect(compactClient).toContain('session.user.isAdministrator&&person.id!==session.user.id&&!person.sync_protected&&person.id!=="staff-beau-koltz"');
     expect(client).toContain("View all operations, projects, and tasks");
     expect(client).toContain("Create client links");
+    expect(client).toContain("Assign published SOPs to visible work");
   });
 
   it("keeps each team access control inside a responsive card row", () => {

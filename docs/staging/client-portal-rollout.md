@@ -54,7 +54,7 @@ and warns that Bypass disables Access enforcement in
 1. Run `npm.cmd run staging:check:test`, the repository tests, and build from
    the pinned commit. Record all config hashes.
 2. Export both staging D1 databases. List migrations and confirm the exact
-   Delivery release set `0096`-`0112`, `0114`-`0135`, plus Operations
+   Delivery release set `0096`-`0112`, `0114`-`0137`, plus Operations
    `0014`-`0023`. Migration `0113` is intentionally reserved and absent. The
    release evidence validator compares the complete filename sets; do not
    shorten them to a range or infer success from a local migration run.
@@ -107,6 +107,23 @@ operator owns that dependency:
 - PA relation/lifecycle contract fixtures, many-to-many scope parity, deny
   precedence, completed-project day-30 cutoff, and reopen restoration. Keep
   `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=false` until all are recorded.
+- migration `0136_portal_v2_identity_denials.sql`, reviewed staff/system
+  mutation ownership, immutable audit evidence, and staging tests showing that
+  global and hierarchy-scoped denials take effect on the next request, expire
+  as configured, and restore only authority still permitted by the live
+  identity, membership, hierarchy, and entitlement state. Keep
+  `CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED=false` until that mutation surface
+  and evidence exist; the client Worker intentionally exposes no public
+  endpoint for creating or revoking deny records.
+- migration `0137_authenticated_delivery_grants.sql`, the separately disabled
+  staff management and Client enforcement flags, exact-person and dynamic
+  organization/department/client/project audience behavior, idempotent
+  create/revoke/restore, binding/source-version invalidation, and proof that a
+  revoked parent grant suspends every descendant client-created public share.
+  Keep `AUTHENTICATED_DELIVERY_GRANTS_ENABLED=false` in both Workers and
+  `CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED=false` in Operations until the
+  same reviewed staging packet proves the Operations UI/API and Client
+  enforcement together.
 
 The exact staging attachment policy is
 `docs/staging/request-attachments-r2-cors.json`; the preflight reads that file

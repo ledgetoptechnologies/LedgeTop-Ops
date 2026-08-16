@@ -20,7 +20,8 @@ describe("public share image locations", () => {
     const statementFor = (query: string) => {
       let values: unknown[] = [];
       const statement = { bind(...bound: unknown[]) { values = bound; return statement; }, async first<T>() {
-        if (query.includes("FROM shares s JOIN projects p") && query.includes("s.id=? AND s.public_id=?")) return values[1] === share.public_id ? disabled as T : null;
+        if (query.includes("FROM shares s LEFT JOIN projects") && query.includes("s.id=? AND s.public_id=?")) return values[1] === share.public_id ? disabled as T : null;
+        if (query.includes("FROM shares s LEFT JOIN projects") && query.includes("s.id=?")) return disabled as T;
         return null;
       }, async all<T>() { if (query.includes("image-location.public-share-assets")) locationQueries += 1; return { results: [] as T[] }; }, async run() { return { meta: { changes: 1 } }; } };
       return statement;

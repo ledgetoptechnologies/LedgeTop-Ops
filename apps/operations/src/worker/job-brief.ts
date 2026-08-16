@@ -171,6 +171,8 @@ interface SopLinkRow {
   author_id: string;
   author_display_name: string;
   published_at: string;
+  document_status: "draft" | "published" | "archived";
+  published_revision_id: string | null;
 }
 
 interface SopLinkDto {
@@ -185,6 +187,7 @@ interface SopLinkDto {
   author: { id: string; displayName: string };
   publishedAt: string;
   linkedAt: string;
+  publicationState: "current" | "superseded" | "archived" | "unpublished";
 }
 
 function parseJsonBody<T>(value: unknown, schema: z.ZodType<T>): T {
@@ -297,6 +300,13 @@ function sopLinkDto(row: SopLinkRow): SopLinkDto {
     author: { id: row.author_id, displayName: row.author_display_name },
     publishedAt: row.published_at,
     linkedAt: row.linked_at,
+    publicationState: row.document_status === "archived"
+      ? "archived"
+      : row.document_status !== "published" || !row.published_revision_id
+        ? "unpublished"
+        : row.published_revision_id === row.revision_id
+          ? "current"
+          : "superseded",
   };
 }
 
@@ -338,7 +348,8 @@ async function loadAttachments(env: Env, operationId: string): Promise<Attachmen
 async function loadLinkedSops(env: Env, operationId: string): Promise<SopLinkRow[]> {
   const result = await env.OPS_DB.withSession("first-primary")
     .prepare(`SELECT l.sop_id,l.revision_id,l.linked_at,r.revision_number,d.slug,r.title,r.purpose,
-      r.rendered_html,r.toc_json,r.author_id,r.author_display_name,r.published_at
+      r.rendered_html,r.toc_json,r.author_id,r.author_display_name,r.published_at,
+      d.status document_status,d.published_revision_id
       FROM operational_job_brief_sop_links l
       JOIN sop_documents d ON d.id=l.sop_id
       JOIN sop_revisions r ON r.id=l.revision_id AND r.sop_id=l.sop_id
@@ -354,14 +365,16 @@ async function loadBrief(
   operation: OperationRow,
 ) {
   const session = env.OPS_DB.withSession("first-primary");
-  const [canEdit, canViewSops] = await Promise.all([
+  const resource = resourceContext(operation);
+  const [canEdit, canViewSops, canAssignSops] = await Promise.all([
     hasPermission(
       env,
       principal,
       "operations.manage",
-      resourceContext(operation),
+      resource,
     ),
-    hasPermission(env, principal, "sops.view"),
+    hasPermission(env, principal, "sops.view", resource),
+    hasPermission(env, principal, "sops.assign", resource),
   ]);
   const results = await session.batch<BriefRow | AttachmentRow | RevisionRow | SopLinkRow>([
     session.prepare(
@@ -383,7 +396,8 @@ async function loadBrief(
       .bind(operation.id),
     ...(canViewSops ? [session.prepare(
         `SELECT l.sop_id,l.revision_id,l.linked_at,r.revision_number,d.slug,r.title,r.purpose,
-          r.rendered_html,r.toc_json,r.author_id,r.author_display_name,r.published_at
+          r.rendered_html,r.toc_json,r.author_id,r.author_display_name,r.published_at,
+          d.status document_status,d.published_revision_id
          FROM operational_job_brief_sop_links l
          JOIN sop_documents d ON d.id=l.sop_id
          JOIN sop_revisions r ON r.id=l.revision_id AND r.sop_id=l.sop_id
@@ -436,6 +450,7 @@ async function loadBrief(
     })),
     canEdit,
     canViewSops,
+    canAssignSops: canViewSops && canAssignSops,
   };
 }
 
@@ -616,18 +631,27 @@ async function replaceSopLinks(
   operation: OperationRow,
   value: z.infer<typeof sopLinksSchema>,
 ): Promise<boolean> {
-  const current = await env.OPS_DB.withSession("first-primary")
-    .prepare("SELECT snapshot_json FROM operational_job_briefs WHERE operation_id=? AND version=?")
-    .bind(operation.id, value.expectedVersion)
-    .first<{ snapshot_json: string }>();
+  const [current, currentLinks] = await Promise.all([
+    env.OPS_DB.withSession("first-primary")
+      .prepare("SELECT snapshot_json FROM operational_job_briefs WHERE operation_id=? AND version=?")
+      .bind(operation.id, value.expectedVersion)
+      .first<{ snapshot_json: string }>(),
+    loadLinkedSops(env, operation.id),
+  ]);
   if (value.expectedVersion > 0 && !current) return false;
   const selected = value.revisionIds.length
     ? await env.OPS_DB.withSession("first-primary")
-        .prepare(`SELECT d.id sop_id,r.id revision_id,datetime('now') linked_at,r.revision_number,d.slug,
-          r.title,r.purpose,r.rendered_html,r.toc_json,r.author_id,r.author_display_name,r.published_at
-          FROM sop_documents d JOIN sop_revisions r ON r.id=d.published_revision_id
-          WHERE d.status='published' AND r.id IN (${value.revisionIds.map(() => "?").join(",")})`)
-        .bind(...value.revisionIds)
+        .prepare(`SELECT d.id sop_id,r.id revision_id,COALESCE(existing.linked_at,datetime('now')) linked_at,
+          r.revision_number,d.slug,r.title,r.purpose,r.rendered_html,r.toc_json,r.author_id,
+          r.author_display_name,r.published_at,d.status document_status,d.published_revision_id
+          FROM sop_documents d JOIN sop_revisions r ON r.sop_id=d.id
+          LEFT JOIN operational_job_brief_sop_links existing
+            ON existing.operation_id=? AND existing.sop_id=d.id AND existing.revision_id=r.id
+          WHERE r.id IN (${value.revisionIds.map(() => "?").join(",")})
+            AND ((d.status='published' AND d.published_revision_id=r.id)
+              OR existing.revision_id IS NOT NULL)
+          ORDER BY r.title COLLATE NOCASE,r.id`)
+        .bind(operation.id, ...value.revisionIds)
         .all<SopLinkRow>()
     : { results: [] as SopLinkRow[] };
   if (selected.results.length !== value.revisionIds.length)
@@ -653,13 +677,17 @@ async function replaceSopLinks(
     nextSnapshot,
     "scope_saved",
   );
+  const retainedRevisionIds = selected.results.map(row => row.revision_id);
+  const currentRevisionIds = new Set(currentLinks.map(row => row.revision_id));
   statements.push(
     env.OPS_DB.prepare(`DELETE FROM operational_job_brief_sop_links
-      WHERE operation_id=? AND EXISTS (SELECT 1 FROM operational_job_briefs
+      WHERE operation_id=?${retainedRevisionIds.length
+        ? ` AND revision_id NOT IN (${retainedRevisionIds.map(() => "?").join(",")})`
+        : ""} AND EXISTS (SELECT 1 FROM operational_job_briefs
         WHERE operation_id=? AND version=? AND snapshot_json=?)`)
-      .bind(operation.id, operation.id, value.expectedVersion + 1, snapshotJson),
+      .bind(operation.id, ...retainedRevisionIds, operation.id, value.expectedVersion + 1, snapshotJson),
   );
-  for (const row of selected.results)
+  for (const row of selected.results.filter(candidate => !currentRevisionIds.has(candidate.revision_id)))
     statements.push(
       env.OPS_DB.prepare(`INSERT INTO operational_job_brief_sop_links
         (operation_id,sop_id,revision_id,linked_by)
@@ -773,7 +801,9 @@ export function registerJobBriefRoutes(app: App): void {
       c.get("administrator"),
       c.req.param("id"),
     );
-    await requireEdit(c.env, principal, operation);
+    const resource = resourceContext(operation);
+    await requirePermission(c.env, principal, "sops.view", resource);
+    await requirePermission(c.env, principal, "sops.assign", resource);
     const value = await jsonBody(c, sopLinksSchema);
     if (!(await replaceSopLinks(c.env, c.req.raw, principal, operation, value)))
       return conflict(c, await currentVersion(c.env, operation.id));

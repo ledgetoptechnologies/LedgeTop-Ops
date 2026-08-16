@@ -126,6 +126,7 @@ import {
   type ClientRequestServiceReviewRow,
 } from "./client-request-service-review";
 import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quote";
+import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import {
   decorateWorkContextsWithSops,
   registerWorkContextSopRoutes,
@@ -146,6 +147,22 @@ import {
 } from "./client-workspace-manager-recovery";
 import { requestAreaKml, requestAreaKmlFilename } from "./request-area-kml";
 import {
+  createPortalIdentityDenial,
+  listPortalIdentityDenials,
+  portalDenyPolicyManagementEnabled,
+  revokePortalIdentityDenial,
+  searchPortalDenyIdentities,
+  searchPortalDenyScopes,
+} from "./client-portal-deny-policies";
+import {
+  authenticatedDeliveryGrantsEnabled,
+  createAuthenticatedDeliveryGrant,
+  listAuthenticatedDeliveryGrants,
+  restoreAuthenticatedDeliveryGrant,
+  revokeAuthenticatedDeliveryGrant,
+  searchAuthenticatedDeliveryGrantAudiences,
+} from "./authenticated-delivery-grants";
+import {
   parseStoredWorkArea,
   summarizeWorkAreaChange,
   validateStaffRequestArea,
@@ -158,6 +175,27 @@ const app = new Hono<{ Bindings: Env; Variables: Variables }>();
 type RequestNotificationDb = {
   prepare(query: string): D1PreparedStatement;
 };
+type ClientRequestReadDb = RequestNotificationDb;
+
+function missingD1SchemaObject(error: unknown, objectName?: string): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!/no such (?:table|column):/i.test(message)) return false;
+  return !objectName || message.toLocaleLowerCase().includes(objectName.toLocaleLowerCase());
+}
+
+async function optionalClientRequestRows<T>(
+  database: ClientRequestReadDb,
+  tableName: string,
+  sql: string,
+  ...values: unknown[]
+): Promise<T[]> {
+  try {
+    return (await database.prepare(sql).bind(...values).all<T>()).results;
+  } catch (error) {
+    if (!missingD1SchemaObject(error, tableName)) throw error;
+    return [];
+  }
+}
 
 async function requestNotificationSnapshot(
   db: RequestNotificationDb,
@@ -400,6 +438,32 @@ const clientWorkspaceManagerTransferSchema = z.object({
   previousManagerIdentityId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/).optional(),
   suspendPrevious: z.boolean().default(false),
 }).strict();
+const identityDenialSchema = z.object({
+  identityId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
+  workspaceId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/).nullable().optional(),
+  scopeType: z.enum(["global", "workspace", "organization", "standalone_client", "department", "client", "project", "folder", "contact"]),
+  scopePublicId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/).nullable().optional(),
+  reasonCode: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/),
+  expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
+}).strict();
+const identityDenialRevokeSchema = z.object({
+  expectedUpdatedAt: z.iso.datetime({ offset: true }),
+  reasonCode: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/),
+}).strict();
+const authenticatedGrantSchema = z.object({
+  folderBindingId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
+  audienceType: z.enum(["organization", "department", "client", "project", "principal"]),
+  audiencePublicId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
+  reasonCode: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/),
+  expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
+}).strict();
+const authenticatedGrantRevokeSchema = z.object({
+  expectedVersion: z.number().int().positive(),
+  reasonCode: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/),
+}).strict();
+const authenticatedGrantRestoreSchema = authenticatedGrantRevokeSchema.extend({
+  expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
+}).strict();
 const paQuoteLinkSchema = z
   .object({ artifactId: z.coerce.number().int().positive() })
   .strict();
@@ -588,6 +652,12 @@ app.get("/api/session", async (c) => {
       },
       clientWorkspaceManagerRecovery: {
         enabled: clientWorkspaceManagerRecoveryEnabled(c.env),
+      },
+      portalIdentityDenials: {
+        enabled: portalDenyPolicyManagementEnabled(c.env),
+      },
+      authenticatedDeliveryGrants: {
+        enabled: authenticatedDeliveryGrantsEnabled(c.env),
       },
     },
   });
@@ -896,6 +966,64 @@ app.delete("/api/client-portal/accounts/:accountId/folder-grants/:grantId", asyn
   await revokeClientFolderGrant(c.env, c.req.raw, c.get("principal"), c.req.param("accountId"), c.req.param("grantId"));
   return c.json({ success: true });
 });
+app.get("/api/client-portal/identity-denials/identities", async (c) => c.json(
+  await searchPortalDenyIdentities(c.env, c.get("principal"), c.req.query("q") || "", c.req.query("workspaceId") || null),
+));
+app.get("/api/client-portal/identity-denials", async (c) => c.json(
+  await listPortalIdentityDenials(c.env, c.get("principal")),
+));
+app.get("/api/client-portal/identity-denials/scopes", async (c) => {
+  const parsed = z.enum(["workspace", "organization", "department", "client", "project"])
+    .safeParse(c.req.query("scopeType"));
+  if (!parsed.success) throw new HTTPException(400, { message: "Denial scope type is invalid" });
+  return c.json(await searchPortalDenyScopes(c.env, c.get("principal"), parsed.data, c.req.query("q") || ""));
+});
+app.post("/api/client-portal/identity-denials", async (c) => {
+  const result = await createPortalIdentityDenial(
+    c.env, c.get("principal"), await body(c, identityDenialSchema), c.req.header("Idempotency-Key") || "",
+  );
+  return c.json(result, result.replayed ? 200 : 201);
+});
+app.post("/api/client-portal/identity-denials/:denialId/revoke", async (c) => {
+  const input = await body(c, identityDenialRevokeSchema);
+  return c.json(await revokePortalIdentityDenial(
+    c.env, c.get("principal"), c.req.param("denialId"), input.expectedUpdatedAt,
+    input.reasonCode, c.req.header("Idempotency-Key") || "",
+  ));
+});
+app.get("/api/delivery/authenticated-grants/audiences", async (c) => c.json(
+  await searchAuthenticatedDeliveryGrantAudiences(
+    c.env, c.get("principal"), c.req.query("folderBindingId") || "", c.req.query("q") || "",
+  ),
+));
+app.get("/api/delivery/authenticated-grants", async (c) => {
+  const folderRef = c.req.query("folderRef") || "";
+  if (!/^[A-Za-z0-9_-]{2,1400}$/.test(folderRef))
+    throw new HTTPException(400, { message: "Folder reference is invalid" });
+  const folderKey = await authorizeItem(c.env, c.get("principal"), folderRef);
+  return c.json(await listAuthenticatedDeliveryGrants(c.env, c.get("principal"), folderKey));
+});
+app.post("/api/delivery/authenticated-grants", async (c) => {
+  const result = await createAuthenticatedDeliveryGrant(
+    c.env, c.get("principal"), await body(c, authenticatedGrantSchema), c.req.header("Idempotency-Key") || "",
+  );
+  return c.json(result, result.replayed ? 200 : 201);
+});
+app.post("/api/delivery/authenticated-grants/:grantId/revoke", async (c) => {
+  const input = await body(c, authenticatedGrantRevokeSchema);
+  return c.json(await revokeAuthenticatedDeliveryGrant(
+    c.env, c.get("principal"), c.req.param("grantId"), input.expectedVersion,
+    input.reasonCode, c.req.header("Idempotency-Key") || "",
+  ));
+});
+app.post("/api/delivery/authenticated-grants/:grantId/restore", async (c) => {
+  const input = await body(c, authenticatedGrantRestoreSchema);
+  const result = await restoreAuthenticatedDeliveryGrant(
+    c.env, c.get("principal"), c.req.param("grantId"), input.expectedVersion,
+    input.reasonCode, input.expiresAt, c.req.header("Idempotency-Key") || "",
+  );
+  return c.json(result, result.replayed ? 200 : 201);
+});
 app.get("/api/admin/client-delegated-shares", async (c) => {
   await requireGlobal(c.env, c.get("principal"), "delivery.share.audit");
   return c.json(await listDelegatedShareProvisioning(c.env));
@@ -1164,6 +1292,7 @@ registerSopRoutes(app);
 registerWorkContextSopRoutes(app);
 registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
+registerTeamAssignedWorkRoutes(app);
 
 app.get("/api/tasks", async (c) => {
   const principal = c.get("principal");
@@ -1191,11 +1320,18 @@ app.get("/api/tasks", async (c) => {
 app.get("/api/client-service-requests", async (c) => {
   const principal = c.get("principal");
   await requireGlobal(c.env, principal, "operations.manage");
-  const result = await c.env.DELIVERY_DB.withSession("first-primary")
-    .prepare(
-      `SELECT r.id,r.account_id,r.project_id,r.parent_request_id,r.request_type,r.title,r.details,r.location_text,r.preferred_start_at,r.service_category,r.deliverables_text,r.site_contact_name,r.site_contact_email,r.site_contact_phone,r.desired_completion_at,r.latitude,r.longitude,r.area_geojson,r.poi_points_json,r.status,r.created_at,r.updated_at,a.display_name account_name,p.project_name,p.client_name,quote.project_alpha_artifact_id quote_id,quote.document_number quote_document_number,quote.artifact_status quote_status,quote.total_minor quote_total_minor,quote.currency quote_currency,quote.verified_at quote_verified_at,EXISTS(SELECT 1 FROM client_service_request_services service WHERE service.request_id=r.id) uses_catalog_v2 FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id LEFT JOIN projects p ON p.id=r.project_id LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id AND quote.artifact_type='quote' AND quote.superseded_at IS NULL WHERE a.status='active' ORDER BY CASE r.status WHEN 'submitted' THEN 0 WHEN 'under_review' THEN 1 WHEN 'accepted_pending_pa_linkage' THEN 2 WHEN 'accepted_linked' THEN 3 ELSE 4 END,CASE WHEN r.desired_completion_at IS NULL THEN 1 ELSE 0 END,r.desired_completion_at ASC,r.created_at ASC,r.id ASC LIMIT 200`,
-    )
-    .all();
+  const db = c.env.DELIVERY_DB.withSession("first-primary");
+  const baseQuery = `SELECT r.id,r.account_id,r.project_id,r.parent_request_id,r.request_type,r.title,r.details,r.location_text,r.preferred_start_at,r.service_category,r.deliverables_text,r.site_contact_name,r.site_contact_email,r.site_contact_phone,r.desired_completion_at,r.latitude,r.longitude,r.area_geojson,r.poi_points_json,r.status,r.created_at,r.updated_at,a.display_name account_name,p.project_name,p.client_name,quote.project_alpha_artifact_id quote_id,quote.document_number quote_document_number,quote.artifact_status quote_status,quote.total_minor quote_total_minor,quote.currency quote_currency,quote.verified_at quote_verified_at,__CATALOG_MARKER__ uses_catalog_v2 FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id LEFT JOIN projects p ON p.id=r.project_id LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id AND quote.artifact_type='quote' AND quote.superseded_at IS NULL WHERE a.status='active' ORDER BY CASE r.status WHEN 'submitted' THEN 0 WHEN 'under_review' THEN 1 WHEN 'accepted_pending_pa_linkage' THEN 2 WHEN 'accepted_linked' THEN 3 ELSE 4 END,CASE WHEN r.desired_completion_at IS NULL THEN 1 ELSE 0 END,r.desired_completion_at ASC,r.created_at ASC,r.id ASC LIMIT 200`;
+  let result: D1Result<Record<string, unknown>>;
+  try {
+    result = await db.prepare(baseQuery.replace(
+      "__CATALOG_MARKER__",
+      "EXISTS(SELECT 1 FROM client_service_request_services service WHERE service.request_id=r.id)",
+    )).all<Record<string, unknown>>();
+  } catch (error) {
+    if (!missingD1SchemaObject(error, "client_service_request_services")) throw error;
+    result = await db.prepare(baseQuery.replace("__CATALOG_MARKER__", "0")).all<Record<string, unknown>>();
+  }
   return c.json({
     requests: result.results.map((raw) => {
       const row = { ...raw } as Record<string, unknown>;
@@ -1227,66 +1363,58 @@ app.get("/api/client-service-requests/:id", async (c) => {
   const principal = c.get("principal");
   await requireGlobal(c.env, principal, "operations.manage");
   const db = c.env.DELIVERY_DB.withSession("first-primary"),
-    id = c.req.param("id"),
-    request = await db
-      .prepare(
-        `SELECT r.*,a.display_name account_name,p.project_name,p.client_name,
+    id = c.req.param("id");
+  const detailQuery = `SELECT r.*,a.display_name account_name,p.project_name,p.client_name,
           quote.document_number quote_document_number,quote.artifact_status quote_status,
           quote.total_minor quote_total_minor,quote.currency quote_currency,
-          quote.verified_at quote_verified_at,quote.scope_stale_at quote_scope_stale_at
+          quote.verified_at quote_verified_at,__SCOPE_STALE__ quote_scope_stale_at
          FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id
          LEFT JOIN projects p ON p.id=r.project_id
          LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id
            AND quote.artifact_type='quote' AND quote.superseded_at IS NULL
-         WHERE r.id=? AND a.status='active'`,
-      )
-      .bind(id)
-      .first();
+         WHERE r.id=? AND a.status='active'`;
+  let request: Record<string, unknown> | null;
+  try {
+    request = await db.prepare(detailQuery.replace("__SCOPE_STALE__", "quote.scope_stale_at"))
+      .bind(id).first<Record<string, unknown>>();
+  } catch (error) {
+    if (!missingD1SchemaObject(error, "scope_stale_at")) throw error;
+    request = await db.prepare(detailQuery.replace("__SCOPE_STALE__", "NULL"))
+      .bind(id).first<Record<string, unknown>>();
+  }
   if (!request)
     throw new HTTPException(404, { message: "Client request not found" });
   const [revisions, estimates, history, children, areaRevisions, serviceRows] = await Promise.all([
-    db
-      .prepare(
-        "SELECT revision_number,author_type,author_id,action,snapshot_json,note,created_at FROM request_revisions WHERE request_id=? ORDER BY revision_number DESC",
-      )
-      .bind(id)
-      .all(),
-    db
-      .prepare(
-        "SELECT id,version,scope_text,estimate_amount_minor,currency,proposed_fields_json,status,client_response_note,created_at,updated_at,responded_at FROM request_operational_estimates WHERE request_id=? ORDER BY version DESC",
-      )
-      .bind(id)
-      .all(),
-    db
-      .prepare(
-        "SELECT actor_id,action,details_json,created_at FROM request_admin_audit WHERE request_id=? ORDER BY created_at DESC,id DESC",
-      )
-      .bind(id)
-      .all(),
-    db
-      .prepare(
-        "SELECT id,title,status,created_at FROM client_service_requests WHERE parent_request_id=? ORDER BY created_at DESC",
-      )
-      .bind(id)
-      .all(),
-    db
-      .prepare(
-        `SELECT id,revision_number,base_request_updated_at,area_geojson,poi_points_json,
-          reason,change_summary,created_by,created_at
-         FROM client_service_request_area_revisions WHERE request_id=?
-         ORDER BY revision_number DESC`,
-      )
-      .bind(id)
-      .all(),
-    db
-      .prepare(
-        `SELECT service_public_id,service_source_version,service_snapshot_json,answers_json
-         FROM client_service_request_services WHERE request_id=? ORDER BY ordinal`,
-      )
-      .bind(id)
-      .all<ClientRequestServiceReviewRow>(),
+    db.prepare(
+      "SELECT revision_number,author_type,author_id,action,snapshot_json,note,created_at FROM request_revisions WHERE request_id=? ORDER BY revision_number DESC",
+    ).bind(id).all().then(result => result.results),
+    db.prepare(
+      "SELECT id,version,scope_text,estimate_amount_minor,currency,proposed_fields_json,status,client_response_note,created_at,updated_at,responded_at FROM request_operational_estimates WHERE request_id=? ORDER BY version DESC",
+    ).bind(id).all().then(result => result.results),
+    db.prepare(
+      "SELECT actor_id,action,details_json,created_at FROM request_admin_audit WHERE request_id=? ORDER BY created_at DESC,id DESC",
+    ).bind(id).all().then(result => result.results),
+    db.prepare(
+      "SELECT id,title,status,created_at FROM client_service_requests WHERE parent_request_id=? ORDER BY created_at DESC",
+    ).bind(id).all().then(result => result.results),
+    optionalClientRequestRows<Record<string, unknown>>(
+      db,
+      "client_service_request_area_revisions",
+      `SELECT id,revision_number,base_request_updated_at,area_geojson,poi_points_json,
+       reason,change_summary,created_by,created_at
+       FROM client_service_request_area_revisions WHERE request_id=?
+       ORDER BY revision_number DESC`,
+      id,
+    ),
+    optionalClientRequestRows<ClientRequestServiceReviewRow>(
+      db,
+      "client_service_request_services",
+      `SELECT service_public_id,service_source_version,service_snapshot_json,answers_json
+       FROM client_service_request_services WHERE request_id=? ORDER BY ordinal`,
+      id,
+    ),
   ]);
-  const effectiveArea = areaRevisions.results[0] as {
+  const effectiveArea = areaRevisions[0] as {
     revision_number: number;
     area_geojson: string | null;
     poi_points_json: string;
@@ -1295,8 +1423,8 @@ app.get("/api/client-service-requests/:id", async (c) => {
     created_by: string;
     created_at: string;
   } | undefined;
-  const usesCatalogV2 = serviceRows.results.length > 0;
-  const responseRequest = { ...(request as Record<string, unknown>) };
+  const usesCatalogV2 = serviceRows.length > 0;
+  const responseRequest = { ...request };
   if (usesCatalogV2) {
     responseRequest.quote_document_number = null;
     responseRequest.quote_status = null;
@@ -1305,7 +1433,7 @@ app.get("/api/client-service-requests/:id", async (c) => {
     responseRequest.quote_verified_at = null;
     responseRequest.quote_scope_stale_at = null;
   }
-  const responseEstimates = estimates.results.map((raw) => {
+  const responseEstimates = estimates.map((raw) => {
     const estimate = { ...raw } as Record<string, unknown>;
     if (usesCatalogV2) {
       delete estimate.estimate_amount_minor;
@@ -1313,7 +1441,7 @@ app.get("/api/client-service-requests/:id", async (c) => {
     }
     return estimate;
   });
-  const responseRevisions = revisions.results.map((raw) => {
+  const responseRevisions = revisions.map((raw) => {
     const revision = { ...raw } as Record<string, unknown>;
     if (!usesCatalogV2 || typeof revision.snapshot_json !== "string") return revision;
     try {
@@ -1330,10 +1458,10 @@ app.get("/api/client-service-requests/:id", async (c) => {
     request: responseRequest,
     revisions: responseRevisions,
     estimates: responseEstimates,
-    history: history.results,
-    children: children.results,
-    areaRevisions: areaRevisions.results,
-    services: serviceRows.results.map(clientRequestServiceReview),
+    history,
+    children,
+    areaRevisions,
+    services: serviceRows.map(clientRequestServiceReview),
     capabilities: {
       legacyPaQuoteLinkEnabled:
         !usesCatalogV2 && legacyClientRequestPaQuoteLinkEnabled(c.env),
@@ -1350,8 +1478,8 @@ app.get("/api/client-service-requests/:id", async (c) => {
         }
       : {
           revisionNumber: 0,
-          areaGeoJson: (request as { area_geojson: string | null }).area_geojson,
-          poiPointsJson: (request as { poi_points_json: string | null }).poi_points_json,
+          areaGeoJson: request.area_geojson as string | null,
+          poiPointsJson: request.poi_points_json as string | null,
           reason: null,
           changeSummary: null,
           createdBy: null,
@@ -1542,8 +1670,7 @@ app.get("/api/client-service-requests/:id/area.kml", async (c) => {
     throw new HTTPException(400, { message: "Choose the original or effective work-area revision" });
   const db = c.env.DELIVERY_DB.withSession("first-primary"),
     id = c.req.param("id"),
-    request = await db.prepare(
-      `SELECT r.title,
+    currentAreaQuery = `SELECT r.title,
         CASE WHEN effective.id IS NULL THEN r.area_geojson ELSE effective.area_geojson END area_geojson,
         CASE WHEN effective.id IS NULL THEN r.poi_points_json ELSE effective.poi_points_json END poi_points_json
        FROM client_service_requests r
@@ -1551,8 +1678,20 @@ app.get("/api/client-service-requests/:id/area.kml", async (c) => {
        LEFT JOIN client_service_request_area_revisions effective ON effective.request_id=r.id
          AND effective.revision_number=(SELECT MAX(candidate.revision_number)
            FROM client_service_request_area_revisions candidate WHERE candidate.request_id=r.id)
+       WHERE r.id=?`;
+  let request: { title: string; area_geojson: string | null; poi_points_json: string | null } | null;
+  try {
+    request = await db.prepare(currentAreaQuery).bind(id)
+      .first<{ title: string; area_geojson: string | null; poi_points_json: string | null }>();
+  } catch (error) {
+    if (!missingD1SchemaObject(error, "client_service_request_area_revisions")) throw error;
+    request = await db.prepare(
+      `SELECT r.title,r.area_geojson,r.poi_points_json
+       FROM client_service_requests r
+       JOIN client_accounts a ON a.id=r.account_id AND a.status='active'
        WHERE r.id=?`,
     ).bind(id).first<{ title: string; area_geojson: string | null; poi_points_json: string | null }>();
+  }
   if (!request)
     throw new HTTPException(404, { message: "Client request not found" });
   let areaGeoJson = request.area_geojson,
@@ -1616,14 +1755,19 @@ app.post("/api/client-service-requests/:id/estimate", async (c) => {
     db = c.env.DELIVERY_DB.withSession("first-primary"),
     id = c.req.param("id"),
     mutationKey = parsedMutationKey.data;
-  const request = await db
-    .prepare(
-      `SELECT id,project_id,status,
-        EXISTS(SELECT 1 FROM client_service_request_services service WHERE service.request_id=client_service_requests.id) uses_catalog_v2
-       FROM client_service_requests WHERE id=?`,
-    )
-    .bind(id)
-    .first<{ id: string; project_id: string | null; status: string; uses_catalog_v2: number }>();
+  const requestQuery = `SELECT id,project_id,status,__CATALOG_MARKER__ uses_catalog_v2
+    FROM client_service_requests WHERE id=?`;
+  let request: { id: string; project_id: string | null; status: string; uses_catalog_v2: number } | null;
+  try {
+    request = await db.prepare(requestQuery.replace(
+      "__CATALOG_MARKER__",
+      "EXISTS(SELECT 1 FROM client_service_request_services service WHERE service.request_id=client_service_requests.id)",
+    )).bind(id).first<{ id: string; project_id: string | null; status: string; uses_catalog_v2: number }>();
+  } catch (error) {
+    if (!missingD1SchemaObject(error, "client_service_request_services")) throw error;
+    request = await db.prepare(requestQuery.replace("__CATALOG_MARKER__", "0"))
+      .bind(id).first<{ id: string; project_id: string | null; status: string; uses_catalog_v2: number }>();
+  }
   if (!request)
     throw new HTTPException(404, { message: "Client request not found" });
   const usesCatalogV2 = Number(request.uses_catalog_v2 || 0) === 1;
@@ -2051,23 +2195,30 @@ app.post("/api/client-service-requests/:id/pa-quote", async (c) => {
     });
   const value = await body(c, paQuoteLinkSchema),
     id = c.req.param("id"),
-    db = c.env.DELIVERY_DB.withSession("first-primary"),
-    request = await db
-      .prepare(
-        `SELECT r.id,r.status,r.project_id,a.project_alpha_client_id,p.project_alpha_project_id,
-          EXISTS(SELECT 1 FROM client_service_request_services service WHERE service.request_id=r.id) uses_catalog_v2
+    db = c.env.DELIVERY_DB.withSession("first-primary");
+  const linkageQuery = `SELECT r.id,r.status,r.project_id,a.project_alpha_client_id,p.project_alpha_project_id,
+          __CATALOG_MARKER__ uses_catalog_v2
          FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id
-         LEFT JOIN projects p ON p.id=r.project_id WHERE r.id=?`,
-      )
-      .bind(id)
-      .first<{
-        id: string;
-        status: string;
-        project_id: string | null;
-        project_alpha_client_id: string | null;
-        project_alpha_project_id: string | null;
-        uses_catalog_v2: number;
-      }>();
+         LEFT JOIN projects p ON p.id=r.project_id WHERE r.id=?`;
+  type LinkageRequest = {
+    id: string;
+    status: string;
+    project_id: string | null;
+    project_alpha_client_id: string | null;
+    project_alpha_project_id: string | null;
+    uses_catalog_v2: number;
+  };
+  let request: LinkageRequest | null;
+  try {
+    request = await db.prepare(linkageQuery.replace(
+      "__CATALOG_MARKER__",
+      "EXISTS(SELECT 1 FROM client_service_request_services service WHERE service.request_id=r.id)",
+    )).bind(id).first<LinkageRequest>();
+  } catch (error) {
+    if (!missingD1SchemaObject(error, "client_service_request_services")) throw error;
+    request = await db.prepare(linkageQuery.replace("__CATALOG_MARKER__", "0"))
+      .bind(id).first<LinkageRequest>();
+  }
   if (!request)
     throw new HTTPException(404, { message: "Client request not found" });
   if (Number(request.uses_catalog_v2 || 0) === 1)
@@ -2710,7 +2861,13 @@ app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
 
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {
-  const status = error instanceof HTTPException ? error.status : 500;
+  const schemaOutdated = c.req.path.startsWith("/api/client-service-requests") &&
+    missingD1SchemaObject(error);
+  const status = schemaOutdated
+    ? 503
+    : error instanceof HTTPException
+      ? error.status
+      : 500;
   if (status >= 500)
     console.error(
       JSON.stringify({
@@ -2719,10 +2876,12 @@ app.onError((error, c) => {
         message: error instanceof Error ? error.message : "unknown",
       }),
     );
-  return c.json(
-    { error: status >= 500 ? "An unexpected error occurred" : error.message },
-    status,
-  );
+  return c.json(schemaOutdated
+    ? {
+        error: "Client request data is temporarily unavailable while its database update finishes.",
+        code: "CLIENT_REQUEST_SCHEMA_OUTDATED",
+      }
+    : { error: status >= 500 ? "An unexpected error occurred" : error.message }, status);
 });
 
 const CONSOLIDATED_CRON = "*/15 * * * *";

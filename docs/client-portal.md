@@ -272,6 +272,32 @@ body text, timestamps, and same-origin portal actions only; no R2 keys, absolute
 paths, raw bucket URLs, public-share data, or unrelated organization records are
 exposed.
 
+Migration `0137_authenticated_delivery_grants.sql` is the default-off
+portal-v2 successor to the legacy account-wide folder grant. Operations can
+select an opaque organization, department, client, project, or exact verified
+principal from a folder-confined typeahead. This creates versioned authenticated
+authority only: it does not create a bearer URL, public cookie, or public-share
+row. Email remains optional notification metadata and never establishes access.
+
+Group grants contain no frozen recipient list. On every portal listing and
+file, thumbnail, preview, or download request, the Client Worker intersects the
+current Access issuer+subject, active workspace membership, live
+`delivery.view` entitlement, current hierarchy and source versions, the exact
+folder binding, grant lifecycle/expiry, and applicable deny. Exact-principal
+grants additionally snapshot and recheck the opaque PA principal and LTDS
+identity binding. This lets a newly authorized group member qualify without a
+staff rewrite while a moved, removed, denied, expired, or source-stale member
+fails immediately. Revocation is terminal history; restore creates a new grant
+version after repeating every current check. A descendant client-created
+`/client-share/` link also rechecks this parent grant on every bearer request.
+
+The staff management API and Client enforcement are independently present but
+ship disabled through `CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED`,
+`CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED`, and
+`AUTHENTICATED_DELIVERY_GRANTS_ENABLED`. They must be enabled together only
+after migration `0137`, Project Alpha projection parity, and end-to-end staging
+grant/revoke/restore/deny evidence are recorded.
+
 The requested final post-fix diff rescan workspace
 `039e35dd-7458-4707-98d8-9af6f3a67225` remained at setup awaiting **Start
 scan**, so it produced no scan ID or report. On 2026-08-01 the user explicitly

@@ -9,8 +9,8 @@ const scope: SqlScope = { global: false, divisions: ["division-30"], assigned: f
 
 describe("operations visibility", () => {
   it("limits the employee session to read-only operational permissions", () => {
-    const permissions: Permission[] = ["dashboard.view", "operations.view", "tasks.create", "sops.view", "delivery.browse", "team.view"];
-    expect(employeePermissions(permissions, false)).toEqual(["dashboard.view", "operations.view", "sops.view", "delivery.browse", "team.view"]);
+    const permissions: Permission[] = ["dashboard.view", "operations.view", "tasks.create", "sops.view", "sops.assign", "delivery.browse", "team.view"];
+    expect(employeePermissions(permissions, false)).toEqual(["dashboard.view", "operations.view", "sops.view", "sops.assign", "delivery.browse", "team.view"]);
     expect(employeePermissions(permissions, true)).toEqual(permissions);
   });
 

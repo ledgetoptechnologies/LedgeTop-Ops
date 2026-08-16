@@ -51,6 +51,47 @@ test("Team remains visible without Administration permission", async ({ page }) 
   await expect(primary.getByRole("link", { name: "Administration" })).toHaveCount(0);
 });
 
+test("administration.view opens the read-only Administration page without privileged API probes", async ({ page }) => {
+  let privilegedProbe = false;
+  await page.route("**/api/**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/session") {
+      await route.fulfill({ json: {
+        user: {
+          id: "staff-administration-viewer",
+          email: "viewer@example.test",
+          displayName: "Administration Viewer",
+          status: "Active",
+          profileType: "Employee",
+          isAdministrator: false,
+          permissions: ["administration.view"],
+          divisions: [],
+        },
+        csrfToken: "csrf-test",
+        timezone: "America/Chicago",
+        mapStyleUrl: null,
+        mapboxPublicToken: null,
+        capabilities: {
+          delegatedShareProvisioning: { enabled: true },
+          clientWorkspaceManagerRecovery: { enabled: true },
+        },
+      } });
+      return;
+    }
+    if (path.startsWith("/api/admin/")) privilegedProbe = true;
+    await route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  await page.goto("/administration");
+  await expect(page).toHaveURL(/\/administration$/);
+  await expect(page.getByRole("heading", { name: "Administration", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Project Alpha" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Security model" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Sync now" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Audit history" })).toHaveCount(0);
+  expect(privilegedProbe).toBe(false);
+});
+
 for (const width of [320, 390, 768]) {
   test(`mobile navigation is bounded and keyboard-safe at ${width}px`, async ({ page }) => {
     await mockSession(page, allNavigationPermissions);

@@ -1,7 +1,7 @@
 import sql from "../migrations/0096_client_portal_foundation.sql?raw";
 import { sha256 } from "../src/worker/security";
 import { describe, expect, it } from "vitest";
-import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
+import { createClientPortalFileHandle, d1ClientPortalRepository } from "../src/worker/client-portal/repository";
 import { clientPortalNotificationsAvailable } from "../src/worker/client-portal/schema-readiness";
 import type { ClientPortalSession } from "../src/worker/client-portal/types";
 import type { Env } from "../src/worker/types";
@@ -46,10 +46,18 @@ function recordingEnv(options: {
       return database;
     },
   };
-  return { env: { DELIVERY_DB: database } as unknown as Env, calls };
+  return { env: { DELIVERY_DB: database, DELIVERY_SESSION_SECRET: "test-client-portal-session-secret-00000001" } as unknown as Env, calls };
 }
 
-const session: ClientPortalSession = { accountId: "account-a", identityId: "identity-a", displayName: "Acme", role: "manager", canViewBilling: false };
+const session: ClientPortalSession = {
+  accountId: "account-a",
+  identityId: "identity-a",
+  principalIssuer: "https://identity.example",
+  principalSubject: "subject-1",
+  displayName: "Acme",
+  role: "manager",
+  canViewBilling: false,
+};
 
 describe("client portal additive schema readiness", () => {
   it.each([[0, false], [1, true]] as const)(
@@ -93,7 +101,7 @@ describe("client portal identity resolution", () => {
 describe("client portal grant enforcement", () => {
   it("resolves a project file only while every current session, project, member, and folder grant holds in the same query", async () => {
     const value = recordingEnv();
-    const fileId = Buffer.from("clients/acme/north/report.pdf").toString("base64url");
+    const fileId = await createClientPortalFileHandle(value.env, "clients/acme/north/report.pdf");
     await expect(d1ClientPortalRepository.getAuthorizedFile(value.env, session, fileId, "project-a")).resolves.toBeNull();
     expect(value.calls).toHaveLength(1);
     const call = value.calls[0]!;
@@ -319,6 +327,41 @@ describe("client service request listing", () => {
     expect(call.sql).toContain("request_project.active=1");
     expect(call.sql).toContain("ORDER BY r.created_at DESC,r.id DESC");
     expect(call.sql).toContain("LIMIT 100");
+  });
+
+  it("falls back to original request geometry while migration 0118 is still pending", async () => {
+    const value = recordingEnv({
+      all: call => {
+        if (call.sql.includes("client_service_request_area_revisions"))
+          throw new Error("D1_ERROR: no such table: client_service_request_area_revisions: SQLITE_ERROR");
+        return [{
+          id: "request-legacy",
+          project_id: "project-a",
+          parent_request_id: null,
+          request_type: "service",
+          title: "Legacy request",
+          details: "Keep this request visible during a deploy-before-migration release.",
+          location_text: "North parcel",
+          preferred_start_at: null,
+          area_geojson: JSON.stringify({ type: "Polygon", coordinates: [[[0, 0], [1, 0], [0, 0]]] }),
+          poi_points_json: "[]",
+          status: "submitted",
+          created_at: "2026-08-01 12:00:00",
+          updated_at: "2026-08-01 12:00:00",
+        }];
+      },
+    });
+
+    const requests = await d1ClientPortalRepository.listServiceRequests(value.env, session);
+    expect(requests).toEqual([expect.objectContaining({
+      id: "request-legacy",
+      status: "submitted",
+    })]);
+    expect(requests[0]).not.toHaveProperty("workAreaRevision");
+    expect(value.calls).toHaveLength(2);
+    expect(value.calls[0]?.sql).toContain("client_service_request_area_revisions");
+    expect(value.calls[1]?.sql).not.toContain("client_service_request_area_revisions");
+    expect(value.calls[1]?.sql).toContain("NULL work_area_revision_number");
   });
 });
 

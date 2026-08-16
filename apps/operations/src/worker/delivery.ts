@@ -37,6 +37,70 @@ export function deliverySourceUrl(kind:DeliveryItem["kind"],id:string):string|un
 function thumbnailEligible(object: Pick<R2Object, "key" | "size" | "httpMetadata">): boolean { return thumbnailSourceEligible(object.key,object.size,object.httpMetadata?.contentType); }
 
 const FOLDER_VISIBILITY_CANDIDATE_BATCH = 40;
+export const DELIVERY_FOLDER_PAGE_SIZE = 150;
+const DELIVERY_MEDIA_LOOKUP_BATCH = 75;
+
+interface DeliveryMediaCandidate {
+  id:string;
+  key:string;
+  kind:MediaKind;
+  etag:string;
+}
+
+interface DeliveryMediaState {
+  thumbnail?:ThumbnailJobRow;
+  video?:{stream_uid?:string;stream_status?:string};
+}
+
+interface DeliveryMediaPatch {
+  id:string;
+  thumbnailState:DeliveryItem["thumbnailState"];
+  thumbnailErrorCode?:string;
+  thumbnailUrl?:string;
+  previewStatus?:"ready"|"processing"|"unavailable";
+}
+
+async function deliveryMediaState(
+  database:D1Database,
+  candidates:readonly DeliveryMediaCandidate[],
+):Promise<Map<string,DeliveryMediaState>>{
+  const byKey=new Map(candidates.map(candidate=>[candidate.key,candidate]));
+  const state=new Map(candidates.map(candidate=>[candidate.id,{} as DeliveryMediaState]));
+  for(let offset=0;offset<candidates.length;offset+=DELIVERY_MEDIA_LOOKUP_BATCH){
+    const batch=candidates.slice(offset,offset+DELIVERY_MEDIA_LOOKUP_BATCH);
+    if(!batch.length)continue;
+    const placeholders=batch.map(()=>"?").join(",");
+    const keys=batch.map(candidate=>candidate.key);
+    const videos=batch.filter(candidate=>candidate.kind==="video");
+    const [thumbnailRows,videoRows]=await Promise.all([
+      database.prepare(`SELECT source_key,source_etag,thumbnail_key,status,error_code
+        FROM image_thumbnail_jobs WHERE source_key IN (${placeholders})`).bind(...keys).all<ThumbnailJobRow>(),
+      videos.length?database.prepare(`SELECT r2_key,stream_uid,stream_status
+        FROM file_index WHERE r2_key IN (${videos.map(()=>"?").join(",")})`).bind(...videos.map(candidate=>candidate.key))
+        .all<{r2_key:string;stream_uid?:string;stream_status?:string}>():Promise.resolve({results:[]} as {results:Array<{r2_key:string;stream_uid?:string;stream_status?:string}>}),
+    ]);
+    for(const row of thumbnailRows.results){
+      const candidate=row.source_key?byKey.get(row.source_key):undefined;
+      if(candidate)state.get(candidate.id)!.thumbnail=row;
+    }
+    for(const row of videoRows.results){
+      const candidate=byKey.get(row.r2_key);
+      if(candidate)state.get(candidate.id)!.video=row;
+    }
+  }
+  return state;
+}
+
+function deliveryMediaPatch(candidate:DeliveryMediaCandidate,state:DeliveryMediaState):DeliveryMediaPatch{
+  const thumbnail=thumbnailStateForObject(candidate.etag,state.thumbnail);
+  return{
+    id:candidate.id,
+    thumbnailState:thumbnail.state,
+    thumbnailErrorCode:thumbnail.errorCode,
+    ...(thumbnail.state==="ready"?{thumbnailUrl:`/api/delivery/items/${candidate.id}/thumbnail`}:{}),
+    ...(candidate.kind==="video"?{previewStatus:state.video?.stream_status==="ready"&&state.video.stream_uid?"ready":state.video?.stream_status==="error"?"unavailable":"processing"}:{}),
+  };
+}
 
 function prefixUpperBound(prefix:string):string{
   // Normalized folder prefixes always end in "/". Replacing that final byte
@@ -61,6 +125,14 @@ async function indexedDeliveryFolderVisibility(env:Env,candidates:readonly strin
             AND instr(lower('/'||indexed_file.r2_key||'/'),'/.previews/')=0
             AND instr(lower('/'||indexed_file.r2_key||'/'),'/dump/')=0
           LIMIT 1
+        ) OR EXISTS (
+          SELECT 1 FROM image_thumbnail_jobs indexed_thumbnail
+          WHERE indexed_thumbnail.source_key>=c.prefix AND indexed_thumbnail.source_key<c.upper_bound
+            AND indexed_thumbnail.source_key<>c.prefix AND substr(indexed_thumbnail.source_key,-1,1)<>'/'
+            AND instr(lower('/'||indexed_thumbnail.source_key||'/'),'/_ltds/')=0
+            AND instr(lower('/'||indexed_thumbnail.source_key||'/'),'/.previews/')=0
+            AND instr(lower('/'||indexed_thumbnail.source_key||'/'),'/dump/')=0
+          LIMIT 1
         ) has_index,
         EXISTS (
         SELECT 1 FROM file_index fi
@@ -76,6 +148,20 @@ async function indexedDeliveryFolderVisibility(env:Env,candidates:readonly strin
             )
           )
         LIMIT 1
+      ) OR EXISTS (
+        SELECT 1 FROM image_thumbnail_jobs thumbnail
+        WHERE thumbnail.source_key>=c.prefix AND thumbnail.source_key<c.upper_bound
+          AND thumbnail.source_key<>c.prefix AND substr(thumbnail.source_key,-1,1)<>'/'
+          AND instr(lower('/'||thumbnail.source_key||'/'),'/_ltds/')=0
+          AND instr(lower('/'||thumbnail.source_key||'/'),'/.previews/')=0
+          AND instr(lower('/'||thumbnail.source_key||'/'),'/dump/')=0
+          AND NOT EXISTS (
+            SELECT 1 FROM delivery_tombstones t WHERE t.restored_at IS NULL AND (
+              (t.tombstone_kind='exact' AND t.physical_key=thumbnail.source_key) OR
+              (t.tombstone_kind='prefix' AND substr(thumbnail.source_key,1,length(t.physical_key))=t.physical_key)
+            )
+          )
+        LIMIT 1
       ) is_visible
       FROM candidates c`).bind(...bindings).all<{prefix:string;has_index:number;is_visible:number}>();
     for(const row of result.results)if(batch.includes(row.prefix)){
@@ -86,22 +172,17 @@ async function indexedDeliveryFolderVisibility(env:Env,candidates:readonly strin
   return{indexed,visible};
 }
 
-async function visibleDeliveryFolders(env:Env,candidates:readonly string[],trashed:(key:string)=>boolean):Promise<Set<string>>{
+async function visibleDeliveryFolders(env:Env,candidates:readonly string[]):Promise<{visible:Set<string>;reconciliationNeeded:boolean}>{
   const allowed=new Set(candidates),visibility=await indexedDeliveryFolderVisibility(env,candidates).catch(error=>{
-    console.warn(JSON.stringify({event:"delivery.folder-index-visibility-fallback",candidateCount:candidates.length,message:error instanceof Error?error.message:"unknown"}));
+    console.warn(JSON.stringify({event:"delivery.folder-index-reconciliation-needed",candidateCount:candidates.length,reason:"lookup_failed",errorName:error instanceof Error?error.name:"unknown"}));
     return{indexed:new Set<string>(),visible:new Set<string>()};
   });
   const {indexed,visible}=visibility;
-  // A candidate with any indexed descendants is authoritative even when every
-  // descendant is hidden or tombstoned. Only genuinely unindexed candidates
-  // need the bounded R2 fallback while the event index catches up.
-  const pending=candidates.filter(value=>!indexed.has(value)).map(value=>({directory:value,child:value})),visited=new Set<string>();
-  while(pending.length){const item=pending.shift()!;if(visible.has(item.child)||visited.has(item.directory)||hidden(item.directory)||trashed(item.directory))continue;visited.add(item.directory);let cursor:string|undefined;do{
-    const page=await env.DATA_BUCKET.list({prefix:item.directory,delimiter:"/",limit:500,cursor,include:["customMetadata"]});
-    if(page.objects.some(object=>object.key!==item.directory&&!object.key.endsWith("/")&&!hidden(object.key)&&!trashed(object.key)&&!isMovedSourceMarker(object))){visible.add(item.child);break;}
-    for(const child of page.delimitedPrefixes)if(!hidden(child)&&!trashed(child))pending.push({directory:child,child:item.child});
-    cursor=page.truncated?page.cursor:undefined;
-  }while(cursor);}return new Set([...visible].filter(value=>allowed.has(value)));
+  const unindexed=candidates.filter(value=>!indexed.has(value));
+  if(unindexed.length)console.warn(JSON.stringify({event:"delivery.folder-index-reconciliation-needed",candidateCount:candidates.length,unindexedCount:unindexed.length,reason:"index_lag"}));
+  // Unknown prefixes fail closed. R2 event ingestion/reconciliation will make
+  // them visible without a request-time recursive subtree scan.
+  return{visible:new Set([...visible].filter(value=>allowed.has(value))),reconciliationNeeded:unindexed.length>0};
 }
 
 interface FolderAssociation { division_id: string; r2_prefix: string }
@@ -157,17 +238,20 @@ export async function listDeliveryFolder(env:Env,principal:StaffPrincipal,prefix
   const prefix=prefixValue?normalizePrefix(prefixValue):"";
   if(prefix&&!access.global&&!access.roots.some(root=>prefix.startsWith(root.prefix)))throw new HTTPException(404,{message:"Folder not found"});
   const tombstones=await activeTombstones(env); const trashed=(key:string)=>tombstones.some(tombstone=>tombstoneMatches(tombstone,key));
-  if(!access.global&&!prefixValue){const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string}>();const shared=(key:string)=>activeShares.results.some(share=>{try{return key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});const roots=access.roots.filter(root=>!trashed(root.prefix));const aliases=await aliasMap(env,roots.map(root=>root.prefix));return{prefix:"",folders:roots.map(root=>({id:encodeRef(root.prefix.slice(0,-1)),prefix:root.prefix,name:aliases.get(root.prefix)||root.name,isShared:shared(root.prefix)})),files:[],nextCursor:null};}
+  if(!access.global&&!prefixValue){const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string}>();const shared=(key:string)=>activeShares.results.some(share=>{try{return key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});const roots=access.roots.filter(root=>!trashed(root.prefix));const aliases=await aliasMap(env,roots.map(root=>root.prefix));return{prefix:"",folders:roots.map(root=>({id:encodeRef(root.prefix.slice(0,-1)),prefix:root.prefix,name:aliases.get(root.prefix)||root.name,isShared:shared(root.prefix)})),files:[],nextCursor:null,mediaHydrated:true,reconciliationNeeded:false};}
   if(prefix)await assertNotTrashed(env,prefix);
-  const listed=await env.DATA_BUCKET.list({prefix,delimiter:"/",limit:500,cursor,include:["httpMetadata","customMetadata"]});
+  const listed=await env.DATA_BUCKET.list({prefix,delimiter:"/",limit:DELIVERY_FOLDER_PAGE_SIZE,cursor,include:["httpMetadata","customMetadata"]});
   const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string}>();
   const shared=(key:string)=>activeShares.results.some(share=>{try{return key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});
   const folderCandidates=listed.delimitedPrefixes.filter(value=>!hidden(value)&&!trashed(value));
-  const visibleFolders=await visibleDeliveryFolders(env,folderCandidates,trashed);
-  const folders=folderCandidates.filter(value=>visibleFolders.has(value));
+  const folderVisibility=await visibleDeliveryFolders(env,folderCandidates);
+  const folders=folderCandidates.filter(value=>folderVisibility.visible.has(value));
   const files=listed.objects.filter(object=>object.key!==prefix&&!object.key.endsWith("/")&&!hidden(object.key)&&!trashed(object.key)&&!isMovedSourceMarker(object));
-  const aliases=await aliasMap(env,[...folders,...files.map(object=>object.key)]); const items=files.map(object=>{const id=encodeRef(object.key);const kind=mediaKind(object.key);const name=aliases.get(object.key)||object.key.slice(prefix.length);const sourceUrl=deliverySourceUrl(kind,id);return{id,name,displayName:name,physicalKey:object.key,kind,size:object.size,uploadedAt:object.uploaded.toISOString(),isShared:shared(object.key),previewUrl:kind==="image"?(isBrowserPreviewableImage(object.key)?sourceUrl:undefined):["audio","text"].includes(kind)?`/api/delivery/items/${id}/preview`:undefined,sourceUrl,thumbnailUrl:undefined as string|undefined,thumbnailState:(thumbnailEligible(object)?"pending":"not_applicable") as DeliveryItem["thumbnailState"],thumbnailErrorCode:undefined as string|undefined,thumbnailFallbackKind:thumbnailFallbackKindForFile(object.key,kind),downloadUrl:`/api/delivery/items/${id}/download`,previewStatus:kind==="video"?"processing":undefined,actions:{rename:`/api/delivery/items/${id}/display-name`,delete:`/api/delivery/items/${id}/source`}};});
-  return{prefix,folders:folders.map(value=>{const id=encodeRef(value.slice(0,-1));const name=aliases.get(value)||value.slice(prefix.length).replace(/\/$/,"");return{id,prefix:value,physicalKey:value,name,displayName:name,isShared:shared(value),actions:{rename:`/api/delivery/items/${id}/display-name`,delete:`/api/delivery/items/${id}/source`}};}),files:items,nextCursor:listed.truncated?listed.cursor:null};
+  const candidates:DeliveryMediaCandidate[]=files.flatMap(object=>{const kind=mediaKind(object.key);if(!thumbnailEligible(object)&&kind!=="video")return[];return[{id:encodeRef(object.key),key:object.key,kind,etag:object.httpEtag}];});
+  const [aliases,media]=await Promise.all([aliasMap(env,[...folders,...files.map(object=>object.key)]),deliveryMediaState(env.DELIVERY_DB,candidates)]);
+  const mediaById=new Map(candidates.map(candidate=>[candidate.id,deliveryMediaPatch(candidate,media.get(candidate.id)||{})]));
+  const items=files.map(object=>{const id=encodeRef(object.key);const kind=mediaKind(object.key);const name=aliases.get(object.key)||object.key.slice(prefix.length);const sourceUrl=deliverySourceUrl(kind,id);return{id,name,displayName:name,physicalKey:object.key,kind,size:object.size,uploadedAt:object.uploaded.toISOString(),isShared:shared(object.key),previewUrl:kind==="image"?(isBrowserPreviewableImage(object.key)?sourceUrl:undefined):["audio","text"].includes(kind)?`/api/delivery/items/${id}/preview`:undefined,sourceUrl,thumbnailUrl:undefined as string|undefined,thumbnailState:(thumbnailEligible(object)?"pending":"not_applicable") as DeliveryItem["thumbnailState"],thumbnailErrorCode:undefined as string|undefined,thumbnailFallbackKind:thumbnailFallbackKindForFile(object.key,kind),downloadUrl:`/api/delivery/items/${id}/download`,previewStatus:kind==="video"?"processing":undefined,actions:{rename:`/api/delivery/items/${id}/display-name`,delete:`/api/delivery/items/${id}/source`},...(mediaById.get(id)||{})};});
+  return{prefix,folders:folders.map(value=>{const id=encodeRef(value.slice(0,-1));const name=aliases.get(value)||value.slice(prefix.length).replace(/\/$/,"");return{id,prefix:value,physicalKey:value,name,displayName:name,isShared:shared(value),actions:{rename:`/api/delivery/items/${id}/display-name`,delete:`/api/delivery/items/${id}/source`}};}),files:items,nextCursor:listed.truncated?listed.cursor:null,mediaHydrated:true,reconciliationNeeded:folderVisibility.reconciliationNeeded};
 }
 
 /**
@@ -183,28 +267,15 @@ export async function listDeliveryFolderMedia(env:Env,principal:StaffPrincipal,p
   if(!access.global&&!prefixValue)return{items:[]};
   if(prefix)await assertNotTrashed(env,prefix);
   const tombstones=await activeTombstones(env),trashed=(key:string)=>tombstones.some(tombstone=>tombstoneMatches(tombstone,key));
-  const listed=await env.DATA_BUCKET.list({prefix,delimiter:"/",limit:500,cursor,include:["httpMetadata","customMetadata"]});
+  const listed=await env.DATA_BUCKET.list({prefix,delimiter:"/",limit:DELIVERY_FOLDER_PAGE_SIZE,cursor,include:["httpMetadata","customMetadata"]});
   const files=listed.objects.filter(object=>object.key!==prefix&&!object.key.endsWith("/")&&!hidden(object.key)&&!trashed(object.key)&&!isMovedSourceMarker(object));
   const candidates=files.flatMap(object=>{
     const kind=mediaKind(object.key);
     if(!thumbnailEligible(object)&&kind!=="video")return[];
     return[{id:encodeRef(object.key),key:object.key,kind,etag:object.httpEtag}];
   });
-  const thumbnails=candidates,videos=candidates.filter(candidate=>candidate.kind==="video");
-  const [thumbnailRows,videoRows]=await Promise.all([
-    thumbnails.length?env.DELIVERY_DB.batch(thumbnails.map(candidate=>env.DELIVERY_DB.prepare("SELECT source_etag,thumbnail_key,status,error_code FROM image_thumbnail_jobs WHERE source_key=?").bind(candidate.key))):[],
-    videos.length?env.DELIVERY_DB.batch(videos.map(candidate=>env.DELIVERY_DB.prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(candidate.key))):[],
-  ]);
-  const thumbnailById=new Map(thumbnails.map((candidate,index)=>[candidate.id,thumbnailRows[index]?.results[0] as ThumbnailJobRow|undefined]));
-  const videoById=new Map(videos.map((candidate,index)=>[candidate.id,videoRows[index]?.results[0] as {stream_uid?:string;stream_status?:string}|undefined]));
-  return{items:candidates.map(candidate=>{
-    const state=thumbnailStateForObject(candidate.etag,thumbnailById.get(candidate.id));
-    if(candidate.kind==="video"){
-      const row=videoById.get(candidate.id);
-      return{id:candidate.id,thumbnailState:state.state,thumbnailErrorCode:state.errorCode,...(state.state==="ready"?{thumbnailUrl:`/api/delivery/items/${candidate.id}/thumbnail`}:{}),previewStatus:row?.stream_status==="ready"&&row.stream_uid?"ready":row?.stream_status==="error"?"unavailable":"processing"};
-    }
-    return{id:candidate.id,thumbnailState:state.state,thumbnailErrorCode:state.errorCode,...(state.state==="ready"?{thumbnailUrl:`/api/delivery/items/${candidate.id}/thumbnail`}:{})};
-  })};
+  const state=await deliveryMediaState(env.DELIVERY_DB,candidates);
+  return{items:candidates.map(candidate=>deliveryMediaPatch(candidate,state.get(candidate.id)||{}))};
 }
 
 /**
@@ -338,6 +409,16 @@ async function recoverShareSecret(env:Env,share:ActiveShareRow):Promise<string|n
 
 function shareUrl(env:Env,publicId:string,secret:string):string{return`${env.DELIVERY_BASE_URL.replace(/\/$/,"")}/s/${publicId}#${secret}`;}
 
+export function resolveShareUpdateSecurity(input:{accessCodeChanged:boolean;recipientChanged:boolean;hasRecoverableSecret:boolean;publicIdChanged:boolean}):{mustRotateCredential:boolean;versionIncrement:0|1}{
+  // share_version is a credential/policy generation, not a general metadata
+  // revision. Expiration and map policy remain live D1 checks on every public
+  // request, so changing either one does not needlessly invalidate an otherwise
+  // valid browser session. A recipient change rotates the bearer credential so
+  // the previously notified audience cannot keep using the old fragment.
+  const mustRotateCredential=input.accessCodeChanged||input.recipientChanged||!input.hasRecoverableSecret;
+  return{mustRotateCredential,versionIncrement:mustRotateCredential||input.publicIdChanged?1:0};
+}
+
 export async function getActiveDeliveryShare(env:Env,principal:StaffPrincipal,prefixValue:string){
   const prefix=normalizePrefix(prefixValue);await authorizeSharePrefix(env,principal,prefix);const share=await activeShareForPrefix(env,prefix);
   if(!share)return null;await requirePermission(env,principal,"delivery.share.create",{divisionId:share.division_id},true);const secret=await recoverShareSecret(env,share);
@@ -393,7 +474,9 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
       const recipientChanged=directoryRecipients
         ?input.recipientAudience!==undefined&&`${effectiveDirectoryRecipient?.audienceType||""}:${effectiveDirectoryRecipient?.audiencePublicId||""}`!==`${currentRecipient?.audienceType||""}:${currentRecipient?.audiencePublicId||""}`
         :input.recipientEmail!==undefined&&recipientEmail!==active.recipient_email;
-      const expirationChanged=expiresAt!==active.expires_at,mapChanged=input.imageLocationMapEnabled!==undefined&&Number(input.imageLocationMapEnabled)!==active.image_location_map_enabled,mustRotate=securityChanged||!previousSecret,publicIdChanged=!active.public_id;
+      const expirationChanged=expiresAt!==active.expires_at,mapChanged=input.imageLocationMapEnabled!==undefined&&Number(input.imageLocationMapEnabled)!==active.image_location_map_enabled,publicIdChanged=!active.public_id;
+      const updateSecurity=resolveShareUpdateSecurity({accessCodeChanged:securityChanged,recipientChanged,hasRecoverableSecret:Boolean(previousSecret),publicIdChanged});
+      const mustRotate=updateSecurity.mustRotateCredential,nextShareVersion=active.share_version+updateSecurity.versionIncrement;
       if(!mustRotate&&!expirationChanged&&!publicIdChanged&&!recipientChanged&&!mapChanged)return{id:active.id,shareUrl:shareUrl(env,active.public_id!,previousSecret!),accessCode:sameCode?codeChange.accessCode:null,passwordProtected:Boolean(active.password_hash),expiresAt:active.expires_at,lifecycle:"reused",idempotentReplay:replay};
 
       const nextPublicId=active.public_id||randomToken(16),nextSecret=mustRotate?randomToken(32):previousSecret!;
@@ -405,14 +488,14 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
       const passwordAlgorithm=effectiveCodeChange.kind==="preserve"?active.password_algorithm:password?.algorithm||null;
       const lifecycle:ShareLifecycleResult["lifecycle"]=mustRotate?"rotated":"updated",tokenHash=mustRotate?await sha256(nextSecret):null;
       const effectiveMapEnabled=input.imageLocationMapEnabled===undefined?active.image_location_map_enabled:Number(input.imageLocationMapEnabled);
-      const updateStatement=env.DELIVERY_DB.prepare(`UPDATE shares SET token_hash=COALESCE(?,token_hash),public_id=COALESCE(public_id,?),secret_ciphertext=?,secret_iv=?,password_hash=?,password_salt=?,password_iterations=?,password_algorithm=?,expires_at=?,recipient_email=?,image_location_map_enabled=?,idempotency_key=?,r2_prefix=?,division_id=COALESCE(division_id,?),share_version=share_version+1 WHERE id=? AND share_version=? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=1)`).bind(tokenHash,nextPublicId,encrypted.ciphertext,encrypted.iv,passwordHash,passwordSalt,passwordIterations,passwordAlgorithm,expiresAt,effectiveRecipient,effectiveMapEnabled,idempotencyKey,prefix,divisionId,active.id,active.share_version);
-      const updated=await env.DELIVERY_DB.batch([updateStatement,...(directoryRecipients&&effectiveDirectoryRecipient?shareAudienceSnapshotStatements(env,active.id,active.share_version+1,effectiveDirectoryRecipient,principal.id,true):[])]);
+      const updateStatement=env.DELIVERY_DB.prepare(`UPDATE shares SET token_hash=COALESCE(?,token_hash),public_id=COALESCE(public_id,?),secret_ciphertext=?,secret_iv=?,password_hash=?,password_salt=?,password_iterations=?,password_algorithm=?,expires_at=?,recipient_email=?,image_location_map_enabled=?,idempotency_key=?,r2_prefix=?,division_id=COALESCE(division_id,?),share_version=share_version+? WHERE id=? AND share_version=? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=1)`).bind(tokenHash,nextPublicId,encrypted.ciphertext,encrypted.iv,passwordHash,passwordSalt,passwordIterations,passwordAlgorithm,expiresAt,effectiveRecipient,effectiveMapEnabled,idempotencyKey,prefix,divisionId,updateSecurity.versionIncrement,active.id,active.share_version);
+      const updated=await env.DELIVERY_DB.batch([updateStatement,...(directoryRecipients&&effectiveDirectoryRecipient&&updateSecurity.versionIncrement?shareAudienceSnapshotStatements(env,active.id,nextShareVersion,effectiveDirectoryRecipient,principal.id,true):[])]);
       if(!updated[0]?.meta.changes){const latest=await activeShareForPrefix(env,prefix);if(!latest)throw new HTTPException(409,{message:"This share changed while you were editing it. Reopen the share and try again."});active=latest;continue;}
 
-      const notificationShareId=active.id,notificationShareVersion=active.share_version+1;
-      const notifications = effectiveDirectoryRecipient ? effectiveDirectoryRecipient.recipients.map(member=>notificationStatement(env,{shareId:notificationShareId,kind:"share_updated",recipientEmail:member.email,dedupeKey:notificationDedupeKey("share_updated",notificationShareId,`${notificationShareVersion}:${member.principalPublicId}`),payload:{shareUrl:shareUrl(env,nextPublicId,nextSecret),r2Prefix:prefix,expiresAt}})!) : [notificationStatement(env, { shareId: notificationShareId, kind: "share_updated", recipientEmail: effectiveRecipient, dedupeKey: notificationDedupeKey("share_updated", notificationShareId, String(notificationShareVersion)), payload: { shareUrl: shareUrl(env, nextPublicId, nextSecret), r2Prefix: prefix, expiresAt } })].filter((value):value is D1PreparedStatement=>Boolean(value));
-      await env.DELIVERY_DB.batch([env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('staff',?,?,?,?,?)").bind(principal.id,`share.${lifecycle}`,'share',active.id,JSON.stringify({divisionId,r2Prefix:prefix,securityChanged,expiresAt,effectiveRecipient,imageLocationMapEnabled:Boolean(effectiveMapEnabled)})), ...notifications]);
-      await env.OPS_DB.batch([await auditStatement(env,request,principal,`delivery.share.${lifecycle}`,"share",active.id,divisionId,{r2Prefix:prefix,securityChanged,expiresAt,imageLocationMapEnabled:Boolean(effectiveMapEnabled)})]);
+      const notificationShareId=active.id,notificationShareVersion=nextShareVersion,notificationRevision=`${notificationShareVersion}:${idempotencyKey}`;
+      const notifications = effectiveDirectoryRecipient ? effectiveDirectoryRecipient.recipients.map(member=>notificationStatement(env,{shareId:notificationShareId,kind:"share_updated",recipientEmail:member.email,dedupeKey:notificationDedupeKey("share_updated",notificationShareId,`${notificationRevision}:${member.principalPublicId}`),payload:{shareUrl:shareUrl(env,nextPublicId,nextSecret),r2Prefix:prefix,expiresAt}})!) : [notificationStatement(env, { shareId: notificationShareId, kind: "share_updated", recipientEmail: effectiveRecipient, dedupeKey: notificationDedupeKey("share_updated", notificationShareId, notificationRevision), payload: { shareUrl: shareUrl(env, nextPublicId, nextSecret), r2Prefix: prefix, expiresAt } })].filter((value):value is D1PreparedStatement=>Boolean(value));
+      await env.DELIVERY_DB.batch([env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('staff',?,?,?,?,?)").bind(principal.id,`share.${lifecycle}`,'share',active.id,JSON.stringify({divisionId,r2Prefix:prefix,securityChanged:mustRotate,accessCodeChanged:securityChanged,recipientChanged,expiresAt,effectiveRecipient,imageLocationMapEnabled:Boolean(effectiveMapEnabled)})), ...notifications]);
+      await env.OPS_DB.batch([await auditStatement(env,request,principal,`delivery.share.${lifecycle}`,"share",active.id,divisionId,{r2Prefix:prefix,securityChanged:mustRotate,accessCodeChanged:securityChanged,recipientChanged,expiresAt,imageLocationMapEnabled:Boolean(effectiveMapEnabled)})]);
       return{id:active.id,shareUrl:shareUrl(env,nextPublicId,nextSecret),accessCode:effectiveCodeChange.kind==="set"?effectiveCodeChange.accessCode:null,passwordProtected:Boolean(passwordHash),expiresAt,lifecycle,idempotentReplay:false};
     }
     throw new HTTPException(409,{message:"This share changed while you were editing it. Reopen the share and try again."});

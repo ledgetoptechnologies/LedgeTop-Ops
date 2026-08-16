@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { NavigationDestination } from "@ltds/shared";
 import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import { api, ApiError } from "./api";
@@ -37,6 +37,7 @@ interface LinkedSop {
   author: { id: string; displayName: string };
   publishedAt: string;
   linkedAt: string;
+  publicationState: "current" | "superseded" | "archived" | "unpublished";
 }
 
 interface PublishedSopSummary {
@@ -74,6 +75,7 @@ interface JobBriefResponse {
   }>;
   canEdit: boolean;
   canViewSops: boolean;
+  canAssignSops: boolean;
 }
 
 function date(value: string | null | undefined) {
@@ -132,7 +134,7 @@ export function JobBriefPanel({
         `/api/operations/${encodeURIComponent(operationId)}/job-brief`,
       );
       setData(previous => {
-        if (dirty && !replaceDraft && previous?.brief?.version !== value.brief?.version) {
+        if ((dirty || sopDirty) && !replaceDraft && previous?.brief?.version !== value.brief?.version) {
           setNotice("A newer brief is available. Refresh before saving your draft.");
           // Keep the draft's original expectedVersion so Save must conflict;
           // never advance it behind a dirty editor.
@@ -140,7 +142,7 @@ export function JobBriefPanel({
         }
         return value;
       });
-      if (!dirty || replaceDraft) {
+      if ((!dirty && !sopDirty) || replaceDraft) {
         setItems(editableItems(value));
         setSopSelection(value.brief?.sops?.map(sop => sop.revisionId) || []);
         setDirty(false);
@@ -154,11 +156,11 @@ export function JobBriefPanel({
   }, [operationId, dirty, sopDirty]);
 
   useEffect(() => {
-    if (!data?.canEdit || !data.canViewSops) return;
+    if (!data?.canAssignSops || !data.canViewSops) return;
     void api<{ sops: PublishedSopSummary[] }>("/api/sops")
       .then(value => setPublishedSops(value.sops))
       .catch(caught => setError((caught as Error).message));
-  }, [data?.canEdit, data?.canViewSops]);
+  }, [data?.canAssignSops, data?.canViewSops]);
 
   useEffect(() => {
     onDirtyChange?.(dirty || sopDirty);
@@ -199,6 +201,31 @@ export function JobBriefPanel({
     } else setError((caught as Error).message);
   };
   const version = data?.brief?.version || 0;
+  const sopChoices = useMemo(() => {
+    const choices = new Map<string, {
+      revisionId: string;
+      revisionNumber: number;
+      title: string;
+      purpose: string;
+      publicationState: LinkedSop["publicationState"];
+    }>();
+    for (const sop of publishedSops) choices.set(sop.publishedRevisionId, {
+      revisionId: sop.publishedRevisionId,
+      revisionNumber: sop.publishedRevisionNumber,
+      title: sop.title,
+      purpose: sop.purpose,
+      publicationState: "current",
+    });
+    for (const sop of data?.brief?.sops || []) if (!choices.has(sop.revisionId))
+      choices.set(sop.revisionId, {
+        revisionId: sop.revisionId,
+        revisionNumber: sop.revisionNumber,
+        title: sop.title,
+        purpose: sop.purpose,
+        publicationState: sop.publicationState,
+      });
+    return [...choices.values()].sort((left, right) => left.title.localeCompare(right.title));
+  }, [data?.brief?.sops, publishedSops]);
 
   if (!data && !error) return <Loading />;
   if (!data)
@@ -419,7 +446,7 @@ export function JobBriefPanel({
                 tabIndex={-1}
               >
                 <summary>
-                  <span><strong>{sop.title}</strong><small>Revision {sop.revisionNumber} · published {date(sop.publishedAt)}</small></span>
+                  <span><strong>{sop.title}</strong><small>Revision {sop.revisionNumber} · published {date(sop.publishedAt)}{sop.publicationState === "current" ? "" : ` · ${sop.publicationState}`}</small></span>
                   <span>{sop.purpose}</span>
                 </summary>
                 <article className="sop-content" dangerouslySetInnerHTML={{ __html: sop.html }} />
@@ -429,23 +456,23 @@ export function JobBriefPanel({
         ) : (
           <p className="muted">No SOP revisions are linked to this job.</p>
         )}
-        {data.canEdit && (
+        {data.canAssignSops && (
           <div className="job-brief-sop-selector">
             <fieldset disabled={busy || dirty}>
               <legend>Published SOP revisions available to this job</legend>
-              {publishedSops.length ? publishedSops.map(sop => (
-                <label key={sop.publishedRevisionId}>
+              {sopChoices.length ? sopChoices.map(sop => (
+                <label key={sop.revisionId}>
                   <input
                     type="checkbox"
-                    checked={sopSelection.includes(sop.publishedRevisionId)}
+                    checked={sopSelection.includes(sop.revisionId)}
                     onChange={event => {
                       setSopSelection(current => event.target.checked
-                        ? [...current, sop.publishedRevisionId]
-                        : current.filter(id => id !== sop.publishedRevisionId));
+                        ? [...current, sop.revisionId]
+                        : current.filter(id => id !== sop.revisionId));
                       setSopDirty(true);
                     }}
                   />
-                  <span><strong>{sop.title}</strong><small>Revision {sop.publishedRevisionNumber} · {sop.purpose}</small></span>
+                  <span><strong>{sop.title}</strong><small>Revision {sop.revisionNumber}{sop.publicationState === "current" ? "" : ` · ${sop.publicationState}; retained until removed`} · {sop.purpose}</small></span>
                 </label>
               )) : <small>No published SOPs are available.</small>}
             </fieldset>

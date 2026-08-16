@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser } from "@ltds/shared";
 import { Brand, Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
@@ -22,6 +22,7 @@ import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
 import { WorkContextSops } from "./WorkContextSops";
+import { TeamAssignedWork } from "./TeamAssignedWork";
 import { ImageLocationMap } from "./ImageLocationMap";
 import { constrainViewerOffset, pointerAnchoredOffset } from "./viewer-zoom";
 import { activeShareLoadError, createShareLoadDeadline } from "./share-load-deadline";
@@ -58,6 +59,8 @@ interface Session {
     shareDirectoryRecipients?: { enabled: boolean };
     delegatedShareProvisioning?: { enabled: boolean };
     clientWorkspaceManagerRecovery?: { enabled: boolean };
+    portalIdentityDenials?: { enabled: boolean };
+    authenticatedDeliveryGrants?: { enabled: boolean };
   };
 }
 interface ActiveDeliveryShare {
@@ -377,6 +380,21 @@ function invalidateDeliveryCacheOnAccessError(error: unknown, prefix: string): b
   if (error.status === 401 || error.status === 403) invalidateDeliveryFolderCache();
   else invalidateDeliveryFolderCache(prefix);
   return true;
+}
+function focusFirstTypeaheadOption(event: ReactKeyboardEvent<HTMLInputElement>) {
+  if (event.key !== "ArrowDown") return;
+  const listId = event.currentTarget.getAttribute("aria-controls");
+  const option = listId ? document.getElementById(listId)?.querySelector<HTMLButtonElement>('[role="option"]') : null;
+  if (option) { event.preventDefault(); option.focus(); }
+}
+function moveTypeaheadOption(event: ReactKeyboardEvent<HTMLButtonElement>, inputId: string) {
+  if (!['ArrowDown', 'ArrowUp', 'Escape'].includes(event.key)) return;
+  event.preventDefault();
+  if (event.key === "Escape") { document.getElementById(inputId)?.focus(); return; }
+  const options = Array.from(event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>('[role="option"]') ?? []);
+  const index = options.indexOf(event.currentTarget);
+  const next = event.key === "ArrowDown" ? Math.min(options.length - 1, index + 1) : Math.max(0, index - 1);
+  options[next]?.focus();
 }
 type ShareDirectoryAudience = {
   audienceType: "organization" | "department" | "client" | "project" | "principal";
@@ -911,12 +929,19 @@ function Operations({ session }: { session: Session }) {
     () => api<{ operations: any[] }>("/api/operations"),
     [],
   );
-  const [selectedOperationId, setSelectedOperationId] = useState<string | null>(null);
+  const requestedBrief = new URLSearchParams(location.search).get("brief");
+  const [selectedOperationId, setSelectedOperationId] = useState<string | null>(
+    requestedBrief && /^[A-Za-z0-9._-]{1,128}$/.test(requestedBrief) ? requestedBrief : null,
+  );
   const [briefDirty, setBriefDirty] = useState(false);
   const selectBrief = useCallback((operationId: string | null) => {
     if (briefDirty && !window.confirm("Discard the unsaved job brief draft?")) return;
     setBriefDirty(false);
     setSelectedOperationId(operationId);
+    const next = new URL(location.href);
+    if (operationId) next.searchParams.set("brief", operationId);
+    else next.searchParams.delete("brief");
+    history.replaceState(null, "", `${next.pathname}${next.search}${next.hash}`);
   }, [briefDirty]);
   return (
     <>
@@ -1519,6 +1544,7 @@ function Delivery({ session }: { session: Session }) {
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
           canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
+          authenticatedGrantsEnabled={session.capabilities?.authenticatedDeliveryGrants?.enabled === true}
           close={() => setPreview(null)}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           changed={() => setShareRevision((value) => value + 1)}
@@ -1556,7 +1582,11 @@ type DeliveryFolderPage = {
   folders?: DeliveryItem[];
   files?: DeliveryItem[];
   nextCursor?: string | null;
+  mediaHydrated?: boolean;
+  reconciliationNeeded?: boolean;
 };
+const DELIVERY_RENDER_WINDOW_SIZE = 450;
+const DELIVERY_RENDER_WINDOW_STEP = 150;
 function needsDeliveryMediaHydration(files: readonly DeliveryItem[]): boolean {
   return files.some(item => item.kind === "image" || item.kind === "pdf" || item.kind === "video");
 }
@@ -2443,6 +2473,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
           canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
+          authenticatedGrantsEnabled={session.capabilities?.authenticatedDeliveryGrants?.enabled === true}
           close={() => setPreview(null)}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           changed={() => {}}
@@ -2489,8 +2520,11 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
   const folderRequestId = useRef(0);
   const folderRequest = useRef<AbortController | null>(null);
   const folderMediaRequests = useRef(new Set<AbortController>());
-  const loadMoreRequest = useRef<AbortController | null>(null);
+  const pageFetch = useRef<{prefix:string;cursor:string;controller:AbortController;promise:Promise<DeliveryFolderPage>} | null>(null);
+  const prefetchedPage = useRef<{prefix:string;cursor:string;page:DeliveryFolderPage} | null>(null);
+  const paginationSentinel = useRef<HTMLDivElement | null>(null);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [pageError, setPageError] = useState("");
   const hydrateFolderMedia = useCallback(async (requestedPrefix: string, cursor: string | null, requestId: number) => {
     const controller = new AbortController();
     folderMediaRequests.current.add(controller);
@@ -2528,8 +2562,11 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     folderRequest.current?.abort();
     const controller = new AbortController();
     folderRequest.current = controller;
-    loadMoreRequest.current?.abort();
+    pageFetch.current?.controller.abort();
+    pageFetch.current = null;
+    prefetchedPage.current = null;
     setLoadingMore(false);
+    setPageError("");
     for (const mediaRequest of folderMediaRequests.current) mediaRequest.abort();
     folderMediaRequests.current.clear();
     setFolderState({ prefix: requestedPrefix, data: null, error: "", loading: true });
@@ -2548,10 +2585,11 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
       const query = new URLSearchParams({ prefix: requestedPrefix });
       const page = await api<DeliveryFolderPage>(`/api/delivery/folders?${query.toString()}`, { signal: controller.signal });
       if (requestedPrefix !== currentPrefixRef.current || requestId !== folderRequestId.current || controller.signal.aborted) return;
-      const firstPage = { prefix: requestedPrefix, folders: page.folders || [], files: page.files || [], nextCursor: page.nextCursor || null };
+      const firstPage = { prefix: requestedPrefix, folders: page.folders || [], files: page.files || [], nextCursor: page.nextCursor || null,
+        mediaHydrated: page.mediaHydrated === true, reconciliationNeeded: page.reconciliationNeeded === true };
       writeDeliveryFolderCache(requestedPrefix, firstPage);
       setFolderState({ prefix: requestedPrefix, data: firstPage, error: "", loading: false });
-      if (needsDeliveryMediaHydration(firstPage.files)) void hydrateFolderMedia(requestedPrefix, null, requestId);
+      if (!firstPage.mediaHydrated && needsDeliveryMediaHydration(firstPage.files)) void hydrateFolderMedia(requestedPrefix, null, requestId);
     } catch (caught) {
       if (requestId !== folderRequestId.current || controller.signal.aborted) return;
       const accessDenied = invalidateDeliveryCacheOnAccessError(caught, requestedPrefix);
@@ -2563,48 +2601,81 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
        });
     }
   }, [hydrateFolderMedia, prefix, session.user.id]);
+  const fetchDeliveryPage = useCallback((requestedPrefix:string,cursor:string):Promise<DeliveryFolderPage>=>{
+    const prefetched=prefetchedPage.current;
+    if(prefetched?.prefix===requestedPrefix&&prefetched.cursor===cursor)return Promise.resolve(prefetched.page);
+    const pending=pageFetch.current;
+    if(pending?.prefix===requestedPrefix&&pending.cursor===cursor)return pending.promise;
+    pending?.controller.abort();
+    const controller=new AbortController();
+    const query=new URLSearchParams({prefix:requestedPrefix,cursor});
+    const promise=api<DeliveryFolderPage>(`/api/delivery/folders?${query.toString()}`,{signal:controller.signal})
+      .then(page=>{if(!controller.signal.aborted)prefetchedPage.current={prefix:requestedPrefix,cursor,page};return page;})
+      .finally(()=>{if(pageFetch.current?.controller===controller)pageFetch.current=null;});
+    pageFetch.current={prefix:requestedPrefix,cursor,controller,promise};
+    return promise;
+  },[]);
   const loadMore = useCallback(async () => {
     const requestedPrefix = prefix;
     const cursor = folderState.prefix === requestedPrefix ? folderState.data?.nextCursor : null;
-    if (!cursor || loadingMore || loadMoreRequest.current) return;
+    if (!cursor || loadingMore) return;
     const requestId = folderRequestId.current;
-    const controller = new AbortController();
-    loadMoreRequest.current = controller;
     setLoadingMore(true);
+    setPageError("");
     try {
-      const query = new URLSearchParams({ prefix: requestedPrefix, cursor });
-      const page = await api<DeliveryFolderPage>(`/api/delivery/folders?${query.toString()}`, { signal: controller.signal });
-      if (controller.signal.aborted || requestId !== folderRequestId.current || requestedPrefix !== currentPrefixRef.current) return;
+      const page = await fetchDeliveryPage(requestedPrefix,cursor);
+      if (requestId !== folderRequestId.current || requestedPrefix !== currentPrefixRef.current) return;
       setFolderState(current => {
         if (current.prefix !== requestedPrefix || !current.data || current.data.nextCursor !== cursor) return current;
         const folders = new Map((current.data.folders || []).map(item => [itemRef(item), item]));
         const files = new Map((current.data.files || []).map(item => [itemRef(item), item]));
         for (const item of page.folders || []) if (!folders.has(itemRef(item))) folders.set(itemRef(item), item);
         for (const item of page.files || []) if (!files.has(itemRef(item))) files.set(itemRef(item), item);
-        const nextData = { prefix: requestedPrefix, folders: [...folders.values()], files: [...files.values()], nextCursor: page.nextCursor || null };
+        const nextData = { prefix: requestedPrefix, folders: [...folders.values()], files: [...files.values()], nextCursor: page.nextCursor || null,
+          mediaHydrated: current.data.mediaHydrated === true && page.mediaHydrated === true,
+          reconciliationNeeded: current.data.reconciliationNeeded === true || page.reconciliationNeeded === true };
         writeDeliveryFolderCache(requestedPrefix, nextData);
         return { prefix: requestedPrefix, data: nextData, error: "", loading: false };
       });
-      if (needsDeliveryMediaHydration(page.files || [])) void hydrateFolderMedia(requestedPrefix, cursor, requestId);
+      if(prefetchedPage.current?.prefix===requestedPrefix&&prefetchedPage.current.cursor===cursor)prefetchedPage.current=null;
+      if (page.mediaHydrated !== true && needsDeliveryMediaHydration(page.files || [])) void hydrateFolderMedia(requestedPrefix, cursor, requestId);
     } catch (caught) {
-      if (controller.signal.aborted || requestId !== folderRequestId.current) return;
+      if (requestId !== folderRequestId.current || requestedPrefix !== currentPrefixRef.current) return;
       const accessDenied = invalidateDeliveryCacheOnAccessError(caught, requestedPrefix);
-      setFolderState(current => current.prefix === requestedPrefix ? { ...current, data: accessDenied ? null : current.data, error: (caught as Error).message, loading: false } : current);
+      if(accessDenied)setFolderState(current => current.prefix === requestedPrefix ? { ...current, data: null, error: (caught as Error).message, loading: false } : current);
+      else setPageError("More items could not be loaded. Retry when you are ready.");
     } finally {
-      if (loadMoreRequest.current === controller) loadMoreRequest.current = null;
-      if (!controller.signal.aborted && requestId === folderRequestId.current) setLoadingMore(false);
+      if (requestId === folderRequestId.current) setLoadingMore(false);
     }
-  }, [folderState.data?.nextCursor, folderState.prefix, hydrateFolderMedia, loadingMore, prefix]);
+  }, [fetchDeliveryPage,folderState.data?.nextCursor, folderState.prefix, hydrateFolderMedia, loadingMore, prefix]);
   useEffect(() => {
     void reload();
     return () => {
       folderRequestId.current += 1;
       folderRequest.current?.abort();
-      loadMoreRequest.current?.abort();
+      pageFetch.current?.controller.abort();
+      pageFetch.current=null;
+      prefetchedPage.current=null;
       for (const mediaRequest of folderMediaRequests.current) mediaRequest.abort();
       folderMediaRequests.current.clear();
     };
   }, [reload]);
+  useEffect(()=>{
+    const requestedPrefix=prefix,cursor=folderState.prefix===requestedPrefix?folderState.data?.nextCursor:null;
+    if(!cursor)return;
+    const run=()=>{void fetchDeliveryPage(requestedPrefix,cursor).then(()=>setPageError("")).catch(()=>{
+      if(requestedPrefix===currentPrefixRef.current)setPageError("The next page could not be prepared. Use Retry to try again.");
+    });};
+    const idleWindow=window as Window&{requestIdleCallback?:(callback:()=>void,options?:{timeout:number})=>number;cancelIdleCallback?:(id:number)=>void};
+    if(idleWindow.requestIdleCallback){const id=idleWindow.requestIdleCallback(run,{timeout:1200});return()=>idleWindow.cancelIdleCallback?.(id);}
+    const id=window.setTimeout(run,300);return()=>window.clearTimeout(id);
+  },[fetchDeliveryPage,folderState.data?.nextCursor,folderState.prefix,prefix]);
+  useEffect(()=>{
+    const node=paginationSentinel.current;
+    if(!node||!folderState.data?.nextCursor||typeof IntersectionObserver==="undefined")return;
+    const observer=new IntersectionObserver(entries=>{if(entries.some(entry=>entry.isIntersecting))void loadMore();},{rootMargin:"600px 0px"});
+    observer.observe(node);return()=>observer.disconnect();
+  },[folderState.data?.nextCursor,loadMore]);
   useEffect(() => {
     const query = searchQuery.trim();
     if (!query) {
@@ -2684,6 +2755,14 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     : [];
   const searching = Boolean(searchQuery.trim());
   const items = searching ? searchState.items : folderItems;
+  const [renderWindowStart,setRenderWindowStart]=useState(0);
+  useEffect(()=>setRenderWindowStart(0),[prefix,searching]);
+  useEffect(()=>{
+    if(searching)return;
+    setRenderWindowStart(current=>Math.min(current,Math.max(0,folderItems.length-DELIVERY_RENDER_WINDOW_SIZE)));
+  },[folderItems.length,searching]);
+  const renderedItems=searching?items:items.slice(renderWindowStart,renderWindowStart+DELIVERY_RENDER_WINDOW_SIZE);
+  const renderWindowEnd=searching?items.length:Math.min(folderItems.length,renderWindowStart+DELIVERY_RENDER_WINDOW_SIZE);
   const admin = session.user.isAdministrator;
   const canCreate = admin && allowed(session.user, "delivery.files.create"),
     canUpload =
@@ -3238,6 +3317,10 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
       <ErrorLine error={error} />
       <ErrorLine error={searchState.error} />
       <ErrorLine error={locationError} />
+      {displayData?.reconciliationNeeded && <div className="inline-note" role="status">
+        <span>Some newly synced folders are still being indexed.</span>
+        <button className="button-ghost button-small" type="button" onClick={() => void reload()}>Retry folder index</button>
+      </div>}
       {locations && locations.points.length > 0 && (
         <ImageLocationMap
           key={prefix}
@@ -3277,7 +3360,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
             />
           ) : view === "grid" ? (
             <div className="file-grid">
-              {items.map((item) => (
+              {renderedItems.map((item) => (
                 <DeliveryGridItem
                   key={itemRef(item)}
                   item={item}
@@ -3299,7 +3382,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
             </div>
           ) : (
             <div className="file-list">
-              {items.map((item) => (
+              {renderedItems.map((item) => (
                 <DeliveryListItem
                   key={itemRef(item)}
                   item={item}
@@ -3317,12 +3400,20 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
             </div>
           )}
         </Card>
+        {!searching && folderItems.length>DELIVERY_RENDER_WINDOW_SIZE && <div className="delivery-pagination" aria-label="Rendered item window">
+          <button className="button-ghost" type="button" disabled={renderWindowStart===0}
+            onClick={()=>setRenderWindowStart(current=>Math.max(0,current-DELIVERY_RENDER_WINDOW_STEP))}>Show earlier</button>
+          <small>Showing {renderWindowStart+1}–{renderWindowEnd} of {folderItems.length} loaded items</small>
+          <button className="button-ghost" type="button" disabled={renderWindowEnd>=folderItems.length}
+            onClick={()=>setRenderWindowStart(current=>Math.min(Math.max(0,folderItems.length-DELIVERY_RENDER_WINDOW_SIZE),current+DELIVERY_RENDER_WINDOW_STEP))}>Show later</button>
+        </div>}
         {!searching && displayData?.nextCursor && (
-          <div className="delivery-pagination">
+          <div className="delivery-pagination" ref={paginationSentinel}>
             <button className="button-ghost" type="button" disabled={loadingMore} onClick={() => void loadMore()}>
-              {loadingMore ? "Loading more..." : "Load more"}
+              {loadingMore ? "Loading more..." : pageError ? "Retry loading more" : "Load more"}
             </button>
             <small>{folderItems.length} items loaded</small>
+            {pageError && <small role="alert">{pageError}</small>}
           </div>
         )}
       </div>
@@ -3331,6 +3422,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           folder={preview.shareFolder}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
           canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
+          authenticatedGrantsEnabled={session.capabilities?.authenticatedDeliveryGrants?.enabled === true}
           directoryRecipientsEnabled={session.capabilities?.shareDirectoryRecipients?.enabled === true}
           close={() => setPreview(null)}
           changed={() => {
@@ -3971,7 +4063,7 @@ function FileCardV2({ item, preview }: { item: any; preview: () => void }) {
       <button className="file-visual" onClick={preview}>
         <OperationsThumbnail item={item} />
         {item.kind === "video" && <b className="play">▶</b>}
-        {item.kind === "video" && item.previewStatus === "processing" && (
+        {item.kind === "video" && item.previewStatus === "processing" && item.thumbnailState !== "ready" && (
           <span className="media-status">Preparing preview…</span>
         )}
       </button>
@@ -4216,11 +4308,170 @@ function ClientWorkspaceGrant({ prefix }: { prefix: string }) {
     </div>}
   </section>;
 }
+
+type AuthenticatedGrantAudienceType = "organization" | "department" | "client" | "project" | "principal";
+type AuthenticatedGrantAudience = {
+  type: AuthenticatedGrantAudienceType;
+  publicId: string;
+  displayName: string;
+  email?: string | null;
+};
+type AuthenticatedGrant = {
+  id: string;
+  grantId: string;
+  version: number;
+  audience: { type: AuthenticatedGrantAudienceType; publicId: string };
+  audienceLabel: string;
+  workspaceLabel: string;
+  status: "active" | "revoked" | "expired";
+  expiresAt: string | null;
+  recipientCount: number;
+  dynamicAudience: boolean;
+  updatedAt: string;
+};
+
+function AuthenticatedDeliveryGrantPanel({ folder }: { folder: { id: string } }) {
+  const [expanded, setExpanded] = useState(false);
+  const [folderBindingId, setFolderBindingId] = useState("");
+  const [grants, setGrants] = useState<AuthenticatedGrant[]>([]);
+  const [query, setQuery] = useState("");
+  const [options, setOptions] = useState<AuthenticatedGrantAudience[]>([]);
+  const [selected, setSelected] = useState<AuthenticatedGrantAudience | null>(null);
+  const [reasonCode, setReasonCode] = useState("client_delivery_access");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+
+  const load = useCallback(async () => {
+    setError("");
+    const value = await api<{ folderBindingId: string; grants: AuthenticatedGrant[] }>(
+      `/api/delivery/authenticated-grants?folderRef=${encodeURIComponent(folder.id)}`,
+    );
+    setFolderBindingId(value.folderBindingId);
+    setGrants(value.grants);
+  }, [folder.id]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    setBusy(true);
+    void load().catch(caught => setError((caught as Error).message)).finally(() => setBusy(false));
+  }, [expanded, load]);
+
+  useEffect(() => {
+    if (!expanded || !folderBindingId || selected || query.trim().length < 2) {
+      setOptions([]);
+      return;
+    }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api<{ audiences: AuthenticatedGrantAudience[] }>(
+        `/api/delivery/authenticated-grants/audiences?folderBindingId=${encodeURIComponent(folderBindingId)}&q=${encodeURIComponent(query.trim())}`,
+        { signal: controller.signal },
+      ).then(value => {
+        setOptions(value.audiences);
+        setError(value.audiences.length ? "" : "No authorized client audience matches this folder.");
+      }).catch(caught => { if ((caught as Error).name !== "AbortError") setError((caught as Error).message); });
+    }, 250);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [expanded, folderBindingId, query, selected]);
+
+  const create = async () => {
+    if (!selected || !folderBindingId || busy) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      await api("/api/delivery/authenticated-grants", {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          folderBindingId,
+          audienceType: selected.type,
+          audiencePublicId: selected.publicId,
+          reasonCode,
+          expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+        }),
+      });
+      setMessage("Authenticated portal access granted. It does not create a public link.");
+      setSelected(null); setQuery(""); setExpiresAt("");
+      await load();
+    } catch (caught) { setError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const mutate = async (grant: AuthenticatedGrant, action: "revoke" | "restore") => {
+    if (busy) return;
+    if (action === "revoke" && !confirm(`Revoke authenticated portal access for ${grant.audienceLabel}?`)) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      await api(`/api/delivery/authenticated-grants/${encodeURIComponent(grant.grantId)}/${action}`, {
+        method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ expectedVersion: grant.version, reasonCode,
+          ...(action === "restore" ? { expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null } : {}) }),
+      });
+      setMessage(action === "revoke" ? "Authenticated portal access revoked." : "Authenticated portal access restored as a new version.");
+      await load();
+    } catch (caught) { setError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const latestVersions = new Map<string, number>();
+  for (const grant of grants) latestVersions.set(grant.grantId, Math.max(latestVersions.get(grant.grantId) ?? 0, grant.version));
+  return <section className="client-workspace-grant authenticated-grant-panel">
+    <button type="button" className="button-ghost button-small" aria-expanded={expanded}
+      onClick={() => setExpanded(value => !value)}>
+      {expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}
+    </button>
+    {expanded && <div className="client-workspace-grant-panel">
+      <strong>Authenticated Client Portal access</strong>
+      <small>This permission is checked against current verified identity, workspace membership, hierarchy, deny policy, and folder source version. It never creates a bearer link.</small>
+      {busy && !folderBindingId ? <Loading /> : <>
+        <label htmlFor="authenticated-grant-audience">Organization, department, client, project, or person</label>
+        <input id="authenticated-grant-audience" type="search" role="combobox" aria-autocomplete="list"
+          aria-expanded={options.length > 0} aria-controls="authenticated-grant-options" autoComplete="off"
+          placeholder="Type at least 2 characters" value={query} disabled={busy}
+          onKeyDown={focusFirstTypeaheadOption}
+          onChange={event => { setQuery(event.target.value); setSelected(null); }} />
+        {options.length > 0 && <div id="authenticated-grant-options" className="client-workspace-typeahead" role="listbox">
+          {options.map(option => <button type="button" role="option" aria-selected={selected?.publicId === option.publicId}
+            key={`${option.type}:${option.publicId}`}
+            onKeyDown={event => moveTypeaheadOption(event, "authenticated-grant-audience")}
+            onClick={() => { setSelected(option); setQuery(`${option.displayName}${option.email ? ` (${option.email})` : ""}`); setOptions([]); }}>
+            <strong>{option.displayName}</strong><small>{option.type === "principal" ? option.email || "Verified person" : `${option.type} · dynamic current members`}</small>
+          </button>)}
+        </div>}
+        {selected && <small className="selected-audience-note">
+          {selected.type === "principal" ? "Exact verified person snapshot" : "Dynamic current authorized members"}
+        </small>}
+        <div className="form-grid authenticated-grant-fields">
+          <label>Reason code<input value={reasonCode} maxLength={80} pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,79}" onChange={event => setReasonCode(event.target.value)} /></label>
+          <label>Expires (optional)<input type="datetime-local" value={expiresAt} onChange={event => setExpiresAt(event.target.value)} /></label>
+        </div>
+        <button type="button" className="button-orange button-small" disabled={busy || !selected || !reasonCode}
+          onClick={() => void create()}>{busy ? "Saving…" : "Grant authenticated access"}</button>
+      </>}
+      {error && <small className="error" role="alert">{error}</small>}
+      {message && <small role="status">{message}</small>}
+      {grants.length > 0 && <div className="authenticated-grant-list" aria-label="Authenticated portal grant history">
+        {grants.map(grant => {
+          const latest = latestVersions.get(grant.grantId) === grant.version;
+          return <section key={grant.id} className="authenticated-grant-row">
+            <span><strong>{grant.audienceLabel}</strong><small>{grant.workspaceLabel} · {grant.audience.type} · {grant.status} · version {grant.version}</small>
+              <small>{grant.dynamicAudience ? "Dynamic current authorized members" : `${grant.recipientCount} exact verified person`} · {grant.expiresAt ? `expires ${date(grant.expiresAt)}` : "no expiry"}</small></span>
+            {latest && grant.status === "active" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void mutate(grant, "revoke")}>Revoke</button>}
+            {latest && grant.status !== "active" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(grant, "restore")}>Restore as new version</button>}
+          </section>;
+        })}
+      </div>}
+    </div>}
+  </section>;
+}
 function ShareDialog({
   folder,
   canRevoke,
   canProvisionDelegated,
   directoryRecipientsEnabled,
+  authenticatedGrantsEnabled,
   close,
   changed,
 }: {
@@ -4228,6 +4479,7 @@ function ShareDialog({
   canRevoke: boolean;
   canProvisionDelegated: boolean;
   directoryRecipientsEnabled: boolean;
+  authenticatedGrantsEnabled: boolean;
   close: () => void;
   changed: () => void;
 }) {
@@ -4394,7 +4646,9 @@ function ShareDialog({
               <span>Folder</span>
               <code>{folder.prefix}</code>
             </div>
-            <ClientWorkspaceGrant prefix={folder.prefix} />
+            {authenticatedGrantsEnabled
+              ? <AuthenticatedDeliveryGrantPanel folder={folder} />
+              : <ClientWorkspaceGrant prefix={folder.prefix} />}
             {canProvisionDelegated && <ClientDelegatedFolderProvisioning folder={folder} />}
             {shown && (
               <div className="current-share">
@@ -5180,6 +5434,7 @@ function ShareHistory({
 
 const STAFF_CONTROL_LABELS = {
   allOperations: "View all operations, projects, and tasks",
+  sopAssignment: "Assign published SOPs to visible work",
   deliveryBrowse: "Browse delivery files",
   deliveryLinkCreate: "Create client links",
   deliveryLinkRevoke: "Revoke client links",
@@ -5246,6 +5501,9 @@ function Team({ session }: { session: Session }) {
               <h3>{person.display_name}</h3>
               <p>{person.email}</p>
               <small>{person.roles || "No Project Alpha role"}</small>
+              {allowed(session.user, "operations.view") && (
+                <TeamAssignedWork staffId={person.id} />
+              )}
               {session.user.isAdministrator &&
               person.id !== session.user.id &&
               !person.sync_protected &&
@@ -5437,6 +5695,175 @@ function ClientWorkspaceManagerRecovery() {
   </Card>;
 }
 
+type PortalDenialScopeType = "global" | "workspace" | "organization" | "department" | "client" | "project";
+type PortalIdentityOption = { identityId: string; displayName: string; email: string | null };
+type PortalDenialScopeOption = {
+  scopeType: Exclude<PortalDenialScopeType, "global">;
+  workspaceId: string;
+  publicId: string;
+  displayName: string;
+  workspaceLabel: string;
+  breadcrumb: string;
+};
+type PortalIdentityDenial = {
+  id: string;
+  identityId: string;
+  identityLabel: string;
+  identityEmail: string | null;
+  workspaceId: string | null;
+  workspaceLabel: string | null;
+  scopeType: PortalDenialScopeType;
+  scopePublicId: string | null;
+  scopeLabel: string;
+  reasonCode: string;
+  status: "active" | "revoked";
+  expiresAt: string | null;
+  updatedAt: string;
+};
+
+function PortalIdentityDenyAdministration() {
+  const [denials, setDenials] = useState<PortalIdentityDenial[]>([]);
+  const [query, setQuery] = useState("");
+  const [identities, setIdentities] = useState<PortalIdentityOption[]>([]);
+  const [identity, setIdentity] = useState<PortalIdentityOption | null>(null);
+  const [scopeType, setScopeType] = useState<PortalDenialScopeType>("global");
+  const [scopeQuery, setScopeQuery] = useState("");
+  const [scopes, setScopes] = useState<PortalDenialScopeOption[]>([]);
+  const [scope, setScope] = useState<PortalDenialScopeOption | null>(null);
+  const [reasonCode, setReasonCode] = useState("security_response");
+  const [expiresAt, setExpiresAt] = useState("");
+  const [revokeReason, setRevokeReason] = useState("security_response_resolved");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+
+  const load = useCallback(async () => {
+    const value = await api<{ denials: PortalIdentityDenial[] }>("/api/client-portal/identity-denials");
+    setDenials(value.denials);
+  }, []);
+  useEffect(() => { void load().catch(caught => setError((caught as Error).message)); }, [load]);
+  useEffect(() => {
+    if (identity || query.trim().length < 2) { setIdentities([]); return; }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api<{ identities: PortalIdentityOption[] }>(`/api/client-portal/identity-denials/identities?q=${encodeURIComponent(query.trim())}`, { signal: controller.signal })
+        .then(value => { setIdentities(value.identities); setError(value.identities.length ? "" : "No active verified identity matches."); })
+        .catch(caught => { if ((caught as Error).name !== "AbortError") setError((caught as Error).message); });
+    }, 250);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [identity, query]);
+  useEffect(() => {
+    if (scopeType === "global" || scope || scopeQuery.trim().length < 2) { setScopes([]); return; }
+    const controller = new AbortController();
+    const timer = window.setTimeout(() => {
+      api<{ scopes: PortalDenialScopeOption[] }>(`/api/client-portal/identity-denials/scopes?scopeType=${encodeURIComponent(scopeType)}&q=${encodeURIComponent(scopeQuery.trim())}`, { signal: controller.signal })
+        .then(value => { setScopes(value.scopes); setError(value.scopes.length ? "" : "No active portal scope matches."); })
+        .catch(caught => { if ((caught as Error).name !== "AbortError") setError((caught as Error).message); });
+    }, 250);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [scope, scopeQuery, scopeType]);
+
+  const create = async () => {
+    if (!identity || busy) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      await api("/api/client-portal/identity-denials", {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({
+          identityId: identity.identityId,
+          scopeType,
+          workspaceId: scopeType === "global" ? null : scope?.workspaceId,
+          scopePublicId: scopeType === "global" ? null : scope?.publicId,
+          reasonCode,
+          expiresAt: expiresAt ? new Date(expiresAt).toISOString() : null,
+        }),
+      });
+      setMessage("Portal identity denial created. Active sessions will recheck it on their next protected request.");
+      setIdentity(null); setQuery(""); setExpiresAt("");
+      await load();
+    } catch (caught) { setError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const revoke = async (denial: PortalIdentityDenial) => {
+    if (busy || !revokeReason) return;
+    if (!confirm(`Revoke the denial for ${denial.identityLabel}? Access still depends on current membership and entitlements.`)) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      await api(`/api/client-portal/identity-denials/${encodeURIComponent(denial.id)}/revoke`, {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ expectedUpdatedAt: denial.updatedAt, reasonCode: revokeReason }),
+      });
+      setMessage("Identity denial revoked. The immutable history remains available below.");
+      await load();
+    } catch (caught) { setError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  return <Card title="Client Portal identity denylist">
+    <p>Emergency deny policy for an exact verified portal identity. Email and display name are search labels only; authority uses the opaque identity ID.</p>
+    <div className="portal-denial-editor">
+      <div className="share-recipient-field">
+        <label htmlFor="portal-denial-identity">Verified identity</label>
+        <input id="portal-denial-identity" type="search" role="combobox" aria-autocomplete="list"
+          aria-expanded={identities.length > 0} aria-controls="portal-denial-identities" autoComplete="off"
+          placeholder="Search verified name or email" value={query} disabled={busy}
+          onKeyDown={focusFirstTypeaheadOption}
+          onChange={event => { setQuery(event.target.value); setIdentity(null); }} />
+        {identities.length > 0 && <div id="portal-denial-identities" className="client-workspace-typeahead" role="listbox">
+          {identities.map(option => <button key={option.identityId} type="button" role="option"
+            aria-selected={identity?.identityId === option.identityId}
+            onKeyDown={event => moveTypeaheadOption(event, "portal-denial-identity")}
+            onClick={() => { setIdentity(option); setQuery(`${option.displayName}${option.email ? ` (${option.email})` : ""}`); setIdentities([]); }}>
+            <strong>{option.displayName}</strong><small>{option.email || "Verified portal identity"}</small>
+          </button>)}
+        </div>}
+      </div>
+      <div className="form-grid portal-denial-fields">
+        <label>Scope<select value={scopeType} onChange={event => { setScopeType(event.target.value as PortalDenialScopeType); setScope(null); setScopeQuery(""); }} disabled={busy}>
+          <option value="global">Global</option><option value="workspace">Workspace</option>
+          <option value="organization">Organization</option><option value="department">Department</option>
+          <option value="client">Client</option><option value="project">Project</option>
+        </select></label>
+        {scopeType !== "global" && <div className="share-recipient-field full">
+          <label htmlFor="portal-denial-scope">{scopeType[0]!.toUpperCase() + scopeType.slice(1)}</label>
+          <input id="portal-denial-scope" type="search" role="combobox" aria-autocomplete="list"
+            aria-expanded={scopes.length > 0} aria-controls="portal-denial-scopes" autoComplete="off"
+            placeholder={`Search active ${scopeType} scopes`} value={scopeQuery} disabled={busy}
+            onKeyDown={focusFirstTypeaheadOption}
+            onChange={event => { setScopeQuery(event.target.value); setScope(null); }} />
+          {scopes.length > 0 && <div id="portal-denial-scopes" className="client-workspace-typeahead" role="listbox">
+            {scopes.map(option => <button key={`${option.workspaceId}:${option.scopeType}:${option.publicId}`} type="button" role="option"
+              aria-selected={scope?.workspaceId === option.workspaceId && scope?.publicId === option.publicId}
+              onKeyDown={event => moveTypeaheadOption(event, "portal-denial-scope")}
+              onClick={() => { setScope(option); setScopeQuery(option.breadcrumb); setScopes([]); }}>
+              <strong>{option.displayName}</strong><small>{option.breadcrumb}</small>
+            </button>)}
+          </div>}
+        </div>}
+        <label>Reason code<input value={reasonCode} maxLength={80} pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,79}" onChange={event => setReasonCode(event.target.value)} /></label>
+        <label>Expires (optional)<input type="datetime-local" value={expiresAt} onChange={event => setExpiresAt(event.target.value)} /></label>
+      </div>
+      <button type="button" className="button-danger" disabled={busy || !identity || !reasonCode || (scopeType !== "global" && !scope)} onClick={() => void create()}>
+        {busy ? "Saving…" : "Create identity denial"}
+      </button>
+    </div>
+    {error && <div className="notice error" role="alert">{error}</div>}
+    {message && <div className="notice" role="status">{message}</div>}
+    {denials.length ? <div className="portal-denial-list">
+      <label>Revocation reason code<input value={revokeReason} maxLength={80} pattern="[A-Za-z0-9][A-Za-z0-9._:-]{0,79}" onChange={event => setRevokeReason(event.target.value)} /></label>
+      {denials.map(denial => {
+        const elapsed = denial.status === "active" && denial.expiresAt !== null && Date.parse(denial.expiresAt) <= Date.now();
+        return <section className="portal-denial-row" key={denial.id}>
+          <span><strong>{denial.identityLabel}</strong><small>{denial.identityEmail || "Verified portal identity"}</small>
+            <small>{denial.scopeLabel} · {denial.scopeType} · {elapsed ? "expired" : denial.status} · {denial.reasonCode}</small></span>
+          {denial.status === "active" && !elapsed && <button type="button" className="button-ghost button-small" disabled={busy || !revokeReason} onClick={() => void revoke(denial)}>Revoke denial</button>}
+        </section>;
+      })}
+    </div> : <EmptyState title="No identity denials" detail="Emergency identity denials will appear here with immutable history." />}
+  </Card>;
+}
+
 function Administration({ session }: { session: Session }) {
   const [message, setMessage] = useState("");
   const audit = useLoad(
@@ -5492,6 +5919,7 @@ function Administration({ session }: { session: Session }) {
       </div>
       {session.capabilities?.clientWorkspaceManagerRecovery?.enabled === true && allowed(session.user, "operations.manage") && <ClientWorkspaceManagerRecovery />}
       {session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <DelegatedShareAdministration />}
+      {session.capabilities?.portalIdentityDenials?.enabled === true && session.user.isAdministrator && <PortalIdentityDenyAdministration />}
       {allowed(session.user, "audit.view") && (
         <Card title="Audit history">
           <ErrorLine error={audit.error} />

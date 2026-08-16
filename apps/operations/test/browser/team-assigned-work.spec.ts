@@ -1,0 +1,132 @@
+import { expect, test, type Page } from "@playwright/test";
+
+const operation = {
+  id: "operation-1",
+  title: "North parcel mapping",
+  project_name: "North Site",
+  division_name: "Flight Operations",
+  scheduled_start: "2026-08-15T15:00:00.000Z",
+  status: "scheduled",
+};
+
+async function mock(page: Page) {
+  let assignedWorkRequests = 0;
+  await page.route("**/api/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/session") {
+      await route.fulfill({ json: {
+        user: {
+          id: "staff-viewer",
+          email: "viewer@example.test",
+          displayName: "Viewer",
+          status: "Active",
+          profileType: "Employee",
+          isAdministrator: false,
+          permissions: ["team.view", "operations.view", "sops.view"],
+          divisions: [],
+        },
+        csrfToken: "csrf-test",
+        timezone: "America/Chicago",
+        mapStyleUrl: null,
+        mapboxPublicToken: null,
+        capabilities: {},
+      } });
+    } else if (path === "/api/team/staff") {
+      await route.fulfill({ json: { staff: [{
+        id: "staff-pilot",
+        display_name: "Colin Pilot",
+        email: "pilot@example.test",
+        status: "active",
+        roles: "Pilot",
+        sync_protected: 0,
+      }] } });
+    } else if (path === "/api/team/staff/staff-pilot/assigned-work") {
+      assignedWorkRequests += 1;
+      await route.fulfill({ json: {
+        operations: [{
+          id: operation.id,
+          title: operation.title,
+          status: operation.status,
+          scheduledStart: operation.scheduled_start,
+          projectName: operation.project_name,
+          briefAvailable: true,
+          canViewSops: true,
+          sopCount: 2,
+        }],
+        truncated: false,
+      } });
+    } else if (path === "/api/operations") {
+      await route.fulfill({ json: { operations: [operation] } });
+    } else if (path === "/api/operations/operation-1/job-brief") {
+      await route.fulfill({ json: {
+        operation: {
+          id: operation.id,
+          title: operation.title,
+          status: operation.status,
+          scheduledStart: operation.scheduled_start,
+          scheduledEnd: null,
+          location: "North parcel",
+          navigation: null,
+        },
+        brief: {
+          version: 2,
+          items: [],
+          attachments: [],
+          sops: [{
+            sopId: "sop-mapping",
+            revisionId: "revision-mapping-3",
+            revisionNumber: 3,
+            slug: "mapping-flight",
+            title: "Mapping Flight SOP",
+            purpose: "Standard capture checks.",
+            html: "<p>Confirm the flight plan.</p>",
+            toc: [],
+            author: { id: "staff-admin", displayName: "Admin" },
+            publishedAt: "2026-08-01T12:00:00.000Z",
+            linkedAt: "2026-08-02T12:00:00.000Z",
+            publicationState: "current",
+          }],
+          createdAt: "2026-08-02T12:00:00.000Z",
+          updatedAt: "2026-08-02T12:00:00.000Z",
+          updatedBy: { id: "staff-admin", displayName: "Admin", email: "admin@example.test" },
+        },
+        history: [],
+        canEdit: false,
+        canViewSops: true,
+        canAssignSops: false,
+      } });
+    } else {
+      await route.fulfill({ status: 404, json: { error: "Not found" } });
+    }
+  });
+  return { assignedWorkRequests: () => assignedWorkRequests };
+}
+
+test("Team lazily exposes only visible assigned work and opens its pinned-SOP brief", async ({ page }) => {
+  const state = await mock(page);
+  await page.goto("/team");
+  await expect(page.getByRole("heading", { name: "Colin Pilot" })).toBeVisible();
+  expect(state.assignedWorkRequests()).toBe(0);
+
+  const summary = page.getByText("Assigned work", { exact: true });
+  await summary.focus();
+  await page.keyboard.press("Enter");
+  await expect(page.getByText("2 SOPs", { exact: true })).toBeVisible();
+  expect(state.assignedWorkRequests()).toBe(1);
+
+  const link = page.getByRole("link", { name: "Open job brief" });
+  await expect(link).toBeVisible();
+  if ((page.viewportSize()?.width || 0) <= 960)
+    expect((await link.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+  await link.focus();
+  await page.keyboard.press("Enter");
+
+  await expect(page).toHaveURL(/\/operations\?brief=operation-1$/);
+  await expect(page.getByText("LTDS brief v2")).toBeVisible();
+  const quickSop = page.getByRole("link", { name: "Mapping Flight SOP Revision 3" });
+  await quickSop.focus();
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/#job-brief-sop-revision-mapping-3$/);
+  await expect(page.locator(".job-brief-sop strong", { hasText: "Mapping Flight SOP" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});

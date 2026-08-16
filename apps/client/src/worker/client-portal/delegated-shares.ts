@@ -7,6 +7,10 @@ import type { Env } from "../types";
 import { constantTimeEqual, hmac, sha256 } from "../security";
 import type { VerifiedClientPrincipal } from "./types";
 import { authorizePortalWorkspaceCapability, portalHierarchyV2Enabled } from "./workspace-v2";
+import {
+  authenticatedDeliveryGrantsEnabled,
+  authorizeAuthenticatedDeliveryGrant,
+} from "./authenticated-delivery-grants";
 
 export const CLIENT_DELEGATED_SHARE_COOKIE = "__Secure-ltds_client_share";
 export const CLIENT_DELEGATED_SHARE_PATH_PREFIX = "/client-share/";
@@ -234,6 +238,12 @@ async function authorizeDelegationRow(
     scopeType: "folder",
     publicId: row.folder_binding_id,
   }))) return null;
+  // A client-generated public share can never outlive or exceed the current
+  // staff-approved authenticated source grant. Revocation/source-version drift
+  // therefore suspends existing bearer sessions immediately on their next use.
+  if (authenticatedDeliveryGrantsEnabled(env) && !(await authorizeAuthenticatedDeliveryGrant(
+    env, principal, row.workspace_id, row.folder_binding_id,
+  ))) return null;
   return {
     delegationId: row.delegation_id,
     workspaceId: row.workspace_id,

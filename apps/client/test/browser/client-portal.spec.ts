@@ -1,10 +1,13 @@
 import { expect, test, type Page } from "@playwright/test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { PortalAccount, PortalFilePage, PortalServiceDraft, PortalServiceRequest } from "../../src/client/portal-api";
 
 const account = { id: "account-a", displayName: "Acme Surveying" };
 const projects = [{ id: "project-a", externalRef: "ALPHA-1", clientName: "Acme", projectName: "North Site", canRequestService: true, status: "in_progress", summary: "Aerial progress documentation", siteAddress: null, serviceAddress: "100 Main St", projectContactName: "LTDS Operations", projectContactEmail: "ops@example.com", projectContactPhone: null, nextMilestone: "Spring progress imagery", lastUpdateAt: "2026-08-01T12:00:00.000Z" }];
-const filePage = { files: [{ id: "file-a", key: "Jobs/Clients/acme/north/final.pdf", name: "final.pdf", size: 2048, uploadedAt: "2026-08-01T12:00:00.000Z", contentType: "application/pdf", previewPath: "/api/client/files/file-a/preview?projectId=project-a", downloadPath: "/api/client/files/file-a/download?projectId=project-a" }], prefix: "", cursor: null };
+const filePage = { files: [{ id: "file-a", name: "final.pdf", size: 2048, uploadedAt: "2026-08-01T12:00:00.000Z", contentType: "application/pdf", kind: "pdf" as const, previewPath: "/api/client/files/file-a/preview?projectId=project-a", thumbnailPath: "/api/client/files/file-a/thumbnail?projectId=project-a", downloadPath: "/api/client/files/file-a/download?projectId=project-a" }], prefix: "", cursor: null };
+const seekableMp4 = readFileSync(fileURLToPath(new URL("../fixtures/client-portal-seek.mp4", import.meta.url)));
 const requests: PortalServiceRequest[] = [{
   id: "request-a",
   projectId: "project-a",
@@ -176,6 +179,34 @@ async function navigatePortal(page: Page, label: "Projects" | "Deliveries" | "Re
   }
 }
 
+test("portal identifies an unfinished schema update and retries cleanly on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let sessionAttempts = 0;
+  await page.route("**/api/client/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/client/session") {
+      sessionAttempts += 1;
+      if (sessionAttempts === 1) return route.fulfill({ status: 503, json: {
+        error: "Client portal data is temporarily unavailable while its database update finishes.",
+        code: "CLIENT_PORTAL_SCHEMA_OUTDATED",
+      } });
+      return route.fulfill({ json: { account, capabilities: {} } });
+    }
+    if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
+    if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
+    if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
+    if (path === "/api/client/notifications") return route.fulfill({ json: { notifications: [], unreadCount: 0, cursor: null } });
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  await page.goto("/portal");
+  await expect(page.getByText("Portal update in progress", { exact: true })).toBeVisible();
+  await expect(page.getByText(/access is valid/i)).toBeVisible();
+  await page.getByRole("button", { name: "Retry portal" }).click();
+  await expect(page.getByRole("heading", { name: "Welcome, Acme Surveying" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
 test("client-created links use opaque authorized targets and remain usable on desktop and mobile", async ({ page }) => {
   let created = false;
   let revoked = false;
@@ -320,6 +351,70 @@ test("authorized portal supports project, delivery, and request workflows", asyn
   await expect(page.getByText("North Site spring imagery")).toBeVisible();
 
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("authenticated video preview uses native controls and supports seeking with range delivery", async ({ page }) => {
+  const videoFile = {
+    ...filePage.files[0]!,
+    id: "video-file-a",
+    name: "flight.mp4",
+    size: seekableMp4.length,
+    contentType: "video/mp4",
+    kind: "video" as const,
+    previewPath: "/media/client-portal-seek.mp4",
+    thumbnailPath: null,
+    downloadPath: "/api/client/files/video-file-a/download?projectId=project-a",
+  };
+  await mockAuthorizedPortal(page, null, requests, undefined, undefined, true, false, undefined,
+    () => ({ files: [videoFile], folders: [], prefix: "", cursor: null }));
+  const observedRanges: string[] = [];
+  await page.route("**/media/client-portal-seek.mp4", async route => {
+    const range = route.request().headers().range;
+    if (!range) {
+      await route.fulfill({ status: 200, contentType: "video/mp4", headers: {
+        "Accept-Ranges": "bytes", "Content-Length": String(seekableMp4.length),
+      }, body: seekableMp4 });
+      return;
+    }
+    observedRanges.push(range);
+    const match = /^bytes=(\d+)-(\d*)$/.exec(range);
+    expect(match).not.toBeNull();
+    const start = Number(match![1]);
+    const end = match![2] ? Math.min(Number(match![2]), seekableMp4.length - 1) : seekableMp4.length - 1;
+    const body = seekableMp4.subarray(start, end + 1);
+    await route.fulfill({ status: 206, contentType: "video/mp4", headers: {
+      "Accept-Ranges": "bytes",
+      "Content-Range": `bytes ${start}-${end}/${seekableMp4.length}`,
+      "Content-Length": String(body.length),
+    }, body });
+  });
+
+  await page.goto("/portal/projects/project-a?tab=files");
+  await expect(page.getByText("flight.mp4", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Preview" }).click();
+  const dialog = page.getByRole("dialog", { name: "Preview flight.mp4" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator(".portal-file-preview-stage")).toHaveCSS("background-color", "rgb(13, 20, 26)");
+  const video = dialog.locator("video");
+  await expect(video).toHaveAttribute("controls", "");
+  await expect(video).toHaveAttribute("playsinline", "");
+  await expect(video).toHaveAttribute("preload", "metadata");
+  await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).readyState)).toBeGreaterThanOrEqual(1);
+  await video.evaluate(async element => {
+    const media = element as HTMLVideoElement;
+    await media.play();
+    media.pause();
+    await new Promise<void>((resolve, reject) => {
+      const timer = window.setTimeout(() => reject(new Error("seek timed out")), 3_000);
+      media.addEventListener("seeked", () => { window.clearTimeout(timer); resolve(); }, { once: true });
+      media.currentTime = 1.5;
+    });
+  });
+  await expect.poll(() => video.evaluate(element => (element as HTMLVideoElement).currentTime)).toBeGreaterThan(1.25);
+  expect(observedRanges.length).toBeGreaterThan(0);
+  await page.getByRole("button", { name: "Close preview" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator("body")).not.toHaveCSS("overflow", "hidden");
 });
 
 test("autosaved service-request drafts resume after navigation and reload", async ({ page }) => {
@@ -497,43 +592,56 @@ test("project files progressively paint 1200 immediate children with one request
     pageCalls += 1;
     await new Promise(resolve => setTimeout(resolve, 8));
     const pageIndex = Number(url.searchParams.get("cursor") ?? "0");
-    const files = Array.from({ length: 100 }, (_, offset) => {
-      const index = pageIndex * 100 + offset;
+    const files = Array.from({ length: 150 }, (_, offset) => {
+      const index = pageIndex * 150 + offset;
       return { ...filePage.files[0]!, id: `mass-${index}`, name: `file-${String(index).padStart(4, "0")}.pdf` };
     });
     inFlight -= 1;
     return { files, folders: [], breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Large deliverable set" }],
-      folderId: folder, prefix: "", cursor: pageIndex < 11 ? String(pageIndex + 1) : null };
+      folderId: folder, prefix: "", cursor: pageIndex < 7 ? String(pageIndex + 1) : null };
   };
   await mockAuthorizedPortal(page, null, requests, undefined, undefined, true, false, undefined, fixture);
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/portal/projects/project-a?tab=files");
   await page.getByRole("button", { name: /Large deliverable set/ }).click();
   await expect(page.getByText("file-0000.pdf")).toBeVisible();
-  expect(pageCalls).toBeLessThan(12);
+  await expect(page.locator(".portal-file-row")).toHaveCount(150);
+  await expect.poll(() => pageCalls).toBe(2);
+  await expect(page.getByText("file-0150.pdf")).toHaveCount(0);
+  for (let pageNumber = 2; pageNumber <= 8; pageNumber += 1) {
+    const button = page.getByRole("button", { name: "Load more" });
+    await expect(button).toBeEnabled();
+    await button.evaluate((element: HTMLButtonElement) => element.click());
+    await expect(page.getByText(`file-${String(pageNumber * 150 - 1).padStart(4, "0")}.pdf`)).toBeVisible();
+  }
   await expect(page.getByText("file-1199.pdf")).toBeVisible();
-  expect({ pageCalls, maximumInFlight }).toEqual({ pageCalls: 12, maximumInFlight: 1 });
+  await expect(page.locator(".portal-file-row")).toHaveCount(450);
+  await expect(page.getByRole("button", { name: "Show earlier files" })).toBeVisible();
+  expect({ pageCalls, maximumInFlight }).toEqual({ pageCalls: 8, maximumInFlight: 1 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test("leaving a folder aborts a manual continuation and ignores its stale result", async ({ page }) => {
+test("leaving a folder aborts a continuation and ignores its stale result", async ({ page }) => {
+  let continuationStarted = false;
   const fixture = async (url: URL): Promise<PortalFilePage> => {
     const folder = url.searchParams.get("folder");
     if (folder !== "pf1_long") return { files: [], folders: [{ id: "pf1_long", name: "Long folder" }],
       breadcrumbs: [{ id: null, name: "Project files" }], folderId: null, prefix: "", cursor: null };
     const pageIndex = Number(url.searchParams.get("cursor") ?? "0");
-    if (pageIndex === 20) await new Promise(resolve => setTimeout(resolve, 250));
+    if (pageIndex === 1) {
+      continuationStarted = true;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
     return {
-      files: [{ ...filePage.files[0]!, id: `continuation-${pageIndex}`, name: pageIndex === 20 ? "stale-late.pdf" : `page-${pageIndex}.pdf` }],
+      files: [{ ...filePage.files[0]!, id: `continuation-${pageIndex}`, name: pageIndex === 1 ? "stale-late.pdf" : `page-${pageIndex}.pdf` }],
       folders: [], breadcrumbs: [{ id: null, name: "Project files" }, { id: folder, name: "Long folder" }],
-      folderId: folder, prefix: "", cursor: pageIndex < 20 ? String(pageIndex + 1) : null,
+      folderId: folder, prefix: "", cursor: pageIndex < 2 ? String(pageIndex + 1) : null,
     };
   };
   await mockAuthorizedPortal(page, null, requests, undefined, undefined, true, false, undefined, fixture);
   await page.goto("/portal/projects/project-a?tab=files");
   await page.getByRole("button", { name: /Long folder/ }).click();
-  await expect(page.getByRole("button", { name: "Load more" })).toBeVisible();
-  await page.getByRole("button", { name: "Load more" }).click();
+  await expect.poll(() => continuationStarted).toBe(true);
   await page.getByRole("button", { name: "Project files" }).click();
   await expect(page.getByRole("button", { name: /Long folder/ })).toBeVisible();
   await page.waitForTimeout(300);

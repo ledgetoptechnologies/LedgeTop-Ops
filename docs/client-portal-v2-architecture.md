@@ -70,6 +70,16 @@ credential is accepted as PA integration authority.
 - Folder authority uses opaque, versioned bindings for organization,
   department, client, or project scope. Raw R2 prefixes never cross a client
   API, and authorization is rechecked before each object read.
+- Staff-created authenticated Delivery grants are versioned LTDS objects
+  targeting one current opaque organization, department, client, project, or
+  verified principal. Group audiences resolve dynamically from current
+  membership, `delivery.view`, hierarchy and deny state; only exact-principal
+  grants snapshot a principal/identity binding. Revocation is terminal and
+  restore creates a new version after current source-version revalidation.
+- Authenticated grants, Operations `/s/` bearers, and client-owned
+  `/client-share/` bearers are three separate security objects. Removing the
+  authenticated source grant immediately suspends any descendant client bearer
+  without granting the client authority over an Operations share.
 - Operations bearer shares remain under `/s/`. Delegated client bearer shares
   use `/client-share/`, a separate signing audience/cookie namespace/audit, and
   remain bounded by the workspace's live source grant. They are workspace-owned,

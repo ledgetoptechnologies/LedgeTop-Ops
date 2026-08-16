@@ -548,17 +548,12 @@ test("an operation completed in an old prefix cannot abort or replace the curren
   await expect(page).toHaveURL(/\/delivery$/);
 });
 
-test("folder pagination paints page one, loads on demand, and deduplicates repeated item identities", async ({ page }) => {
+test("folder pagination paints page one, prefetches near the boundary, and deduplicates repeated item identities", async ({ page }) => {
   const cursors = await mockDeliveryPagination(page);
   await page.goto("/delivery/Acme/Current");
 
   await expect(page.locator(".file-card-title", { hasText: "Alpha" })).toBeVisible();
-  expect(cursors).toEqual([null]);
-  await expect(page.getByText("Charlie", { exact: true })).toHaveCount(0);
-  await page.getByRole("button", { name: "Load more" }).click();
   await expect(page.getByText("Bravo", { exact: true })).toBeVisible();
-  expect(cursors).toEqual([null, "page-2"]);
-  await page.getByRole("button", { name: "Load more" }).click();
   await expect(page.locator(".file-card-title", { hasText: "Charlie" })).toBeVisible();
   expect(cursors).toEqual([null, "page-2", "page-3"]);
   await expect(page.locator(".file-card-title", { hasText: "Alpha" })).toHaveCount(1);
@@ -573,7 +568,6 @@ test("navigation during page two aborts the old cursor chain without contaminati
   const race = await mockPaginationNavigationRace(page);
   await page.goto("/delivery/Acme/Current");
   await expect(page.locator(".file-card-title", { hasText: "Old first" })).toBeVisible();
-  await page.getByRole("button", { name: "Load more" }).click();
   await race.secondPageRequested.promise;
 
   await page
@@ -587,6 +581,82 @@ test("navigation during page two aborts the old cursor chain without contaminati
   await expect(page.locator(".file-card-title", { hasText: "Current root" })).toBeVisible();
   await expect(page.getByText("Late old", { exact: true })).toHaveCount(0);
   await expect(page).toHaveURL(/\/delivery$/);
+});
+
+test("1200 immediate children paint in 150-item pages with one page request in flight", async ({ page }) => {
+  const fixture=Array.from({length:1200},(_,index)=>({
+    id:`asset-${String(index+1).padStart(4,"0")}`,
+    physicalKey:`Jobs/Clients/Acme/Current/asset-${String(index+1).padStart(4,"0")}.jpg`,
+    name:`Asset ${String(index+1).padStart(4,"0")}.jpg`,displayName:`Asset ${String(index+1).padStart(4,"0")}.jpg`,
+    kind:"image",size:1024,uploadedAt:"2026-08-15T12:00:00.000Z",thumbnailState:"pending",
+    thumbnailFallbackKind:"image",downloadUrl:`/api/delivery/items/asset-${index+1}/download`,
+  }));
+  let active=0,maxActive=0;
+  const cursors:string[]=[];
+  await page.route("**/api/**",async route=>{
+    const url=new URL(route.request().url());
+    if(url.pathname==="/api/session")return route.fulfill({json:{user:{id:"staff-1200",email:"staff@example.test",displayName:"Staff",status:"Active",profileType:"Administrator",isAdministrator:true,permissions:["delivery.browse"],divisions:[]},csrfToken:"csrf-1200",timezone:"America/Chicago",mapStyleUrl:null,mapboxPublicToken:null,capabilities:{deliveryJobsRoot:{enabled:true}}}});
+    if(url.pathname==="/api/delivery/access-revision")return route.fulfill({json:{revision:`dbr_${"a".repeat(43)}`}});
+    if(url.pathname==="/api/delivery/folders"){
+      const raw=url.searchParams.get("cursor"),offset=raw?Number(raw):0;
+      cursors.push(raw||"root");active+=1;maxActive=Math.max(maxActive,active);
+      await new Promise(resolve=>setTimeout(resolve,25));active-=1;
+      return route.fulfill({json:{prefix:"Jobs/Clients/Acme/Current/",folders:[],files:fixture.slice(offset,offset+150),nextCursor:offset+150<fixture.length?String(offset+150):null,mediaHydrated:true,reconciliationNeeded:false}});
+    }
+    if(url.pathname==="/api/delivery/folders/locations")return route.fulfill({json:{points:[],imageCount:0,truncated:false}});
+    if(url.pathname==="/api/delivery/shares")return route.fulfill({json:{shares:[]}});
+    return route.fulfill({status:404,json:{error:"Not found"}});
+  });
+
+  await page.goto("/delivery/Acme/Current");
+  await expect(page.locator(".file-card")).toHaveCount(150);
+  await expect(page.getByText("Asset 0151.jpg",{exact:true})).toHaveCount(0);
+  await expect.poll(()=>cursors.length).toBeGreaterThanOrEqual(2);
+  expect(cursors.length).toBeLessThanOrEqual(2);
+  for(const expected of [300,450,600,750,900,1050,1200]){
+    await page.evaluate(()=>window.scrollTo(0,document.body.scrollHeight));
+    await expect.poll(async()=>Math.max(0,...(await page.locator(".delivery-pagination small").allTextContents()).map(text=>{
+      const match=/(?:of\s+)?(\d+)\s+(?:loaded\s+)?items|of\s+(\d+)\s+loaded items/.exec(text);
+      return Number(match?.[1]||match?.[2]||0);
+    })),{timeout:15_000}).toBeGreaterThanOrEqual(expected);
+    expect(await page.locator(".file-card").count()).toBeLessThanOrEqual(450);
+  }
+  expect(cursors).toEqual(["root","150","300","450","600","750","900","1050"]);
+  expect(maxActive).toBe(1);
+  await expect(page.getByText("Showing 1–450 of 1200 loaded items",{exact:true})).toBeVisible();
+  for(let index=0;index<5;index+=1)await page.getByRole("button",{name:"Show later"}).click();
+  await expect(page.getByText("Showing 751–1200 of 1200 loaded items",{exact:true})).toBeVisible();
+  await expect(page.getByText("Asset 1200.jpg",{exact:true})).toBeVisible();
+});
+
+test("a failed page prefetch keeps loaded cards visible and exposes a working retry",async({page})=>{
+  let pageTwoAttempts=0;
+  await page.addInitScript(()=>Object.defineProperty(window,"IntersectionObserver",{value:undefined,configurable:true}));
+  await page.route("**/api/**",async route=>{
+    const url=new URL(route.request().url());
+    if(url.pathname==="/api/session")return route.fulfill({json:{user:{id:"staff-retry",email:"staff@example.test",displayName:"Staff",status:"Active",profileType:"Employee",isAdministrator:false,permissions:["delivery.browse"],divisions:[]},csrfToken:"csrf-retry",timezone:"America/Chicago",mapStyleUrl:null,mapboxPublicToken:null,capabilities:{deliveryJobsRoot:{enabled:true}}}});
+    if(url.pathname==="/api/delivery/access-revision")return route.fulfill({json:{revision:`dbr_${"b".repeat(43)}`}});
+    if(url.pathname==="/api/delivery/folders"){
+      const cursor=url.searchParams.get("cursor");
+      if(!cursor)return route.fulfill({json:{prefix:"Jobs/Clients/Acme/Current/",folders:[{id:"first",prefix:"Jobs/Clients/Acme/Current/First/",name:"First",displayName:"First"}],files:[],nextCursor:"page-2",mediaHydrated:true}});
+      pageTwoAttempts+=1;
+      return pageTwoAttempts===1
+        ?route.fulfill({status:503,json:{error:"Temporary listing failure"}})
+        :route.fulfill({json:{prefix:"Jobs/Clients/Acme/Current/",folders:[{id:"second",prefix:"Jobs/Clients/Acme/Current/Second/",name:"Second",displayName:"Second"}],files:[],nextCursor:null,mediaHydrated:true}});
+    }
+    if(url.pathname==="/api/delivery/folders/locations")return route.fulfill({json:{points:[],imageCount:0,truncated:false}});
+    if(url.pathname==="/api/delivery/shares")return route.fulfill({json:{shares:[]}});
+    return route.fulfill({status:404,json:{error:"Not found"}});
+  });
+  await page.goto("/delivery/Acme/Current");
+  await expect(page.getByText("First",{exact:true})).toBeVisible();
+  const retry=page.getByRole("button",{name:"Retry loading more"});
+  await expect(retry).toBeVisible();
+  await expect(page.getByText(/next page could not be prepared|More items could not be loaded/)).toBeVisible();
+  await retry.click();
+  await expect(page.getByText("Second",{exact:true})).toBeVisible();
+  await expect(page.getByText("First",{exact:true})).toBeVisible();
+  expect(pageTwoAttempts).toBe(2);
 });
 
 test("browser back and forward never render a blank grid from a cached empty Jobs/Clients result", async ({ page }) => {

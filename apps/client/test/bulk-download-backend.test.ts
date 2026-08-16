@@ -115,7 +115,7 @@ function authenticatedEnv(
     const statement = {
       bind(..._values: unknown[]) { return statement; },
       async first<T>() {
-        if (query.includes("FROM shares s JOIN projects")) return share as T;
+        if (query.includes("FROM shares s LEFT JOIN projects")) return share as T;
         if (query.includes("FROM bulk_download_jobs")) {
           return {
             id: "job-1",

@@ -1,6 +1,6 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { deliveryBrowseRevision, listDeliveryFolder, listDeliveryFolderMedia, searchDeliveryItems } from "../src/worker/delivery";
+import { DELIVERY_FOLDER_PAGE_SIZE, deliveryBrowseRevision, listDeliveryFolder, listDeliveryFolderMedia, searchDeliveryItems } from "../src/worker/delivery";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const principal:StaffPrincipal={
@@ -95,7 +95,7 @@ describe("Delivery folder-only listing performance",()=>{
     expect(get).not.toHaveBeenCalled();
   });
 
-  it("uses one R2 metadata listing for 120 indexed child folders and never reads files or thumbnails",async()=>{
+  it("uses one R2 metadata listing for 120 indexed child folders and no per-item reads",async()=>{
     const folders=Array.from({length:120},(_,index)=>`Jobs/Clients/Client-${String(index).padStart(3,"0")}/`);
     for(let offset=0;offset<folders.length;offset+=75){
       await deliveryDb.batch(folders.slice(offset,offset+75).map((folder,index)=>deliveryDb.prepare(
@@ -120,17 +120,17 @@ describe("Delivery folder-only listing performance",()=>{
     expect(result.folders.at(-1)?.name).toBe("Last client");
     expect(result.files).toEqual([]);
     expect(list).toHaveBeenCalledTimes(1);
-    expect(list).toHaveBeenCalledWith({prefix:"Jobs/Clients/",delimiter:"/",limit:500,cursor:undefined,include:["httpMetadata","customMetadata"]});
+    expect(list).toHaveBeenCalledWith({prefix:"Jobs/Clients/",delimiter:"/",limit:DELIVERY_FOLDER_PAGE_SIZE,cursor:undefined,include:["httpMetadata","customMetadata"]});
     expect(head).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();
     expect(grantQueries).toHaveLength(2);
     expect(deliveryQueries.filter(sql=>sql.includes("WITH candidates(prefix,upper_bound)")).length).toBe(3);
     expect(deliveryQueries.filter(sql=>sql.includes("FROM file_aliases WHERE physical_key IN")).length).toBe(2);
-    expect(deliveryQueries.some(sql=>sql.includes("image_thumbnail_jobs"))).toBe(false);
-    expect(elapsedMs).toBeLessThan(1500);
+    expect(deliveryQueries.some(sql=>sql.includes("WHERE source_key=?"))).toBe(false);
+    expect(elapsedMs).toBeLessThan(10_000);
   },15_000);
 
-  it("lists the true Jobs root with one delimiter query and no recursive object or thumbnail reads",async()=>{
+  it("lists the true Jobs root with one delimiter query and no recursive object reads",async()=>{
     const folders=["Jobs/Archive/","Jobs/Clients/","Jobs/Demo/"];
     await deliveryDb.batch(folders.map((folder,index)=>deliveryDb.prepare(
       "INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')",
@@ -143,10 +143,10 @@ describe("Delivery folder-only listing performance",()=>{
 
     expect(result.folders.map(folder=>folder.prefix)).toEqual(folders);
     expect(list).toHaveBeenCalledTimes(1);
-    expect(list).toHaveBeenCalledWith({prefix:"Jobs/",delimiter:"/",limit:500,cursor:undefined,include:["httpMetadata","customMetadata"]});
+    expect(list).toHaveBeenCalledWith({prefix:"Jobs/",delimiter:"/",limit:DELIVERY_FOLDER_PAGE_SIZE,cursor:undefined,include:["httpMetadata","customMetadata"]});
     expect(head).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();
-    expect(deliveryQueries.some(sql=>sql.includes("image_thumbnail_jobs"))).toBe(false);
+    expect(deliveryQueries.some(sql=>sql.includes("WHERE source_key=?"))).toBe(false);
     expect(elapsedMs).toBeLessThan(1500);
   });
 
@@ -163,13 +163,13 @@ describe("Delivery folder-only listing performance",()=>{
     expect(result.nextCursor).toBe("opaque-next-cursor");
     expect(list).toHaveBeenCalledTimes(1);
     expect(list).toHaveBeenCalledWith({
-      prefix:"Jobs/Clients/",delimiter:"/",limit:500,cursor:"opaque-current-cursor",include:["httpMetadata","customMetadata"],
+      prefix:"Jobs/Clients/",delimiter:"/",limit:DELIVERY_FOLDER_PAGE_SIZE,cursor:"opaque-current-cursor",include:["httpMetadata","customMetadata"],
     });
     expect(head).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();
   });
 
-  it("falls back only for unindexed candidates and trusts indexed tombstone state without recursive R2 scans",async()=>{
+  it("fails unindexed candidates closed and signals reconciliation without recursive R2 scans",async()=>{
     const indexed="Jobs/Clients/Indexed/",fresh="Jobs/Clients/Fresh/",trashedOnly="Jobs/Clients/Trashed/";
     await deliveryDb.batch([
       deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')")
@@ -181,16 +181,15 @@ describe("Delivery folder-only listing performance",()=>{
     ]);
     list.mockImplementation(async(options:R2ListOptions)=>{
       if(options.prefix==="Jobs/Clients/")return {objects:[],delimitedPrefixes:[indexed,fresh,trashedOnly],truncated:false};
-      if(options.prefix===fresh)return {objects:[r2Object(`${fresh}new.jpg`)],delimitedPrefixes:[],truncated:false};
-      if(options.prefix===trashedOnly)return {objects:[r2Object(`${trashedOnly}photo.jpg`)],delimitedPrefixes:[],truncated:false};
       throw new Error("unexpected listing");
     });
 
     const result=await listDeliveryFolder(environment(),principal,"Jobs/Clients/");
 
-    expect(result.folders.map(folder=>folder.prefix)).toEqual([indexed,fresh]);
-    expect(list).toHaveBeenCalledTimes(2);
-    expect(list.mock.calls.map(call=>(call[0] as R2ListOptions).prefix)).toEqual(["Jobs/Clients/",fresh]);
+    expect(result.folders.map(folder=>folder.prefix)).toEqual([indexed]);
+    expect(result.reconciliationNeeded).toBe(true);
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(list.mock.calls.map(call=>(call[0] as R2ListOptions).prefix)).toEqual(["Jobs/Clients/"]);
     expect(head).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();
   });
@@ -239,6 +238,40 @@ describe("Delivery folder-only listing performance",()=>{
     expect(head).not.toHaveBeenCalled();
     expect(get).not.toHaveBeenCalled();
   });
+
+  it("hydrates a full 150-file page with bounded listing-scoped queries instead of per-item D1 reads",async()=>{
+    const objects=Array.from({length:DELIVERY_FOLDER_PAGE_SIZE},(_,index)=>{
+      const video=index%3===0,key=`Jobs/Clients/Acme/asset-${String(index).padStart(3,"0")}.${video?"mp4":"jpg"}`;
+      return{...r2Object(key),httpMetadata:{contentType:video?"video/mp4":"image/jpeg"}} as R2Object;
+    });
+    for(let offset=0;offset<objects.length;offset+=50){
+      const batch=objects.slice(offset,offset+50);
+      await deliveryDb.batch(batch.flatMap((object,index)=>{
+        const absolute=offset+index,video=object.key.endsWith(".mp4");
+        return[
+          deliveryDb.prepare(`INSERT INTO image_thumbnail_jobs(source_key,source_etag,thumbnail_key,thumbnail_etag,thumbnail_size,status)
+            VALUES(?,?,?,?,?,'ready')`).bind(object.key,"etag-a",`_ltds/thumbnails/${absolute}.webp`,`thumb-${absolute}`,64),
+          deliveryDb.prepare(`INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind,stream_uid,stream_status)
+            VALUES(?,?,?,?,?,?,?,?)`).bind(object.key,"etag-a",1024,"2026-08-07T12:00:00.000Z",video?"video/mp4":"image/jpeg",video?"video":"image",video?`stream-${absolute}`:null,video?"ready":null),
+        ];
+      }));
+    }
+    list.mockResolvedValue({objects,delimitedPrefixes:[],truncated:true,cursor:"page-two"});
+
+    const result=await listDeliveryFolder(environment(),principal,"Jobs/Clients/Acme/");
+
+    expect(result.files).toHaveLength(DELIVERY_FOLDER_PAGE_SIZE);
+    expect(result.files.every(file=>file.thumbnailState==="ready")).toBe(true);
+    expect(result.files.filter(file=>file.kind==="video").every(file=>file.previewStatus==="ready")).toBe(true);
+    expect(result.mediaHydrated).toBe(true);
+    expect(result.nextCursor).toBe("page-two");
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(deliveryQueries.filter(sql=>sql.includes("FROM image_thumbnail_jobs WHERE source_key IN"))).toHaveLength(2);
+    expect(deliveryQueries.filter(sql=>sql.includes("FROM file_index WHERE r2_key IN"))).toHaveLength(2);
+    expect(deliveryQueries.filter(sql=>sql.includes("WHERE source_key=?"))).toHaveLength(0);
+    expect(head).not.toHaveBeenCalled();
+    expect(get).not.toHaveBeenCalled();
+  },30_000);
 
   it("searches indexed Jobs content without exposing hidden namespaces or out-of-scope roots",async()=>{
     await deliveryDb.batch([

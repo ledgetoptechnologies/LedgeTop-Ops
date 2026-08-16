@@ -13,6 +13,7 @@ const firstLink = {
   publishedAt: "2026-08-10T12:00:00Z",
   linkedAt: "2026-08-11T12:00:00Z",
   archived: false,
+  publicationState: "current" as const,
   href: `/sops/lidar-capture/revisions/${revisionOne}?contextKind=project&contextId=project-1`,
 };
 
@@ -31,7 +32,7 @@ async function mock(page: Page) {
           status: "Active",
           profileType: "Administrator",
           isAdministrator: true,
-          permissions: ["operations.view", "operations.manage", "projects.view", "tasks.view", "tasks.update", "sops.view"],
+          permissions: ["operations.view", "projects.view", "tasks.view", "sops.view", "sops.assign"],
           divisions: [],
         },
         csrfToken: "csrf-context-sops",

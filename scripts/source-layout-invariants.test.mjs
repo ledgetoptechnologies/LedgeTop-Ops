@@ -40,7 +40,6 @@ const expectedPublicRoutes = [
   "GET /api/public/shares/:publicId/locations",
   "GET /api/public/shares/:publicId/locations/:assetRef",
   "GET /api/public/shares/:publicId/manifest",
-  "GET /api/public/shares/:publicId/manifest/media",
   "GET /client-share/:publicId",
   "GET /health",
   "GET /s/:publicId",
@@ -61,6 +60,7 @@ const expectedPublicRoutes = [
   "POST /api/public/shares/:publicId/cloud-transfers/google/authorizations/:authorizationId/token",
   "POST /api/public/shares/:publicId/cloud-transfers/oauth/:provider/start",
   "POST /api/public/shares/:publicId/items/:itemRef/stream-ticket",
+  "POST /api/public/shares/:publicId/manifest/media",
   "POST /api/public/shares/:routeId/session",
   "USE /api/public/shares/:publicId/*",
 ].sort();
@@ -89,7 +89,7 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "e668138b571dcedd9f0c6b3a30b2613dae078186158ba69cadbeb991f1eb1ddd");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "8f31a0c92622913dc0b63225fea2b6784444b09e261472095a500793ba9100f4");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -111,6 +111,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_PORTAL_REQUEST_V2_ENABLED, "false");
   assert.equal(config.vars.CLIENT_REQUEST_ATTACHMENTS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_V2_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED, "false");
+  assert.equal(config.vars.AUTHENTICATED_DELIVERY_GRANTS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_INVITATION_EMAIL_ENABLED, "false");
@@ -145,13 +147,15 @@ test("public route, host-guard, health, and isolated cookie contracts remain rev
   const worker = read("apps/client/src/worker/index.ts");
   const security = read("apps/client/src/worker/security.ts");
   const delegated = read("apps/client/src/worker/client-portal/delegated-shares.ts");
+  const lifecycle = read("apps/client/src/worker/public-share-lifecycle.ts");
   assert.deepEqual(publicRoutes(worker), expectedPublicRoutes);
   assert(worker.includes('app.route("/client-share/api", createClientDelegatedPublicRouter())'));
   assert(worker.includes('const COOKIE_NAME = "__Host-ltds_delivery";'));
   assert(worker.includes('service: "ltds-delivery"'));
   assert(worker.includes("requestHostAllowed(c.req.url,c.env)"));
   assert(worker.includes('requestHost===env.EXPECTED_HOST'));
-  assert.equal(worker.match(/12 \* 60 \* 60 \* 1000/g)?.length, 2);
+  assert.equal(worker.match(/12 \* 60 \* 60 \* 1000/g)?.length, 1);
+  assert.equal(lifecycle.match(/12 \* 60 \* 60 \* 1000/g)?.length, 1);
   assert(security.includes('`__Host-ltds_delivery=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`'));
   assert(!security.includes("Domain="));
   assert(delegated.includes('CLIENT_DELEGATED_SHARE_COOKIE = "__Secure-ltds_client_share"'));

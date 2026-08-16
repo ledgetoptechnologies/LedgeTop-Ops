@@ -7,6 +7,7 @@ import {
 } from "./hierarchy-relations";
 
 export const PORTAL_HIERARCHY_V2_FLAG = "CLIENT_PORTAL_HIERARCHY_V2_ENABLED";
+export const PORTAL_IDENTITY_DENYLIST_FLAG = "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED";
 
 export type PortalWorkspaceCapability =
   | "workspace.view"
@@ -62,6 +63,11 @@ interface EntitlementRow {
   scope_public_id: string;
 }
 interface ScopeRow { entity_type: PortalWorkspaceScopeType; public_id: string }
+interface IdentityDenialRow {
+  workspace_id: string | null;
+  scope_type: "global" | PortalWorkspaceScopeType;
+  scope_public_id: string | null;
+}
 
 function isPreRelationContractDatabase(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
@@ -74,6 +80,65 @@ function portalDb(env: Env): D1Database {
 
 export function portalHierarchyV2Enabled(env: Env): boolean {
   return env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED === "true";
+}
+
+export function portalIdentityDenylistEnabled(env: Env): boolean {
+  return portalHierarchyV2Enabled(env) && env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED === "true";
+}
+
+/**
+ * Evaluates emergency identity denials from durable state on every request.
+ * Cloudflare Access assertions are intentionally not treated as a cached
+ * authorization session; enabling a denial therefore takes effect without
+ * waiting for the assertion to expire. An unexpectedly large policy set fails
+ * closed instead of silently ignoring later rows.
+ */
+async function identityDeniedForScopes(
+  env: Env,
+  identityId: string,
+  workspaceId: string,
+  scopes: ReadonlySet<string>,
+): Promise<boolean> {
+  if (!portalIdentityDenylistEnabled(env)) return false;
+  const result = await portalDb(env).prepare(`SELECT workspace_id,scope_type,scope_public_id
+    FROM portal_v2_identity_denials
+    WHERE identity_id=? AND status='active' AND revoked_at IS NULL
+      AND datetime(valid_from)<=datetime('now')
+      AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+      AND (scope_type='global' OR workspace_id=?)
+    ORDER BY id LIMIT 201`).bind(identityId, workspaceId).all<IdentityDenialRow>();
+  if (result.results.length > 200) return true;
+  return result.results.some(denial => denial.scope_type === "global" || (
+    denial.workspace_id === workspaceId && denial.scope_public_id !== null &&
+    scopes.has(`${denial.scope_type}:${denial.scope_public_id}`)
+  ));
+}
+
+async function invitationAcceptanceScopes(
+  env: Env,
+  workspaceId: string,
+  invitationId: string,
+): Promise<Set<string> | null> {
+  const workspace = await portalDb(env).prepare(`SELECT id,root_type,pa_organization_public_id,
+      pa_client_public_id,display_name
+    FROM portal_v2_workspaces WHERE id=? AND status='active'`)
+    .bind(workspaceId).first<WorkspaceRow>();
+  if (!workspace || !(await activeRootExists(env, workspace))) return null;
+  const grants = await portalDb(env).prepare(`SELECT DISTINCT scope_type,scope_public_id
+    FROM portal_v2_invitation_entitlements WHERE invitation_id=?
+    ORDER BY scope_type,scope_public_id LIMIT 51`).bind(invitationId)
+    .all<{ scope_type: PortalWorkspaceScopeType; scope_public_id: string }>();
+  if (grants.results.length === 0 || grants.results.length > 50) return null;
+  const scopes = new Set<string>();
+  for (const grant of grants.results) {
+    const resolved = await targetScopes(env, workspace, {
+      scopeType: grant.scope_type,
+      publicId: grant.scope_public_id,
+    });
+    if (!resolved) return null;
+    for (const scope of resolved) scopes.add(scope);
+  }
+  return scopes;
 }
 
 export const PORTAL_WORKSPACE_HEADER = "X-LTDS-Workspace-Id";
@@ -414,6 +479,7 @@ export async function authorizePortalWorkspaceCapability(
   if (!workspace || !(await activeRootExists(env, workspace))) return false;
   const scopes = await targetScopes(env, workspace, target);
   if (!scopes) return false;
+  if (await identityDeniedForScopes(env, identity.id, workspaceId, scopes)) return false;
 
   const result = await portalDb(env).prepare(`
     SELECT effect,scope_type,scope_public_id
@@ -616,6 +682,16 @@ export async function acceptPortalWorkspaceInvitation(
       .bind(principal.issuer, principal.subject, normalizedEmail).first<IdentityRow>();
   }
   if (!identity) return "denied";
+  // Invitations are durable, but their authority is not a snapshot. Recheck
+  // the current hierarchy and any live identity denial immediately before the
+  // acceptance transaction; stale/moved scopes never create a latent grant
+  // that could unexpectedly revive later.
+  const acceptanceScopes = await invitationAcceptanceScopes(
+    env, invitation.workspace_id, invitation.id,
+  );
+  if (!acceptanceScopes || await identityDeniedForScopes(
+    env, identity.id, invitation.workspace_id, acceptanceScopes,
+  )) return "denied";
   await portalDb(env).batch([
     portalDb(env).prepare(`UPDATE portal_v2_invitations AS invitation
       SET status='accepted',accepted_at=datetime('now'),accepted_by_identity_id=?

@@ -10,6 +10,10 @@ export interface VerifiedClientPrincipal {
 export interface ClientPortalSession {
   accountId: string;
   identityId: string;
+  /** Server-only portal-v2 context used for live authenticated delivery grants. */
+  workspaceId?: string;
+  principalIssuer?: string;
+  principalSubject?: string;
   displayName: string;
   role: "manager" | "member";
   canViewBilling: boolean;
@@ -58,13 +62,18 @@ export interface ClientProject {
 
 export interface ClientPortalFile {
   id: string;
-  key: string;
   name: string;
   size: number;
   uploadedAt: string;
   contentType: string | null;
+  kind: "image" | "video" | "audio" | "pdf" | "text" | "other";
   previewPath: string | null;
+  thumbnailPath: string | null;
   downloadPath: string;
+}
+
+export interface AuthorizedClientPortalFile extends ClientPortalFile {
+  storageKey: string;
 }
 
 export interface ClientPortalFolder {
@@ -330,7 +339,7 @@ export interface ClientPortalRepository {
   listPastDeliveries(env: Env, session: ClientPortalSession, cursor?: string | null): Promise<ClientFilePage>;
   listProjectFileLocations(env: Env, session: ClientPortalSession, projectId: string): Promise<DeliveryLocationCollection | null>;
   listPastDeliveryLocations(env: Env, session: ClientPortalSession): Promise<DeliveryLocationCollection>;
-  getAuthorizedFile(env: Env, session: ClientPortalSession, fileId: string, projectId?: string | null): Promise<ClientPortalFile | null>;
+  getAuthorizedFile(env: Env, session: ClientPortalSession, fileId: string, projectId?: string | null): Promise<AuthorizedClientPortalFile | null>;
   listDeliveries(env: Env, session: ClientPortalSession, projectId: string): Promise<ClientDelivery[]>;
   getDeliveryHandoff(env: Env, session: ClientPortalSession, projectId: string, shareId: string): Promise<{ publicId: string } | null>;
   listNotifications(env: Env, session: ClientPortalSession, cursor?: string | null): Promise<{ notifications: ClientPortalNotification[]; unreadCount: number; cursor: string | null }>;

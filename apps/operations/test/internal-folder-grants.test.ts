@@ -96,6 +96,7 @@ describe("direct authenticated client folder grants", () => {
     env = {
       DELIVERY_DB: db,
       DELIVERY_BASE_URL: "https://client.example.test",
+      DELIVERY_SESSION_SECRET: "test-client-portal-session-secret-00000001",
       OPS_DB: opsDb,
     };
   }, 30_000);
@@ -127,7 +128,7 @@ describe("direct authenticated client folder grants", () => {
     expect(await db.prepare("SELECT COUNT(*) count FROM shares").first("count")).toBe(0);
     expect(await db.prepare("SELECT status FROM client_folder_grant_notifications WHERE association_id=?").bind(created.id).first("status")).toBe("pending");
     const session = { accountId: "account-a", displayName: "Acme", identityId: "identity-a", role: "manager" as const, canViewBilling: false };
-    expect((await d1ClientPortalRepository.listPastDeliveries(env, session)).files.map(file => file.key)).toContain("Jobs/Clients/Acme/Delivery/photo.jpg");
+    expect((await d1ClientPortalRepository.listPastDeliveries(env, session)).files.map(file => file.name)).toContain("photo.jpg");
     expect(await d1ClientPortalRepository.listPastDeliveryLocations(env, session)).toEqual({
       points: [{ latitude: 44.5, longitude: -88.1, imageCount: 1 }],
       imageCount: 1,
@@ -136,7 +137,7 @@ describe("direct authenticated client folder grants", () => {
 
     await revokeClientFolderGrant(env, request, principal, "account-a", created.grantId);
     expect(mocks.requirePermission.mock.calls.at(-1)?.slice(1)).toEqual([principal, "delivery.share.revoke", { divisionId: "division-a" }, true]);
-    expect((await d1ClientPortalRepository.listPastDeliveries(env, session)).files.map(file => file.key)).not.toContain("Jobs/Clients/Acme/Delivery/photo.jpg");
+    expect((await d1ClientPortalRepository.listPastDeliveries(env, session)).files.map(file => file.name)).not.toContain("photo.jpg");
     expect(await d1ClientPortalRepository.listPastDeliveryLocations(env, session)).toEqual({ points: [], imageCount: 0, truncated: false });
     await db.prepare("UPDATE client_folder_grant_notifications SET next_attempt_at=datetime('now','-1 minute') WHERE association_id=?").bind(created.id).run();
     await processClientFolderGrantNotifications(env);

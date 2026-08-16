@@ -209,6 +209,92 @@ describe("verified Project Alpha quote linkage", () => {
     expect(JSON.stringify(payload)).not.toMatch(/Q-0042|125000|USD|"quote_id":42/);
   });
 
+  it("keeps the request queue available while the additive v2 table migration is pending", async () => {
+    const state: DbState = {
+      batches: [],
+      all(kind, sql) {
+        if (kind !== "delivery") return [];
+        if (sql.includes("client_service_request_services"))
+          throw new Error("D1_ERROR: no such table: client_service_request_services: SQLITE_ERROR");
+        if (sql.includes("0 uses_catalog_v2"))
+          return [{ id: "request-legacy", title: "Legacy request", status: "submitted", uses_catalog_v2: 0 }];
+        return [];
+      },
+    };
+
+    const response = await worker.fetch(
+      new Request("https://ops.example/api/client-service-requests"),
+      environment(state) as any,
+      executionCtx,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      requests: [{ id: "request-legacy", title: "Legacy request", status: "submitted" }],
+    });
+  });
+
+  it("reports a stable schema-readiness error when the core request schema is unavailable", async () => {
+    const state: DbState = {
+      batches: [],
+      all(kind) {
+        if (kind === "delivery")
+          throw new Error("D1_ERROR: no such table: client_service_requests: SQLITE_ERROR");
+        return [];
+      },
+    };
+    const response = await worker.fetch(
+      new Request("https://ops.example/api/client-service-requests"),
+      environment(state) as any,
+      executionCtx,
+    );
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({
+      error: "Client request data is temporarily unavailable while its database update finishes.",
+      code: "CLIENT_REQUEST_SCHEMA_OUTDATED",
+    });
+  });
+
+  it("opens a legacy request without optional catalog or staff-area tables", async () => {
+    const state: DbState = {
+      batches: [],
+      first(kind, sql) {
+        if (kind !== "delivery" || !sql.includes("FROM client_service_requests r JOIN client_accounts")) return null;
+        if (sql.includes("quote.scope_stale_at"))
+          throw new Error("D1_ERROR: no such column: quote.scope_stale_at: SQLITE_ERROR");
+        return {
+          id: "request-legacy",
+          account_id: "account-a",
+          title: "Legacy request",
+          status: "submitted",
+          area_geojson: null,
+          poi_points_json: "[]",
+          account_name: "Acme Surveying",
+        };
+      },
+      all(kind, sql) {
+        if (kind !== "delivery") return [];
+        if (sql.includes("client_service_request_area_revisions"))
+          throw new Error("D1_ERROR: no such table: client_service_request_area_revisions: SQLITE_ERROR");
+        if (sql.includes("client_service_request_services"))
+          throw new Error("D1_ERROR: no such table: client_service_request_services: SQLITE_ERROR");
+        return [];
+      },
+    };
+
+    const response = await worker.fetch(
+      new Request("https://ops.example/api/client-service-requests/request-legacy"),
+      environment(state) as any,
+      executionCtx,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      request: { id: "request-legacy", title: "Legacy request", status: "submitted" },
+      services: [],
+      areaRevisions: [],
+      effectiveWorkArea: { revisionNumber: 0, areaGeoJson: null, poiPointsJson: "[]" },
+    });
+  });
+
   it("verifies exact client/project ownership before atomically linking an approved quote", async () => {
     const state: DbState = { batches: [] };
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {

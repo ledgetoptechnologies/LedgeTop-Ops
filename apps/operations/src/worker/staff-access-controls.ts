@@ -2,6 +2,7 @@ import type { Permission } from "@ltds/shared";
 
 export const STAFF_ACCESS_CONTROLS = {
   allOperations: ["operations.view_all"],
+  sopAssignment: ["sops.assign"],
   deliveryBrowse: ["delivery.browse"],
   deliveryLinkCreate: ["delivery.share.create"],
   deliveryLinkRevoke: ["delivery.share.revoke"],

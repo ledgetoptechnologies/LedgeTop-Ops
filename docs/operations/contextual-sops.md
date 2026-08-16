@@ -25,10 +25,13 @@ Task hides the entire context without deleting its LTDS-local link history.
 ## Authorization
 
 - Project reads require visible `projects.view` scope plus `sops.view` for that
-  resource context. Project changes additionally require scoped
-  `operations.manage`.
+  resource context. Project changes additionally require scoped `sops.assign`.
 - Task reads require visible `tasks.view` scope plus `sops.view` for that
-  resource context. Task changes additionally require scoped `tasks.update`.
+  resource context. Task changes additionally require scoped `sops.assign`.
+- `sops.assign` is deliberately separate from `sops.view`, `sops.manage`,
+  `operations.manage`, and `tasks.update`. It permits only link-set changes on
+  work the caller can already see. An effective deny wins at request time and
+  is checked again in the atomic replacement batch.
 - A denied or unrelated target returns not found before link data is read.
 - Exact historical/archived revision URLs carry the Project/Task context and
   reauthorize both the active link row and current target visibility on every

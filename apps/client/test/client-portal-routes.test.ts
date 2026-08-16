@@ -426,7 +426,7 @@ describe("client portal full Worker isolation", () => {
       executionContext,
     );
     expect(publicApi.status).toBe(401);
-    expect(await publicApi.json()).toEqual({ error: "Delivery session expired" });
+    expect(await publicApi.json()).toEqual({ error: "Delivery session expired", code: "DELIVERY_SESSION_EXPIRED" });
 
     const health = await deliveryWorker.fetch(
       new Request("https://delivery.example/health"),
@@ -517,6 +517,7 @@ describe("client portal activation hardening", () => {
       repository: repository({ listProjectFiles }),
     }).request("/projects/project-a/files?folder=pf1_folder&cursor=pc1_cursor", {}, env("true"));
     expect(response.status).toBe(200);
+    expect(response.headers.get("Server-Timing")).toMatch(/^auth;dur=\d+\.\d, list;dur=\d+\.\d$/);
     expect(listProjectFiles).toHaveBeenCalledWith(expect.anything(), session, "project-a", "pc1_cursor", "pf1_folder");
   });
 

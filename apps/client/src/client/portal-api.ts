@@ -39,12 +39,13 @@ export interface PortalProject {
 
 export interface PortalFile {
   id: string;
-  key: string;
   name: string;
   size: number;
   uploadedAt: string;
   contentType: string | null;
+  kind: "image" | "video" | "audio" | "pdf" | "text" | "other";
   previewPath: string | null;
+  thumbnailPath: string | null;
   downloadPath: string;
 }
 
@@ -265,9 +266,10 @@ export async function loadPortalProjectFolderFiles(
 export async function loadPortalPastDeliveries(
   cursor: string | null = null,
   request: PortalRequest = requestJson,
+  signal?: AbortSignal,
 ): Promise<PortalFilePage> {
   const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : "";
-  return request<PortalFilePage>(`/api/client/past-deliveries${query}`);
+  return request<PortalFilePage>(`/api/client/past-deliveries${query}`, signal ? { signal } : undefined);
 }
 
 export async function loadPortalProjectFileLocations(

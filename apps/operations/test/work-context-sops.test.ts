@@ -137,6 +137,7 @@ function setup(options: { withLinkSchema?: boolean } = {}) {
   database.exec(readFileSync(new URL("../migrations/0020_internal_sop_library.sql", import.meta.url), "utf8"));
   if (withLinkSchema)
     database.exec(readFileSync(new URL("../migrations/0023_project_task_sop_links.sql", import.meta.url), "utf8"));
+  database.exec(readFileSync(new URL("../migrations/0025_sop_assignment_permission.sql", import.meta.url), "utf8"));
   const addStaff = database.prepare("INSERT INTO staff_users VALUES (?,?,?,?)");
   for (const principal of Object.values(principals))
     addStaff.run(principal.id, principal.email, principal.displayName, principal.projectAlphaUserId);
@@ -156,7 +157,7 @@ function setup(options: { withLinkSchema?: boolean } = {}) {
   `);
   const grant = database.prepare(`INSERT INTO staff_permission_overrides
     (id,staff_id,permission_key,effect,scope,division_id) VALUES (?,?,?,'allow','global',NULL)`);
-  for (const permission of ["projects.view", "tasks.view", "sops.view", "operations.manage", "tasks.update"])
+  for (const permission of ["projects.view", "tasks.view", "sops.view", "sops.assign", "operations.manage", "tasks.update"])
     grant.run(`admin-${permission}`, principals.admin.id, permission);
   for (const permission of ["projects.view", "tasks.view", "sops.view"])
     grant.run(`pilot-${permission}`, principals.pilot.id, permission);
@@ -218,7 +219,7 @@ describe("Project and Task direct SOP links", () => {
     ) => {
       if (["projects.view", "tasks.view"].includes(permission)) return;
       if (permission === "sops.view" && principal.id !== principals.noSop.id) return;
-      if (["operations.manage", "tasks.update"].includes(permission) && principal.id === principals.admin.id) return;
+      if (permission === "sops.assign" && principal.id === principals.admin.id) return;
       throw new HTTPException(403, { message: `Missing permission: ${permission}` });
     });
     mocks.loadGrants.mockReset().mockResolvedValue([]);
@@ -228,7 +229,7 @@ describe("Project and Task direct SOP links", () => {
       permission: string,
     ) => permission === "sops.view"
       ? principal.id !== principals.noSop.id
-      : principal.id === principals.admin.id);
+      : permission === "sops.assign" && principal.id === principals.admin.id);
   });
 
   it("degrades list decoration and returns a stable capability response before migration 0023", async () => {
@@ -383,7 +384,20 @@ describe("Project and Task direct SOP links", () => {
       "pilot",
     ), state.env);
     expect(await pinned.json()).toMatchObject({
-      sops: [{ revisionId: revisionOne, revisionNumber: 1, archived: false }],
+      sops: [{ revisionId: revisionOne, revisionNumber: 1, archived: false, publicationState: "superseded" }],
+    });
+    const preservedAfterRepublish = await state.app.fetch(request(
+      "/api/work-contexts/project/project-1/sops",
+      "admin",
+      {
+        method: "PUT",
+        body: JSON.stringify({ expectedVersion: 1, revisionIds: [revisionOne] }),
+      },
+    ), state.env);
+    expect(preservedAfterRepublish.status).toBe(200);
+    expect(await preservedAfterRepublish.json()).toMatchObject({
+      version: 2,
+      sops: [{ revisionId: revisionOne, publicationState: "superseded" }],
     });
     const oldOnTask = await state.app.fetch(request("/api/work-contexts/task/task-1/sops", "admin", {
       method: "PUT",
@@ -401,7 +415,20 @@ describe("Project and Task direct SOP links", () => {
       "pilot",
     ), state.env);
     expect(await retained.json()).toMatchObject({
-      sops: [{ revisionId: revisionOne, archived: true }],
+      sops: [{ revisionId: revisionOne, archived: true, publicationState: "archived" }],
+    });
+    const preservedAfterArchive = await state.app.fetch(request(
+      "/api/work-contexts/project/project-1/sops",
+      "admin",
+      {
+        method: "PUT",
+        body: JSON.stringify({ expectedVersion: 2, revisionIds: [revisionOne] }),
+      },
+    ), state.env);
+    expect(preservedAfterArchive.status).toBe(200);
+    expect(await preservedAfterArchive.json()).toMatchObject({
+      version: 3,
+      sops: [{ revisionId: revisionOne, publicationState: "archived" }],
     });
     await expect(readAuthorizedWorkContextSopRevision(
       state.env,
@@ -411,6 +438,17 @@ describe("Project and Task direct SOP links", () => {
       "lidar-capture",
       revisionOne,
     )).resolves.toMatchObject({ status: "archived", revision_id: revisionOne });
+
+    state.database.prepare(`UPDATE sop_documents
+      SET status='draft',draft_revision_id=?,published_revision_id=NULL,archived_at=NULL
+      WHERE id='sop-lidar'`).run(revisionTwo);
+    const unpublished = await state.app.fetch(request(
+      "/api/work-contexts/project/project-1/sops",
+      "pilot",
+    ), state.env);
+    expect(await unpublished.json()).toMatchObject({
+      sops: [{ revisionId: revisionOne, publicationState: "unpublished" }],
+    });
   });
 
   it("denies a pinned revision when assignment or SOP access is revoked immediately before its authoritative read", async () => {
@@ -455,9 +493,9 @@ describe("Project and Task direct SOP links", () => {
   it("treats assignment or ACL revocation immediately before the replacement batch as denial", async () => {
     const aclState = setup();
     aclState.env.OPS_DB.setBeforeBatch(() => {
-      aclState.database.prepare(
-        "DELETE FROM staff_permission_overrides WHERE staff_id='staff-admin' AND permission_key='sops.view'",
-      ).run();
+      aclState.database.prepare(`INSERT INTO staff_permission_overrides
+        (id,staff_id,permission_key,effect,scope,division_id)
+        VALUES ('admin-assign-deny','staff-admin','sops.assign','deny','global',NULL)`).run();
     });
     const aclDenied = await aclState.app.fetch(request("/api/work-contexts/project/project-1/sops", "admin", {
       method: "PUT",
@@ -491,6 +529,45 @@ describe("Project and Task direct SOP links", () => {
       .toEqual({ count: 0 });
     expect(assignmentState.database.prepare("SELECT COUNT(*) count FROM work_context_sop_mutation_guards").get())
       .toEqual({ count: 0 });
+  });
+
+  it("allows narrow SOP assignment without granting project, task, or SOP authoring permissions", async () => {
+    const state = setup();
+    state.database.prepare(`INSERT INTO staff_permission_overrides
+      (id,staff_id,permission_key,effect,scope,division_id)
+      VALUES ('pilot-sops-assign','staff-pilot','sops.assign','allow','global',NULL)`).run();
+    mocks.requirePermission.mockImplementation(async (
+      _env: unknown,
+      principal: { id: string },
+      permission: string,
+    ) => {
+      if (["projects.view", "tasks.view", "sops.view"].includes(permission)) return;
+      if (permission === "sops.assign" && new Set<string>([principals.admin.id, principals.pilot.id]).has(principal.id)) return;
+      throw new HTTPException(403, { message: `Missing permission: ${permission}` });
+    });
+    mocks.evaluatePermission.mockImplementation((
+      _grants: unknown,
+      principal: { id: string },
+      permission: string,
+    ) => permission === "sops.view"
+      ? principal.id !== principals.noSop.id
+      : permission === "sops.assign" && new Set<string>([principals.admin.id, principals.pilot.id]).has(principal.id));
+
+    const project = await state.app.fetch(request("/api/work-contexts/project/project-1/sops", "pilot", {
+      method: "PUT",
+      body: JSON.stringify({ expectedVersion: 0, revisionIds: [revisionOne] }),
+    }), state.env);
+    expect(project.status).toBe(200);
+    expect(await project.json()).toMatchObject({ canEdit: true, version: 1 });
+
+    const task = await state.app.fetch(request("/api/work-contexts/task/task-1/sops", "pilot", {
+      method: "PUT",
+      body: JSON.stringify({ expectedVersion: 0, revisionIds: [revisionOne] }),
+    }), state.env);
+    expect(task.status).toBe(200);
+    expect(state.database.prepare(`SELECT permission_key FROM staff_permission_overrides
+      WHERE staff_id='staff-pilot' AND permission_key IN ('operations.manage','tasks.update','sops.manage')`).all())
+      .toEqual([]);
   });
 
   it("requires both work visibility and SOP permission and decorates lists with summaries only", async () => {

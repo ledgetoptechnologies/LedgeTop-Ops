@@ -12,7 +12,7 @@ const operation = {
 function brief(canEdit: boolean, version = 1, items = [
   { id: "scope-map", category: "Mapping mission", title: "Orthomosaic", instructions: "Fly 300 ft AGL with 80/75 overlap.", sortOrder: 0, presetRef: null },
   { id: "scope-photo", category: "Marketing photos", title: "Exterior set", instructions: "Capture front, side, and context views.", sortOrder: 1, presetRef: null },
-]) {
+], canAssignSops = canEdit) {
   return {
     operation: {
       id: operation.id,
@@ -56,6 +56,7 @@ function brief(canEdit: boolean, version = 1, items = [
         author: { id: "staff-a", displayName: "Staff Planner" },
         publishedAt: "2026-08-01T12:00:00.000Z",
         linkedAt: "2026-08-02T12:00:00.000Z",
+        publicationState: "current" as const,
       }],
       createdAt: "2026-08-02T12:00:00.000Z",
       updatedAt: "2026-08-02T12:00:00.000Z",
@@ -64,11 +65,12 @@ function brief(canEdit: boolean, version = 1, items = [
     history: [{ version, changeKind: "scope_saved", author: { id: "staff-a", displayName: "Staff Planner", email: "staff@example.com" }, createdAt: "2026-08-02T12:00:00.000Z" }],
     canEdit,
     canViewSops: true,
+    canAssignSops,
   };
 }
 
-async function mock(page: Page, canEdit: boolean) {
-  let current = brief(canEdit);
+async function mock(page: Page, canEdit: boolean, canAssignSops = canEdit) {
+  let current = brief(canEdit, 1, undefined, canAssignSops);
   await page.route("**/api/**", async route => {
     const incoming = route.request();
     const path = new URL(incoming.url()).pathname;
@@ -81,7 +83,7 @@ async function mock(page: Page, canEdit: boolean) {
           status: "Active",
           profileType: canEdit ? "Administrator" : "Employee",
           isAdministrator: canEdit,
-          permissions: canEdit ? ["operations.view", "operations.manage", "delivery.browse", "sops.view"] : ["operations.view", "sops.view"],
+          permissions: ["operations.view", "sops.view", ...(canEdit ? ["operations.manage", "delivery.browse"] : []), ...(canAssignSops ? ["sops.assign"] : [])],
           divisions: [],
         },
         csrfToken: "csrf-test",
@@ -107,7 +109,7 @@ async function mock(page: Page, canEdit: boolean) {
       expect(payload.expectedVersion).toBe(1);
       expect(payload.items).toHaveLength(3);
       expect(incoming.headers()["x-csrf-token"]).toBe("csrf-test");
-      current = brief(true, 2, payload.items.map((item, sortOrder) => ({ ...item, sortOrder })));
+      current = brief(true, 2, payload.items.map((item, sortOrder) => ({ ...item, sortOrder })), canAssignSops);
       await route.fulfill({ json: current });
     } else {
       await route.fulfill({ status: 404, json: { error: "Not found" } });
@@ -117,7 +119,7 @@ async function mock(page: Page, canEdit: boolean) {
     advance(version: number, instructions: string) {
       current = brief(canEdit, version, current.brief.items.map((item, index) =>
         index === 0 ? { ...item, instructions } : item,
-      ));
+      ), canAssignSops);
     },
   };
 }
@@ -177,6 +179,17 @@ test("assigned pilot sees the current brief without edit or delivery-browse cont
     const box = await quickLink.boundingBox();
     expect(box?.height).toBeGreaterThanOrEqual(44);
   }
+});
+
+test("sops.assign exposes only the SOP pin editor, not the broader job-brief editor", async ({ page }) => {
+  await mock(page, false, true);
+  await page.goto("/operations?brief=operation-1");
+
+  await expect(page.getByRole("group", { name: "Published SOP revisions available to this job" })).toBeVisible();
+  await expect(page.getByRole("checkbox", { name: /Mapping Flight SOP.*Revision 3/ })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Save SOP links" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Add scope item" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Save brief" })).toHaveCount(0);
 });
 
 test("background refresh preserves a dirty draft and explicit refresh adopts the newer version", async ({ page }) => {

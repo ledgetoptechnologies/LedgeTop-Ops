@@ -33,6 +33,7 @@ export interface WorkContextSopSummary {
   publishedAt: string;
   linkedAt: string;
   archived: boolean;
+  publicationState: "current" | "superseded" | "archived" | "unpublished";
   href: string;
 }
 
@@ -79,6 +80,7 @@ interface LinkRow {
   revision_id: string | null;
   linked_at: string | null;
   document_status: "draft" | "published" | "archived" | null;
+  published_revision_id: string | null;
   revision_number: number | null;
   slug: string | null;
   title: string | null;
@@ -106,10 +108,6 @@ export async function workContextSopsAvailable(env: Env): Promise<boolean> {
 
 function viewPermission(kind: WorkContextKind): Permission {
   return kind === "project" ? "projects.view" : "tasks.view";
-}
-
-function managePermission(kind: WorkContextKind): Permission {
-  return kind === "project" ? "operations.manage" : "tasks.update";
 }
 
 function contextResource(row: WorkContextRow): ResourceContext {
@@ -301,6 +299,13 @@ function linkSummary(kind: WorkContextKind, row: LinkRow): WorkContextSopSummary
     publishedAt: row.published_at,
     linkedAt: row.linked_at,
     archived: row.document_status === "archived",
+    publicationState: row.document_status === "archived"
+      ? "archived"
+      : row.document_status !== "published" || !row.published_revision_id
+        ? "unpublished"
+        : row.published_revision_id === row.revision_id
+          ? "current"
+          : "superseded",
     href: `/sops/${encodeURIComponent(row.slug)}/revisions/${encodeURIComponent(row.revision_id)}?contextKind=${kind}&contextId=${encodeURIComponent(row.context_id)}`,
   };
 }
@@ -316,7 +321,7 @@ async function linkRows(
     const chunk = ids.slice(offset, offset + 40);
     const rows = await env.OPS_DB.withSession("first-primary").prepare(
       `SELECT sets.context_id,sets.version,sets.updated_at,l.sop_id,l.revision_id,l.linked_at,
-        d.status document_status,r.revision_number,d.slug,r.title,r.purpose,r.published_at
+        d.status document_status,d.published_revision_id,r.revision_number,d.slug,r.title,r.purpose,r.published_at
        FROM work_context_sop_link_sets sets
        LEFT JOIN work_context_sop_links l
          ON l.context_kind=sets.context_kind AND l.context_id=sets.context_id
@@ -424,7 +429,7 @@ export async function decorateWorkContextsWithSops<T extends { id: string }>(
       canManageSops: Boolean(canView && context && evaluatePermission(
         grants,
         principal,
-        managePermission(kind),
+        "sops.assign",
         contextManageResource(context),
       )),
     };
@@ -452,7 +457,7 @@ async function state(
     sops: rows.map(row => linkSummary(kind, row)).filter((value): value is WorkContextSopSummary => value !== null),
     canEdit: await (async () => {
       try {
-        await requirePermission(env, principal, managePermission(kind), contextManageResource(context));
+        await requirePermission(env, principal, "sops.assign", contextManageResource(context));
         return true;
       } catch (error) {
         if (error instanceof HTTPException && error.status === 403) return false;
@@ -526,14 +531,20 @@ async function replaceLinks(
   const principal = c.get("principal");
   const resource = contextResource(context);
   await requirePermission(c.env, principal, "sops.view", resource);
-  await requirePermission(c.env, principal, managePermission(kind), contextManageResource(context));
+  await requirePermission(c.env, principal, "sops.assign", contextManageResource(context));
 
+  const currentLinks = await linkRows(c.env, kind, [context.id]);
   const selected = input.revisionIds.length
     ? await c.env.OPS_DB.withSession("first-primary").prepare(
       `SELECT d.id sop_id,r.id revision_id
-       FROM sop_documents d JOIN sop_revisions r ON r.id=d.published_revision_id
-       WHERE d.status='published' AND r.id IN (${input.revisionIds.map(() => "?").join(",")})`,
-    ).bind(...input.revisionIds).all<{ sop_id: string; revision_id: string }>()
+       FROM sop_documents d JOIN sop_revisions r ON r.sop_id=d.id
+       LEFT JOIN work_context_sop_links existing
+         ON existing.context_kind=? AND existing.context_id=?
+           AND existing.sop_id=d.id AND existing.revision_id=r.id
+       WHERE r.id IN (${input.revisionIds.map(() => "?").join(",")})
+         AND ((d.status='published' AND d.published_revision_id=r.id)
+           OR existing.revision_id IS NOT NULL)`,
+    ).bind(kind, context.id, ...input.revisionIds).all<{ sop_id: string; revision_id: string }>()
     : { results: [] as Array<{ sop_id: string; revision_id: string }> };
   if (selected.results.length !== input.revisionIds.length)
     throw new HTTPException(409, {
@@ -549,7 +560,7 @@ async function replaceLinks(
        (mutation_id,context_kind,context_id,staff_id)
      SELECT ?,?,?,? FROM context
      WHERE ${authorization.allowed}
-       AND (${scopedPermissionSql(managePermission(kind), "manage_assigned")})`,
+       AND (${scopedPermissionSql("sops.assign", "manage_assigned")})`,
   ).bind(principal.id, context.id, mutationId, kind, context.id, principal.id);
   const mutation = input.expectedVersion === 0
     ? c.env.OPS_DB.prepare(
@@ -570,18 +581,24 @@ async function replaceLinks(
        )`,
     ).bind(nextVersion, mutationId, principal.id, kind, context.id, input.expectedVersion,
       mutationId, kind, context.id, principal.id);
+  const retainedRevisionIds = selected.results.map(row => row.revision_id);
+  const currentRevisionIds = new Set(currentLinks
+    .filter(row => row.revision_id)
+    .map(row => row.revision_id as string));
   const statements: D1PreparedStatement[] = [
     guard,
     mutation,
     c.env.OPS_DB.prepare(
       `DELETE FROM work_context_sop_links
-       WHERE context_kind=? AND context_id=? AND EXISTS (
-         SELECT 1 FROM work_context_sop_link_sets sets
-         WHERE sets.context_kind=? AND sets.context_id=? AND sets.version=? AND sets.mutation_id=?
-       )`,
-    ).bind(kind, context.id, kind, context.id, nextVersion, mutationId),
+       WHERE context_kind=? AND context_id=?${retainedRevisionIds.length
+         ? ` AND revision_id NOT IN (${retainedRevisionIds.map(() => "?").join(",")})`
+         : ""} AND EXISTS (
+          SELECT 1 FROM work_context_sop_link_sets sets
+          WHERE sets.context_kind=? AND sets.context_id=? AND sets.version=? AND sets.mutation_id=?
+        )`,
+    ).bind(kind, context.id, ...retainedRevisionIds, kind, context.id, nextVersion, mutationId),
   ];
-  for (const row of selected.results) {
+  for (const row of selected.results.filter(candidate => !currentRevisionIds.has(candidate.revision_id))) {
     statements.push(c.env.OPS_DB.prepare(
       `INSERT INTO work_context_sop_links
         (context_kind,context_id,sop_id,revision_id,linked_by)

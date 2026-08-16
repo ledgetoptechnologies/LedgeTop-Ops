@@ -64,15 +64,15 @@ export async function createSessionCookie(secret: string, keyId: string, shareId
 }
 
 export async function verifySessionCookie(secret: string, expectedKeyId: string, value: string | null): Promise<{ shareId: string; shareVersion: number; expiresAt: number }> {
-  if (!value) throw new HTTPException(401, { message: "Delivery session required" });
+  if (!value) throw new HTTPException(401, { message: "Delivery session required", cause: { code: "DELIVERY_SESSION_REQUIRED" } });
   const [keyId, shareId, versionRaw, expiresRaw, signature] = value.split(".");
   const shareVersion = Number(versionRaw);
   const expiresAt = Number(expiresRaw);
   if (!keyId || keyId !== expectedKeyId || !shareId || !signature || !Number.isSafeInteger(shareVersion) || shareVersion < 1 || !Number.isSafeInteger(expiresAt) || expiresAt <= Date.now()) {
-    throw new HTTPException(401, { message: "Delivery session expired" });
+    throw new HTTPException(401, { message: "Delivery session expired", cause: { code: "DELIVERY_SESSION_EXPIRED" } });
   }
   const expected = await hmac(secret, `${keyId}:${shareId}:${shareVersion}:${expiresAt}`);
-  if (!constantTimeEqual(expected, signature)) throw new HTTPException(401, { message: "Invalid delivery session" });
+  if (!constantTimeEqual(expected, signature)) throw new HTTPException(401, { message: "Invalid delivery session", cause: { code: "DELIVERY_SESSION_INVALID" } });
   return { shareId, shareVersion, expiresAt };
 }
 
@@ -84,7 +84,7 @@ export async function verifyRotatingSessionCookie(
   const keyId = value?.split(".", 1)[0];
   if (keyId === current.keyId) return verifySessionCookie(current.secret, current.keyId, value);
   if (previous?.keyId && previous.secret && keyId === previous.keyId) return verifySessionCookie(previous.secret, previous.keyId, value);
-  throw new HTTPException(401, { message: "Delivery session expired" });
+  throw new HTTPException(401, { message: "Delivery session expired", cause: { code: "DELIVERY_SESSION_EXPIRED" } });
 }
 
 function hex(bytes: Uint8Array): string {
