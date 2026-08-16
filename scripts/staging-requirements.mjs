@@ -106,6 +106,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0137_authenticated_delivery_grants.sql",
     "0138_viewer_model_associations.sql",
     "0139_thumbnail_claim_queue_index.sql",
+    "0140_truenas_thumbnail_provenance.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",

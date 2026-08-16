@@ -7,6 +7,7 @@ const migration = readFileSync(new URL("../../client/migrations/0106_image_thumb
 const cleanupMigration = readFileSync(new URL("../../client/migrations/0107_thumbnail_cleanup_jobs.sql", import.meta.url), "utf8");
 const backfillMigration = readFileSync(new URL("../../client/migrations/0108_thumbnail_backfill_runs.sql", import.meta.url), "utf8");
 const claimIndexMigration = readFileSync(new URL("../../client/migrations/0139_thumbnail_claim_queue_index.sql", import.meta.url), "utf8");
+const trueNasProvenanceMigration = readFileSync(new URL("../../client/migrations/0140_truenas_thumbnail_provenance.sql", import.meta.url), "utf8");
 const clientConfig = JSON.parse(readFileSync(new URL("../../client/wrangler.jsonc", import.meta.url), "utf8"));
 const crud = readFileSync(new URL("../src/worker/r2-crud.ts", import.meta.url), "utf8");
 const sourceDelete = readFileSync(new URL("../src/worker/source-delete.ts", import.meta.url), "utf8");
@@ -64,6 +65,30 @@ describe("thumbnail deployment contract", () => {
     database.exec(claimIndexMigration);
     const indexes = database.prepare("PRAGMA index_list('image_thumbnail_jobs')").all() as Array<{ name: string; partial: number }>;
     expect(indexes).toContainEqual(expect.objectContaining({ name: "idx_image_thumbnail_jobs_pending_queue", partial: 1 }));
+    database.close();
+  });
+
+  it("repairs only exact ready video rows mislabeled as Container output", () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec(`CREATE TABLE image_thumbnail_jobs(
+      source_key TEXT PRIMARY KEY, source_etag TEXT NOT NULL, source_size INTEGER NOT NULL,
+      status TEXT NOT NULL, thumbnail_provider TEXT);
+      CREATE TABLE file_index(
+        r2_key TEXT PRIMARY KEY, etag TEXT NOT NULL, size INTEGER NOT NULL, media_kind TEXT NOT NULL);
+      INSERT INTO image_thumbnail_jobs VALUES
+        ('video.mov','video-etag',100,'ready','cloudflare-container'),
+        ('image.jpg','image-etag',200,'ready','cloudflare-container'),
+        ('pending.mov','pending-etag',300,'pending','cloudflare-container');
+      INSERT INTO file_index VALUES
+        ('video.mov','"video-etag"',100,'video'),
+        ('image.jpg','image-etag',200,'image'),
+        ('pending.mov','pending-etag',300,'video');`);
+    database.exec(trueNasProvenanceMigration);
+    expect(database.prepare("SELECT source_key,thumbnail_provider FROM image_thumbnail_jobs ORDER BY source_key").all()).toEqual([
+      { source_key: "image.jpg", thumbnail_provider: "cloudflare-container" },
+      { source_key: "pending.mov", thumbnail_provider: "cloudflare-container" },
+      { source_key: "video.mov", thumbnail_provider: "ltds-truenas" },
+    ]);
     database.close();
   });
 
