@@ -1,8 +1,8 @@
 # 3D processing and delivery release runbook
 
-Status: **the immutable Viewer registry image and Operations diagnostics
-follow-up are frozen for final contract verification; live staging evidence
-and activation remain pending**. Every
+Status: **source candidates and the immutable Viewer registry image are
+frozen and independently signed off; live staging evidence and activation
+remain pending**. Every
 Viewer, Operations, Client, processing, public-share, and Project Alpha portal
 feature gate remains off until the corresponding live evidence below is
 captured.
@@ -26,11 +26,11 @@ captured.
   real isolated MySQL scope-lock regression a mandatory CI gate.
 
 The pinned source, manifest digest, migrations, fixtures, and activation policy
-remain under final cross-repository verification after the bounded Operations
-diagnostics follow-up. The corresponding constant in
-`scripts/staging-requirements.mjs` remains
-`RELEASE_CONTRACT_FINALIZED=false` until that verification is complete. This
-does not approve deployment, migrations, or any feature flag.
+passed independent cross-repository verification, so the corresponding
+constant in `scripts/staging-requirements.mjs` is
+`RELEASE_CONTRACT_FINALIZED=true`. This freezes the candidate contract only;
+it does not approve deployment, migrations, or any feature flag. Reset it to
+`false` before changing a pinned source or deployment artifact.
 
 The Viewer/Ops signed-processing corpus has SHA-256
 `13ab12919e624be6a048c058774ccff2031f865855e64ab3b726e9b31cffab82`.
