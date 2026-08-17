@@ -1,6 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 
-async function mockDisabledViewer(page: Page, permissions: string[]) {
+async function mockDisabledViewer(
+  page: Page,
+  permissions: string[],
+  serviceAuthStatus: "connected" | "authentication_failed" = "connected",
+) {
   let preflightRequests = 0;
   await page.route("**/api/**", async route => {
     const request = route.request();
@@ -29,9 +33,10 @@ async function mockDisabledViewer(page: Page, permissions: string[]) {
         publicReadyReachable: true,
         publicReady: false,
         readinessIssueCount: 1,
-        serviceAuthReachable: true,
-        modelCount: 4,
-        readyModelCount: 3,
+        serviceAuthReachable: serviceAuthStatus === "connected",
+        serviceAuthStatus,
+        modelCount: serviceAuthStatus === "connected" ? 4 : null,
+        readyModelCount: serviceAuthStatus === "connected" ? 3 : null,
       } });
     }
     return route.fulfill({ status: 404, json: { error: "Not found" } });
@@ -56,6 +61,18 @@ test("viewer managers can test a disabled Viewer connection without enabling it"
   await expect(result).toContainText("Signed service authentication: connected");
   await expect(result).toContainText("Catalog: 3 ready of 4 models");
   expect(preflightRequests()).toBe(1);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+});
+
+test("viewer managers receive bounded service-auth remediation without secret values", async ({ page }) => {
+  await mockDisabledViewer(page, ["viewer.view", "viewer.manage"], "authentication_failed");
+  await page.goto("/operations/processing");
+  await page.getByRole("button", { name: "Test Viewer connection" }).click();
+  const result = page.getByRole("status");
+  await expect(result).toContainText("Signed service authentication: failed");
+  await expect(result).toContainText("SERVICE_AUTH_SECRET exactly matches Operations VIEWER_SERVICE_HMAC_SECRET");
+  await expect(result).toContainText("proxy preserves X-LTDS-* headers from its trusted forwarder");
+  await expect(result).not.toContainText("viewer-shared-secret");
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
 });
 

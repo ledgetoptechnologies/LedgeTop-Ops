@@ -25,7 +25,7 @@ function healthyFetcher(overrides = {}) {
     if (path === "/api/viewer/connection-preflight") return json({
       integrationEnabled: false, configured: true, publicHealthReachable: true, publicHealthOk: true,
       publicReadyReachable: true, publicReady: true, readinessIssueCount: 0,
-      serviceAuthReachable: true, modelCount: 2, readyModelCount: 1,
+      serviceAuthReachable: true, serviceAuthStatus: "connected", modelCount: 2, readyModelCount: 1,
     }, { "Cache-Control": "no-store" });
     throw new Error("unexpected request");
   };
@@ -76,5 +76,28 @@ test("fails closed on redirects, identity drift, cache drift, oversize, and DTO 
     const { fetcher, calls } = healthyFetcher({ [path]: factory });
     await assert.rejects(runReadOnlyStagingAcceptance({ accessCookie: "x".repeat(32) }, { ...dependencies, fetcher }), { code });
     if (name === "redirect") assert.equal(calls.filter(call => call.url.includes("evil.test")).length, 0);
+  });
+});
+
+test("requires an exact and internally consistent service-auth status", async t => {
+  const base = {
+    integrationEnabled: false, configured: true, publicHealthReachable: true, publicHealthOk: true,
+    publicReadyReachable: true, publicReady: true, readinessIssueCount: 0,
+    serviceAuthReachable: true, serviceAuthStatus: "connected", modelCount: 2, readyModelCount: 1,
+  };
+  const cases = [
+    ["missing", ({ serviceAuthStatus: _removed, ...payload }) => payload],
+    ["unknown", payload => ({ ...payload, serviceAuthStatus: "secret_mismatch" })],
+    ["reachable mismatch", payload => ({ ...payload, serviceAuthReachable: false })],
+    ["configured mismatch", payload => ({ ...payload, configured: false, serviceAuthReachable: false,
+      modelCount: null, readyModelCount: null })],
+    ["failed counts", payload => ({ ...payload, serviceAuthStatus: "authentication_failed", serviceAuthReachable: false })],
+    ["impossible counts", payload => ({ ...payload, readyModelCount: 3 })],
+  ];
+  for (const [name, mutate] of cases) await t.test(name, async () => {
+    const { fetcher } = healthyFetcher({ "/api/viewer/connection-preflight": () =>
+      json(mutate(base), { "Cache-Control": "no-store" }) });
+    await assert.rejects(runReadOnlyStagingAcceptance({ accessCookie: "x".repeat(32) },
+      { ...dependencies, fetcher }), { code: "operations_preflight_invalid" });
   });
 });

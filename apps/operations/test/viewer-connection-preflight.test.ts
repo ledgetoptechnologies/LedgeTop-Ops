@@ -88,6 +88,7 @@ describe("Operations Viewer connection preflight", () => {
       publicReady: false,
       readinessIssueCount: 2,
       serviceAuthReachable: true,
+      serviceAuthStatus: "connected",
       modelCount: 1,
       readyModelCount: 1,
     });
@@ -109,10 +110,33 @@ describe("Operations Viewer connection preflight", () => {
       publicHealthReachable: false,
       publicReadyReachable: false,
       serviceAuthReachable: false,
+      serviceAuthStatus: "not_configured",
       modelCount: null,
       readyModelCount: null,
     });
     expect(outbound).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [401, { error: "signature invalid", secret: "must-not-leak" }, "authentication_failed"],
+    [404, { error: "not found" }, "route_not_found"],
+    [502, { error: "upstream unavailable" }, "unavailable"],
+  ] as const)("classifies signed service status %i without exposing the upstream body", async (status, body, expected) => {
+    const outbound = vi.fn(async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/api/v1/health") return Response.json({ ok: true });
+      if (path === "/api/v1/ready") return Response.json({ ok: true, missing: [] });
+      if (path === "/api/v1/models") return Response.json(body, { status });
+      throw new Error("unexpected request");
+    });
+    vi.stubGlobal("fetch", outbound);
+    const response = await worker.fetch(request(), environment() as never, executionCtx);
+    expect(response.status).toBe(200);
+    const payload = await response.json() as Record<string, unknown>;
+    expect(payload).toMatchObject({ serviceAuthReachable: false, serviceAuthStatus: expected });
+    expect(JSON.stringify(payload)).not.toContain("signature invalid");
+    expect(JSON.stringify(payload)).not.toContain("must-not-leak");
+    expect(JSON.stringify(payload)).not.toContain("upstream unavailable");
   });
 
   it("requires exact global viewer.manage before probing Viewer", async () => {

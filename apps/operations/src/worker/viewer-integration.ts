@@ -466,6 +466,7 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
       publicReady: false,
       readinessIssueCount: null,
       serviceAuthReachable: false,
+      serviceAuthStatus: "not_configured" as const,
       modelCount: null,
       readyModelCount: null,
     });
@@ -475,10 +476,21 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
       viewerServiceClient(c.env, fetch, { allowWhenDisabled: true }).listModels()
         .then(models => ({
           reachable: true,
+          status: "connected" as const,
           modelCount: models.length,
           readyModelCount: models.filter(model => model.available && model.status === "ready" && model.activeVersion).length,
         }))
-        .catch(() => ({ reachable: false, modelCount: null, readyModelCount: null })),
+        .catch(error => ({
+          reachable: false,
+          status: error instanceof ViewerServiceError
+            ? error.code === "authentication_failed" ? "authentication_failed" as const
+              : error.code === "not_found" ? "route_not_found" as const
+                : error.code === "invalid_response" ? "invalid_response" as const
+                  : "unavailable" as const
+            : "unavailable" as const,
+          modelCount: null,
+          readyModelCount: null,
+        })),
     ]);
     return c.json({
       integrationEnabled: viewerIntegrationEnabled(c.env),
@@ -489,6 +501,7 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
       publicReady: ready.ok,
       readinessIssueCount: ready.issueCount,
       serviceAuthReachable: service.reachable,
+      serviceAuthStatus: service.status,
       modelCount: service.modelCount,
       readyModelCount: service.readyModelCount,
     });

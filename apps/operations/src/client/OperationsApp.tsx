@@ -6013,8 +6013,23 @@ interface ViewerConnectionPreflight {
   publicReady: boolean;
   readinessIssueCount: number | null;
   serviceAuthReachable: boolean;
+  serviceAuthStatus: "connected" | "not_configured" | "authentication_failed" | "route_not_found" | "invalid_response" | "unavailable";
   modelCount: number | null;
   readyModelCount: number | null;
+}
+
+function viewerServiceAuthGuidance(status: ViewerConnectionPreflight["serviceAuthStatus"]): string | null {
+  if (status === "authentication_failed")
+    return "Viewer or its proxy rejected the signed request. Confirm Viewer SERVICE_AUTH_SECRET exactly matches Operations VIEWER_SERVICE_HMAC_SECRET, the two key IDs match, both system clocks are synchronized, and the proxy preserves X-LTDS-* headers from its trusted forwarder.";
+  if (status === "route_not_found")
+    return "The signed model-catalog route was not found. Confirm the reviewed Viewer image is running and the proxy forwards /api/v1/models without rewriting it.";
+  if (status === "invalid_response")
+    return "Viewer returned an unexpected catalog response. Confirm the running Viewer revision matches the frozen contract.";
+  if (status === "unavailable")
+    return "The signed route could not be reached. Confirm the proxy preserves X-LTDS-* request headers and inspect the Viewer service-auth log code.";
+  if (status === "not_configured")
+    return "Configure the Viewer URL, service key ID, and shared service secret before enabling integration.";
+  return null;
 }
 
 function viewerShareExpiryValue(days = 7): string {
@@ -6194,6 +6209,7 @@ function ViewerModels({ session }: { session: Session }) {
         <p><strong>Public health:</strong> {connectionPreflight.publicHealthOk ? "healthy" : connectionPreflight.publicHealthReachable ? "responded but unhealthy" : "unreachable"}</p>
         <p><strong>Public readiness:</strong> {connectionPreflight.publicReady ? "ready" : connectionPreflight.publicReadyReachable ? `not ready${connectionPreflight.readinessIssueCount === null ? "" : ` (${connectionPreflight.readinessIssueCount} checks failed)`}` : "unreachable"}</p>
         <p><strong>Signed service authentication:</strong> {connectionPreflight.serviceAuthReachable ? "connected" : "failed"}</p>
+        {viewerServiceAuthGuidance(connectionPreflight.serviceAuthStatus) && <p>{viewerServiceAuthGuidance(connectionPreflight.serviceAuthStatus)}</p>}
         {connectionPreflight.modelCount !== null && <p><strong>Catalog:</strong> {connectionPreflight.readyModelCount} ready of {connectionPreflight.modelCount} models</p>}
       </div>}
     </Card>}

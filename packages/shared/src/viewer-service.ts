@@ -477,6 +477,7 @@ export class ViewerServiceError extends Error {
     readonly code:
       | "not_configured"
       | "invalid_configuration"
+      | "authentication_failed"
       | "unavailable"
       | "invalid_response"
       | "not_found"
@@ -737,6 +738,8 @@ export class ViewerServiceClient {
         redirect: "manual",
         signal: controller.signal,
       });
+      if (response.status === 401 || response.status === 403)
+        throw new ViewerServiceError("3D Viewer service authentication failed", "authentication_failed", 503);
       if (response.status === 404) throw new ViewerServiceError("3D model not found", "not_found", 404);
       if (response.status === 409)
         throw new ViewerServiceError("3D Viewer request conflicts with an earlier request", "conflict", 409);

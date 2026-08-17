@@ -90,13 +90,24 @@ export async function runReadOnlyStagingAcceptance(options = {}, dependencies = 
       ...common, Cookie: `CF_Authorization=${options.accessCookie}`,
     }, controller.signal);
     const preflightKeys = ["integrationEnabled", "configured", "publicHealthReachable", "publicHealthOk",
-      "publicReadyReachable", "publicReady", "readinessIssueCount", "serviceAuthReachable", "modelCount", "readyModelCount"];
+      "publicReadyReachable", "publicReady", "readinessIssueCount", "serviceAuthReachable", "serviceAuthStatus",
+      "modelCount", "readyModelCount"];
     if (preflight.response.status !== 200 || preflight.response.headers.get("Cache-Control") !== "no-store" ||
         !exactObject(preflight.payload, preflightKeys)) throw new StagingAcceptanceError("operations_preflight_invalid");
     const counts = [preflight.payload.readinessIssueCount, preflight.payload.modelCount, preflight.payload.readyModelCount];
     if (counts.some(value => value !== null && (!Number.isSafeInteger(value) || value < 0)) ||
         ["integrationEnabled", "configured", "publicHealthReachable", "publicHealthOk", "publicReadyReachable",
           "publicReady", "serviceAuthReachable"].some(key => typeof preflight.payload[key] !== "boolean"))
+      throw new StagingAcceptanceError("operations_preflight_invalid");
+    const serviceAuthStatuses = new Set(["connected", "not_configured", "authentication_failed", "route_not_found",
+      "invalid_response", "unavailable"]);
+    const serviceConnected = preflight.payload.serviceAuthStatus === "connected";
+    if (!serviceAuthStatuses.has(preflight.payload.serviceAuthStatus) ||
+        serviceConnected !== preflight.payload.serviceAuthReachable ||
+        preflight.payload.configured === (preflight.payload.serviceAuthStatus === "not_configured") ||
+        (serviceConnected && (preflight.payload.modelCount === null || preflight.payload.readyModelCount === null)) ||
+        (!serviceConnected && (preflight.payload.modelCount !== null || preflight.payload.readyModelCount !== null)) ||
+        (serviceConnected && preflight.payload.readyModelCount > preflight.payload.modelCount))
       throw new StagingAcceptanceError("operations_preflight_invalid");
 
     return {
