@@ -9,7 +9,7 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `dea573f0b8addd60acb823fcd70c44b4e56d5125`.
+- 3D Viewer source: `9ed172cd0c83147c56b1dad97a0525754910ff4b`.
   The final GHCR tag and manifest digest are deliberately pending; the local
   verification image ID is not a substitute for a registry manifest digest.
 - LTDS-Ops product code: `89a3a4566b9de3e1b9a7c8ad90aed15bfdec087a` on
@@ -37,8 +37,12 @@ Do not substitute a later commit or hand-edit a fixture during activation.
 The candidate also passed the guarded disposable-volume scale rehearsal with
 exactly 100,000 one-byte files: full scan/fingerprint, authoritative adoption,
 index/accounting, database reopen and re-fingerprint, low-space refusal, and
-sentinel-verified cleanup. Total local Docker Desktop time was 67.546 seconds
-with peak RSS 536,317,952 bytes. This is inode/index/recovery evidence only;
+sentinel-verified cleanup. The build-stamped production replay completed in
+70.165 seconds with peak RSS 602,533,888 bytes. Its pre-generation disk check
+required 11,811,260,064 bytes (payload, 10 GiB reserve, and safety margin)
+against 936,637,571,072 available bytes. Production mode rejects mutable image
+tags, source-stamp mismatches, and insufficient space before creating a target.
+This is inode/index/recovery evidence only;
 the same rehearsal still must run on the disposable TrueNAS storage class with
 representative imagery before activation.
 
