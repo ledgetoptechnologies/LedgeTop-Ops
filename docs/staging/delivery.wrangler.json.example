@@ -35,7 +35,7 @@
     "PROJECT_ALPHA_PORTAL_HMAC_KEY_ID": "portal-staging-v1",
     "PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID": "",
     "PROJECT_ALPHA_PRICING_HINTS_ENABLED": "false",
-    "PROJECT_ALPHA_PRICING_HINT_URL": "https://project-alpha-staging.ledgetopdroneservices.com/api/v2/integrations/ltds/pricing-hints",
+    "PROJECT_ALPHA_PRICING_HINT_URL": "https://project-alpha-staging.ledgetopdroneservices.com/api/v2/integrations/ltds_client_pricing_staging/pricing-hints",
     "PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN": "https://project-alpha-staging.ledgetopdroneservices.com",
     "PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY": "ltds_client_pricing_staging",
     "PROJECT_ALPHA_PRICING_HINT_CURRENCIES": "USD",

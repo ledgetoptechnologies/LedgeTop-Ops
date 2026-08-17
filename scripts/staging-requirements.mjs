@@ -7,9 +7,9 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 // FINAL_* placeholders below are replaced after the three repositories settle.
 export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
-  operations: "<FINAL_OPS_RUNTIME_COMMIT>",
-  viewer: "<FINAL_VIEWER_COMMIT>",
-  projectAlpha: "<FINAL_PROJECT_ALPHA_COMMIT>",
+  operations: "be4cc963dfa82a9ceab2e82a786aa8f5de505103",
+  viewer: "20d27246d80937ffb45976492009429b6daafe0f",
+  projectAlpha: "27877741fba3a63daf2d992bb8c08cf9d4c7a9df",
 });
 
 export const STAGING_VIEWER = Object.freeze({
@@ -28,8 +28,8 @@ export const STAGING_VIEWER = Object.freeze({
 export const PROJECT_ALPHA_STAGING = Object.freeze({
   releaseCommit: RELEASE_CANDIDATES.projectAlpha,
   migrations: Object.freeze({
-    "0066_generic_portal_v2_integration.sql": "<FINAL_PROJECT_ALPHA_0066_SHA256>",
-    "0067_portal_projection_delivery.sql": "<FINAL_PROJECT_ALPHA_0067_SHA256>",
+    "0066_generic_portal_v2_integration.sql": "12cfd32e4854bddf763a5fe80653fe7494ab5f9e82b592bf0da05eed78f3e886",
+    "0067_portal_projection_delivery.sql": "a8150facbd25ff8c3275a591b09c2e75a50302abdc9c212477e3cc36d0cf11ea",
   }),
   defaultOffSettings: Object.freeze([
     "portal_v2_integration_enabled", "portal_v2_relations_enabled",
@@ -371,11 +371,15 @@ export const STAGING_STATIC_VARS = Object.freeze({
     PROJECT_ALPHA_CATALOG_SYNC_ENABLED: "false",
     PROJECT_ALPHA_CATALOG_APPLICATION_KEY: "ltds_client_catalog_staging",
     PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
+    PROJECT_ALPHA_CATALOG_HMAC_KEY_ID: "catalog-staging-v1",
+    PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID: "",
     PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "false",
     PROJECT_ALPHA_PORTAL_APPLICATION_KEY: "ltds_client_portal_staging",
     PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
+    PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: "portal-staging-v1",
+    PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID: "",
     PROJECT_ALPHA_PRICING_HINTS_ENABLED: "false",
-    PROJECT_ALPHA_PRICING_HINT_URL: `${STAGING_PROJECT_ALPHA_ORIGIN}/api/v2/integrations/ltds/pricing-hints`,
+    PROJECT_ALPHA_PRICING_HINT_URL: `${STAGING_PROJECT_ALPHA_ORIGIN}/api/v2/integrations/ltds_client_pricing_staging/pricing-hints`,
     PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN: STAGING_PROJECT_ALPHA_ORIGIN,
     PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY: "ltds_client_pricing_staging",
     PROJECT_ALPHA_PRICING_HINT_CURRENCIES: "USD",
@@ -441,8 +445,10 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_CATALOG_APPLICATION_KEY",
     "PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN", "PROJECT_ALPHA_CATALOG_ACCESS_AUD",
+    "PROJECT_ALPHA_CATALOG_HMAC_KEY_ID", "PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID",
     "PROJECT_ALPHA_PORTAL_SYNC_ENABLED", "PROJECT_ALPHA_PORTAL_APPLICATION_KEY",
     "PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN", "PROJECT_ALPHA_PORTAL_ACCESS_AUD",
+    "PROJECT_ALPHA_PORTAL_HMAC_KEY_ID", "PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID",
     "PROJECT_ALPHA_PRICING_HINTS_ENABLED", "PROJECT_ALPHA_PRICING_HINT_URL",
     "PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN", "PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY",
     "PROJECT_ALPHA_PRICING_HINT_CURRENCIES", "CLIENT_REQUEST_ATTACHMENTS_ENABLED",

@@ -8,13 +8,13 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer: `<FINAL_VIEWER_COMMIT>` and
+- 3D Viewer: `20d27246d80937ffb45976492009429b6daafe0f` and
   `<FINAL_VIEWER_IMAGE_TAG_AT_SHA256_DIGEST>`
-- LTDS-Ops product code: `<FINAL_OPS_RUNTIME_COMMIT>` on
+- LTDS-Ops product code: `be4cc963dfa82a9ceab2e82a786aa8f5de505103` on
   `codex/3d-processing-control-plane`. The final pin must contain the desktop
   Administration-menu fix equivalent to `09e3443`; never substitute a mutable
   branch tip.
-- Project Alpha: `<FINAL_PROJECT_ALPHA_COMMIT>` on
+- Project Alpha: `27877741fba3a63daf2d992bb8c08cf9d4c7a9df` on
   `codex/generic-portal-v2-integration`
 
 The centralized placeholders above and the corresponding constants in
