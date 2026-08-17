@@ -16,7 +16,7 @@ test("administrator links the reviewed Project Alpha root on desktop and mobile"
     } });
     if (path === "/api/admin/client-account-activation" && request.method() === "GET") {
       return route.fulfill({ json: {
-        workspaceMigrationApplied: false,
+        workspaceMigrationApplied: true,
         accounts: [{
           id: "account-a", displayName: "Acme Surveying", status: "active",
           projectAlphaClientId: null, projectAlphaOrganizationId: null,
@@ -51,13 +51,14 @@ test("administrator links the reviewed Project Alpha root on desktop and mobile"
   const heading = page.getByRole("heading", { name: "Client account Project Alpha activation" });
   const card = page.locator("section.ltds-card").filter({ has: heading });
   await expect(card).toBeVisible();
+  await expect(card.getByText(/Workspace migration 0121 is active/)).toBeVisible();
   await expect(page.getByLabel("Legacy client account")).toHaveValue("account-a");
   await expect(page.getByLabel("Project Alpha client")).toHaveValue("");
   await expect(page.getByRole("button", { name: "Link Project Alpha root" })).toBeDisabled();
   await page.getByLabel("Project Alpha client").selectOption("pa-client-a");
   await expect(card.locator(".notice.full")).toContainText("Effective workspace root: Acme Organization · pa-org-a");
   await page.getByRole("button", { name: "Link Project Alpha root" }).click();
-  await expect(page.getByText(/Project Alpha root linked and audited/)).toBeVisible();
+  await expect(page.getByText(/complete legacy workspace projection was created atomically and audited/)).toBeVisible();
   expect(activationPosted).toBe(true);
 
   const box = await card.boundingBox();

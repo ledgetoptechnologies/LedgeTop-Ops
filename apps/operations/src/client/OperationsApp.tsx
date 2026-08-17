@@ -5649,7 +5649,7 @@ type ClientAccountRootActivationState = {
     projectAlphaClientId: string | null;
     projectAlphaOrganizationId: string | null;
     updatedAt: string;
-    activationState: "unlinked" | "linked" | "projection_missing" | "projected";
+    activationState: "unlinked" | "linked" | "projection_missing" | "manual_review" | "projected";
   }>;
   sources: Array<{
     clientId: string;
@@ -5667,15 +5667,22 @@ function ClientAccountRootActivation() {
   const [sourceId, setSourceId] = useState("");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
-  const unlinked = state.data?.accounts.filter(account => account.status === "active" && account.activationState === "unlinked") ?? [];
-  const account = unlinked.find(item => item.id === accountId) ?? unlinked[0];
+  const eligible = state.data?.accounts.filter(account => account.status === "active"
+    && (account.activationState === "unlinked" || account.activationState === "projection_missing")) ?? [];
+  const manualReview = state.data?.accounts.filter(account => account.activationState === "manual_review") ?? [];
+  const account = eligible.find(item => item.id === accountId) ?? eligible[0];
   const source = state.data?.sources.find(item => item.clientId === sourceId);
   useEffect(() => {
-    if (!accountId && unlinked[0]) setAccountId(unlinked[0].id);
-  }, [accountId, unlinked]);
+    if (!accountId && eligible[0]) setAccountId(eligible[0].id);
+  }, [accountId, eligible]);
+  useEffect(() => {
+    setSourceId(account?.activationState === "projection_missing"
+      ? account.projectAlphaClientId ?? ""
+      : "");
+  }, [account?.id]);
 
   const activate = async () => {
-    if (!account || !source || busy || state.data?.workspaceMigrationApplied) return;
+    if (!account || !source || busy) return;
     const rootLabel = source.rootType === "organization"
       ? `${source.organizationName || "Project Alpha organization"} (${source.rootPublicId})`
       : `${source.clientName} (${source.rootPublicId})`;
@@ -5689,7 +5696,9 @@ function ClientAccountRootActivation() {
           expectedUpdatedAt: account.updatedAt,
         }),
       });
-      setMessage("Project Alpha root linked and audited. Apply Client migration 0121 next so the workspace-v2 shadow projection is created from this exact root.");
+      setMessage(state.data?.workspaceMigrationApplied
+        ? "Project Alpha root linked and the complete legacy workspace projection was created atomically and audited."
+        : "Project Alpha root linked and audited. Apply Client migration 0121 next so the workspace-v2 shadow projection is created from this exact root.");
       setAccountId("");
       await state.reload();
     } catch (caught) { setMessage((caught as Error).message); }
@@ -5699,13 +5708,16 @@ function ClientAccountRootActivation() {
   return <Card title="Client account Project Alpha activation">
     <p>One-time bridge for an existing legacy Client account. Select the concrete Project Alpha client; an active parent organization becomes the single workspace root, otherwise the client is the standalone root.</p>
     <ErrorLine error={state.error} />
-    {state.data?.workspaceMigrationApplied ? <div className="notice" role="status">
-      Migration 0121 is already present. Pre-migration linking is closed; any account marked projection missing requires a reviewed repair, not a direct remap.
-    </div> : unlinked.length && state.data?.sources.length ? <div className="form-grid">
+    {state.data?.workspaceMigrationApplied && <div className="notice" role="status">
+      Workspace migration 0121 is active. Linking creates the complete legacy projection in one audited transaction. Existing partial or conflicting projections remain blocked for manual review.
+    </div>}
+    {eligible.length && state.data?.sources.length ? <div className="form-grid">
       <label>Legacy client account<select value={account?.id ?? ""} disabled={busy} onChange={event => setAccountId(event.target.value)}>
-        {unlinked.map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}
+        {eligible.map(item => <option key={item.id} value={item.id}>{item.displayName}{item.activationState === "projection_missing" ? " · projection repair" : ""}</option>)}
       </select></label>
-      <label>Project Alpha client<select value={source?.clientId ?? ""} disabled={busy} onChange={event => setSourceId(event.target.value)}>
+      <label>Project Alpha client<select value={source?.clientId ?? ""}
+        disabled={busy || account?.activationState === "projection_missing"}
+        onChange={event => setSourceId(event.target.value)}>
         <option value="" disabled>Select a Project Alpha client</option>
         {state.data.sources.map(item => <option key={item.clientId} value={item.clientId}>
           {item.organizationName ? `${item.organizationName} · ${item.clientName}` : `${item.clientName} · standalone`}
@@ -5715,10 +5727,12 @@ function ClientAccountRootActivation() {
         {source.rootType === "organization" ? source.organizationName : source.clientName} · <code>{source.rootPublicId}</code>
       </div>}
       <button type="button" className="button-orange" disabled={busy || !account || !source} onClick={() => void activate()}>
-        {busy ? "Linking…" : "Link Project Alpha root"}
+        {busy ? "Linking…" : account?.activationState === "projection_missing" ? "Create missing projection" : "Link Project Alpha root"}
       </button>
     </div> : state.data && <EmptyState title="No account is ready for activation" detail={
-      state.data.sources.length ? "Every active legacy account is already linked." : "No active, internally consistent Project Alpha client is available."
+      manualReview.length
+        ? `${manualReview.length} account${manualReview.length === 1 ? " requires" : "s require"} manual projection review.`
+        : state.data.sources.length ? "Every active legacy account is already linked." : "No active, internally consistent Project Alpha client is available."
     } />}
     {message && <div className="notice" role="status">{message}</div>}
     {!!state.data?.accounts.length && <div className="delegated-share-admin-list">
@@ -5990,6 +6004,18 @@ interface ViewerAdminData {
   projects: ViewerProjectOption[];
   associations: ViewerAssociation[];
 }
+interface ViewerConnectionPreflight {
+  integrationEnabled: boolean;
+  configured: boolean;
+  publicHealthReachable: boolean;
+  publicHealthOk: boolean;
+  publicReadyReachable: boolean;
+  publicReady: boolean;
+  readinessIssueCount: number | null;
+  serviceAuthReachable: boolean;
+  modelCount: number | null;
+  readyModelCount: number | null;
+}
 
 function viewerShareExpiryValue(days = 7): string {
   const value = new Date(Date.now() + days * 24 * 60 * 60 * 1000);
@@ -6015,6 +6041,8 @@ function ViewerModels({ session }: { session: Session }) {
   const [shareDisplayUnits, setShareDisplayUnits] = useState<"imperial" | "metric">("imperial");
   const [createdShareUrl, setCreatedShareUrl] = useState("");
   const [shareMessage, setShareMessage] = useState("");
+  const [connectionPreflight, setConnectionPreflight] = useState<ViewerConnectionPreflight | null>(null);
+  const [connectionPreflightBusy, setConnectionPreflightBusy] = useState(false);
   const canManage = allowed(session.user, "viewer.manage");
   const canCreateShare = allowed(session.user, "viewer.share.create");
   const canRevokeShare = allowed(session.user, "viewer.share.revoke");
@@ -6137,6 +6165,14 @@ function ViewerModels({ session }: { session: Session }) {
     finally { setBusy(false); }
   };
 
+  const testViewerConnection = async () => {
+    if (connectionPreflightBusy) return;
+    setConnectionPreflightBusy(true); setActionError(""); setConnectionPreflight(null);
+    try { setConnectionPreflight(await api<ViewerConnectionPreflight>("/api/viewer/connection-preflight")); }
+    catch (caught) { setActionError((caught as Error).message); }
+    finally { setConnectionPreflightBusy(false); }
+  };
+
   if (loading && !data) return <Loading />;
   if (opened) return <ViewerEmbed
     modelId={opened.association.viewerModelId}
@@ -6148,7 +6184,19 @@ function ViewerModels({ session }: { session: Session }) {
   return <div className="viewer-admin-layout">
     <ErrorLine error={error || actionError} />
     <ViewerProcessingPanel mapToken={session.mapboxPublicToken} />
-    {data && !data.enabled && <Card><EmptyState title="3D Viewer is disabled" detail="Enable the Viewer integration only after its URL, service key, routes, and database migration are ready." /></Card>}
+    {data && !data.enabled && <Card title="3D Viewer is disabled">
+      <p>Enable the Viewer integration only after its URL, service key, routes, and database migration are ready.</p>
+      {canManage && <button type="button" className="button-orange" disabled={connectionPreflightBusy} onClick={() => void testViewerConnection()}>
+        {connectionPreflightBusy ? "Testing Viewer connection…" : "Test Viewer connection"}
+      </button>}
+      {connectionPreflight && <div role="status" aria-live="polite" className="viewer-association-help">
+        <p><strong>Configuration:</strong> {connectionPreflight.configured ? "ready" : "incomplete"}</p>
+        <p><strong>Public health:</strong> {connectionPreflight.publicHealthOk ? "healthy" : connectionPreflight.publicHealthReachable ? "responded but unhealthy" : "unreachable"}</p>
+        <p><strong>Public readiness:</strong> {connectionPreflight.publicReady ? "ready" : connectionPreflight.publicReadyReachable ? `not ready${connectionPreflight.readinessIssueCount === null ? "" : ` (${connectionPreflight.readinessIssueCount} checks failed)`}` : "unreachable"}</p>
+        <p><strong>Signed service authentication:</strong> {connectionPreflight.serviceAuthReachable ? "connected" : "failed"}</p>
+        {connectionPreflight.modelCount !== null && <p><strong>Catalog:</strong> {connectionPreflight.readyModelCount} ready of {connectionPreflight.modelCount} models</p>}
+      </div>}
+    </Card>}
     {data?.enabled && canManage && <Card title="Associate a model with a client project">
       <form className="viewer-association-form" onSubmit={associate}>
         <label>Viewer model<select value={modelId} onChange={event => setModelId(event.target.value)} required>

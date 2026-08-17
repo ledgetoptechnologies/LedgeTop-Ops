@@ -540,9 +540,9 @@ Email and `primary_contact` are presentation data and never grant access.
 
 ### Existing-account Project Alpha root activation
 
-An existing legacy account must be linked **before** migration `0121` is
-applied. Operations Administration exposes the bounded **Client account Project
-Alpha activation** card for this one-time transition. It lists only active PA
+Operations Administration exposes the bounded **Client account Project Alpha
+activation** card for this one-time transition, both before and after migration
+`0121`. It lists only active PA
 clients whose active organization ancestry is internally consistent. The
 operator chooses the concrete PA client; LTDS derives the one effective root:
 
@@ -557,9 +557,19 @@ The mutation requires an Operations administrator with global
 version, an unlinked active account, and a source root not assigned to another
 account. It writes `client.account.project_alpha_root_linked` to `audit_log`.
 It is idempotent for the exact same source and refuses automatic remapping.
-Once `portal_v2_workspaces` exists, the endpoint refuses late linking because
-updating only the legacy row would leave identities, memberships, directory,
-entitlements, bindings, and the checkpoint incomplete.
+Before `0121`, it preserves the original behavior and links only the legacy
+account for the migration backfill. After `0121`, it pins and immediately
+rechecks the PA client/organization projection version, then links the account
+and creates the exact legacy workspace, identities, memberships, schema-v2
+baseline generation, entities, checkpoint, entitlements, folder bindings, and
+mandatory audit in one Delivery-D1 batch. A previously linked account with no
+workspace rows may use the same bounded repair and records
+`client.account.project_alpha_projection_repaired`. Any partial, conflicting,
+different-root, or structurally invalid authoritative projection is marked
+manual review and remains blocked. A correctly rooted complete schema-v2 or
+schema-v3 authoritative generation at a higher checkpoint sequence is
+recognized as projected and replays unchanged; the endpoint never overwrites
+or lowers its checkpoint.
 
 Production activation order:
 
@@ -568,22 +578,24 @@ Production activation order:
    `CLIENT_VIEWER_SESSION_ISSUER_ENABLED` false. Confirm the latest PA sync is
    healthy and the selected client/organization public IDs are stable opaque
    IDs. Take a D1 export or record a D1 Time Travel restore bookmark.
-2. In Operations Administration, review the displayed effective root and link
-   the unrooted legacy account. Confirm exactly one
+2. Apply the reviewed Client migration set through the current release while
+   every new hierarchy/Viewer/share flag remains false. Migration `0121`
+   intentionally leaves an account with neither PA ID unprojected, so the
+   pending migrations do not guess a root or grant access.
+3. In Operations Administration, review the displayed effective root and link
+   the unrooted legacy account. With `0121` present, the same transaction also
+   creates the complete legacy projection. Confirm exactly one
    `client.account.project_alpha_root_linked` audit event exists. Do not edit
-   the IDs with ad-hoc SQL.
-3. Apply the reviewed Client migration set beginning with `0121`. Its legacy
-   backfill creates `workspace-<legacy-account-id>`, stores only the derived
-   organization or standalone-client root in `portal_v2_workspaces`, and
-   projects the existing verified identities, memberships, project grants,
-   folder bindings, and explicit entitlements. A legacy account with neither
-   PA ID remains unprojected by design.
+   the IDs or seed projection rows with ad-hoc SQL. (For a fresh environment,
+   linking before `0121` remains supported and its migration backfill creates
+   the same projection.)
 4. Before any flag changes, verify the new workspace has one non-null root
    column, its `legacy_account_id` is exact, it has one complete active
    directory generation/checkpoint, expected active memberships and explicit
    `workspace.view`/`delivery.view` grants, and `PRAGMA foreign_key_check`
-   returns no rows. An Administration state of `projection missing` is a stop
-   condition requiring a reviewed repair.
+   returns no rows. `projection missing` is actionable only when no projection
+   rows exist; `manual review` is a stop condition for any partial or
+   conflicting state.
 5. For the authoritative PA hierarchy rollout, PA must publish the same exact
    workspace ID (`workspace-<legacy-account-id>`) and root descriptor in a
    complete signed snapshot. Activate the snapshot and verify its root,

@@ -4,6 +4,7 @@ import {
   ViewerServiceClient,
   ViewerServiceError,
   viewerServiceConfigured,
+  viewerServiceOrigin,
   type Permission,
   type ViewerAudience,
   type ViewerDisplayUnits,
@@ -100,8 +101,12 @@ export function viewerPublicSharesEnabled(
   return viewerIntegrationEnabled(env) && env.VIEWER_PUBLIC_SHARES_ENABLED === "true";
 }
 
-export function viewerServiceClient(env: Env, fetcher: typeof fetch = fetch): ViewerServiceClient {
-  if (!viewerIntegrationEnabled(env) || !viewerServiceConfigured({
+export function viewerServiceClient(
+  env: Env,
+  fetcher: typeof fetch = fetch,
+  options: { allowWhenDisabled?: boolean } = {},
+): ViewerServiceClient {
+  if ((!options.allowWhenDisabled && !viewerIntegrationEnabled(env)) || !viewerServiceConfigured({
     baseUrl: env.VIEWER_BASE_URL || "",
     keyId: env.VIEWER_SERVICE_KEY_ID || "",
     secret: env.VIEWER_SERVICE_HMAC_SECRET || "",
@@ -111,6 +116,62 @@ export function viewerServiceClient(env: Env, fetcher: typeof fetch = fetch): Vi
     keyId: env.VIEWER_SERVICE_KEY_ID!,
     secret: env.VIEWER_SERVICE_HMAC_SECRET!,
   }, fetcher);
+}
+
+interface PublicViewerProbe {
+  reachable: boolean;
+  ok: boolean;
+  issueCount: number | null;
+}
+
+async function publicViewerProbe(origin: string, path: "/api/v1/health" | "/api/v1/ready"): Promise<PublicViewerProbe> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5_000);
+  try {
+    const response = await fetch(`${origin}${path}`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+      cache: "no-store",
+      redirect: "error",
+      signal: controller.signal,
+    });
+    const declaredLength = Number(response.headers.get("Content-Length") || "0");
+    if (Number.isFinite(declaredLength) && declaredLength > 16_384)
+      return { reachable: true, ok: false, issueCount: null };
+    if (!response.body) return { reachable: true, ok: false, issueCount: null };
+    const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+    let total = 0;
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > 16_384) {
+        await reader.cancel();
+        return { reachable: true, ok: false, issueCount: null };
+      }
+      chunks.push(value);
+    }
+    const bytes = new Uint8Array(total);
+    let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    let payload: unknown;
+    try { payload = JSON.parse(new TextDecoder().decode(bytes)); }
+    catch { return { reachable: true, ok: false, issueCount: null }; }
+    const record = payload && typeof payload === "object" && !Array.isArray(payload)
+      ? payload as Record<string, unknown>
+      : null;
+    return {
+      reachable: true,
+      ok: response.ok && record?.ok === true,
+      issueCount: path === "/api/v1/ready" && Array.isArray(record?.missing)
+        ? Math.min(record.missing.length, 100)
+        : null,
+    };
+  } catch {
+    return { reachable: false, ok: false, issueCount: null };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function associationView(row: AssociationRow) {
@@ -317,6 +378,51 @@ function viewerError(error: unknown): never {
 }
 
 export function registerViewerIntegrationRoutes(app: ViewerApp): void {
+  app.get("/api/viewer/connection-preflight", async c => {
+    await requireGlobalViewer(c.env, c.get("principal"), "viewer.manage");
+    const configured = viewerServiceConfigured({
+      baseUrl: c.env.VIEWER_BASE_URL || "",
+      keyId: c.env.VIEWER_SERVICE_KEY_ID || "",
+      secret: c.env.VIEWER_SERVICE_HMAC_SECRET || "",
+    });
+    const origin = viewerServiceOrigin(c.env.VIEWER_BASE_URL || "");
+    if (!configured || !origin) return c.json({
+      integrationEnabled: viewerIntegrationEnabled(c.env),
+      configured: false,
+      publicHealthReachable: false,
+      publicHealthOk: false,
+      publicReadyReachable: false,
+      publicReady: false,
+      readinessIssueCount: null,
+      serviceAuthReachable: false,
+      modelCount: null,
+      readyModelCount: null,
+    });
+    const [health, ready, service] = await Promise.all([
+      publicViewerProbe(origin, "/api/v1/health"),
+      publicViewerProbe(origin, "/api/v1/ready"),
+      viewerServiceClient(c.env, fetch, { allowWhenDisabled: true }).listModels()
+        .then(models => ({
+          reachable: true,
+          modelCount: models.length,
+          readyModelCount: models.filter(model => model.available && model.status === "ready" && model.activeVersion).length,
+        }))
+        .catch(() => ({ reachable: false, modelCount: null, readyModelCount: null })),
+    ]);
+    return c.json({
+      integrationEnabled: viewerIntegrationEnabled(c.env),
+      configured: true,
+      publicHealthReachable: health.reachable,
+      publicHealthOk: health.ok,
+      publicReadyReachable: ready.reachable,
+      publicReady: ready.ok,
+      readinessIssueCount: ready.issueCount,
+      serviceAuthReachable: service.reachable,
+      modelCount: service.modelCount,
+      readyModelCount: service.readyModelCount,
+    });
+  });
+
   app.get("/api/viewer", async c => {
     await requireGlobalViewer(c.env, c.get("principal"), "viewer.view");
     if (!viewerIntegrationEnabled(c.env)) return c.json({
