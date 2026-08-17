@@ -1,7 +1,7 @@
 # 3D processing and delivery release runbook
 
-Status: **release remediation is active; live staging evidence and activation
-remain pending**. Every
+Status: **source contracts and immutable image pins are frozen; live staging
+evidence and activation remain pending**. Every
 Viewer, Operations, Client, processing, public-share, and Project Alpha portal
 feature gate remains off until the corresponding live evidence below is
 captured.
@@ -10,16 +10,16 @@ captured.
 
 - 3D Viewer: `8f6c4025368f0157bcd1e1c575d2fb4fab56564c` and
   `ghcr.io/ledgetoptechnologies/3d-viewer:sha-8f6c402@sha256:994f6dbba8995e083df0bc1da634fb50ee1e46217a1e3633a1761199f533381a`
-- LTDS-Ops product code: `be786b724d13838dc54023e0ee0a194c83fae6a8` on
-  `codex/3d-processing-control-plane`. The final pin must contain the desktop
+- LTDS-Ops product code: `6496545e62c7126610b9dfaeeea1c4a672df20df` on
+  `codex/3d-processing-control-plane`. This pin contains the desktop
   Administration-menu fix equivalent to `09e3443`; never substitute a mutable
   branch tip.
 - Project Alpha: `769df9320dbf4dfc512d364173d5cb7d8ad8a97c` on `main`
 
-The corresponding constants in `scripts/staging-requirements.mjs` intentionally
-remain unfrozen with `RELEASE_CONTRACT_FINALIZED=false` while Viewer and Ops
-remediation is active. Set it to `true` only after every immutable pin is final
-and independent cross-repository verification has been repeated.
+The corresponding constants in `scripts/staging-requirements.mjs` are frozen
+with `RELEASE_CONTRACT_FINALIZED=true`. Any source, fixture, migration, or image
+change must first set it back to `false`, refresh every immutable pin, and repeat
+independent cross-repository verification.
 
 The Viewer/Ops signed-processing corpus has SHA-256
 `13ab12919e624be6a048c058774ccff2031f865855e64ab3b726e9b31cffab82`.

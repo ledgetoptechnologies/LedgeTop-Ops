@@ -5,12 +5,12 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 // This lets evidence and documentation evolve without silently changing the
 // exact application bytes approved for staging. Set this back to false whenever
 // any candidate changes, then refresh every immutable commit/image/migration pin.
-// Remediation work is active across Viewer, Operations, and Project Alpha.
-// Freeze this only after the final commits, image digest, fixtures, and
-// migration checksums have passed the independent cross-repository gate.
-export const RELEASE_CONTRACT_FINALIZED = false;
+// Final commits, image digest, fixtures, and migration checksums passed the
+// independent cross-repository gate. Set this back to false before changing
+// any pinned source or deployment artifact.
+export const RELEASE_CONTRACT_FINALIZED = true;
 export const RELEASE_CANDIDATES = Object.freeze({
-  operations: "be786b724d13838dc54023e0ee0a194c83fae6a8",
+  operations: "6496545e62c7126610b9dfaeeea1c4a672df20df",
   viewer: "8f6c4025368f0157bcd1e1c575d2fb4fab56564c",
   projectAlpha: "769df9320dbf4dfc512d364173d5cb7d8ad8a97c",
 });
