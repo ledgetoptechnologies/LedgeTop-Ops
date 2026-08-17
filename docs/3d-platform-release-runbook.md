@@ -9,7 +9,9 @@ captured.
 
 - 3D Viewer: `da6b812bdaf4e0a9fa3569cb526bb6faa3bf6df5`
   (`ghcr.io/ledgetoptechnologies/3d-viewer:sha-da6b812`)
-- LTDS-Ops product code: `a867631` on `codex/3d-processing-control-plane`
+- LTDS-Ops: `51e8451b4cf1d65c319cab8ca6990e1878604efe` on
+  `codex/3d-processing-control-plane` (product code is frozen through
+  `a867631`; the later commits are reviewed release documentation only)
 - Project Alpha: `b52cdbe9` on `codex/generic-portal-v2-integration`
 
 The Viewer/Ops signed-processing corpus has SHA-256
