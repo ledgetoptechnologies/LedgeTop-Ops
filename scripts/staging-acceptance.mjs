@@ -128,7 +128,8 @@ async function readAccessCookie(storageStatePath) {
     throw new StagingAcceptanceError("invalid_storage_state");
   const parsed = JSON.parse(await readFile(absolute, "utf8"));
   const matches = Array.isArray(parsed.cookies) ? parsed.cookies.filter(cookie =>
-    cookie?.name === "CF_Authorization" && cookie?.domain === STAGING_HOSTS.operations && cookie?.secure === true &&
+    cookie?.name === "CF_Authorization" && cookie?.domain === STAGING_HOSTS.operations &&
+    cookie?.secure === true && cookie?.httpOnly === true &&
     typeof cookie.value === "string") : [];
   if (matches.length !== 1) throw new StagingAcceptanceError("access_cookie_required");
   return matches[0].value;
@@ -150,9 +151,9 @@ async function main() {
   const accessCookie = await readAccessCookie(process.argv[storageIndex + 1]);
   const report = await runReadOnlyStagingAcceptance({ accessCookie });
   if (!SAFE_ID.test(report.runId)) throw new StagingAcceptanceError("invalid_run_id");
-  const output = resolve(".backups", "staging-acceptance", `${report.runId}.json`);
-  await atomicWriteJson(output, report);
-  process.stdout.write(`${JSON.stringify({ status: report.status, runId: report.runId, report: output })}\n`);
+  const relativeOutput = `.backups/staging-acceptance/${report.runId}.json`;
+  await atomicWriteJson(resolve(relativeOutput), report);
+  process.stdout.write(`${JSON.stringify({ status: report.status, runId: report.runId, report: relativeOutput })}\n`);
   if (report.status !== "passed") process.exitCode = 1;
 }
 

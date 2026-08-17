@@ -50,6 +50,7 @@ test("uses only GET/manual requests and emits a secret-free bounded report", asy
   assert.equal(calls.length, 3);
   for (const call of calls) { assert.equal(call.init.method, "GET"); assert.equal(call.init.redirect, "manual"); }
   assert.equal(calls.filter(call => call.init.headers.Cookie).length, 1);
+  assert.equal(calls.filter(call => call.url.startsWith(viewerOrigin) && call.init.headers.Cookie).length, 0);
 });
 
 test("refuses unfinalized, mutable, or wrong-origin runs before fetching", async () => {
