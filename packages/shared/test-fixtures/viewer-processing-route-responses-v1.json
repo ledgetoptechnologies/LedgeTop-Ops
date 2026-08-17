@@ -93,7 +93,7 @@
   "providers": {
     "providers": [{
       "id": "provider-one", "type": "clusterodm", "displayName": "Local ClusterODM", "endpoint": "http://192.168.50.80:30048",
-      "enabled": true, "admissionLimit": 4, "activeAttempts": 1, "capabilities": null, "capabilityFingerprint": null,
+      "enabled": true, "admissionLimit": 4, "activeAttempts": 1, "credential": { "configured": true, "updatedAt": "2027-01-15T07:30:00.000Z" }, "capabilities": null, "capabilityFingerprint": null,
       "lastHealth": "healthy", "lastHealthAt": "2027-01-15T08:00:00.000Z",
       "createdAt": "2027-01-15T07:00:00.000Z", "updatedAt": "2027-01-15T08:00:00.000Z"
     }],

@@ -1380,6 +1380,11 @@ tbody tr:last-child td { border: 0; }
 .viewer-processing-list h3 { margin: .35rem 0 .15rem; overflow-wrap: anywhere; }
 .viewer-processing-list p { margin: 0; color: var(--muted); overflow-wrap: anywhere; }
 .viewer-processing-list article > div:last-child { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .5rem; }
+.viewer-provider-card { align-items: flex-start !important; }
+.viewer-provider-card > div:first-child { min-width: min(100%,20rem); }
+.viewer-provider-controls { width: min(100%,34rem); }
+.viewer-provider-credential-form { display: grid; grid-template-columns: minmax(190px,1fr) auto; align-items: end; gap: .5rem; width: 100%; }
+.viewer-provider-credential-form label { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 800; }
 .viewer-processing-error { color: #991b1b !important; }
 .gcp-workspace { display: grid; gap: 1rem; min-width: 0; }
 .gcp-workspace :is(button,.button-orange,.button-danger) { min-height: 44px; }
@@ -1454,6 +1459,7 @@ tbody tr:last-child td { border: 0; }
   .viewer-import-preview { grid-template-columns: 1fr; }
   .viewer-processing :is(button,a.button-orange,a.button-ghost) { min-height: 44px; }
   .viewer-processing-list article > div:last-child { display: grid; grid-template-columns: 1fr; }
+  .viewer-provider-controls, .viewer-provider-credential-form { width: 100%; grid-template-columns: 1fr; }
   .gcp-context-selectors, .gcp-import-form, .gcp-map-layout, .gcp-pixel-form { grid-template-columns: 1fr; }
   .gcp-map { min-height: 330px; }
   .gcp-point-list, .gcp-image-list { max-height: none; }

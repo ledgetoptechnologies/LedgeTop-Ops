@@ -105,6 +105,10 @@ export interface ViewerProviderSummary {
   enabled: boolean;
   admissionLimit: number;
   activeAttempts: number;
+  credential: {
+    configured: boolean;
+    updatedAt: string | null;
+  };
   capabilities: ViewerProviderCapabilities | null;
   capabilityFingerprint: string | null;
   lastHealth: "healthy" | "degraded" | "unavailable" | "unknown" | null;

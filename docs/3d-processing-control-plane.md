@@ -43,6 +43,16 @@ resume and cannot silently create a duplicate dataset.
 
 Every retry creates a new immutable `ProcessingAttempt`. Provider capabilities and presets drive options. LTDS admission/backpressure happens before provider submission; ClusterODM owns node scheduling. Logs shown to staff are bounded and sanitized, with retention/size caps; secrets, tokens, full server paths, and raw provider payloads must not enter client-facing errors or permanent logs.
 
+Staff with `viewer.providers.write` configure provider credentials directly in
+the Operations UI without editing container environment files or restarting
+Viewer. The browser sends an optional credential during disabled provider
+creation, or uses the dedicated credential endpoint to rotate or clear it.
+Viewer returns only `{configured,updatedAt}` status; it never returns the token,
+ciphertext, encryption metadata, or a token suffix. Credential changes are
+blocked during active attempts and invalidate provider health/capabilities, so
+the deliberate admission sequence is configure or rotate, probe, then enable.
+Password inputs are never prefilled and are cleared after every submission.
+
 Project and dataset friendly names, descriptions, and tags are editable without
 changing stable IDs. Dataset project reassociation is catalog-only: Viewer
 requires an active target project and refuses the change while a dataset is

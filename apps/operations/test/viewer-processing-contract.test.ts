@@ -23,7 +23,7 @@ const routes = JSON.parse(routeBytes);
 describe("Viewer processing cross-service contract", () => {
   it("pins the byte-identical cross-repository route fixture", () => {
     expect(createHash("sha256").update(routeBytes).digest("hex").toUpperCase())
-      .toBe("B3460F02E053CDAE6462071A54370CAFF7A8381D4EABED67B307A6B45636EFCF");
+      .toBe("D46543EBA16ED892C1FDFE33F22692A1D3F84DB4F8E65793D87A720C10914BCF");
   });
   it("pins the exact admin-grant body and service HMAC", async () => {
     const value = fixture.adminGrant;
@@ -61,7 +61,12 @@ describe("Viewer processing cross-service contract", () => {
     expect(dataset).not.toHaveProperty("ownership");
     expect(task.latestAttempt).toMatchObject({ status: "running", errorCode: null, errorMessage: null });
     expect(task.latestAttempt).not.toHaveProperty("state");
-    expect(provider).toMatchObject({ lastHealth: "healthy", admissionLimit: 4, activeAttempts: 1 });
+    expect(provider).toMatchObject({
+      lastHealth: "healthy", admissionLimit: 4, activeAttempts: 1,
+      credential: { configured: true, updatedAt: "2027-01-15T07:30:00.000Z" },
+    });
+    expect(provider.credential).not.toHaveProperty("token");
+    expect(provider.credential).not.toHaveProperty("ciphertext");
     expect(provider).not.toHaveProperty("health");
     expect(attempt.logs[0]).toMatchObject({ level: "info", created_at: expect.any(String) });
     expect(storage.trash.items[0]).toMatchObject({ entityType: "dataset", entityId: "dataset-old" });
