@@ -30,7 +30,7 @@ published-model viewing must remain independent of every processing provider.
 | DJI Terra output discovery/import into the same Project/Task/model catalog | Proven + live gate | Candidate scan, external/adopted ownership, asset registration, review/publish and crash-recovery tests; representative Terra export remains live evidence |
 | Local upload and import operations never block normal API requests | Proven | Separate durable operation worker lane, 202 polling, cancellation/restart tests |
 | NodeODM/ClusterODM provider abstraction and LTDS admission ahead of upstream scheduling | Proven + live gate | Source contract tests, `/info.maxImages`, LTDS high-water and active-storage reservation enforcement, plus real NodeODM 2.2.3 and ClusterODM 1.5.5 probes/jobs |
-| Restart-safe init/upload/auxiliary/commit reconciliation; every retry is a new attempt | Proven | Submission-phase checkpoints, ambiguity restart, lease/fencing/fault tests |
+| Restart-safe init/upload/auxiliary/commit reconciliation; every retry is a new attempt | Proven | Submission-phase checkpoints, explicit private/provider input roles, ambiguity restart, lease/fencing/fault tests |
 | Bounded streamed `all.zip` ingestion without retaining a duplicate archive | Proven + live gate | Safe streaming ZIP tests and representative large-result interruption test |
 | Native EPT, GLB and 3D Tiles requested; full-detail LOD equivalence fails closed | Proven + live gate | Capability validation, LOD-v2 proof tests, representative real model close-range QA |
 | Provider `/options`, boolean-false preservation, familiar grouped controls, built-in and reusable presets | Proven + live gate | Custom preset CRUD, capability binding and responsive UI tests; real-provider option corpus remains live evidence |
@@ -39,18 +39,18 @@ published-model viewing must remain independent of every processing provider.
 | Provider outage cannot break health or already-published viewing | Proven + live gate | Separate readiness paths, outage tests, staging provider-loss asset/session check |
 | GCP generic CSV/GeoJSON, canonical meters, map/pixel marking, EXIF proximity without visibility claims | Proven | Viewer/Operations route, trigger, parser, conversion and responsive browser tests |
 | Emlid parser | Sample gate | Representative Emlid export supplied by the user; no schema is guessed |
-| Processing progress/logs, bounded sanitization/retention, retry/cancel, completion/failure notifications | Proven + live gate | Durable callback/outbox tests; staging in-app and email delivery evidence |
-| Task creation plus its first attempt is one recoverable, subject-scoped submission | Proven | Atomic compound submission, lost-response replay across session renewal, conflict and orphan-prevention tests |
-| Review before publication; only selected derived outputs can become public | Proven + live gate | Short-lived unpublished admin review session, embedded Viewer state/renewal tests, model/asset publication allowlist and raw-input exclusion tests; representative rendered model remains live evidence |
-| Model versions and output lifecycle; archive, recoverable trash, restore and explicit purge | Proven | Two-phase journal and crash/restart fault suite |
-| Dataset/output/project/task/cache storage accounting and disk-space preflight | Proven + live gate | Repository/preflight tests plus real TrueNAS `statfs` and reserve evidence |
+| Processing progress/logs, bounded sanitization/retention, retry/cancel, completion/failure notifications | Proven + live gate | Transaction-owned terminal state, callback/outbox and audit rollback tests; staging in-app and email delivery evidence |
+| Task creation plus its first attempt is one recoverable, subject-scoped submission | Proven | Atomic compound submission, subject-durable draft creation for GCP-before-attempt ordering, lost-response replay across session renewal, conflict and orphan-prevention tests |
+| Review before publication; only selected derived outputs can become public | Proven + live gate | Short-lived unpublished admin review session, embedded Viewer state/renewal tests, atomic attempt/model/version/output publication, asset allowlist and raw-input exclusion tests; representative rendered model remains live evidence |
+| Model versions and output lifecycle; archive, recoverable trash, restore and explicit purge | Proven | Historical attempt/version paging, active-versus-historical output tests, transaction-owned audit and two-phase journal crash/restart fault suite |
+| Dataset/output/project/task/cache storage accounting and disk-space preflight | Proven + live gate | Adopted/external tree de-duplication, project/task/output repository and preflight tests, plus real TrueNAS `statfs` and reserve evidence |
 | Imperial default and metric option for distance, elevation, area, volume, GCP and DEM/point-cloud displays | Proven + browser live gate | Central formatters/unit propagation plus desktop/mobile end-to-end toggling |
 | LTDS Worker remains identity/control plane; large assets flow Browser → Cloudflare/Nginx → TrueNAS | Proven + live gate | Chunk-bound Range/no-store authorization tests and bounded immutable-integrity verification; production network trace remains live evidence |
 | Short-lived sessions, silent renewal, preserved state on retryable refresh failure, live revocation | Proven + live gate | Exact-origin/source postMessage and desktop/mobile mounted-state renewal tests; deployed iframe revocation remains live evidence |
 | Staff public shares: expiry, never-expire, access code, revocation, download/units policy | Proven + live gate | Viewer/Ops contract tests and staging expiry/revocation/abuse exercise |
 | Client-created Viewer shares are distinct, owner-audited, and cannot outlive their exact source grant | Proven + live gate | Explicit opt-in portal `viewer.share.create` entitlement, bound authorization, maximum-five-second positive lease and revocation tests; staging authorization loss remains live evidence |
 | Durable privacy-safe abuse controls around public unlock/assets and grant redemption | Proven + live gate | Shared-SQLite/restart rate-window tests and hash-only token keys; deployed WAF/rate behavior remains live evidence |
-| Ops administration: Projects, Datasets, Processing, Imports, Models/Tasks, Shares, Providers, Settings | Proven + live gate | Complete desktop, 390 px and 320 px browser workflows; real provider/storage workflow remains live evidence |
+| Ops administration: Projects, Datasets, Processing, Imports, Models/Tasks, Shares, Providers, Settings | Proven + live gate | Consolidated project context, typed task controls, draft→GCP→attempt, history/review/publish, desktop, 390 px and 320 px browser workflows; real provider/storage workflow remains live evidence |
 | Project Alpha adapter remains generic, profile/workspace isolated, signed, default-off and independently deployable | Proven locally + live gate | Neutral fixtures, exact HMAC/key overlap, MySQL migrations and full PHP suite; staging sender/receiver exercise remains |
 | PA authoritative mutations fail closed with audit/outbox in the same transaction | Proven | Injected outbox/audit failure rollback tests and exact-image contract suite |
 | PA complete snapshots plus incremental upsert/tombstone events | Proven locally + live gate | Cross-profile/root event ordering, replay and revocation tests; staging interruption/resume remains |
@@ -67,8 +67,9 @@ The provider adapter follows the primary NodeODM API contract for `GET /info`,
 `POST /task/new/upload/{uuid}`, `POST /task/new/commit/{uuid}`,
 `GET /task/{uuid}/info`, `GET /task/{uuid}/output`, cancel/remove, and streamed
 `GET /task/{uuid}/download/all.zip`. NodeODM `v2.2.3` and ClusterODM `v1.5.5`
-are tested baselines, not hard production lockouts. Runtime capability probes
-remain authoritative; a real-provider compatibility run is still required.
+are declared compatibility baselines, not hard production lockouts. Runtime
+capability probes remain authoritative; a real-provider compatibility run is
+still required before calling either baseline proven in the deployment.
 
 ## Activation rule
 

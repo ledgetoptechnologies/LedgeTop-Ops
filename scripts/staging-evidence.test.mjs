@@ -235,7 +235,7 @@ function fixture(base) {
 test("accepts complete, current, config-bound non-secret release evidence", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-"));
   const { configs, evidence } = fixture(base);
-  assert.deepEqual(validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes: evidence.configSha256, now, sourceControlVerified: true }), []);
+  assert.deepEqual(validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes: evidence.configSha256, now, sourceControlVerified: true, allowUnfinalizedContractForTest: true }), []);
 });
 
 test("operational verification reflects the final cross-repository pin gate", () => {
@@ -378,7 +378,7 @@ test("activation dependencies cover every default-off flag and reject prohibited
   errors = validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true });
   assert(errors.some((error) => error.includes("external gate projectAlphaDraftQuotes must be confirmed ready")), errors.join(" | "));
   viewer.evidence.externalGates.projectAlphaDraftQuotes.ready = true;
-  assert.deepEqual(validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true }), []);
+  assert.deepEqual(validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true, allowUnfinalizedContractForTest: true }), []);
 
   viewer.evidence.activationPlan.phase = "post-evidence-validation";
   errors = validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true });

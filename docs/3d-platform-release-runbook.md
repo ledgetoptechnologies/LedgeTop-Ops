@@ -1,25 +1,28 @@
 # 3D processing and delivery release runbook
 
-Status: **source contracts and immutable image pins are frozen; live staging
-evidence and activation remain pending**. Every
+Status: **source candidates are locally frozen; the final immutable Viewer
+registry image, independent cross-repository sign-off, live staging evidence,
+and activation remain pending**. Every
 Viewer, Operations, Client, processing, public-share, and Project Alpha portal
 feature gate remains off until the corresponding live evidence below is
 captured.
 
 ## Frozen source candidates
 
-- 3D Viewer: `8f6c4025368f0157bcd1e1c575d2fb4fab56564c` and
-  `ghcr.io/ledgetoptechnologies/3d-viewer:sha-8f6c402@sha256:994f6dbba8995e083df0bc1da634fb50ee1e46217a1e3633a1761199f533381a`
-- LTDS-Ops product code: `e44a1b4e789790834dfb071fbdbdda7e0cfd5dfc` on
+- 3D Viewer source: `a4ff4629a170bc89be72263a6f7d8f00c2630299`.
+  The final GHCR tag and manifest digest are deliberately pending; the local
+  verification image ID is not a substitute for a registry manifest digest.
+- LTDS-Ops product code: `89a3a4566b9de3e1b9a7c8ad90aed15bfdec087a` on
   `codex/3d-processing-control-plane`. This pin contains the desktop
   Administration-menu fix equivalent to `09e3443`; never substitute a mutable
   branch tip.
 - Project Alpha: `769df9320dbf4dfc512d364173d5cb7d8ad8a97c` on `main`
 
-The corresponding constants in `scripts/staging-requirements.mjs` are frozen
-with `RELEASE_CONTRACT_FINALIZED=true`. Any source, fixture, migration, or image
-change must first set it back to `false`, refresh every immutable pin, and repeat
-independent cross-repository verification.
+The corresponding constants in `scripts/staging-requirements.mjs` remain
+fail-closed with `RELEASE_CONTRACT_FINALIZED=false`. After the final Viewer
+image is published, replace `FINAL_VIEWER_IMAGE_PENDING` with its immutable
+GHCR manifest digest, repeat independent cross-repository verification, and
+only then set the constant to `true`.
 
 The Viewer/Ops signed-processing corpus has SHA-256
 `13ab12919e624be6a048c058774ccff2031f865855e64ab3b726e9b31cffab82`.

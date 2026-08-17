@@ -384,11 +384,13 @@ addresses; and execute cross-account, revoked-access, retry, and rollback
 checks. The checked-in staging config intentionally leaves the Mapbox token and
 triage address blank and SMTP disabled, so it is not release-ready.
 
-The reviewed release branch is committed and pushed, but it has not been
-promoted to the live Workers and Delivery D1 still has pending additive
-migrations. Portal-v2 capabilities remain disabled. Promotion
-requires the isolated staging exercise, evidence packet, backups, external
-provider integrations, and explicit deployment/migration approval. PA
+The reviewed release was promoted to the live Workers on 2026-08-17, and the
+Delivery and Operations D1 ledgers were applied through Client `0142` and
+Operations `0029`; immediate rechecks reported no pending migrations. Every
+portal-v2, Viewer, processing, and client-sharing capability remains disabled.
+Activation still requires the isolated staging exercise, evidence packet,
+external-provider checks, an operator-selected Project Alpha root, and the
+per-boundary approval sequence in the 3D platform release runbook. PA
 verification credentials must remain read-only.
 
 ## Known limitations and blockers
