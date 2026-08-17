@@ -11,14 +11,14 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
   operations: "1d46d83dda7ef287360867fa734a8d0e0be5aa85",
-  viewer: "bfcbcef52c651768503789d1d83090b4c4e443b8",
+  viewer: "ab6e65e3db8963a03e2ea8b4518d5cc23acc203e",
   projectAlpha: "3c0059e538067718abd91bc28e67a9714305260b",
 });
 
 export const STAGING_VIEWER = Object.freeze({
   hostname: "viewer-staging.ledgetopdroneservices.com",
   origin: "https://viewer-staging.ledgetopdroneservices.com",
-  image: "ghcr.io/ledgetoptechnologies/3d-viewer@sha256:769b81f4b455d6f0764ce12fbd9d0f9855e0e31ade6150582dda32f57589ef78",
+  image: "ghcr.io/ledgetoptechnologies/3d-viewer@sha256:9be49534d3cae15672f1e70a8eafe005695dc23c0a4679aabea78a29c79590bf",
   schemaVersion: 17,
   serviceKeyId: "ops-staging-v1",
   eventKeyId: "viewer-staging-v1",

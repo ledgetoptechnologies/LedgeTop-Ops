@@ -9,11 +9,13 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `bfcbcef52c651768503789d1d83090b4c4e443b8`.
+- 3D Viewer source: `ab6e65e3db8963a03e2ea8b4518d5cc23acc203e`.
   The reviewed release-candidate image is
-  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:769b81f4b455d6f0764ce12fbd9d0f9855e0e31ade6150582dda32f57589ef78`.
-  GitHub Actions run `32054356877` published only tags
-  `v0.2.0-rc.bfcbcef` and `sha-bfcbcef`; it did not publish `latest`.
+  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:9be49534d3cae15672f1e70a8eafe005695dc23c0a4679aabea78a29c79590bf`.
+  GitHub Actions run `32055416240` published only tags
+  `v0.2.0-rc.ab6e65e` and `sha-ab6e65e`; it did not publish `latest`. The
+  workflow then pulled that exact digest back from GHCR and verified runtime
+  UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
 - LTDS-Ops product code: `1d46d83dda7ef287360867fa734a8d0e0be5aa85` on
   `codex/3d-processing-control-plane`. This pin contains the desktop
   Administration-menu fix equivalent to `09e3443`; never substitute a mutable
@@ -96,13 +98,14 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091` and published-session revocation
 commits `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06` and
-`bfcbcef52c651768503789d1d83090b4c4e443b8` do not change the provider adapter,
+`ab6e65e3db8963a03e2ea8b4518d5cc23acc203e` do not change the provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
-`72f3d1a9c36a7d366ca3e129d0516f72eb281091`. The final revocation candidate
-requires a new immutable registry build and identity-bound staging rehearsal;
-that evidence remains pending and the release contract stays unfinalized.
+`72f3d1a9c36a7d366ca3e129d0516f72eb281091`. The final revocation candidate has
+an immutable registry build whose exact digest was pulled back and
+identity-verified by its publishing workflow. Identity-bound deployment and
+TrueNAS staging rehearsal remain live gates.
 
 ## 1. Back up and prove the disabled baseline
 
@@ -141,7 +144,7 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`bfcbcef52c651768503789d1d83090b4c4e443b8` and schema version `17`. Confirm
+`ab6e65e3db8963a03e2ea8b4518d5cc23acc203e` and schema version `17`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
 `X-LTDS-Viewer-Revision`, `17` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
