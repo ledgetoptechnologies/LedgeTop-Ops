@@ -1455,6 +1455,17 @@ tbody tr:last-child td { border: 0; }
 .viewer-task-catalog { min-width: min(100%, 18rem); }
 .viewer-task-catalog form { display: grid; gap: .55rem; margin-top: .55rem; padding: .7rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
 .viewer-task-catalog label { display: grid; gap: .25rem; min-width: 0; }
+.viewer-project-columns { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: .75rem; }
+.viewer-project-columns h4 { margin-bottom: .35rem; }
+.viewer-project-columns ul { margin: 0; padding-left: 1.15rem; }
+.viewer-project-actions, .viewer-task-submit-actions { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .7rem; }
+.viewer-file-roles { display: grid; gap: .65rem; max-height: 22rem; overflow: auto; }
+.viewer-file-roles p { margin: 0; }
+.viewer-attempt-history { margin-top: .7rem; }
+.viewer-attempt-history > ol { display: grid; gap: .55rem; max-height: 24rem; overflow: auto; padding-left: 1.5rem; }
+.viewer-attempt-history li { overflow-wrap: anywhere; }
+.viewer-attempt-history small { display: block; color: var(--muted); }
+.viewer-attempt-history pre { max-width: 100%; overflow: auto; white-space: pre-wrap; }
 .viewer-storage-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(180px,1fr)); gap: .75rem; margin-bottom: 1rem; }
 .viewer-storage-grid article { padding: .85rem; border: 1px solid var(--line); border-radius: 10px; background: #f8fafb; }
 .viewer-storage-grid h3 { margin: 0 0 .4rem; text-transform: capitalize; }
@@ -1488,6 +1499,8 @@ tbody tr:last-child td { border: 0; }
   .viewer-import-preview { grid-template-columns: 1fr; }
   .viewer-processing :is(button,a.button-orange,a.button-ghost) { min-height: 44px; }
   .viewer-processing-list article > div:last-child { display: grid; grid-template-columns: 1fr; }
+  .viewer-project-columns, .viewer-task-submit-actions { grid-template-columns: 1fr; }
+  .viewer-project-actions, .viewer-task-submit-actions { display: grid; }
   .viewer-provider-controls, .viewer-provider-credential-form { width: 100%; grid-template-columns: 1fr; }
   .gcp-context-selectors, .gcp-import-form, .gcp-map-layout, .gcp-pixel-form { grid-template-columns: 1fr; }
   .gcp-map { min-height: 330px; }

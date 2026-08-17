@@ -132,7 +132,7 @@ function ImageMarker({ client, datasetId, image, initial, saving, onSave, onRemo
   </section>;
 }
 
-export function GcpWorkspace({ client, datasets, tasks, mapToken, units, canRead, canWrite }: {
+export function GcpWorkspace({ client, datasets, tasks, mapToken, units, canRead, canWrite, onReturnToTasks }: {
   client: ViewerAdminClient;
   datasets: ViewerDatasetSummary[];
   tasks: ViewerProcessingTask[];
@@ -140,6 +140,7 @@ export function GcpWorkspace({ client, datasets, tasks, mapToken, units, canRead
   units: ViewerDisplayUnits;
   canRead: boolean;
   canWrite: boolean;
+  onReturnToTasks?: () => void;
 }): ReactElement {
   const fileId = useId();
   const availableDatasets = datasets.filter((dataset) => dataset.status === "finalized");
@@ -215,7 +216,7 @@ export function GcpWorkspace({ client, datasets, tasks, mapToken, units, canRead
       </div>
       <p className="viewer-processing-warning">GCP files, source imagery, and pixel correspondences are private administrative inputs. They are never eligible for client or public shares.</p>
       {error && <div className="notice error" role="alert">{error}</div>}
-      {message && <div className="notice" role="status">{message}</div>}
+      {message && <div className="notice" role="status">{message}{taskId && tasks.find(task => task.id === taskId)?.status === "draft" && onReturnToTasks && <> <button type="button" className="button-orange button-small" onClick={onReturnToTasks}>Return to Tasks and start first attempt</button></>}</div>}
     </Card>
 
     {canWrite && <Card title="Import generic GCP interchange">
@@ -275,7 +276,7 @@ export function GcpWorkspace({ client, datasets, tasks, mapToken, units, canRead
     </Card>}
 
     {selectedPoint && selectedImage && <Card title="Manual image mark">
-      {!taskId ? <div className="notice">Select a processing task for this dataset before saving a pixel correspondence.</div> : <ImageMarker
+      {!taskId ? <div className="notice">Create a draft task for this dataset in Tasks, then select it here before saving a pixel correspondence. Starting an attempt first would freeze an empty GCP snapshot.{onReturnToTasks && <> <button type="button" className="button-orange button-small" onClick={onReturnToTasks}>Go to Tasks</button></>}</div> : <ImageMarker
         client={client} datasetId={datasetId} image={selectedImage} initial={selectedCorrespondence} saving={busy}
         onSave={(pixelX, pixelY) => void run(async () => {
           if (selectedCorrespondence) {

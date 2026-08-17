@@ -21,9 +21,10 @@ import {
 
 type CandidatePage = { candidates: ViewerCatalogImportCandidate[]; nextCursor: string | null };
 
-export function ViewerCatalogImports({ client, projects, units, canImport }: {
+export function ViewerCatalogImports({ client, projects, preferredProjectId, units, canImport }: {
   client: ViewerAdminClient | null;
   projects: ViewerProcessingProject[];
+  preferredProjectId?: string | null;
   units: ViewerDisplayUnits;
   canImport: boolean;
 }): ReactElement {
@@ -98,20 +99,21 @@ export function ViewerCatalogImports({ client, projects, units, canImport }: {
     </div>
     {operation && <p className="viewer-upload-resume" role="status">Durable {operation.type === "catalog_scan" ? "scan" : "model import"} {operation.operationId} can be resumed without duplication. <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void resume()}>Resume status</button></p>}
     {message && <p role="status">{message}</p>}{error && <p className="viewer-processing-error" role="alert">{error}</p>}
-    {!candidates.length ? <EmptyState title={`No ${state} ${provider === "webodm" ? "WebODM" : "Terra"} candidates`} detail="Run a scan after placing or mounting outputs in the configured source root." /> : <div className="viewer-processing-list">{candidates.map(candidate => <Candidate key={candidate.id} candidate={candidate} projects={projects} units={units} busy={busy || Boolean(operation)} map={(body) => start(`/api/v1/processing/catalog-imports/candidates/${encodeURIComponent(candidate.id)}/map`, "catalog_map", body)} />)}</div>}
+    {!candidates.length ? <EmptyState title={`No ${state} ${provider === "webodm" ? "WebODM" : "Terra"} candidates`} detail="Run a scan after placing or mounting outputs in the configured source root." /> : <div className="viewer-processing-list">{candidates.map(candidate => <Candidate key={candidate.id} candidate={candidate} projects={projects} preferredProjectId={preferredProjectId} units={units} busy={busy || Boolean(operation)} map={(body) => start(`/api/v1/processing/catalog-imports/candidates/${encodeURIComponent(candidate.id)}/map`, "catalog_map", body)} />)}</div>}
     {nextCursor && <button type="button" className="button-ghost viewer-load-more" disabled={busy} onClick={() => void load(nextCursor).catch(caught => setError((caught as Error).message))}>Load 50 more</button>}
   </Card>;
 }
 
-function Candidate({ candidate, projects, units, busy, map }: {
+function Candidate({ candidate, projects, preferredProjectId, units, busy, map }: {
   candidate: ViewerCatalogImportCandidate;
   projects: ViewerProcessingProject[];
+  preferredProjectId?: string | null;
   units: ViewerDisplayUnits;
   busy: boolean;
   map: (body: unknown) => Promise<void>;
 }): ReactElement {
   const [destination, setDestination] = useState<"existing" | "new">(projects.length ? "existing" : "new");
-  const [projectId, setProjectId] = useState(projects[0]?.id || "");
+  const [projectId, setProjectId] = useState(projects.find(project => project.id === preferredProjectId && project.status === "active")?.id || projects[0]?.id || "");
   const [projectName, setProjectName] = useState(candidate.suggestedProjectName);
   const [taskName, setTaskName] = useState(candidate.suggestedTaskName);
   const [storageMode, setStorageMode] = useState<Exclude<ViewerAssetOwnership, "managed">>(candidate.provider === "webodm" ? "external_reference" : "adopted");

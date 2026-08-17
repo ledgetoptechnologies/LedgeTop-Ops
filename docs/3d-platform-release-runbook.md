@@ -24,7 +24,7 @@ independent cross-repository verification.
 The Viewer/Ops signed-processing corpus has SHA-256
 `13ab12919e624be6a048c058774ccff2031f865855e64ab3b726e9b31cffab82`.
 The route-response corpus has SHA-256
-`26ba67c5ecc3a534e3c067a6b4b0cd80e2d3823d766830edc3fe77ce71152b5e`.
+`8df468634c41ff84ceda6e74c34c732e2c28ee6472cdd3f28b9d658d19cacc01`.
 The five generic Project Alpha fixtures are byte-pinned by both repositories.
 Do not substitute a later commit or hand-edit a fixture during activation.
 

@@ -1,11 +1,13 @@
-import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from "react";
 import type {
   ViewerDatasetImportPreview,
   ViewerDatasetSummary,
   ViewerDatasetUploadGrant,
   ViewerDisplayUnits,
   ViewerDurableOperationResponse,
+  ViewerProcessingAttempt,
   ViewerProcessingAttemptDetail,
+  ViewerProcessingAttemptPage,
   ViewerProcessingPreset,
   ViewerProcessingProject,
   ViewerProcessingTask,
@@ -30,7 +32,7 @@ import {
 import { ViewerAdminClient } from "./viewer-admin-client";
 import { GcpWorkspace } from "./GcpWorkspace";
 import { ViewerCatalogImports } from "./ViewerCatalogImports";
-import { ViewerPresetSettings } from "./ViewerPresetSettings";
+import { AdvancedJsonEditor, OptionEditor, ViewerPresetSettings } from "./ViewerPresetSettings";
 import { providerCredentialError } from "./provider-credential";
 import { defaultViewerProviderOverrides } from "./provider-options";
 import {
@@ -41,6 +43,14 @@ import {
   writeViewerTaskSubmissionCheckpoint,
   type ViewerTaskSubmissionCheckpoint,
 } from "./viewer-task-submission";
+import {
+  clearViewerTaskDraftCheckpoint,
+  newViewerTaskDraftCheckpoint,
+  readViewerTaskDraftCheckpoint,
+  resumeViewerTaskDraft,
+  writeViewerTaskDraftCheckpoint,
+  type ViewerTaskDraftCheckpoint,
+} from "./viewer-task-draft";
 import {
   assertViewerOperation,
   pollViewerOperation,
@@ -85,7 +95,26 @@ async function chunkHash(blob: Blob): Promise<string> {
   return [...digest].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-type UploadManifestFile = { id: string; relativePath: string; byteSize: number; sha256: string; contentType?: string; file: File };
+type UploadProcessingRole = "image" | "gcp_source" | "provider_input" | "administrative";
+type UploadManifestFile = { id: string; relativePath: string; byteSize: number; sha256: string; contentType?: string; processingRole: UploadProcessingRole; file: File };
+
+function uploadExtension(path: string): string {
+  return path.toLocaleLowerCase("en-US").split(".").at(-1) || "";
+}
+
+function processingRoleForUpload(path: string): UploadProcessingRole {
+  const extension = uploadExtension(path);
+  if (["jpg", "jpeg", "png", "tif", "tiff", "dng", "raw", "heic"].includes(extension)) return "image";
+  if (extension === "csv") return "gcp_source";
+  return "administrative";
+}
+
+function selectableProcessingRoles(path: string): UploadProcessingRole[] {
+  const extension = uploadExtension(path);
+  if (extension === "csv") return ["gcp_source", "administrative"];
+  if (["txt", "geojson", "json", "zip", "las", "laz"].includes(extension)) return ["administrative", "provider_input"];
+  return [processingRoleForUpload(path)];
+}
 
 function formatBytes(value: number): string {
   if (!Number.isFinite(value) || value <= 0) return "0 B";
@@ -123,6 +152,8 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
   const [presets, setPresets] = useState<ViewerProcessingPreset[]>([]);
   const [storage, setStorage] = useState<ViewerStorageSummary | null>(null);
   const [reviewAttempt, setReviewAttempt] = useState<ViewerProcessingAttemptDetail | null>(null);
+  const [pendingGcpDraftId, setPendingGcpDraftId] = useState<string | null>(null);
+  const [projectContext, setProjectContext] = useState<string | null>(null);
   const [cursors, setCursors] = useState<PageCursors>({ projects: null, datasets: null, tasks: null, outputs: null, providers: null });
   const [tab, setTab] = useState<Tab>(() => {
     const pending = readViewerOperationCheckpoints()[0];
@@ -184,6 +215,11 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
   }, []);
 
   useEffect(() => { load().catch(caught => { if ((caught as Error).name !== "AbortError") setError((caught as Error).message); }); return () => loadAbort.current?.abort(); }, [load]);
+  useEffect(() => {
+    if (pendingGcpDraftId && tasks.some(task => task.id === pendingGcpDraftId && task.status === "draft")) {
+      clearViewerTaskDraftCheckpoint(); setPendingGcpDraftId(null); setTab("gcp");
+    }
+  }, [pendingGcpDraftId, tasks]);
   const loadMore = async (kind: PagedKind) => {
     const client = clientRef.current, cursor = cursors[kind];
     if (!client || !cursor || busy) return;
@@ -274,7 +310,7 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
       </div>
       <nav className="viewer-processing-tabs" aria-label="Processing sections">
         {(["projects","datasets","gcp","tasks","outputs","imports","providers","storage","shares","settings"] as Tab[]).map(value =>
-          <button type="button" key={value} aria-current={tab === value ? "page" : undefined} onClick={() => setTab(value)}>{value === "gcp" ? "Ground control" : value[0]!.toUpperCase() + value.slice(1)}</button>)}
+          <button type="button" key={value} aria-current={tab === value ? "page" : undefined} onClick={() => { setProjectContext(null); setTab(value); }}>{value === "gcp" ? "Ground control" : value[0]!.toUpperCase() + value.slice(1)}</button>)}
       </nav>
       {error && <div className="notice error" role="alert">{error}</div>}
       {message && <div className="notice" role="status">{message}</div>}
@@ -282,12 +318,12 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
       {clientRef.current?.status().renewalError && <div className="notice" role="status">Viewer authorization renewal will retry; the current session remains active until expiry.</div>}
     </Card>
 
-    {tab === "projects" && <Projects projects={projects} canWrite={can("viewer.projects.write")} busy={busy} mutate={mutate} query={query} units={bootstrap.units.resolved} nextCursor={cursors.projects} loadMore={() => loadMore("projects")} />}
-    {tab === "datasets" && <Datasets key={`datasets-${recoveryVersion}`} projects={projects} datasets={datasets} canWrite={can("viewer.datasets.write")} canTrash={can("viewer.storage.purge")} busy={busy} mutate={mutate} nextCursor={cursors.datasets} loadMore={() => loadMore("datasets")} />}
-    {tab === "gcp" && clientRef.current && <GcpWorkspace client={clientRef.current} datasets={datasets} tasks={tasks} mapToken={mapToken} units={bootstrap.units.resolved} canRead={can("viewer.gcp.read")} canWrite={can("viewer.gcp.write")} />}
-    {tab === "tasks" && <Tasks client={clientRef.current} tasks={tasks} datasets={datasets} providers={providers} presets={presets} canWrite={can("viewer.processing.write")} canPublish={can("viewer.processing.publish")} busy={busy} mutate={mutate} query={query} nextCursor={cursors.tasks} loadMore={() => loadMore("tasks")} />}
+    {tab === "projects" && <Projects projects={projects} datasets={datasets} tasks={tasks} canWrite={can("viewer.projects.write")} busy={busy} mutate={mutate} query={query} units={bootstrap.units.resolved} nextCursor={cursors.projects} loadMore={() => loadMore("projects")} navigate={(next, projectId) => { setProjectContext(projectId); setTab(next); }} />}
+    {tab === "datasets" && <Datasets key={`datasets-${recoveryVersion}`} projects={projects} datasets={datasets} preferredProjectId={projectContext} canWrite={can("viewer.datasets.write")} canTrash={can("viewer.storage.purge")} busy={busy} mutate={mutate} nextCursor={cursors.datasets} loadMore={() => loadMore("datasets")} />}
+    {tab === "gcp" && clientRef.current && <GcpWorkspace client={clientRef.current} datasets={datasets} tasks={tasks} mapToken={mapToken} units={bootstrap.units.resolved} canRead={can("viewer.gcp.read")} canWrite={can("viewer.gcp.write")} onReturnToTasks={() => setTab("tasks")} />}
+    {tab === "tasks" && <Tasks client={clientRef.current} tasks={tasks} datasets={datasets} preferredProjectId={projectContext} providers={providers} presets={presets} canWrite={can("viewer.processing.write")} canPublish={can("viewer.processing.publish")} busy={busy} mutate={mutate} query={query} nextCursor={cursors.tasks} loadMore={() => loadMore("tasks")} onDraftCreated={setPendingGcpDraftId} />}
     {tab === "outputs" && <Outputs outputs={outputs} totals={outputTotals} canPublish={can("viewer.processing.publish")} busy={busy} mutate={mutate} nextCursor={cursors.outputs} loadMore={() => loadMore("outputs")} />}
-    {tab === "imports" && <><ViewerCatalogImports key={`catalog-${recoveryVersion}`} client={clientRef.current} projects={projects} units={bootstrap.units.resolved} canImport={can("viewer.datasets.import")} /><Imports key={`imports-${recoveryVersion}`} client={clientRef.current} projects={projects} canImport={can("viewer.datasets.import")} busy={busy} mutate={mutate} /></>}
+    {tab === "imports" && <><ViewerCatalogImports key={`catalog-${recoveryVersion}`} client={clientRef.current} projects={projects} preferredProjectId={projectContext} units={bootstrap.units.resolved} canImport={can("viewer.datasets.import")} /><Imports key={`imports-${recoveryVersion}`} client={clientRef.current} projects={projects} preferredProjectId={projectContext} canImport={can("viewer.datasets.import")} busy={busy} mutate={mutate} /></>}
     {tab === "providers" && <Providers providers={providers} canWrite={can("viewer.providers.write")} busy={busy} mutate={mutate} nextCursor={cursors.providers} loadMore={() => loadMore("providers")} />}
     {tab === "storage" && <Storage summary={storage} canPurge={can("viewer.storage.purge")} busy={busy} mutate={mutate} loadMore={loadMoreTrash} />}
     {tab === "shares" && <Card title="Shares"><p>Published-model demo links, expiry, revocation, passwords, units, and download policy are managed in Public demo links below. Raw dataset inputs and processing logs are never share candidates.</p><a className="button-orange button-small" href="#viewer-public-shares">Go to public demo links</a></Card>}
@@ -314,13 +350,22 @@ function Pager({ nextCursor, busy, loadMore }: { nextCursor: string | null; busy
 function normalizedTags(value: string): string[] {
   return [...new Set(value.split(/[\n,]/).map(tag => tag.trim()).filter(Boolean))];
 }
-function Projects({ projects, canWrite, busy, mutate, query, units, nextCursor, loadMore }: { projects: ViewerProcessingProject[]; canWrite: boolean; busy: boolean; mutate: Mutate; query: Query; units: ViewerDisplayUnits; nextCursor: string | null; loadMore: () => void }) {
+function Projects({ projects, datasets, tasks, canWrite, busy, mutate, query, units, nextCursor, loadMore, navigate }: { projects: ViewerProcessingProject[]; datasets: ViewerDatasetSummary[]; tasks: ViewerProcessingTask[]; canWrite: boolean; busy: boolean; mutate: Mutate; query: Query; units: ViewerDisplayUnits; nextCursor: string | null; loadMore: () => void; navigate: (tab: Tab, projectId: string) => void }) {
   const [name, setName] = useState("");
   return <Card title="Projects">{canWrite && <form className="viewer-processing-form" onSubmit={event => {
     event.preventDefault(); const displayName = name.trim(); if (!displayName) return;
     void mutate(client => client.request("/api/v1/projects", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ displayName, defaultUnits: units }) }), "Project created.").then(() => setName(""));
   }}><label>Friendly project name<input maxLength={160} value={name} onChange={event => setName(event.target.value)} /></label><button className="button-orange" disabled={busy || !name.trim()}>Create project</button></form>}
-    {!projects.length ? <EmptyState title="No processing projects" detail="Create a project to organize reusable datasets and tasks." /> : <div className="viewer-processing-list">{projects.map(project => <article key={project.id}><div><h3>{project.displayName}</h3><p>{project.description || "No description"}</p><p>{project.defaultUnits} · {project.status} · stable ID {project.id}</p>{project.tags.length > 0 && <p>Tags: {project.tags.join(", ")}</p>}<ProjectStorageDetails project={project} busy={busy} query={query} /></div><div>{canWrite && <ProjectCatalogControls project={project} busy={busy} mutate={mutate} />}{canWrite && project.status === "active" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/projects/${encodeURIComponent(project.id)}/archive`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Project archived; stable IDs and published model links are unchanged.")}>Archive</button>}</div></article>)}</div>}<Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
+    {!projects.length ? <EmptyState title="No processing projects" detail="Create a project to organize reusable datasets and tasks." /> : <div className="viewer-processing-list">{projects.map(project => {
+      const projectDatasets = datasets.filter(dataset => dataset.projectId === project.id);
+      const projectTasks = tasks.filter(task => task.projectId === project.id);
+      return <article key={project.id}><div><h3>{project.displayName}</h3><p>{project.description || "No description"}</p><p>{project.defaultUnits} · {project.status} · stable ID {project.id}</p>{project.tags.length > 0 && <p>Tags: {project.tags.join(", ")}</p>}
+        <details className="viewer-project-contents"><summary>Tasks, datasets, and actions</summary>
+          <p>{projectDatasets.length} loaded dataset{projectDatasets.length === 1 ? "" : "s"} · {projectTasks.length} loaded task{projectTasks.length === 1 ? "" : "s"}</p>
+          <div className="viewer-project-columns"><section><h4>Datasets</h4>{projectDatasets.length ? <ul>{projectDatasets.map(dataset => <li key={dataset.id}>{dataset.displayName} · {dataset.status}</li>)}</ul> : <p>No loaded datasets.</p>}</section><section><h4>Tasks</h4>{projectTasks.length ? <ul>{projectTasks.map(task => <li key={task.id}>{task.displayName} · {task.status}</li>)}</ul> : <p>No loaded tasks.</p>}</section></div>
+          <div className="viewer-project-actions"><button type="button" className="button-ghost button-small" onClick={() => navigate("datasets", project.id)}>Add dataset to {project.displayName}</button><button type="button" className="button-ghost button-small" onClick={() => navigate("tasks", project.id)}>Create task in {project.displayName}</button><button type="button" className="button-ghost button-small" onClick={() => navigate("imports", project.id)}>Import model into {project.displayName}</button><button type="button" className="button-ghost button-small" onClick={() => navigate("shares", project.id)}>Open share management</button></div>
+        </details><ProjectStorageDetails project={project} busy={busy} query={query} /></div><div>{canWrite && <ProjectCatalogControls project={project} busy={busy} mutate={mutate} />}{canWrite && project.status === "active" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/projects/${encodeURIComponent(project.id)}/archive`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Project archived; stable IDs and published model links are unchanged.")}>Archive</button>}</div></article>;
+    })}</div>}<Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
   </Card>;
 }
 
@@ -354,8 +399,9 @@ function ProjectStorageDetails({ project, busy, query }: { project: ViewerProces
   </details>;
 }
 
-function Datasets({ projects, datasets, canWrite, canTrash, busy, mutate, nextCursor, loadMore }: { projects: ViewerProcessingProject[]; datasets: ViewerDatasetSummary[]; canWrite: boolean; canTrash: boolean; busy: boolean; mutate: Mutate; nextCursor: string | null; loadMore: () => void }) {
+function Datasets({ projects, datasets, preferredProjectId, canWrite, canTrash, busy, mutate, nextCursor, loadMore }: { projects: ViewerProcessingProject[]; datasets: ViewerDatasetSummary[]; preferredProjectId: string | null; canWrite: boolean; canTrash: boolean; busy: boolean; mutate: Mutate; nextCursor: string | null; loadMore: () => void }) {
   const [projectId, setProjectId] = useState(""); const [name, setName] = useState(""); const [files, setFiles] = useState<File[]>([]); const [progress, setProgress] = useState("");
+  const [fileRoles, setFileRoles] = useState<Record<string, UploadProcessingRole>>({});
   const [resumeAvailable, setResumeAvailable] = useState(() => Boolean(readUploadCheckpoint()));
   const [resumeDurabilityWarning, setResumeDurabilityWarning] = useState("");
   const [savedOperation, setSavedOperation] = useState<ViewerOperationCheckpoint | null>(() =>
@@ -364,7 +410,10 @@ function Datasets({ projects, datasets, canWrite, canTrash, busy, mutate, nextCu
   const checkpointRef = useRef<ViewerUploadCheckpoint | null>(null);
   const cancellation = useRef<AbortController | null>(null);
   const operationResumeStarted = useRef(false);
-  useEffect(() => { if (!projectId && projects[0]) setProjectId(projects[0].id); }, [projectId, projects]);
+  useEffect(() => {
+    if (preferredProjectId && projects.some(project => project.id === preferredProjectId && project.status === "active")) setProjectId(preferredProjectId);
+    else if (!projectId && projects[0]) setProjectId(projects[0].id);
+  }, [preferredProjectId, projectId, projects]);
   const watchOperation = async (client: ViewerAdminClient, checkpoint: ViewerOperationCheckpoint, controller: AbortController) => {
     const terminal = await pollViewerOperation(client, checkpoint, operation => {
       setProgress(`Finalizing immutable manifest: ${Math.round(operation.progress * 100)}% · ${operation.status}`);
@@ -373,7 +422,7 @@ function Datasets({ projects, datasets, canWrite, canTrash, busy, mutate, nextCu
       throw new Error(terminal.errorMessage || `Dataset finalization ${terminal.status}. The durable operation is saved for review.`);
     removeViewerOperationCheckpoint(checkpoint.operationId); setSavedOperation(null);
     clearUploadCheckpoint(); checkpointRef.current = null; setResumeAvailable(false); setResumeDurabilityWarning("");
-    setProgress(""); setFiles([]); setName(""); cancellation.current = null;
+    setProgress(""); setFiles([]); setFileRoles({}); setName(""); cancellation.current = null;
   };
   useEffect(() => {
     if (!savedOperation || operationResumeStarted.current) return;
@@ -388,7 +437,8 @@ function Datasets({ projects, datasets, canWrite, canTrash, busy, mutate, nextCu
     let manifest: UploadManifestFile[] = [];
     for (const [index, file] of files.entries()) {
       setProgress(`Hashing ${index + 1} of ${files.length}: ${file.name}`);
-      manifest.push({ id: crypto.randomUUID(), relativePath: canonicalUploadPath(file.webkitRelativePath || file.name), byteSize: file.size, sha256: await hashFileOffThread(file, completed => setProgress(`Hashing ${index + 1} of ${files.length}: ${file.name} · ${file.size ? Math.round(completed / file.size * 100) : 100}%`), controller.signal), contentType: file.type || undefined, file });
+      const relativePath = canonicalUploadPath(file.webkitRelativePath || file.name);
+      manifest.push({ id: crypto.randomUUID(), relativePath, byteSize: file.size, sha256: await hashFileOffThread(file, completed => setProgress(`Hashing ${index + 1} of ${files.length}: ${file.name} · ${file.size ? Math.round(completed / file.size * 100) : 100}%`), controller.signal), contentType: file.type || undefined, processingRole: fileRoles[relativePath] || processingRoleForUpload(relativePath), file });
     }
     manifest.sort((left, right) => left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0);
     const foldedPaths = new Set<string>();
@@ -437,7 +487,23 @@ function Datasets({ projects, datasets, canWrite, canTrash, busy, mutate, nextCu
   return <Card title="Datasets">{canWrite && <form className="viewer-processing-form" onSubmit={event => { event.preventDefault(); if (projectId && name.trim() && files.length) void mutate(upload, "Dataset finalized. The source manifest is now immutable."); }}>
     <label>Project<select value={projectId} onChange={event => setProjectId(event.target.value)}>{projects.map(project => <option key={project.id} value={project.id}>{project.displayName}</option>)}</select></label>
     <label>Dataset name<input maxLength={160} value={name} onChange={event => setName(event.target.value)} /></label>
-    <label>Drone dataset folder<input type="file" multiple {...({ webkitdirectory: "", directory: "" } as Record<string, string>)} onChange={event => setFiles([...event.target.files || []])} /></label>
+    <label>Drone dataset folder<input type="file" multiple {...({ webkitdirectory: "", directory: "" } as Record<string, string>)} onChange={event => {
+      const selected = [...event.target.files || []];
+      const saved = checkpointRef.current || readUploadCheckpoint();
+      const savedRoles = new Map(saved?.files.map(file => [`${file.relativePath}\0${file.byteSize}`, file.processingRole]) || []);
+      const nextRoles: Record<string, UploadProcessingRole> = {};
+      for (const file of selected) {
+        const relativePath = canonicalUploadPath(file.webkitRelativePath || file.name);
+        const savedRole = savedRoles.get(`${relativePath}\0${file.size}`);
+        nextRoles[relativePath] = savedRole && savedRole !== "auto" ? savedRole as UploadProcessingRole : processingRoleForUpload(relativePath);
+      }
+      setFiles(selected); setFileRoles(nextRoles);
+    }} /></label>
+    {files.some(file => selectableProcessingRoles(canonicalUploadPath(file.webkitRelativePath || file.name)).length > 1) && <fieldset className="viewer-processing-wide viewer-file-roles"><legend>Auxiliary processing roles</legend><p>GCP source and administrative files remain private and are never sent upstream. Mark only a supported boundary, mask, point-cloud, or provider option file as provider input.</p>{files.map(file => {
+      const relativePath = canonicalUploadPath(file.webkitRelativePath || file.name), roles = selectableProcessingRoles(relativePath);
+      if (roles.length < 2) return null;
+      return <label key={relativePath}>Role for {relativePath}<select value={fileRoles[relativePath] || processingRoleForUpload(relativePath)} onChange={event => setFileRoles(current => ({ ...current, [relativePath]: event.target.value as UploadProcessingRole }))}>{roles.map(role => <option key={role} value={role}>{role === "gcp_source" ? "GCP source (private)" : role === "administrative" ? "Administrative (private)" : "Provider input (sent upstream)"}</option>)}</select></label>;
+    })}</fieldset>}
     <button className="button-orange" disabled={busy || !projectId || !name.trim() || !files.length}>{busy ? "Working…" : resumeAvailable ? "Resume upload" : "Upload dataset"}</button>
     {busy && cancellation.current && <button type="button" className="button-danger" onClick={() => cancellation.current?.abort()}>{savedOperation ? "Stop watching (finalization continues)" : "Cancel upload"}</button>}
     {resumeDurabilityWarning && <p className="viewer-processing-warning" role="alert">{resumeDurabilityWarning}</p>}
@@ -473,16 +539,31 @@ function DatasetCatalogControls({ dataset, projects, busy, mutate }: { dataset: 
   </form></details>;
 }
 
-function Tasks({ client, tasks, datasets, providers, presets, canWrite, canPublish, busy, mutate, query, nextCursor, loadMore }: { client: ViewerAdminClient | null; tasks: ViewerProcessingTask[]; datasets: ViewerDatasetSummary[]; providers: ViewerProviderSummary[]; presets: ViewerProcessingPreset[]; canWrite: boolean; canPublish: boolean; busy: boolean; mutate: Mutate; query: Query; nextCursor: string | null; loadMore: () => void }) {
-  const [datasetId, setDatasetId] = useState(""); const [providerId, setProviderId] = useState(""); const [presetId, setPresetId] = useState(""); const [name, setName] = useState(""); const [advancedOptions, setAdvancedOptions] = useState(() => JSON.stringify(defaultViewerProviderOverrides(null)));
+function Tasks({ client, tasks, datasets, preferredProjectId, providers, presets, canWrite, canPublish, busy, mutate, query, nextCursor, loadMore, onDraftCreated }: { client: ViewerAdminClient | null; tasks: ViewerProcessingTask[]; datasets: ViewerDatasetSummary[]; preferredProjectId: string | null; providers: ViewerProviderSummary[]; presets: ViewerProcessingPreset[]; canWrite: boolean; canPublish: boolean; busy: boolean; mutate: Mutate; query: Query; nextCursor: string | null; loadMore: () => void; onDraftCreated: (taskId: string) => void }) {
+  const [datasetId, setDatasetId] = useState(""); const [providerId, setProviderId] = useState(""); const [presetId, setPresetId] = useState(""); const [name, setName] = useState(""); const [options, setOptions] = useState<Record<string, unknown>>(() => defaultViewerProviderOverrides(null));
   const [pendingSubmission, setPendingSubmission] = useState<ViewerTaskSubmissionCheckpoint | null>(() => readViewerTaskSubmissionCheckpoint());
+  const [pendingDraft, setPendingDraft] = useState<ViewerTaskDraftCheckpoint | null>(() => readViewerTaskDraftCheckpoint());
   const [submissionWarning, setSubmissionWarning] = useState("");
-  useEffect(() => { if (!datasetId && datasets[0]) setDatasetId(datasets[0].id); if (!providerId && providers[0]) setProviderId(providers[0].id); }, [datasetId, datasets, providerId, providers]);
+  const eligibleDatasets = useMemo(() => datasets.filter(dataset => dataset.status === "finalized" && (!preferredProjectId || dataset.projectId === preferredProjectId)), [datasets, preferredProjectId]);
+  useEffect(() => {
+    if (!eligibleDatasets.some(dataset => dataset.id === datasetId)) setDatasetId(eligibleDatasets[0]?.id || "");
+    if (!providerId) setProviderId(providers.find(provider => provider.enabled)?.id || "");
+  }, [datasetId, eligibleDatasets, providerId, providers]);
   const selectedProvider = providers.find(item => item.id === providerId);
-  return <Card title="Tasks and attempts">{canWrite && <form className="viewer-processing-form" onSubmit={event => { event.preventDefault(); void mutate(async client => {
-    let options: Record<string, unknown>; try { options = JSON.parse(advancedOptions) as Record<string, unknown>; } catch { throw new Error("Advanced provider options must be valid JSON."); }
+  const compatiblePresets = presets.filter(preset => preset.enabled && (!preset.providerType || (preset.providerType === selectedProvider?.type && preset.capabilityFingerprint === selectedProvider.capabilityFingerprint)));
+  return <Card title="Tasks and attempts">{canWrite && <form className="viewer-processing-form" onSubmit={event => { event.preventDefault(); const submitter = (event.nativeEvent as SubmitEvent).submitter; const mode = submitter instanceof HTMLButtonElement ? submitter.value : "process"; void (async () => {
     const projectId = datasets.find(item => item.id === datasetId)?.projectId;
     if (!projectId) throw new Error("Choose a finalized dataset in an active project");
+    if (mode === "draft") {
+      const checkpoint = newViewerTaskDraftCheckpoint({ projectId, datasetId, displayName: name });
+      setPendingDraft(checkpoint);
+      if (!writeViewerTaskDraftCheckpoint(checkpoint)) setSubmissionWarning("Browser storage denied the draft checkpoint. Keep this page open until draft creation completes.");
+      let taskId = "";
+      await mutate(async client => { const result = await resumeViewerTaskDraft(client, checkpoint); taskId = result.task.id; return result; }, "Draft task created. Add GCP correspondences before starting its first immutable attempt.");
+      if (taskId) onDraftCreated(taskId);
+      return;
+    }
+    await mutate(async client => {
     const checkpoint = newViewerTaskSubmissionCheckpoint({ projectId, datasetId, taskDisplayName: name, providerId, presetId, options });
     setPendingSubmission(checkpoint);
     if (!writeViewerTaskSubmissionCheckpoint(checkpoint)) setSubmissionWarning("Browser storage denied the task checkpoint. Keep this page open until submission completes.");
@@ -490,19 +571,22 @@ function Tasks({ client, tasks, datasets, providers, presets, canWrite, canPubli
       setPendingSubmission(updated); writeViewerTaskSubmissionCheckpoint(updated);
     });
     clearViewerTaskSubmissionCheckpoint(); setPendingSubmission(null); setSubmissionWarning("");
-    return result;
-  }, "Task submitted to the LTDS queue."); }}>
-    <label>Task name<input value={name} onChange={event => setName(event.target.value)} /></label><label>Dataset<select value={datasetId} onChange={event => setDatasetId(event.target.value)}>{datasets.filter(item => item.status === "finalized").map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
-    <label>Provider<select value={providerId} onChange={event => setProviderId(event.target.value)}>{providers.filter(item => item.enabled).map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
-    <label>Preset<select value={presetId} onChange={event => setPresetId(event.target.value)}><option value="">Provider default</option>{presets.map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
-    <label className="viewer-processing-wide">Advanced provider options (overrides only)<textarea aria-label="Advanced provider options" value={advancedOptions} onChange={event => setAdvancedOptions(event.target.value)} rows={5} /></label>
-    {!!selectedProvider?.capabilities?.options.length && <details className="viewer-processing-wide"><summary>Available {selectedProvider.capabilities.engine} options</summary><ul>{selectedProvider.capabilities.options.map(option => <li key={option.name}><code>{option.name}</code> ({option.type}) — {option.help}</li>)}</ul><p>Defaults are intentionally not copied into overrides because upstream NodeODM may report typed defaults as strings. Viewer validates only explicit overrides and injects required output flags.</p></details>}
-    <button className="button-orange" disabled={busy || !name.trim() || !datasetId || !providerId}>Create and process</button></form>}
+      return result;
+    }, "Task submitted to the LTDS queue.");
+  })().catch(caught => setSubmissionWarning((caught as Error).message)); }}>
+    <label>Task name<input value={name} onChange={event => setName(event.target.value)} /></label><label>Dataset<select value={datasetId} onChange={event => setDatasetId(event.target.value)}><option value="">{preferredProjectId && !eligibleDatasets.length ? "No finalized datasets in this project" : "Choose a finalized dataset"}</option>{eligibleDatasets.map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
+    <label>Provider<select value={providerId} onChange={event => { setProviderId(event.target.value); setPresetId(""); setOptions({}); }}>{providers.filter(item => item.enabled).map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
+    <label>Preset<select value={presetId} onChange={event => setPresetId(event.target.value)}><option value="">Provider default</option>{compatiblePresets.map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
+    <div className="viewer-processing-wide"><h4>Processing options</h4><p>Choose explicit overrides from the provider's live capability probe. Unset controls keep the provider default.</p><OptionEditor provider={selectedProvider} value={options} onChange={setOptions} /></div>
+    <div className="viewer-processing-wide"><AdvancedJsonEditor label="Advanced provider options (expert fallback)" value={options} onApply={setOptions} /></div>
+    <div className="viewer-processing-wide viewer-task-submit-actions"><button type="submit" name="mode" value="process" className="button-orange" disabled={busy || !name.trim() || !datasetId || !providerId || !selectedProvider?.capabilities}>Create and process</button><button type="submit" name="mode" value="draft" className="button-ghost" disabled={busy || !name.trim() || !datasetId}>Create draft for GCP</button></div>
+    <p>Use a draft when this dataset needs ground-control marks. The first attempt snapshots only correspondences that already exist.</p></form>}
     {submissionWarning && <p className="viewer-processing-warning" role="alert">{submissionWarning}</p>}
+    {pendingDraft && <p className="viewer-upload-resume" role="status">A recoverable draft creation for <strong>{pendingDraft.displayName}</strong> is saved. Replay uses the same subject-scoped submission ID and cannot create a duplicate after reload or Viewer renewal. Keep this recovery record until Viewer confirms the draft in its refreshed task catalog. <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void (async () => { let taskId = ""; await mutate(async client => { const result = await resumeViewerTaskDraft(client, pendingDraft); taskId = result.task.id; return result; }, "Draft task recovered. Its refreshed catalog entry is ready for GCP marks."); if (taskId) onDraftCreated(taskId); })()}>Resume draft creation</button></p>}
     {pendingSubmission && <p className="viewer-upload-resume" role="status">A recoverable processing submission for <strong>{pendingSubmission.taskDisplayName}</strong> is saved. Its stable submission ID replays atomically across Viewer authorization renewals. <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void mutate(async client => {
       const result = await resumeViewerTaskSubmission(client, pendingSubmission, updated => { setPendingSubmission(updated); writeViewerTaskSubmissionCheckpoint(updated); });
       clearViewerTaskSubmissionCheckpoint(); setPendingSubmission(null); setSubmissionWarning(""); return result;
-    }, "Task submission resumed without creating a duplicate.")}>Resume submission</button> <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => { clearViewerTaskSubmissionCheckpoint(); setPendingSubmission(null); setSubmissionWarning(""); }}>Dismiss local recovery</button></p>}
+    }, "Task submission resumed without creating a duplicate.")}>Resume submission</button></p>}
     {!tasks.length ? <EmptyState title="No processing tasks" detail="Each retry creates a new immutable attempt." /> : <div className="viewer-processing-list">{tasks.map(task => <TaskRow key={task.id} client={client} task={task} providers={providers} presets={presets} canWrite={canWrite} canPublish={canPublish} busy={busy} mutate={mutate} query={query} />)}</div>}<Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
   </Card>;
 }
@@ -526,9 +610,12 @@ function validatedReviewSession(value: ViewerReviewSessionGrant, client: ViewerA
 function TaskRow({ client, task, providers, presets, canWrite, canPublish, busy, mutate, query }: { client: ViewerAdminClient | null; task: ViewerProcessingTask; providers: ViewerProviderSummary[]; presets: ViewerProcessingPreset[]; canWrite: boolean; canPublish: boolean; busy: boolean; mutate: Mutate; query: Query }) {
   const [detail, setDetail] = useState<ViewerProcessingAttemptDetail | null>(null);
   const [detailError, setDetailError] = useState("");
+  const [history, setHistory] = useState<ViewerProcessingAttemptPage | null>(null);
   const [reviewSession, setReviewSession] = useState<ViewerReviewSessionGrant | null>(null);
+  const [reviewAssetKinds, setReviewAssetKinds] = useState<ViewerReviewSessionGrant["assetKinds"]>([]);
   const [reviewBusy, setReviewBusy] = useState(false), [reviewError, setReviewError] = useState("");
   const attempt = task.latestAttempt;
+  useEffect(() => { setReviewSession(null); setReviewAssetKinds([]); }, [attempt?.id, attempt?.resultModelVersionId]);
   const active = Boolean(attempt && ["pending","admitted","initializing","uploading","committed","queued_upstream","running","ingesting","derivatives"].includes(attempt.status));
   const issueReviewSession = async (): Promise<ViewerReviewSessionGrant> => {
     if (!client || !attempt) throw new Error("Viewer review is unavailable");
@@ -540,7 +627,7 @@ function TaskRow({ client, task, providers, presets, canWrite, canPublish, busy,
   const openReview = async () => {
     if (reviewBusy) return;
     setReviewBusy(true); setReviewError("");
-    try { setReviewSession(await issueReviewSession()); }
+    try { const session = await issueReviewSession(); setReviewSession(session); setReviewAssetKinds(session.assetKinds); }
     catch (caught) { setReviewError((caught as Error).message); }
     finally { setReviewBusy(false); }
   };
@@ -557,28 +644,35 @@ function TaskRow({ client, task, providers, presets, canWrite, canPublish, busy,
     {detailError && <p className="viewer-processing-error">{detailError}</p>}
     {reviewError && <p className="viewer-processing-error" role="alert">{reviewError}</p>}
     {detail && <details open className="viewer-attempt-detail"><summary>Attempt logs</summary><progress max={1} value={detail.attempt.progress || 0} />{detail.logs.length ? <ol>{detail.logs.map((log, index) => <li key={`${log.created_at}-${index}`}><time>{log.created_at}</time> <strong>{log.level}</strong> {log.message}</li>)}</ol> : <p>No provider logs yet.</p>}</details>}
+    {history && <details open className="viewer-attempt-history"><summary>Attempt and model-version history</summary>{history.attempts.length ? <ol>{history.attempts.map(item => <AttemptHistoryItem key={item.id} attempt={item} provider={providers.find(provider => provider.id === item.providerId)} />)}</ol> : <p>No attempts have been created.</p>}{history.nextCursor && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void query(async viewer => { const next = await viewer.request<ViewerProcessingAttemptPage>(`/api/v1/tasks/${encodeURIComponent(task.id)}/attempts?limit=20&cursor=${encodeURIComponent(history.nextCursor!)}`); setHistory(current => current ? { attempts: [...current.attempts, ...next.attempts], nextCursor: next.nextCursor } : next); })}>Load older attempts</button>}</details>}
     {reviewSession && <ViewerEmbed modelId={reviewSession.modelId} title={`${task.displayName} — unpublished review`} session={reviewSession} renew={issueReviewSession} onClose={() => void closeReview()} />}
     <TaskStorageDetails task={task} busy={busy} query={query} />
   </div><div>
     {attempt && <button type="button" className="button-ghost button-small" onClick={() => void clientFor(mutate, async client => { try { setDetail(await client.request<ViewerProcessingAttemptDetail>(`/api/v1/attempts/${encodeURIComponent(attempt.id)}`)); setDetailError(""); } catch (caught) { setDetailError((caught as Error).message); } })}>Progress & logs</button>}
+    <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void query(async viewer => setHistory(await viewer.request<ViewerProcessingAttemptPage>(`/api/v1/tasks/${encodeURIComponent(task.id)}/attempts?limit=20`)))}>Attempt history</button>
     {canPublish && attempt?.status === "ready_for_review" && !reviewSession && <button type="button" className="button-orange button-small" disabled={busy || reviewBusy || !client} onClick={() => void openReview()}>{reviewBusy ? "Opening review…" : "Preview unpublished model"}</button>}
-    {canWrite && !attempt && task.status === "draft" && <DraftAttemptControls task={task} providers={providers} presets={presets} busy={busy} mutate={mutate} />}
+    {canWrite && task.status === "draft" && !task.activeAttemptId && <DraftAttemptControls task={task} providers={providers} presets={presets} busy={busy} mutate={mutate} />}
     {canWrite && attempt?.status === "failed" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/attempts/${encodeURIComponent(attempt.id)}/retry`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "A new retry attempt was created.")}>Retry</button>}
     {canWrite && active && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/attempts/${encodeURIComponent(attempt!.id)}/cancel`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Cancellation requested.")}>Cancel</button>}
-    {canPublish && attempt?.status === "ready_for_review" && <PublishButton task={task} busy={busy} mutate={mutate} />}
+    {canPublish && attempt?.status === "ready_for_review" && <PublishButton task={task} availableKinds={reviewAssetKinds} busy={busy} mutate={mutate} />}
     {canWrite && <TaskCatalogControls task={task} active={active} busy={busy} mutate={mutate} />}
   </div></article>;
+}
+
+function AttemptHistoryItem({ attempt, provider }: { attempt: ViewerProcessingAttempt; provider: ViewerProviderSummary | undefined }) {
+  return <li><strong>Attempt {attempt.attemptNumber}</strong> · {attempt.status} · {provider?.displayName || attempt.providerId}<br /><small>Dataset {attempt.datasetId} · created {attempt.createdAt}{attempt.completedAt ? ` · completed ${attempt.completedAt}` : ""}</small>{attempt.resultModelId && <small className="viewer-history-version">Model {attempt.resultModelId} · version {attempt.resultModelVersionId}</small>}{Object.keys(attempt.options).length > 0 && <details><summary>Immutable option snapshot</summary><pre>{JSON.stringify(attempt.options, null, 2)}</pre></details>}</li>;
 }
 
 function DraftAttemptControls({ task, providers, presets, busy, mutate }: { task: ViewerProcessingTask; providers: ViewerProviderSummary[]; presets: ViewerProcessingPreset[]; busy: boolean; mutate: Mutate }) {
   const enabled = providers.filter(provider => provider.enabled);
   const [providerId, setProviderId] = useState(enabled[0]?.id || "");
   const [presetId, setPresetId] = useState("");
-  const [options, setOptions] = useState("{}");
-  return <details className="viewer-task-catalog"><summary>Start processing</summary><form onSubmit={event => { event.preventDefault(); void mutate(client => {
-    let parsed: Record<string, unknown>; try { parsed = JSON.parse(options) as Record<string, unknown>; } catch { throw new Error("Advanced provider options must be valid JSON."); }
-    return client.request(`/api/v1/tasks/${encodeURIComponent(task.id)}/attempts`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ providerId, ...(presetId ? { presetId } : {}), options: parsed }) });
-  }, "Draft task submitted to the LTDS queue."); }}><label>Provider<select value={providerId} onChange={event => setProviderId(event.target.value)}>{enabled.map(provider => <option key={provider.id} value={provider.id}>{provider.displayName}</option>)}</select></label><label>Preset<select value={presetId} onChange={event => setPresetId(event.target.value)}><option value="">Provider default</option>{presets.map(preset => <option key={preset.id} value={preset.id}>{preset.displayName}</option>)}</select></label><label>Advanced overrides<textarea value={options} onChange={event => setOptions(event.target.value)} rows={3} /></label><button type="submit" className="button-orange button-small" disabled={busy || !providerId}>Start attempt</button></form></details>;
+  const [options, setOptions] = useState<Record<string, unknown>>({});
+  const provider = providers.find(item => item.id === providerId);
+  const compatiblePresets = presets.filter(preset => preset.enabled && (!preset.providerType || (preset.providerType === provider?.type && preset.capabilityFingerprint === provider.capabilityFingerprint)));
+  return <details className="viewer-task-catalog"><summary>{task.latestAttempt ? "Start new attempt" : "Start processing"}</summary><form onSubmit={event => { event.preventDefault(); void mutate(client =>
+    client.request(`/api/v1/tasks/${encodeURIComponent(task.id)}/attempts`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ providerId, ...(presetId ? { presetId } : {}), options }) }),
+  "Draft task submitted to the LTDS queue. Its immutable attempt includes the GCP correspondences saved before this moment."); }}><label>Provider<select value={providerId} onChange={event => { setProviderId(event.target.value); setPresetId(""); setOptions({}); }}>{enabled.map(provider => <option key={provider.id} value={provider.id}>{provider.displayName}</option>)}</select></label><label>Preset<select value={presetId} onChange={event => setPresetId(event.target.value)}><option value="">Provider default</option>{compatiblePresets.map(preset => <option key={preset.id} value={preset.id}>{preset.displayName}</option>)}</select></label><p>Confirm all ground-control marks before starting. The attempt snapshots them and later edits apply only to a new attempt.</p><OptionEditor provider={provider} value={options} onChange={setOptions} /><AdvancedJsonEditor label={`Advanced options for ${task.displayName} (expert fallback)`} value={options} onApply={setOptions} /><button type="submit" className="button-orange button-small" disabled={busy || !providerId || !provider?.capabilities}>{task.latestAttempt ? "Start new attempt" : "Start first attempt"}</button></form></details>;
 }
 
 function TaskCatalogControls({ task, active, busy, mutate }: { task: ViewerProcessingTask; active: boolean; busy: boolean; mutate: Mutate }) {
@@ -609,11 +703,13 @@ async function clientFor(mutate: Mutate, action: (client: ViewerAdminClient) => 
   await mutate(async client => action(client), "Attempt detail refreshed.");
 }
 
-const PUBLISHABLE_DERIVATIVES = ["glb","tiles","ept","ortho","dsm","dtm","shots","pointCloud"] as const;
-function PublishButton({ task, busy, mutate }: { task: ViewerProcessingTask; busy: boolean; mutate: Mutate }) {
+const PUBLISHABLE_DERIVATIVES = ["glb","tiles","ept","ortho","dsm","dtm"] as const;
+function PublishButton({ task, availableKinds, busy, mutate }: { task: ViewerProcessingTask; availableKinds: ViewerReviewSessionGrant["assetKinds"]; busy: boolean; mutate: Mutate }) {
   const [selected, setSelected] = useState<string[]>([]);
-  return <details className="viewer-publish-picker"><summary>Choose outputs</summary><fieldset><legend>Derived outputs only</legend>
-    {PUBLISHABLE_DERIVATIVES.map(kind => <label key={kind}><input type="checkbox" checked={selected.includes(kind)} onChange={event => setSelected(current => event.target.checked ? [...current, kind] : current.filter(value => value !== kind))} /> {kind}</label>)}
+  const offered = PUBLISHABLE_DERIVATIVES.filter(kind => availableKinds.includes(kind));
+  if (!offered.length) return <p className="viewer-processing-warning">Preview the unpublished model before choosing outputs. Viewer will return only the derivatives that passed integrity review.</p>;
+  return <details className="viewer-publish-picker"><summary>Choose reviewed outputs</summary><fieldset><legend>Available derived outputs only</legend>
+    {offered.map(kind => <label key={kind}><input type="checkbox" checked={selected.includes(kind)} onChange={event => setSelected(current => event.target.checked ? [...current, kind] : current.filter(value => value !== kind))} /> {kind}</label>)}
     <button type="button" className="button-orange button-small" disabled={busy || !selected.length} onClick={() => {
       if (window.confirm(`Publish ${selected.join(", ")}? Raw datasets, GCP files, logs, and processing internals remain private.`))
         void mutate(client => client.request(`/api/v1/attempts/${encodeURIComponent(task.latestAttempt!.id)}/publish`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ displayName: task.displayName, selectedAssetKinds: selected }) }), "Selected derived outputs published.");
@@ -626,19 +722,19 @@ function Outputs({ outputs, totals, canPublish, busy, mutate, nextCursor, loadMo
   busy: boolean; mutate: Mutate; nextCursor: string | null; loadMore: () => void;
 }) {
   return <Card title="Model output lifecycle"><p>{totals.count} output version{totals.count === 1 ? "" : "s"} · {formatBytes(totals.bytes)} managed output storage</p>
-    <p>Archiving is reversible and preserves stable IDs. Trash is retained for 14 days. Active publications, shares, sessions, processing, and non-managed layouts are protected from lifecycle changes.</p>
+    <p>Archiving is reversible and preserves stable IDs. Managed output bytes stay in recoverable trash for 14 days; external-reference lifecycle changes remove only LTDS catalog metadata and never delete provider source files. Active publications, shares, sessions, and processing remain protected.</p>
     {!outputs.length ? <EmptyState title="No model outputs" detail="Published or review-ready derivative versions appear here. Raw source imagery and logs never do." /> : <div className="viewer-processing-list">{outputs.map(output => <article key={output.id}><div>
       <StatusPill tone={output.status === "published" ? "success" : output.status === "ready" ? "warning" : output.status === "trashed" ? "danger" : "warning"}>{output.status}</StatusPill>
       <h3>{output.displayName}</h3><p>{output.assetCount} derivative asset{output.assetCount === 1 ? "" : "s"} · {formatBytes(output.byteSize)}</p><small>Version {output.id} · model {output.modelId} · task {output.taskId}</small>
     </div><div>
       {canPublish && (output.status === "ready" || output.status === "published") && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => { if (window.confirm(`Archive ${output.displayName}? Active publications, shares, or sessions will block this safely.`)) void mutate(client => client.request(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/archive`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Model output archived; stable version and model IDs are unchanged."); }}>Archive output</button>}
-      {canPublish && output.status === "archived" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => { if (window.confirm(`Move archived output ${output.displayName} to recoverable 14-day trash?`)) void mutate(client => client.request(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/archive`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } }), "Archived output moved to recoverable trash."); }}>Trash output</button>}
+      {canPublish && output.status === "archived" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => { if (window.confirm(`Remove archived output ${output.displayName} from the LTDS catalog? Managed bytes use recoverable 14-day trash; external provider source files are never deleted.`)) void mutate(client => client.request(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } }), "Archived output removed from the active catalog; managed bytes remain recoverable for 14 days and external source files are unchanged."); }}>Trash output</button>}
     </div></article>)}</div>}
     <Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
   </Card>;
 }
 
-function Imports({ client, projects, canImport, busy, mutate }: { client: ViewerAdminClient | null; projects: ViewerProcessingProject[]; canImport: boolean; busy: boolean; mutate: Mutate }) {
+function Imports({ client, projects, preferredProjectId, canImport, busy, mutate }: { client: ViewerAdminClient | null; projects: ViewerProcessingProject[]; preferredProjectId: string | null; canImport: boolean; busy: boolean; mutate: Mutate }) {
   const [rootKey, setRootKey] = useState<"dataset_import" | "terra_import" | "webodm">("dataset_import"); const [relativePath, setRelativePath] = useState(""); const [projectId, setProjectId] = useState(""); const [preview, setPreview] = useState<ViewerDatasetImportPreview | null>(null); const [storageMode, setStorageMode] = useState<"adopted" | "external_reference">("adopted");
   const [operationProgress, setOperationProgress] = useState("");
   const [operationWarning, setOperationWarning] = useState("");
@@ -652,7 +748,10 @@ function Imports({ client, projects, canImport, busy, mutate }: { client: Viewer
   );
   const previewWatcher = useRef<AbortController | null>(null), adoptWatcher = useRef<AbortController | null>(null);
   const previewGeneration = useRef(0), operationResumeStarted = useRef(false);
-  useEffect(() => { if (!projectId && projects[0]) setProjectId(projects[0].id); }, [projectId, projects]);
+  useEffect(() => {
+    if (preferredProjectId && projects.some(project => project.id === preferredProjectId && project.status === "active")) setProjectId(preferredProjectId);
+    else if (!projectId && projects[0]) setProjectId(projects[0].id);
+  }, [preferredProjectId, projectId, projects]);
   useEffect(() => {
     if (!preview) { setPreviewExpired(false); return; }
     const delay = Date.parse(preview.expiresAt) - Date.now();

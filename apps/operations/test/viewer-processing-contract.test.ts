@@ -23,7 +23,7 @@ const routes = JSON.parse(routeBytes);
 describe("Viewer processing cross-service contract", () => {
   it("pins the byte-identical cross-repository route fixture", () => {
     expect(createHash("sha256").update(routeBytes).digest("hex").toUpperCase())
-      .toBe("26BA67C5ECC3A534E3C067A6B4B0CD80E2D3823D766830EDC3FE77CE71152B5E");
+      .toBe("8DF468634C41FF84CEDA6E74C34C732E2C28EE6472CDD3F28B9D658D19CACC01");
   });
   it("pins the exact admin-grant body and service HMAC", async () => {
     const value = fixture.adminGrant;
@@ -88,6 +88,20 @@ describe("Viewer processing cross-service contract", () => {
       id: dataset.id, projectId: "project-two", rootKey: dataset.rootKey,
       relativePath: dataset.relativePath, manifestSha256: dataset.manifestSha256,
     });
+  });
+
+  it("pins durable task draft replay and bounded historical-attempt response shapes", () => {
+    expect(routes.taskDraftCreated).toMatchObject({
+      replayed: false,
+      task: { id: "task-draft", status: "draft", activeAttemptId: null },
+    });
+    expect(routes.taskDraftReplayed).toEqual({ ...routes.taskDraftCreated, replayed: true });
+    expect(Object.keys(routes.attemptHistory)).toEqual(["attempts", "nextCursor"]);
+    expect(routes.attemptHistory.attempts[0]).toMatchObject({
+      id: "attempt-two", taskId: "task-one", attemptNumber: 2,
+      submissionPhase: "committed", uploadedFileCount: 12,
+    });
+    expect(routes.attemptHistory.nextCursor).toEqual(expect.any(String));
   });
 
   it("pins aggregate storage accounting and managed output lifecycle shapes", () => {

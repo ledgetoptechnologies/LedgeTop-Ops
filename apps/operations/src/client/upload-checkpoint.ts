@@ -4,6 +4,7 @@ export interface ViewerUploadCheckpointFile {
   byteSize: number;
   sha256: string;
   contentType?: string;
+  processingRole?: "auto" | "image" | "gcp_source" | "provider_input" | "administrative";
 }
 
 export interface ViewerUploadCheckpoint {
@@ -31,6 +32,7 @@ export function parseUploadCheckpoint(raw: string | null, now = Date.now()): Vie
       value.files.every(file => /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(file.id) && typeof file.relativePath === "string" &&
         canonicalUploadPath(file.relativePath) === file.relativePath && Number.isSafeInteger(file.byteSize) && file.byteSize >= 0 &&
         /^[a-f0-9]{64}$/.test(file.sha256) && (file.contentType === undefined || typeof file.contentType === "string" && file.contentType.length <= 255) &&
+        (file.processingRole === undefined || ["auto", "image", "gcp_source", "provider_input", "administrative"].includes(file.processingRole)) &&
         !("uploadToken" in file) && !("accessToken" in file)))) return null;
     const ids = new Set<string>(), paths = new Set<string>();
     for (const file of value.files) {
@@ -80,8 +82,8 @@ export function canonicalUploadPath(value: string): string {
   return path;
 }
 
-export async function uploadManifestSignature(projectId: string, displayName: string, files: Array<Pick<ViewerUploadCheckpointFile, "relativePath" | "byteSize" | "sha256">>): Promise<string> {
-  const bytes = new TextEncoder().encode(JSON.stringify({ projectId, displayName, files: files.map(({ relativePath, byteSize, sha256 }) => ({ relativePath, byteSize, sha256 })) }));
+export async function uploadManifestSignature(projectId: string, displayName: string, files: Array<Pick<ViewerUploadCheckpointFile, "relativePath" | "byteSize" | "sha256" | "processingRole">>): Promise<string> {
+  const bytes = new TextEncoder().encode(JSON.stringify({ projectId, displayName, files: files.map(({ relativePath, byteSize, sha256, processingRole }) => ({ relativePath, byteSize, sha256, ...(processingRole ? { processingRole } : {}) })) }));
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", bytes));
   return [...digest].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }

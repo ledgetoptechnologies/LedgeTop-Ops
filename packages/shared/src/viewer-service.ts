@@ -189,6 +189,12 @@ export interface ViewerProcessingAttempt {
   upstreamCompletedAt: string | null;
   ingestedAt: string | null;
   completedAt: string | null;
+  submissionPhase: string | null;
+  uploadedFileCount: number;
+}
+export interface ViewerProcessingAttemptPage {
+  attempts: ViewerProcessingAttempt[];
+  nextCursor: string | null;
 }
 export interface ViewerProcessingTask {
   id: string;

@@ -7,6 +7,8 @@ test("processing controls remain usable at 320/390px and send metadata directly 
   let catalogScan = false, catalogMap: Record<string, unknown> | null = null, presetCreate: Record<string, unknown> | null = null;
   let previewStarts = 0, previewCancelled = false, allowPreviewCompletion = false;
   let reviewSessions = 0, reviewEmbedLoads = 0, reviewRevoked = false;
+  let taskSubmission: Record<string, unknown> | null = null, publishedKinds: string[] = [];
+  let historyOutputArchived = false, replacementAttempt: Record<string, unknown> | null = null;
   const interruptedKey = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
   const interruptedOperationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
   const consoleErrors: string[] = [];
@@ -51,6 +53,11 @@ test("processing controls remain usable at 320/390px and send metadata directly 
         } });
       }
       if (url.pathname === "/api/v1/attempts/attempt-one/review-sessions" && request.method() === "DELETE") { reviewRevoked = true; return route.fulfill({ json: { attemptId: "attempt-one", revokedGrants: 1, revokedSessions: 1 } }); }
+      if (url.pathname === "/api/v1/tasks/task-one/attempts" && request.method() === "GET") return route.fulfill({ json: { attempts: [{ id: "attempt-one", taskId: "task-one", datasetId: "dataset-one", attemptNumber: 1, providerId: "provider-one", providerTaskId: null, presetId: null, options: { dsm: false }, capabilityFingerprint: "f".repeat(64), status: "ready_for_review", progress: 1, providerOutputCursor: 0, errorCode: null, errorMessage: null, resultModelId: "model-one", resultModelVersionId: "version-one", createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", startedAt: null, upstreamCompletedAt: null, ingestedAt: null, completedAt: null, submissionPhase: "complete", uploadedFileCount: 1 }], nextCursor: null } });
+      if (url.pathname === "/api/v1/task-submissions" && request.method() === "POST") { taskSubmission = request.postDataJSON(); return route.fulfill({ status: 201, json: { task: { id: "task-new" }, attempt: { id: "attempt-new" }, replayed: false } }); }
+      if (url.pathname === "/api/v1/attempts/attempt-one/publish" && request.method() === "POST") { publishedKinds = request.postDataJSON().selectedAssetKinds; return route.fulfill({ json: { task: { id: "task-one", status: "published" }, model: { id: "model-one" } } }); }
+      if (url.pathname === "/api/v1/processing/outputs/version-history/archive" && request.method() === "POST") { historyOutputArchived = true; return route.fulfill({ json: { output: { id: "version-history", status: "archived" } } }); }
+      if (url.pathname === "/api/v1/tasks/task-history/attempts" && request.method() === "POST") { replacementAttempt = request.postDataJSON(); return route.fulfill({ status: 202, json: { attempt: { id: "attempt-replacement" } } }); }
       if (url.pathname === `/api/v1/operation-receipts/${interruptedKey}`) return route.fulfill({ json: { receipt: {
         subject: "ops:staff-one", key: interruptedKey, method: "POST", path: "/api/v1/processing/catalog-imports/scans",
         requestHash: "e".repeat(64), responseStatus: null, response: null, operationId: interruptedOperationId,
@@ -72,7 +79,7 @@ test("processing controls remain usable at 320/390px and send metadata directly 
       if (url.pathname === "/api/v1/projects/project-one/storage") return route.fulfill({ json: { project: { projectId: "project-one", datasetBytes: 10, outputBytes: 20, totalBytes: 30 }, tasks: [{ taskId: "task-one", projectId: "project-one", datasetBytes: 10, outputBytes: 20, totalBytes: 30 }], nextCursor: null } });
       if (url.pathname === "/api/v1/tasks/task-one/storage") return route.fulfill({ json: { task: { taskId: "task-one", projectId: "project-one", datasetBytes: 10, outputBytes: 20, totalBytes: 30 }, outputs: [{ id: "version-one", modelId: "model-one", taskId: "task-one", attemptId: "attempt-one", projectId: "project-one", displayName: "Map flight one", status: "archived", byteSize: 20, assetCount: 2, createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: "2026-08-16T00:00:00Z", trashedAt: null }], nextCursor: null } });
       if (url.pathname === "/api/v1/datasets/dataset-one" && request.method() === "PATCH") { datasetPatch = request.postDataJSON(); return route.fulfill({ json: { dataset: { id: "dataset-one" } } }); }
-      if (url.pathname === "/api/v1/processing/outputs/version-one/archive" && request.method() === "DELETE") { outputTrash = true; return route.fulfill({ json: { output: { id: "version-one", status: "trashed" }, trash: { id: "trash-output" } } }); }
+      if (url.pathname === "/api/v1/processing/outputs/version-one" && request.method() === "DELETE") { outputTrash = true; return route.fulfill({ json: { output: { id: "version-one", status: "trashed" }, trash: { id: "trash-output" } } }); }
       if (url.pathname === "/api/v1/dataset-imports/preview" && request.method() === "POST") {
         previewStarts += 1;
         expect(request.postDataJSON()).toEqual({ rootKey: "dataset_import", relativePath: "north/import-flight" });
@@ -144,7 +151,11 @@ test("processing controls remain usable at 320/390px and send metadata directly 
       } } });
       if (url.pathname === "/api/v1/datasets" && request.method() === "POST") return route.fulfill({ status: 201, json: { dataset: { id: "22222222-2222-4222-8222-222222222222", projectId: "project-one" } } });
       if (url.pathname.endsWith("/uploads") && request.method() === "POST") {
-        const manifest = request.postDataJSON().files as Array<{ id: string; relativePath: string; byteSize: number; sha256: string }>;
+        const manifest = request.postDataJSON().files as Array<{ id: string; relativePath: string; byteSize: number; sha256: string; processingRole: string }>;
+        expect(manifest.find(file => file.relativePath.endsWith("IMG_0001.JPG"))?.processingRole).toBe("image");
+        expect(manifest.find(file => file.relativePath.endsWith("capture.dng"))?.processingRole).toBe("image");
+        expect(manifest.find(file => file.relativePath.endsWith("control.csv"))?.processingRole).toBe("gcp_source");
+        expect(manifest.find(file => file.relativePath.endsWith("boundary.geojson"))?.processingRole).toBe("provider_input");
         return route.fulfill({ status: 201, json: { upload: { id: "33333333-3333-4333-8333-333333333333", datasetId: "22222222-2222-4222-8222-222222222222", status: "open", chunkSize: 1024, expiresAt: new Date(Date.now() + 60_000).toISOString(), files: manifest.map(file => ({ ...file, chunkCount: 1, completedChunks: [], missingChunks: [0] })) }, uploadToken: "upload-token" } });
       }
       if (url.pathname.includes("/chunks/") && request.method() === "PUT") return route.fulfill({ status: 201, json: { chunk: { index: 0, byteSize: 10, sha256: "hash", replayed: false } } });
@@ -169,8 +180,14 @@ test("processing controls remain usable at 320/390px and send metadata directly 
       } } });
       if (key === "projects") return route.fulfill({ json: { projects: [{ id: url.searchParams.has("cursor") ? "project-two" : "project-one", displayName: url.searchParams.has("cursor") ? "South site" : "North site", description: null, metadata: {}, tags: [], defaultUnits: "imperial", status: "active", createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: null }], nextCursor: url.searchParams.has("cursor") ? null : "opaque-next" } });
       if (key === "datasets") return route.fulfill({ json: { datasets: [{ id: "dataset-one", projectId: "project-one", displayName: "Flight one", description: null, sourceType: "upload", storageMode: "managed", rootKey: "datasets", relativePath: "flight-one", status: "finalized", manifestSha256: "a".repeat(64), fileCount: 1, byteSize: 10, metadata: {}, tags: [], createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", finalizedAt: "2026-08-16T00:00:00Z", archivedAt: null, trashedAt: null }], nextCursor: null } });
-      if (key === "tasks") return route.fulfill({ json: { tasks: [{ id: "task-one", projectId: "project-one", datasetId: "dataset-one", displayName: "Map flight one", description: null, status: "ready_for_review", activeAttemptId: "attempt-one", publishedModelId: null, metadata: {}, createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: null, latestAttempt: { id: "attempt-one", taskId: "task-one", datasetId: "dataset-one", attemptNumber: 1, providerId: "provider-one", providerTaskId: null, presetId: null, options: {}, status: "ready_for_review", progress: 1, providerOutputCursor: 0, capabilityFingerprint: null, errorCode: null, errorMessage: null, resultModelId: "model-one", resultModelVersionId: "version-one", createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", startedAt: null, upstreamCompletedAt: null, ingestedAt: null, completedAt: null } }], nextCursor: null } });
-      if (key === "outputs") return route.fulfill({ json: { outputs: [{ id: "version-one", modelId: "model-one", taskId: "task-one", attemptId: "attempt-one", projectId: "project-one", displayName: "Map flight one", status: "archived", byteSize: 20, assetCount: 2, createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: "2026-08-16T00:00:00Z", trashedAt: null }], nextCursor: null, totalCount: 1, totalBytes: 20 } });
+      if (key === "tasks") return route.fulfill({ json: { tasks: [
+        { id: "task-one", projectId: "project-one", datasetId: "dataset-one", displayName: "Map flight one", description: null, status: "ready_for_review", activeAttemptId: "attempt-one", publishedModelId: null, metadata: {}, createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: null, latestAttempt: { id: "attempt-one", taskId: "task-one", datasetId: "dataset-one", attemptNumber: 1, providerId: "provider-one", providerTaskId: null, presetId: null, options: {}, status: "ready_for_review", progress: 1, providerOutputCursor: 0, capabilityFingerprint: null, errorCode: null, errorMessage: null, resultModelId: "model-one", resultModelVersionId: "version-one", createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", startedAt: null, upstreamCompletedAt: null, ingestedAt: null, completedAt: null, submissionPhase: "complete", uploadedFileCount: 1 } },
+        { id: "task-history", projectId: "project-one", datasetId: "dataset-one", displayName: "Historical model", description: null, status: historyOutputArchived ? "draft" : "published", activeAttemptId: historyOutputArchived ? null : "attempt-history", publishedModelId: historyOutputArchived ? null : "model-history", metadata: {}, createdBy: "ops:staff-one", createdAt: "2026-08-15T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: null, latestAttempt: { id: "attempt-history", taskId: "task-history", datasetId: "dataset-one", attemptNumber: 1, providerId: "provider-one", providerTaskId: null, presetId: null, options: {}, status: "published", progress: 1, providerOutputCursor: 0, capabilityFingerprint: "f".repeat(64), errorCode: null, errorMessage: null, resultModelId: "model-history", resultModelVersionId: "version-history", createdBy: "ops:staff-one", createdAt: "2026-08-15T00:00:00Z", updatedAt: "2026-08-15T00:00:00Z", startedAt: null, upstreamCompletedAt: null, ingestedAt: null, completedAt: "2026-08-15T00:00:00Z", submissionPhase: "complete", uploadedFileCount: 1 } },
+      ], nextCursor: null } });
+      if (key === "outputs") return route.fulfill({ json: { outputs: [
+        { id: "version-one", modelId: "model-one", taskId: "task-one", attemptId: "attempt-one", projectId: "project-one", displayName: "Map flight one", status: "archived", byteSize: 20, assetCount: 2, createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: "2026-08-16T00:00:00Z", trashedAt: null },
+        { id: "version-history", modelId: "model-history", taskId: "task-history", attemptId: "attempt-history", projectId: "project-one", displayName: "Historical model", status: historyOutputArchived ? "archived" : "published", byteSize: 30, assetCount: 1, createdAt: "2026-08-15T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: historyOutputArchived ? "2026-08-16T00:00:00Z" : null, trashedAt: null },
+      ], nextCursor: null, totalCount: 2, totalBytes: 50 } });
       if (key === "providers") return route.fulfill({ json: { providers: [{ id: "provider-one", displayName: "Cluster", type: "clusterodm", endpoint: "http://nodeodm:3000", enabled: true, admissionLimit: 4, activeAttempts: 0, credential: { configured: true, updatedAt: "2026-08-16T00:00:00Z" }, capabilities: { apiVersion: "1", engine: "ODM", engineVersion: "2.2.3", maxImages: null, maxParallelTasks: null, taskQueueCount: 0, totalMemory: null, availableMemory: null, cpuCores: null, providerType: "clusterodm", testedBaseline: "1.5.5", compatibilityWarning: null, options: [{ name: "dsm", type: "bool", domain: [true,false], help: "Generate DSM", value: false }, { name: "orthophoto-resolution", type: "float", domain: { min: 1, max: 20 }, help: "Orthophoto resolution", value: 5 }] }, capabilityFingerprint: "f".repeat(64), lastHealth: "healthy", lastHealthAt: "2026-08-16T00:00:00Z", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z" }], nextCursor: null } });
       if (key === "presets") return route.fulfill({ json: { presets: [] } });
       if (key === "attempt-one") return route.fulfill({ json: { attempt: { id: "attempt-one", taskId: "task-one", datasetId: "dataset-one", attemptNumber: 1, providerId: "provider-one", providerTaskId: null, presetId: null, options: {}, status: "ready_for_review", progress: 1, providerOutputCursor: 0, errorCode: null, errorMessage: null, resultModelId: "model-one", resultModelVersionId: "version-one", createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", startedAt: null, upstreamCompletedAt: null, ingestedAt: null, completedAt: null }, logs: [] } });
@@ -217,18 +234,45 @@ test("processing controls remain usable at 320/390px and send metadata directly 
   }
   await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Projects" }).click();
-  await expect(page.getByText("North site")).toBeVisible();
-  await page.getByText("North site").locator("xpath=ancestor::article").getByText("Storage accounting").click();
+  const northProject = page.getByRole("heading", { name: "North site", exact: true }).locator("xpath=ancestor::article");
+  await expect(northProject).toBeVisible();
+  await northProject.getByText("Tasks, datasets, and actions").click();
+  await expect(page.getByText("Flight one · finalized")).toBeVisible();
+  await expect(page.getByText("Map flight one · ready_for_review")).toBeVisible();
+  await northProject.getByRole("button", { name: "Create task in North site" }).click();
+  await expect(page.getByRole("heading", { name: "Tasks and attempts" })).toBeVisible();
+  await expect(page.locator("form").filter({ has: page.getByRole("button", { name: "Create and process" }) }).getByLabel("Dataset")).toHaveValue("dataset-one");
+  await page.getByRole("button", { name: "Projects" }).click();
+  await northProject.getByText("Storage accounting").click();
   await expect(page.getByText("30 B total").first()).toBeVisible();
-  await page.getByText("North site").locator("xpath=ancestor::article").getByText("Edit project").click();
-  await page.getByText("North site").locator("xpath=ancestor::article").getByLabel("Description").fill("Updated project description");
-  await page.getByText("North site").locator("xpath=ancestor::article").getByLabel("Tags (comma or line separated)").fill("survey, priority");
-  await page.getByText("North site").locator("xpath=ancestor::article").getByRole("button", { name: "Save project" }).click();
+  await northProject.getByText("Edit project").click();
+  await northProject.getByLabel("Description").fill("Updated project description");
+  await northProject.getByLabel("Tags (comma or line separated)").fill("survey, priority");
+  await northProject.getByRole("button", { name: "Save project" }).click();
   await expect.poll(() => projectPatch).toMatchObject({ description: "Updated project description", tags: ["survey", "priority"] });
   await expect(page.getByText("Project catalog updated without changing its stable ID.")).toBeVisible();
   await page.getByRole("button", { name: "Load 50 more" }).focus();
   await page.getByRole("button", { name: "Load 50 more" }).press("Enter");
-  await expect(page.getByText("South site")).toBeVisible();
+  const southProject = page.getByRole("heading", { name: "South site", exact: true }).locator("xpath=ancestor::article");
+  await expect(southProject).toBeVisible();
+  await southProject.getByText("Tasks, datasets, and actions").click();
+  await southProject.getByRole("button", { name: "Create task in South site" }).click();
+  const southTaskForm = page.locator("form").filter({ has: page.getByRole("button", { name: "Create and process" }) });
+  await expect(southTaskForm.getByLabel("Dataset")).toHaveValue("");
+  await expect(southTaskForm.getByRole("option", { name: "No finalized datasets in this project" })).toBeAttached();
+  await page.getByRole("button", { name: "Projects" }).click();
+  const southImportProject = page.getByRole("heading", { name: "South site", exact: true }).locator("xpath=ancestor::article");
+  await southImportProject.getByText("Tasks, datasets, and actions").click();
+  await southImportProject.getByRole("button", { name: "Import model into South site" }).click();
+  const candidate = page.getByRole("heading", { name: "August 2026 Survey" }).locator("xpath=ancestor::article");
+  await candidate.getByText("Map into LTDS").click();
+  await expect(candidate.locator("label").filter({ hasText: /^LTDS project/ }).locator("select")).toHaveValue("project-two");
+  await page.getByRole("button", { name: "Projects" }).click();
+  const southDatasetProject = page.getByRole("heading", { name: "South site", exact: true }).locator("xpath=ancestor::article");
+  await southDatasetProject.getByText("Tasks, datasets, and actions").click();
+  await southDatasetProject.getByRole("button", { name: "Add dataset to South site" }).click();
+  const datasetUploadForm = page.locator("form").filter({ has: page.getByLabel("Dataset name") });
+  await expect(datasetUploadForm.locator("select").first()).toHaveValue("project-two");
   await page.getByRole("button", { name: "Datasets" }).click();
   await expect(page.getByRole("heading", { name: "Datasets" })).toBeVisible();
   await page.getByText("Flight one").locator("xpath=ancestor::article").getByText("Edit dataset catalog").click();
@@ -241,10 +285,28 @@ test("processing controls remain usable at 320/390px and send metadata directly 
   const datasetDirectory = testInfo.outputPath("drone-dataset");
   await mkdir(datasetDirectory, { recursive: true });
   await writeFile(`${datasetDirectory}/IMG_0001.JPG`, "drone-data");
+  await writeFile(`${datasetDirectory}/capture.dng`, "raw-drone-data");
+  await writeFile(`${datasetDirectory}/control.csv`, "point_id,latitude,longitude\nA,44.5,-88.1\n");
+  await writeFile(`${datasetDirectory}/boundary.geojson`, '{"type":"FeatureCollection","features":[]}');
   await page.getByLabel("Drone dataset folder").setInputFiles(datasetDirectory);
+  await page.getByLabel(/Role for .*boundary\.geojson/).selectOption("provider_input");
   await page.getByRole("button", { name: "Upload dataset" }).click();
   await expect(page.getByText("Dataset finalized. The source manifest is now immutable.")).toBeVisible();
   await page.getByRole("button", { name: "Tasks" }).click();
+  await expect(page.getByText(/Preview the unpublished model before choosing outputs/)).toBeVisible();
+  const mapTask = page.getByText("Map flight one", { exact: true }).locator("xpath=ancestor::article");
+  await mapTask.getByRole("button", { name: "Attempt history" }).click();
+  await expect(page.getByText("Model model-one · version version-one")).toBeVisible();
+  await page.getByText("Immutable option snapshot").click();
+  await expect(page.getByText(/"dsm": false/)).toBeVisible();
+  const createTaskForm = page.locator("form").filter({ has: page.getByRole("button", { name: "Create and process" }) });
+  await expect(createTaskForm.getByLabel("Advanced provider options (expert fallback)")).toBeVisible();
+  await expect(createTaskForm.locator("label button")).toHaveCount(0);
+  await createTaskForm.getByRole("textbox", { name: "Task name", exact: true }).fill("Typed option task");
+  await createTaskForm.getByText("Terrain/DEM").click();
+  await createTaskForm.getByLabel(/Generate DSM/).selectOption("false");
+  await createTaskForm.getByRole("button", { name: "Create and process" }).click();
+  await expect.poll(() => taskSubmission).toMatchObject({ taskDisplayName: "Typed option task", providerId: "provider-one", options: { dsm: false } });
   await page.getByRole("button", { name: "Preview unpublished model" }).click();
   const reviewFrame = page.frameLocator('iframe[title="3D model: Map flight one — unpublished review"]');
   await expect(reviewFrame.locator("#review-camera")).toHaveText("camera-review-42");
@@ -254,12 +316,31 @@ test("processing controls remain usable at 320/390px and send metadata directly 
   expect(reviewSessions).toBe(3); expect(reviewEmbedLoads).toBe(1);
   await page.getByRole("button", { name: "Close viewer" }).click();
   await expect.poll(() => reviewRevoked).toBe(true);
+  const publishPicker = page.locator(".viewer-publish-picker");
+  await publishPicker.getByText("Choose reviewed outputs").click();
+  await expect(publishPicker.getByLabel("glb")).toBeVisible();
+  await expect(publishPicker.getByLabel("shots")).toHaveCount(0);
+  await expect(publishPicker.getByLabel("dsm")).toHaveCount(0);
+  await publishPicker.getByLabel("glb").check();
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByRole("button", { name: "Publish selected" }).click();
+  await expect.poll(() => publishedKinds).toEqual(["glb"]);
   await page.getByText("Map flight one").locator("xpath=ancestor::article").getByText("Task storage & model outputs").click();
   await expect(page.getByText("20 B outputs").first()).toBeVisible();
   await page.getByRole("button", { name: "Outputs" }).click();
   await expect(page.getByText("Map flight one")).toBeVisible();
+  const historicalOutput = page.getByText("Historical model", { exact: true }).locator("xpath=ancestor::article");
   page.once("dialog", dialog => dialog.accept());
-  await page.getByRole("button", { name: "Trash output" }).click();
+  await historicalOutput.getByRole("button", { name: "Archive output" }).click();
+  await expect.poll(() => historyOutputArchived).toBe(true);
+  await page.getByRole("button", { name: "Tasks" }).click();
+  const historicalTask = page.getByText("Historical model", { exact: true }).locator("xpath=ancestor::article");
+  await historicalTask.locator("summary").filter({ hasText: "Start new attempt" }).click();
+  await historicalTask.getByRole("button", { name: "Start new attempt" }).click();
+  await expect.poll(() => replacementAttempt).toMatchObject({ providerId: "provider-one", options: {} });
+  await page.getByRole("button", { name: "Outputs" }).click();
+  page.once("dialog", dialog => dialog.accept());
+  await page.getByText("Map flight one", { exact: true }).locator("xpath=ancestor::article").getByRole("button", { name: "Trash output" }).click();
   await expect.poll(() => outputTrash).toBe(true);
   await page.getByRole("button", { name: "Imports" }).click();
   await expect(page.getByText("August 2026 Survey")).toBeVisible();

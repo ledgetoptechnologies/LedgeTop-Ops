@@ -238,6 +238,38 @@
       "updatedAt": "2027-01-15T08:18:00.000Z", "completedAt": "2027-01-15T08:18:00.000Z"
     } }
   },
+  "taskDraftCreated": {
+    "task": {
+      "id": "task-draft", "projectId": "project-one", "datasetId": "dataset-one", "displayName": "Recoverable draft",
+      "description": null, "status": "draft", "activeAttemptId": null, "publishedModelId": null,
+      "metadata": {}, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:35:00.000Z",
+      "updatedAt": "2027-01-15T08:35:00.000Z", "archivedAt": null
+    },
+    "replayed": false
+  },
+  "taskDraftReplayed": {
+    "task": {
+      "id": "task-draft", "projectId": "project-one", "datasetId": "dataset-one", "displayName": "Recoverable draft",
+      "description": null, "status": "draft", "activeAttemptId": null, "publishedModelId": null,
+      "metadata": {}, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:35:00.000Z",
+      "updatedAt": "2027-01-15T08:35:00.000Z", "archivedAt": null
+    },
+    "replayed": true
+  },
+  "attemptHistory": {
+    "attempts": [{
+      "id": "attempt-two", "taskId": "task-one", "datasetId": "dataset-one", "attemptNumber": 2,
+      "providerId": "provider-one", "providerTaskId": "43", "presetId": "preset-one",
+      "options": { "pc-ept": true, "gltf": true, "3d-tiles": true },
+      "capabilityFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "status": "running", "progress": 0.25, "providerOutputCursor": 0,
+      "errorCode": null, "errorMessage": null, "resultModelId": null, "resultModelVersionId": null,
+      "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:41:00.000Z", "updatedAt": "2027-01-15T08:42:00.000Z",
+      "startedAt": "2027-01-15T08:41:30.000Z", "upstreamCompletedAt": null, "ingestedAt": null, "completedAt": null,
+      "submissionPhase": "committed", "uploadedFileCount": 12
+    }],
+    "nextCursor": "eyJjcmVhdGVkQXQiOiIyMDI3LTAxLTE1VDA4OjQxOjAwLjAwMFoiLCJpZCI6ImF0dGVtcHQtdHdvIn0"
+  },
   "taskSubmission": {
     "task": {
       "id": "task-submitted", "projectId": "project-one", "datasetId": "dataset-one", "displayName": "Submitted flight",
