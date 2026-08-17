@@ -10,7 +10,7 @@ captured.
 
 - 3D Viewer: `8f6c4025368f0157bcd1e1c575d2fb4fab56564c` and
   `ghcr.io/ledgetoptechnologies/3d-viewer:sha-8f6c402@sha256:994f6dbba8995e083df0bc1da634fb50ee1e46217a1e3633a1761199f533381a`
-- LTDS-Ops product code: `6496545e62c7126610b9dfaeeea1c4a672df20df` on
+- LTDS-Ops product code: `a996b43412c569f5bc003fc002c2e400777e344a` on
   `codex/3d-processing-control-plane`. This pin contains the desktop
   Administration-menu fix equivalent to `09e3443`; never substitute a mutable
   branch tip.
