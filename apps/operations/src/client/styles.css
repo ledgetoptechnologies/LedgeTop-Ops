@@ -28,7 +28,7 @@
   align-self: stretch;
   display: flex;
   align-items: stretch;
-  overflow: auto;
+  overflow: visible;
 }
 
 .ops-header > nav > a,
@@ -54,7 +54,7 @@
 .ops-manage-popover {
   position: absolute;
   z-index: 90;
-  top: calc(100% + 8px);
+  top: calc(100% + 10px);
   right: 0;
   min-width: 190px;
   padding: .4rem;
