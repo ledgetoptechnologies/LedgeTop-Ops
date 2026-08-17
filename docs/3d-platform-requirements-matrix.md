@@ -29,7 +29,7 @@ published-model viewing must remain independent of every processing provider.
 | Permanent WebODM mapping to existing or new LTDS Project and friendly Task | Proven + live gate | Durable mapping operation, stable mapping row, Ops desktop/mobile workflow; real mounted output remains live evidence |
 | DJI Terra output discovery/import into the same Project/Task/model catalog | Proven + live gate | Candidate scan, external/adopted ownership, asset registration, review/publish and crash-recovery tests; representative Terra export remains live evidence |
 | Local upload and import operations never block normal API requests | Proven | Separate durable operation worker lane, 202 polling, cancellation/restart tests |
-| NodeODM/ClusterODM provider abstraction and LTDS admission ahead of upstream scheduling | Proven + live gate | Source contract tests, `/info.maxImages`, LTDS high-water and active-storage reservation enforcement, real isolated NodeODM 2.2.3 capability plus 16-image job/download/cancel; representative TrueNAS job and ClusterODM 1.5.5 remain live evidence |
+| NodeODM/ClusterODM provider abstraction and LTDS admission ahead of upstream scheduling | Proven + live gate | Source contract tests, `/info.maxImages`, LTDS high-water and active-storage reservation enforcement, real isolated NodeODM 2.2.3 and ClusterODM 1.5.5 capability plus 16-image job/download/cancel/verified cleanup; representative TrueNAS job remains live evidence |
 | Restart-safe init/upload/auxiliary/commit reconciliation; every retry is a new attempt | Proven | Submission-phase checkpoints, explicit private/provider input roles, ambiguity restart, lease/fencing/fault tests |
 | Bounded streamed `all.zip` ingestion without retaining a duplicate archive | Proven + live gate | Safe streaming ZIP tests and representative large-result interruption test |
 | Native EPT, GLB and 3D Tiles requested; full-detail LOD equivalence fails closed | Proven + live gate | Capability validation, LOD-v2 proof tests, representative real model close-range QA |
@@ -68,10 +68,13 @@ The provider adapter follows the primary NodeODM API contract for `GET /info`,
 `GET /task/{uuid}/info`, `GET /task/{uuid}/output`, cancel/remove, and streamed
 `GET /task/{uuid}/download/all.zip`. NodeODM `v2.2.3` and ClusterODM `v1.5.5`
 are declared compatibility baselines, not hard production lockouts. Runtime
-capability probes remain authoritative. The pinned NodeODM 2.2.3 baseline has
-passed the repository's real small-corpus processing, streamed-download, and
-committed-task cancellation gate. ClusterODM and the actual deployment still
-require their own compatibility evidence.
+capability probes remain authoritative. The pinned NodeODM 2.2.3 baseline and
+the ClusterODM 1.5.5 image with a registered NodeODM 2.2.3 node have both passed
+the repository's real small-corpus processing, streamed-download,
+committed-task cancellation, and verified-removal gate. The ClusterODM image
+reports API package 1.5.3 at runtime; the immutable image digest and observed API
+version are both retained as evidence. The actual TrueNAS/provider deployment
+still requires its own compatibility and representative-corpus evidence.
 
 ## Activation rule
 
