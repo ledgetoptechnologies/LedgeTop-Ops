@@ -45,7 +45,8 @@ sentinel-verified cleanup. The exact repinned build-stamped replay completed in
 required 11,811,260,064 bytes (payload, 10 GiB reserve, and safety margin)
 against 923,211,886,592 available bytes. The local source-stamped image ID was
 `sha256:799b17aa0795fc17c5e884b70518581c4b1f28cd95556b60fa0841d4f56ca0af`;
-it is local evidence, not the pending GHCR manifest digest. Production mode
+it is local scale-rehearsal evidence, not the separately reviewed GHCR
+manifest digest pinned above. Production mode
 rejects mutable image tags, source-stamp mismatches, and insufficient space
 before creating a target.
 This is inode/index/recovery evidence only;
@@ -96,9 +97,9 @@ The destructive provider runs were recorded on executable commit
 `b03bd66b121eecc16b2b1164add335065d998121`. The later evidence-only commit
 `b407a9e86729a34108050eaecbc8d38b38374a4a`, runtime-attestation commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
-`72f3d1a9c36a7d366ca3e129d0516f72eb281091` and published-session revocation
-commits `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06` and
-`ab6e65e3db8963a03e2ea8b4518d5cc23acc203e` do not change the provider adapter,
+`72f3d1a9c36a7d366ca3e129d0516f72eb281091`, published-session revocation
+commit `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06`, and subsequent hardening commits
+through `ab6e65e3db8963a03e2ea8b4518d5cc23acc203e` do not change the provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
