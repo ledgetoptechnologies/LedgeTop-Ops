@@ -52,6 +52,14 @@ proved UID/GID 568 named-volume initialization and byte/database persistence
 across restart and same-image upgrade. Together these close the two expected
 Windows-host skips; they do not replace the real TrueNAS ACL/mount drill.
 
+The same Linux candidate completed a read-only probe against the official
+`opendronemap/nodeodm:2.2.3` container on an isolated Docker network. It
+reported NodeODM API `2.2.3`, ODM engine `3.5.0`, 80 options, and capability
+fingerprint
+`7e0410ff352d6bdf286b9f1d22de9d2e7408a6275eec1b5ff6d77cc6160f62fe`.
+The disposable container/network were removed. This proves the real baseline
+capability contract, not an actual corpus job, cancellation, or ClusterODM.
+
 ## 1. Back up and prove the disabled baseline
 
 1. Back up both Cloudflare D1 databases and the Project Alpha database before
