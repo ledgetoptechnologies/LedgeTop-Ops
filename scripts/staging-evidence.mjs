@@ -174,6 +174,7 @@ export function validateEvidence(evidence, options = {}) {
   const viewer = evidence.viewer ?? {};
   if (viewer.hostname !== STAGING_VIEWER.hostname || viewer.origin !== STAGING_VIEWER.origin) errors.push("Viewer deployment must use the approved staging origin");
   if (viewer.releaseCommit !== RELEASE_CANDIDATES.viewer || viewer.image !== STAGING_VIEWER.image) errors.push("Viewer deployment must use the exact reviewed commit and image digest");
+  if (viewer.servedRevision !== RELEASE_CANDIDATES.viewer || viewer.servedSchemaVersion !== STAGING_VIEWER.schemaVersion || viewer.runtimeIdentityAttested !== true) errors.push("Viewer health and readiness headers must attest the exact reviewed revision and schema version");
   if (!sha256Hex(viewer.configSha256) || !recentDate(viewer.deployedAt, now) || !populated(viewer.deploymentEvidenceRef)) errors.push("Viewer deployment needs a current referenced non-secret configuration hash");
   const viewerConfig = viewer.configuration ?? {};
   if (viewerConfig.publicBaseUrl !== STAGING_VIEWER.origin || viewerConfig.expectedHost !== STAGING_VIEWER.hostname || viewerConfig.opsBaseUrl !== `https://${STAGING_HOSTS.operations}`) errors.push("Viewer staging origins and host guard must match the reviewed topology");

@@ -123,6 +123,9 @@ function fixture(base) {
       },
       healthCheckPassed: true,
       readinessCheckPassed: true,
+      servedRevision: RELEASE_CANDIDATES.viewer,
+      servedSchemaVersion: STAGING_VIEWER.schemaVersion,
+      runtimeIdentityAttested: true,
       directIpHostDenied: true,
       canonicalHostViaProxyVerified: true,
       proxyForwardedHostVerified: true,
@@ -249,6 +252,9 @@ test("fails closed on Viewer and Project Alpha deployment-contract drift", () =>
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-cross-repo-"));
   const { configs, evidence, configHashes } = fixture(base);
   evidence.viewer.image = "ghcr.io/example/viewer:latest";
+  evidence.viewer.servedRevision = "f".repeat(40);
+  evidence.viewer.servedSchemaVersion = STAGING_VIEWER.schemaVersion - 1;
+  evidence.viewer.runtimeIdentityAttested = false;
   evidence.viewer.configuration.proxySharedSecretEnabled = true;
   evidence.viewer.narrowBindFirewallTopologyVerified = false;
   evidence.projectAlpha.releaseCommit = "f".repeat(40);
@@ -257,7 +263,7 @@ test("fails closed on Viewer and Project Alpha deployment-contract drift", () =>
   evidence.projectAlpha.outbound.secretValues = { signingSecret: "must-never-appear" };
   evidence.projectAlpha.rollback.restoreDrillPassed = false;
   const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
-  for (const expected of ["exact reviewed commit and image digest", "proxy hardening", "narrowBindFirewallTopologyVerified", "reviewed source commit", "0066_generic_portal_v2_integration.sql SHA-256", "portal_outbound_delivery_enabled must remain false", "without containing secret values", "restoreDrillPassed"]) {
+  for (const expected of ["exact reviewed commit and image digest", "attest the exact reviewed revision and schema version", "proxy hardening", "narrowBindFirewallTopologyVerified", "reviewed source commit", "0066_generic_portal_v2_integration.sql SHA-256", "portal_outbound_delivery_enabled must remain false", "without containing secret values", "restoreDrillPassed"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
@@ -397,6 +403,9 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   assert.equal(example.sourceControl.runtimeCandidateCommit, RELEASE_CANDIDATES.operations);
   assert.equal(example.viewer.releaseCommit, RELEASE_CANDIDATES.viewer);
   assert.equal(example.viewer.image, STAGING_VIEWER.image);
+  assert.equal(example.viewer.servedRevision, RELEASE_CANDIDATES.viewer);
+  assert.equal(example.viewer.servedSchemaVersion, STAGING_VIEWER.schemaVersion);
+  assert.equal(example.viewer.runtimeIdentityAttested, false);
   assert.deepEqual(new Set(example.viewer.configuration.secretNames), new Set(STAGING_VIEWER.requiredSecretNames));
   assert.equal(example.viewer.configuration.proxySharedSecretEnabled, false);
   assert.equal(example.projectAlpha.releaseCommit, RELEASE_CANDIDATES.projectAlpha);

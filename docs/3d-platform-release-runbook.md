@@ -9,7 +9,7 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `b407a9e86729a34108050eaecbc8d38b38374a4a`.
+- 3D Viewer source: `1bb6681c4b8b54407433e991a5dfcb860ed262c4`.
   The final GHCR tag and manifest digest are deliberately pending; the local
   verification image ID is not a substitute for a registry manifest digest.
 - LTDS-Ops product code: `89a3a4566b9de3e1b9a7c8ad90aed15bfdec087a` on
@@ -38,10 +38,10 @@ The candidate also passed the guarded disposable-volume scale rehearsal with
 exactly 100,000 one-byte files: full scan/fingerprint, authoritative adoption,
 index/accounting, database reopen and re-fingerprint, low-space refusal, and
 sentinel-verified cleanup. The exact repinned build-stamped replay completed in
-63.257 seconds with peak RSS 586,067,968 bytes. Its pre-generation disk check
+62.619 seconds with peak RSS 581,935,104 bytes. Its pre-generation disk check
 required 11,811,260,064 bytes (payload, 10 GiB reserve, and safety margin)
-against 925,714,518,016 available bytes. The local source-stamped image ID was
-`sha256:d64fd78f1c3d68f3ec053005fd3dc71787d9e2f4b589d38ed6d8fa80635ab732`;
+against 924,461,854,720 available bytes. The local source-stamped image ID was
+`sha256:852b64a817d36b4ffe5ba05254b45ee52da51da4a016b9acff429831a8fb7294`;
 it is local evidence, not the pending GHCR manifest digest. Production mode
 rejects mutable image tags, source-stamp mismatches, and insufficient space
 before creating a target.
@@ -49,7 +49,7 @@ This is inode/index/recovery evidence only;
 the same rehearsal still must run on the disposable TrueNAS storage class with
 representative imagery before activation.
 
-The exact candidate also passed 179 repository-owned tests inside the Linux
+The exact candidate also passed 181 repository-owned tests inside the Linux
 build image, including the real symlink-escape gate. Its separate Docker test
 proved UID/GID 568 named-volume initialization and byte/database persistence
 across restart and same-image upgrade. Together these close the two expected
@@ -90,11 +90,13 @@ representative TrueNAS imagery, GCP/LOD review, and interruption/restart remain
 live gates.
 
 The destructive provider runs were recorded on executable commit
-`b03bd66b121eecc16b2b1164add335065d998121`; the frozen
-`b407a9e86729a34108050eaecbc8d38b38374a4a` candidate changes only this
-evidence documentation. Its exact Linux test and production images were
-rebuilt afterward, proving the runtime, harness, and tests are unchanged while
-binding the final source stamp.
+`b03bd66b121eecc16b2b1164add335065d998121`. The later evidence-only commit
+`b407a9e86729a34108050eaecbc8d38b38374a4a` and runtime-attestation commit
+`1bb6681c4b8b54407433e991a5dfcb860ed262c4` do not change the provider adapter,
+provider harness, or production ZIP ingestion path. The exact final Linux test
+and production images, UID-568 volume gate, health/readiness smoke, and scale
+rehearsal were rebuilt and rerun against
+`1bb6681c4b8b54407433e991a5dfcb860ed262c4`.
 
 ## 1. Back up and prove the disabled baseline
 
@@ -130,6 +132,13 @@ id
 node scripts/container-healthcheck.js
 node scripts/production-readiness.mjs --verify-mount-options
 ```
+
+The readiness command must report build revision
+`1bb6681c4b8b54407433e991a5dfcb860ed262c4` and schema version `16`. Confirm
+both `/api/v1/health` and `/api/v1/ready` return that exact revision in
+`X-LTDS-Viewer-Revision`, `16` in `X-LTDS-Viewer-Schema-Version`, and
+`Cache-Control: no-store`. A tag, container creation timestamp, or successful
+body alone is not deployment-identity evidence.
 
 Expected identity is `568:568`; `CapEff`, `CapBnd`, and the other capability
 sets in `/proc/1/status` must be zero. Confirm the SQLite file is under
