@@ -1,0 +1,172 @@
+# 3D processing and delivery release runbook
+
+Status: **source candidate complete; live activation not performed**. Every
+Viewer, Operations, Client, processing, public-share, and Project Alpha portal
+feature gate remains off until the corresponding live evidence below is
+captured.
+
+## Frozen source candidates
+
+- 3D Viewer: `da6b812bdaf4e0a9fa3569cb526bb6faa3bf6df5`
+  (`ghcr.io/ledgetoptechnologies/3d-viewer:sha-da6b812`)
+- LTDS-Ops product code: `a867631` on `codex/3d-processing-control-plane`
+- Project Alpha: `b52cdbe9` on `codex/generic-portal-v2-integration`
+
+The Viewer/Ops signed-processing corpus has SHA-256
+`5e412f9b57a9b8495b2c11736fdb6e7aeed57b15a1cb96ba219c1f2398b50572`.
+The route-response corpus has SHA-256
+`d46543eba16ed892c1fdfe33f22692a1d3f84db4f8e65793d87a720c10914bcf`.
+The five generic Project Alpha fixtures are byte-pinned by both repositories.
+Do not substitute a later commit or hand-edit a fixture during activation.
+
+## 1. Back up and prove the disabled baseline
+
+1. Back up both Cloudflare D1 databases and the Project Alpha database before
+   applying migrations. Record database IDs, migration ledgers, backup IDs,
+   row counts, and restore commands.
+2. Back up `/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env`. After the
+   first Viewer start, back up the complete `ltds-viewer-storage` Docker volume
+   as one unit; its SQLite database and managed assets must remain consistent.
+3. Confirm these production variables remain the literal string `false`:
+   `VIEWER_INTEGRATION_ENABLED`, `VIEWER_PROCESSING_ENABLED`,
+   `VIEWER_PUBLIC_SHARES_ENABLED`, `CLIENT_VIEWER_SESSION_ISSUER_ENABLED`, and
+   `CLIENT_VIEWER_ENABLED`.
+4. In Project Alpha confirm the installation-wide portal integration,
+   relations, catalog, pricing, draft quote, outbound delivery, and
+   authoritative-hook flags are all off. New profiles and profile delivery are
+   independently disabled as well.
+
+## 2. Start the Viewer without activating processing
+
+Use the reviewed Viewer Compose file, not the superseded bind-mount/root
+bootstrap version. It runs as TrueNAS Apps UID/GID `568:568`, has no privileged
+entrypoint or added capabilities, and lets Docker create the fixed
+`ltds-viewer-storage` volume. Do not retain old `/app/data`, `/app/datasets`,
+or `/app/models` bind mounts. If they contain real data, stop and migrate it
+before switching; never silently start an empty catalog over existing bytes.
+
+Keep `PROCESSING_PLATFORM_ENABLED=false` for the first boot. The API should
+be healthy without the worker or any provider. Verify inside the container:
+
+```sh
+id
+node scripts/container-healthcheck.js
+node scripts/production-readiness.mjs --verify-mount-options
+```
+
+Expected identity is `568:568`; `CapEff`, `CapBnd`, and the other capability
+sets in `/proc/1/status` must be zero. Confirm the SQLite file is under
+`/app/storage/data`, every managed directory is writable, WebODM Media and
+legacy Derivatives are read-only, and direct-IP Host requests fail while the
+canonical Viewer host succeeds through external Nginx.
+
+Run the symlink-escape test in this Linux image. Its Windows skip is not
+acceptable as production evidence.
+
+## 3. Configure independent secrets
+
+Generate independent random values; none is a Cloudflare API key and none may
+be reused:
+
+```sh
+openssl rand -hex 32  # Viewer SESSION_SECRET
+openssl rand -hex 32  # Ops -> Viewer service HMAC
+openssl rand -hex 32  # Viewer -> Ops event HMAC
+openssl rand -hex 32  # Viewer provider-credential encryption key
+```
+
+The exact mappings are:
+
+| Viewer `viewer.env` | Operations secret/config |
+| --- | --- |
+| `SERVICE_AUTH_KEY_ID=ops-v1` | `VIEWER_SERVICE_KEY_ID=ops-v1` |
+| `SERVICE_AUTH_SECRET` | `VIEWER_SERVICE_HMAC_SECRET` |
+| `VIEWER_EVENT_KEY_ID=viewer-v1` | `VIEWER_EVENT_KEY_ID=viewer-v1` |
+| `VIEWER_EVENT_SECRET` | `VIEWER_EVENT_HMAC_SECRET` |
+
+`SESSION_SECRET` stays Viewer-only. Set
+`PROVIDER_CREDENTIALS_KEY_ID=provider-v1` and the 64-hex
+`PROVIDER_CREDENTIALS_KEY`; losing it makes stored provider tokens
+unrecoverable. Back it up separately from the database. Use the documented
+old-key maps only during a bounded rotation overlap.
+
+For UI-managed on-premises nodes, set the one-time admission boundary:
+
+```env
+PROCESSING_PROVIDER_ALLOWED_CIDRS=192.168.50.0/24,192.168.10.0/24
+PROCESSING_PROVIDER_TOKENS_JSON={}
+```
+
+Administrators can then create a disabled IP-literal node, store or rotate its
+token, probe it, and enable it from Ops without another environment edit or
+restart. Exact origins remain available for explicitly reviewed DNS providers.
+
+## 4. Apply migrations with flags still off
+
+Apply each repository's normal migration command and every pending migration
+in lexical/ledger order; never cherry-pick only a later file.
+
+- Client/delivery D1: apply all pending migrations through `0140`. The Viewer
+  dependency begins at `0138_viewer_model_associations.sql`; `0139` and `0140`
+  also carry the thumbnail queue/provenance fixes and must not be skipped.
+- Operations D1: apply all pending migrations through
+  `0027_viewer_processing_control_plane.sql`; `0026` establishes the base
+  Viewer permissions.
+- Project Alpha: apply `0066` and then `0067` through the normal migration
+  runner. Both are replay-safe but must still be recorded once in the ledger.
+- Viewer: startup applies its internal SQLite migrations through schema v12.
+
+After each database, verify the migration ledger, integrity/foreign-key checks,
+new permissions, default-off flag values, and backup restore point. Do not
+enable a Client v2 workspace until its existing account has exactly one
+operator-selected Project Alpha organization or standalone-client root.
+
+## 5. Live validation while gates remain off
+
+Capture request IDs, timestamps, bounded logs, screenshots, and rollback
+results for each item:
+
+1. Signed Ops grant, one-time redemption, scoped Viewer session, silent
+   renewal, retryable renewal state preservation, expiry, and live revocation.
+2. Provider creation through Ops, encrypted credential status (never the
+   token), capability probe, probe-before-enable enforcement, worker heartbeat,
+   admission/backpressure, cancellation, and a provider restart mid-attempt.
+3. A representative large drone dataset upload/finalize/reselect/resume,
+   actual disk preflight, immutable manifest/EXIF-GPS index, a new attempt for
+   every retry, native ODM EPT/3D Tiles/GLB ingestion, and sanitized bounded
+   logs/callback retries.
+4. GCP CSV or GeoJSON import, private source image reads, pixel
+   correspondences, immutable attempt snapshot, NodeODM `gcp_list.txt`, and
+   cross-dataset denial. Keep canonical elevations in metres while proving both
+   imperial-default and metric UI editing.
+5. Review and publish selected derived outputs only. Prove raw imagery, GCP
+   files, provider archives, logs, and processing internals cannot be shared.
+6. Real point-cloud and mesh viewing on desktop and mobile: protected range
+   requests, nested EPT/3D Tiles children, close-range full-detail LOD evidence,
+   zoom-out quality reduction, and point-cloud camera framing.
+7. Public share expiry, never-expire, password attempts/rate limits,
+   revocation, hash-only storage/abuse keys, large byte ranges, and no cache of
+   capability URLs.
+8. Stop every processing provider and prove already-published Ops, Client, and
+   public viewing remain usable.
+9. Kill API/worker processes at upload promotion, provider submission, result
+   ingestion, callback, trash, restore, and purge boundaries. Restart and prove
+   lease/journal reconciliation without duplicate upstream tasks or lost
+   bytes.
+10. Project Alpha two-profile isolation, signed exact-body delivery, retry and
+    dead-letter behavior, disable/unlink revocation priority, ordinary
+    hierarchy mutation fan-out, and concurrent reparent serialization.
+
+## 6. Activation and rollback
+
+Enable only one boundary at a time after its evidence is accepted. Start with
+staff Viewer integration, then processing administration, then authenticated
+Client sessions, and public shares last. Project Alpha profile and module
+switches remain independently scoped per integration profile.
+
+Rollback is always flag-first: disable the affected gate without deleting
+catalogs, associations, sessions, outbox rows, migration ledgers, or storage.
+Stop processing admission before the worker, preserve the Viewer volume, and
+allow already-published viewing to continue. Investigate and reconcile durable
+operations before retrying activation; never repair by deleting an in-flight
+journal row.
