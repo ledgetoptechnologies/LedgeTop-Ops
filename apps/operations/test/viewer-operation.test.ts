@@ -14,7 +14,7 @@ const dataset = {
   id: "22222222-2222-4222-8222-222222222222", projectId: "66666666-6666-4666-8666-666666666666",
   displayName: "Flight", description: null, sourceType: "upload", storageMode: "managed" as const,
   rootKey: "datasets", relativePath: "flight", status: "finalized" as const, manifestSha256: "a".repeat(64),
-  fileCount: 1, byteSize: 1, metadata: {}, createdBy: "ops:staff-one", finalizedAt: "2026-08-16T12:02:00.000Z",
+  fileCount: 1, byteSize: 1, metadata: {}, tags: [], createdBy: "ops:staff-one", finalizedAt: "2026-08-16T12:02:00.000Z",
   createdAt: "2026-08-16T12:00:00.000Z", updatedAt: "2026-08-16T12:02:00.000Z", archivedAt: null, trashedAt: null,
 };
 const queued: ViewerDurableOperation = {

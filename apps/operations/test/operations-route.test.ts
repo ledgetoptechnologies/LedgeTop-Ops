@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import { pathOperationsSection, pathPage } from "../src/client/operations-route";
 
 describe("consolidated Operations routes", () => {
+  it("maps the canonical authenticated processing review route to Viewer", () => {
+    expect(pathPage("/operations/processing")).toBe("viewer");
+    expect(pathPage("/operations/processing/anything")).toBe("viewer");
+  });
+
   it.each([
     ["/operations", "operations"],
     ["/operations/projects", "projects"],

@@ -159,6 +159,57 @@ export class ViewerAdminClient {
     return (await this.requestWithMetadata<T>(path, init)).payload;
   }
 
+  async requestBlob(path: string, init: RequestInit = {}): Promise<Blob> {
+    if (!path.startsWith("/api/v1/") || path.includes("..")) throw new Error("Viewer API path is invalid");
+    await this.ensureSession();
+    const send = () => {
+      const headers = new Headers(init.headers);
+      headers.set("Accept", "image/*");
+      headers.set("Authorization", `Bearer ${this.accessToken}`);
+      return this.fetcher(new URL(path, this.origin), {
+        ...init, headers, cache: "no-store", credentials: "omit", redirect: "error",
+      });
+    };
+    let response = await send();
+    if (response.status === 401 && this.expiresAt > Date.now()) {
+      await this.ensureSession(true);
+      response = await send();
+    }
+    if (!response.ok) {
+      let message = `3D Viewer request failed (${response.status})`;
+      try {
+        const payload = await boundedJson<{ error?: string }>(response, 64 * 1024);
+        if (payload.error) message = payload.error;
+      } catch { /* preserve the bounded generic error */ }
+      throw new Error(message);
+    }
+    const declared = Number(response.headers.get("Content-Length"));
+    if (Number.isFinite(declared) && declared > 128 * 1024 * 1024)
+      throw new Error("3D Viewer returned an oversized image response");
+    const contentType = response.headers.get("Content-Type") || "";
+    if (!/^image\/(?:jpeg|png|webp|gif|avif|tiff)(?:\s*;|$)/i.test(contentType))
+      throw new Error("3D Viewer returned an unsupported image response");
+    if (!response.body) throw new Error("3D Viewer returned an empty image response");
+    const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+    let total = 0;
+    for (;;) {
+      const result = await reader.read();
+      if (result.done) break;
+      total += result.value.byteLength;
+      if (total > 128 * 1024 * 1024) {
+        await reader.cancel();
+        throw new Error("3D Viewer returned an oversized image response");
+      }
+      chunks.push(result.value);
+    }
+    const parts: BlobPart[] = chunks.map((chunk) => {
+      const copy = new Uint8Array(chunk.byteLength);
+      copy.set(chunk);
+      return copy.buffer;
+    });
+    return new Blob(parts, { type: contentType.split(";", 1)[0] });
+  }
+
   async uploadChunk(input: {
     uploadId: string;
     fileId: string;

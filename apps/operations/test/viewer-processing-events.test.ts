@@ -33,6 +33,7 @@ async function setup(): Promise<void> {
   await database.exec(migration.replace(/--.*$/gm, "").replace(/\s*\n\s*/g, " "));
   env = {
     OPS_DB: database, VIEWER_INTEGRATION_ENABLED: "true", VIEWER_PROCESSING_ENABLED: "true",
+    PUBLIC_BASE_URL: "https://ops.example.test",
     VIEWER_BASE_URL: "https://viewer.example.test", VIEWER_EVENT_KEY_ID: "viewer-v1",
     VIEWER_EVENT_HMAC_SECRET: secret, NOTIFICATION_FROM: "notify@example.test",
     NOTIFICATION_EMAIL: { send: vi.fn(async () => undefined) },
@@ -44,7 +45,7 @@ function body(eventId: string, overrides: Record<string, unknown> = {}): string 
   return JSON.stringify({ schemaVersion: 1, eventId, type: "processing.ready_for_review",
     occurredAt: new Date().toISOString(), projectId: "project-one", taskId: "task-one",
     attemptId: "attempt-one", requestedBySubject: "ops:staff-one", status: "ready_for_review",
-    reviewUrl: "https://viewer.example.test/review/attempt-one", ...overrides });
+    reviewUrl: "https://ops.example.test/operations/processing?attemptId=attempt-one", ...overrides });
 }
 
 async function request(eventBody: string, nonce: string): Promise<Response> {
@@ -91,8 +92,24 @@ describe("Viewer processing event callback", () => {
   });
 
   it("rejects review open redirects and non-opaque attempt identifiers", async () => {
-    expect((await request(body("event-ready-000003", { reviewUrl: "https://evil.example/review/attempt-one" }), "event-nonce-4234567890")).status).toBe(400);
+    expect((await request(body("event-ready-000003", { reviewUrl: "https://evil.example/operations/processing?attemptId=attempt-one" }), "event-nonce-4234567890")).status).toBe(400);
     expect((await request(body("event-ready-000004", { attemptId: "../attempt-one" }), "event-nonce-5234567890")).status).toBe(400);
+    expect(await database.prepare("SELECT COUNT(*) FROM viewer_processing_events").first<number>("COUNT(*)")).toBe(0);
+  });
+
+  it("requires one canonical attemptId query on the exact public Operations route", async () => {
+    const invalid = [
+      "https://ops.example.test/operations/processing?attemptId=other-attempt",
+      "https://ops.example.test/operations/processing?attemptId=attempt-one&attemptId=attempt-one",
+      "https://ops.example.test/operations/processing?attemptId=attempt-one&next=https%3A%2F%2Fevil.example",
+      "https://ops.example.test/operations/processing/?attemptId=attempt-one",
+      "https://ops.example.test/operations/processing?attemptId=attempt-one#fragment",
+      "http://ops.example.test/operations/processing?attemptId=attempt-one",
+    ];
+    for (const [index, reviewUrl] of invalid.entries()) {
+      const response = await request(body(`event-invalid-url-${index}`, { reviewUrl }), `invalid-url-nonce-${index}-123456`);
+      expect(response.status, reviewUrl).toBe(400);
+    }
     expect(await database.prepare("SELECT COUNT(*) FROM viewer_processing_events").first<number>("COUNT(*)")).toBe(0);
   });
 

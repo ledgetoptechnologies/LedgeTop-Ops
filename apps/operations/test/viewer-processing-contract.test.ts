@@ -5,7 +5,8 @@ import { describe, expect, it } from "vitest";
 import { signViewerServiceRequest } from "@ltds/shared";
 import type {
   ViewerDatasetSummary, ViewerDurableOperationResponse, ViewerProcessingAttemptDetail, ViewerProcessingProject,
-  ViewerProcessingTask, ViewerProviderSummary, ViewerStorageSummary,
+  ViewerOutputSummary, ViewerProcessingTask, ViewerProjectStorageResponse, ViewerProviderSummary,
+  ViewerStorageSummary, ViewerTaskStorageResponse,
 } from "@ltds/shared";
 import { signViewerProcessingEvent } from "../src/worker/viewer-processing";
 
@@ -22,7 +23,7 @@ const routes = JSON.parse(routeBytes);
 describe("Viewer processing cross-service contract", () => {
   it("pins the byte-identical cross-repository route fixture", () => {
     expect(createHash("sha256").update(routeBytes).digest("hex").toUpperCase())
-      .toBe("2E71AB8CA396AADBBBA254BA528DCF4EA27E1D55376D079F2E514DA1D8E7EEAA");
+      .toBe("4202BA6C6EB3610B178A7DAEB67AAF7A8A4496B08B3ADCE91FCD281E49574978");
   });
   it("pins the exact admin-grant body and service HMAC", async () => {
     const value = fixture.adminGrant;
@@ -44,6 +45,7 @@ describe("Viewer processing cross-service contract", () => {
     expect(signed.contentSha256).toBe(value.contentSha256);
     expect(signed.signature).toBe(value.signature);
     expect(JSON.parse(value.body)).toMatchObject({ requestedBySubject: "ops:staff-one" });
+    expect(JSON.parse(value.body)).toEqual(routes.processingEvent);
   });
 
   it("pins actual Viewer list/detail response names without legacy DTO aliases", () => {
@@ -53,8 +55,8 @@ describe("Viewer processing cross-service contract", () => {
     const provider = routes.providers.providers[0] as ViewerProviderSummary;
     const attempt = routes.attemptDetail as ViewerProcessingAttemptDetail;
     const storage = routes.storage as ViewerStorageSummary;
-    expect(project).toMatchObject({ defaultUnits: "imperial", status: "active" });
-    expect(dataset).toMatchObject({ sourceType: "upload", storageMode: "managed", status: "finalized" });
+    expect(project).toMatchObject({ defaultUnits: "imperial", status: "active", tags: ["survey"] });
+    expect(dataset).toMatchObject({ sourceType: "upload", storageMode: "managed", status: "finalized", tags: ["flight-1"] });
     expect(dataset).not.toHaveProperty("state");
     expect(dataset).not.toHaveProperty("ownership");
     expect(task.latestAttempt).toMatchObject({ status: "running", errorCode: null, errorMessage: null });
@@ -73,6 +75,30 @@ describe("Viewer processing cross-service contract", () => {
       projectId: routes.taskDetail.task.projectId,
       datasetId: routes.taskDetail.task.datasetId,
       displayName: "Renamed map flight",
+    });
+    expect(routes.projectPatched.project).toMatchObject({
+      id: project.id, displayName: "North site renamed", tags: ["survey", "priority"],
+    });
+    expect(routes.datasetPatched.dataset).toMatchObject({
+      id: dataset.id, projectId: "project-two", rootKey: dataset.rootKey,
+      relativePath: dataset.relativePath, manifestSha256: dataset.manifestSha256,
+    });
+  });
+
+  it("pins aggregate storage accounting and managed output lifecycle shapes", () => {
+    const projectStorage = routes.projectStorage as ViewerProjectStorageResponse;
+    const taskStorage = routes.taskStorage as ViewerTaskStorageResponse;
+    const output = routes.outputs.outputs[0] as ViewerOutputSummary;
+    expect(projectStorage.project).toEqual({
+      projectId: "project-one", datasetBytes: 1048576, outputBytes: 2097152, totalBytes: 3145728,
+    });
+    expect(projectStorage.tasks[0]).toEqual(taskStorage.task);
+    expect(taskStorage.outputs[0]).toEqual(output);
+    expect(routes.outputs).toMatchObject({ totalCount: 1, totalBytes: 2097152, nextCursor: null });
+    expect(routes.outputArchived.output).toMatchObject({ id: output.id, modelId: output.modelId, status: "archived" });
+    expect(routes.outputTrashed).toMatchObject({
+      output: { id: output.id, status: "trashed" },
+      trash: { entityType: "output", entityId: output.id, permanentlyDeletedAt: null },
     });
   });
 

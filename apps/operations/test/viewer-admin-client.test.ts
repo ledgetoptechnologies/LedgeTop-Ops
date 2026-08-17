@@ -107,4 +107,24 @@ describe("Viewer administrative browser client", () => {
       payload: { operation: { id: "operation-one" } },
     });
   });
+
+  it("loads private dataset images with the bearer token and rejects unsafe image responses", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => grant()));
+    let redeemed = false, mode: "image" | "wrong-type" | "oversized" = "image";
+    const viewerFetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (!redeemed) { redeemed = true; return json(session(new Date(Date.now() + 30 * 60_000).toISOString())); }
+      expect(path).toContain("/gcp-images/");
+      expect(new Headers(init?.headers).get("Authorization")).toBe(`Bearer ${token}`);
+      if (mode === "wrong-type") return new Response("not an image", { headers: { "Content-Type": "text/plain" } });
+      if (mode === "oversized") return new Response(new Uint8Array([1]), { headers: { "Content-Type": "image/jpeg", "Content-Length": String(128 * 1024 * 1024 + 1) } });
+      return new Response(new Uint8Array([1, 2, 3]), { headers: { "Content-Type": "image/jpeg", "Content-Length": "3" } });
+    });
+    const client = new ViewerAdminClient("https://viewer.example.test", viewerFetch as typeof fetch);
+    await expect(client.requestBlob("/api/v1/datasets/dataset-one/gcp-images/image-one/content")).resolves.toMatchObject({ size: 3, type: "image/jpeg" });
+    mode = "wrong-type";
+    await expect(client.requestBlob("/api/v1/datasets/dataset-one/gcp-images/image-one/content")).rejects.toThrow(/unsupported image/i);
+    mode = "oversized";
+    await expect(client.requestBlob("/api/v1/datasets/dataset-one/gcp-images/image-one/content")).rejects.toThrow(/oversized image/i);
+  });
 });

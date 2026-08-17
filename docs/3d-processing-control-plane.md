@@ -43,6 +43,21 @@ resume and cannot silently create a duplicate dataset.
 
 Every retry creates a new immutable `ProcessingAttempt`. Provider capabilities and presets drive options. LTDS admission/backpressure happens before provider submission; ClusterODM owns node scheduling. Logs shown to staff are bounded and sanitized, with retention/size caps; secrets, tokens, full server paths, and raw provider payloads must not enter client-facing errors or permanent logs.
 
+Project and dataset friendly names, descriptions, and tags are editable without
+changing stable IDs. Dataset project reassociation is catalog-only: Viewer
+requires an active target project and refuses the change while a dataset is
+trashed/finalizing, has an active operation or lifecycle mutation, or has any
+non-archived task. Reassociation never moves or rewrites the immutable manifest,
+source files, root alias, or storage path.
+
+Bounded project/task storage endpoints separate immutable dataset bytes from
+managed model-output bytes. The output catalog is cursor-paged and reports its
+aggregate count and bytes. A managed output can be archived, then moved to
+recoverable 14-day trash; restore uses the common trash endpoint and permanent
+purge remains owner-only with the stable model-version ID typed for confirmation.
+Viewer rejects lifecycle changes while processing, publication, a share/session,
+or a non-managed layout still depends on the output.
+
 Dataset finalize and server-import adoption return `202` with canonical
 `Location: /api/v1/operations/:id` and `Retry-After: 2`. Ops stores only the
 non-secret operation ID/type/dataset/upload identifiers in a bounded seven-day
@@ -58,6 +73,12 @@ surface their sanitized code/message and remain recoverable for review.
 
 Viewer posts at most 16 KiB of exact JSON to `POST /api/viewer/events` with `X-LTDS-Viewer-Key-Id`, timestamp, nonce, content hash, signature, and `Idempotency-Key=eventId`. Operations verifies the selected current/previous rotation key, time window, nonce syntax, body hash, and HMAC before parsing JSON.
 
+A ready-for-review callback carries exactly
+`PUBLIC_BASE_URL/operations/processing?attemptId=<opaque-id>`. Operations
+requires HTTPS, its configured public origin, the exact path, one canonical
+`attemptId` query matching the signed event, and no credentials, extra query,
+or fragment. Viewer-origin review links and open redirects are rejected.
+
 Nonce consumption, event fingerprint, outbox row, and audit event are committed in one D1 batch. Same event ID/body replays; same ID/different body or reused nonce/new ID returns `409`. Only expired nonces are pruned. At the live nonce cap, callbacks backpressure instead of evicting unexpired replay protection.
 
 Notifications use the durable Operations outbox and bounded retry. Direct `waitUntil()` email is not the delivery guarantee. Callback errors are sanitized and target `requestedBySubject` when it names an active staff member, with the configured alert address as fallback.
@@ -71,7 +92,7 @@ Notifications use the durable Operations outbox and bounded retry. Direct `waitU
 
 ## Required configuration
 
-Non-secret vars: `VIEWER_PROCESSING_ENABLED`, `VIEWER_BASE_URL`, `VIEWER_SERVICE_KEY_ID`, `VIEWER_EVENT_KEY_ID`, optional previous event key ID, and `DEFAULT_UNITS=imperial`.
+Non-secret vars: canonical HTTPS Operations `PUBLIC_BASE_URL`, `VIEWER_PROCESSING_ENABLED`, `VIEWER_BASE_URL`, `VIEWER_SERVICE_KEY_ID`, `VIEWER_EVENT_KEY_ID`, optional previous event key ID, and `DEFAULT_UNITS=imperial`.
 
 Secrets: `VIEWER_SERVICE_HMAC_SECRET`, `VIEWER_EVENT_HMAC_SECRET`, and during overlap only `VIEWER_EVENT_PREVIOUS_HMAC_SECRET`. Never commit, return, or log them. Rotation removes the previous key only after the maximum callback retry/time window has elapsed.
 

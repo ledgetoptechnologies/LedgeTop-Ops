@@ -33,6 +33,8 @@ export type ViewerProcessingPermission =
   | "viewer.datasets.read"
   | "viewer.datasets.write"
   | "viewer.datasets.import"
+  | "viewer.gcp.read"
+  | "viewer.gcp.write"
   | "viewer.processing.read"
   | "viewer.processing.write"
   | "viewer.processing.publish"
@@ -65,6 +67,7 @@ export interface ViewerProcessingProject {
   displayName: string;
   description?: string | null;
   metadata?: Record<string, unknown>;
+  tags: string[];
   defaultUnits: ViewerDisplayUnits;
   status: "active" | "archived";
   createdBy: string;
@@ -86,6 +89,7 @@ export interface ViewerDatasetSummary {
   fileCount: number;
   byteSize: number;
   metadata: Record<string, unknown>;
+  tags: string[];
   createdBy: string;
   finalizedAt: string | null;
   createdAt: string;
@@ -195,7 +199,7 @@ export interface ViewerStorageVolume {
 }
 export interface ViewerTrashEntry {
   id: string;
-  entityType: "dataset";
+  entityType: "dataset" | "output";
   entityId: string;
   rootKey: string;
   relativePath: string;
@@ -204,6 +208,44 @@ export interface ViewerTrashEntry {
   createdBy: string;
   createdAt: string;
   permanentlyDeletedAt: string | null;
+}
+export interface ViewerOutputSummary {
+  id: string;
+  modelId: string;
+  taskId: string;
+  attemptId: string;
+  projectId: string;
+  displayName: string;
+  status: "ready" | "published" | "archived" | "trashed";
+  byteSize: number;
+  assetCount: number;
+  createdAt: string;
+  updatedAt: string;
+  archivedAt: string | null;
+  trashedAt: string | null;
+}
+export interface ViewerTaskStorageUsage {
+  taskId: string;
+  projectId: string;
+  datasetBytes: number;
+  outputBytes: number;
+  totalBytes: number;
+}
+export interface ViewerProjectStorageUsage {
+  projectId: string;
+  datasetBytes: number;
+  outputBytes: number;
+  totalBytes: number;
+}
+export interface ViewerProjectStorageResponse {
+  project: ViewerProjectStorageUsage;
+  tasks: ViewerTaskStorageUsage[];
+  nextCursor: string | null;
+}
+export interface ViewerTaskStorageResponse {
+  task: ViewerTaskStorageUsage;
+  outputs: ViewerOutputSummary[];
+  nextCursor: string | null;
 }
 export interface ViewerStorageSummary {
   storage: {

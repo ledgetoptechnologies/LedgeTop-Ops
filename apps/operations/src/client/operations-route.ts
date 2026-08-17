@@ -5,6 +5,7 @@ const PAGES:OperationsPage[]=["dashboard","operations","client-requests","sops",
 
 export function pathPage(pathname:string):OperationsPage{
   const parts=pathname.split("/").filter(Boolean), value=parts[0];
+  if(value==="operations"&&parts[1]==="processing")return"viewer";
   if(value==="operations"&&parts[1]==="client-requests")return"client-requests";
   if(value==="projects"||value==="tasks")return"operations";
   if(value==="jobs")return"delivery";

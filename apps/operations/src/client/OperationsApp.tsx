@@ -6145,7 +6145,7 @@ function ViewerModels({ session }: { session: Session }) {
   />;
   return <div className="viewer-admin-layout">
     <ErrorLine error={error || actionError} />
-    <ViewerProcessingPanel />
+    <ViewerProcessingPanel mapToken={session.mapboxPublicToken} />
     {data && !data.enabled && <Card><EmptyState title="3D Viewer is disabled" detail="Enable the Viewer integration only after its URL, service key, routes, and database migration are ready." /></Card>}
     {data?.enabled && canManage && <Card title="Associate a model with a client project">
       <form className="viewer-association-form" onSubmit={associate}>

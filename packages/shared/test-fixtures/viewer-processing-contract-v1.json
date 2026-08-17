@@ -18,8 +18,8 @@
     "path": "/api/viewer/events",
     "timestamp": 1800000001,
     "nonce": "event-nonce-1234567890",
-    "body": "{\"schemaVersion\":1,\"eventId\":\"event-ready-0001\",\"type\":\"processing.ready_for_review\",\"occurredAt\":\"2027-01-15T08:01:00.000Z\",\"projectId\":\"project-one\",\"taskId\":\"task-one\",\"attemptId\":\"attempt-one\",\"requestedBySubject\":\"ops:staff-one\",\"status\":\"ready_for_review\",\"reviewUrl\":\"https://viewer.example.test/review/attempt-one\"}",
-    "contentSha256": "6005ec4b9f6119fd7659162d8e12b08dd2a135629ec2fda41f178e49cd427627",
-    "signature": "PzQ-so8PN2gW0ZkDNxVjvD5R0gx2V7A3unvXbQJGfpw"
+    "body": "{\"schemaVersion\":1,\"eventId\":\"event-ready-0001\",\"type\":\"processing.ready_for_review\",\"occurredAt\":\"2027-01-15T08:01:00.000Z\",\"projectId\":\"project-one\",\"taskId\":\"task-one\",\"attemptId\":\"attempt-one\",\"requestedBySubject\":\"ops:staff-one\",\"status\":\"ready_for_review\",\"reviewUrl\":\"https://ops.example.test/operations/processing?attemptId=attempt-one\"}",
+    "contentSha256": "5e21e3d7c70aa0e1410f6cce5351c5c4dd02910e521a1e409fc5b51f1d320cd5",
+    "signature": "0NF81Qstc35oa2A4i3uKH0w883GgQXNL37yDW_9evVY"
   }
 }

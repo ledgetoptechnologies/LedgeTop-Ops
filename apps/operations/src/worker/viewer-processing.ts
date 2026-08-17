@@ -58,13 +58,13 @@ const viewerPermissionMapping: ReadonlyArray<{
   viewer: readonly ViewerProcessingPermission[];
 }> = [
   { ops: "viewer.view", viewer: [
-    "viewer.projects.read", "viewer.datasets.read", "viewer.processing.read", "viewer.providers.read",
+    "viewer.projects.read", "viewer.datasets.read", "viewer.gcp.read", "viewer.processing.read", "viewer.providers.read",
   ] },
   { ops: "viewer.datasets.manage", viewer: [
     "viewer.projects.write", "viewer.datasets.write", "viewer.datasets.import",
   ] },
   { ops: "viewer.processing.manage", viewer: [
-    "viewer.processing.write", "viewer.providers.write",
+    "viewer.gcp.write", "viewer.processing.write", "viewer.providers.write",
   ] },
   { ops: "viewer.publish", viewer: ["viewer.processing.publish"] },
   { ops: "viewer.storage.purge", viewer: ["viewer.storage.purge"] },
@@ -152,15 +152,18 @@ function safeEventMessage(value: string): string {
     .slice(0, 500);
 }
 
-function validateReviewUrl(env: Env, value: string | undefined): string | null {
+function validateReviewUrl(env: Env, value: string | undefined, attemptId: string): string | null {
   if (!value) return null;
   try {
-    const base = new URL(env.VIEWER_BASE_URL || ""), url = new URL(value);
-    if (base.origin !== url.origin || url.protocol !== "https:" || url.username || url.password)
-      throw new Error("origin");
-    return url.toString();
+    const base = new URL(env.PUBLIC_BASE_URL), url = new URL(value);
+    if (base.protocol !== "https:" || base.username || base.password ||
+      url.protocol !== "https:" || url.username || url.password || url.hash ||
+      url.origin !== base.origin || url.pathname !== "/operations/processing" ||
+      url.search !== `?attemptId=${encodeURIComponent(attemptId)}`)
+      throw new Error("canonical_url");
+    return `${base.origin}/operations/processing?attemptId=${encodeURIComponent(attemptId)}`;
   } catch {
-    throw new HTTPException(400, { message: "Viewer review URL is invalid" });
+    throw new HTTPException(400, { message: "Operations review URL is invalid" });
   }
 }
 
@@ -301,7 +304,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     const event: ViewerProcessingEventV1 = parsed.data;
     if (Math.abs(Date.now() - Date.parse(event.occurredAt)) > 24 * 60 * 60 * 1000)
       throw new HTTPException(400, { message: "Viewer event time is invalid" });
-    const reviewUrl = validateReviewUrl(c.env, event.reviewUrl);
+    const reviewUrl = validateReviewUrl(c.env, event.reviewUrl, event.attemptId);
     const errorMessage = event.error ? safeEventMessage(event.error.message) : null;
     const sanitized = JSON.stringify({
       ...event,

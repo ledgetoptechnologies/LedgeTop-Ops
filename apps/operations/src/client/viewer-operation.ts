@@ -113,6 +113,7 @@ function validFinalizedDataset(value: unknown, datasetId: string): boolean {
     Number.isSafeInteger(dataset.fileCount) && (dataset.fileCount as number) >= 0 &&
     Number.isSafeInteger(dataset.byteSize) && (dataset.byteSize as number) >= 0 &&
     Boolean(dataset.metadata && typeof dataset.metadata === "object" && !Array.isArray(dataset.metadata)) &&
+    Array.isArray(dataset.tags) && dataset.tags.every(tag => typeof tag === "string") &&
     typeof dataset.createdBy === "string" && typeof dataset.createdAt === "string" && Number.isFinite(Date.parse(dataset.createdAt)) &&
     typeof dataset.updatedAt === "string" && Number.isFinite(Date.parse(dataset.updatedAt)) &&
     typeof dataset.finalizedAt === "string" && Number.isFinite(Date.parse(dataset.finalizedAt)) &&

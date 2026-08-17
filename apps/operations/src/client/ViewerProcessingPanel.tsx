@@ -8,8 +8,11 @@ import type {
   ViewerProcessingPreset,
   ViewerProcessingProject,
   ViewerProcessingTask,
+  ViewerOutputSummary,
+  ViewerProjectStorageResponse,
   ViewerProviderSummary,
   ViewerStorageSummary,
+  ViewerTaskStorageResponse,
 } from "@ltds/shared";
 import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import { api } from "./api";
@@ -23,6 +26,7 @@ import {
   type ViewerUploadCheckpoint,
 } from "./upload-checkpoint";
 import { ViewerAdminClient } from "./viewer-admin-client";
+import { GcpWorkspace } from "./GcpWorkspace";
 import { defaultViewerProviderOverrides } from "./provider-options";
 import {
   pollViewerOperation,
@@ -44,8 +48,8 @@ type Bootstrap = {
   units: { default: "imperial"; resolved: ViewerDisplayUnits };
   events: ProcessingEvent[];
 };
-type Tab = "projects" | "datasets" | "tasks" | "imports" | "providers" | "storage" | "shares";
-type PagedKind = "projects" | "datasets" | "tasks" | "providers";
+type Tab = "projects" | "datasets" | "gcp" | "tasks" | "outputs" | "imports" | "providers" | "storage" | "shares";
+type PagedKind = "projects" | "datasets" | "tasks" | "outputs" | "providers";
 type PageCursors = Record<PagedKind, string | null>;
 
 function firstArray<T>(payload: unknown, key: string): T[] {
@@ -92,16 +96,18 @@ async function retryUpload<T>(action: () => Promise<T>, signal: AbortSignal, att
   throw last;
 }
 
-export function ViewerProcessingPanel(): ReactElement {
+export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null }): ReactElement {
   const [bootstrap, setBootstrap] = useState<Bootstrap | null>(null);
   const [projects, setProjects] = useState<ViewerProcessingProject[]>([]);
   const [datasets, setDatasets] = useState<ViewerDatasetSummary[]>([]);
   const [tasks, setTasks] = useState<ViewerProcessingTask[]>([]);
   const [providers, setProviders] = useState<ViewerProviderSummary[]>([]);
+  const [outputs, setOutputs] = useState<ViewerOutputSummary[]>([]);
+  const [outputTotals, setOutputTotals] = useState({ count: 0, bytes: 0 });
   const [presets, setPresets] = useState<ViewerProcessingPreset[]>([]);
   const [storage, setStorage] = useState<ViewerStorageSummary | null>(null);
   const [reviewAttempt, setReviewAttempt] = useState<ViewerProcessingAttemptDetail | null>(null);
-  const [cursors, setCursors] = useState<PageCursors>({ projects: null, datasets: null, tasks: null, providers: null });
+  const [cursors, setCursors] = useState<PageCursors>({ projects: null, datasets: null, tasks: null, outputs: null, providers: null });
   const [tab, setTab] = useState<Tab>(() => {
     const pending = readViewerOperationCheckpoints()[0];
     return pending?.type === "upload_finalize" ? "datasets" : pending?.type === "import_adopt" ? "imports" : "projects";
@@ -112,6 +118,7 @@ export function ViewerProcessingPanel(): ReactElement {
   const clientRef = useRef<ViewerAdminClient | null>(null);
   const loadGeneration = useRef(0);
   const loadAbort = useRef<AbortController | null>(null);
+  const reviewTabSelected = useRef(false);
 
   const load = useCallback(async () => {
     const generation = ++loadGeneration.current;
@@ -125,11 +132,12 @@ export function ViewerProcessingPanel(): ReactElement {
       ? clientRef.current
       : new ViewerAdminClient(config.viewerBaseUrl);
     clientRef.current = client;
-    const requestedAttempt = new URLSearchParams(window.location.search).get("attempt");
+    const requestedAttempt = new URLSearchParams(window.location.search).get("attemptId");
     const safeAttempt = requestedAttempt && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(requestedAttempt) ? requestedAttempt : null;
-    const [projectData, datasetData, taskData, providerData, presetData, storageData, reviewData] = await Promise.all([
+    const [projectData, datasetData, taskData, outputData, providerData, presetData, storageData, reviewData] = await Promise.all([
       client.request("/api/v1/projects?limit=50", { signal: controller.signal }), client.request("/api/v1/datasets?limit=50", { signal: controller.signal }),
-      client.request("/api/v1/tasks?limit=50", { signal: controller.signal }), client.request("/api/v1/processing/providers?limit=50", { signal: controller.signal }),
+      client.request("/api/v1/tasks?limit=50", { signal: controller.signal }), client.request("/api/v1/processing/outputs?limit=50", { signal: controller.signal }),
+      client.request("/api/v1/processing/providers?limit=50", { signal: controller.signal }),
       client.request("/api/v1/processing/presets", { signal: controller.signal }),
       client.request<ViewerStorageSummary>("/api/v1/storage?limit=50", { signal: controller.signal }),
       safeAttempt ? client.request<ViewerProcessingAttemptDetail>(`/api/v1/attempts/${encodeURIComponent(safeAttempt)}`, { signal: controller.signal }) : Promise.resolve(null),
@@ -140,12 +148,20 @@ export function ViewerProcessingPanel(): ReactElement {
     // The task list contract includes latestAttempt; never fan out one detail
     // request per row because a real catalog would create an unbounded N+1.
     setTasks(firstArray(taskData, "tasks"));
+    setOutputs(firstArray(outputData, "outputs"));
+    setOutputTotals({
+      count: typeof (outputData as Record<string, unknown>)?.totalCount === "number" ? (outputData as { totalCount: number }).totalCount : 0,
+      bytes: typeof (outputData as Record<string, unknown>)?.totalBytes === "number" ? (outputData as { totalBytes: number }).totalBytes : 0,
+    });
     setProviders(firstArray(providerData, "providers"));
     setPresets(firstArray(presetData, "presets"));
     setStorage(storageData);
     setReviewAttempt(reviewData);
-    if (reviewData) setTab("tasks");
-    setCursors({ projects: pageCursor(projectData), datasets: pageCursor(datasetData), tasks: pageCursor(taskData), providers: pageCursor(providerData) });
+    if (reviewData && !reviewTabSelected.current) {
+      reviewTabSelected.current = true;
+      setTab("tasks");
+    }
+    setCursors({ projects: pageCursor(projectData), datasets: pageCursor(datasetData), tasks: pageCursor(taskData), outputs: pageCursor(outputData), providers: pageCursor(providerData) });
   }, []);
 
   useEffect(() => { load().catch(caught => { if ((caught as Error).name !== "AbortError") setError((caught as Error).message); }); return () => loadAbort.current?.abort(); }, [load]);
@@ -154,11 +170,16 @@ export function ViewerProcessingPanel(): ReactElement {
     if (!client || !cursor || busy) return;
     setBusy(true); setError("");
     try {
-      const path = kind === "providers" ? "/api/v1/processing/providers" : `/api/v1/${kind}`;
+      const path = kind === "providers" ? "/api/v1/processing/providers" : kind === "outputs" ? "/api/v1/processing/outputs" : `/api/v1/${kind}`;
       const payload = await client.request(`${path}?limit=50&cursor=${encodeURIComponent(cursor)}`);
       if (kind === "projects") setProjects(current => [...current, ...firstArray<ViewerProcessingProject>(payload, kind)]);
       if (kind === "datasets") setDatasets(current => [...current, ...firstArray<ViewerDatasetSummary>(payload, kind)]);
       if (kind === "tasks") setTasks(current => [...current, ...firstArray<ViewerProcessingTask>(payload, kind)]);
+      if (kind === "outputs") {
+        setOutputs(current => [...current, ...firstArray<ViewerOutputSummary>(payload, kind)]);
+        const totals = payload as { totalCount?: number; totalBytes?: number };
+        setOutputTotals(current => ({ count: totals.totalCount ?? current.count, bytes: totals.totalBytes ?? current.bytes }));
+      }
       if (kind === "providers") setProviders(current => [...current, ...firstArray<ViewerProviderSummary>(payload, kind)]);
       setCursors(current => ({ ...current, [kind]: pageCursor(payload) }));
     } catch (caught) { setError((caught as Error).message); }
@@ -181,7 +202,15 @@ export function ViewerProcessingPanel(): ReactElement {
     const client = clientRef.current;
     if (!client || busy) return;
     setBusy(true); setError(""); setMessage("");
-    try { await action(client); setMessage(success); await load(); }
+    try { await action(client); await load(); setMessage(success); }
+    catch (caught) { setError((caught as Error).message); }
+    finally { setBusy(false); }
+  };
+  const query = async (action: (client: ViewerAdminClient) => Promise<unknown>) => {
+    const client = clientRef.current;
+    if (!client || busy) return;
+    setBusy(true); setError("");
+    try { await action(client); }
     catch (caught) { setError((caught as Error).message); }
     finally { setBusy(false); }
   };
@@ -203,17 +232,19 @@ export function ViewerProcessingPanel(): ReactElement {
         }}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
       </div>
       <nav className="viewer-processing-tabs" aria-label="Processing sections">
-        {(["projects","datasets","tasks","imports","providers","storage","shares"] as Tab[]).map(value =>
-          <button type="button" key={value} aria-current={tab === value ? "page" : undefined} onClick={() => setTab(value)}>{value[0]!.toUpperCase() + value.slice(1)}</button>)}
+        {(["projects","datasets","gcp","tasks","outputs","imports","providers","storage","shares"] as Tab[]).map(value =>
+          <button type="button" key={value} aria-current={tab === value ? "page" : undefined} onClick={() => setTab(value)}>{value === "gcp" ? "Ground control" : value[0]!.toUpperCase() + value.slice(1)}</button>)}
       </nav>
       {error && <div className="notice error" role="alert">{error}</div>}
       {message && <div className="notice" role="status">{message}</div>}
       {clientRef.current?.status().renewalError && <div className="notice" role="status">Viewer authorization renewal will retry; the current session remains active until expiry.</div>}
     </Card>
 
-    {tab === "projects" && <Projects projects={projects} canWrite={can("viewer.projects.write")} busy={busy} mutate={mutate} units={bootstrap.units.resolved} nextCursor={cursors.projects} loadMore={() => loadMore("projects")} />}
+    {tab === "projects" && <Projects projects={projects} canWrite={can("viewer.projects.write")} busy={busy} mutate={mutate} query={query} units={bootstrap.units.resolved} nextCursor={cursors.projects} loadMore={() => loadMore("projects")} />}
     {tab === "datasets" && <Datasets projects={projects} datasets={datasets} canWrite={can("viewer.datasets.write")} canTrash={can("viewer.storage.purge")} busy={busy} mutate={mutate} nextCursor={cursors.datasets} loadMore={() => loadMore("datasets")} />}
-    {tab === "tasks" && <Tasks tasks={tasks} datasets={datasets} providers={providers} presets={presets} canWrite={can("viewer.processing.write")} canPublish={can("viewer.processing.publish")} busy={busy} mutate={mutate} nextCursor={cursors.tasks} loadMore={() => loadMore("tasks")} />}
+    {tab === "gcp" && clientRef.current && <GcpWorkspace client={clientRef.current} datasets={datasets} tasks={tasks} mapToken={mapToken} units={bootstrap.units.resolved} canRead={can("viewer.gcp.read")} canWrite={can("viewer.gcp.write")} />}
+    {tab === "tasks" && <Tasks tasks={tasks} datasets={datasets} providers={providers} presets={presets} canWrite={can("viewer.processing.write")} canPublish={can("viewer.processing.publish")} busy={busy} mutate={mutate} query={query} nextCursor={cursors.tasks} loadMore={() => loadMore("tasks")} />}
+    {tab === "outputs" && <Outputs outputs={outputs} totals={outputTotals} canPublish={can("viewer.processing.publish")} busy={busy} mutate={mutate} nextCursor={cursors.outputs} loadMore={() => loadMore("outputs")} />}
     {tab === "imports" && <Imports projects={projects} canImport={can("viewer.datasets.import")} busy={busy} mutate={mutate} />}
     {tab === "providers" && <Providers providers={providers} canWrite={can("viewer.providers.write")} busy={busy} mutate={mutate} nextCursor={cursors.providers} loadMore={() => loadMore("providers")} />}
     {tab === "storage" && <Storage summary={storage} canPurge={can("viewer.storage.purge")} busy={busy} mutate={mutate} loadMore={loadMoreTrash} />}
@@ -225,7 +256,7 @@ export function ViewerProcessingPanel(): ReactElement {
       {bootstrap.events.map(event => <article key={event.event_id}>
         <div><StatusPill tone={event.event_type === "processing.failed" ? "danger" : "success"}>{event.status}</StatusPill>
           <h3>Task {event.task_id}</h3><p>{event.error_message || `Attempt ${event.attempt_id} is ready for review.`}</p></div>
-        <div>{event.review_url && <a className="button-orange button-small" href={`/viewer?attempt=${encodeURIComponent(event.attempt_id)}`}>Review</a>}
+        <div>{event.review_url && <a className="button-orange button-small" href={`/operations/processing?attemptId=${encodeURIComponent(event.attempt_id)}`}>Review</a>}
           {!event.acknowledged_at && <button className="button-ghost button-small" type="button" onClick={() => void api(`/api/viewer/events/${encodeURIComponent(event.event_id)}/acknowledge`, { method: "POST" }).then(load)}>Acknowledge</button>}</div>
       </article>)}
     </div></Card>}
@@ -233,17 +264,51 @@ export function ViewerProcessingPanel(): ReactElement {
 }
 
 type Mutate = (action: (client: ViewerAdminClient) => Promise<unknown>, success: string) => Promise<void>;
+type Query = (action: (client: ViewerAdminClient) => Promise<unknown>) => Promise<void>;
 function Pager({ nextCursor, busy, loadMore }: { nextCursor: string | null; busy: boolean; loadMore: () => void }) {
   return nextCursor ? <button type="button" className="button-ghost viewer-load-more" disabled={busy} onClick={loadMore}>Load 50 more</button> : <></>;
 }
-function Projects({ projects, canWrite, busy, mutate, units, nextCursor, loadMore }: { projects: ViewerProcessingProject[]; canWrite: boolean; busy: boolean; mutate: Mutate; units: ViewerDisplayUnits; nextCursor: string | null; loadMore: () => void }) {
+function normalizedTags(value: string): string[] {
+  return [...new Set(value.split(/[\n,]/).map(tag => tag.trim()).filter(Boolean))];
+}
+function Projects({ projects, canWrite, busy, mutate, query, units, nextCursor, loadMore }: { projects: ViewerProcessingProject[]; canWrite: boolean; busy: boolean; mutate: Mutate; query: Query; units: ViewerDisplayUnits; nextCursor: string | null; loadMore: () => void }) {
   const [name, setName] = useState("");
   return <Card title="Projects">{canWrite && <form className="viewer-processing-form" onSubmit={event => {
     event.preventDefault(); const displayName = name.trim(); if (!displayName) return;
     void mutate(client => client.request("/api/v1/projects", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ displayName, defaultUnits: units }) }), "Project created.").then(() => setName(""));
   }}><label>Friendly project name<input maxLength={160} value={name} onChange={event => setName(event.target.value)} /></label><button className="button-orange" disabled={busy || !name.trim()}>Create project</button></form>}
-    {!projects.length ? <EmptyState title="No processing projects" detail="Create a project to organize reusable datasets and tasks." /> : <div className="viewer-processing-list">{projects.map(project => <article key={project.id}><div><h3>{project.displayName}</h3><p>{project.defaultUnits} · {project.status} · stable ID {project.id}</p></div><div>{canWrite && project.status === "active" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/projects/${encodeURIComponent(project.id)}/archive`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Project archived; stable IDs and published model links are unchanged.")}>Archive</button>}</div></article>)}</div>}<Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
+    {!projects.length ? <EmptyState title="No processing projects" detail="Create a project to organize reusable datasets and tasks." /> : <div className="viewer-processing-list">{projects.map(project => <article key={project.id}><div><h3>{project.displayName}</h3><p>{project.description || "No description"}</p><p>{project.defaultUnits} · {project.status} · stable ID {project.id}</p>{project.tags.length > 0 && <p>Tags: {project.tags.join(", ")}</p>}<ProjectStorageDetails project={project} busy={busy} query={query} /></div><div>{canWrite && <ProjectCatalogControls project={project} busy={busy} mutate={mutate} />}{canWrite && project.status === "active" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/projects/${encodeURIComponent(project.id)}/archive`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Project archived; stable IDs and published model links are unchanged.")}>Archive</button>}</div></article>)}</div>}<Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
   </Card>;
+}
+
+function ProjectCatalogControls({ project, busy, mutate }: { project: ViewerProcessingProject; busy: boolean; mutate: Mutate }) {
+  const [displayName, setDisplayName] = useState(project.displayName), [description, setDescription] = useState(project.description || "");
+  const [tags, setTags] = useState(project.tags.join(", ")), [defaultUnits, setDefaultUnits] = useState(project.defaultUnits);
+  return <details className="viewer-task-catalog"><summary>Edit project</summary><form onSubmit={event => {
+    event.preventDefault();
+    void mutate(client => client.request(`/api/v1/projects/${encodeURIComponent(project.id)}`, {
+      method: "PATCH", headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ displayName: displayName.trim(), description: description.trim() || null, tags: normalizedTags(tags), defaultUnits }),
+    }), "Project catalog updated without changing its stable ID.");
+  }}><label>Friendly name<input maxLength={160} value={displayName} onChange={event => setDisplayName(event.target.value)} /></label>
+    <label>Description<textarea maxLength={1000} rows={3} value={description} onChange={event => setDescription(event.target.value)} /></label>
+    <label>Tags (comma or line separated)<textarea rows={2} value={tags} onChange={event => setTags(event.target.value)} /></label>
+    <label>Default units<select value={defaultUnits} onChange={event => setDefaultUnits(event.target.value as ViewerDisplayUnits)}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
+    <button type="submit" className="button-orange button-small" disabled={busy || !displayName.trim()}>Save project</button>
+  </form></details>;
+}
+
+function ProjectStorageDetails({ project, busy, query }: { project: ViewerProcessingProject; busy: boolean; query: Query }) {
+  const [usage, setUsage] = useState<ViewerProjectStorageResponse | null>(null);
+  const fetchPage = (cursor?: string) => query(async client => {
+    const page = await client.request<ViewerProjectStorageResponse>(`/api/v1/projects/${encodeURIComponent(project.id)}/storage?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+    setUsage(current => cursor && current ? { project: page.project, tasks: [...current.tasks, ...page.tasks], nextCursor: page.nextCursor } : page);
+  });
+  return <details className="viewer-storage-details" onToggle={event => { if ((event.currentTarget as HTMLDetailsElement).open && !usage && !busy) void fetchPage(); }}><summary>Storage accounting</summary>
+    {!usage ? <p>Open to load bounded project and task usage.</p> : <><p>{formatBytes(usage.project.datasetBytes)} datasets · {formatBytes(usage.project.outputBytes)} outputs · {formatBytes(usage.project.totalBytes)} total</p>
+      {usage.tasks.length > 0 && <ul>{usage.tasks.map(task => <li key={task.taskId}>Task {task.taskId}: {formatBytes(task.totalBytes)} total ({formatBytes(task.outputBytes)} outputs)</li>)}</ul>}
+      {usage.nextCursor && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void fetchPage(usage.nextCursor!)}>Load more task usage</button>}</>}
+  </details>;
 }
 
 function Datasets({ projects, datasets, canWrite, canTrash, busy, mutate, nextCursor, loadMore }: { projects: ViewerProcessingProject[]; datasets: ViewerDatasetSummary[]; canWrite: boolean; canTrash: boolean; busy: boolean; mutate: Mutate; nextCursor: string | null; loadMore: () => void }) {
@@ -337,14 +402,35 @@ function Datasets({ projects, datasets, canWrite, canTrash, busy, mutate, nextCu
     {savedOperation && !busy && <p className="viewer-upload-resume" role="status">Durable finalization {savedOperation.operationId} continues in Viewer; no files or credentials are stored here. <button type="button" className="button-ghost button-small" onClick={() => { const controller = new AbortController(); cancellation.current = controller; void mutate(client => watchOperation(client, savedOperation, controller), "Dataset finalized. The source manifest is now immutable."); }}>Resume status check</button> <button type="button" className="button-ghost button-small" onClick={() => { removeViewerOperationCheckpoint(savedOperation.operationId); setSavedOperation(null); }}>Dismiss local status</button></p>}
     {progress && <p role="status">{progress}</p>}<p className="viewer-processing-warning">Source imagery is administrative input. Publishing never shares raw photos, GCP files, logs, or processing internals.</p>
   </form>}
-  {!datasets.length ? <EmptyState title="No datasets" detail="Upload or adopt an immutable source manifest. Existing delivery uploads are unaffected." /> : <div className="viewer-processing-list">{datasets.map(dataset => <article key={dataset.id}><div><StatusPill tone={dataset.status === "finalized" ? "success" : "warning"}>{dataset.status}</StatusPill><h3>{dataset.displayName}</h3><p>{dataset.fileCount} files · {dataset.storageMode} · {dataset.sourceType} · {formatBytes(dataset.byteSize)}</p></div><div>
+  {!datasets.length ? <EmptyState title="No datasets" detail="Upload or adopt an immutable source manifest. Existing delivery uploads are unaffected." /> : <div className="viewer-processing-list">{datasets.map(dataset => <article key={dataset.id}><div><StatusPill tone={dataset.status === "finalized" ? "success" : "warning"}>{dataset.status}</StatusPill><h3>{dataset.displayName}</h3><p>{dataset.description || "No description"}</p><p>{dataset.fileCount} files · {dataset.storageMode} · {dataset.sourceType} · {formatBytes(dataset.byteSize)}</p>{dataset.tags.length > 0 && <p>Tags: {dataset.tags.join(", ")}</p>}</div><div>
+    {canWrite && <DatasetCatalogControls dataset={dataset} projects={projects} busy={busy} mutate={mutate} />}
     {canWrite && dataset.status === "finalized" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/datasets/${encodeURIComponent(dataset.id)}/archive`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Dataset archived.")}>Archive</button>}
     {canTrash && !dataset.trashedAt && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => { if (window.confirm(`Move ${dataset.displayName} to recoverable trash?`)) void mutate(client => client.request(`/api/v1/datasets/${encodeURIComponent(dataset.id)}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } }), "Dataset moved to recoverable trash."); }}>Trash</button>}
   </div></article>)}</div>}<Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
   </Card>;
 }
 
-function Tasks({ tasks, datasets, providers, presets, canWrite, canPublish, busy, mutate, nextCursor, loadMore }: { tasks: ViewerProcessingTask[]; datasets: ViewerDatasetSummary[]; providers: ViewerProviderSummary[]; presets: ViewerProcessingPreset[]; canWrite: boolean; canPublish: boolean; busy: boolean; mutate: Mutate; nextCursor: string | null; loadMore: () => void }) {
+function DatasetCatalogControls({ dataset, projects, busy, mutate }: { dataset: ViewerDatasetSummary; projects: ViewerProcessingProject[]; busy: boolean; mutate: Mutate }) {
+  const [displayName, setDisplayName] = useState(dataset.displayName), [description, setDescription] = useState(dataset.description || "");
+  const [tags, setTags] = useState(dataset.tags.join(", ")), [projectId, setProjectId] = useState(dataset.projectId);
+  const changedProject = projectId !== dataset.projectId;
+  return <details className="viewer-task-catalog"><summary>Edit dataset catalog</summary><form onSubmit={event => {
+    event.preventDefault();
+    if (changedProject && !window.confirm("Reassociate this dataset with the selected active project? This changes catalog ownership only; immutable source files, manifest, storage location, and task history are not moved.")) return;
+    void mutate(client => client.request(`/api/v1/datasets/${encodeURIComponent(dataset.id)}`, {
+      method: "PATCH", headers: { "Idempotency-Key": crypto.randomUUID() },
+      body: JSON.stringify({ displayName: displayName.trim(), description: description.trim() || null, tags: normalizedTags(tags), ...(changedProject ? { projectId } : {}) }),
+    }), changedProject ? "Dataset catalog reassociated; immutable source storage and manifest are unchanged." : "Dataset catalog updated without changing immutable source contents.");
+  }}><label>Friendly name<input maxLength={160} value={displayName} onChange={event => setDisplayName(event.target.value)} /></label>
+    <label>Description<textarea maxLength={1000} rows={3} value={description} onChange={event => setDescription(event.target.value)} /></label>
+    <label>Tags (comma or line separated)<textarea rows={2} value={tags} onChange={event => setTags(event.target.value)} /></label>
+    <label>Catalog project<select value={projectId} onChange={event => setProjectId(event.target.value)}>{projects.filter(project => project.status === "active").map(project => <option key={project.id} value={project.id}>{project.displayName}</option>)}</select></label>
+    {changedProject && <p className="viewer-processing-warning">Reassociation is blocked while this dataset has active operations, lifecycle mutations, or any non-archived task. It never moves or rewrites immutable source files.</p>}
+    <button type="submit" className="button-orange button-small" disabled={busy || !displayName.trim() || !projectId}>Save dataset</button>
+  </form></details>;
+}
+
+function Tasks({ tasks, datasets, providers, presets, canWrite, canPublish, busy, mutate, query, nextCursor, loadMore }: { tasks: ViewerProcessingTask[]; datasets: ViewerDatasetSummary[]; providers: ViewerProviderSummary[]; presets: ViewerProcessingPreset[]; canWrite: boolean; canPublish: boolean; busy: boolean; mutate: Mutate; query: Query; nextCursor: string | null; loadMore: () => void }) {
   const [datasetId, setDatasetId] = useState(""); const [providerId, setProviderId] = useState(""); const [presetId, setPresetId] = useState(""); const [name, setName] = useState(""); const [advancedOptions, setAdvancedOptions] = useState(() => JSON.stringify(defaultViewerProviderOverrides(null)));
   useEffect(() => { if (!datasetId && datasets[0]) setDatasetId(datasets[0].id); if (!providerId && providers[0]) setProviderId(providers[0].id); }, [datasetId, datasets, providerId, providers]);
   const selectedProvider = providers.find(item => item.id === providerId);
@@ -359,11 +445,11 @@ function Tasks({ tasks, datasets, providers, presets, canWrite, canPublish, busy
     <label className="viewer-processing-wide">Advanced provider options (overrides only)<textarea aria-label="Advanced provider options" value={advancedOptions} onChange={event => setAdvancedOptions(event.target.value)} rows={5} /></label>
     {!!selectedProvider?.capabilities?.options.length && <details className="viewer-processing-wide"><summary>Available {selectedProvider.capabilities.engine} options</summary><ul>{selectedProvider.capabilities.options.map(option => <li key={option.name}><code>{option.name}</code> ({option.type}) — {option.help}</li>)}</ul><p>Defaults are intentionally not copied into overrides because upstream NodeODM may report typed defaults as strings. Viewer validates only explicit overrides and injects required output flags.</p></details>}
     <button className="button-orange" disabled={busy || !name.trim() || !datasetId || !providerId}>Create and process</button></form>}
-    {!tasks.length ? <EmptyState title="No processing tasks" detail="Each retry creates a new immutable attempt." /> : <div className="viewer-processing-list">{tasks.map(task => <TaskRow key={task.id} task={task} canWrite={canWrite} canPublish={canPublish} busy={busy} mutate={mutate} />)}</div>}<Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
+    {!tasks.length ? <EmptyState title="No processing tasks" detail="Each retry creates a new immutable attempt." /> : <div className="viewer-processing-list">{tasks.map(task => <TaskRow key={task.id} task={task} canWrite={canWrite} canPublish={canPublish} busy={busy} mutate={mutate} query={query} />)}</div>}<Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
   </Card>;
 }
 
-function TaskRow({ task, canWrite, canPublish, busy, mutate }: { task: ViewerProcessingTask; canWrite: boolean; canPublish: boolean; busy: boolean; mutate: Mutate }) {
+function TaskRow({ task, canWrite, canPublish, busy, mutate, query }: { task: ViewerProcessingTask; canWrite: boolean; canPublish: boolean; busy: boolean; mutate: Mutate; query: Query }) {
   const [detail, setDetail] = useState<ViewerProcessingAttemptDetail | null>(null);
   const [detailError, setDetailError] = useState("");
   const attempt = task.latestAttempt;
@@ -372,6 +458,7 @@ function TaskRow({ task, canWrite, canPublish, busy, mutate }: { task: ViewerPro
     {attempt?.errorMessage && <p className="viewer-processing-error">{attempt.errorCode ? `${attempt.errorCode}: ` : ""}{attempt.errorMessage}</p>}
     {detailError && <p className="viewer-processing-error">{detailError}</p>}
     {detail && <details open className="viewer-attempt-detail"><summary>Attempt logs</summary><progress max={1} value={detail.attempt.progress || 0} />{detail.logs.length ? <ol>{detail.logs.map((log, index) => <li key={`${log.created_at}-${index}`}><time>{log.created_at}</time> <strong>{log.level}</strong> {log.message}</li>)}</ol> : <p>No provider logs yet.</p>}</details>}
+    <TaskStorageDetails task={task} busy={busy} query={query} />
   </div><div>
     {attempt && <button type="button" className="button-ghost button-small" onClick={() => void clientFor(mutate, async client => { try { setDetail(await client.request<ViewerProcessingAttemptDetail>(`/api/v1/attempts/${encodeURIComponent(attempt.id)}`)); setDetailError(""); } catch (caught) { setDetailError((caught as Error).message); } })}>Progress & logs</button>}
     {canWrite && attempt?.status === "failed" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/attempts/${encodeURIComponent(attempt.id)}/retry`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "A new retry attempt was created.")}>Retry</button>}
@@ -392,6 +479,19 @@ function TaskCatalogControls({ task, active, busy, mutate }: { task: ViewerProce
   </form></details>;
 }
 
+function TaskStorageDetails({ task, busy, query }: { task: ViewerProcessingTask; busy: boolean; query: Query }) {
+  const [usage, setUsage] = useState<ViewerTaskStorageResponse | null>(null);
+  const fetchPage = (cursor?: string) => query(async client => {
+    const page = await client.request<ViewerTaskStorageResponse>(`/api/v1/tasks/${encodeURIComponent(task.id)}/storage?limit=50${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ""}`);
+    setUsage(current => cursor && current ? { task: page.task, outputs: [...current.outputs, ...page.outputs], nextCursor: page.nextCursor } : page);
+  });
+  return <details className="viewer-storage-details" onToggle={event => { if ((event.currentTarget as HTMLDetailsElement).open && !usage && !busy) void fetchPage(); }}><summary>Task storage & model outputs</summary>
+    {!usage ? <p>Open to load bounded output accounting.</p> : <><p>{formatBytes(usage.task.datasetBytes)} dataset · {formatBytes(usage.task.outputBytes)} outputs · {formatBytes(usage.task.totalBytes)} total</p>
+      {usage.outputs.length > 0 && <ul>{usage.outputs.map(output => <li key={output.id}>{output.displayName}: {formatBytes(output.byteSize)} · {output.status}</li>)}</ul>}
+      {usage.nextCursor && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void fetchPage(usage.nextCursor!)}>Load more outputs</button>}</>}
+  </details>;
+}
+
 async function clientFor(mutate: Mutate, action: (client: ViewerAdminClient) => Promise<void>): Promise<void> {
   await mutate(async client => action(client), "Attempt detail refreshed.");
 }
@@ -406,6 +506,23 @@ function PublishButton({ task, busy, mutate }: { task: ViewerProcessingTask; bus
         void mutate(client => client.request(`/api/v1/attempts/${encodeURIComponent(task.latestAttempt!.id)}/publish`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ displayName: task.displayName, selectedAssetKinds: selected }) }), "Selected derived outputs published.");
     }}>Publish selected</button>
   </fieldset></details>;
+}
+
+function Outputs({ outputs, totals, canPublish, busy, mutate, nextCursor, loadMore }: {
+  outputs: ViewerOutputSummary[]; totals: { count: number; bytes: number }; canPublish: boolean;
+  busy: boolean; mutate: Mutate; nextCursor: string | null; loadMore: () => void;
+}) {
+  return <Card title="Model output lifecycle"><p>{totals.count} output version{totals.count === 1 ? "" : "s"} · {formatBytes(totals.bytes)} managed output storage</p>
+    <p>Archiving is reversible and preserves stable IDs. Trash is retained for 14 days. Active publications, shares, sessions, processing, and non-managed layouts are protected from lifecycle changes.</p>
+    {!outputs.length ? <EmptyState title="No model outputs" detail="Published or review-ready derivative versions appear here. Raw source imagery and logs never do." /> : <div className="viewer-processing-list">{outputs.map(output => <article key={output.id}><div>
+      <StatusPill tone={output.status === "published" ? "success" : output.status === "ready" ? "warning" : output.status === "trashed" ? "danger" : "warning"}>{output.status}</StatusPill>
+      <h3>{output.displayName}</h3><p>{output.assetCount} derivative asset{output.assetCount === 1 ? "" : "s"} · {formatBytes(output.byteSize)}</p><small>Version {output.id} · model {output.modelId} · task {output.taskId}</small>
+    </div><div>
+      {canPublish && (output.status === "ready" || output.status === "published") && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => { if (window.confirm(`Archive ${output.displayName}? Active publications, shares, or sessions will block this safely.`)) void mutate(client => client.request(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/archive`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Model output archived; stable version and model IDs are unchanged."); }}>Archive output</button>}
+      {canPublish && output.status === "archived" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => { if (window.confirm(`Move archived output ${output.displayName} to recoverable 14-day trash?`)) void mutate(client => client.request(`/api/v1/processing/outputs/${encodeURIComponent(output.id)}/archive`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } }), "Archived output moved to recoverable trash."); }}>Trash output</button>}
+    </div></article>)}</div>}
+    <Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
+  </Card>;
 }
 
 function Imports({ projects, canImport, busy, mutate }: { projects: ViewerProcessingProject[]; canImport: boolean; busy: boolean; mutate: Mutate }) {
@@ -468,10 +585,10 @@ function Storage({ summary, canPurge, busy, mutate, loadMore }: { summary: Viewe
   if (!summary) return <Card title="Storage and recoverable trash"><Loading /></Card>;
   return <Card title="Storage and recoverable trash"><div className="viewer-storage-grid">
     {Object.entries(summary.storage).map(([name, volume]) => <article key={name}><h3>{name}</h3><p>{formatBytes(volume.available)} available of {formatBytes(volume.total)}</p><p>Reserve {formatBytes(volume.reserve)} · required {formatBytes(volume.required)}</p><StatusPill tone={volume.ok ? "success" : "danger"}>{volume.ok ? "preflight passes" : "capacity blocked"}</StatusPill></article>)}
-  </div><p>Trash is recoverable until its purge date. Permanent purge requires owner-only permission and typing the stable dataset ID.</p><p>{summary.trash.totalCount} trashed dataset{summary.trash.totalCount === 1 ? "" : "s"} · {formatBytes(summary.trash.totalBytes)}</p>
-  {!summary.trash.items.length ? <EmptyState title="Trash is empty" detail="Archived data remains cataloged; trashed data appears here for restore or explicit purge." /> : <div className="viewer-processing-list">{summary.trash.items.filter(item => !item.permanentlyDeletedAt).map(item => <article key={item.id}><div><h3>Dataset {item.entityId}</h3><p>{formatBytes(item.byteSize)} · purge after {new Date(item.purgeAfter).toLocaleString()}</p></div><div>
-    <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/storage/trash/${encodeURIComponent(item.id)}/restore`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Dataset restored from trash.")}>Restore</button>
-    {canPurge && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => { const typedId = window.prompt(`Permanent deletion cannot be undone. Type dataset ID ${item.entityId} to continue.`); if (typedId === item.entityId) void mutate(client => client.request(`/api/v1/storage/trash/${encodeURIComponent(item.id)}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ typedId }) }), "Dataset permanently purged."); }}>Permanently purge</button>}
+  </div><p>Dataset and output trash is recoverable until its purge date. Restore and permanent purge require owner-only storage permission; permanent purge also requires typing the stable entity ID.</p><p>{summary.trash.totalCount} trashed item{summary.trash.totalCount === 1 ? "" : "s"} · {formatBytes(summary.trash.totalBytes)}</p>
+  {!summary.trash.items.length ? <EmptyState title="Trash is empty" detail="Archived data remains cataloged; trashed data appears here for restore or explicit purge." /> : <div className="viewer-processing-list">{summary.trash.items.filter(item => !item.permanentlyDeletedAt).map(item => <article key={item.id}><div><h3>{item.entityType === "output" ? "Model output" : "Dataset"} {item.entityId}</h3><p>{formatBytes(item.byteSize)} · purge after {new Date(item.purgeAfter).toLocaleString()}</p></div><div>
+    {canPurge && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/storage/trash/${encodeURIComponent(item.id)}/restore`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), `${item.entityType === "output" ? "Model output" : "Dataset"} restored from trash.`)}>Restore</button>}
+    {canPurge && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => { const typedId = window.prompt(`Permanent deletion cannot be undone. Type ${item.entityType} ID ${item.entityId} to continue.`); if (typedId === item.entityId) void mutate(client => client.request(`/api/v1/storage/trash/${encodeURIComponent(item.id)}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ typedId }) }), `${item.entityType === "output" ? "Model output" : "Dataset"} permanently purged.`); }}>Permanently purge</button>}
   </div></article>)}</div>}<Pager nextCursor={summary.trash.nextCursor} busy={busy} loadMore={loadMore} />
   </Card>;
 }

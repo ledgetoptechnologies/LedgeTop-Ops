@@ -1,23 +1,52 @@
 {
   "schemaVersion": 1,
+  "processingEvent": {
+    "schemaVersion": 1,
+    "eventId": "event-ready-0001",
+    "type": "processing.ready_for_review",
+    "occurredAt": "2027-01-15T08:01:00.000Z",
+    "projectId": "project-one",
+    "taskId": "task-one",
+    "attemptId": "attempt-one",
+    "requestedBySubject": "ops:staff-one",
+    "status": "ready_for_review",
+    "reviewUrl": "https://ops.example.test/operations/processing?attemptId=attempt-one"
+  },
   "projects": {
     "projects": [{
       "id": "project-one", "displayName": "North site", "description": null,
-      "metadata": {}, "defaultUnits": "imperial", "status": "active", "createdBy": "ops:staff-one",
+      "metadata": {}, "tags": ["survey"], "defaultUnits": "imperial", "status": "active", "createdBy": "ops:staff-one",
       "createdAt": "2027-01-15T08:00:00.000Z", "updatedAt": "2027-01-15T08:00:00.000Z", "archivedAt": null
     }],
     "nextCursor": null
+  },
+  "projectPatched": {
+    "project": {
+      "id": "project-one", "displayName": "North site renamed", "description": "Updated catalog text",
+      "metadata": {}, "tags": ["survey", "priority"], "defaultUnits": "imperial", "status": "active", "createdBy": "ops:staff-one",
+      "createdAt": "2027-01-15T08:00:00.000Z", "updatedAt": "2027-01-15T08:05:00.000Z", "archivedAt": null
+    }
   },
   "datasets": {
     "datasets": [{
       "id": "dataset-one", "projectId": "project-one", "displayName": "Flight 1", "description": null,
       "sourceType": "upload", "storageMode": "managed", "rootKey": "datasets", "relativePath": "project-one/dataset-one",
       "status": "finalized", "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "fileCount": 12, "byteSize": 1048576, "metadata": {}, "createdBy": "ops:staff-one",
+      "fileCount": 12, "byteSize": 1048576, "metadata": {}, "tags": ["flight-1"], "createdBy": "ops:staff-one",
       "createdAt": "2027-01-15T08:00:00.000Z", "updatedAt": "2027-01-15T08:10:00.000Z",
       "finalizedAt": "2027-01-15T08:10:00.000Z", "archivedAt": null, "trashedAt": null
     }],
     "nextCursor": null
+  },
+  "datasetPatched": {
+    "dataset": {
+      "id": "dataset-one", "projectId": "project-two", "displayName": "Flight 1 renamed", "description": "Updated catalog text",
+      "sourceType": "upload", "storageMode": "managed", "rootKey": "datasets", "relativePath": "project-one/dataset-one",
+      "status": "finalized", "manifestSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "fileCount": 12, "byteSize": 1048576, "metadata": {}, "tags": ["reassociated"], "createdBy": "ops:staff-one",
+      "createdAt": "2027-01-15T08:00:00.000Z", "updatedAt": "2027-01-15T08:10:00.000Z",
+      "finalizedAt": "2027-01-15T08:10:00.000Z", "archivedAt": null, "trashedAt": null
+    }
   },
   "tasks": {
     "tasks": [{
@@ -82,6 +111,46 @@
     },
     "logs": [{ "level": "info", "message": "Processing image set", "created_at": "2027-01-15T08:12:00.000Z" }]
   },
+  "projectStorage": {
+    "project": { "projectId": "project-one", "datasetBytes": 1048576, "outputBytes": 2097152, "totalBytes": 3145728 },
+    "tasks": [{ "taskId": "task-one", "projectId": "project-one", "datasetBytes": 1048576, "outputBytes": 2097152, "totalBytes": 3145728 }],
+    "nextCursor": null
+  },
+  "taskStorage": {
+    "task": { "taskId": "task-one", "projectId": "project-one", "datasetBytes": 1048576, "outputBytes": 2097152, "totalBytes": 3145728 },
+    "outputs": [{
+      "id": "version-one", "modelId": "model-one", "taskId": "task-one", "attemptId": "attempt-one", "projectId": "project-one",
+      "displayName": "Map flight 1", "status": "published", "byteSize": 2097152, "assetCount": 4,
+      "createdAt": "2027-01-15T08:20:00.000Z", "updatedAt": "2027-01-15T08:20:00.000Z", "archivedAt": null, "trashedAt": null
+    }],
+    "nextCursor": null
+  },
+  "outputs": {
+    "outputs": [{
+      "id": "version-one", "modelId": "model-one", "taskId": "task-one", "attemptId": "attempt-one", "projectId": "project-one",
+      "displayName": "Map flight 1", "status": "published", "byteSize": 2097152, "assetCount": 4,
+      "createdAt": "2027-01-15T08:20:00.000Z", "updatedAt": "2027-01-15T08:20:00.000Z", "archivedAt": null, "trashedAt": null
+    }],
+    "nextCursor": null, "totalCount": 1, "totalBytes": 2097152
+  },
+  "outputArchived": {
+    "output": {
+      "id": "version-one", "modelId": "model-one", "taskId": "task-one", "attemptId": "attempt-one", "projectId": "project-one",
+      "displayName": "Map flight 1", "status": "archived", "byteSize": 2097152, "assetCount": 4,
+      "createdAt": "2027-01-15T08:20:00.000Z", "updatedAt": "2027-01-15T08:30:00.000Z", "archivedAt": "2027-01-15T08:30:00.000Z", "trashedAt": null
+    }
+  },
+  "outputTrashed": {
+    "output": {
+      "id": "version-one", "modelId": "model-one", "taskId": "task-one", "attemptId": "attempt-one", "projectId": "project-one",
+      "displayName": "Map flight 1", "status": "trashed", "byteSize": 2097152, "assetCount": 4,
+      "createdAt": "2027-01-15T08:20:00.000Z", "updatedAt": "2027-01-15T08:31:00.000Z", "archivedAt": "2027-01-15T08:30:00.000Z", "trashedAt": "2027-01-15T08:31:00.000Z"
+    },
+    "trash": {
+      "id": "trash-output-one", "entityType": "output", "entityId": "version-one", "rootKey": "models", "relativePath": "model-one/version-one",
+      "byteSize": 2097152, "purgeAfter": "2027-01-29T08:31:00.000Z", "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:31:00.000Z", "permanentlyDeletedAt": null
+    }
+  },
   "operations": {
     "uploadFinalizeAccepted": {
       "status": 202,
@@ -112,7 +181,7 @@
         "displayName": "Flight 2", "description": null, "sourceType": "upload", "storageMode": "managed",
         "rootKey": "datasets", "relativePath": "66666666-6666-4666-8666-666666666666/22222222-2222-4222-8222-222222222222",
         "status": "finalized", "manifestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-        "fileCount": 12, "byteSize": 1048576, "metadata": {}, "createdBy": "ops:staff-one",
+        "fileCount": 12, "byteSize": 1048576, "metadata": {}, "tags": ["flight-2"], "createdBy": "ops:staff-one",
         "createdAt": "2027-01-15T08:00:00.000Z", "updatedAt": "2027-01-15T08:18:00.000Z",
         "finalizedAt": "2027-01-15T08:18:00.000Z", "archivedAt": null, "trashedAt": null
       } },
