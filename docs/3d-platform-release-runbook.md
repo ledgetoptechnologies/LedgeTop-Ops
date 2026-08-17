@@ -9,7 +9,7 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `a4ff4629a170bc89be72263a6f7d8f00c2630299`.
+- 3D Viewer source: `dea573f0b8addd60acb823fcd70c44b4e56d5125`.
   The final GHCR tag and manifest digest are deliberately pending; the local
   verification image ID is not a substitute for a registry manifest digest.
 - LTDS-Ops product code: `89a3a4566b9de3e1b9a7c8ad90aed15bfdec087a` on
@@ -33,6 +33,14 @@ The route-response corpus has SHA-256
 `8df468634c41ff84ceda6e74c34c732e2c28ee6472cdd3f28b9d658d19cacc01`.
 The five generic Project Alpha fixtures are byte-pinned by both repositories.
 Do not substitute a later commit or hand-edit a fixture during activation.
+
+The candidate also passed the guarded disposable-volume scale rehearsal with
+exactly 100,000 one-byte files: full scan/fingerprint, authoritative adoption,
+index/accounting, database reopen and re-fingerprint, low-space refusal, and
+sentinel-verified cleanup. Total local Docker Desktop time was 67.546 seconds
+with peak RSS 536,317,952 bytes. This is inode/index/recovery evidence only;
+the same rehearsal still must run on the disposable TrueNAS storage class with
+representative imagery before activation.
 
 ## 1. Back up and prove the disabled baseline
 
