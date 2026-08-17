@@ -16,6 +16,7 @@
     "INCOMING_BASE_URL": "https://incoming-staging.ledgetopdroneservices.com",
     "INCOMING_EXPECTED_HOST": "incoming-staging.ledgetopdroneservices.com",
     "THUMBNAIL_INGEST_EXPECTED_HOST": "ops-staging.ledgetopdroneservices.com",
+    "THUMBNAIL_RENDERER_EXPECTED_HOST": "incoming-staging.ledgetopdroneservices.com",
     "ENVIRONMENT": "staging",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",
     "OPERATIONS_AUD": "e5e2026896677c6fbaa0c7eb9b795e326516c15a3191dfba3c2ad43da4728671",

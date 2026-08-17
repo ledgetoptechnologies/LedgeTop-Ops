@@ -268,6 +268,18 @@ test("fails closed on Viewer and Project Alpha deployment-contract drift", () =>
   }
 });
 
+for (const [name, mutate] of [
+  ["served Viewer revision", evidence => { evidence.viewer.servedRevision = "f".repeat(40); }],
+  ["served Viewer schema", evidence => { evidence.viewer.servedSchemaVersion = STAGING_VIEWER.schemaVersion + 1; }],
+  ["Viewer runtime attestation", evidence => { evidence.viewer.runtimeIdentityAttested = false; }],
+]) test(`requires the ${name} independently`, () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-viewer-identity-"));
+  const { configs, evidence, configHashes } = fixture(base);
+  mutate(evidence);
+  const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
+  assert(errors.some((error) => error.includes("attest the exact reviewed revision and schema version")), errors.join(" | "));
+});
+
 test("fails closed on stale credential, config drift, branch builds, secrets, and backup identity", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-"));
   const { configs, evidence } = fixture(base);

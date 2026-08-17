@@ -8,6 +8,7 @@ const set = { id: "gcp-set-one", datasetId: "dataset-one", displayName: "Control
 
 test("ground control workspace is private, explicit about proximity, and usable on desktop and mobile", async ({ page }) => {
   let saved: Record<string, unknown> | null = null;
+  let pointUpdate: Record<string, unknown> | null = null, unitsUpdate: Record<string, unknown> | null = null;
   let taskExists = false, draftRequests = 0, draftSubmissionId = "", attemptStarted: Record<string, unknown> | null = null;
   const eventOrder: string[] = [];
   await page.route("**/api/**", async route => {
@@ -31,6 +32,7 @@ test("ground control workspace is private, explicit about proximity, and usable 
       if (url.pathname === "/api/v1/storage") return route.fulfill({ json: { storage: {}, trash: { items: [], nextCursor: null, totalCount: 0, totalBytes: 0 } } });
       if (url.pathname === "/api/v1/datasets/dataset-one/gcp-sets") return route.fulfill({ json: { sets: [set] } });
       if (url.pathname === "/api/v1/gcp-sets/gcp-set-one") return route.fulfill({ json: { set, points: [point] } });
+      if (url.pathname === "/api/v1/gcp-points/gcp-point-one" && request.method() === "PATCH") { pointUpdate = request.postDataJSON(); return route.fulfill({ json: { point: { ...point, ...pointUpdate } } }); }
       if (url.pathname === "/api/v1/datasets/dataset-one/gcp-images") return route.fulfill({ json: { images: [{ id: "image-one", datasetId: "dataset-one", relativePath: "IMG_0001.JPG", mimeType: "image/png", capturedAt: "2026-08-16T00:00:00Z", latitude: 44.5001, longitude: -88.1001, altitudeM: 250, width: 1, height: 1, distanceM: 13.7 }], selectedPoint: point, ranking: { basis: "camera_gps_proximity", visibilityConfirmed: false, notice: "Nearby camera positions are suggestions only; proximity does not prove that the GCP is visible." } } });
       if (url.pathname === "/api/v1/tasks/task-one/gcp-correspondences" && request.method() === "GET") return route.fulfill({ json: { taskId: "task-one", datasetId: "dataset-one", correspondences: [] } });
       if (url.pathname === "/api/v1/tasks/task-one/gcp-correspondences" && request.method() === "POST") { const posted=request.postDataJSON() as Record<string,unknown>;saved = posted; eventOrder.push("mark"); return route.fulfill({ status: 201, json: { correspondence: { id: "mark-one", taskId: "task-one", pointId: "gcp-point-one", imageFileId: "image-one", pixelX: posted.pixelX, pixelY: posted.pixelY, createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z" } } }); }
@@ -39,8 +41,9 @@ test("ground control workspace is private, explicit about proximity, and usable 
     }
     if (url.pathname === "/api/session") return route.fulfill({ json: { user: { id: "staff-one", email: "staff@example.test", displayName: "Staff", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["viewer.view","viewer.datasets.manage","viewer.processing.manage"], divisions: [] }, csrfToken: "csrf", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, units: { default: "imperial", resolved: "imperial" }, capabilities: { viewerProcessing: { enabled: true } } } });
     if (url.pathname === "/api/viewer") return route.fulfill({ json: { enabled: true, publicSharesEnabled: false, models: [], projects: [], associations: [] } });
-    if (url.pathname === "/api/viewer/processing") return route.fulfill({ json: { enabled: true, viewerBaseUrl: "https://viewer.ledgetopdroneservices.com", permissions: ["viewer.projects.read","viewer.datasets.read","viewer.processing.read","viewer.processing.write","viewer.providers.read","viewer.gcp.read","viewer.gcp.write"], units: { default: "imperial", resolved: "imperial" }, events: [] } });
+    if (url.pathname === "/api/viewer/processing") return route.fulfill({ json: { enabled: true, viewerBaseUrl: "https://viewer.ledgetopdroneservices.com", permissions: ["viewer.projects.read","viewer.datasets.read","viewer.processing.read","viewer.processing.write","viewer.providers.read","viewer.gcp.read","viewer.gcp.write"], units: { default: "imperial", resolved: unitsUpdate ? "metric" : "imperial" }, events: [] } });
     if (url.pathname === "/api/viewer/admin-grant") return route.fulfill({ status: 201, json: { grant: "g".repeat(43), grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800, redeemUrl: "https://viewer.ledgetopdroneservices.com/api/v1/admin-sessions/redeem", units: { default: "imperial", resolved: "imperial" } } });
+    if (url.pathname === "/api/viewer/preferences" && request.method() === "PATCH") { unitsUpdate = request.postDataJSON(); return route.fulfill({ json: { default: "imperial", resolved: "metric" } }); }
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
 
@@ -58,6 +61,14 @@ test("ground control workspace is private, explicit about proximity, and usable 
   await expect(page.getByText("proximity does not prove that the GCP is visible")).toBeVisible();
   await expect(page.getByText("800.00 ft")).toBeVisible();
   await expect(page.getByText("45 ft")).toBeVisible();
+  await page.getByLabel("Measurement units").selectOption("metric");
+  await expect.poll(() => unitsUpdate).toEqual({ displayUnits: "metric" });
+  await expect(page.getByText("243.84 m")).toBeVisible();
+  await expect(page.getByText("14 m")).toBeVisible();
+  await page.getByText("Edit or remove selected point").click();
+  await expect(page.getByLabel("Elevation (meters)")).toHaveValue("243.84");
+  await page.getByRole("button", { name: "Save point" }).click();
+  await expect.poll(() => pointUpdate).toMatchObject({ elevationM: 243.84 });
   await expect(page.getByText("Map unavailable because the Mapbox public token is not configured.")).toBeVisible();
   for (const width of [390, 320]) {
     await page.setViewportSize({ width, height: 844 });

@@ -1051,7 +1051,7 @@ test("authorized photo map supports compact, enlarged, and empty states", async 
 });
 
 test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 320", async ({ page }) => {
-  let active = false;
+  let active = false, preferenceUnits: string | null = null, sessionUnits: string | null = null;
   await page.setViewportSize({ width: 390, height: 844 });
   await page.route("**/api/client/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
@@ -1064,6 +1064,8 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
       associationId: "association-one", title: "North Site point cloud", provider: "WebODM",
       modelId: "model-one", modelVersionId: "version-one", updatedAt: "2026-08-16T12:00:00.000Z", canShare: true,
     }] } });
+    if (path === "/api/client/viewer/preferences" && request.method() === "PATCH") { preferenceUnits = String((request.postDataJSON() as { displayUnits?: string }).displayUnits || ""); return route.fulfill({ json: { displayUnits: preferenceUnits } }); }
+    if (path === "/api/client/projects/project-a/models/association-one/session" && request.method() === "POST") { sessionUnits = String((request.postDataJSON() as { displayUnits?: string }).displayUnits || ""); return route.fulfill({ status: 201, json: { grant: "s".repeat(43), grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionExpiresAt: new Date(Date.now() + 30 * 60_000).toISOString(), embedUrl: "https://viewer.example.test/embed/model-one" } }); }
     if (path === "/api/client/projects/project-a/models/association-one/shares" && request.method() === "GET") return route.fulfill({ json: { shares: [...(active ? [{
       id: "share-one", modelId: "model-one", versionPolicy: "latest", modelVersionId: null, hasPassword: true,
       permissions: { view: true, measure: true, cameras: true, download: false }, label: "Engineer review",
@@ -1081,7 +1083,7 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
     }] } });
     if (path === "/api/client/projects/project-a/models/association-one/shares" && request.method() === "POST") {
       expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
-      expect(request.postDataJSON()).toMatchObject({ label: "Engineer review", displayUnits: "imperial", password: "model-passcode" });
+      expect(request.postDataJSON()).toMatchObject({ label: "Engineer review", displayUnits: "metric", password: "model-passcode" });
       active = true;
       return route.fulfill({ status: 201, json: {
         share: { id: "share-one", modelId: "model-one" },
@@ -1095,10 +1097,16 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
     }
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
+  await page.route("https://viewer.example.test/**", route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Viewer</title>" }));
   await page.goto("/portal");
   await navigatePortal(page, "Projects");
   await page.getByRole("button", { name: /North Site/ }).click();
   await page.getByRole("button", { name: "Models" }).click();
+  await page.getByLabel("Measurement units").selectOption("metric");
+  await expect.poll(() => preferenceUnits).toBe("metric");
+  await page.getByRole("button", { name: "Open 3D model" }).click();
+  await expect.poll(() => sessionUnits).toBe("metric");
+  await page.getByRole("button", { name: "Close viewer" }).click();
   await page.getByRole("button", { name: "Share public link" }).click();
   await expect(page.getByText("Expired engineer review")).toHaveCount(0);
   await page.getByLabel("Link label").fill("Engineer review");
@@ -1120,6 +1128,7 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
 
 test("Viewer renewal keeps the iframe and camera state mounted across a transient authorization failure", async ({ page }) => {
   let sessionRequests = 0, embedLoads = 0;
+  const sessionDisplayUnits: string[] = [];
   const viewerOrigin = "https://viewer.ledgetopdroneservices.com";
   await page.route(`${viewerOrigin}/**`, async route => {
     if (new URL(route.request().url()).pathname !== "/embed/model-one")
@@ -1138,7 +1147,7 @@ test("Viewer renewal keeps the iframe and camera state mounted across a transien
   });
   await page.route("**/api/client/**", async route => {
     const request = route.request(), path = new URL(request.url()).pathname;
-    if (path === "/api/client/session") return route.fulfill({ json: { account, viewerDisplayUnits: "imperial", capabilities: { viewer: true } } });
+    if (path === "/api/client/session") return route.fulfill({ json: { account, viewerDisplayUnits: "metric", capabilities: { viewer: true } } });
     if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
     if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
     if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
@@ -1149,6 +1158,7 @@ test("Viewer renewal keeps the iframe and camera state mounted across a transien
     }] } });
     if (path === "/api/client/projects/project-a/models/association-one/session" && request.method() === "POST") {
       sessionRequests += 1;
+      sessionDisplayUnits.push(String((request.postDataJSON() as { displayUnits?: string }).displayUnits || ""));
       if (sessionRequests === 2) return route.fulfill({ status: 503, json: { error: "temporary authorization failure" } });
       return route.fulfill({ status: 201, json: {
         grant: sessionRequests === 1 ? "initial-grant" : "renewed-grant",
@@ -1172,6 +1182,7 @@ test("Viewer renewal keeps the iframe and camera state mounted across a transien
   await expect(frame.locator("#camera-state")).toHaveText("camera-position-42");
   await expect(frame.locator("body")).toHaveAttribute("data-renewed-grant", "renewed-grant", { timeout: 5_000 });
   expect(sessionRequests).toBe(3);
+  expect(sessionDisplayUnits).toEqual(["metric", "metric", "metric"]);
   expect(embedLoads).toBe(1);
 });
 

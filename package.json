@@ -10,6 +10,8 @@
     "build": "npm --prefix apps/client run build && npm --prefix apps/operations run build && npm --prefix apps/ops-sync run build",
     "staging:check": "node scripts/staging-preflight.mjs",
     "staging:check:test": "node --test scripts/staging-preflight.test.mjs",
+    "staging:config:check": "node scripts/staging-config-scaffold.mjs",
+    "staging:config:test": "node --test scripts/staging-config-scaffold.test.mjs",
     "staging:evidence:check": "node scripts/staging-evidence.mjs",
     "staging:evidence:check:test": "node --test scripts/staging-evidence.test.mjs",
     "staging:release:prepare": "node scripts/staging-release.mjs",

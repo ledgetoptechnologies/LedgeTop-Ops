@@ -124,6 +124,13 @@ Before ignored `apps/*/wrangler.staging.json` files can pass preflight:
 - eight unused positive-integer rate-limit namespace values;
 - the reviewed commit and build artifact checksum.
 
+Record those nine non-secret operator choices in an ignored copy of
+`docs/staging/staging-config-values.json.example`, then use
+`npm run staging:config:check -- --values <ignored-json> --write`. The command
+validates all three rendered configs together, refuses placeholders or an
+existing target, and performs no remote action. Secrets remain governed by
+`staging-secret-manifest.json` and must never be added to the values file.
+
 Incoming remains outside Access and must not be published until its anti-abuse
 controls and the direct-upload capability gate are separately approved.
 

@@ -9,7 +9,7 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `1bb6681c4b8b54407433e991a5dfcb860ed262c4`.
+- 3D Viewer source: `72f3d1a9c36a7d366ca3e129d0516f72eb281091`.
   The final GHCR tag and manifest digest are deliberately pending; the local
   verification image ID is not a substitute for a registry manifest digest.
 - LTDS-Ops product code: `89a3a4566b9de3e1b9a7c8ad90aed15bfdec087a` on
@@ -38,10 +38,10 @@ The candidate also passed the guarded disposable-volume scale rehearsal with
 exactly 100,000 one-byte files: full scan/fingerprint, authoritative adoption,
 index/accounting, database reopen and re-fingerprint, low-space refusal, and
 sentinel-verified cleanup. The exact repinned build-stamped replay completed in
-62.619 seconds with peak RSS 581,935,104 bytes. Its pre-generation disk check
+63.152 seconds with peak RSS 587,587,584 bytes. Its pre-generation disk check
 required 11,811,260,064 bytes (payload, 10 GiB reserve, and safety margin)
-against 924,461,854,720 available bytes. The local source-stamped image ID was
-`sha256:852b64a817d36b4ffe5ba05254b45ee52da51da4a016b9acff429831a8fb7294`;
+against 923,211,886,592 available bytes. The local source-stamped image ID was
+`sha256:799b17aa0795fc17c5e884b70518581c4b1f28cd95556b60fa0841d4f56ca0af`;
 it is local evidence, not the pending GHCR manifest digest. Production mode
 rejects mutable image tags, source-stamp mismatches, and insufficient space
 before creating a target.
@@ -49,7 +49,7 @@ This is inode/index/recovery evidence only;
 the same rehearsal still must run on the disposable TrueNAS storage class with
 representative imagery before activation.
 
-The exact candidate also passed 181 repository-owned tests inside the Linux
+The exact candidate also passed 188 repository-owned tests inside the Linux
 build image, including the real symlink-escape gate. Its separate Docker test
 proved UID/GID 568 named-volume initialization and byte/database persistence
 across restart and same-image upgrade. Together these close the two expected
@@ -91,12 +91,13 @@ live gates.
 
 The destructive provider runs were recorded on executable commit
 `b03bd66b121eecc16b2b1164add335065d998121`. The later evidence-only commit
-`b407a9e86729a34108050eaecbc8d38b38374a4a` and runtime-attestation commit
-`1bb6681c4b8b54407433e991a5dfcb860ed262c4` do not change the provider adapter,
+`b407a9e86729a34108050eaecbc8d38b38374a4a`, runtime-attestation commit
+`1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
+`72f3d1a9c36a7d366ca3e129d0516f72eb281091` do not change the provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were rebuilt and rerun against
-`1bb6681c4b8b54407433e991a5dfcb860ed262c4`.
+`72f3d1a9c36a7d366ca3e129d0516f72eb281091`.
 
 ## 1. Back up and prove the disabled baseline
 
@@ -134,7 +135,7 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`1bb6681c4b8b54407433e991a5dfcb860ed262c4` and schema version `16`. Confirm
+`72f3d1a9c36a7d366ca3e129d0516f72eb281091` and schema version `16`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
 `X-LTDS-Viewer-Revision`, `16` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
@@ -200,7 +201,7 @@ in lexical/ledger order; never cherry-pick only a later file.
   Viewer permissions.
 - Project Alpha: apply `0066`, `0067`, and `0068` through the normal migration
   runner. All are replay-safe but must still be recorded once in the ledger.
-- Viewer: startup applies every internal SQLite migration through schema v15;
+- Viewer: startup applies every internal SQLite migration through schema v16;
   verify integrity, foreign keys, and the final schema ledger after restart.
 
 After each database, verify the migration ledger, integrity/foreign-key checks,

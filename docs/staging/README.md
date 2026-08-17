@@ -32,6 +32,22 @@ docs/staging/operations.wrangler.json.example  -> apps/operations/wrangler.stagi
 docs/staging/ops-sync.wrangler.json.example    -> apps/ops-sync/wrangler.staging.json
 ```
 
+Do not hand-edit those three files from separate notes. Copy
+`docs/staging/staging-config-values.json.example` to an ignored local path such
+as `.backups/staging-config-values.json`, replace every placeholder with the
+reviewed non-secret staging value, and validate it before writing anything:
+
+```powershell
+npm run staging:config:check -- --values .backups/staging-config-values.json
+npm run staging:config:check -- --values .backups/staging-config-values.json --write
+```
+
+The renderer accepts only the nine reviewed values, resolves the checked-in
+templates, runs the same fail-closed inventory checks as `staging:check`, and
+refuses to overwrite an existing ignored config. It never accepts secrets and
+performs no Cloudflare action. Preserve or remove an obsolete ignored config
+explicitly before rendering a replacement.
+
 The Wrangler examples contain only fields accepted by Wrangler. Required secret
 names live in the checked-in sidecar
 `docs/staging/staging-secret-manifest.json`; never add the release-only manifest
