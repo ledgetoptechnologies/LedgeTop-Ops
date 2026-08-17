@@ -10,8 +10,8 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 // any pinned source or deployment artifact.
 export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
-  operations: "89a3a4566b9de3e1b9a7c8ad90aed15bfdec087a",
-  viewer: "72f3d1a9c36a7d366ca3e129d0516f72eb281091",
+  operations: "1d46d83dda7ef287360867fa734a8d0e0be5aa85",
+  viewer: "e16819f4566eee6e24dfc72bdb87f1ae8ed9e5be",
   projectAlpha: "3c0059e538067718abd91bc28e67a9714305260b",
 });
 
@@ -19,7 +19,7 @@ export const STAGING_VIEWER = Object.freeze({
   hostname: "viewer-staging.ledgetopdroneservices.com",
   origin: "https://viewer-staging.ledgetopdroneservices.com",
   image: "FINAL_VIEWER_IMAGE_PENDING",
-  schemaVersion: 16,
+  schemaVersion: 17,
   serviceKeyId: "ops-staging-v1",
   eventKeyId: "viewer-staging-v1",
   providerCredentialsKeyId: "provider-staging-v1",
@@ -155,6 +155,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0140_truenas_thumbnail_provenance.sql",
     "0141_viewer_client_preferences.sql",
     "0142_client_viewer_shares.sql",
+    "0143_viewer_session_revocation_outbox.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -304,6 +305,7 @@ export const REQUIRED_EXTERNAL_GATE_PROOFS = Object.freeze({
   viewerServiceContract: Object.freeze([
     "fixturesPinned", "serviceKeyIdsMatched", "eventKeyIdsMatched",
     "exactBodySignaturesVerified", "callbackReplayDenied", "providerOutageViewingVerified",
+    "publishedSessionSourceRevocationVerified",
   ]),
   viewerProcessing: Object.freeze([
     "providerCredentialEncrypted", "providerProbeVerified", "admissionBackpressureVerified",
@@ -369,6 +371,52 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     R2_PURGE_ENABLED: Object.freeze({ prohibitedReason: "Permanent purge requires a separate destructive-lifecycle approval" }),
   }),
   "ops-sync": Object.freeze({}),
+});
+
+// Some end-to-end staging capabilities are unreachable with a single flag:
+// the second flag is a dependency, not a second evidence boundary. These
+// exact, closed sets are the only multi-flag windows the evidence validator
+// accepts. Production flags still remain off throughout staging collection.
+export const FEATURE_FLAG_DEPENDENCY_WINDOWS = Object.freeze({
+  viewerProcessing: Object.freeze({
+    collectingGate: "viewerProcessing",
+    requestedFlags: Object.freeze([
+      "operations.VIEWER_INTEGRATION_ENABLED",
+      "operations.VIEWER_PROCESSING_ENABLED",
+    ]),
+    requiresViewerProcessingPlatform: true,
+    requiresViewerWorkerProfile: true,
+  }),
+  viewerPublicShares: Object.freeze({
+    collectingGate: "viewerPublicShares",
+    requestedFlags: Object.freeze([
+      "operations.VIEWER_INTEGRATION_ENABLED",
+      "operations.VIEWER_PUBLIC_SHARES_ENABLED",
+    ]),
+  }),
+  viewerClientSessions: Object.freeze({
+    collectingGate: "viewerClientSessions",
+    requestedFlags: Object.freeze([
+      "delivery.CLIENT_VIEWER_ENABLED",
+      "operations.VIEWER_INTEGRATION_ENABLED",
+      "operations.CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
+      "operations.CLIENT_VIEWER_SESSION_ISSUER_ENABLED",
+    ]),
+    requiresViewerPublishedSessionSourceRevocation: true,
+  }),
+  viewerClientShares: Object.freeze({
+    collectingGate: "viewerClientShares",
+    requestedFlags: Object.freeze([
+      "delivery.CLIENT_VIEWER_ENABLED",
+      "delivery.CLIENT_VIEWER_SHARES_ENABLED",
+      "operations.VIEWER_INTEGRATION_ENABLED",
+      "operations.VIEWER_PUBLIC_SHARES_ENABLED",
+      "operations.CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
+      "operations.CLIENT_VIEWER_SESSION_ISSUER_ENABLED",
+      "operations.CLIENT_VIEWER_SHARES_ENABLED",
+    ]),
+    requiresViewerPublishedSessionSourceRevocation: true,
+  }),
 });
 
 export const STAGING_ACCESS_AUDS = Object.freeze({

@@ -9,10 +9,10 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `72f3d1a9c36a7d366ca3e129d0516f72eb281091`.
+- 3D Viewer source: `e16819f4566eee6e24dfc72bdb87f1ae8ed9e5be`.
   The final GHCR tag and manifest digest are deliberately pending; the local
   verification image ID is not a substitute for a registry manifest digest.
-- LTDS-Ops product code: `89a3a4566b9de3e1b9a7c8ad90aed15bfdec087a` on
+- LTDS-Ops product code: `1d46d83dda7ef287360867fa734a8d0e0be5aa85` on
   `codex/3d-processing-control-plane`. This pin contains the desktop
   Administration-menu fix equivalent to `09e3443`; never substitute a mutable
   branch tip.
@@ -30,7 +30,7 @@ only then set the constant to `true`.
 The Viewer/Ops signed-processing corpus has SHA-256
 `13ab12919e624be6a048c058774ccff2031f865855e64ab3b726e9b31cffab82`.
 The route-response corpus has SHA-256
-`8df468634c41ff84ceda6e74c34c732e2c28ee6472cdd3f28b9d658d19cacc01`.
+`2ea39cd2b36c037c95831c708f9c29b6804d272f403b43f0a9ad0eed4af76154`.
 The six generic Project Alpha fixtures are byte-pinned by both repositories.
 Do not substitute a later commit or hand-edit a fixture during activation.
 
@@ -93,11 +93,15 @@ The destructive provider runs were recorded on executable commit
 `b03bd66b121eecc16b2b1164add335065d998121`. The later evidence-only commit
 `b407a9e86729a34108050eaecbc8d38b38374a4a`, runtime-attestation commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
-`72f3d1a9c36a7d366ca3e129d0516f72eb281091` do not change the provider adapter,
+`72f3d1a9c36a7d366ca3e129d0516f72eb281091` and published-session revocation
+commits `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06` and
+`e16819f4566eee6e24dfc72bdb87f1ae8ed9e5be` do not change the provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
-rehearsal were rebuilt and rerun against
-`72f3d1a9c36a7d366ca3e129d0516f72eb281091`.
+rehearsal were last rebuilt and rerun against
+`72f3d1a9c36a7d366ca3e129d0516f72eb281091`. The final revocation candidate
+requires a new immutable registry build and identity-bound staging rehearsal;
+that evidence remains pending and the release contract stays unfinalized.
 
 ## 1. Back up and prove the disabled baseline
 
@@ -110,7 +114,8 @@ rehearsal were rebuilt and rerun against
 3. Confirm these production variables remain the literal string `false`:
    `VIEWER_INTEGRATION_ENABLED`, `VIEWER_PROCESSING_ENABLED`,
    `VIEWER_PUBLIC_SHARES_ENABLED`, `CLIENT_VIEWER_SESSION_ISSUER_ENABLED`,
-   `CLIENT_VIEWER_SHARES_ENABLED`, and `CLIENT_VIEWER_ENABLED`.
+   `CLIENT_VIEWER_SHARES_ENABLED`, `CLIENT_VIEWER_ENABLED`, and Viewer
+   `PUBLISHED_SESSION_SOURCE_REVOCATION_ENABLED`.
 4. In Project Alpha confirm the installation-wide portal integration,
    relations, catalog, pricing, draft quote, outbound delivery, and
    authoritative-hook flags are all off. New profiles and profile delivery are
@@ -135,9 +140,9 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`72f3d1a9c36a7d366ca3e129d0516f72eb281091` and schema version `16`. Confirm
+`e16819f4566eee6e24dfc72bdb87f1ae8ed9e5be` and schema version `17`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
-`X-LTDS-Viewer-Revision`, `16` in `X-LTDS-Viewer-Schema-Version`, and
+`X-LTDS-Viewer-Revision`, `17` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
 body alone is not deployment-identity evidence.
 
@@ -193,15 +198,17 @@ restart. Exact origins remain available for explicitly reviewed DNS providers.
 Apply each repository's normal migration command and every pending migration
 in lexical/ledger order; never cherry-pick only a later file.
 
-- Client/delivery D1: apply all pending migrations through `0142`. The Viewer
+- Client/delivery D1: apply all pending migrations through `0143`. The Viewer
   dependency begins at `0138_viewer_model_associations.sql`; `0139` and `0140`
   also carry the thumbnail queue/provenance fixes and must not be skipped.
+  `0143` adds the durable association-session revocation outbox and must be
+  present before live Viewer session issuance is enabled.
 - Operations D1: apply all pending migrations through `0029`. Migration `0026`
   establishes the base
   Viewer permissions.
 - Project Alpha: apply `0066`, `0067`, and `0068` through the normal migration
   runner. All are replay-safe but must still be recorded once in the ledger.
-- Viewer: startup applies every internal SQLite migration through schema v16;
+- Viewer: startup applies every internal SQLite migration through schema v17;
   verify integrity, foreign keys, and the final schema ledger after restart.
 
 After each database, verify the migration ledger, integrity/foreign-key checks,
@@ -213,8 +220,19 @@ operator-selected Project Alpha organization or standalone-client root.
 
 Keep every production gate off while collecting this evidence. Deploy the same
 candidate commits and migrations to an isolated staging environment, enable
-only the staging gate needed for the current check, and return it to off before
-moving to the next boundary. Do not use production data, production provider
+only the staging capability window needed for the current check, and return
+every flag in that window to off before moving to the next boundary. Most
+windows contain one flag. Processing and Viewer session/share checks instead
+use only the exact dependency sets in `FEATURE_FLAG_DEPENDENCY_WINDOWS`; those
+dependencies do not authorize collecting a second evidence gate. Processing
+also requires the staging Viewer processing profile and worker for the same
+bounded window. Client session/share windows additionally require Viewer
+`PUBLISHED_SESSION_SOURCE_REVOCATION_ENABLED=true`, so association version
+changes immediately revoke older grants and redeemed sessions; migration v17
+fails closed on unbound legacy live authorization instead of inventing a
+source descriptor. Do not silently add another flag, carry a dependency into the
+next check, or interpret a multi-flag staging window as production activation
+approval. Do not use production data, production provider
 credentials, or production share recipients for these checks. If staging
 cannot reproduce a production-only network boundary, use a documented,
 time-bounded, one-gate-at-a-time production canary with an assigned operator
@@ -263,7 +281,10 @@ results for each item:
 
 Enable only one boundary at a time after its evidence is accepted. Start with
 staff Viewer integration, then processing administration, then authenticated
-Client sessions, and public shares last. Project Alpha profile and module
+Client sessions, and public shares last. Enable Viewer published-session source
+revocation before any session/share issuer window and keep its Delivery D1
+revocation outbox draining until every prior association version is
+acknowledged; disabling issuance must not strand pending revocations. Project Alpha profile and module
 switches remain independently scoped per integration profile.
 
 Rollback is flag-first for Viewer, Operations, and Client: disable the affected

@@ -69,6 +69,33 @@ post-deployment evidence and activation dependencies are checked later with
 `npm run staging:release:verify`; this avoids requiring a deployed version ID
 before that version exists.
 
+Evidence collection normally enables one staging flag. The Viewer processing,
+public-share, Client-session, and Client-share cases require exact multi-flag
+dependency windows because their routes are deliberately gated in more than
+one Worker. Those closed sets are defined in
+`FEATURE_FLAG_DEPENDENCY_WINDOWS`; the validator rejects a partial set, an
+extra flag, a mismatched evidence gate, and processing without both the Viewer
+processing platform and worker profile. Restore every flag in the chosen
+window to false before recording the gate ready or starting another case.
+
+## Read-only acceptance collector
+
+After the immutable release contract and Viewer registry digest are finalized,
+run `npm run staging:acceptance -- --storage-state <dedicated-staging-state.json>`.
+The state must contain exactly one secure `CF_Authorization` cookie for the Ops
+staging host belonging to a pre-provisioned, non-production test identity with
+global `viewer.manage`. The collector performs GET-only, no-follow, bounded
+health/readiness and Viewer connection probes. It writes a sanitized report
+under ignored `.backups/staging-acceptance/`; it never updates the canonical
+release evidence, records a cookie, model identifier, mount path, or secret, or
+claims the Ops Worker version. That deployment check and all mutable acceptance
+cases require independent operator evidence.
+
+The collector deliberately refuses before network access while
+`RELEASE_CONTRACT_FINALIZED=false`, while the Viewer image is pending or
+mutable, or if either origin differs from the exact staging origin. Do not use
+a personal or production Access session.
+
 ## Separately authorized release sequence
 
 Only after the unexpected production branch deployment has been resolved and a staging release is explicitly approved:

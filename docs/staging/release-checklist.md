@@ -85,6 +85,11 @@ timestamps, secret names, hashes, and evidence references. Record SHA-256 for
 all three ignored staging configs immediately before each mutation phase;
 `staging:evidence:check` rejects any later config drift.
 
+After deployment and before enabling any capability window, run the guarded
+GET-only collector from `docs/staging/README.md` with the dedicated staging
+Access identity. Attach its sanitized report to the release ticket; it does not
+replace the independently reviewed evidence packet or any manual/browser gate.
+
 Before collecting deployment evidence, replace every `FINAL_*` value in
 `scripts/staging-requirements.mjs` with the settled Ops, Viewer, and Project
 Alpha commits, the immutable Viewer tag-plus-digest, and all Project Alpha

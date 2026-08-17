@@ -3,7 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultEvidence = path.join(root, ".backups", "staging-release-evidence.json");
@@ -44,8 +44,31 @@ export function validateActivationPlan(plan, evidence, options = {}) {
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) return ["activationPlan must be an object"];
   const requested = plan.requestedFlags;
   if (!Array.isArray(requested) || new Set(requested).size !== requested.length) return ["activationPlan.requestedFlags must be a duplicate-free array"];
-  if (requested.length > 1) errors.push("activationPlan may enable only one staging flag at a time");
   const evidenceCollection = plan.phase === "evidence-collection";
+  const window = typeof plan.dependencyWindow === "string"
+    ? FEATURE_FLAG_DEPENDENCY_WINDOWS[plan.dependencyWindow]
+    : null;
+  const requestedSet = new Set(requested);
+  const windowMatches = Boolean(window && requested.length === window.requestedFlags.length &&
+    window.requestedFlags.every((flag) => requestedSet.has(flag)));
+  const requiredWindow = Object.entries(FEATURE_FLAG_DEPENDENCY_WINDOWS)
+    .find(([, candidate]) => candidate.collectingGate === plan.collectingGate);
+  if (evidenceCollection && requiredWindow && !window)
+    errors.push(`activationPlan.collectingGate ${plan.collectingGate} requires dependencyWindow ${requiredWindow[0]}`);
+  if (requested.length > 1 && (!evidenceCollection || !windowMatches))
+    errors.push("activationPlan may enable multiple staging flags only through one exact reviewed dependencyWindow");
+  if (plan.dependencyWindow !== undefined && !window)
+    errors.push("activationPlan.dependencyWindow is not part of the reviewed release contract");
+  if (window && !windowMatches)
+    errors.push(`activationPlan.dependencyWindow ${plan.dependencyWindow} requires its exact dependency flag set`);
+  if (window && plan.collectingGate !== window.collectingGate)
+    errors.push(`activationPlan.dependencyWindow ${plan.dependencyWindow} must collect gate ${window.collectingGate}`);
+  if (window?.requiresViewerProcessingPlatform && plan.viewerProcessingPlatformEnabled !== true)
+    errors.push(`activationPlan.dependencyWindow ${plan.dependencyWindow} requires the staging Viewer processing platform`);
+  if (window?.requiresViewerWorkerProfile && plan.viewerWorkerProfileStarted !== true)
+    errors.push(`activationPlan.dependencyWindow ${plan.dependencyWindow} requires the staging Viewer worker profile`);
+  if (window?.requiresViewerPublishedSessionSourceRevocation && plan.viewerPublishedSessionSourceRevocationEnabled !== true)
+    errors.push(`activationPlan.dependencyWindow ${plan.dependencyWindow} requires Viewer published-session source revocation`);
   for (const value of requested) {
     if (typeof value !== "string" || !value.includes(".")) { errors.push(`activation flag ${String(value)} is invalid`); continue; }
     const separator = value.indexOf(".");
@@ -54,8 +77,8 @@ export function validateActivationPlan(plan, evidence, options = {}) {
     const policy = FEATURE_FLAG_ACTIVATION_POLICIES[app]?.[flag];
     if (!policy) { errors.push(`activation flag ${value} is not part of the reviewed release contract`); continue; }
     if (policy.prohibitedReason) { errors.push(`activation flag ${value} is prohibited: ${policy.prohibitedReason}`); continue; }
-    const gates = evidenceCollection ? policy.stagingGates : policy.gates;
-    if (evidenceCollection && (!Array.isArray(policy.stagingGates) || !(policy.gates ?? []).includes(plan.collectingGate) || policy.stagingGates.includes(plan.collectingGate))) {
+    const gates = evidenceCollection ? (policy.stagingGates ?? (window ? policy.gates : undefined)) : policy.gates;
+    if (evidenceCollection && !window && (!Array.isArray(policy.stagingGates) || !(policy.gates ?? []).includes(plan.collectingGate) || policy.stagingGates.includes(plan.collectingGate))) {
       errors.push(`activation flag ${value} must name its non-prerequisite evidence gate in activationPlan.collectingGate`);
     }
     for (const gate of gates ?? []) {
@@ -178,7 +201,9 @@ export function validateEvidence(evidence, options = {}) {
   if (!sha256Hex(viewer.configSha256) || !recentDate(viewer.deployedAt, now) || !populated(viewer.deploymentEvidenceRef)) errors.push("Viewer deployment needs a current referenced non-secret configuration hash");
   const viewerConfig = viewer.configuration ?? {};
   if (viewerConfig.publicBaseUrl !== STAGING_VIEWER.origin || viewerConfig.expectedHost !== STAGING_VIEWER.hostname || viewerConfig.opsBaseUrl !== `https://${STAGING_HOSTS.operations}`) errors.push("Viewer staging origins and host guard must match the reviewed topology");
-  if (viewerConfig.processingPlatformEnabled !== false || viewerConfig.processingWorkerProfileStarted !== false || viewerConfig.webodmEnabled !== false) errors.push("Viewer processing, worker profile, and WebODM discovery must remain default-off in release preparation");
+  if (viewerConfig.processingPlatformEnabled !== false || viewerConfig.processingWorkerProfileStarted !== false ||
+      viewerConfig.webodmEnabled !== false || viewerConfig.publishedSessionSourceRevocationEnabled !== false)
+    errors.push("Viewer processing, worker profile, WebODM discovery, and published-session source revocation must remain default-off in release preparation");
   if (viewerConfig.proxySharedSecretEnabled !== false || viewerConfig.trustedProxyAddressesEnabled !== false) errors.push("Viewer optional proxy hardening must remain default-off for this release contract");
   if (viewerConfig.serviceKeyId !== STAGING_VIEWER.serviceKeyId || viewerConfig.eventKeyId !== STAGING_VIEWER.eventKeyId || viewerConfig.providerCredentialsKeyId !== STAGING_VIEWER.providerCredentialsKeyId) errors.push("Viewer non-secret key IDs must match the staging contract");
   if (!sameSet(viewerConfig.secretNames, STAGING_VIEWER.requiredSecretNames) || viewerConfig.secretValuesExcluded !== true || Object.hasOwn(viewerConfig, "secretValues")) errors.push("Viewer secret evidence must contain only the exact approved secret names");
@@ -256,7 +281,7 @@ export function validateEvidence(evidence, options = {}) {
   if (migrations.productionUnchanged !== true) errors.push("production migrations must be confirmed unchanged");
 
   const externalGates = evidence.externalGates ?? {};
-  const evidenceCollection = evidence.activationPlan?.phase === "evidence-collection" && (evidence.activationPlan?.requestedFlags?.length ?? 0) === 1;
+  const evidenceCollection = evidence.activationPlan?.phase === "evidence-collection" && (evidence.activationPlan?.requestedFlags?.length ?? 0) > 0;
   const collectingGate = evidenceCollection ? evidence.activationPlan.collectingGate : null;
   for (const gate of REQUIRED_EXTERNAL_GATES) {
     const result = externalGates[gate] ?? {};

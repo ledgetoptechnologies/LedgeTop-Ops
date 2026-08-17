@@ -14,6 +14,8 @@
     "staging:config:test": "node --test scripts/staging-config-scaffold.test.mjs",
     "staging:evidence:check": "node scripts/staging-evidence.mjs",
     "staging:evidence:check:test": "node --test scripts/staging-evidence.test.mjs",
+    "staging:acceptance": "node scripts/staging-acceptance.mjs",
+    "staging:acceptance:test": "node --test scripts/staging-acceptance.test.mjs",
     "staging:release:prepare": "node scripts/staging-release.mjs",
     "staging:release:verify": "node scripts/staging-release-verify.mjs"
   }

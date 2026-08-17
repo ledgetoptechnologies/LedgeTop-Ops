@@ -546,7 +546,8 @@ model-share creation additionally requires an explicit PA-projected
 `viewer.share.create` allow with normal deny precedence; it is never implied by
 manager role or `delegated_share.create`. Apply Client migrations
 `0138_viewer_model_associations.sql`, `0141_viewer_client_preferences.sql`, and
-`0142_client_viewer_shares.sql`, plus Operations migrations
+`0142_client_viewer_shares.sql` through
+`0143_viewer_session_revocation_outbox.sql`, plus Operations migrations
 `0026_viewer_permissions.sql` through `0029_viewer_machine_rate_limits.sql`,
 deploy both Workers, and verify both shared HMAC/route fixtures, reverse callback
 key overlap and durable notification outbox, direct browser upload/CORS/CSP,

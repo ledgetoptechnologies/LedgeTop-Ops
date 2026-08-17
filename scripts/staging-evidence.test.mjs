@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { validateEvidence as validateEvidenceContract } from "./staging-evidence.mjs";
-import { FEATURE_FLAG_ACTIVATION_POLICIES, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
+import { FEATURE_FLAG_ACTIVATION_POLICIES, FEATURE_FLAG_DEPENDENCY_WINDOWS, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 
 const now = Date.parse("2026-07-30T12:30:00Z");
 const digest = (value) => crypto.createHash("sha256").update(value).digest("hex").toUpperCase();
@@ -111,6 +111,7 @@ function fixture(base) {
         processingPlatformEnabled: false,
         processingWorkerProfileStarted: false,
         webodmEnabled: false,
+        publishedSessionSourceRevocationEnabled: false,
         proxySharedSecretEnabled: false,
         trustedProxyAddressesEnabled: false,
         serviceKeyId: STAGING_VIEWER.serviceKeyId,
@@ -390,6 +391,15 @@ test("activation dependencies cover every default-off flag and reject prohibited
   viewer.evidence.externalGates.viewerProcessing.ready = false;
   viewer.evidence.externalGates.viewerDeployment.ready = false;
   errors = validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true });
+  assert(errors.some((error) => error.includes("requires dependencyWindow viewerProcessing")), errors.join(" | "));
+  viewer.evidence.activationPlan = {
+    ...viewer.evidence.activationPlan,
+    dependencyWindow: "viewerProcessing",
+    requestedFlags: [...FEATURE_FLAG_DEPENDENCY_WINDOWS.viewerProcessing.requestedFlags],
+    viewerProcessingPlatformEnabled: true,
+    viewerWorkerProfileStarted: true,
+  };
+  errors = validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true });
   assert(errors.some((error) => error.includes("requires current ready gate viewerDeployment")), errors.join(" | "));
   viewer.evidence.externalGates.viewerDeployment.ready = true;
   viewer.evidence.externalGates.projectAlphaDraftQuotes.ready = false;
@@ -397,6 +407,34 @@ test("activation dependencies cover every default-off flag and reject prohibited
   assert(errors.some((error) => error.includes("external gate projectAlphaDraftQuotes must be confirmed ready")), errors.join(" | "));
   viewer.evidence.externalGates.projectAlphaDraftQuotes.ready = true;
   assert.deepEqual(validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true, allowUnfinalizedContractForTest: true }), []);
+
+  viewer.evidence.activationPlan.requestedFlags = [...FEATURE_FLAG_DEPENDENCY_WINDOWS.viewerProcessing.requestedFlags, "operations.VIEWER_PUBLIC_SHARES_ENABLED"];
+  errors = validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true });
+  assert(errors.some((error) => error.includes("exact dependency flag set")), errors.join(" | "));
+  viewer.evidence.activationPlan.requestedFlags = [...FEATURE_FLAG_DEPENDENCY_WINDOWS.viewerProcessing.requestedFlags];
+  viewer.evidence.activationPlan.viewerWorkerProfileStarted = false;
+  errors = validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true });
+  assert(errors.some((error) => error.includes("requires the staging Viewer worker profile")), errors.join(" | "));
+  viewer.evidence.activationPlan.viewerWorkerProfileStarted = true;
+
+  const clientWindowBase = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-viewer-client-window-"));
+  const clientWindow = fixture(clientWindowBase);
+  clientWindow.evidence.activationPlan = {
+    requestedFlags: [...FEATURE_FLAG_DEPENDENCY_WINDOWS.viewerClientSessions.requestedFlags],
+    dependencyWindow: "viewerClientSessions", phase: "evidence-collection", collectingGate: "viewerClientSessions",
+    environment: "staging", productionFlagsRemainOff: true, oneGateAtATime: true,
+    rollbackRef: "ticket:viewer-client-rollback", approvalGranted: true,
+    approvedAt: "2026-07-30T12:00:00Z", approvalRef: "ticket:viewer-client-activation",
+    viewerPublishedSessionSourceRevocationEnabled: false,
+  };
+  clientWindow.evidence.externalGates.viewerClientSessions.ready = false;
+  errors = validateEvidence(clientWindow.evidence, { base: clientWindowBase, head: clientWindow.evidence.releaseCommit,
+    configs: clientWindow.configs, configHashes: clientWindow.configHashes, now, sourceControlVerified: true });
+  assert(errors.some(error => error.includes("requires Viewer published-session source revocation")), errors.join(" | "));
+  clientWindow.evidence.activationPlan.viewerPublishedSessionSourceRevocationEnabled = true;
+  assert.deepEqual(validateEvidence(clientWindow.evidence, { base: clientWindowBase, head: clientWindow.evidence.releaseCommit,
+    configs: clientWindow.configs, configHashes: clientWindow.configHashes, now, sourceControlVerified: true,
+    allowUnfinalizedContractForTest: true }), []);
 
   viewer.evidence.activationPlan.phase = "post-evidence-validation";
   errors = validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true });
@@ -420,6 +458,7 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   assert.equal(example.viewer.runtimeIdentityAttested, false);
   assert.deepEqual(new Set(example.viewer.configuration.secretNames), new Set(STAGING_VIEWER.requiredSecretNames));
   assert.equal(example.viewer.configuration.proxySharedSecretEnabled, false);
+  assert.equal(example.viewer.configuration.publishedSessionSourceRevocationEnabled, false);
   assert.equal(example.projectAlpha.releaseCommit, RELEASE_CANDIDATES.projectAlpha);
   assert.deepEqual(example.projectAlpha.migrations.sourceSha256, PROJECT_ALPHA_STAGING.migrations);
   assert.deepEqual(new Set(Object.keys(example.projectAlpha.defaultOff.settings)), new Set(PROJECT_ALPHA_STAGING.defaultOffSettings));
