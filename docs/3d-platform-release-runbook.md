@@ -121,7 +121,17 @@ new permissions, default-off flag values, and backup restore point. Do not
 enable a Client v2 workspace until its existing account has exactly one
 operator-selected Project Alpha organization or standalone-client root.
 
-## 5. Live validation while gates remain off
+## 5. Live validation in isolated staging
+
+Keep every production gate off while collecting this evidence. Deploy the same
+candidate commits and migrations to an isolated staging environment, enable
+only the staging gate needed for the current check, and return it to off before
+moving to the next boundary. Do not use production data, production provider
+credentials, or production share recipients for these checks. If staging
+cannot reproduce a production-only network boundary, use a documented,
+time-bounded, one-gate-at-a-time production canary with an assigned operator
+and tested rollback; never enable the next production gate merely to unblock
+validation of the current one.
 
 Capture request IDs, timestamps, bounded logs, screenshots, and rollback
 results for each item:
@@ -164,9 +174,16 @@ staff Viewer integration, then processing administration, then authenticated
 Client sessions, and public shares last. Project Alpha profile and module
 switches remain independently scoped per integration profile.
 
-Rollback is always flag-first: disable the affected gate without deleting
-catalogs, associations, sessions, outbox rows, migration ledgers, or storage.
-Stop processing admission before the worker, preserve the Viewer volume, and
-allow already-published viewing to continue. Investigate and reconcile durable
-operations before retrying activation; never repair by deleting an in-flight
-journal row.
+Rollback is flag-first for Viewer, Operations, and Client: disable the affected
+gate without deleting catalogs, associations, sessions, outbox rows, migration
+ledgers, or storage. Stop processing admission before the worker, preserve the
+Viewer volume, and allow already-published viewing to continue. Investigate
+and reconcile durable operations before retrying activation; never repair by
+deleting an in-flight journal row.
+
+Project Alpha delivery is the ordering exception. First disable the affected
+profile's projection authority so it transactionally queues scoped unlink or
+profile tombstones. Keep that profile's delivery and the global
+`portal_outbound_delivery_enabled` gate on until every revocation tombstone is
+acknowledged downstream. Only then disable profile/global outbound delivery.
+Turning delivery off first can strand stale downstream authority.
