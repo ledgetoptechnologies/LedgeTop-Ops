@@ -241,6 +241,15 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   assert.deepEqual(example.activationPlan, { requestedFlags: [], approvalGranted: false });
 });
 
+test("Viewer processing cannot disappear from the staging release inventory", () => {
+  assert(REQUIRED_STAGING_MIGRATIONS.operations.includes("0027_viewer_processing_control_plane.sql"));
+  assert(REQUIRED_STAGING_SECRETS.operations.includes("VIEWER_SERVICE_HMAC_SECRET"));
+  assert(REQUIRED_STAGING_SECRETS.operations.includes("VIEWER_EVENT_HMAC_SECRET"));
+  assert(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes("VIEWER_PROCESSING_ENABLED"));
+  assert.equal(STAGING_STATIC_VARS.operations.VIEWER_PROCESSING_ENABLED, "false");
+  assert.equal(STAGING_STATIC_VARS.operations.VIEWER_EVENT_KEY_ID, "viewer-staging-v1");
+});
+
 test("pre-deployment preparation and post-deployment verification remain non-circular", () => {
   const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
   const prepare = fs.readFileSync(path.join(root, "scripts", "staging-release.mjs"), "utf8");
