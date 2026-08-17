@@ -39,6 +39,28 @@ test("desktop navigation exposes canonical client requests and independently aut
   await primary.getByRole("button", { name: "Administration" }).click();
   await expect(primary.getByRole("link", { name: "Team" })).toBeVisible();
   await expect(primary.getByRole("link", { name: "Administration" })).toBeVisible();
+  const menuLayout = await page.locator(".ops-header").evaluate((header) => {
+    const navigation = header.querySelector<HTMLElement>(".ops-desktop-nav");
+    const popover = header.querySelector<HTMLElement>(".ops-manage-popover");
+    if (!navigation || !popover) throw new Error("desktop Administration menu is missing");
+    const headerBox = header.getBoundingClientRect();
+    const popoverBox = popover.getBoundingClientRect();
+    return {
+      navigationScrollWidth: navigation.scrollWidth,
+      navigationClientWidth: navigation.clientWidth,
+      navigationOverflowX: getComputedStyle(navigation).overflowX,
+      navigationOverflowY: getComputedStyle(navigation).overflowY,
+      headerBottom: headerBox.bottom,
+      popoverTop: popoverBox.top,
+      popoverRight: popoverBox.right,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  expect(menuLayout.navigationScrollWidth).toBeLessThanOrEqual(menuLayout.navigationClientWidth + 1);
+  expect(menuLayout.navigationOverflowX).toBe("visible");
+  expect(menuLayout.navigationOverflowY).toBe("visible");
+  expect(menuLayout.popoverTop).toBeGreaterThanOrEqual(menuLayout.headerBottom - 1);
+  expect(menuLayout.popoverRight).toBeLessThanOrEqual(menuLayout.viewportWidth);
 });
 
 test("Team remains visible without Administration permission", async ({ page }) => {
