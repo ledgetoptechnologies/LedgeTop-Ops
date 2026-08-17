@@ -77,8 +77,8 @@ export async function runReadOnlyStagingAcceptance(options = {}, dependencies = 
     ]);
     for (const probe of [health, ready]) {
       if (probe.response.status !== 200 || probe.response.headers.get("Cache-Control") !== "no-store" ||
-          probe.response.headers.get("X-Viewer-Revision") !== candidates.viewer ||
-          probe.response.headers.get("X-Viewer-Schema-Version") !== String(viewer.schemaVersion))
+          probe.response.headers.get("X-LTDS-Viewer-Revision") !== candidates.viewer ||
+          probe.response.headers.get("X-LTDS-Viewer-Schema-Version") !== String(viewer.schemaVersion))
         throw new StagingAcceptanceError("viewer_identity_mismatch");
     }
     if (!exactObject(health.payload, ["ok"]) || health.payload.ok !== true ||

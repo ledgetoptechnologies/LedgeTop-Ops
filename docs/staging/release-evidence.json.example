@@ -129,7 +129,7 @@
   "viewer": {
     "hostname": "viewer-staging.ledgetopdroneservices.com",
     "origin": "https://viewer-staging.ledgetopdroneservices.com",
-    "releaseCommit": "e16819f4566eee6e24dfc72bdb87f1ae8ed9e5be",
+    "releaseCommit": "419c92972f8fa2e18df3cf01ac1add31f8c91fc1",
     "image": "FINAL_VIEWER_IMAGE_PENDING",
     "configSha256": "<SHA256>",
     "deployedAt": "<ISO_8601_TIMESTAMP>",
@@ -154,7 +154,7 @@
     },
     "healthCheckPassed": false,
     "readinessCheckPassed": false,
-    "servedRevision": "e16819f4566eee6e24dfc72bdb87f1ae8ed9e5be",
+    "servedRevision": "419c92972f8fa2e18df3cf01ac1add31f8c91fc1",
     "servedSchemaVersion": 17,
     "runtimeIdentityAttested": false,
     "directIpHostDenied": false,

@@ -11,7 +11,7 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
   operations: "1d46d83dda7ef287360867fa734a8d0e0be5aa85",
-  viewer: "e16819f4566eee6e24dfc72bdb87f1ae8ed9e5be",
+  viewer: "419c92972f8fa2e18df3cf01ac1add31f8c91fc1",
   projectAlpha: "3c0059e538067718abd91bc28e67a9714305260b",
 });
 

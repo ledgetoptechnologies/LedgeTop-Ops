@@ -9,7 +9,7 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `e16819f4566eee6e24dfc72bdb87f1ae8ed9e5be`.
+- 3D Viewer source: `419c92972f8fa2e18df3cf01ac1add31f8c91fc1`.
   The final GHCR tag and manifest digest are deliberately pending; the local
   verification image ID is not a substitute for a registry manifest digest.
 - LTDS-Ops product code: `1d46d83dda7ef287360867fa734a8d0e0be5aa85` on
@@ -95,7 +95,7 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091` and published-session revocation
 commits `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06` and
-`e16819f4566eee6e24dfc72bdb87f1ae8ed9e5be` do not change the provider adapter,
+`419c92972f8fa2e18df3cf01ac1add31f8c91fc1` do not change the provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
@@ -140,7 +140,7 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`e16819f4566eee6e24dfc72bdb87f1ae8ed9e5be` and schema version `17`. Confirm
+`419c92972f8fa2e18df3cf01ac1add31f8c91fc1` and schema version `17`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
 `X-LTDS-Viewer-Revision`, `17` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful

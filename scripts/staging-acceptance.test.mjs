@@ -19,7 +19,7 @@ function healthyFetcher(overrides = {}) {
     calls.push({ url: String(input), init });
     const path = new URL(String(input)).pathname;
     if (overrides[path]) return overrides[path](input, init);
-    const identity = { "Cache-Control": "no-store", "X-Viewer-Revision": viewerCommit, "X-Viewer-Schema-Version": "17" };
+    const identity = { "Cache-Control": "no-store", "X-LTDS-Viewer-Revision": viewerCommit, "X-LTDS-Viewer-Schema-Version": "17" };
     if (path === "/api/v1/health") return json({ ok: true }, identity);
     if (path === "/api/v1/ready") return json({ ok: true, missing: [] }, identity);
     if (path === "/api/viewer/connection-preflight") return json({
@@ -67,8 +67,8 @@ test("refuses unfinalized, mutable, or wrong-origin runs before fetching", async
 test("fails closed on redirects, identity drift, cache drift, oversize, and DTO drift", async t => {
   const cases = [
     ["redirect", "/api/v1/health", () => new Response(null, { status: 302, headers: { Location: "https://evil.test" } }), "redirect_denied"],
-    ["cache", "/api/v1/health", () => json({ ok: true }, { "X-Viewer-Revision": viewerCommit, "X-Viewer-Schema-Version": "17" }), "viewer_identity_mismatch"],
-    ["schema", "/api/v1/ready", () => json({ ok: true, missing: [] }, { "Cache-Control": "no-store", "X-Viewer-Revision": viewerCommit, "X-Viewer-Schema-Version": "16" }), "viewer_identity_mismatch"],
+    ["cache", "/api/v1/health", () => json({ ok: true }, { "X-LTDS-Viewer-Revision": viewerCommit, "X-LTDS-Viewer-Schema-Version": "17" }), "viewer_identity_mismatch"],
+    ["schema", "/api/v1/ready", () => json({ ok: true, missing: [] }, { "Cache-Control": "no-store", "X-LTDS-Viewer-Revision": viewerCommit, "X-LTDS-Viewer-Schema-Version": "16" }), "viewer_identity_mismatch"],
     ["oversize", "/api/v1/health", () => json({ ok: true }, { "Content-Length": "20000" }), "response_too_large"],
     ["dto", "/api/viewer/connection-preflight", () => json({ secret: "blocked" }, { "Cache-Control": "no-store" }), "operations_preflight_invalid"],
   ];
