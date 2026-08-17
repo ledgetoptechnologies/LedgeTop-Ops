@@ -1,8 +1,8 @@
 # 3D processing and delivery release runbook
 
-Status: **the immutable Viewer registry image remains frozen, while an
-Operations preflight-diagnostics follow-up is under review; live staging
-evidence and activation remain pending**. Every
+Status: **the immutable Viewer registry image and Operations diagnostics
+follow-up are frozen for final contract verification; live staging evidence
+and activation remain pending**. Every
 Viewer, Operations, Client, processing, public-share, and Project Alpha portal
 feature gate remains off until the corresponding live evidence below is
 captured.
@@ -16,7 +16,7 @@ captured.
   `v0.2.0-rc.ab6e65e` and `sha-ab6e65e`; it did not publish `latest`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
   UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
-- LTDS-Ops product code: `1d46d83dda7ef287360867fa734a8d0e0be5aa85` on
+- LTDS-Ops product code: `c74c4da030dddd089f46008dfffffbe148ec76fb` on
   `codex/3d-processing-control-plane`. This pin contains the desktop
   Administration-menu fix equivalent to `09e3443`; never substitute a mutable
   branch tip.
@@ -25,12 +25,12 @@ captured.
   `769df9320dbf4dfc512d364173d5cb7d8ad8a97c`; the tip additionally makes the
   real isolated MySQL scope-lock regression a mandatory CI gate.
 
-The prior pinned source, manifest digest, migrations, fixtures, and activation
-policy passed independent cross-repository verification. The corresponding
-constant in `scripts/staging-requirements.mjs` has been reset to
-`RELEASE_CONTRACT_FINALIZED=false` while the bounded Operations diagnostics
-follow-up is reviewed and repinned. This does not approve deployment,
-migrations, or any feature flag.
+The pinned source, manifest digest, migrations, fixtures, and activation policy
+remain under final cross-repository verification after the bounded Operations
+diagnostics follow-up. The corresponding constant in
+`scripts/staging-requirements.mjs` remains
+`RELEASE_CONTRACT_FINALIZED=false` until that verification is complete. This
+does not approve deployment, migrations, or any feature flag.
 
 The Viewer/Ops signed-processing corpus has SHA-256
 `13ab12919e624be6a048c058774ccff2031f865855e64ab3b726e9b31cffab82`.
