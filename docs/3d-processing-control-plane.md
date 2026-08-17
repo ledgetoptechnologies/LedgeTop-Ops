@@ -69,6 +69,12 @@ stopping status checks never cancels server work. Success is accepted only when
 the terminal result contains the expected finalized dataset; terminal failures
 surface their sanitized code/message and remain recoverable for review.
 
+Import preview exposes one normalized public storage preflight DTO:
+`destinationSpace.{availableBytes,totalBytes,reserveBytes,requiredBytes,sufficient}`.
+Operations enables confirmation only when `sufficient` is true and displays the
+same byte values reviewed by the operator; internal Viewer storage field names
+must not leak across this API boundary.
+
 ## Reverse callback and notifications
 
 Viewer posts at most 16 KiB of exact JSON to `POST /api/viewer/events` with `X-LTDS-Viewer-Key-Id`, timestamp, nonce, content hash, signature, and `Idempotency-Key=eventId`. Operations verifies the selected current/previous rotation key, time window, nonce syntax, body hash, and HMAC before parsing JSON.

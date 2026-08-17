@@ -3,7 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 
 test("processing controls remain usable at 390px and send metadata directly to Viewer", async ({ page }, testInfo) => {
   let operationsMetadata = 0, viewerMetadata = 0;
-  let projectPatch: Record<string, unknown> | null = null, datasetPatch: Record<string, unknown> | null = null, outputTrash = false;
+  let projectPatch: Record<string, unknown> | null = null, datasetPatch: Record<string, unknown> | null = null, outputTrash = false, importAdopt = false;
   const consoleErrors: string[] = [];
   page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
   await page.route("**/api/**", async route => {
@@ -12,7 +12,7 @@ test("processing controls remain usable at 390px and send metadata directly to V
       viewerMetadata += 1;
       if (url.pathname === "/api/v1/admin-sessions/redeem") return route.fulfill({ json: {
         accessToken: "a".repeat(43), session: { id: "session-one", subject: "ops:staff-one",
-          permissions: ["viewer.projects.read","viewer.datasets.read","viewer.processing.read","viewer.providers.read"],
+          permissions: ["viewer.projects.read","viewer.datasets.read","viewer.datasets.import","viewer.processing.read","viewer.providers.read"],
           expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() },
         units: { default: "imperial", resolved: "imperial" },
       } });
@@ -22,6 +22,29 @@ test("processing controls remain usable at 390px and send metadata directly to V
       if (url.pathname === "/api/v1/tasks/task-one/storage") return route.fulfill({ json: { task: { taskId: "task-one", projectId: "project-one", datasetBytes: 10, outputBytes: 20, totalBytes: 30 }, outputs: [{ id: "version-one", modelId: "model-one", taskId: "task-one", attemptId: "attempt-one", projectId: "project-one", displayName: "Map flight one", status: "archived", byteSize: 20, assetCount: 2, createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: "2026-08-16T00:00:00Z", trashedAt: null }], nextCursor: null } });
       if (url.pathname === "/api/v1/datasets/dataset-one" && request.method() === "PATCH") { datasetPatch = request.postDataJSON(); return route.fulfill({ json: { dataset: { id: "dataset-one" } } }); }
       if (url.pathname === "/api/v1/processing/outputs/version-one/archive" && request.method() === "DELETE") { outputTrash = true; return route.fulfill({ json: { output: { id: "version-one", status: "trashed" }, trash: { id: "trash-output" } } }); }
+      if (url.pathname === "/api/v1/dataset-imports/preview" && request.method() === "POST") return route.fulfill({ json: {
+        preview: { rootKey: "dataset_import", relativePath: "north/import-flight", fileCount: 3, byteSize: 30,
+          treeFingerprint: "c".repeat(64),
+          files: [{ relativePath: "IMG_0001.JPG", byteSize: 10, mtimeMs: 1799999000000, ctimeMs: 1799999000000 }], truncated: false, sameFilesystem: true,
+          destinationSpace: { availableBytes: 1000, totalBytes: 2000, reserveBytes: 100, requiredBytes: 30, sufficient: true } },
+        id: "77777777-7777-4777-8777-777777777777", previewToken: "preview-token", expiresAt: new Date(Date.now() + 60_000).toISOString(),
+      } });
+      if (url.pathname === "/api/v1/dataset-imports/adopt" && request.method() === "POST") { importAdopt = true; return route.fulfill({ status: 202, headers: { Location: "/api/v1/operations/44444444-4444-4444-8444-444444444444", "Retry-After": "2", "Access-Control-Expose-Headers": "Location, Retry-After" }, json: { operation: {
+        id: "44444444-4444-4444-8444-444444444444", type: "import_adopt", subject: "ops:staff-one", datasetId: "55555555-5555-4555-8555-555555555555", uploadId: null,
+        status: "queued", progress: 0, result: null, errorCode: null, errorMessage: null,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null,
+      } } }); }
+      if (url.pathname === "/api/v1/operations/44444444-4444-4444-8444-444444444444") return route.fulfill({ json: { operation: {
+        id: "44444444-4444-4444-8444-444444444444", type: "import_adopt", subject: "ops:staff-one", datasetId: "55555555-5555-4555-8555-555555555555", uploadId: null,
+        status: "succeeded", progress: 1, result: { dataset: {
+          id: "55555555-5555-4555-8555-555555555555", projectId: "project-one", displayName: "import-flight", description: null,
+          sourceType: "server_import", storageMode: "adopted", rootKey: "dataset_import", relativePath: "north/import-flight",
+          status: "finalized", manifestSha256: "c".repeat(64), fileCount: 3, byteSize: 30, metadata: {}, tags: [],
+          createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z",
+          finalizedAt: "2026-08-16T00:00:00Z", archivedAt: null, trashedAt: null,
+        } },
+        errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+      } } });
       if (url.pathname === "/api/v1/datasets" && request.method() === "POST") return route.fulfill({ status: 201, json: { dataset: { id: "22222222-2222-4222-8222-222222222222", projectId: "project-one" } } });
       if (url.pathname.endsWith("/uploads") && request.method() === "POST") {
         const manifest = request.postDataJSON().files as Array<{ id: string; relativePath: string; byteSize: number; sha256: string }>;
@@ -72,7 +95,7 @@ test("processing controls remain usable at 390px and send metadata directly to V
     if (url.pathname === "/api/viewer") return route.fulfill({ json: { enabled: true, publicSharesEnabled: false, models: [], projects: [], associations: [] } });
     if (url.pathname === "/api/viewer/processing") return route.fulfill({ json: { enabled: true,
       viewerBaseUrl: "https://viewer.ledgetopdroneservices.com",
-      permissions: ["viewer.projects.read","viewer.projects.write","viewer.datasets.read","viewer.datasets.write","viewer.processing.read","viewer.processing.write","viewer.processing.publish","viewer.providers.read","viewer.providers.write"],
+      permissions: ["viewer.projects.read","viewer.projects.write","viewer.datasets.read","viewer.datasets.write","viewer.datasets.import","viewer.processing.read","viewer.processing.write","viewer.processing.publish","viewer.providers.read","viewer.providers.write"],
       units: { default: "imperial", resolved: "imperial" }, events: [] } });
     if (url.pathname === "/api/viewer/admin-grant") return route.fulfill({ status: 201, json: {
       grant: "g".repeat(43), grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
@@ -122,6 +145,15 @@ test("processing controls remain usable at 390px and send metadata directly to V
   page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Trash output" }).click();
   await expect.poll(() => outputTrash).toBe(true);
+  await page.getByRole("button", { name: "Imports" }).click();
+  await page.getByLabel("Relative path").fill("north/import-flight");
+  await page.getByRole("button", { name: "Preview import" }).click();
+  await expect(page.getByText("Storage reserve passes.")).toBeVisible();
+  await expect(page.getByText("30 B required · 1000 B available of 2.0 KB · 100 B reserved")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Confirm import" })).toBeEnabled();
+  await page.getByRole("button", { name: "Confirm import" }).click();
+  await expect.poll(() => importAdopt).toBe(true);
+  await expect(page.getByText("Dataset import completed and indexed.")).toBeVisible();
   expect(consoleErrors.filter(message => /worker-src|content security policy/i.test(message))).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   expect(viewerMetadata).toBeGreaterThanOrEqual(6);

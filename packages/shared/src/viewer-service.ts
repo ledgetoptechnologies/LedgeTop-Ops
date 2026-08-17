@@ -281,6 +281,7 @@ export interface ViewerDatasetUploadGrant {
   uploadToken: string;
 }
 export interface ViewerDatasetImportPreview {
+  id: string;
   previewToken: string;
   expiresAt: string;
   preview: {
@@ -288,10 +289,17 @@ export interface ViewerDatasetImportPreview {
     relativePath: string;
     fileCount: number;
     byteSize: number;
-    files: Array<{ relativePath: string; byteSize: number }>;
+    treeFingerprint: string;
+    files: Array<{ relativePath: string; byteSize: number; mtimeMs: number; ctimeMs: number }>;
     truncated: boolean;
     sameFilesystem: boolean;
-    destinationSpace: { availableBytes: number; reserveBytes: number; sufficient: boolean };
+    destinationSpace: {
+      availableBytes: number;
+      totalBytes: number;
+      reserveBytes: number;
+      requiredBytes: number;
+      sufficient: boolean;
+    };
   };
 }
 

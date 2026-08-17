@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { signViewerServiceRequest } from "@ltds/shared";
 import type {
-  ViewerDatasetSummary, ViewerDurableOperationResponse, ViewerProcessingAttemptDetail, ViewerProcessingProject,
+  ViewerDatasetImportPreview, ViewerDatasetSummary, ViewerDurableOperationResponse, ViewerProcessingAttemptDetail, ViewerProcessingProject,
   ViewerOutputSummary, ViewerProcessingTask, ViewerProjectStorageResponse, ViewerProviderSummary,
   ViewerStorageSummary, ViewerTaskStorageResponse,
 } from "@ltds/shared";
@@ -23,7 +23,7 @@ const routes = JSON.parse(routeBytes);
 describe("Viewer processing cross-service contract", () => {
   it("pins the byte-identical cross-repository route fixture", () => {
     expect(createHash("sha256").update(routeBytes).digest("hex").toUpperCase())
-      .toBe("4202BA6C6EB3610B178A7DAEB67AAF7A8A4496B08B3ADCE91FCD281E49574978");
+      .toBe("B3460F02E053CDAE6462071A54370CAFF7A8381D4EABED67B307A6B45636EFCF");
   });
   it("pins the exact admin-grant body and service HMAC", async () => {
     const value = fixture.adminGrant;
@@ -113,5 +113,25 @@ describe("Viewer processing cross-service contract", () => {
     expect(adopt.body.operation).toMatchObject({ type: "import_adopt", status: "queued", uploadId: null, result: null });
     expect(succeeded.operation).toMatchObject({ status: "succeeded", progress: 1, completedAt: expect.any(String) });
     expect(succeeded.operation.result?.dataset).toMatchObject({ id: succeeded.operation.datasetId, status: "finalized" });
+  });
+
+  it("pins the normalized import storage preflight DTO without internal storage aliases", () => {
+    const response = routes.importPreview as ViewerDatasetImportPreview;
+    expect(response).toMatchObject({
+      id: expect.any(String), previewToken: expect.any(String), expiresAt: expect.any(String),
+      preview: {
+        treeFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/), truncated: false, sameFilesystem: true,
+        files: [{ relativePath: "photo-001.jpg", byteSize: 1048576, mtimeMs: 1799999000000, ctimeMs: 1799999000000 }],
+        destinationSpace: {
+          availableBytes: 5368709120, totalBytes: 10737418240, reserveBytes: 1073741824,
+          requiredBytes: 1048576, sufficient: true,
+        },
+      },
+    });
+    expect(Object.keys(response.preview.destinationSpace).sort()).toEqual([
+      "availableBytes", "requiredBytes", "reserveBytes", "sufficient", "totalBytes",
+    ]);
+    expect(response.preview.destinationSpace).not.toHaveProperty("available");
+    expect(response.preview.destinationSpace).not.toHaveProperty("ok");
   });
 });

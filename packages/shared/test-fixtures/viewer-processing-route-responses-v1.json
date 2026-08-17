@@ -151,6 +151,21 @@
       "byteSize": 2097152, "purgeAfter": "2027-01-29T08:31:00.000Z", "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:31:00.000Z", "permanentlyDeletedAt": null
     }
   },
+  "importPreview": {
+    "preview": {
+      "rootKey": "dataset_import", "relativePath": "north-site/flight-2", "fileCount": 1, "byteSize": 1048576,
+      "treeFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "files": [{ "relativePath": "photo-001.jpg", "byteSize": 1048576, "mtimeMs": 1799999000000, "ctimeMs": 1799999000000 }],
+      "truncated": false, "sameFilesystem": true,
+      "destinationSpace": {
+        "availableBytes": 5368709120, "totalBytes": 10737418240, "reserveBytes": 1073741824,
+        "requiredBytes": 1048576, "sufficient": true
+      }
+    },
+    "id": "77777777-7777-4777-8777-777777777777",
+    "expiresAt": "2027-01-15T08:20:00.000Z",
+    "previewToken": "fixture-preview-token-0000000000000000000000"
+  },
   "operations": {
     "uploadFinalizeAccepted": {
       "status": 202,
