@@ -55,6 +55,7 @@ describe("Operations Viewer connection preflight", () => {
   it("tests disabled Viewer configuration, public probes, and signed service auth without exposing details", async () => {
     const outbound = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
+      expect(init?.redirect).toBe("manual");
       if (url.pathname === "/api/v1/health") return Response.json({ ok: true });
       if (url.pathname === "/api/v1/ready") {
         return Response.json({ ok: false, missing: ["/private/server/path", "viewer database"] }, { status: 503 });

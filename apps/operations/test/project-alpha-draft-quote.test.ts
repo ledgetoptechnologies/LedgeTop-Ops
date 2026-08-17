@@ -93,7 +93,7 @@ describe("Project Alpha private draft command", () => {
       expect(headers.get("X-Portal-Integration-Application-Key")).toBe("ltds_ops");
       expect(headers.get("X-Portal-Integration-Body-SHA256")).toBe(bodyHash);
       expect(headers.get("X-Portal-Integration-Timestamp")).toBe(now.toISOString());
-      expect(init?.redirect).toBe("error");
+      expect(init?.redirect).toBe("manual");
       const signed = `${now.toISOString()}\nPOST\n/api/v2/integrations/ltds_ops/draft-quotes\n${idempotencyKey}\n${bodyHash}`;
       expect(headers.get("X-Portal-Integration-Signature")).toBe(`sha256=${await expectedHmac("0123456789abcdef0123456789abcdef", signed)}`);
       return Response.json(draftQuoteFixture.valid.response);

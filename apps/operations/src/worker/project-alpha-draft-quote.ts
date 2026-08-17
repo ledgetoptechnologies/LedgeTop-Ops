@@ -402,7 +402,9 @@ export async function sendProjectAlphaDraftQuoteCommand(
         "X-Portal-Integration-Timestamp": timestamp,
       },
       body: rawBody,
-      redirect: "error",
+      // Cloudflare Workers rejects redirect:"error"; manual prevents the
+      // signed request from following a destination-controlled Location.
+      redirect: "manual",
       signal: AbortSignal.timeout(COMMAND_TIMEOUT_MS),
     });
   } catch {

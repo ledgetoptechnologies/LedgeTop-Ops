@@ -132,7 +132,9 @@ async function publicViewerProbe(origin: string, path: "/api/v1/health" | "/api/
       method: "GET",
       headers: { Accept: "application/json" },
       cache: "no-store",
-      redirect: "error",
+      // Workers rejects redirect:"error". Manual preserves the no-follow
+      // boundary and the response is considered healthy only when it is 2xx.
+      redirect: "manual",
       signal: controller.signal,
     });
     const declaredLength = Number(response.headers.get("Content-Length") || "0");

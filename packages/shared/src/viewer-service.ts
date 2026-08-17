@@ -713,7 +713,10 @@ export class ViewerServiceClient {
           ...(init.idempotencyKey ? { "Idempotency-Key": init.idempotencyKey } : {}),
         },
         cache: "no-store",
-        redirect: "error",
+        // Cloudflare Workers supports manual redirect handling but rejects the
+        // Fetch-standard "error" mode. Manual keeps signed credentials from
+        // following a Location; every 3xx then fails the non-ok check below.
+        redirect: "manual",
         signal: controller.signal,
       });
       if (response.status === 404) throw new ViewerServiceError("3D model not found", "not_found", 404);

@@ -74,7 +74,7 @@ describe("Viewer service client", () => {
         authorizationExpiresAt: "2026-08-15T05:30:00.000Z",
       });
       expect(init?.headers).toMatchObject({ "Idempotency-Key": "viewer-session-key-0001" });
-      expect(init?.redirect).toBe("error");
+      expect(init?.redirect).toBe("manual");
       expect(init?.cache).toBe("no-store");
       return Response.json({
         grant: "00000000-0000-4000-8000-000000000001",
@@ -124,7 +124,7 @@ describe("Viewer service client", () => {
       const url = new URL(String(input));
       if (url.pathname === "/api/v1/models/model-one/shares" && init?.method === "POST") {
         expect(init.headers).toMatchObject({ "Idempotency-Key": "viewer-share-create-0001" });
-        expect(init.redirect).toBe("error");
+        expect(init.redirect).toBe("manual");
         expect(init.cache).toBe("no-store");
         expect(JSON.parse(String(init.body))).toMatchObject({
           versionPolicy: "latest",
@@ -216,5 +216,22 @@ describe("Viewer service client", () => {
     await expect(conflictClient.revokePublicShare({
       shareId: "share-one", idempotencyKey: "viewer-share-revoke-0002", reason: "Demo complete",
     })).rejects.toMatchObject({ code: "conflict", status: 409 });
+  });
+
+  it("uses Worker-compatible manual redirect handling and rejects every redirect", async () => {
+    const redirected = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      expect(init?.redirect).toBe("manual");
+      return new Response(null, {
+        status: 302,
+        headers: { Location: "https://evil.example.test/capture" },
+      });
+    });
+    const client = new ViewerServiceClient({
+      baseUrl: "https://viewer.example.test",
+      keyId: "ops-v1",
+      secret,
+    }, redirected as typeof fetch);
+    await expect(client.listModels()).rejects.toMatchObject({ code: "unavailable", status: 503 });
+    expect(redirected).toHaveBeenCalledOnce();
   });
 });
