@@ -8,7 +8,7 @@ captured.
 ## Frozen source candidates
 
 - 3D Viewer: `da6b812bdaf4e0a9fa3569cb526bb6faa3bf6df5`
-  (`ghcr.io/ledgetoptechnologies/3d-viewer:sha-da6b812`)
+  (`ghcr.io/ledgetoptechnologies/3d-viewer:sha-da6b812@sha256:7e2c2ba085572048b9a6be643c27308d122af054aa2b2323cf160762c3ec1b81`)
 - LTDS-Ops product code: `a867631` on
   `codex/3d-processing-control-plane`; use that branch's current tip for this
   reviewed runbook and other documentation-only follow-ups
