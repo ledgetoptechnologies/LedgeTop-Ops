@@ -1,17 +1,19 @@
 # 3D processing and delivery release runbook
 
-Status: **source candidates are locally frozen; the final immutable Viewer
-registry image, independent cross-repository sign-off, live staging evidence,
-and activation remain pending**. Every
+Status: **source candidates and the immutable Viewer registry image are
+frozen; independent cross-repository sign-off, live staging evidence, and
+activation remain pending**. Every
 Viewer, Operations, Client, processing, public-share, and Project Alpha portal
 feature gate remains off until the corresponding live evidence below is
 captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `419c92972f8fa2e18df3cf01ac1add31f8c91fc1`.
-  The final GHCR tag and manifest digest are deliberately pending; the local
-  verification image ID is not a substitute for a registry manifest digest.
+- 3D Viewer source: `bfcbcef52c651768503789d1d83090b4c4e443b8`.
+  The reviewed release-candidate image is
+  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:769b81f4b455d6f0764ce12fbd9d0f9855e0e31ade6150582dda32f57589ef78`.
+  GitHub Actions run `32054356877` published only tags
+  `v0.2.0-rc.bfcbcef` and `sha-bfcbcef`; it did not publish `latest`.
 - LTDS-Ops product code: `1d46d83dda7ef287360867fa734a8d0e0be5aa85` on
   `codex/3d-processing-control-plane`. This pin contains the desktop
   Administration-menu fix equivalent to `09e3443`; never substitute a mutable
@@ -22,10 +24,9 @@ captured.
   real isolated MySQL scope-lock regression a mandatory CI gate.
 
 The corresponding constants in `scripts/staging-requirements.mjs` remain
-fail-closed with `RELEASE_CONTRACT_FINALIZED=false`. After the final Viewer
-image is published, replace `FINAL_VIEWER_IMAGE_PENDING` with its immutable
-GHCR manifest digest, repeat independent cross-repository verification, and
-only then set the constant to `true`.
+fail-closed with `RELEASE_CONTRACT_FINALIZED=false` until the pinned source,
+manifest digest, migrations, fixtures, and activation policy pass independent
+cross-repository verification. Only then set the constant to `true`.
 
 The Viewer/Ops signed-processing corpus has SHA-256
 `13ab12919e624be6a048c058774ccff2031f865855e64ab3b726e9b31cffab82`.
@@ -95,7 +96,7 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091` and published-session revocation
 commits `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06` and
-`419c92972f8fa2e18df3cf01ac1add31f8c91fc1` do not change the provider adapter,
+`bfcbcef52c651768503789d1d83090b4c4e443b8` do not change the provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
@@ -140,7 +141,7 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`419c92972f8fa2e18df3cf01ac1add31f8c91fc1` and schema version `17`. Confirm
+`bfcbcef52c651768503789d1d83090b4c4e443b8` and schema version `17`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
 `X-LTDS-Viewer-Revision`, `17` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
