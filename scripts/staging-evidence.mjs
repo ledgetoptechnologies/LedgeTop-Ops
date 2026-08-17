@@ -182,7 +182,7 @@ export function validateEvidence(evidence, options = {}) {
   if (viewerConfig.serviceKeyId !== STAGING_VIEWER.serviceKeyId || viewerConfig.eventKeyId !== STAGING_VIEWER.eventKeyId || viewerConfig.providerCredentialsKeyId !== STAGING_VIEWER.providerCredentialsKeyId) errors.push("Viewer non-secret key IDs must match the staging contract");
   if (!sameSet(viewerConfig.secretNames, STAGING_VIEWER.requiredSecretNames) || viewerConfig.secretValuesExcluded !== true || Object.hasOwn(viewerConfig, "secretValues")) errors.push("Viewer secret evidence must contain only the exact approved secret names");
   if (viewerConfig.envFileMode !== "0600" || !populated(viewerConfig.evidenceRef)) errors.push("Viewer persistent environment file must be mode 0600 and referenced");
-  for (const proof of ["healthCheckPassed", "readinessCheckPassed", "canonicalDomainDenied", "proxyForwardedHostVerified", "narrowBindFirewallTopologyVerified", "rootlessUidGidVerified", "capabilitySetsEmpty", "readOnlyRootFilesystem", "persistentVolumeVerified", "readOnlyImportsVerified", "rangeNoStoreVerified"]) {
+  for (const proof of ["healthCheckPassed", "readinessCheckPassed", "directIpHostDenied", "canonicalHostViaProxyVerified", "proxyForwardedHostVerified", "narrowBindFirewallTopologyVerified", "rootlessUidGidVerified", "capabilitySetsEmpty", "readOnlyRootFilesystem", "persistentVolumeVerified", "readOnlyImportsVerified", "rangeNoStoreVerified"]) {
     if (viewer[proof] !== true) errors.push(`Viewer deployment must prove ${proof}`);
   }
   const viewerRollback = viewer.rollback ?? {};

@@ -95,7 +95,8 @@ release-candidate placeholder remains.
 The Viewer evidence is separate from the three Wrangler deployments. Record its
 exact image/commit, a SHA-256 of the non-secret `viewer.env` shape, secret names
 only, mode `0600`, health/readiness, exact `EXPECTED_HOST`, forwarded Host,
-narrow LAN bind/firewall boundary, canonical-domain denial, rootless/capability
+narrow LAN bind/firewall boundary, direct-IP/wrong-Host denial, successful
+canonical Viewer Host forwarding through the proxy, rootless/capability
 state, persistent volume, read-only imports, range/no-store behavior, and a
 tested immutable-image rollback. Keep `PROCESSING_PLATFORM_ENABLED`, the
 processing Compose profile, WebODM discovery, `PROXY_SHARED_SECRET`, and

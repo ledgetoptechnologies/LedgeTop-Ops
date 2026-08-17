@@ -3,19 +3,19 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 
 // Runtime candidates are pinned independently from the release-packet HEAD.
 // This lets evidence and documentation evolve without silently changing the
-// exact application bytes approved for staging. Keep this false until all
-// FINAL_* placeholders below are replaced after the three repositories settle.
-export const RELEASE_CONTRACT_FINALIZED = false;
+// exact application bytes approved for staging. Set this back to false whenever
+// any candidate changes, then refresh every immutable commit/image/migration pin.
+export const RELEASE_CONTRACT_FINALIZED = true;
 export const RELEASE_CANDIDATES = Object.freeze({
-  operations: "be4cc963dfa82a9ceab2e82a786aa8f5de505103",
-  viewer: "20d27246d80937ffb45976492009429b6daafe0f",
-  projectAlpha: "27877741fba3a63daf2d992bb8c08cf9d4c7a9df",
+  operations: "be786b724d13838dc54023e0ee0a194c83fae6a8",
+  viewer: "8691ba68b20b4b6985bc1bf345f67dc7af889448",
+  projectAlpha: "af2864547d59743300879472bedb276f5694f662",
 });
 
 export const STAGING_VIEWER = Object.freeze({
   hostname: "viewer-staging.ledgetopdroneservices.com",
   origin: "https://viewer-staging.ledgetopdroneservices.com",
-  image: "<FINAL_VIEWER_IMAGE_TAG_AT_SHA256_DIGEST>",
+  image: "ghcr.io/ledgetoptechnologies/3d-viewer:sha-8691ba6@sha256:c80582711664a59c47f23162c43e082c6f38c3f4ddef8e70f93d6d24b846cdd5",
   serviceKeyId: "ops-staging-v1",
   eventKeyId: "viewer-staging-v1",
   providerCredentialsKeyId: "provider-staging-v1",

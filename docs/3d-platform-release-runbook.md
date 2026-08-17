@@ -1,31 +1,31 @@
 # 3D processing and delivery release runbook
 
-Status: **release contract complete; final cross-repository pins and live
-activation pending**. Every
+Status: **release contract complete and source/image pins frozen; live staging
+evidence and activation pending**. Every
 Viewer, Operations, Client, processing, public-share, and Project Alpha portal
 feature gate remains off until the corresponding live evidence below is
 captured.
 
 ## Frozen source candidates
 
-- 3D Viewer: `20d27246d80937ffb45976492009429b6daafe0f` and
-  `<FINAL_VIEWER_IMAGE_TAG_AT_SHA256_DIGEST>`
-- LTDS-Ops product code: `be4cc963dfa82a9ceab2e82a786aa8f5de505103` on
+- 3D Viewer: `8691ba68b20b4b6985bc1bf345f67dc7af889448` and
+  `ghcr.io/ledgetoptechnologies/3d-viewer:sha-8691ba6@sha256:c80582711664a59c47f23162c43e082c6f38c3f4ddef8e70f93d6d24b846cdd5`
+- LTDS-Ops product code: `be786b724d13838dc54023e0ee0a194c83fae6a8` on
   `codex/3d-processing-control-plane`. The final pin must contain the desktop
   Administration-menu fix equivalent to `09e3443`; never substitute a mutable
   branch tip.
-- Project Alpha: `27877741fba3a63daf2d992bb8c08cf9d4c7a9df` on
+- Project Alpha: `af2864547d59743300879472bedb276f5694f662` on
   `codex/generic-portal-v2-integration`
 
-The centralized placeholders above and the corresponding constants in
-`scripts/staging-requirements.mjs` must be updated after all three repositories
-settle. Until then, `RELEASE_CONTRACT_FINALIZED=false` makes staging evidence
-verification fail closed.
+The corresponding constants in `scripts/staging-requirements.mjs` are frozen
+with `RELEASE_CONTRACT_FINALIZED=true`. Any source or image change must first
+set it back to `false`, refresh every immutable pin, and repeat independent
+cross-repository verification.
 
 The Viewer/Ops signed-processing corpus has SHA-256
 `5e412f9b57a9b8495b2c11736fdb6e7aeed57b15a1cb96ba219c1f2398b50572`.
 The route-response corpus has SHA-256
-`d46543eba16ed892c1fdfe33f22692a1d3f84db4f8e65793d87a720c10914bcf`.
+`54bb20112e37322f43b7c1b9c40c1f94244942097ae54ca378de8c90a438e443`.
 The five generic Project Alpha fixtures are byte-pinned by both repositories.
 Do not substitute a later commit or hand-edit a fixture during activation.
 

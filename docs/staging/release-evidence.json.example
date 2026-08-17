@@ -5,7 +5,7 @@
     "remoteRef": "<REMOTE_REF_CONTAINING_RELEASE_COMMIT>",
     "verifiedAt": "<ISO_8601_TIMESTAMP>",
     "evidenceRef": "<EVIDENCE_REFERENCE>",
-    "runtimeCandidateCommit": "be4cc963dfa82a9ceab2e82a786aa8f5de505103",
+    "runtimeCandidateCommit": "be786b724d13838dc54023e0ee0a194c83fae6a8",
     "runtimeCandidatePushed": false,
     "runtimeEvidenceRef": "<EVIDENCE_REFERENCE>"
   },
@@ -53,7 +53,7 @@
     "ed25519Ready": false,
     "paymentBillingContractReady": false,
     "authorizationBypassUsed": false,
-    "releaseCommit": "27877741fba3a63daf2d992bb8c08cf9d4c7a9df",
+    "releaseCommit": "af2864547d59743300879472bedb276f5694f662",
     "sourceCommitVerified": false,
     "remoteRef": "<PROJECT_ALPHA_REMOTE_REF>",
     "webImageDigest": "sha256:<64_HEX_DIGEST>",
@@ -127,8 +127,8 @@
   "viewer": {
     "hostname": "viewer-staging.ledgetopdroneservices.com",
     "origin": "https://viewer-staging.ledgetopdroneservices.com",
-    "releaseCommit": "20d27246d80937ffb45976492009429b6daafe0f",
-    "image": "<FINAL_VIEWER_IMAGE_TAG_AT_SHA256_DIGEST>",
+    "releaseCommit": "8691ba68b20b4b6985bc1bf345f67dc7af889448",
+    "image": "ghcr.io/ledgetoptechnologies/3d-viewer:sha-8691ba6@sha256:c80582711664a59c47f23162c43e082c6f38c3f4ddef8e70f93d6d24b846cdd5",
     "configSha256": "<SHA256>",
     "deployedAt": "<ISO_8601_TIMESTAMP>",
     "deploymentEvidenceRef": "<EVIDENCE_REFERENCE>",
@@ -151,7 +151,8 @@
     },
     "healthCheckPassed": false,
     "readinessCheckPassed": false,
-    "canonicalDomainDenied": false,
+    "directIpHostDenied": false,
+    "canonicalHostViaProxyVerified": false,
     "proxyForwardedHostVerified": false,
     "narrowBindFirewallTopologyVerified": false,
     "rootlessUidGidVerified": false,
@@ -472,9 +473,9 @@
     }
   },
   "deployments": {
-    "delivery": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "be4cc963dfa82a9ceab2e82a786aa8f5de505103", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": ["CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_PORTAL_SYNC_ENABLED", "PROJECT_ALPHA_PRICING_HINTS_ENABLED", "CLIENT_REQUEST_ATTACHMENTS_ENABLED", "CLIENT_PORTAL_TEAM_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "CLIENT_VIEWER_ENABLED", "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED", "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY", "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED", "CLIENT_DELEGATED_SHARES_ENABLED", "CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED"], "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "operations": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "be4cc963dfa82a9ceab2e82a786aa8f5de505103", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": ["PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED", "AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "VIEWER_INTEGRATION_ENABLED", "VIEWER_PROCESSING_ENABLED", "VIEWER_PUBLIC_SHARES_ENABLED", "CLIENT_VIEWER_SESSION_ISSUER_ENABLED", "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED", "DIRECT_DELIVERY_UPLOADS_ENABLED", "DROPBOX_IMPORT_ENABLED", "R2_PURGE_ENABLED"], "evidenceRef": "<EVIDENCE_REFERENCE>" },
-    "ops-sync": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "be4cc963dfa82a9ceab2e82a786aa8f5de505103", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [], "evidenceRef": "<EVIDENCE_REFERENCE>" }
+    "delivery": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "be786b724d13838dc54023e0ee0a194c83fae6a8", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": ["CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED", "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_PORTAL_SYNC_ENABLED", "PROJECT_ALPHA_PRICING_HINTS_ENABLED", "CLIENT_REQUEST_ATTACHMENTS_ENABLED", "CLIENT_PORTAL_TEAM_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "CLIENT_VIEWER_ENABLED", "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED", "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY", "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED", "CLIENT_DELEGATED_SHARES_ENABLED", "CLOUD_TRANSFER_DROPBOX_ENABLED", "CLOUD_TRANSFER_GOOGLE_ENABLED", "CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED"], "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "operations": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "be786b724d13838dc54023e0ee0a194c83fae6a8", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": ["PROJECT_ALPHA_DRAFT_QUOTES_ENABLED", "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED", "AUTHENTICATED_DELIVERY_GRANTS_ENABLED", "VIEWER_INTEGRATION_ENABLED", "VIEWER_PROCESSING_ENABLED", "VIEWER_PUBLIC_SHARES_ENABLED", "CLIENT_VIEWER_SESSION_ISSUER_ENABLED", "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED", "DIRECT_DELIVERY_UPLOADS_ENABLED", "DROPBOX_IMPORT_ENABLED", "R2_PURGE_ENABLED"], "evidenceRef": "<EVIDENCE_REFERENCE>" },
+    "ops-sync": { "versionId": "<IMMUTABLE_STAGING_VERSION_ID>", "releaseCommit": "be786b724d13838dc54023e0ee0a194c83fae6a8", "configSha256": "<SHA256>", "deployedAt": "<ISO_8601_TIMESTAMP>", "bindingsVerified": false, "healthCheckPassed": false, "hostAdmissionDenied": false, "disabledFeatureFlags": [], "evidenceRef": "<EVIDENCE_REFERENCE>" }
   },
   "infrastructure": {
     "remoteInventoryVerified": false,
