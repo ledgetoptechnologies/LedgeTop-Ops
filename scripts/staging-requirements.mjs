@@ -10,7 +10,7 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 // any pinned source or deployment artifact.
 export const RELEASE_CONTRACT_FINALIZED = true;
 export const RELEASE_CANDIDATES = Object.freeze({
-  operations: "a996b43412c569f5bc003fc002c2e400777e344a",
+  operations: "e44a1b4e789790834dfb071fbdbdda7e0cfd5dfc",
   viewer: "8f6c4025368f0157bcd1e1c575d2fb4fab56564c",
   projectAlpha: "769df9320dbf4dfc512d364173d5cb7d8ad8a97c",
 });
