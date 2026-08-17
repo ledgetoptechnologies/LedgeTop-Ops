@@ -275,11 +275,15 @@ export async function persistViewerAssociation(input: {
   if (replay) return { id: replay, created: false, replayed: true };
   const database = primaryDeliveryDb(input.env);
   const existing = await database.prepare(
-    "SELECT id FROM viewer_model_associations WHERE project_id=? AND viewer_model_id=?",
-  ).bind(input.project.id, input.model.id).first<{ id: string }>();
+    "SELECT id,association_version FROM viewer_model_associations WHERE project_id=? AND viewer_model_id=?",
+  ).bind(input.project.id, input.model.id).first<{ id: string; association_version: number }>();
   const id = existing?.id || crypto.randomUUID();
-  try {
-    await database.batch([database.prepare(`INSERT INTO viewer_model_associations
+  const statements = [database.prepare(`INSERT OR IGNORE INTO viewer_session_revocation_outbox
+      (id,association_id,association_version,idempotency_key)
+      SELECT ?,id,association_version,? FROM viewer_model_associations
+      WHERE project_id=? AND viewer_model_id=?`)
+    .bind(crypto.randomUUID(), `viewer-session-revoke:${crypto.randomUUID()}`, input.project.id, input.model.id),
+    database.prepare(`INSERT INTO viewer_model_associations
       (id,project_id,project_alpha_project_id,project_source_version,viewer_model_id,viewer_model_version_id,
        viewer_resource_version,model_title,model_provider,model_status,state,created_by_staff_id)
       VALUES (?,?,?,?,?,?,?,?,?,?,'active',?)
@@ -291,13 +295,16 @@ export async function persistViewerAssociation(input: {
         model_title=excluded.model_title,model_provider=excluded.model_provider,model_status=excluded.model_status,
         state='active',association_version=association_version+1,updated_at=datetime('now'),
         revoked_at=NULL,revoked_by_staff_id=NULL,revoke_reason=NULL`)
-      .bind(id, input.project.id, input.project.project_alpha_project_id, input.project.source_updated_at,
-        input.model.id, input.model.activeVersion.id, input.model.updatedAt, input.model.title,
-        input.model.provider, input.model.status, input.principal.id),
+    .bind(id, input.project.id, input.project.project_alpha_project_id, input.project.source_updated_at,
+      input.model.id, input.model.activeVersion.id, input.model.updatedAt, input.model.title,
+      input.model.provider, input.model.status, input.principal.id),
     database.prepare(`INSERT INTO viewer_association_mutation_receipts
-      (actor_staff_id,idempotency_key,action,request_fingerprint,association_id) VALUES (?,?,?,?,?)`)
-      .bind(input.principal.id, input.idempotencyKey, "association.create", input.fingerprint, id),
-    ]);
+      (actor_staff_id,idempotency_key,action,request_fingerprint,association_id)
+      SELECT ?,?,?,?,id FROM viewer_model_associations WHERE project_id=? AND viewer_model_id=?`)
+      .bind(input.principal.id, input.idempotencyKey, "association.create", input.fingerprint,
+        input.project.id, input.model.id)];
+  try {
+    await database.batch(statements);
   } catch (error) {
     const raced = await replayedAssociationMutation({
       env: input.env, principal: input.principal, action: "association.create",
@@ -306,7 +313,11 @@ export async function persistViewerAssociation(input: {
     if (!raced) throw error;
     return { id: raced, created: false, replayed: true };
   }
-  return { id, created: !existing, replayed: false };
+  const persisted = await database.prepare(
+    "SELECT id FROM viewer_model_associations WHERE project_id=? AND viewer_model_id=?",
+  ).bind(input.project.id, input.model.id).first<{ id: string }>();
+  if (!persisted) throw new Error("Viewer association persistence failed");
+  return { id: persisted.id, created: !existing && persisted.id === id, replayed: false };
 }
 
 export async function issueViewerSession(input: {
@@ -355,6 +366,9 @@ export async function issueViewerSession(input: {
     authorizationExpiresAt,
     displayUnits: input.displayUnits || "imperial",
     permissions: { view: true, measure: true, cameras: true, download: false },
+    sourceAuthorization: {
+      type: "model_association", id: input.association.id, version: input.association.association_version,
+    },
   });
   await db.prepare(`INSERT INTO viewer_session_issuance_receipts
     (actor_id,audience,idempotency_key,request_fingerprint,response_json,expires_at)
@@ -372,6 +386,60 @@ export async function pruneViewerSessionIssuanceReceipts(env: Pick<Env, "DELIVER
   return result.meta.changes || 0;
 }
 
+interface ViewerSessionRevocationRow {
+  id: string;
+  association_id: string;
+  association_version: number;
+  idempotency_key: string;
+  attempt_count: number;
+}
+
+function revocationRetrySeconds(attempt: number): number {
+  return Math.min(900, 30 * (2 ** Math.min(Math.max(attempt, 0), 5)));
+}
+
+export async function drainViewerSessionRevocations(
+  env: Env,
+  options: { associationId?: string; limit?: number; fetcher?: typeof fetch } = {},
+): Promise<{ delivered: number; pending: number }> {
+  const database = primaryDeliveryDb(env);
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 50);
+  const rows = await database.prepare(`SELECT id,association_id,association_version,idempotency_key,attempt_count
+    FROM viewer_session_revocation_outbox
+    WHERE state='pending' AND datetime(next_attempt_at)<=datetime('now')
+      AND (? IS NULL OR association_id=?)
+    ORDER BY created_at,id LIMIT ?`)
+    .bind(options.associationId ?? null, options.associationId ?? null, limit)
+    .all<ViewerSessionRevocationRow>();
+  let delivered = 0;
+  for (const row of rows.results) {
+    try {
+      await viewerServiceClient(env, options.fetcher ?? fetch, { allowWhenDisabled: true })
+        .revokePublishedSessionSourceAuthorization({
+          sourceAuthorization: {
+            type: "model_association", id: row.association_id, version: row.association_version,
+          },
+          idempotencyKey: row.idempotency_key,
+        });
+      const update = await database.prepare(`UPDATE viewer_session_revocation_outbox SET
+        state='delivered',attempt_count=attempt_count+1,last_error_code=NULL,
+        delivered_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND state='pending'`)
+        .bind(row.id).run();
+      delivered += update.meta.changes || 0;
+    } catch (error) {
+      const code = error instanceof ViewerServiceError ? error.code : "unavailable";
+      await database.prepare(`UPDATE viewer_session_revocation_outbox SET
+        attempt_count=attempt_count+1,last_error_code=?,updated_at=datetime('now'),
+        next_attempt_at=datetime('now',?) WHERE id=? AND state='pending'`)
+        .bind(code.slice(0, 64), `+${revocationRetrySeconds(row.attempt_count)} seconds`, row.id).run();
+    }
+  }
+  const pending = await database.prepare(`SELECT COUNT(*) count FROM viewer_session_revocation_outbox
+    WHERE state='pending' AND (? IS NULL OR association_id=?)`)
+    .bind(options.associationId ?? null, options.associationId ?? null).first<number>("count");
+  return { delivered, pending: pending ?? 0 };
+}
+
 function viewerError(error: unknown): never {
   if (error instanceof HTTPException) throw error;
   if (error instanceof ViewerServiceError)
@@ -381,6 +449,7 @@ function viewerError(error: unknown): never {
 
 export function registerViewerIntegrationRoutes(app: ViewerApp): void {
   app.get("/api/viewer/connection-preflight", async c => {
+    c.header("Cache-Control", "no-store");
     await requireGlobalViewer(c.env, c.get("principal"), "viewer.manage");
     const configured = viewerServiceConfigured({
       baseUrl: c.env.VIEWER_BASE_URL || "",
@@ -459,7 +528,8 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
       if (replay) {
         const association = (await listAssociations(c.env)).find(item => item.id === replay);
         if (!association) throw new HTTPException(409, { message: "The replayed Viewer association no longer exists" });
-        return c.json({ association, replayed: true }, 200);
+        const sessionRevocation = await drainViewerSessionRevocations(c.env, { associationId: replay });
+        return c.json({ association, replayed: true, sessionRevocation }, 200);
       }
       const [projects, models] = await Promise.all([listProjectOptions(c.env), viewerServiceClient(c.env).listModels()]);
       const project = projects.find(item => item.id === parsed.data.projectId);
@@ -477,14 +547,15 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
         idempotencyKey: key.data, fingerprint,
       });
       const association = (await listAssociations(c.env)).find(item => item.id === persisted.id);
-      if (persisted.replayed) return c.json({ association, replayed: true }, 200);
+      const sessionRevocation = await drainViewerSessionRevocations(c.env, { associationId: persisted.id });
+      if (persisted.replayed) return c.json({ association, replayed: true, sessionRevocation }, 200);
       await c.env.OPS_DB.batch([await auditStatement(
         c.env, c.req.raw, principal,
         persisted.created ? "viewer.association.created" : "viewer.association.refreshed",
         "viewer_model_association", persisted.id, null,
         { projectId: project.id, viewerModelId: model.id, viewerModelVersionId: model.activeVersion.id },
       )]);
-      return c.json({ association }, persisted.created ? 201 : 200);
+      return c.json({ association, sessionRevocation }, persisted.created ? 201 : 200);
     } catch (error) { return viewerError(error); }
   });
 
@@ -502,34 +573,43 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
     const replay = await replayedAssociationMutation({
       env: c.env, principal, action: "association.revoke", idempotencyKey: key.data, fingerprint,
     });
-    if (replay) return c.json({ success: true, replayed: true });
+    if (replay) {
+      const sessionRevocation = await drainViewerSessionRevocations(c.env, { associationId: replay });
+      return c.json({ success: true, replayed: true, sessionRevocation }, sessionRevocation.pending ? 202 : 200);
+    }
     const database = primaryDeliveryDb(c.env);
     const existing = await database.prepare(
-      "SELECT id,state FROM viewer_model_associations WHERE id=?",
-    ).bind(associationId.data).first<{ id: string; state: string }>();
+      "SELECT id,state,association_version FROM viewer_model_associations WHERE id=?",
+    ).bind(associationId.data).first<{ id: string; state: string; association_version: number }>();
     if (!existing) throw new HTTPException(404, { message: "Viewer association not found" });
     try {
-      await database.batch([database.prepare(`UPDATE viewer_model_associations SET
+      const statements = [database.prepare(`UPDATE viewer_model_associations SET
       state='revoked',association_version=association_version+1,updated_at=datetime('now'),
       revoked_at=COALESCE(revoked_at,datetime('now')),revoked_by_staff_id=COALESCE(revoked_by_staff_id,?),
       revoke_reason=COALESCE(revoke_reason,?) WHERE id=? AND state='active'`)
-        .bind(principal.id, value.data.reason, associationId.data),
-      database.prepare(`INSERT INTO viewer_association_mutation_receipts
+        .bind(principal.id, value.data.reason, associationId.data)];
+      if (existing.state === "active") statements.unshift(database.prepare(`INSERT OR IGNORE INTO viewer_session_revocation_outbox
+        (id,association_id,association_version,idempotency_key)
+        SELECT ?,id,association_version,? FROM viewer_model_associations WHERE id=? AND state='active'`)
+        .bind(crypto.randomUUID(), `viewer-session-revoke:${crypto.randomUUID()}`, associationId.data));
+      statements.push(database.prepare(`INSERT INTO viewer_association_mutation_receipts
         (actor_staff_id,idempotency_key,action,request_fingerprint,association_id) VALUES (?,?,?,?,?)`)
-        .bind(principal.id, key.data, "association.revoke", fingerprint, associationId.data),
-      ]);
+        .bind(principal.id, key.data, "association.revoke", fingerprint, associationId.data));
+      await database.batch(statements);
     } catch (error) {
       const raced = await replayedAssociationMutation({
         env: c.env, principal, action: "association.revoke", idempotencyKey: key.data, fingerprint,
       });
       if (!raced) throw error;
-      return c.json({ success: true, replayed: true });
+      const sessionRevocation = await drainViewerSessionRevocations(c.env, { associationId: raced });
+      return c.json({ success: true, replayed: true, sessionRevocation }, sessionRevocation.pending ? 202 : 200);
     }
     if (existing.state === "active") await c.env.OPS_DB.batch([await auditStatement(
       c.env, c.req.raw, principal, "viewer.association.revoked", "viewer_model_association",
       associationId.data, null, { reason: value.data.reason },
     )]);
-    return c.json({ success: true });
+    const sessionRevocation = await drainViewerSessionRevocations(c.env, { associationId: associationId.data });
+    return c.json({ success: true, sessionRevocation }, sessionRevocation.pending ? 202 : 200);
   });
 
   app.post("/api/viewer/associations/:associationId/session", async c => {

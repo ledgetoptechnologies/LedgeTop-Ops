@@ -172,7 +172,11 @@ import {
   validateStaffRequestArea,
   validateStaffRequestPois,
 } from "./request-area-revision";
-import { pruneViewerSessionIssuanceReceipts, registerViewerIntegrationRoutes } from "./viewer-integration";
+import {
+  drainViewerSessionRevocations,
+  pruneViewerSessionIssuanceReceipts,
+  registerViewerIntegrationRoutes,
+} from "./viewer-integration";
 import {
   registerViewerProcessingRoutes,
   processViewerProcessingNotifications,
@@ -2944,6 +2948,7 @@ async function scheduled(
   ctx: ExecutionContext,
 ) {
   if (event.cron === CLIENT_REQUEST_NOTIFICATION_CRON) {
+    ctx.waitUntil(drainViewerSessionRevocations(env));
     ctx.waitUntil(processThumbnailBackfills(env));
     ctx.waitUntil(processLegacyVideoThumbnailRecovery(env));
     try {
@@ -3024,6 +3029,7 @@ async function scheduled(
   ctx.waitUntil(pruneViewerMachineRateLimits(env));
   ctx.waitUntil(pruneClientViewerShareReceipts(env));
   ctx.waitUntil(pruneViewerSessionIssuanceReceipts(env));
+  ctx.waitUntil(drainViewerSessionRevocations(env));
 }
 async function fetch(
   request: Request,

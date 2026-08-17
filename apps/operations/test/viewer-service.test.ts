@@ -72,6 +72,7 @@ describe("Viewer service client", () => {
         audience: "client",
         modelVersionId: "version-one",
         authorizationExpiresAt: "2026-08-15T05:30:00.000Z",
+        sourceAuthorization: { type: "model_association", id: "association-one", version: 7 },
       });
       expect(init?.headers).toMatchObject({ "Idempotency-Key": "viewer-session-key-0001" });
       expect(init?.redirect).toBe("manual");
@@ -90,7 +91,34 @@ describe("Viewer service client", () => {
       modelId: "model-one", modelVersionId: "version-one", subject: "client:identity-one",
       audience: "client", idempotencyKey: "viewer-session-key-0001",
       authorizationExpiresAt: "2026-08-15T05:30:00.000Z",
+      sourceAuthorization: { type: "model_association", id: "association-one", version: 7 },
     })).rejects.toBeInstanceOf(ViewerServiceError);
+  });
+
+  it("revokes an exact model-association authorization with a signed idempotent request", async () => {
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new URL(String(input)).pathname).toBe("/api/v1/published-sessions/source-authorization");
+      expect(init?.method).toBe("DELETE");
+      expect(init?.redirect).toBe("manual");
+      expect(init?.headers).toMatchObject({ "Idempotency-Key": "viewer-source-revoke-0001" });
+      expect(JSON.parse(String(init?.body))).toEqual({
+        sourceAuthorization: { type: "model_association", id: "association-one", version: 7 },
+      });
+      return Response.json({
+        sourceAuthorization: { type: "model_association", id: "association-one", version: 7 },
+        revokedGrants: 1, revokedSessions: 2,
+      });
+    });
+    const client = new ViewerServiceClient(
+      { baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret }, fetcher as typeof fetch,
+    );
+    await expect(client.revokePublishedSessionSourceAuthorization({
+      sourceAuthorization: { type: "model_association", id: "association-one", version: 7 },
+      idempotencyKey: "viewer-source-revoke-0001",
+    })).resolves.toEqual({
+      sourceAuthorization: { type: "model_association", id: "association-one", version: 7 },
+      revokedGrants: 1, revokedSessions: 2,
+    });
   });
 
   it("rejects a session grant for any model version other than the pinned request", async () => {

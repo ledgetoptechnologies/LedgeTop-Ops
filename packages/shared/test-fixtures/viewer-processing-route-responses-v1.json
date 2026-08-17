@@ -369,6 +369,15 @@
     "headers": { "Cache-Control": "no-store" },
     "body": { "attemptId": "attempt-import-two", "revokedGrants": 1, "revokedSessions": 1 }
   },
+  "publishedSessionsRevoked": {
+    "status": 200,
+    "headers": { "Cache-Control": "no-store" },
+    "body": {
+      "sourceAuthorization": { "type": "model_association", "id": "association-one", "version": 3 },
+      "revokedGrants": 1,
+      "revokedSessions": 2
+    }
+  },
   "storage": {
     "storage": {
       "datasets": { "available": 900, "total": 1000, "reserve": 100, "required": 50, "ok": true },

@@ -12,7 +12,11 @@ import {
   pruneClientViewerShareReceipts,
   revokeClientViewerShare,
 } from "../src/worker/viewer-session-issuer";
-import { persistViewerAssociation } from "../src/worker/viewer-integration";
+import {
+  drainViewerSessionRevocations,
+  issueViewerSession,
+  persistViewerAssociation,
+} from "../src/worker/viewer-integration";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const active: Miniflare[] = [];
@@ -52,6 +56,14 @@ async function fixture(): Promise<{ database: D1Database; env: Env }> {
     CREATE TABLE viewer_association_mutation_receipts(
       actor_staff_id TEXT,idempotency_key TEXT,action TEXT,request_fingerprint TEXT,association_id TEXT,
       PRIMARY KEY(actor_staff_id,idempotency_key));
+    CREATE TABLE viewer_session_revocation_outbox(
+      id TEXT PRIMARY KEY,association_id TEXT,association_version INTEGER,idempotency_key TEXT UNIQUE,
+      state TEXT DEFAULT 'pending',attempt_count INTEGER DEFAULT 0,next_attempt_at TEXT DEFAULT (datetime('now')),
+      last_error_code TEXT,created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')),
+      delivered_at TEXT,UNIQUE(association_id,association_version));
+    CREATE TABLE viewer_session_issuance_receipts(
+      actor_id TEXT,audience TEXT,idempotency_key TEXT,request_fingerprint TEXT,response_json TEXT,
+      expires_at TEXT,PRIMARY KEY(actor_id,audience,idempotency_key));
     CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,source_updated_at TEXT,active INTEGER);
     CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT);
     CREATE TABLE client_project_grants(project_id TEXT,account_id TEXT,revoked_at TEXT);
@@ -182,6 +194,81 @@ describe("client Viewer authorization", () => {
     expect((await persistViewerAssociation(input)).replayed).toBe(true);
     expect(await database.prepare("SELECT association_version FROM viewer_model_associations WHERE id='association-one'")
       .first("association_version")).toBe(2);
+    expect(await database.prepare(`SELECT association_version FROM viewer_session_revocation_outbox
+      WHERE association_id='association-one'`).first("association_version")).toBe(1);
+    const next = { ...input, idempotencyKey: "association-retry-key-0002", fingerprint: "next-request-fingerprint" };
+    expect((await persistViewerAssociation(next)).replayed).toBe(false);
+    expect(await database.prepare("SELECT association_version FROM viewer_model_associations WHERE id='association-one'")
+      .first("association_version")).toBe(3);
+    expect((await database.prepare(`SELECT association_version FROM viewer_session_revocation_outbox
+      WHERE association_id='association-one' ORDER BY association_version`).all()).results)
+      .toEqual([{ association_version: 1 }, { association_version: 2 }]);
+  });
+
+  it("delivers exact version-bound session revocation and retains bounded retry state", async () => {
+    const { database, env } = await fixture();
+    await database.prepare(`INSERT INTO viewer_session_revocation_outbox
+      (id,association_id,association_version,idempotency_key)
+      VALUES('outbox-one','association-one',1,'viewer-session-revoke:outbox-one')`).run();
+    const seen: Array<{ method: string; body: unknown; key: string }> = [];
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({
+        method: init?.method || "", body: JSON.parse(String(init?.body)),
+        key: (init?.headers as Record<string, string>)["Idempotency-Key"] || "",
+      });
+      return Response.json({
+        sourceAuthorization: { type: "model_association", id: "association-one", version: 1 },
+        revokedGrants: 2, revokedSessions: 3,
+      });
+    });
+    expect(await drainViewerSessionRevocations(env, { fetcher: fetcher as typeof fetch }))
+      .toEqual({ delivered: 1, pending: 0 });
+    expect(seen).toEqual([{
+      method: "DELETE",
+      body: { sourceAuthorization: { type: "model_association", id: "association-one", version: 1 } },
+      key: "viewer-session-revoke:outbox-one",
+    }]);
+    expect(await database.prepare("SELECT state,attempt_count,last_error_code FROM viewer_session_revocation_outbox")
+      .first()).toMatchObject({ state: "delivered", attempt_count: 1, last_error_code: null });
+
+    await database.prepare(`INSERT INTO viewer_session_revocation_outbox
+      (id,association_id,association_version,idempotency_key)
+      VALUES('outbox-two','association-one',2,'viewer-session-revoke:outbox-two')`).run();
+    const unavailable = vi.fn(async () => new Response("unavailable", { status: 503 }));
+    expect(await drainViewerSessionRevocations(env, { fetcher: unavailable as typeof fetch }))
+      .toEqual({ delivered: 0, pending: 1 });
+    const retry = await database.prepare(`SELECT state,attempt_count,last_error_code,
+      datetime(next_attempt_at)>datetime('now') delayed FROM viewer_session_revocation_outbox WHERE id='outbox-two'`).first();
+    expect(retry).toMatchObject({ state: "pending", attempt_count: 1, last_error_code: "unavailable", delayed: 1 });
+  });
+
+  it("binds every issued Viewer session to the exact association version", async () => {
+    const { env } = await fixture();
+    const expires = new Date(Date.now() + 10 * 60_000).toISOString();
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/api/v1/models") return Response.json({ models: [{
+        id: "viewer-model-one", title: "Point cloud", provider: "webodm", status: "ready", available: true,
+        activeVersion: { id: "viewer-version-one", providerVersionId: "provider-version-one",
+          createdAt: expires, updatedAt: expires }, updatedAt: expires,
+      }] });
+      expect(path).toBe("/api/v1/models/viewer-model-one/sessions");
+      expect(JSON.parse(String(init?.body))).toMatchObject({
+        sourceAuthorization: { type: "model_association", id: "association-one", version: 1 },
+      });
+      return Response.json({
+        grant: "00000000-0000-4000-8000-000000000001", grantExpiresAt: expires, sessionTtlSeconds: 900,
+        modelVersionId: "viewer-version-one", redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem",
+        embedUrl: "https://viewer.example.test/session/00000000-0000-4000-8000-000000000001",
+      });
+    });
+    vi.stubGlobal("fetch", fetcher);
+    const association = await env.DELIVERY_DB.prepare("SELECT * FROM viewer_model_associations WHERE id='association-one'")
+      .first<import("../src/worker/viewer-integration").AssociationRow>();
+    await expect(issueViewerSession({
+      env, actorId: "staff-one", audience: "ops", association: association!,
+      idempotencyKey: "viewer-session-key-source-0001", displayUnits: "imperial",
+    })).resolves.toMatchObject({ grant: "00000000-0000-4000-8000-000000000001" });
   });
 
   it("fails closed for an explicit entitlement denial", async () => {

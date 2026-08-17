@@ -25,6 +25,18 @@ export interface ViewerSessionGrant {
   embedUrl: string;
 }
 
+export interface ViewerPublishedSessionSourceAuthorization {
+  type: "model_association";
+  id: string;
+  version: number;
+}
+
+export interface ViewerPublishedSessionRevocation {
+  sourceAuthorization: ViewerPublishedSessionSourceAuthorization;
+  revokedGrants: number;
+  revokedSessions: number;
+}
+
 export interface ViewerReviewSessionGrant extends ViewerSessionGrant {
   sessionMode: "review";
   attemptId: string;
@@ -757,6 +769,7 @@ export class ViewerServiceClient {
     authorizationExpiresAt: string;
     displayUnits?: ViewerDisplayUnits;
     permissions?: { view: true; measure?: boolean; cameras?: boolean; download?: boolean };
+    sourceAuthorization?: ViewerPublishedSessionSourceAuthorization;
   }): Promise<ViewerSessionGrant> {
     const path = `/api/v1/models/${encodeURIComponent(input.modelId)}/sessions`;
     const body = JSON.stringify({
@@ -766,6 +779,7 @@ export class ViewerServiceClient {
       authorizationExpiresAt: input.authorizationExpiresAt,
       displayUnits: input.displayUnits || "imperial",
       permissions: input.permissions || { view: true, measure: true, cameras: true, download: false },
+      ...(input.sourceAuthorization ? { sourceAuthorization: input.sourceAuthorization } : {}),
     });
     const payload = record(await this.request(path, { method: "POST", body, idempotencyKey: input.idempotencyKey }));
     const grant = typeof payload?.grant === "string" ? payload.grant : "";
@@ -784,6 +798,30 @@ export class ViewerServiceClient {
       sessionTtlSeconds: payload.sessionTtlSeconds,
       redeemUrl,
       embedUrl,
+    };
+  }
+
+  async revokePublishedSessionSourceAuthorization(input: {
+    sourceAuthorization: ViewerPublishedSessionSourceAuthorization;
+    idempotencyKey: string;
+  }): Promise<ViewerPublishedSessionRevocation> {
+    const path = "/api/v1/published-sessions/source-authorization";
+    const body = JSON.stringify({ sourceAuthorization: input.sourceAuthorization });
+    const payload = record(await this.request(path, {
+      method: "DELETE", body, idempotencyKey: input.idempotencyKey,
+    }));
+    const source = record(payload?.sourceAuthorization);
+    if (!payload || !source || source.type !== "model_association" || source.id !== input.sourceAuthorization.id ||
+      source.version !== input.sourceAuthorization.version ||
+      !Number.isSafeInteger(payload?.revokedGrants) || (payload?.revokedGrants as number) < 0 ||
+      !Number.isSafeInteger(payload?.revokedSessions) || (payload?.revokedSessions as number) < 0)
+      throw new ViewerServiceError("3D Viewer returned an invalid session-revocation result", "invalid_response");
+    return {
+      sourceAuthorization: {
+        type: "model_association", id: source.id as string, version: source.version as number,
+      },
+      revokedGrants: payload!.revokedGrants as number,
+      revokedSessions: payload!.revokedSessions as number,
     };
   }
 

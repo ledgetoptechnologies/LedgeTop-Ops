@@ -23,7 +23,7 @@ const routes = JSON.parse(routeBytes);
 describe("Viewer processing cross-service contract", () => {
   it("pins the byte-identical cross-repository route fixture", () => {
     expect(createHash("sha256").update(routeBytes).digest("hex").toUpperCase())
-      .toBe("8DF468634C41FF84CEDA6E74C34C732E2C28EE6472CDD3F28B9D658D19CACC01");
+      .toBe("2EA39CD2B36C037C95831C708F9C29B6804D272F403B43F0A9AD0EED4AF76154");
   });
   it("pins the exact admin-grant body and service HMAC", async () => {
     const value = fixture.adminGrant;
