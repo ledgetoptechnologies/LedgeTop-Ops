@@ -28,7 +28,7 @@ not become active deployments.
 - approved Project Alpha staging HTTPS origin;
 - staging Access group ID and exact group name;
 - Ops Sync staging service-auth policy and Project Alpha service-token owner;
-- Delivery, Operations, and Ops Sync staging DNS readiness;
+- Delivery, Operations, Ops Sync, and self-hosted Viewer staging DNS readiness;
 - `client-staging.ledgetopdroneservices.com`, its dedicated portal Access
   app/audience/group, and its separately reviewed public Bypass app/policy;
 - reviewed commit SHA and current build-control evidence;
@@ -85,6 +85,37 @@ timestamps, secret names, hashes, and evidence references. Record SHA-256 for
 all three ignored staging configs immediately before each mutation phase;
 `staging:evidence:check` rejects any later config drift.
 
+Before collecting deployment evidence, replace every `FINAL_*` value in
+`scripts/staging-requirements.mjs` with the settled Ops, Viewer, and Project
+Alpha commits, the immutable Viewer tag-plus-digest, and the two Project Alpha
+migration hashes. Set `RELEASE_CONTRACT_FINALIZED=true` only after independent
+comparison with those repositories. The verifier intentionally fails while any
+release-candidate placeholder remains.
+
+The Viewer evidence is separate from the three Wrangler deployments. Record its
+exact image/commit, a SHA-256 of the non-secret `viewer.env` shape, secret names
+only, mode `0600`, health/readiness, exact `EXPECTED_HOST`, forwarded Host,
+narrow LAN bind/firewall boundary, canonical-domain denial, rootless/capability
+state, persistent volume, read-only imports, range/no-store behavior, and a
+tested immutable-image rollback. Keep `PROCESSING_PLATFORM_ENABLED`, the
+processing Compose profile, WebODM discovery, `PROXY_SHARED_SECRET`, and
+`TRUSTED_PROXY_ADDRESSES` off in the baseline. The optional proxy secret is not
+part of the required manifest for this release.
+
+Project Alpha evidence must identify its exact commit and immutable web/cron
+image digests, migration `0066`/`0067` ledger and source hashes, all seven
+installation settings and profile capabilities/delivery still off, the inert
+one-minute outbound sender, non-secret delivery key IDs, encrypted-secret and
+redacted-evidence proof, retry/dead-letter/revocation behavior, fresh backup,
+and a non-destructive restore/fix-forward drill.
+
+Project Alpha is the rollback-order exception: disable projection authority
+first so scoped revocation tombstones are queued, but keep the affected
+profile's delivery switch, the sender, and `portal_outbound_delivery_enabled`
+on until every tombstone is acknowledged. Only then turn outbound delivery
+off. The rollback evidence must prove this drain order; disabling the sender
+first can strand stale downstream authority.
+
 ## Required staging secret names
 
 The canonical non-secret list is
@@ -127,11 +158,21 @@ Operations:
 - `INCOMING_ACCESS_CODE_PEPPER`
 - `INCOMING_PICKUP_SECRET`
 - `THUMBNAIL_INGEST_SECRET`
+- `VIEWER_SERVICE_HMAC_SECRET`
+- `VIEWER_EVENT_HMAC_SECRET`
 
 Ops Sync:
 
 - `CF_ACCESS_GROUP_API_TOKEN`
 - `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET`
+
+Self-hosted Viewer (record names in `viewer.configuration.secretNames`, not in
+the Wrangler manifest):
+
+- `SESSION_SECRET`
+- `SERVICE_AUTH_SECRET`
+- `VIEWER_EVENT_SECRET`
+- `PROVIDER_CREDENTIALS_KEY`
 
 The staging manifest currently requires the complete Operations secret set
 even while incoming capability flags remain disabled. This keeps the checked
@@ -186,8 +227,14 @@ DDL without a safe raw-SQL replay form.
 `activationPlan.requestedFlags` is empty for this release preparation. Any
 later staging activation is validated against
 `FEATURE_FLAG_ACTIVATION_POLICIES`; flags marked prohibited require their own
-release packet, and dependent gates must remain current. Production flags stay
-false and production activation is never authorized by this packet.
+release packet, and dependent gates must remain current. For the controlled run
+that creates a not-yet-available proof, set `phase=evidence-collection`, name
+the one `collectingGate`, request exactly one staging flag, retain current
+`stagingGates` prerequisite proofs, record the rollback reference, and explicitly
+attest `productionFlagsRemainOff=true`. Restore the staging flag to false before
+marking the collected gate ready. A later `post-evidence-validation` activation
+requires every final gate. Production activation is never authorized by this
+packet.
 
 ## Read-only backup and migration preflight
 

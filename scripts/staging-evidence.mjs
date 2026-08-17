@@ -3,13 +3,15 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { APP_SOURCE_DIRS, FEATURE_FLAG_ACTIVATION_POLICIES, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const defaultEvidence = path.join(root, ".backups", "staging-release-evidence.json");
 const marker = /<[^>]+>|CHANGE[_-]?ME|REPLACE[_-]?ME|example\.invalid/i;
 const apps = ["delivery", "operations", "ops-sync"];
 const populated = (value) => typeof value === "string" && value.length > 0 && !marker.test(value);
+const sha256Digest = (value) => /^sha256:[a-f0-9]{64}$/i.test(value ?? "");
+const sha256Hex = (value) => /^[a-f0-9]{64}$/i.test(value ?? "");
 
 function recentDate(value, now, maxAgeMs = 24 * 60 * 60 * 1000) {
   if (!populated(value)) return false;
@@ -42,6 +44,8 @@ export function validateActivationPlan(plan, evidence, options = {}) {
   if (!plan || typeof plan !== "object" || Array.isArray(plan)) return ["activationPlan must be an object"];
   const requested = plan.requestedFlags;
   if (!Array.isArray(requested) || new Set(requested).size !== requested.length) return ["activationPlan.requestedFlags must be a duplicate-free array"];
+  if (requested.length > 1) errors.push("activationPlan may enable only one staging flag at a time");
+  const evidenceCollection = plan.phase === "evidence-collection";
   for (const value of requested) {
     if (typeof value !== "string" || !value.includes(".")) { errors.push(`activation flag ${String(value)} is invalid`); continue; }
     const separator = value.indexOf(".");
@@ -50,7 +54,11 @@ export function validateActivationPlan(plan, evidence, options = {}) {
     const policy = FEATURE_FLAG_ACTIVATION_POLICIES[app]?.[flag];
     if (!policy) { errors.push(`activation flag ${value} is not part of the reviewed release contract`); continue; }
     if (policy.prohibitedReason) { errors.push(`activation flag ${value} is prohibited: ${policy.prohibitedReason}`); continue; }
-    for (const gate of policy.gates ?? []) {
+    const gates = evidenceCollection ? policy.stagingGates : policy.gates;
+    if (evidenceCollection && (!Array.isArray(policy.stagingGates) || !(policy.gates ?? []).includes(plan.collectingGate) || policy.stagingGates.includes(plan.collectingGate))) {
+      errors.push(`activation flag ${value} must name its non-prerequisite evidence gate in activationPlan.collectingGate`);
+    }
+    for (const gate of gates ?? []) {
       const result = evidence.externalGates?.[gate] ?? {};
       if (result.ready !== true || !recentDate(result.verifiedAt, now) || !populated(result.evidenceRef)) {
         errors.push(`activation flag ${value} requires current ready gate ${gate}`);
@@ -61,6 +69,10 @@ export function validateActivationPlan(plan, evidence, options = {}) {
     }
   }
   if (requested.length) {
+    if (!evidenceCollection && plan.phase !== "post-evidence-validation") errors.push("activationPlan.phase must be evidence-collection or post-evidence-validation");
+    if (plan.environment !== "staging" || plan.productionFlagsRemainOff !== true) errors.push("activationPlan must be staging-only while production flags remain off");
+    if (plan.oneGateAtATime !== true || !populated(plan.rollbackRef)) errors.push("activationPlan must prove one-gate-at-a-time rollback control");
+    if (evidenceCollection && evidence.externalGates?.[plan.collectingGate]?.ready !== false) errors.push("activationPlan.collectingGate must remain ready=false until staging evidence is captured and the flag is restored off");
     if (plan.approvalGranted !== true) errors.push("activationPlan.approvalGranted must be true when flags are requested");
     if (!recentDate(plan.approvedAt, now) || !populated(plan.approvalRef)) errors.push("activation plan approval must be current and referenced");
   } else if (plan.approvalGranted !== false) errors.push("empty activation plan must explicitly keep approvalGranted=false");
@@ -73,14 +85,25 @@ export function validateEvidence(evidence, options = {}) {
   const configs = options.configs ?? {};
   const configHashes = options.configHashes ?? {};
   const sourceControlVerified = options.sourceControlVerified ?? false;
+  const runtimeSourceControlVerified = options.runtimeSourceControlVerified ?? sourceControlVerified;
+  const allowUnfinalizedContractForTest = options.allowUnfinalizedContractForTest === true;
   const now = options.now ?? Date.now();
   const errors = [];
+
+  if (RELEASE_CONTRACT_FINALIZED !== true && !allowUnfinalizedContractForTest) errors.push("release contract FINAL_* candidate placeholders must be replaced before staging verification");
+  if (RELEASE_CONTRACT_FINALIZED === true) {
+    for (const [name, commit] of Object.entries(RELEASE_CANDIDATES)) if (!/^[a-f0-9]{40}$/i.test(commit)) errors.push(`${name} release candidate must be an immutable 40-character Git SHA`);
+    if (!/^ghcr\.io\/[^@]+@sha256:[a-f0-9]{64}$/i.test(STAGING_VIEWER.image)) errors.push("Viewer release image must include an immutable sha256 digest");
+    for (const [name, hash] of Object.entries(PROJECT_ALPHA_STAGING.migrations)) if (!sha256Hex(hash)) errors.push(`Project Alpha migration ${name} release hash must be finalized`);
+  }
 
   if (!/^[a-f0-9]{40}$/i.test(evidence.releaseCommit ?? "") || evidence.releaseCommit !== head) errors.push("releaseCommit must equal the exact local HEAD SHA");
   const sourceControl = evidence.sourceControl ?? {};
   if (sourceControl.pushed !== true || !populated(sourceControl.remoteRef)) errors.push("sourceControl must prove the exact release commit is pushed to a named remote ref");
   if (!recentDate(sourceControl.verifiedAt, now) || !populated(sourceControl.evidenceRef)) errors.push("sourceControl pushed-commit evidence must be current and referenced");
   if (sourceControlVerified !== true) errors.push("releaseCommit must be reachable from the named local remote-tracking ref");
+  if (sourceControl.runtimeCandidateCommit !== RELEASE_CANDIDATES.operations || sourceControl.runtimeCandidatePushed !== true) errors.push("sourceControl must pin and confirm the immutable Ops runtime candidate");
+  if (!populated(sourceControl.runtimeEvidenceRef) || runtimeSourceControlVerified !== true) errors.push("Ops runtime candidate must be reachable from the named local remote-tracking ref");
   for (const app of apps) {
     if (!/^[A-F0-9]{64}$/i.test(evidence.configSha256?.[app] ?? "") || evidence.configSha256[app].toUpperCase() !== configHashes[app]) {
       errors.push(`${app} staging config SHA-256 must match the ignored config used for release`);
@@ -109,12 +132,71 @@ export function validateEvidence(evidence, options = {}) {
   if (projectAlpha.ed25519Ready !== true && projectAlpha.ed25519Ready !== false) errors.push("Project Alpha ed25519Ready must explicitly record the optional rollout state");
   if (projectAlpha.paymentBillingContractReady !== true) errors.push("Project Alpha paymentBillingContractReady must be confirmed true");
   if (projectAlpha.authorizationBypassUsed !== false) errors.push("Project Alpha must not bypass LTDS authorization");
+  if (projectAlpha.releaseCommit !== PROJECT_ALPHA_STAGING.releaseCommit || projectAlpha.sourceCommitVerified !== true || !populated(projectAlpha.remoteRef)) errors.push("Project Alpha deployment must pin and verify the reviewed source commit");
+  if (!sha256Digest(projectAlpha.webImageDigest) || !sha256Digest(projectAlpha.cronImageDigest) || projectAlpha.imagesShareSourceCommit !== true) errors.push("Project Alpha web and cron images must have immutable digests from the reviewed commit");
+  if (!recentDate(projectAlpha.deployedAt, now) || !populated(projectAlpha.deploymentEvidenceRef)) errors.push("Project Alpha deployment evidence must be current and referenced");
+
+  const projectAlphaMigrations = projectAlpha.migrations ?? {};
+  if (!sameSet(projectAlphaMigrations.expected, Object.keys(PROJECT_ALPHA_STAGING.migrations))) errors.push("Project Alpha migration set must exactly match the release contract");
+  for (const [name, expectedHash] of Object.entries(PROJECT_ALPHA_STAGING.migrations)) {
+    if (projectAlphaMigrations.sourceSha256?.[name] !== expectedHash) errors.push(`Project Alpha migration ${name} SHA-256 must match the reviewed source`);
+  }
+  for (const proof of ["appliedToStaging", "ledgerVerified", "secondRunEmpty", "schemaIntegrityPassed"]) {
+    if (projectAlphaMigrations[proof] !== true) errors.push(`Project Alpha migrations must prove ${proof}`);
+  }
+  if (!recentDate(projectAlphaMigrations.verifiedAt, now) || !populated(projectAlphaMigrations.ledgerEvidenceRef) || !populated(projectAlphaMigrations.verificationEvidenceRef)) errors.push("Project Alpha migration evidence must be current and referenced");
+
+  const projectAlphaDefaults = projectAlpha.defaultOff ?? {};
+  if (!sameSet(Object.keys(projectAlphaDefaults.settings ?? {}), PROJECT_ALPHA_STAGING.defaultOffSettings)) errors.push("Project Alpha default-off settings must exactly match the release contract");
+  for (const setting of PROJECT_ALPHA_STAGING.defaultOffSettings) {
+    if (projectAlphaDefaults.settings?.[setting] !== false) errors.push(`Project Alpha ${setting} must remain false in release preparation`);
+  }
+  if (projectAlphaDefaults.profileCapabilitiesDisabled !== true || projectAlphaDefaults.profileDeliveryDisabled !== true) errors.push("Project Alpha profile capabilities and delivery must remain default-off");
+  if (!populated(projectAlphaDefaults.evidenceRef)) errors.push("Project Alpha default-off state needs an evidence reference");
+
+  const projectAlphaOutbound = projectAlpha.outbound ?? {};
+  if (projectAlphaOutbound.senderInstalled !== true || projectAlphaOutbound.schedule !== PROJECT_ALPHA_STAGING.outboundSchedule) errors.push("Project Alpha bounded portal sender must be installed on the reviewed schedule");
+  if (projectAlphaOutbound.deliveryEnabled !== false || projectAlphaOutbound.authoritativeHooksEnabled !== false || projectAlphaOutbound.workerInertWhileDisabled !== true) errors.push("Project Alpha outbound publisher must remain inert while default-off");
+  if (!populated(projectAlphaOutbound.deliveryKeyId) || projectAlphaOutbound.deliveryKeyId === projectAlphaOutbound.previousDeliveryKeyId) errors.push("Project Alpha outbound delivery key IDs must be non-empty and non-reused");
+  if (projectAlphaOutbound.secretEncryptedAtRest !== true || projectAlphaOutbound.secretValuesExcluded !== true || Object.hasOwn(projectAlphaOutbound, "secretValues")) errors.push("Project Alpha outbound evidence must prove encrypted secrets without containing secret values");
+  for (const proof of ["exactBodyHmacVerified", "destinationValidationVerified", "retryDeadLetterVerified", "revocationPriorityVerified"]) {
+    if (projectAlphaOutbound[proof] !== true) errors.push(`Project Alpha outbound publisher must prove ${proof}`);
+  }
+  if (!recentDate(projectAlphaOutbound.verifiedAt, now) || !populated(projectAlphaOutbound.evidenceRef)) errors.push("Project Alpha outbound evidence must be current and referenced");
+
+  const projectAlphaRollback = projectAlpha.rollback ?? {};
+  if (!populated(projectAlphaRollback.backupRef) || !sha256Digest(projectAlphaRollback.targetWebImageDigest) || !sha256Digest(projectAlphaRollback.targetCronImageDigest)) errors.push("Project Alpha rollback requires backup and immutable target images");
+  for (const proof of ["restoreDrillPassed", "migrationFixForwardReviewed", "tombstoneDrainPlanReviewed", "projectionAuthorityDisabledFirst", "outboundHeldUntilTombstonesAcknowledged", "senderDisabledAfterDrain", "noDestructiveRollback"]) {
+    if (projectAlphaRollback[proof] !== true) errors.push(`Project Alpha rollback must prove ${proof}`);
+  }
+  if (!recentDate(projectAlphaRollback.testedAt, now) || !populated(projectAlphaRollback.evidenceRef)) errors.push("Project Alpha rollback evidence must be current and referenced");
+
+  const viewer = evidence.viewer ?? {};
+  if (viewer.hostname !== STAGING_VIEWER.hostname || viewer.origin !== STAGING_VIEWER.origin) errors.push("Viewer deployment must use the approved staging origin");
+  if (viewer.releaseCommit !== RELEASE_CANDIDATES.viewer || viewer.image !== STAGING_VIEWER.image) errors.push("Viewer deployment must use the exact reviewed commit and image digest");
+  if (!sha256Hex(viewer.configSha256) || !recentDate(viewer.deployedAt, now) || !populated(viewer.deploymentEvidenceRef)) errors.push("Viewer deployment needs a current referenced non-secret configuration hash");
+  const viewerConfig = viewer.configuration ?? {};
+  if (viewerConfig.publicBaseUrl !== STAGING_VIEWER.origin || viewerConfig.expectedHost !== STAGING_VIEWER.hostname || viewerConfig.opsBaseUrl !== `https://${STAGING_HOSTS.operations}`) errors.push("Viewer staging origins and host guard must match the reviewed topology");
+  if (viewerConfig.processingPlatformEnabled !== false || viewerConfig.processingWorkerProfileStarted !== false || viewerConfig.webodmEnabled !== false) errors.push("Viewer processing, worker profile, and WebODM discovery must remain default-off in release preparation");
+  if (viewerConfig.proxySharedSecretEnabled !== false || viewerConfig.trustedProxyAddressesEnabled !== false) errors.push("Viewer optional proxy hardening must remain default-off for this release contract");
+  if (viewerConfig.serviceKeyId !== STAGING_VIEWER.serviceKeyId || viewerConfig.eventKeyId !== STAGING_VIEWER.eventKeyId || viewerConfig.providerCredentialsKeyId !== STAGING_VIEWER.providerCredentialsKeyId) errors.push("Viewer non-secret key IDs must match the staging contract");
+  if (!sameSet(viewerConfig.secretNames, STAGING_VIEWER.requiredSecretNames) || viewerConfig.secretValuesExcluded !== true || Object.hasOwn(viewerConfig, "secretValues")) errors.push("Viewer secret evidence must contain only the exact approved secret names");
+  if (viewerConfig.envFileMode !== "0600" || !populated(viewerConfig.evidenceRef)) errors.push("Viewer persistent environment file must be mode 0600 and referenced");
+  for (const proof of ["healthCheckPassed", "readinessCheckPassed", "canonicalDomainDenied", "proxyForwardedHostVerified", "narrowBindFirewallTopologyVerified", "rootlessUidGidVerified", "capabilitySetsEmpty", "readOnlyRootFilesystem", "persistentVolumeVerified", "readOnlyImportsVerified", "rangeNoStoreVerified"]) {
+    if (viewer[proof] !== true) errors.push(`Viewer deployment must prove ${proof}`);
+  }
+  const viewerRollback = viewer.rollback ?? {};
+  if (!sha256Digest(viewerRollback.targetImageDigest) || viewerRollback.targetImageDigest === STAGING_VIEWER.image.split("@", 2)[1] || !populated(viewerRollback.configBackupRef)) errors.push("Viewer rollback requires a distinct immutable image and configuration backup");
+  for (const proof of ["drillPassed", "persistentDataPreserved", "noDestructiveRollback"]) if (viewerRollback[proof] !== true) errors.push(`Viewer rollback must prove ${proof}`);
+  if (!recentDate(viewerRollback.testedAt, now) || !populated(viewerRollback.evidenceRef)) errors.push("Viewer rollback evidence must be current and referenced");
 
   for (const [name, hostname] of Object.entries(STAGING_HOSTS)) {
     const host = evidence.hosts?.[name] ?? {};
     if (host.hostname !== hostname) errors.push(`${name} hostname does not match the approved staging topology`);
     if (name === "incoming") {
       if (host.published !== false) errors.push("incoming staging hostname must remain unpublished");
+    } else if (name === "viewer") {
+      for (const proof of ["dnsReady", "tlsReady", "tunnelReady", "protectedRoutesReady", "publicShareBypassReady"]) if (host[proof] !== true) errors.push(`viewer staging host must prove ${proof}`);
     } else {
       if (host.dnsReady !== true) errors.push(`${name} staging DNS must be confirmed ready`);
       if (host.accessReady !== true) errors.push(`${name} staging Access must be confirmed ready`);
@@ -173,9 +255,15 @@ export function validateEvidence(evidence, options = {}) {
   if (migrations.productionUnchanged !== true) errors.push("production migrations must be confirmed unchanged");
 
   const externalGates = evidence.externalGates ?? {};
+  const evidenceCollection = evidence.activationPlan?.phase === "evidence-collection" && (evidence.activationPlan?.requestedFlags?.length ?? 0) === 1;
+  const collectingGate = evidenceCollection ? evidence.activationPlan.collectingGate : null;
   for (const gate of REQUIRED_EXTERNAL_GATES) {
     const result = externalGates[gate] ?? {};
-    if (result.ready !== true) errors.push(`external gate ${gate} must be confirmed ready`);
+    if (result.ready !== true) {
+      if (gate === collectingGate && result.ready === false) continue;
+      errors.push(`external gate ${gate} must be confirmed ready`);
+      continue;
+    }
     if (!recentDate(result.verifiedAt, now) || !populated(result.evidenceRef)) {
       errors.push(`external gate ${gate} needs current referenced staging evidence`);
     }
@@ -184,15 +272,19 @@ export function validateEvidence(evidence, options = {}) {
     }
   }
   const accessEnrollment = externalGates.workspaceAccessEnrollment ?? {};
-  if (accessEnrollment.mode !== "dedicated_workspace_reconciler") errors.push("workspace Access enrollment must use the dedicated workspace reconciler");
-  for (const proof of ["clientGroupIsolated", "enrollmentBeforeEmail", "perInvitationReceiptEnforced", "receiptBindsWorkspaceAndEmailHash", "receiptRevocationRaceVerified", "multiWorkspaceRetention", "lastEligibilityRevocation", "staffGroupUnchanged"]) {
-    if (accessEnrollment[proof] !== true) errors.push(`workspace Access enrollment must prove ${proof}`);
+  if (accessEnrollment.ready === true) {
+    if (accessEnrollment.mode !== "dedicated_workspace_reconciler") errors.push("workspace Access enrollment must use the dedicated workspace reconciler");
+    for (const proof of ["clientGroupIsolated", "enrollmentBeforeEmail", "perInvitationReceiptEnforced", "receiptBindsWorkspaceAndEmailHash", "receiptRevocationRaceVerified", "multiWorkspaceRetention", "lastEligibilityRevocation", "staffGroupUnchanged"]) {
+      if (accessEnrollment[proof] !== true) errors.push(`workspace Access enrollment must prove ${proof}`);
+    }
+    if (!populated(accessEnrollment.processorEvidenceRef)) errors.push("workspace Access enrollment needs dedicated processor evidence");
   }
-  if (!populated(accessEnrollment.processorEvidenceRef)) errors.push("workspace Access enrollment needs dedicated processor evidence");
   const attachmentCors = externalGates.requestAttachmentR2CorsAndLeastPrivilege ?? {};
-  if (attachmentCors.corsArtifact !== "docs/staging/request-attachments-r2-cors.json") errors.push("request attachment gate must identify the reviewed staging CORS artifact");
-  for (const proof of ["allowedOriginPutVerified", "outOfScopeOriginDenied", "leastPrivilegeCredentialVerified"]) {
-    if (attachmentCors[proof] !== true) errors.push(`request attachment gate must prove ${proof}`);
+  if (attachmentCors.ready === true) {
+    if (attachmentCors.corsArtifact !== "docs/staging/request-attachments-r2-cors.json") errors.push("request attachment gate must identify the reviewed staging CORS artifact");
+    for (const proof of ["allowedOriginPutVerified", "outOfScopeOriginDenied", "leastPrivilegeCredentialVerified"]) {
+      if (attachmentCors[proof] !== true) errors.push(`request attachment gate must prove ${proof}`);
+    }
   }
 
   for (const app of apps) {
@@ -229,7 +321,7 @@ export function validateEvidence(evidence, options = {}) {
   for (const app of apps) {
     const deployment = deployments[app] ?? {};
     if (!populated(deployment.versionId)) errors.push(`${app} deployment needs an immutable staging version ID`);
-    if (deployment.releaseCommit !== evidence.releaseCommit) errors.push(`${app} deployed release commit must match releaseCommit`);
+    if (deployment.releaseCommit !== RELEASE_CANDIDATES.operations) errors.push(`${app} deployed release commit must match the immutable Ops runtime candidate`);
     if (typeof deployment.configSha256 !== "string" || deployment.configSha256.toUpperCase() !== configHashes[app]) errors.push(`${app} deployed config SHA-256 must match the reviewed config`);
     if (!recentDate(deployment.deployedAt, now) || !populated(deployment.evidenceRef)) errors.push(`${app} deployment evidence must be current and referenced`);
     for (const proof of ["bindingsVerified", "healthCheckPassed", "hostAdmissionDenied"]) {
@@ -285,7 +377,9 @@ export function validateEvidenceFile(base = root, evidenceFile = defaultEvidence
     const safeRemoteRef = typeof remoteRef === "string" && /^(?:origin|upstream)\/[A-Za-z0-9._/-]+$/.test(remoteRef);
     const sourceControlVerified = safeRemoteRef
       && spawnSync("git", ["merge-base", "--is-ancestor", head, remoteRef], { cwd: base, encoding: "utf8" }).status === 0;
-    return validateEvidence(evidence, { base, head, configs, configHashes, sourceControlVerified });
+    const runtimeSourceControlVerified = safeRemoteRef
+      && spawnSync("git", ["merge-base", "--is-ancestor", RELEASE_CANDIDATES.operations, remoteRef], { cwd: base, encoding: "utf8" }).status === 0;
+    return validateEvidence(evidence, { base, head, configs, configHashes, sourceControlVerified, runtimeSourceControlVerified });
   } catch (error) { return [`staging release evidence is invalid: ${error.message}`]; }
 }
 

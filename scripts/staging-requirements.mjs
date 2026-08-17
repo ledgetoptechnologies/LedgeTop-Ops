@@ -1,6 +1,45 @@
 export const STAGING_ACCOUNT_ID = "846c924bf17bf4f3dd15c97a4c5d1d51";
 export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledgetopdroneservices.com";
 
+// Runtime candidates are pinned independently from the release-packet HEAD.
+// This lets evidence and documentation evolve without silently changing the
+// exact application bytes approved for staging. Keep this false until all
+// FINAL_* placeholders below are replaced after the three repositories settle.
+export const RELEASE_CONTRACT_FINALIZED = false;
+export const RELEASE_CANDIDATES = Object.freeze({
+  operations: "<FINAL_OPS_RUNTIME_COMMIT>",
+  viewer: "<FINAL_VIEWER_COMMIT>",
+  projectAlpha: "<FINAL_PROJECT_ALPHA_COMMIT>",
+});
+
+export const STAGING_VIEWER = Object.freeze({
+  hostname: "viewer-staging.ledgetopdroneservices.com",
+  origin: "https://viewer-staging.ledgetopdroneservices.com",
+  image: "<FINAL_VIEWER_IMAGE_TAG_AT_SHA256_DIGEST>",
+  serviceKeyId: "ops-staging-v1",
+  eventKeyId: "viewer-staging-v1",
+  providerCredentialsKeyId: "provider-staging-v1",
+  requiredSecretNames: Object.freeze([
+    "SESSION_SECRET", "SERVICE_AUTH_SECRET", "VIEWER_EVENT_SECRET",
+    "PROVIDER_CREDENTIALS_KEY",
+  ]),
+});
+
+export const PROJECT_ALPHA_STAGING = Object.freeze({
+  releaseCommit: RELEASE_CANDIDATES.projectAlpha,
+  migrations: Object.freeze({
+    "0066_generic_portal_v2_integration.sql": "<FINAL_PROJECT_ALPHA_0066_SHA256>",
+    "0067_portal_projection_delivery.sql": "<FINAL_PROJECT_ALPHA_0067_SHA256>",
+  }),
+  defaultOffSettings: Object.freeze([
+    "portal_v2_integration_enabled", "portal_v2_relations_enabled",
+    "portal_catalog_v2_enabled", "portal_pricing_preview_enabled",
+    "portal_draft_quotes_enabled", "portal_outbound_delivery_enabled",
+    "portal_authoritative_hooks_enabled",
+  ]),
+  outboundSchedule: "* * * * *",
+});
+
 // Logical service identities remain stable even when their source directories
 // change. "delivery" still names the deployed Worker and staging evidence;
 // only its repository directory is apps/client.
@@ -38,6 +77,7 @@ export const STAGING_HOSTS = Object.freeze({
   operations: "ops-staging.ledgetopdroneservices.com",
   incoming: "incoming-staging.ledgetopdroneservices.com",
   "ops-sync": "ops-sync-staging.ledgetopdroneservices.com",
+  viewer: STAGING_VIEWER.hostname,
 });
 
 export const STAGING_CLIENT_PORTAL = Object.freeze({
@@ -184,6 +224,11 @@ export const REQUIRED_EXTERNAL_GATES = Object.freeze([
   "delegatedSharePublicAuthorization",
   "trueNasVideoThumbnailRenderer",
   "projectionParityAndAlerts",
+  "viewerDeployment",
+  "viewerServiceContract",
+  "viewerProcessing",
+  "viewerPublicShares",
+  "viewerClientSessions",
 ]);
 
 // A bare "ready" attestation is not enough for any external capability. These
@@ -238,6 +283,28 @@ export const REQUIRED_EXTERNAL_GATE_PROOFS = Object.freeze({
     "parityThresholdsConfigured", "stalenessAlertConfigured",
     "alertDestinationVerified", "testAlertObserved",
   ]),
+  viewerDeployment: Object.freeze([
+    "exactCommitAndDigestVerified", "configHashVerified", "secretValuesExcluded",
+    "healthAndReadinessVerified", "rootlessRuntimeVerified", "persistentStorageVerified",
+    "readOnlyImportsVerified", "rollbackVerified",
+  ]),
+  viewerServiceContract: Object.freeze([
+    "fixturesPinned", "serviceKeyIdsMatched", "eventKeyIdsMatched",
+    "exactBodySignaturesVerified", "callbackReplayDenied", "providerOutageViewingVerified",
+  ]),
+  viewerProcessing: Object.freeze([
+    "providerCredentialEncrypted", "providerProbeVerified", "admissionBackpressureVerified",
+    "durableWorkerHeartbeatVerified", "diskPreflightVerified", "callbackRetryVerified",
+    "restartRecoveryVerified", "representativeDatasetVerified",
+  ]),
+  viewerPublicShares: Object.freeze([
+    "expiryVerified", "neverExpireVerified", "passwordRateLimitsVerified",
+    "revocationVerified", "hashOnlyAbuseKeysVerified", "rangeNoStoreVerified",
+  ]),
+  viewerClientSessions: Object.freeze([
+    "oneTimeGrantVerified", "scopedSessionVerified", "silentRenewalVerified",
+    "refreshFailureStatePreserved", "expiryAndRevocationVerified", "desktopMobileVerified",
+  ]),
 });
 
 // Every default-off flag is either tied to current evidence gates or explicitly
@@ -255,7 +322,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: Object.freeze({ prohibitedReason: "Identity denylist activation requires a reviewed Operations mutation and audit surface" }),
     AUTHENTICATED_DELIVERY_GRANTS_ENABLED: Object.freeze({ prohibitedReason: "Authenticated Delivery grants require migration 0137, Project Alpha hierarchy parity, and end-to-end grant/revoke/restore evidence" }),
-    CLIENT_VIEWER_ENABLED: Object.freeze({ prohibitedReason: "Client Viewer activation requires migration 0138 and end-to-end scoped session, revocation, desktop, and mobile evidence" }),
+    CLIENT_VIEWER_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerClientSessions"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
     CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
     CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: Object.freeze({ gates: Object.freeze(["workspaceAccessEnrollment", "workspaceStaffRecovery"]) }),
     CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: Object.freeze({ gates: Object.freeze(["workspaceAccessEnrollment"]) }),
@@ -272,10 +339,10 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: Object.freeze({ prohibitedReason: "Identity denylist activation requires reviewed staging denial and last-manager evidence" }),
     CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: Object.freeze({ prohibitedReason: "Staff deny-policy management remains disabled until Client enforcement and audit evidence are recorded together" }),
     AUTHENTICATED_DELIVERY_GRANTS_ENABLED: Object.freeze({ prohibitedReason: "Authenticated Delivery grants require migration 0137 and end-to-end Operations-to-portal evidence" }),
-    VIEWER_INTEGRATION_ENABLED: Object.freeze({ prohibitedReason: "Viewer integration activation requires a deployed staging Viewer and signed service-contract evidence" }),
-    VIEWER_PROCESSING_ENABLED: Object.freeze({ prohibitedReason: "Viewer processing activation requires a deployed staging Viewer, encrypted provider credential, provider probe, durable worker, disk, callback, restart, and representative-dataset evidence" }),
-    VIEWER_PUBLIC_SHARES_ENABLED: Object.freeze({ prohibitedReason: "Public Viewer shares require deployed staging share creation, expiry, password, and revocation evidence" }),
-    CLIENT_VIEWER_SESSION_ISSUER_ENABLED: Object.freeze({ prohibitedReason: "Client Viewer sessions require migration 0138 and end-to-end entitlement and revocation evidence" }),
+    VIEWER_INTEGRATION_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract"]), stagingGates: Object.freeze(["viewerDeployment"]) }),
+    VIEWER_PROCESSING_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerProcessing"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
+    VIEWER_PUBLIC_SHARES_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerPublicShares"]), stagingGates: Object.freeze(["viewerDeployment"]) }),
+    CLIENT_VIEWER_SESSION_ISSUER_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerClientSessions"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
     DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
     DIRECT_DELIVERY_UPLOADS_ENABLED: Object.freeze({ prohibitedReason: "Direct Delivery upload activation requires its separate media acceptance packet" }),
     DROPBOX_IMPORT_ENABLED: Object.freeze({ prohibitedReason: "Dropbox import is outside this release packet" }),

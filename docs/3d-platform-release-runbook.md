@@ -1,18 +1,26 @@
 # 3D processing and delivery release runbook
 
-Status: **source candidate complete; live activation not performed**. Every
+Status: **release contract complete; final cross-repository pins and live
+activation pending**. Every
 Viewer, Operations, Client, processing, public-share, and Project Alpha portal
 feature gate remains off until the corresponding live evidence below is
 captured.
 
 ## Frozen source candidates
 
-- 3D Viewer: `da6b812bdaf4e0a9fa3569cb526bb6faa3bf6df5`
-  (`ghcr.io/ledgetoptechnologies/3d-viewer:sha-da6b812@sha256:7e2c2ba085572048b9a6be643c27308d122af054aa2b2323cf160762c3ec1b81`)
-- LTDS-Ops product code: `a867631` on
-  `codex/3d-processing-control-plane`; use that branch's current tip for this
-  reviewed runbook and other documentation-only follow-ups
-- Project Alpha: `b52cdbe9` on `codex/generic-portal-v2-integration`
+- 3D Viewer: `<FINAL_VIEWER_COMMIT>` and
+  `<FINAL_VIEWER_IMAGE_TAG_AT_SHA256_DIGEST>`
+- LTDS-Ops product code: `<FINAL_OPS_RUNTIME_COMMIT>` on
+  `codex/3d-processing-control-plane`. The final pin must contain the desktop
+  Administration-menu fix equivalent to `09e3443`; never substitute a mutable
+  branch tip.
+- Project Alpha: `<FINAL_PROJECT_ALPHA_COMMIT>` on
+  `codex/generic-portal-v2-integration`
+
+The centralized placeholders above and the corresponding constants in
+`scripts/staging-requirements.mjs` must be updated after all three repositories
+settle. Until then, `RELEASE_CONTRACT_FINALIZED=false` makes staging evidence
+verification fail closed.
 
 The Viewer/Ops signed-processing corpus has SHA-256
 `5e412f9b57a9b8495b2c11736fdb6e7aeed57b15a1cb96ba219c1f2398b50572`.

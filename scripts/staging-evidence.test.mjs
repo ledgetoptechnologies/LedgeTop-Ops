@@ -5,11 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { validateEvidence } from "./staging-evidence.mjs";
-import { FEATURE_FLAG_ACTIVATION_POLICIES, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS } from "./staging-requirements.mjs";
+import { validateEvidence as validateEvidenceContract } from "./staging-evidence.mjs";
+import { FEATURE_FLAG_ACTIVATION_POLICIES, PROJECT_ALPHA_STAGING, RELEASE_CANDIDATES, RELEASE_CONTRACT_FINALIZED, REQUIRED_DISABLED_FEATURE_FLAGS, REQUIRED_EXTERNAL_GATES, REQUIRED_EXTERNAL_GATE_PROOFS, REQUIRED_STAGING_MIGRATIONS, REQUIRED_STAGING_SECRETS, STAGING_ACCESS_AUDS, STAGING_ACCOUNT_ID, STAGING_CLIENT_PORTAL, STAGING_HOSTS, STAGING_INVENTORY, STAGING_STATIC_VARS, STAGING_VIEWER } from "./staging-requirements.mjs";
 
 const now = Date.parse("2026-07-30T12:30:00Z");
 const digest = (value) => crypto.createHash("sha256").update(value).digest("hex").toUpperCase();
+const validateEvidence = (evidence, options) => validateEvidenceContract(evidence, { ...options, allowUnfinalizedContractForTest: true });
 function fixture(base) {
   fs.mkdirSync(path.join(base, ".backups"), { recursive: true });
   const backupBody = "backup".repeat(60);
@@ -25,17 +26,129 @@ function fixture(base) {
   };
   const evidence = {
     releaseCommit: "a".repeat(40),
-    sourceControl: { pushed: true, remoteRef: "origin/codex/release", verifiedAt: "2026-07-30T12:00:00Z", evidenceRef: "ticket:source-control" },
+    sourceControl: { pushed: true, remoteRef: "origin/codex/release", verifiedAt: "2026-07-30T12:00:00Z", evidenceRef: "ticket:source-control", runtimeCandidateCommit: RELEASE_CANDIDATES.operations, runtimeCandidatePushed: true, runtimeEvidenceRef: "ticket:source-control:runtime" },
     configSha256: { delivery: "B".repeat(64), operations: "C".repeat(64), "ops-sync": "D".repeat(64) },
     credential: { valid: true, accountId: STAGING_ACCOUNT_ID, verifiedAt: "2026-07-30T12:00:00Z", confirmedPermissions: ["workers:write", "d1:write", "zone:read"] },
     branchBuilds: Object.fromEntries(["delivery", "operations", "ops-sync"].map((app) => [app, { productionBranch: "main", nonProductionBuildsEnabled: false, verifiedAt: "2026-07-30T12:00:00Z", evidenceRef: `ticket:${app}` }])),
-    projectAlpha: { baseUrl: configs.operations.vars.PROJECT_ALPHA_BASE_URL, approvalRef: "ticket:pa", operationsReadCredentialReady: true, opsSyncServiceAuthReady: true, opsSyncAccessGroupReady: true, ed25519Ready: false, paymentBillingContractReady: true, authorizationBypassUsed: false },
+    projectAlpha: {
+      baseUrl: configs.operations.vars.PROJECT_ALPHA_BASE_URL,
+      approvalRef: "ticket:pa",
+      operationsReadCredentialReady: true,
+      opsSyncServiceAuthReady: true,
+      opsSyncAccessGroupReady: true,
+      ed25519Ready: false,
+      paymentBillingContractReady: true,
+      authorizationBypassUsed: false,
+      releaseCommit: RELEASE_CANDIDATES.projectAlpha,
+      sourceCommitVerified: true,
+      remoteRef: "origin/codex/generic-portal-v2-integration",
+      webImageDigest: `sha256:${"1".repeat(64)}`,
+      cronImageDigest: `sha256:${"2".repeat(64)}`,
+      imagesShareSourceCommit: true,
+      deployedAt: "2026-07-30T12:00:00Z",
+      deploymentEvidenceRef: "ticket:pa:deployment",
+      migrations: {
+        expected: Object.keys(PROJECT_ALPHA_STAGING.migrations),
+        sourceSha256: { ...PROJECT_ALPHA_STAGING.migrations },
+        appliedToStaging: true,
+        ledgerVerified: true,
+        secondRunEmpty: true,
+        schemaIntegrityPassed: true,
+        verifiedAt: "2026-07-30T12:00:00Z",
+        ledgerEvidenceRef: "ticket:pa:migrations:ledger",
+        verificationEvidenceRef: "ticket:pa:migrations:verify",
+      },
+      defaultOff: {
+        settings: Object.fromEntries(PROJECT_ALPHA_STAGING.defaultOffSettings.map((setting) => [setting, false])),
+        profileCapabilitiesDisabled: true,
+        profileDeliveryDisabled: true,
+        evidenceRef: "ticket:pa:default-off",
+      },
+      outbound: {
+        senderInstalled: true,
+        schedule: PROJECT_ALPHA_STAGING.outboundSchedule,
+        deliveryEnabled: false,
+        authoritativeHooksEnabled: false,
+        workerInertWhileDisabled: true,
+        deliveryKeyId: "pa-staging-v1",
+        previousDeliveryKeyId: "",
+        secretEncryptedAtRest: true,
+        secretValuesExcluded: true,
+        exactBodyHmacVerified: true,
+        destinationValidationVerified: true,
+        retryDeadLetterVerified: true,
+        revocationPriorityVerified: true,
+        verifiedAt: "2026-07-30T12:00:00Z",
+        evidenceRef: "ticket:pa:outbound",
+      },
+      rollback: {
+        backupRef: "ticket:pa:backup",
+        targetWebImageDigest: `sha256:${"3".repeat(64)}`,
+        targetCronImageDigest: `sha256:${"4".repeat(64)}`,
+        restoreDrillPassed: true,
+        migrationFixForwardReviewed: true,
+        tombstoneDrainPlanReviewed: true,
+        projectionAuthorityDisabledFirst: true,
+        outboundHeldUntilTombstonesAcknowledged: true,
+        senderDisabledAfterDrain: true,
+        noDestructiveRollback: true,
+        testedAt: "2026-07-30T12:00:00Z",
+        evidenceRef: "ticket:pa:rollback",
+      },
+    },
+    viewer: {
+      hostname: STAGING_VIEWER.hostname,
+      origin: STAGING_VIEWER.origin,
+      releaseCommit: RELEASE_CANDIDATES.viewer,
+      image: STAGING_VIEWER.image,
+      configSha256: "5".repeat(64),
+      deployedAt: "2026-07-30T12:00:00Z",
+      deploymentEvidenceRef: "ticket:viewer:deployment",
+      configuration: {
+        publicBaseUrl: STAGING_VIEWER.origin,
+        expectedHost: STAGING_VIEWER.hostname,
+        opsBaseUrl: `https://${STAGING_HOSTS.operations}`,
+        processingPlatformEnabled: false,
+        processingWorkerProfileStarted: false,
+        webodmEnabled: false,
+        proxySharedSecretEnabled: false,
+        trustedProxyAddressesEnabled: false,
+        serviceKeyId: STAGING_VIEWER.serviceKeyId,
+        eventKeyId: STAGING_VIEWER.eventKeyId,
+        providerCredentialsKeyId: STAGING_VIEWER.providerCredentialsKeyId,
+        secretNames: [...STAGING_VIEWER.requiredSecretNames],
+        secretValuesExcluded: true,
+        envFileMode: "0600",
+        evidenceRef: "ticket:viewer:config",
+      },
+      healthCheckPassed: true,
+      readinessCheckPassed: true,
+      canonicalDomainDenied: true,
+      proxyForwardedHostVerified: true,
+      narrowBindFirewallTopologyVerified: true,
+      rootlessUidGidVerified: true,
+      capabilitySetsEmpty: true,
+      readOnlyRootFilesystem: true,
+      persistentVolumeVerified: true,
+      readOnlyImportsVerified: true,
+      rangeNoStoreVerified: true,
+      rollback: {
+        targetImageDigest: `sha256:${"6".repeat(64)}`,
+        configBackupRef: "ticket:viewer:config-backup",
+        drillPassed: true,
+        persistentDataPreserved: true,
+        noDestructiveRollback: true,
+        testedAt: "2026-07-30T12:00:00Z",
+        evidenceRef: "ticket:viewer:rollback",
+      },
+    },
     hosts: {
       delivery: { hostname: STAGING_HOSTS.delivery, dnsReady: true, accessReady: true },
       client: { hostname: STAGING_HOSTS.client, dnsReady: true, accessReady: true },
       operations: { hostname: STAGING_HOSTS.operations, dnsReady: true, accessReady: true },
       incoming: { hostname: STAGING_HOSTS.incoming, published: false },
       "ops-sync": { hostname: STAGING_HOSTS["ops-sync"], dnsReady: true, accessReady: true },
+      viewer: { hostname: STAGING_HOSTS.viewer, dnsReady: true, tlsReady: true, tunnelReady: true, protectedRoutesReady: true, publicShareBypassReady: true },
     },
     access: { audiences: { ...STAGING_ACCESS_AUDS }, groupId: "staging-group-id", groupName: "LTDS Staging Testers", testerEmail: "tester@example.com", testerActiveOperationsUser: true, approvalRef: "ticket:access" },
     clientPortal: {
@@ -71,7 +184,7 @@ function fixture(base) {
     },
     deployments: Object.fromEntries(["delivery", "operations", "ops-sync"].map((app) => [app, {
       versionId: `staging-version-${app}`,
-      releaseCommit: "a".repeat(40),
+      releaseCommit: RELEASE_CANDIDATES.operations,
       configSha256: { delivery: "B".repeat(64), operations: "C".repeat(64), "ops-sync": "D".repeat(64) }[app],
       deployedAt: "2026-07-30T12:00:00Z",
       bindingsVerified: true,
@@ -122,6 +235,30 @@ test("accepts complete, current, config-bound non-secret release evidence", () =
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-"));
   const { configs, evidence } = fixture(base);
   assert.deepEqual(validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes: evidence.configSha256, now, sourceControlVerified: true }), []);
+});
+
+test("operational verification reflects the final cross-repository pin gate", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-final-pins-"));
+  const { configs, evidence } = fixture(base);
+  const errors = validateEvidenceContract(evidence, { base, head: evidence.releaseCommit, configs, configHashes: evidence.configSha256, now, sourceControlVerified: true });
+  assert.equal(errors.some((error) => error.includes("FINAL_* candidate placeholders")), !RELEASE_CONTRACT_FINALIZED, errors.join(" | "));
+});
+
+test("fails closed on Viewer and Project Alpha deployment-contract drift", () => {
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-cross-repo-"));
+  const { configs, evidence, configHashes } = fixture(base);
+  evidence.viewer.image = "ghcr.io/example/viewer:latest";
+  evidence.viewer.configuration.proxySharedSecretEnabled = true;
+  evidence.viewer.narrowBindFirewallTopologyVerified = false;
+  evidence.projectAlpha.releaseCommit = "f".repeat(40);
+  evidence.projectAlpha.migrations.sourceSha256["0066_generic_portal_v2_integration.sql"] = "0".repeat(64);
+  evidence.projectAlpha.defaultOff.settings.portal_outbound_delivery_enabled = true;
+  evidence.projectAlpha.outbound.secretValues = { signingSecret: "must-never-appear" };
+  evidence.projectAlpha.rollback.restoreDrillPassed = false;
+  const errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
+  for (const expected of ["exact reviewed commit and image digest", "proxy hardening", "narrowBindFirewallTopologyVerified", "reviewed source commit", "0066_generic_portal_v2_integration.sql SHA-256", "portal_outbound_delivery_enabled must remain false", "without containing secret values", "restoreDrillPassed"]) {
+    assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
+  }
 });
 
 test("fails closed on stale credential, config drift, branch builds, secrets, and backup identity", () => {
@@ -217,16 +354,34 @@ test("activation dependencies cover every default-off flag and reject prohibited
   }
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-activation-"));
   const { evidence, configs, configHashes } = fixture(base);
-  evidence.activationPlan = { requestedFlags: ["delivery.CLIENT_PORTAL_INVITATION_EMAIL_ENABLED"], approvalGranted: true, approvedAt: "2026-07-30T12:00:00Z", approvalRef: "ticket:activation" };
+  evidence.activationPlan = { requestedFlags: ["delivery.CLIENT_PORTAL_INVITATION_EMAIL_ENABLED"], phase: "post-evidence-validation", environment: "staging", productionFlagsRemainOff: true, oneGateAtATime: true, rollbackRef: "ticket:rollback", approvalGranted: true, approvedAt: "2026-07-30T12:00:00Z", approvalRef: "ticket:activation" };
   evidence.externalGates.workspaceAccessEnrollment.ready = false;
   let errors = validateEvidence(evidence, { base, head: evidence.releaseCommit, configs, configHashes, now, sourceControlVerified: true });
   assert(errors.some((error) => error.includes("requires current ready gate workspaceAccessEnrollment")), errors.join(" | "));
 
   const freshBase = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-prohibited-"));
   const fresh = fixture(freshBase);
-  fresh.evidence.activationPlan = { requestedFlags: ["operations.R2_PURGE_ENABLED"], approvalGranted: true, approvedAt: "2026-07-30T12:00:00Z", approvalRef: "ticket:activation" };
+  fresh.evidence.activationPlan = { requestedFlags: ["operations.R2_PURGE_ENABLED"], phase: "post-evidence-validation", environment: "staging", productionFlagsRemainOff: true, oneGateAtATime: true, rollbackRef: "ticket:rollback", approvalGranted: true, approvedAt: "2026-07-30T12:00:00Z", approvalRef: "ticket:activation" };
   errors = validateEvidence(fresh.evidence, { base: freshBase, head: fresh.evidence.releaseCommit, configs: fresh.configs, configHashes: fresh.configHashes, now, sourceControlVerified: true });
   assert(errors.some((error) => error.includes("R2_PURGE_ENABLED is prohibited")), errors.join(" | "));
+
+  const viewerBase = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-viewer-activation-"));
+  const viewer = fixture(viewerBase);
+  viewer.evidence.activationPlan = { requestedFlags: ["operations.VIEWER_PROCESSING_ENABLED"], phase: "evidence-collection", collectingGate: "viewerProcessing", environment: "staging", productionFlagsRemainOff: true, oneGateAtATime: true, rollbackRef: "ticket:viewer-rollback", approvalGranted: true, approvedAt: "2026-07-30T12:00:00Z", approvalRef: "ticket:viewer-activation" };
+  viewer.evidence.externalGates.viewerProcessing.ready = false;
+  viewer.evidence.externalGates.viewerDeployment.ready = false;
+  errors = validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true });
+  assert(errors.some((error) => error.includes("requires current ready gate viewerDeployment")), errors.join(" | "));
+  viewer.evidence.externalGates.viewerDeployment.ready = true;
+  viewer.evidence.externalGates.projectAlphaDraftQuotes.ready = false;
+  errors = validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true });
+  assert(errors.some((error) => error.includes("external gate projectAlphaDraftQuotes must be confirmed ready")), errors.join(" | "));
+  viewer.evidence.externalGates.projectAlphaDraftQuotes.ready = true;
+  assert.deepEqual(validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true }), []);
+
+  viewer.evidence.activationPlan.phase = "post-evidence-validation";
+  errors = validateEvidence(viewer.evidence, { base: viewerBase, head: viewer.evidence.releaseCommit, configs: viewer.configs, configHashes: viewer.configHashes, now, sourceControlVerified: true });
+  assert(errors.some((error) => error.includes("viewerProcessing")), errors.join(" | "));
 });
 
 test("checked-in evidence example stays complete as migrations, flags, gates, and proofs evolve", () => {
@@ -238,6 +393,14 @@ test("checked-in evidence example stays complete as migrations, flags, gates, an
   for (const gate of REQUIRED_EXTERNAL_GATES) {
     for (const proof of REQUIRED_EXTERNAL_GATE_PROOFS[gate] ?? []) assert.equal(example.externalGates[gate][proof], false, `${gate}.${proof}`);
   }
+  assert.equal(example.sourceControl.runtimeCandidateCommit, RELEASE_CANDIDATES.operations);
+  assert.equal(example.viewer.releaseCommit, RELEASE_CANDIDATES.viewer);
+  assert.equal(example.viewer.image, STAGING_VIEWER.image);
+  assert.deepEqual(new Set(example.viewer.configuration.secretNames), new Set(STAGING_VIEWER.requiredSecretNames));
+  assert.equal(example.viewer.configuration.proxySharedSecretEnabled, false);
+  assert.equal(example.projectAlpha.releaseCommit, RELEASE_CANDIDATES.projectAlpha);
+  assert.deepEqual(example.projectAlpha.migrations.sourceSha256, PROJECT_ALPHA_STAGING.migrations);
+  assert.deepEqual(new Set(Object.keys(example.projectAlpha.defaultOff.settings)), new Set(PROJECT_ALPHA_STAGING.defaultOffSettings));
   assert.deepEqual(example.activationPlan, { requestedFlags: [], approvalGranted: false });
 });
 
@@ -248,6 +411,10 @@ test("Viewer processing cannot disappear from the staging release inventory", ()
   assert(REQUIRED_DISABLED_FEATURE_FLAGS.operations.includes("VIEWER_PROCESSING_ENABLED"));
   assert.equal(STAGING_STATIC_VARS.operations.VIEWER_PROCESSING_ENABLED, "false");
   assert.equal(STAGING_STATIC_VARS.operations.VIEWER_EVENT_KEY_ID, "viewer-staging-v1");
+  assert.equal(STAGING_HOSTS.viewer, STAGING_VIEWER.hostname);
+  assert.deepEqual(FEATURE_FLAG_ACTIVATION_POLICIES.operations.VIEWER_PROCESSING_ENABLED.gates, ["viewerDeployment", "viewerServiceContract", "viewerProcessing"]);
+  assert.deepEqual(FEATURE_FLAG_ACTIVATION_POLICIES.operations.VIEWER_PROCESSING_ENABLED.stagingGates, ["viewerDeployment", "viewerServiceContract"]);
+  assert.equal(FEATURE_FLAG_ACTIVATION_POLICIES.operations.VIEWER_PROCESSING_ENABLED.prohibitedReason, undefined);
 });
 
 test("pre-deployment preparation and post-deployment verification remain non-circular", () => {
