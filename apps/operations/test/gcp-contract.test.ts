@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatGcpDistance, formatGcpElevation, MAX_GCP_IMPORT_BYTES, validateGcpImportSize } from "../src/client/gcp-contract";
+import { formatGcpDistance, formatGcpElevation, gcpElevationDisplayValue, gcpElevationToMeters, MAX_GCP_IMPORT_BYTES, validateGcpImportSize } from "../src/client/gcp-contract";
 
 describe("GCP display units", () => {
   it("fails fast before reading interchange files over the Viewer 2 MiB cap", () => {
@@ -12,6 +12,10 @@ describe("GCP display units", () => {
     expect(formatGcpElevation(243.84, "metric")).toBe("243.84 m");
     expect(formatGcpDistance(30.48, "imperial")).toBe("100 ft");
     expect(formatGcpDistance(30.48, "metric")).toBe("30 m");
+    expect(gcpElevationDisplayValue(243.84,"imperial")).toBeCloseTo(800);
+    expect(gcpElevationToMeters(800,"imperial")).toBeCloseTo(243.84);
+    expect(gcpElevationDisplayValue(243.84,"metric")).toBe(243.84);
+    expect(gcpElevationToMeters(243.84,"metric")).toBe(243.84);
   });
 
   it("uses larger units for longer image-to-GCP distances", () => {

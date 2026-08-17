@@ -64,6 +64,18 @@ export interface ViewerGcpCorrespondence {
   updatedAt: string;
 }
 
+export function gcpElevationDisplayValue(meters: number, units: ViewerDisplayUnits): number {
+  return units === "imperial" ? meters / 0.3048 : meters;
+}
+
+export function gcpElevationToMeters(value: number, units: ViewerDisplayUnits): number {
+  return units === "imperial" ? value * 0.3048 : value;
+}
+
+export function gcpElevationUnitName(units: ViewerDisplayUnits): "feet" | "meters" {
+  return units === "imperial" ? "feet" : "meters";
+}
+
 export function formatGcpElevation(meters: number, units: ViewerDisplayUnits): string {
   return units === "imperial"
     ? `${(meters * 3.280839895).toFixed(2)} ft`

@@ -7,6 +7,9 @@ import type { ViewerAdminClient } from "./viewer-admin-client";
 import {
   formatGcpDistance,
   formatGcpElevation,
+  gcpElevationDisplayValue,
+  gcpElevationToMeters,
+  gcpElevationUnitName,
   validateGcpImportSize,
   type GcpInterchangeFormat,
   type ViewerGcpCorrespondence,
@@ -248,13 +251,13 @@ export function GcpWorkspace({ client, datasets, tasks, mapToken, units, canRead
         <div className="gcp-point-list">{detail.points.map((point) => <button key={point.id} type="button" aria-pressed={point.id === selectedPointId} onClick={() => setSelectedPointId(point.id)}>
           <strong>{point.label}</strong><span>{point.externalId} · {point.latitude.toFixed(6)}, {point.longitude.toFixed(6)}</span><small>{formatGcpElevation(point.elevationM, units)}</small>
         </button>)}</div>
-        {selectedPoint && canWrite && <details className="gcp-point-editor"><summary>Edit or remove selected point</summary><form onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); void run(async () => {
+        {selectedPoint && canWrite && <details className="gcp-point-editor"><summary>Edit or remove selected point</summary><form key={`${selectedPoint.id}:${units}`} onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); void run(async () => {
           const value = await client.request<{ point: ViewerGcpPoint }>(`/api/v1/gcp-points/${encodeURIComponent(selectedPoint.id)}`, { method: "PATCH", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({
-            label: String(data.get("label")), latitude: Number(data.get("latitude")), longitude: Number(data.get("longitude")), elevationM: Number(data.get("elevationM")), description: String(data.get("description")) || null,
+            label: String(data.get("label")), latitude: Number(data.get("latitude")), longitude: Number(data.get("longitude")), elevationM: gcpElevationToMeters(Number(data.get("elevation")), units), description: String(data.get("description")) || null,
           }) });
           setDetail((current) => current && ({ ...current, points: current.points.map((point) => point.id === value.point.id ? value.point : point) }));
         }, "GCP point updated."); }}>
-          <label>Label<input name="label" defaultValue={selectedPoint.label} required /></label><label>Latitude<input name="latitude" type="number" min="-90" max="90" step="any" defaultValue={selectedPoint.latitude} required /></label><label>Longitude<input name="longitude" type="number" min="-180" max="180" step="any" defaultValue={selectedPoint.longitude} required /></label><label>Elevation (meters)<input name="elevationM" type="number" step="any" defaultValue={selectedPoint.elevationM} required /></label><label>Description<input name="description" defaultValue={selectedPoint.description || ""} /></label>
+          <label>Label<input name="label" defaultValue={selectedPoint.label} required /></label><label>Latitude<input name="latitude" type="number" min="-90" max="90" step="any" defaultValue={selectedPoint.latitude} required /></label><label>Longitude<input name="longitude" type="number" min="-180" max="180" step="any" defaultValue={selectedPoint.longitude} required /></label><label>Elevation ({gcpElevationUnitName(units)})<input name="elevation" type="number" step="any" defaultValue={gcpElevationDisplayValue(selectedPoint.elevationM,units)} required /></label><label>Description<input name="description" defaultValue={selectedPoint.description || ""} /></label>
           <button className="button-orange" disabled={busy}>Save point</button><button type="button" className="button-danger" disabled={busy} onClick={() => { if (window.confirm(`Remove ${selectedPoint.label} and all of its image marks?`)) void run(async () => {
             await client.request(`/api/v1/gcp-points/${encodeURIComponent(selectedPoint.id)}`, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } });
             setDetail((current) => current && ({ ...current, points: current.points.filter((point) => point.id !== selectedPoint.id) })); setSelectedPointId(null);
