@@ -183,6 +183,43 @@ The exact mappings are:
 | `VIEWER_EVENT_KEY_ID=viewer-v1` | `VIEWER_EVENT_KEY_ID=viewer-v1` |
 | `VIEWER_EVENT_SECRET` | `VIEWER_EVENT_HMAC_SECRET` |
 
+Before enabling either integration flag, an Operations administrator with
+`viewer.manage` must open **Administration → 3D Viewer** and run **Test Viewer
+connection**. This read-only probe remains available while Viewer integration
+is disabled. It checks public health, public readiness, and a signed catalog
+request without returning model identifiers, mount paths, response bodies, or
+secret values.
+
+Use the bounded service-auth result as follows:
+
+- `connected`: the signed catalog request passed; record the model counts as
+  staging evidence, but do not infer that processing or sharing is enabled.
+- `not_configured`: configure the bare HTTPS Viewer origin, key ID, and shared
+  secret on Operations. The origin must contain no path, query, credentials, or
+  redirect.
+- `authentication_failed`: Viewer or its proxy returned 401/403. Confirm the
+  two secret values are byte-identical without printing them; confirm both key
+  IDs match the environment-specific configured value (`ops-v1` in production
+  or `ops-staging-v1` in isolated staging); synchronize both clocks; and verify
+  Nginx preserves the `X-LTDS-*` request headers from its trusted forwarder.
+  Rotate by generating one new random value and setting that same value on both
+  sides, never by copying either value into a ticket, log, evidence file, or
+  browser field.
+- `route_not_found`: confirm the reviewed Viewer image is running and Nginx
+  forwards `/api/v1/models` unchanged instead of serving an older image or
+  rewriting the path.
+- `invalid_response`: compare the running Viewer revision/schema headers with
+  the frozen candidate and reject the deployment if they differ.
+- `unavailable`: confirm DNS/Tunnel/Nginx reachability, no redirect or Access
+  interstitial is inserted, and the proxy preserves signed headers. Inspect
+  only the bounded Viewer log code; do not retain raw request headers.
+
+After a Viewer environment change, restart both Viewer services against the
+same persistent volume. After an Operations Worker secret change, wait for the
+new Worker version to become active. Rerun the preflight and require
+`connected`; do not enable a feature flag merely because public health and
+readiness pass.
+
 `SESSION_SECRET` stays Viewer-only. Set
 `PROVIDER_CREDENTIALS_KEY_ID=provider-v1` and the 64-hex
 `PROVIDER_CREDENTIALS_KEY`; losing it makes stored provider tokens
