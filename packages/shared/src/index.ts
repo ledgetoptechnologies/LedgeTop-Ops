@@ -1,4 +1,9 @@
-import type { ViewerDisplayUnits, ViewerSessionGrant } from "./viewer-service";
+import type {
+  ViewerDisplayUnits,
+  ViewerPublicShareCreation,
+  ViewerPublicShareSummary,
+  ViewerSessionGrant,
+} from "./viewer-service";
 
 export const PERMISSIONS = [
   "dashboard.view",
@@ -507,6 +512,52 @@ export type ClientViewerSessionResultV1 =
       code: "invalid_request" | "denied" | "not_found" | "configuration_error" | "temporarily_unavailable";
     };
 
+export interface ClientViewerShareAuthorizationV1 {
+  protocolVersion: 1;
+  workspaceId: string;
+  identityId: string;
+  legacyAccountId: string;
+  legacyIdentityId: string;
+  principalIssuer: string;
+  principalSubject: string;
+  projectId: string;
+  associationId: string;
+}
+
+export interface ClientViewerShareCreateRequestV1 extends ClientViewerShareAuthorizationV1 {
+  idempotencyKey: string;
+  label: string | null;
+  expiresAt: string | null;
+  password?: string;
+  displayUnits: ViewerDisplayUnits;
+}
+
+export interface ClientViewerShareListRequestV1 extends ClientViewerShareAuthorizationV1 {}
+
+export interface ClientViewerShareRevokeRequestV1 extends ClientViewerShareAuthorizationV1 {
+  shareId: string;
+  idempotencyKey: string;
+}
+
+export type ClientViewerShareResultCodeV1 =
+  | "invalid_request" | "denied" | "not_found" | "idempotency_conflict"
+  | "configuration_error" | "temporarily_unavailable";
+
+export type ClientViewerShareCreateResultV1 =
+  | { ok: true; protocolVersion: 1; replayed: boolean; creation: ViewerPublicShareCreation }
+  | { ok: false; protocolVersion: 1; code: ClientViewerShareResultCodeV1 };
+
+export type ClientViewerShareListResultV1 =
+  | { ok: true; protocolVersion: 1; shares: ViewerPublicShareSummary[] }
+  | { ok: false; protocolVersion: 1; code: ClientViewerShareResultCodeV1 };
+
+export type ClientViewerShareRevokeResultV1 =
+  | { ok: true; protocolVersion: 1; replayed: boolean; share: ViewerPublicShareSummary }
+  | { ok: false; protocolVersion: 1; code: ClientViewerShareResultCodeV1 };
+
 export interface ViewerSessionIssuerBinding {
   issueClientViewerSession(request: ClientViewerSessionRequestV1): Promise<ClientViewerSessionResultV1>;
+  createClientViewerShare(request: ClientViewerShareCreateRequestV1): Promise<ClientViewerShareCreateResultV1>;
+  listClientViewerShares(request: ClientViewerShareListRequestV1): Promise<ClientViewerShareListResultV1>;
+  revokeClientViewerShare(request: ClientViewerShareRevokeRequestV1): Promise<ClientViewerShareRevokeResultV1>;
 }

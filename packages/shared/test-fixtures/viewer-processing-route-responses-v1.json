@@ -8,6 +8,8 @@
     "projectId": "project-one",
     "taskId": "task-one",
     "attemptId": "attempt-one",
+    "projectDisplayName": "North site",
+    "taskDisplayName": "Map flight 1",
     "requestedBySubject": "ops:staff-one",
     "status": "ready_for_review",
     "reviewUrl": "https://ops.example.test/operations/processing?attemptId=attempt-one"
@@ -55,7 +57,7 @@
       "metadata": {}, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z",
       "updatedAt": "2027-01-15T08:12:00.000Z", "archivedAt": null,
       "latestAttempt": {
-        "id": "attempt-one", "taskId": "task-one", "attemptNumber": 1, "providerId": "provider-one",
+        "id": "attempt-one", "taskId": "task-one", "datasetId": "dataset-one", "attemptNumber": 1, "providerId": "provider-one",
         "providerTaskId": "42", "presetId": null, "options": {}, "status": "running", "progress": 0.4,
         "providerOutputCursor": 0, "capabilityFingerprint": null, "errorCode": null, "errorMessage": null, "resultModelId": null,
         "resultModelVersionId": null, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z",
@@ -72,7 +74,7 @@
       "metadata": {}, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z",
       "updatedAt": "2027-01-15T08:12:00.000Z", "archivedAt": null,
       "latestAttempt": {
-        "id": "attempt-one", "taskId": "task-one", "attemptNumber": 1, "providerId": "provider-one",
+        "id": "attempt-one", "taskId": "task-one", "datasetId": "dataset-one", "attemptNumber": 1, "providerId": "provider-one",
         "providerTaskId": "42", "presetId": null, "options": {}, "status": "running", "progress": 0.4,
         "providerOutputCursor": 0, "capabilityFingerprint": null, "errorCode": null, "errorMessage": null, "resultModelId": null,
         "resultModelVersionId": null, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z",
@@ -99,10 +101,11 @@
     }],
     "nextCursor": null
   },
-  "presets": { "presets": [{ "id": "preset-one", "displayName": "Balanced", "options": { "dsm": true }, "builtIn": true, "providerType": null, "capabilityFingerprint": null }] },
+  "presets": { "presets": [{ "id": "preset-one", "displayName": "Balanced", "description": "Reusable settings", "options": { "dsm": true }, "builtIn": false, "enabled": true, "providerType": "clusterodm", "capabilityFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "createdAt": "2027-01-15T07:30:00.000Z", "updatedAt": "2027-01-15T07:30:00.000Z" }] },
+  "presetCreated": { "preset": { "id": "preset-one", "displayName": "Balanced", "description": "Reusable settings", "options": { "dsm": true }, "builtIn": false, "enabled": true, "providerType": "clusterodm", "capabilityFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "createdAt": "2027-01-15T07:30:00.000Z", "updatedAt": "2027-01-15T07:30:00.000Z" } },
   "attemptDetail": {
     "attempt": {
-      "id": "attempt-one", "taskId": "task-one", "attemptNumber": 1, "providerId": "provider-one",
+      "id": "attempt-one", "taskId": "task-one", "datasetId": "dataset-one", "attemptNumber": 1, "providerId": "provider-one",
       "providerTaskId": "42", "presetId": null, "options": {}, "status": "running", "progress": 0.4,
       "providerOutputCursor": 0, "capabilityFingerprint": null, "errorCode": null, "errorMessage": null, "resultModelId": null,
       "resultModelVersionId": null, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z",
@@ -234,6 +237,105 @@
       "errorCode": null, "errorMessage": null, "createdAt": "2027-01-15T08:15:00.000Z",
       "updatedAt": "2027-01-15T08:18:00.000Z", "completedAt": "2027-01-15T08:18:00.000Z"
     } }
+  },
+  "taskSubmission": {
+    "task": {
+      "id": "task-submitted", "projectId": "project-one", "datasetId": "dataset-one", "displayName": "Submitted flight",
+      "description": null, "status": "queued", "activeAttemptId": "attempt-submitted", "publishedModelId": null,
+      "metadata": {}, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:40:00.000Z",
+      "updatedAt": "2027-01-15T08:40:00.000Z", "archivedAt": null,
+      "latestAttempt": {
+        "id": "attempt-submitted", "taskId": "task-submitted", "datasetId": "dataset-one", "attemptNumber": 1,
+        "providerId": "provider-one", "providerTaskId": "provider-task-submitted", "presetId": "preset-one",
+        "options": { "pc-ept": true, "gltf": true, "3d-tiles": true }, "status": "pending", "progress": 0,
+        "providerOutputCursor": 0, "capabilityFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "errorCode": null, "errorMessage": null, "resultModelId": null, "resultModelVersionId": null,
+        "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:40:00.000Z", "updatedAt": "2027-01-15T08:40:00.000Z",
+        "startedAt": null, "upstreamCompletedAt": null, "ingestedAt": null, "completedAt": null
+      }
+    },
+    "attempt": {
+      "id": "attempt-submitted", "taskId": "task-submitted", "datasetId": "dataset-one", "attemptNumber": 1,
+      "providerId": "provider-one", "providerTaskId": "provider-task-submitted", "presetId": "preset-one",
+      "options": { "pc-ept": true, "gltf": true, "3d-tiles": true }, "status": "pending", "progress": 0,
+      "providerOutputCursor": 0, "capabilityFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "errorCode": null, "errorMessage": null, "resultModelId": null, "resultModelVersionId": null,
+      "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:40:00.000Z", "updatedAt": "2027-01-15T08:40:00.000Z",
+      "startedAt": null, "upstreamCompletedAt": null, "ingestedAt": null, "completedAt": null
+    },
+    "replayed": false
+  },
+  "catalogCandidates": {
+    "candidates": [{
+      "id": "candidate-one", "provider": "webodm", "externalProjectId": "17", "externalTaskId": "42",
+      "sourceRootKey": "webodm", "sourceRelativePath": "project/17/task/42/assets",
+      "sourceFingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "suggestedProjectName": "WebODM Project 17", "suggestedTaskName": "WebODM Task 42",
+      "assetKinds": ["ept", "glb"], "state": "stale", "staleReason": "source_changed", "scanGeneration": 3,
+      "lastSeenAt": "2027-01-15T08:45:00.000Z",
+      "mapping": { "projectId": "project-one", "taskId": "task-one", "datasetId": "dataset-one", "attemptId": "attempt-one", "modelId": "model-one", "modelVersionId": "version-one", "mappedAt": "2027-01-15T08:20:00.000Z" }
+    }],
+    "nextCursor": null
+  },
+  "catalogScanAccepted": {
+    "status": 202,
+    "headers": { "Location": "/api/v1/operations/catalog-scan-operation", "Retry-After": "2" },
+    "body": { "operation": {
+      "id": "catalog-scan-operation", "type": "catalog_scan", "subject": "ops:staff-one", "datasetId": null, "uploadId": null,
+      "status": "queued", "progress": 0, "result": null, "errorCode": null, "errorMessage": null,
+      "createdAt": "2027-01-15T08:44:00.000Z", "updatedAt": "2027-01-15T08:44:00.000Z", "completedAt": null
+    } }
+  },
+  "catalogScanSucceeded": { "operation": {
+    "id": "catalog-scan-operation", "type": "catalog_scan", "subject": "ops:staff-one", "datasetId": null, "uploadId": null,
+    "status": "succeeded", "progress": 1,
+    "result": { "scan": { "id": "catalog-scan-one", "provider": "webodm", "generation": 3, "candidateCount": 1, "seenAt": "2027-01-15T08:45:00.000Z" }, "candidatesSeen": 1 },
+    "errorCode": null, "errorMessage": null, "createdAt": "2027-01-15T08:44:00.000Z", "updatedAt": "2027-01-15T08:45:00.000Z", "completedAt": "2027-01-15T08:45:00.000Z"
+  } },
+  "catalogMapSucceeded": { "operation": {
+    "id": "catalog-map-operation", "type": "catalog_map", "subject": "ops:staff-one", "datasetId": null, "uploadId": null,
+    "status": "succeeded", "progress": 1,
+    "result": {
+      "project": { "id": "project-one", "displayName": "North site", "description": null, "metadata": {}, "tags": ["survey"], "defaultUnits": "imperial", "status": "active", "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:00:00.000Z", "updatedAt": "2027-01-15T08:00:00.000Z", "archivedAt": null },
+      "task": { "id": "task-one", "projectId": "project-one", "datasetId": "dataset-import-two", "displayName": "Map flight 1 updated", "description": null, "status": "ready_for_review", "activeAttemptId": "attempt-import-two", "publishedModelId": null, "metadata": { "catalogImport": true }, "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:11:00.000Z", "updatedAt": "2027-01-15T08:48:00.000Z", "archivedAt": null },
+      "attempt": { "id": "attempt-import-two", "taskId": "task-one", "datasetId": "dataset-import-two", "attemptNumber": 2, "providerId": null, "providerTaskId": "webodm:17:42", "presetId": null, "options": {}, "status": "ready_for_review", "progress": 1, "providerOutputCursor": 0, "capabilityFingerprint": null, "errorCode": null, "errorMessage": null, "resultModelId": "model-one", "resultModelVersionId": "version-import-two", "createdBy": "ops:staff-one", "createdAt": "2027-01-15T08:48:00.000Z", "updatedAt": "2027-01-15T08:48:00.000Z", "startedAt": "2027-01-15T08:48:00.000Z", "upstreamCompletedAt": "2027-01-15T08:48:00.000Z", "ingestedAt": "2027-01-15T08:48:00.000Z", "completedAt": "2027-01-15T08:48:00.000Z" },
+      "model": { "id": "model-one", "title": "Map flight 1 updated", "provider": "webodm", "status": "ready", "available": true, "activeVersion": { "id": "version-import-two", "providerVersionId": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "createdAt": "2027-01-15T08:48:00.000Z", "updatedAt": "2027-01-15T08:48:00.000Z" }, "updatedAt": "2027-01-15T08:48:00.000Z" },
+      "candidate": { "id": "candidate-one", "provider": "webodm", "externalProjectId": "17", "externalTaskId": "42", "sourceRootKey": "webodm", "sourceRelativePath": "project/17/task/42/assets", "sourceFingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "suggestedProjectName": "WebODM Project 17", "suggestedTaskName": "WebODM Task 42", "assetKinds": ["ept", "glb"], "state": "mapped", "staleReason": null, "scanGeneration": 3, "lastSeenAt": "2027-01-15T08:45:00.000Z", "mapping": { "projectId": "project-one", "taskId": "task-one", "datasetId": "dataset-import-two", "attemptId": "attempt-import-two", "modelId": "model-one", "modelVersionId": "version-import-two", "mappedAt": "2027-01-15T08:48:00.000Z" } }
+    },
+    "errorCode": null, "errorMessage": null, "createdAt": "2027-01-15T08:46:00.000Z", "updatedAt": "2027-01-15T08:48:00.000Z", "completedAt": "2027-01-15T08:48:00.000Z"
+  } },
+  "operationReceiptAfterLostResponse": {
+    "receipt": {
+      "subject": "ops:staff-one", "key": "catalog-map-key", "method": "POST", "path": "/api/v1/processing/catalog-imports/candidates/candidate-one/map",
+      "requestHash": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff", "responseStatus": null, "response": null,
+      "operationId": "catalog-map-operation", "createdAt": "2027-01-15T08:46:00.000Z", "updatedAt": "2027-01-15T08:46:00.000Z"
+    },
+    "operation": {
+      "id": "catalog-map-operation", "type": "catalog_map", "subject": "ops:staff-one", "datasetId": null, "uploadId": null,
+      "status": "queued", "progress": 0, "result": null, "errorCode": null, "errorMessage": null,
+      "createdAt": "2027-01-15T08:46:00.000Z", "updatedAt": "2027-01-15T08:46:00.000Z", "completedAt": null
+    }
+  },
+  "reviewSessionCreated": {
+    "status": 201,
+    "headers": { "Cache-Control": "no-store" },
+    "body": {
+      "grant": "77777777-7777-4777-8777-777777777777",
+      "grantExpiresAt": "2027-01-15T08:50:00.000Z",
+      "sessionTtlSeconds": 900,
+      "sessionMode": "review",
+      "attemptId": "attempt-import-two",
+      "modelId": "model-one",
+      "modelVersionId": "version-import-two",
+      "assetKinds": ["ept", "glb"],
+      "redeemUrl": "https://viewer.example.test/api/v1/sessions/redeem",
+      "embedUrl": "https://viewer.example.test/session/77777777-7777-4777-8777-777777777777"
+    }
+  },
+  "reviewSessionsRevoked": {
+    "status": 200,
+    "headers": { "Cache-Control": "no-store" },
+    "body": { "attemptId": "attempt-import-two", "revokedGrants": 1, "revokedSessions": 1 }
   },
   "storage": {
     "storage": {

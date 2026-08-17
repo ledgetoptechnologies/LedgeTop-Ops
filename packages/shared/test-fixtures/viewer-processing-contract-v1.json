@@ -18,8 +18,19 @@
     "path": "/api/viewer/events",
     "timestamp": 1800000001,
     "nonce": "event-nonce-1234567890",
-    "body": "{\"schemaVersion\":1,\"eventId\":\"event-ready-0001\",\"type\":\"processing.ready_for_review\",\"occurredAt\":\"2027-01-15T08:01:00.000Z\",\"projectId\":\"project-one\",\"taskId\":\"task-one\",\"attemptId\":\"attempt-one\",\"requestedBySubject\":\"ops:staff-one\",\"status\":\"ready_for_review\",\"reviewUrl\":\"https://ops.example.test/operations/processing?attemptId=attempt-one\"}",
-    "contentSha256": "5e21e3d7c70aa0e1410f6cce5351c5c4dd02910e521a1e409fc5b51f1d320cd5",
-    "signature": "0NF81Qstc35oa2A4i3uKH0w883GgQXNL37yDW_9evVY"
+    "body": "{\"schemaVersion\":1,\"eventId\":\"event-ready-0001\",\"type\":\"processing.ready_for_review\",\"occurredAt\":\"2027-01-15T08:01:00.000Z\",\"projectId\":\"project-one\",\"taskId\":\"task-one\",\"attemptId\":\"attempt-one\",\"projectDisplayName\":\"North site\",\"taskDisplayName\":\"Map flight 1\",\"requestedBySubject\":\"ops:staff-one\",\"status\":\"ready_for_review\",\"reviewUrl\":\"https://ops.example.test/operations/processing?attemptId=attempt-one\"}",
+    "contentSha256": "e5a203baed7c61aa62664ee49d5c0948e27c182419766ffa5d89e5560e1d0b22",
+    "signature": "pyHRt2dEmVvaQ7rphy3hWAw7Xb72usge9lXlyl_SlwU"
+  },
+  "sourceAuthorizationIntrospection": {
+    "secret": "viewer-event-secret-32-characters-minimum",
+    "keyId": "viewer-v1",
+    "method": "POST",
+    "path": "/api/viewer/source-authorizations/introspect",
+    "timestamp": 1800000002,
+    "nonce": "introspection-nonce-1234567890",
+    "body": "{\"authorizationId\":\"authorization-one\",\"authorizationVersion\":2,\"subject\":\"client-subject\",\"modelId\":\"model-one\",\"shareId\":\"share-one\"}",
+    "contentSha256": "509f9234a5033927d1167abdbab1d99b2a628498e6b5f96f78ef232a7607ab43",
+    "signature": "6K29QYzItVJLCYYuu-RDLxu1UJr2eAeTtz1-NZ9DuuI"
   }
 }

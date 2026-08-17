@@ -15,7 +15,8 @@ export type PortalWorkspaceCapability =
   | "delivery.view"
   | "request.create"
   | "member.manage"
-  | "delegated_share.create";
+  | "delegated_share.create"
+  | "viewer.share.create";
 
 export type PortalWorkspaceScopeType =
   | "workspace"
@@ -275,7 +276,7 @@ export async function authorizeEffectiveWorkspaceProject(
   env: Env,
   principal: VerifiedClientPrincipal,
   context: EffectivePortalWorkspaceContext,
-  capability: "delivery.view" | "request.create",
+  capability: "delivery.view" | "request.create" | "viewer.share.create",
   localProjectId: string,
 ): Promise<boolean> {
   const project = await portalDb(env).prepare(`

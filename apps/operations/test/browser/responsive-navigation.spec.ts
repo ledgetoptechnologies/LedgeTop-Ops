@@ -169,3 +169,34 @@ test("operations shell contains very long identity text and reflows at a 200% zo
   const headingTop = await page.getByRole("heading", { name: "Operations dashboard" }).evaluate(node => node.getBoundingClientRect().top);
   expect(headingTop).toBeGreaterThanOrEqual(headerBottom);
 });
+
+test("account identity menu provides keyboard-safe same-origin Access logout on desktop and mobile", async ({ page }) => {
+  await mockSession(page, allNavigationPermissions);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/");
+  const trigger = page.getByRole("button", { name: "Account menu for Staff User" });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  let menu = page.getByRole("menu", { name: "Account" });
+  const logout = menu.getByRole("menuitem", { name: "Logout" });
+  await expect(logout).toBeFocused();
+  await expect(logout).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await page.keyboard.press("Space");
+  await expect(page.getByRole("menu", { name: "Account" })).toBeVisible();
+  await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name: "Dashboard" }).focus();
+  await expect(page.getByRole("menu", { name: "Account" })).toHaveCount(0);
+
+  await page.setViewportSize({ width: 320, height: 740 });
+  await expect(trigger).toBeVisible();
+  await expect(trigger).toHaveCSS("min-height", "44px");
+  await trigger.click();
+  menu = page.getByRole("menu", { name: "Account" });
+  await expect(menu.getByRole("menuitem", { name: "Logout" })).toHaveCSS("min-height", "44px");
+  const bounds = await menu.evaluate(node => ({ right: node.getBoundingClientRect().right, left: node.getBoundingClientRect().left }));
+  expect(bounds.left).toBeGreaterThanOrEqual(0);
+  expect(bounds.right).toBeLessThanOrEqual(320);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+});

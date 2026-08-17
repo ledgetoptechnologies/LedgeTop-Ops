@@ -678,8 +678,40 @@ test("desktop portal navigation uses the client IA and restores routes with brow
   await expect(page).toHaveURL(/\/portal\/projects$/);
   await page.goForward();
   await expect(page).toHaveURL(/\/portal\/deliveries$/);
-  await page.getByRole("button", { name: "Open account" }).click();
+  await page.getByRole("button", { name: "Account menu for Acme Surveying" }).click();
+  await page.getByRole("menu", { name: "Account" }).getByRole("menuitem", { name: "Account" }).click();
   await expect(page).toHaveURL(/\/portal\/account$/);
+});
+
+test("account identity menu provides same-origin Access logout on desktop and mobile", async ({ page }) => {
+  await mockAuthorizedPortal(page);
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/portal");
+  const trigger = page.getByRole("button", { name: "Account menu for Acme Surveying" });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  let menu = page.getByRole("menu", { name: "Account" });
+  await expect(menu.getByRole("menuitem", { name: "Account" })).toBeFocused();
+  await expect(menu.getByRole("menuitem", { name: "Logout" })).toHaveAttribute("href", "/cdn-cgi/access/logout");
+  await page.keyboard.press("Escape");
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+  await page.keyboard.press("Space");
+  menu = page.getByRole("menu", { name: "Account" });
+  await expect(menu).toBeVisible();
+  await page.getByRole("navigation", { name: "Client portal" }).getByRole("link", { name: "Home" }).focus();
+  await expect(menu).toHaveCount(0);
+
+  await page.setViewportSize({ width: 320, height: 740 });
+  await expect(trigger).toBeVisible();
+  await expect(trigger).toHaveCSS("min-height", "44px");
+  await trigger.click();
+  menu = page.getByRole("menu", { name: "Account" });
+  await expect(menu.getByRole("menuitem", { name: "Logout" })).toHaveCSS("min-height", "44px");
+  const bounds = await menu.evaluate(node => ({ right: node.getBoundingClientRect().right, left: node.getBoundingClientRect().left }));
+  expect(bounds.left).toBeGreaterThanOrEqual(0);
+  expect(bounds.right).toBeLessThanOrEqual(320);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
 });
 
 for (const width of [1280, 390, 320]) {
@@ -1016,6 +1048,131 @@ test("authorized photo map supports compact, enlarged, and empty states", async 
   await expect(dialog).toHaveCount(0);
   await navigatePortal(page, "Deliveries");
   await expect(page.getByText("No image locations are available for your available delivery files.")).toBeVisible();
+});
+
+test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 320", async ({ page }) => {
+  let active = false;
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route("**/api/client/**", async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (path === "/api/client/session") return route.fulfill({ json: { account, viewerDisplayUnits: "imperial", capabilities: { viewer: true, viewerShares: true } } });
+    if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
+    if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
+    if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
+    if (path === "/api/client/notifications") return route.fulfill({ json: { notifications: [], unreadCount: 0, cursor: null } });
+    if (path === "/api/client/projects/project-a/models") return route.fulfill({ json: { models: [{
+      associationId: "association-one", title: "North Site point cloud", provider: "WebODM",
+      modelId: "model-one", modelVersionId: "version-one", updatedAt: "2026-08-16T12:00:00.000Z", canShare: true,
+    }] } });
+    if (path === "/api/client/projects/project-a/models/association-one/shares" && request.method() === "GET") return route.fulfill({ json: { shares: [...(active ? [{
+      id: "share-one", modelId: "model-one", versionPolicy: "latest", modelVersionId: null, hasPassword: true,
+      permissions: { view: true, measure: true, cameras: true, download: false }, label: "Engineer review",
+      createdBy: "identity-one", createdAt: "2026-08-17T03:00:00.000Z", updatedAt: "2026-08-17T03:00:00.000Z",
+      expiresAt: "2026-08-24T03:00:00.000Z", revokedAt: null, revokedBy: null, revokeReason: null,
+      accessCount: 0, lastAccessedAt: null, shareClass: "client",
+      sourceAuthorization: { type: "client_grant", id: "source-one", version: 1, subject: "subject-one", expiresAt: null },
+    }] : []), {
+      id: "share-expired", modelId: "model-one", versionPolicy: "latest", modelVersionId: null, hasPassword: false,
+      permissions: { view: true, measure: true, cameras: true, download: false }, label: "Expired engineer review",
+      createdBy: "identity-one", createdAt: "2026-07-01T03:00:00.000Z", updatedAt: "2026-07-01T03:00:00.000Z",
+      expiresAt: "2026-07-02T03:00:00.000Z", revokedAt: null, revokedBy: null, revokeReason: null,
+      accessCount: 0, lastAccessedAt: null, shareClass: "client",
+      sourceAuthorization: { type: "client_grant", id: "source-old", version: 1, subject: "subject-one", expiresAt: null },
+    }] } });
+    if (path === "/api/client/projects/project-a/models/association-one/shares" && request.method() === "POST") {
+      expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+      expect(request.postDataJSON()).toMatchObject({ label: "Engineer review", displayUnits: "imperial", password: "model-passcode" });
+      active = true;
+      return route.fulfill({ status: 201, json: {
+        share: { id: "share-one", modelId: "model-one" },
+        viewUrl: "https://viewer.example.test/view/one-time-client-token", embedUrl: "https://viewer.example.test/embed/one-time-client-token", replayed: false,
+      } });
+    }
+    if (path.endsWith("/shares/share-one") && request.method() === "DELETE") {
+      expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+      active = false;
+      return route.fulfill({ json: { share: { id: "share-one", revokedAt: new Date().toISOString() }, replayed: false } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  await page.goto("/portal");
+  await navigatePortal(page, "Projects");
+  await page.getByRole("button", { name: /North Site/ }).click();
+  await page.getByRole("button", { name: "Models" }).click();
+  await page.getByRole("button", { name: "Share public link" }).click();
+  await expect(page.getByText("Expired engineer review")).toHaveCount(0);
+  await page.getByLabel("Link label").fill("Engineer review");
+  await page.getByLabel("Access code").fill("model-passcode");
+  await page.getByRole("button", { name: "Create link" }).click();
+  await expect(page.getByLabel("New public 3D model link")).toHaveValue(/one-time-client-token/);
+  await expect(page.getByText("Engineer review · expires")).toBeVisible();
+  await page.getByRole("button", { name: "Share public link" }).click();
+  await expect(page.getByLabel("New public 3D model link")).toHaveCount(0);
+  await page.getByRole("button", { name: "Share public link" }).click();
+  await expect(page.getByLabel("Access code")).toHaveValue("");
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+  await page.getByRole("button", { name: "Revoke" }).click();
+  await expect(page.getByText("No active links.")).toBeVisible();
+});
+
+test("Viewer renewal keeps the iframe and camera state mounted across a transient authorization failure", async ({ page }) => {
+  let sessionRequests = 0, embedLoads = 0;
+  const viewerOrigin = "https://viewer.ledgetopdroneservices.com";
+  await page.route(`${viewerOrigin}/**`, async route => {
+    if (new URL(route.request().url()).pathname !== "/embed/model-one")
+      return route.fulfill({ status: 404, body: "not found" });
+    embedLoads += 1;
+    await route.fulfill({ contentType: "text/html", body: `<!doctype html><body><div id="camera-state">camera-position-42</div><script>
+      const expiresAt = new Date(Date.now() + 10000).toISOString();
+      addEventListener("message", event => {
+        if (event.data?.type !== "ltds-viewer:renew-session") return;
+        document.body.dataset.renewedGrant = event.data.grant;
+        parent.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-one",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
+      });
+      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-one",expiresAt}, "*"), 50);
+      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-one",expiresAt}, "*"), 100);
+    </script></body>` });
+  });
+  await page.route("**/api/client/**", async route => {
+    const request = route.request(), path = new URL(request.url()).pathname;
+    if (path === "/api/client/session") return route.fulfill({ json: { account, viewerDisplayUnits: "imperial", capabilities: { viewer: true } } });
+    if (path === "/api/client/projects") return route.fulfill({ json: { projects } });
+    if (path === "/api/client/service-requests") return route.fulfill({ json: { requests } });
+    if (path === "/api/client/map-config") return route.fulfill({ json: { mapboxPublicToken: null } });
+    if (path === "/api/client/notifications") return route.fulfill({ json: { notifications: [], unreadCount: 0, cursor: null } });
+    if (path === "/api/client/projects/project-a/models") return route.fulfill({ json: { models: [{
+      associationId: "association-one", title: "North Site point cloud", provider: "WebODM",
+      modelId: "model-one", modelVersionId: "version-one", updatedAt: "2026-08-16T12:00:00.000Z", canShare: false,
+    }] } });
+    if (path === "/api/client/projects/project-a/models/association-one/session" && request.method() === "POST") {
+      sessionRequests += 1;
+      if (sessionRequests === 2) return route.fulfill({ status: 503, json: { error: "temporary authorization failure" } });
+      return route.fulfill({ status: 201, json: {
+        grant: sessionRequests === 1 ? "initial-grant" : "renewed-grant",
+        grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
+        redeemUrl: `${viewerOrigin}/api/v1/client-sessions/redeem`, embedUrl: `${viewerOrigin}/embed/model-one`,
+      } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  await page.goto("/portal");
+  await navigatePortal(page, "Projects");
+  await page.getByRole("button", { name: /North Site/ }).click();
+  await page.getByRole("button", { name: "Models" }).click();
+  await page.getByRole("button", { name: "Open 3D model" }).click();
+  await expect.poll(() => embedLoads).toBe(1);
+  await expect(page.locator('iframe[title="3D model: North Site point cloud"]')).toHaveAttribute("src", `${viewerOrigin}/embed/model-one`);
+  const frame = page.frameLocator('iframe[title="3D model: North Site point cloud"]');
+  await expect(frame.locator("#camera-state")).toHaveText("camera-position-42");
+  await expect(page.getByText("Viewer renewal is retrying…")).toBeVisible();
+  await expect(frame.locator("#camera-state")).toHaveText("camera-position-42");
+  await expect(frame.locator("body")).toHaveAttribute("data-renewed-grant", "renewed-grant", { timeout: 5_000 });
+  expect(sessionRequests).toBe(3);
+  expect(embedLoads).toBe(1);
 });
 
 test("disabled or unavailable session stops before account data requests", async ({ page }) => {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerModelSummary, type ViewerPublicShareSummary, type ViewerSessionGrant } from "@ltds/shared";
-import { Brand, Card, EmptyState, Loading, StatusPill, ViewerEmbed } from "@ltds/ui";
+import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, ViewerEmbed } from "@ltds/ui";
 import { ApiError, api, setCsrf } from "./api";
 import { generateSecureAccessCode } from "./access-code";
 import {
@@ -282,16 +282,13 @@ export function OperationsApp() {
           </div>}
         </nav>
         <button ref={mobileNavTrigger} className="ops-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="ops-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
-        <div className="profile">
-          <span>{session.user.displayName.slice(0, 1).toUpperCase()}</span>
-          <div>
-            {session.user.displayName}
+        <AccountMenu className="profile" displayName={session.user.displayName}
+          avatar={session.user.displayName.slice(0, 1).toUpperCase()} details={<>
             <small>
               {session.user.status} {session.user.profileType}
             </small>
             <small>{session.user.email}</small>
-          </div>
-        </div>
+          </>} />
       </header>
       {mobileNavOpen && <div className="ops-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
         <div ref={mobileNavPanel} id="ops-mobile-navigation" className="ops-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">

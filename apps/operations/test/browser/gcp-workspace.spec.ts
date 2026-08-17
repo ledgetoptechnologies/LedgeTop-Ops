@@ -43,6 +43,12 @@ test("ground control workspace is private, explicit about proximity, and usable 
   await expect(page.getByText("800.00 ft")).toBeVisible();
   await expect(page.getByText("45 ft")).toBeVisible();
   await expect(page.getByText("Map unavailable because the Mapbox public token is not configured.")).toBeVisible();
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    const bounds = await page.getByRole("heading", { name: "Ground control workspace" }).boundingBox();
+    expect(bounds && bounds.x + bounds.width <= width).toBe(true);
+  }
   await page.getByLabel("Pixel X").fill("0");await page.getByLabel("Pixel Y").fill("0");
   await page.getByRole("button", { name: "Save mark" }).click();
   await expect.poll(() => saved).toMatchObject({ pointId: "gcp-point-one", imageFileId: "image-one", pixelX: 0, pixelY: 0 });

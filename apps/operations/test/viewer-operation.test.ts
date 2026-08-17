@@ -1,13 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ViewerDurableOperation, ViewerDurableOperationResponse } from "@ltds/shared";
-import { ViewerAdminClient } from "../src/client/viewer-admin-client";
+import { ViewerAdminClient, ViewerAdminRequestError } from "../src/client/viewer-admin-client";
 import {
+  PENDING_OPERATION_REQUEST_KEY,
   parseViewerOperationCheckpoints,
+  parseViewerPendingOperationRequests,
   pollViewerOperation,
   readViewerOperationCheckpoints,
+  readViewerPendingOperationRequests,
+  recoverViewerPendingOperations,
   startViewerOperation,
   writeViewerOperationCheckpoint,
+  writeViewerPendingOperationRequest,
   type ViewerOperationCheckpoint,
+  type ViewerPendingOperationRequest,
 } from "../src/client/viewer-operation";
 
 const dataset = {
@@ -47,6 +53,41 @@ const previewCheckpoint: ViewerOperationCheckpoint = {
   createdAt: previewQueued.createdAt,
 };
 
+const pending: ViewerPendingOperationRequest = {
+  version: 1,
+  key: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+  method: "POST",
+  path: "/api/v1/admin/uploads/33333333-3333-4333-8333-333333333333/finalize",
+  type: "upload_finalize",
+  datasetId: dataset.id,
+  uploadId: queued.uploadId,
+  createdAt: "2026-08-16T12:00:00.000Z",
+};
+
+function receipt(operation: ViewerDurableOperation | null = queued) {
+  return {
+    receipt: {
+      subject: "ops:staff-one", key: pending.key, method: "POST", path: pending.path,
+      requestHash: "d".repeat(64), responseStatus: operation ? 202 : null,
+      response: null, operationId: operation?.id ?? null,
+      createdAt: "2026-08-16T12:00:00.000Z", updatedAt: "2026-08-16T12:00:01.000Z",
+    },
+    operation,
+  };
+}
+
+function memoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() { return values.size; },
+    clear() { values.clear(); },
+    getItem(key) { return values.get(key) ?? null; },
+    key(index) { return [...values.keys()][index] ?? null; },
+    removeItem(key) { values.delete(key); },
+    setItem(key, value) { values.set(key, value); },
+  };
+}
+
 describe("Viewer durable operations", () => {
   it("stores only bounded credential-free operation identity and fails closed on storage errors", () => {
     expect(parseViewerOperationCheckpoints(JSON.stringify([checkpoint]), Date.parse("2026-08-16T12:01:00.000Z"))).toEqual([checkpoint]);
@@ -56,6 +97,9 @@ describe("Viewer durable operations", () => {
     expect(writeViewerOperationCheckpoint(checkpoint, denied)).toBe(false);
     expect(parseViewerOperationCheckpoints(JSON.stringify([previewCheckpoint]), Date.parse("2026-08-16T12:01:00.000Z"))).toEqual([previewCheckpoint]);
     expect(parseViewerOperationCheckpoints(JSON.stringify([{ ...previewCheckpoint, previewToken: "secret" }]), Date.parse("2026-08-16T12:01:00.000Z"))).toEqual([]);
+    expect(parseViewerPendingOperationRequests(JSON.stringify([pending]), Date.parse("2026-08-16T12:01:00.000Z"))).toEqual([pending]);
+    for (const forbidden of ["accessToken", "uploadToken", "previewToken", "grant", "body", "requestHash", "headers"])
+      expect(parseViewerPendingOperationRequests(JSON.stringify([{ ...pending, [forbidden]: "secret" }]), Date.parse("2026-08-16T12:01:00.000Z"))).toEqual([]);
   });
 
   it("replays an ambiguous start with the same idempotency key and validates canonical 202 Location", async () => {
@@ -66,12 +110,86 @@ describe("Viewer durable operations", () => {
     const storage = globalThis.localStorage;
     const result = await startViewerOperation(client, "/api/v1/admin/uploads/upload/finalize", {
       method: "POST", headers: { "Idempotency-Key": "stable-key" }, body: "{}",
-    }, "upload_finalize");
+    }, "upload_finalize", { datasetId: dataset.id, uploadId: queued.uploadId });
     expect(result.operation).toEqual(queued);
     expect(requestWithMetadata).toHaveBeenCalledTimes(2);
     expect(new Headers(requestWithMetadata.mock.calls[0]![1].headers).get("Idempotency-Key")).toBe("stable-key");
     expect(new Headers(requestWithMetadata.mock.calls[1]![1].headers).get("Idempotency-Key")).toBe("stable-key");
     if (storage) storage.removeItem("ltds.viewer.processing-operations.v1");
+    storage?.removeItem(PENDING_OPERATION_REQUEST_KEY);
+  });
+
+  it("persists a credential-free receipt locator before the first POST byte", async () => {
+    const storage = memoryStorage();
+    const requestWithMetadata = vi.fn().mockImplementation(async () => {
+      const saved = readViewerPendingOperationRequests(storage);
+      expect(saved).toHaveLength(1);
+      expect(saved[0]).toMatchObject({ path: pending.path, type: "upload_finalize", datasetId: dataset.id, uploadId: queued.uploadId });
+      expect(storage.getItem(PENDING_OPERATION_REQUEST_KEY)).not.toContain("upload-secret");
+      return { payload: { operation: queued }, status: 202, location: `/api/v1/operations/${queued.id}`, retryAfterSeconds: 2 };
+    });
+    const client = { requestWithMetadata } as unknown as ViewerAdminClient;
+    const original = globalThis.localStorage;
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+    try {
+      await startViewerOperation(client, pending.path, {
+        method: "POST", headers: { "Idempotency-Key": pending.key }, body: JSON.stringify({ uploadToken: "upload-secret" }),
+      }, "upload_finalize", { datasetId: dataset.id, uploadId: queued.uploadId });
+      expect(readViewerPendingOperationRequests(storage)).toEqual([]);
+    } finally {
+      Object.defineProperty(globalThis, "localStorage", { configurable: true, value: original });
+    }
+  });
+
+  it("recovers an accepted operation after every POST response is lost", async () => {
+    vi.useFakeTimers();
+    const storage = memoryStorage();
+    const client = {
+      requestWithMetadata: vi.fn().mockRejectedValue(new TypeError("response lost")),
+      request: vi.fn().mockResolvedValue(receipt()),
+    } as unknown as ViewerAdminClient;
+    const original = globalThis.localStorage;
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+    try {
+      const promise = startViewerOperation(client, pending.path, {
+        method: "POST", headers: { "Idempotency-Key": pending.key }, body: JSON.stringify({ uploadToken: "upload-secret" }),
+      }, "upload_finalize", { datasetId: dataset.id, uploadId: queued.uploadId });
+      await vi.runAllTimersAsync();
+      await expect(promise).resolves.toMatchObject({ operation: queued, checkpoint });
+      expect(client.requestWithMetadata).toHaveBeenCalledTimes(3);
+      expect(client.request).toHaveBeenCalledWith(`/api/v1/operation-receipts/${pending.key}`);
+      expect(readViewerPendingOperationRequests(storage)).toEqual([]);
+      expect(readViewerOperationCheckpoints(storage)).toEqual([checkpoint]);
+    } finally {
+      vi.useRealTimers();
+      Object.defineProperty(globalThis, "localStorage", { configurable: true, value: original });
+    }
+  });
+
+  it("recovers after reload and session renewal without replaying a secret request body", async () => {
+    const storage = memoryStorage();
+    writeViewerPendingOperationRequest(pending, storage);
+    const client = { request: vi.fn().mockResolvedValue(receipt()) } as unknown as ViewerAdminClient;
+    await expect(recoverViewerPendingOperations(client, storage)).resolves.toEqual({ recovered: [checkpoint], unknown: 0, stillPending: 0 });
+    expect(client.request).toHaveBeenCalledTimes(1);
+    expect(client.request).toHaveBeenCalledWith(`/api/v1/operation-receipts/${pending.key}`);
+    expect(readViewerPendingOperationRequests(storage)).toEqual([]);
+    expect(readViewerOperationCheckpoints(storage)).toEqual([checkpoint]);
+  });
+
+  it("removes an authoritative unknown receipt but fails closed on receipt identity mismatch", async () => {
+    const unknownStorage = memoryStorage();
+    writeViewerPendingOperationRequest(pending, unknownStorage);
+    const unknownClient = { request: vi.fn().mockRejectedValue(new ViewerAdminRequestError("not found", 404)) } as unknown as ViewerAdminClient;
+    await expect(recoverViewerPendingOperations(unknownClient, unknownStorage)).resolves.toEqual({ recovered: [], unknown: 1, stillPending: 0 });
+    expect(readViewerPendingOperationRequests(unknownStorage)).toEqual([]);
+
+    const mismatchStorage = memoryStorage();
+    writeViewerPendingOperationRequest(pending, mismatchStorage);
+    const mismatch = receipt(); mismatch.receipt.path = "/api/v1/different";
+    const mismatchClient = { request: vi.fn().mockResolvedValue(mismatch) } as unknown as ViewerAdminClient;
+    await expect(recoverViewerPendingOperations(mismatchClient, mismatchStorage)).rejects.toThrow("mismatched operation receipt");
+    expect(readViewerPendingOperationRequests(mismatchStorage)).toEqual([pending]);
   });
 
   it("accepts only the matching subject-bound operation and terminal dataset", async () => {
@@ -121,7 +239,7 @@ describe("Viewer durable operations", () => {
     const client = { requestWithMetadata: vi.fn().mockResolvedValue({
       payload: { operation: queued }, status: 202, location: `https://evil.example/api/v1/operations/${queued.id}`, retryAfterSeconds: 2,
     }) } as unknown as ViewerAdminClient;
-    await expect(startViewerOperation(client, "/api/v1/finalize", { method: "POST", headers: { "Idempotency-Key": "key" }, body: "{}" }, "upload_finalize"))
+    await expect(startViewerOperation(client, "/api/v1/finalize", { method: "POST", headers: { "Idempotency-Key": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb" }, body: "{}" }, "upload_finalize", { datasetId: dataset.id, uploadId: queued.uploadId }))
       .rejects.toThrow("non-canonical");
   });
 });

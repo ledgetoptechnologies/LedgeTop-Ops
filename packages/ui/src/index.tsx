@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useRef, useState, type PropsWithChildren, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PropsWithChildren, type ReactNode } from "react";
 import { BRAND } from "@ltds/shared";
 import type { ViewerSessionGrant } from "@ltds/shared";
+import { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
+export { CLOUDFLARE_ACCESS_LOGOUT_PATH } from "./access";
 
 export function Brand({ product }: { product: string }) {
   return <div className="ltds-brand"><img src={BRAND.logoUrl} alt="" /><span>{BRAND.name}<small>{product}</small></span></div>;
@@ -20,6 +22,72 @@ export function EmptyState({ title, detail }: { title: string; detail: string })
 
 export function Loading() {
   return <div className="loading-state skeleton-loading" role="status" aria-label="Loading"><span /><span /><span /><span /></div>;
+}
+
+export function AccountMenu({
+  displayName,
+  avatar,
+  details,
+  accountHref,
+  onAccount,
+  className = "",
+}: {
+  displayName: string;
+  avatar: string;
+  details?: ReactNode;
+  accountHref?: string;
+  onAccount?: () => void;
+  className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const root = useRef<HTMLDivElement>(null), trigger = useRef<HTMLButtonElement>(null);
+  const menuId = `account-menu-${useId().replace(/:/g, "")}`;
+  const close = useCallback((restoreFocus = false) => {
+    setOpen(false);
+    if (restoreFocus) queueMicrotask(() => trigger.current?.focus());
+  }, []);
+  useEffect(() => {
+    if (!open) return;
+    root.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    const outside = (event: MouseEvent | FocusEvent) => {
+      if (!root.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); close(true); }
+    };
+    document.addEventListener("mousedown", outside);
+    document.addEventListener("focusin", outside);
+    document.addEventListener("keydown", escape);
+    return () => {
+      document.removeEventListener("mousedown", outside);
+      document.removeEventListener("focusin", outside);
+      document.removeEventListener("keydown", escape);
+    };
+  }, [close, open]);
+  const move = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    const items = [...(root.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') || [])];
+    if (!items.length) return;
+    event.preventDefault();
+    const current = Math.max(0, items.indexOf(document.activeElement as HTMLElement));
+    const index = event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 :
+      event.key === "ArrowDown" ? (current + 1) % items.length : (current - 1 + items.length) % items.length;
+    items[index]?.focus();
+  };
+  return <div ref={root} className={`account-menu ${className}`.trim()}>
+    <button ref={trigger} type="button" className="account-menu-trigger" aria-label={`Account menu for ${displayName}`}
+      aria-haspopup="menu" aria-expanded={open} aria-controls={menuId} onClick={() => setOpen(value => !value)}>
+      <span className="account-menu-avatar" aria-hidden="true">{avatar}</span>
+      <span className="account-menu-copy"><strong>{displayName}</strong>{details}</span>
+    </button>
+    {open && <div id={menuId} className="account-menu-popover" role="menu" aria-label="Account" onKeyDown={move}>
+      {accountHref && <a role="menuitem" href={accountHref} onClick={(event) => {
+        if (onAccount) { event.preventDefault(); onAccount(); }
+        setOpen(false);
+      }}>Account</a>}
+      <a role="menuitem" href={CLOUDFLARE_ACCESS_LOGOUT_PATH}>Logout</a>
+    </div>}
+  </div>;
 }
 
 type ViewerMessage = {

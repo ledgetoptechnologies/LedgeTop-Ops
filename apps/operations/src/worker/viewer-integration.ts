@@ -44,7 +44,7 @@ const publicShareInput = z.object({
     context.addIssue({ code: "custom", path: ["expiresAt"], message: "Expiry cannot be more than 30 days in the future" });
 });
 
-interface AssociationRow {
+export interface AssociationRow {
   id: string;
   project_id: string;
   project_alpha_project_id: string;
@@ -302,6 +302,13 @@ export async function issueViewerSession(input: {
   return grant;
 }
 
+export async function pruneViewerSessionIssuanceReceipts(env: Pick<Env, "DELIVERY_DB">): Promise<number> {
+  const result = await primaryDeliveryDb(env as Env).prepare(
+    "DELETE FROM viewer_session_issuance_receipts WHERE datetime(expires_at)<=datetime('now')",
+  ).run();
+  return result.meta.changes || 0;
+}
+
 function viewerError(error: unknown): never {
   if (error instanceof HTTPException) throw error;
   if (error instanceof ViewerServiceError)
@@ -511,4 +518,4 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
   });
 }
 
-export { currentStaffAssociation, type AssociationRow };
+export { currentStaffAssociation };

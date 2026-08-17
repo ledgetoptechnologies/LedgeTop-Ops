@@ -12,10 +12,11 @@ import type {
   ViewerOutputSummary,
   ViewerProjectStorageResponse,
   ViewerProviderSummary,
+  ViewerReviewSessionGrant,
   ViewerStorageSummary,
   ViewerTaskStorageResponse,
 } from "@ltds/shared";
-import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
+import { Card, EmptyState, Loading, StatusPill, ViewerEmbed } from "@ltds/ui";
 import { api } from "./api";
 import { hashFileOffThread } from "./file-hash";
 import {
@@ -28,19 +29,31 @@ import {
 } from "./upload-checkpoint";
 import { ViewerAdminClient } from "./viewer-admin-client";
 import { GcpWorkspace } from "./GcpWorkspace";
+import { ViewerCatalogImports } from "./ViewerCatalogImports";
+import { ViewerPresetSettings } from "./ViewerPresetSettings";
 import { providerCredentialError } from "./provider-credential";
 import { defaultViewerProviderOverrides } from "./provider-options";
+import {
+  clearViewerTaskSubmissionCheckpoint,
+  newViewerTaskSubmissionCheckpoint,
+  readViewerTaskSubmissionCheckpoint,
+  resumeViewerTaskSubmission,
+  writeViewerTaskSubmissionCheckpoint,
+  type ViewerTaskSubmissionCheckpoint,
+} from "./viewer-task-submission";
 import {
   assertViewerOperation,
   pollViewerOperation,
   readViewerOperationCheckpoints,
+  readViewerPendingOperationRequests,
+  recoverViewerPendingOperations,
   removeViewerOperationCheckpoint,
   startViewerOperation,
   type ViewerOperationCheckpoint,
 } from "./viewer-operation";
 
 type ProcessingEvent = {
-  event_id: string; event_type: string; task_id: string; attempt_id: string;
+  event_id: string; event_type: string; project_id: string; project_display_name: string | null; task_id: string; task_display_name: string | null; attempt_id: string;
   status: string; error_message: string | null; review_url: string | null;
   acknowledged_at: string | null; received_at: string;
 };
@@ -48,10 +61,10 @@ type Bootstrap = {
   enabled: boolean;
   viewerBaseUrl: string | null;
   permissions: string[];
-  units: { default: "imperial"; resolved: ViewerDisplayUnits };
+  units: { default: ViewerDisplayUnits; resolved: ViewerDisplayUnits };
   events: ProcessingEvent[];
 };
-type Tab = "projects" | "datasets" | "gcp" | "tasks" | "outputs" | "imports" | "providers" | "storage" | "shares";
+type Tab = "projects" | "datasets" | "gcp" | "tasks" | "outputs" | "imports" | "providers" | "storage" | "shares" | "settings";
 type PagedKind = "projects" | "datasets" | "tasks" | "outputs" | "providers";
 type PageCursors = Record<PagedKind, string | null>;
 
@@ -114,11 +127,13 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
   const [tab, setTab] = useState<Tab>(() => {
     const pending = readViewerOperationCheckpoints()[0];
     return pending?.type === "upload_finalize" ? "datasets" :
-      pending?.type === "import_adopt" || pending?.type === "import_preview" ? "imports" : "projects";
+      pending?.type === "import_adopt" || pending?.type === "import_preview" || pending?.type === "catalog_scan" || pending?.type === "catalog_map" ? "imports" : "projects";
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [message, setMessage] = useState("");
+  const [pendingReceiptCount, setPendingReceiptCount] = useState(() => readViewerPendingOperationRequests().length);
+  const [recoveryVersion, setRecoveryVersion] = useState(0);
   const clientRef = useRef<ViewerAdminClient | null>(null);
   const loadGeneration = useRef(0);
   const loadAbort = useRef<AbortController | null>(null);
@@ -219,6 +234,28 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
     finally { setBusy(false); }
   };
   const can = (permission: string) => bootstrap?.permissions.includes(permission) === true;
+  const recoverAcceptedRequests = async () => {
+    const client = clientRef.current;
+    if (!client || busy) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const result = await recoverViewerPendingOperations(client);
+      setPendingReceiptCount(readViewerPendingOperationRequests().length);
+      if (result.recovered.length) {
+        const first = result.recovered[0]!;
+        setTab(first.type === "upload_finalize" ? "datasets" : "imports");
+        setRecoveryVersion(value => value + 1);
+      }
+      const parts = [
+        result.recovered.length ? `${result.recovered.length} accepted operation${result.recovered.length === 1 ? "" : "s"} restored` : "",
+        result.stillPending ? `${result.stillPending} request${result.stillPending === 1 ? " is" : "s are"} still reconciling in Viewer` : "",
+        result.unknown ? `${result.unknown} request${result.unknown === 1 ? " was" : "s were"} confirmed not accepted` : "",
+      ].filter(Boolean);
+      setMessage(parts.length ? `${parts.join("; ")}.` : "There are no accepted requests waiting for recovery.");
+    } catch (caught) {
+      setError((caught as Error).message);
+    } finally { setBusy(false); }
+  };
 
   if (!bootstrap) return <Card title="Processing platform"><Loading /></Card>;
   if (!bootstrap.enabled) return <Card title="Processing platform"><EmptyState
@@ -236,30 +273,32 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
         }}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
       </div>
       <nav className="viewer-processing-tabs" aria-label="Processing sections">
-        {(["projects","datasets","gcp","tasks","outputs","imports","providers","storage","shares"] as Tab[]).map(value =>
+        {(["projects","datasets","gcp","tasks","outputs","imports","providers","storage","shares","settings"] as Tab[]).map(value =>
           <button type="button" key={value} aria-current={tab === value ? "page" : undefined} onClick={() => setTab(value)}>{value === "gcp" ? "Ground control" : value[0]!.toUpperCase() + value.slice(1)}</button>)}
       </nav>
       {error && <div className="notice error" role="alert">{error}</div>}
       {message && <div className="notice" role="status">{message}</div>}
+      {pendingReceiptCount > 0 && <div className="notice" role="status">Viewer may already have accepted {pendingReceiptCount} request{pendingReceiptCount === 1 ? "" : "s"} whose response was interrupted. No upload token, preview token, or request body is stored here. <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void recoverAcceptedRequests()}>Recover accepted requests</button></div>}
       {clientRef.current?.status().renewalError && <div className="notice" role="status">Viewer authorization renewal will retry; the current session remains active until expiry.</div>}
     </Card>
 
     {tab === "projects" && <Projects projects={projects} canWrite={can("viewer.projects.write")} busy={busy} mutate={mutate} query={query} units={bootstrap.units.resolved} nextCursor={cursors.projects} loadMore={() => loadMore("projects")} />}
-    {tab === "datasets" && <Datasets projects={projects} datasets={datasets} canWrite={can("viewer.datasets.write")} canTrash={can("viewer.storage.purge")} busy={busy} mutate={mutate} nextCursor={cursors.datasets} loadMore={() => loadMore("datasets")} />}
+    {tab === "datasets" && <Datasets key={`datasets-${recoveryVersion}`} projects={projects} datasets={datasets} canWrite={can("viewer.datasets.write")} canTrash={can("viewer.storage.purge")} busy={busy} mutate={mutate} nextCursor={cursors.datasets} loadMore={() => loadMore("datasets")} />}
     {tab === "gcp" && clientRef.current && <GcpWorkspace client={clientRef.current} datasets={datasets} tasks={tasks} mapToken={mapToken} units={bootstrap.units.resolved} canRead={can("viewer.gcp.read")} canWrite={can("viewer.gcp.write")} />}
-    {tab === "tasks" && <Tasks tasks={tasks} datasets={datasets} providers={providers} presets={presets} canWrite={can("viewer.processing.write")} canPublish={can("viewer.processing.publish")} busy={busy} mutate={mutate} query={query} nextCursor={cursors.tasks} loadMore={() => loadMore("tasks")} />}
+    {tab === "tasks" && <Tasks client={clientRef.current} tasks={tasks} datasets={datasets} providers={providers} presets={presets} canWrite={can("viewer.processing.write")} canPublish={can("viewer.processing.publish")} busy={busy} mutate={mutate} query={query} nextCursor={cursors.tasks} loadMore={() => loadMore("tasks")} />}
     {tab === "outputs" && <Outputs outputs={outputs} totals={outputTotals} canPublish={can("viewer.processing.publish")} busy={busy} mutate={mutate} nextCursor={cursors.outputs} loadMore={() => loadMore("outputs")} />}
-    {tab === "imports" && <Imports client={clientRef.current} projects={projects} canImport={can("viewer.datasets.import")} busy={busy} mutate={mutate} />}
+    {tab === "imports" && <><ViewerCatalogImports key={`catalog-${recoveryVersion}`} client={clientRef.current} projects={projects} units={bootstrap.units.resolved} canImport={can("viewer.datasets.import")} /><Imports key={`imports-${recoveryVersion}`} client={clientRef.current} projects={projects} canImport={can("viewer.datasets.import")} busy={busy} mutate={mutate} /></>}
     {tab === "providers" && <Providers providers={providers} canWrite={can("viewer.providers.write")} busy={busy} mutate={mutate} nextCursor={cursors.providers} loadMore={() => loadMore("providers")} />}
     {tab === "storage" && <Storage summary={storage} canPurge={can("viewer.storage.purge")} busy={busy} mutate={mutate} loadMore={loadMoreTrash} />}
     {tab === "shares" && <Card title="Shares"><p>Published-model demo links, expiry, revocation, passwords, units, and download policy are managed in Public demo links below. Raw dataset inputs and processing logs are never share candidates.</p><a className="button-orange button-small" href="#viewer-public-shares">Go to public demo links</a></Card>}
+    {tab === "settings" && <><ViewerPresetSettings presets={presets} providers={providers} canWrite={can("viewer.providers.write")} busy={busy} mutate={mutate} /><Card title="Viewer settings"><p>Installation units default to imperial. Each staff member may override measurement display without changing canonical stored values. Provider endpoints, admission limits, credentials, and health are managed in Providers.</p></Card></>}
 
-    {reviewAttempt && <Card title="Requested processing review"><StatusPill tone={reviewAttempt.attempt.status === "ready_for_review" ? "success" : reviewAttempt.attempt.status === "failed" ? "danger" : "warning"}>{reviewAttempt.attempt.status}</StatusPill><p>Attempt {reviewAttempt.attempt.id} · task {reviewAttempt.attempt.taskId} · {Math.round((reviewAttempt.attempt.progress || 0) * 100)}%</p>{reviewAttempt.attempt.errorMessage && <p className="viewer-processing-error">{reviewAttempt.attempt.errorMessage}</p>}<details><summary>Sanitized processing logs</summary><ol>{reviewAttempt.logs.map((log, index) => <li key={`${log.created_at}-${index}`}>{log.created_at} · {log.level} · {log.message}</li>)}</ol></details></Card>}
+    {reviewAttempt && <Card title="Requested processing review"><StatusPill tone={reviewAttempt.attempt.status === "ready_for_review" ? "success" : reviewAttempt.attempt.status === "failed" ? "danger" : "warning"}>{reviewAttempt.attempt.status}</StatusPill><p>Attempt {reviewAttempt.attempt.id} · task {reviewAttempt.attempt.taskId} · dataset {reviewAttempt.attempt.datasetId} · {Math.round((reviewAttempt.attempt.progress || 0) * 100)}%</p>{reviewAttempt.attempt.errorMessage && <p className="viewer-processing-error">{reviewAttempt.attempt.errorMessage}</p>}<details><summary>Sanitized processing logs</summary><ol>{reviewAttempt.logs.map((log, index) => <li key={`${log.created_at}-${index}`}>{log.created_at} · {log.level} · {log.message}</li>)}</ol></details></Card>}
 
     {!!bootstrap.events.length && <Card title="Processing notifications"><div className="viewer-processing-list">
       {bootstrap.events.map(event => <article key={event.event_id}>
         <div><StatusPill tone={event.event_type === "processing.failed" ? "danger" : "success"}>{event.status}</StatusPill>
-          <h3>Task {event.task_id}</h3><p>{event.error_message || `Attempt ${event.attempt_id} is ready for review.`}</p></div>
+          <h3>{event.task_display_name || `Task ${event.task_id}`}</h3><p>{event.project_display_name || `Project ${event.project_id}`} · {event.error_message || `Attempt ${event.attempt_id} is ready for review.`}</p></div>
         <div>{event.review_url && <a className="button-orange button-small" href={`/operations/processing?attemptId=${encodeURIComponent(event.attempt_id)}`}>Review</a>}
           {!event.acknowledged_at && <button className="button-ghost button-small" type="button" onClick={() => void api(`/api/viewer/events/${encodeURIComponent(event.event_id)}/acknowledge`, { method: "POST" }).then(load)}>Acknowledge</button>}</div>
       </article>)}
@@ -434,14 +473,24 @@ function DatasetCatalogControls({ dataset, projects, busy, mutate }: { dataset: 
   </form></details>;
 }
 
-function Tasks({ tasks, datasets, providers, presets, canWrite, canPublish, busy, mutate, query, nextCursor, loadMore }: { tasks: ViewerProcessingTask[]; datasets: ViewerDatasetSummary[]; providers: ViewerProviderSummary[]; presets: ViewerProcessingPreset[]; canWrite: boolean; canPublish: boolean; busy: boolean; mutate: Mutate; query: Query; nextCursor: string | null; loadMore: () => void }) {
+function Tasks({ client, tasks, datasets, providers, presets, canWrite, canPublish, busy, mutate, query, nextCursor, loadMore }: { client: ViewerAdminClient | null; tasks: ViewerProcessingTask[]; datasets: ViewerDatasetSummary[]; providers: ViewerProviderSummary[]; presets: ViewerProcessingPreset[]; canWrite: boolean; canPublish: boolean; busy: boolean; mutate: Mutate; query: Query; nextCursor: string | null; loadMore: () => void }) {
   const [datasetId, setDatasetId] = useState(""); const [providerId, setProviderId] = useState(""); const [presetId, setPresetId] = useState(""); const [name, setName] = useState(""); const [advancedOptions, setAdvancedOptions] = useState(() => JSON.stringify(defaultViewerProviderOverrides(null)));
+  const [pendingSubmission, setPendingSubmission] = useState<ViewerTaskSubmissionCheckpoint | null>(() => readViewerTaskSubmissionCheckpoint());
+  const [submissionWarning, setSubmissionWarning] = useState("");
   useEffect(() => { if (!datasetId && datasets[0]) setDatasetId(datasets[0].id); if (!providerId && providers[0]) setProviderId(providers[0].id); }, [datasetId, datasets, providerId, providers]);
   const selectedProvider = providers.find(item => item.id === providerId);
   return <Card title="Tasks and attempts">{canWrite && <form className="viewer-processing-form" onSubmit={event => { event.preventDefault(); void mutate(async client => {
-    const created = await client.request<{ task: ViewerProcessingTask }>("/api/v1/tasks", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ datasetId, projectId: datasets.find(item => item.id === datasetId)?.projectId, displayName: name.trim() }) });
     let options: Record<string, unknown>; try { options = JSON.parse(advancedOptions) as Record<string, unknown>; } catch { throw new Error("Advanced provider options must be valid JSON."); }
-    return client.request(`/api/v1/tasks/${encodeURIComponent(created.task.id)}/attempts`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ providerId, ...(presetId ? { presetId } : {}), options }) });
+    const projectId = datasets.find(item => item.id === datasetId)?.projectId;
+    if (!projectId) throw new Error("Choose a finalized dataset in an active project");
+    const checkpoint = newViewerTaskSubmissionCheckpoint({ projectId, datasetId, taskDisplayName: name, providerId, presetId, options });
+    setPendingSubmission(checkpoint);
+    if (!writeViewerTaskSubmissionCheckpoint(checkpoint)) setSubmissionWarning("Browser storage denied the task checkpoint. Keep this page open until submission completes.");
+    const result = await resumeViewerTaskSubmission(client, checkpoint, updated => {
+      setPendingSubmission(updated); writeViewerTaskSubmissionCheckpoint(updated);
+    });
+    clearViewerTaskSubmissionCheckpoint(); setPendingSubmission(null); setSubmissionWarning("");
+    return result;
   }, "Task submitted to the LTDS queue."); }}>
     <label>Task name<input value={name} onChange={event => setName(event.target.value)} /></label><label>Dataset<select value={datasetId} onChange={event => setDatasetId(event.target.value)}>{datasets.filter(item => item.status === "finalized").map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
     <label>Provider<select value={providerId} onChange={event => setProviderId(event.target.value)}>{providers.filter(item => item.enabled).map(item => <option key={item.id} value={item.id}>{item.displayName}</option>)}</select></label>
@@ -449,27 +498,87 @@ function Tasks({ tasks, datasets, providers, presets, canWrite, canPublish, busy
     <label className="viewer-processing-wide">Advanced provider options (overrides only)<textarea aria-label="Advanced provider options" value={advancedOptions} onChange={event => setAdvancedOptions(event.target.value)} rows={5} /></label>
     {!!selectedProvider?.capabilities?.options.length && <details className="viewer-processing-wide"><summary>Available {selectedProvider.capabilities.engine} options</summary><ul>{selectedProvider.capabilities.options.map(option => <li key={option.name}><code>{option.name}</code> ({option.type}) — {option.help}</li>)}</ul><p>Defaults are intentionally not copied into overrides because upstream NodeODM may report typed defaults as strings. Viewer validates only explicit overrides and injects required output flags.</p></details>}
     <button className="button-orange" disabled={busy || !name.trim() || !datasetId || !providerId}>Create and process</button></form>}
-    {!tasks.length ? <EmptyState title="No processing tasks" detail="Each retry creates a new immutable attempt." /> : <div className="viewer-processing-list">{tasks.map(task => <TaskRow key={task.id} task={task} canWrite={canWrite} canPublish={canPublish} busy={busy} mutate={mutate} query={query} />)}</div>}<Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
+    {submissionWarning && <p className="viewer-processing-warning" role="alert">{submissionWarning}</p>}
+    {pendingSubmission && <p className="viewer-upload-resume" role="status">A recoverable processing submission for <strong>{pendingSubmission.taskDisplayName}</strong> is saved. Its stable submission ID replays atomically across Viewer authorization renewals. <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void mutate(async client => {
+      const result = await resumeViewerTaskSubmission(client, pendingSubmission, updated => { setPendingSubmission(updated); writeViewerTaskSubmissionCheckpoint(updated); });
+      clearViewerTaskSubmissionCheckpoint(); setPendingSubmission(null); setSubmissionWarning(""); return result;
+    }, "Task submission resumed without creating a duplicate.")}>Resume submission</button> <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => { clearViewerTaskSubmissionCheckpoint(); setPendingSubmission(null); setSubmissionWarning(""); }}>Dismiss local recovery</button></p>}
+    {!tasks.length ? <EmptyState title="No processing tasks" detail="Each retry creates a new immutable attempt." /> : <div className="viewer-processing-list">{tasks.map(task => <TaskRow key={task.id} client={client} task={task} providers={providers} presets={presets} canWrite={canWrite} canPublish={canPublish} busy={busy} mutate={mutate} query={query} />)}</div>}<Pager nextCursor={nextCursor} busy={busy} loadMore={loadMore} />
   </Card>;
 }
 
-function TaskRow({ task, canWrite, canPublish, busy, mutate, query }: { task: ViewerProcessingTask; canWrite: boolean; canPublish: boolean; busy: boolean; mutate: Mutate; query: Query }) {
+const REVIEW_ASSET_KINDS = new Set(["glb", "tiles", "ept", "ortho", "dsm", "dtm"]);
+function validatedReviewSession(value: ViewerReviewSessionGrant, client: ViewerAdminClient, attempt: NonNullable<ViewerProcessingTask["latestAttempt"]>): ViewerReviewSessionGrant {
+  const redeem = new URL(value.redeemUrl), embed = new URL(value.embedUrl);
+  if (value.sessionMode !== "review" || value.attemptId !== attempt.id || value.modelId !== attempt.resultModelId ||
+    value.modelVersionId !== attempt.resultModelVersionId || typeof value.modelId !== "string" || !value.modelId ||
+    typeof value.modelVersionId !== "string" || !value.modelVersionId || typeof value.grant !== "string" || value.grant.length < 32 ||
+    typeof value.grantExpiresAt !== "string" || !Number.isFinite(Date.parse(value.grantExpiresAt)) || Date.parse(value.grantExpiresAt) <= Date.now() ||
+    !Number.isInteger(value.sessionTtlSeconds) || value.sessionTtlSeconds < 60 || value.sessionTtlSeconds > 3600 ||
+    redeem.origin !== client.origin || redeem.pathname !== "/api/v1/sessions/redeem" || redeem.search || redeem.hash ||
+    embed.origin !== client.origin || embed.pathname !== `/session/${encodeURIComponent(value.grant)}` || embed.search || embed.hash ||
+    !Array.isArray(value.assetKinds) ||
+    !value.assetKinds.length || value.assetKinds.some(kind => !REVIEW_ASSET_KINDS.has(kind)))
+    throw new Error("3D Viewer returned an invalid unpublished review session");
+  return value;
+}
+
+function TaskRow({ client, task, providers, presets, canWrite, canPublish, busy, mutate, query }: { client: ViewerAdminClient | null; task: ViewerProcessingTask; providers: ViewerProviderSummary[]; presets: ViewerProcessingPreset[]; canWrite: boolean; canPublish: boolean; busy: boolean; mutate: Mutate; query: Query }) {
   const [detail, setDetail] = useState<ViewerProcessingAttemptDetail | null>(null);
   const [detailError, setDetailError] = useState("");
+  const [reviewSession, setReviewSession] = useState<ViewerReviewSessionGrant | null>(null);
+  const [reviewBusy, setReviewBusy] = useState(false), [reviewError, setReviewError] = useState("");
   const attempt = task.latestAttempt;
   const active = Boolean(attempt && ["pending","admitted","initializing","uploading","committed","queued_upstream","running","ingesting","derivatives"].includes(attempt.status));
-  return <article><div><StatusPill tone={attempt?.status === "failed" ? "danger" : attempt?.status === "ready_for_review" ? "success" : "warning"}>{attempt?.status || task.status}</StatusPill><h3>{task.displayName}</h3><p>Stable task ID {task.id}{attempt ? ` · attempt ${attempt.attemptNumber} · ${Math.round((attempt.progress || 0) * 100)}%` : ""}</p>
+  const issueReviewSession = async (): Promise<ViewerReviewSessionGrant> => {
+    if (!client || !attempt) throw new Error("Viewer review is unavailable");
+    const value = await client.request<ViewerReviewSessionGrant>(`/api/v1/attempts/${encodeURIComponent(attempt.id)}/review-sessions`, {
+      method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}",
+    });
+    return validatedReviewSession(value, client, attempt);
+  };
+  const openReview = async () => {
+    if (reviewBusy) return;
+    setReviewBusy(true); setReviewError("");
+    try { setReviewSession(await issueReviewSession()); }
+    catch (caught) { setReviewError((caught as Error).message); }
+    finally { setReviewBusy(false); }
+  };
+  const closeReview = async () => {
+    if (!client || !attempt) { setReviewSession(null); return; }
+    setReviewSession(null); setReviewError("");
+    try { await client.request(`/api/v1/attempts/${encodeURIComponent(attempt.id)}/review-sessions`, {
+      method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}",
+    }); }
+    catch { setReviewError("The preview is closed locally. Viewer authorization cleanup will retry at expiry."); }
+  };
+  return <article><div><StatusPill tone={attempt?.status === "failed" ? "danger" : attempt?.status === "ready_for_review" ? "success" : "warning"}>{attempt?.status || task.status}</StatusPill><h3>{task.displayName}</h3><p>Stable task ID {task.id}{attempt ? ` · dataset ${attempt.datasetId} · attempt ${attempt.attemptNumber} · ${Math.round((attempt.progress || 0) * 100)}%` : ""}</p>
     {attempt?.errorMessage && <p className="viewer-processing-error">{attempt.errorCode ? `${attempt.errorCode}: ` : ""}{attempt.errorMessage}</p>}
     {detailError && <p className="viewer-processing-error">{detailError}</p>}
+    {reviewError && <p className="viewer-processing-error" role="alert">{reviewError}</p>}
     {detail && <details open className="viewer-attempt-detail"><summary>Attempt logs</summary><progress max={1} value={detail.attempt.progress || 0} />{detail.logs.length ? <ol>{detail.logs.map((log, index) => <li key={`${log.created_at}-${index}`}><time>{log.created_at}</time> <strong>{log.level}</strong> {log.message}</li>)}</ol> : <p>No provider logs yet.</p>}</details>}
+    {reviewSession && <ViewerEmbed modelId={reviewSession.modelId} title={`${task.displayName} — unpublished review`} session={reviewSession} renew={issueReviewSession} onClose={() => void closeReview()} />}
     <TaskStorageDetails task={task} busy={busy} query={query} />
   </div><div>
     {attempt && <button type="button" className="button-ghost button-small" onClick={() => void clientFor(mutate, async client => { try { setDetail(await client.request<ViewerProcessingAttemptDetail>(`/api/v1/attempts/${encodeURIComponent(attempt.id)}`)); setDetailError(""); } catch (caught) { setDetailError((caught as Error).message); } })}>Progress & logs</button>}
+    {canPublish && attempt?.status === "ready_for_review" && !reviewSession && <button type="button" className="button-orange button-small" disabled={busy || reviewBusy || !client} onClick={() => void openReview()}>{reviewBusy ? "Opening review…" : "Preview unpublished model"}</button>}
+    {canWrite && !attempt && task.status === "draft" && <DraftAttemptControls task={task} providers={providers} presets={presets} busy={busy} mutate={mutate} />}
     {canWrite && attempt?.status === "failed" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/attempts/${encodeURIComponent(attempt.id)}/retry`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "A new retry attempt was created.")}>Retry</button>}
     {canWrite && active && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/attempts/${encodeURIComponent(attempt!.id)}/cancel`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Cancellation requested.")}>Cancel</button>}
     {canPublish && attempt?.status === "ready_for_review" && <PublishButton task={task} busy={busy} mutate={mutate} />}
     {canWrite && <TaskCatalogControls task={task} active={active} busy={busy} mutate={mutate} />}
   </div></article>;
+}
+
+function DraftAttemptControls({ task, providers, presets, busy, mutate }: { task: ViewerProcessingTask; providers: ViewerProviderSummary[]; presets: ViewerProcessingPreset[]; busy: boolean; mutate: Mutate }) {
+  const enabled = providers.filter(provider => provider.enabled);
+  const [providerId, setProviderId] = useState(enabled[0]?.id || "");
+  const [presetId, setPresetId] = useState("");
+  const [options, setOptions] = useState("{}");
+  return <details className="viewer-task-catalog"><summary>Start processing</summary><form onSubmit={event => { event.preventDefault(); void mutate(client => {
+    let parsed: Record<string, unknown>; try { parsed = JSON.parse(options) as Record<string, unknown>; } catch { throw new Error("Advanced provider options must be valid JSON."); }
+    return client.request(`/api/v1/tasks/${encodeURIComponent(task.id)}/attempts`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ providerId, ...(presetId ? { presetId } : {}), options: parsed }) });
+  }, "Draft task submitted to the LTDS queue."); }}><label>Provider<select value={providerId} onChange={event => setProviderId(event.target.value)}>{enabled.map(provider => <option key={provider.id} value={provider.id}>{provider.displayName}</option>)}</select></label><label>Preset<select value={presetId} onChange={event => setPresetId(event.target.value)}><option value="">Provider default</option>{presets.map(preset => <option key={preset.id} value={preset.id}>{preset.displayName}</option>)}</select></label><label>Advanced overrides<textarea value={options} onChange={event => setOptions(event.target.value)} rows={3} /></label><button type="submit" className="button-orange button-small" disabled={busy || !providerId}>Start attempt</button></form></details>;
 }
 
 function TaskCatalogControls({ task, active, busy, mutate }: { task: ViewerProcessingTask; active: boolean; busy: boolean; mutate: Mutate }) {
@@ -694,19 +803,21 @@ function Providers({ providers, canWrite, busy, mutate, nextCursor, loadMore }: 
 
 function ProviderCard({ provider, canWrite, busy, mutate }: { provider: ViewerProviderSummary; canWrite: boolean; busy: boolean; mutate: Mutate }) {
   const [credential, setCredential] = useState("");
+  const [displayName, setDisplayName] = useState(provider.displayName), [endpoint, setEndpoint] = useState(provider.endpoint), [admissionLimit, setAdmissionLimit] = useState(provider.admissionLimit);
   const credentialIssue = providerCredentialError(credential);
   const credentialPath = `/api/v1/processing/providers/${encodeURIComponent(provider.id)}/credential`;
   const credentialStatus = provider.credential || { configured: false, updatedAt: null };
   const credentialDate = credentialStatus.updatedAt ? new Date(credentialStatus.updatedAt).toLocaleString() : null;
   const currentProbe = credentialStatus.configured && provider.lastHealth === "healthy" && Boolean(provider.lastHealthAt) &&
     (!credentialStatus.updatedAt || Date.parse(provider.lastHealthAt!) >= Date.parse(credentialStatus.updatedAt));
-  return <article className="viewer-provider-card"><div><StatusPill tone={provider.lastHealth === "healthy" ? "success" : provider.lastHealth === "degraded" || provider.lastHealth === null ? "warning" : "danger"}>{provider.lastHealth || "not probed"}</StatusPill><h3>{provider.displayName}</h3><p>{provider.type} · admission limit {provider.admissionLimit} · {provider.activeAttempts} active · {provider.enabled ? "enabled" : "disabled"}</p><p><strong>{credentialStatus.configured ? "Credential configured" : "Credential missing"}</strong>{credentialDate ? ` · updated ${credentialDate}` : ""}</p>{provider.capabilities && <p>{provider.capabilities.engine} {provider.capabilities.engineVersion}{provider.capabilities.compatibilityWarning ? ` · ${provider.capabilities.compatibilityWarning}` : ""}</p>}</div><div className="viewer-provider-controls">
+  return <article className="viewer-provider-card"><div><StatusPill tone={provider.lastHealth === "healthy" ? "success" : provider.lastHealth === "degraded" || provider.lastHealth === null ? "warning" : "danger"}>{provider.lastHealth || "not probed"}</StatusPill><h3>{provider.displayName}</h3><p>{provider.type} · admission limit {provider.admissionLimit} · {provider.activeAttempts} active · {provider.enabled ? "enabled" : "disabled"}</p>{provider.runtimeHealth && <p>Scheduled runtime health: {provider.runtimeHealth}{provider.runtimeHealthAt ? ` · checked ${new Date(provider.runtimeHealthAt).toLocaleString()}` : ""}{provider.runtimeHealthError ? ` · ${provider.runtimeHealthError}` : ""}</p>}<p><strong>{credentialStatus.configured ? "Credential configured" : "Credential missing"}</strong>{credentialDate ? ` · updated ${credentialDate}` : ""}</p>{provider.capabilities && <p>{provider.capabilities.engine} {provider.capabilities.engineVersion}{provider.capabilities.compatibilityWarning ? ` · ${provider.capabilities.compatibilityWarning}` : ""}</p>}</div><div className="viewer-provider-controls">
     {canWrite && <form className="viewer-provider-credential-form" onSubmit={event => { event.preventDefault(); const token = credential; if (providerCredentialError(token)) return; void mutate(async client => {
       try { return await client.request(credentialPath, { method: "PUT", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ token }) }); }
       finally { setCredential(""); }
     }, credentialStatus.configured ? "Provider credential rotated. Probe it before re-enabling admission." : "Provider credential stored. Probe it before enabling admission."); }}><label>{credentialStatus.configured ? "Replacement provider token" : "Provider token"}<input type="password" autoComplete="new-password" spellCheck={false} value={credential} onChange={event => setCredential(event.target.value)} aria-invalid={credential && credentialIssue ? "true" : undefined} />{credential && credentialIssue && <small className="viewer-processing-error">{credentialIssue}</small>}</label><button type="submit" className="button-ghost button-small" disabled={busy || provider.activeAttempts > 0 || Boolean(credentialIssue)}>{credentialStatus.configured ? "Rotate credential" : "Store credential"}</button></form>}
     {canWrite && credentialStatus.configured && <button type="button" className="button-danger button-small" disabled={busy || provider.activeAttempts > 0} onClick={() => { if (window.confirm(`Clear the stored credential for ${provider.displayName}? The provider will be disabled and must be configured and probed again.`)) void mutate(client => client.request(credentialPath, { method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() } }), "Provider credential cleared and admission disabled."); }}>Clear credential</button>}
     {canWrite && <button type="button" className="button-ghost button-small" disabled={busy || !credentialStatus.configured} onClick={() => void mutate(client => client.request(`/api/v1/processing/providers/${encodeURIComponent(provider.id)}/capabilities/probe`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Provider capability and health probe completed.")}>Probe capabilities</button>}
+    {canWrite && <details className="viewer-task-catalog"><summary>Edit provider settings</summary><form onSubmit={event => { event.preventDefault(); void mutate(client => client.request(`/api/v1/processing/providers/${encodeURIComponent(provider.id)}`, { method: "PATCH", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ displayName: displayName.trim(), endpoint, admissionLimit }) }), "Provider settings saved. Probe again before admission if the endpoint changed."); }}><label>Name<input maxLength={160} value={displayName} onChange={event => setDisplayName(event.target.value)} /></label><label>Endpoint<input type="url" value={endpoint} onChange={event => setEndpoint(event.target.value)} /></label><label>Admission limit<input type="number" min={1} max={100} step={1} value={admissionLimit} onChange={event => setAdmissionLimit(Number(event.target.value))} /></label><button type="submit" className="button-orange button-small" disabled={busy || provider.activeAttempts > 0 || !displayName.trim() || !endpoint || !Number.isInteger(admissionLimit) || admissionLimit < 1}>Save settings</button>{provider.activeAttempts > 0 && <small>Wait for active attempts before changing provider routing.</small>}</form></details>}
     {canWrite && <button type="button" className={provider.enabled ? "button-danger button-small" : "button-orange button-small"} disabled={busy || (!provider.enabled && !currentProbe)} onClick={() => void mutate(client => client.request(`/api/v1/processing/providers/${encodeURIComponent(provider.id)}`, { method: "PATCH", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ enabled: !provider.enabled }) }), provider.enabled ? "Provider disabled. Published viewing is unaffected." : "Provider enabled for admission.")}>{provider.enabled ? "Disable" : "Enable"}</button>}
   </div></article>;
 }

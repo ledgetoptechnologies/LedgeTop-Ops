@@ -5,17 +5,20 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 // This lets evidence and documentation evolve without silently changing the
 // exact application bytes approved for staging. Set this back to false whenever
 // any candidate changes, then refresh every immutable commit/image/migration pin.
-export const RELEASE_CONTRACT_FINALIZED = true;
+// Remediation work is active across Viewer, Operations, and Project Alpha.
+// Freeze this only after the final commits, image digest, fixtures, and
+// migration checksums have passed the independent cross-repository gate.
+export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
   operations: "be786b724d13838dc54023e0ee0a194c83fae6a8",
-  viewer: "8691ba68b20b4b6985bc1bf345f67dc7af889448",
-  projectAlpha: "af2864547d59743300879472bedb276f5694f662",
+  viewer: "8f6c4025368f0157bcd1e1c575d2fb4fab56564c",
+  projectAlpha: "769df9320dbf4dfc512d364173d5cb7d8ad8a97c",
 });
 
 export const STAGING_VIEWER = Object.freeze({
   hostname: "viewer-staging.ledgetopdroneservices.com",
   origin: "https://viewer-staging.ledgetopdroneservices.com",
-  image: "ghcr.io/ledgetoptechnologies/3d-viewer:sha-8691ba6@sha256:c80582711664a59c47f23162c43e082c6f38c3f4ddef8e70f93d6d24b846cdd5",
+  image: "ghcr.io/ledgetoptechnologies/3d-viewer:sha-8f6c402@sha256:994f6dbba8995e083df0bc1da634fb50ee1e46217a1e3633a1761199f533381a",
   serviceKeyId: "ops-staging-v1",
   eventKeyId: "viewer-staging-v1",
   providerCredentialsKeyId: "provider-staging-v1",
@@ -30,6 +33,7 @@ export const PROJECT_ALPHA_STAGING = Object.freeze({
   migrations: Object.freeze({
     "0066_generic_portal_v2_integration.sql": "12cfd32e4854bddf763a5fe80653fe7494ab5f9e82b592bf0da05eed78f3e886",
     "0067_portal_projection_delivery.sql": "a8150facbd25ff8c3275a591b09c2e75a50302abdc9c212477e3cc36d0cf11ea",
+    "0068_portal_contract_completeness.sql": "6d35f540edd176d192503d69d2d9c8914cd3e40f3f9d5f0e522eeef96ffdab37",
   }),
   defaultOffSettings: Object.freeze([
     "portal_v2_integration_enabled", "portal_v2_relations_enabled",
@@ -148,6 +152,8 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0138_viewer_model_associations.sql",
     "0139_thumbnail_claim_queue_index.sql",
     "0140_truenas_thumbnail_provenance.sql",
+    "0141_viewer_client_preferences.sql",
+    "0142_client_viewer_shares.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -164,6 +170,8 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0025_sop_assignment_permission.sql",
     "0026_viewer_permissions.sql",
     "0027_viewer_processing_control_plane.sql",
+    "0028_viewer_processing_labels.sql",
+    "0029_viewer_machine_rate_limits.sql",
   ]),
 });
 
@@ -183,6 +191,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
     "CLIENT_VIEWER_ENABLED",
+    "CLIENT_VIEWER_SHARES_ENABLED",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED",
     "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
     "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY",
@@ -203,6 +212,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "VIEWER_PROCESSING_ENABLED",
     "VIEWER_PUBLIC_SHARES_ENABLED",
     "CLIENT_VIEWER_SESSION_ISSUER_ENABLED",
+    "CLIENT_VIEWER_SHARES_ENABLED",
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED",
     "DIRECT_DELIVERY_UPLOADS_ENABLED",
     "DROPBOX_IMPORT_ENABLED",
@@ -230,6 +240,7 @@ export const REQUIRED_EXTERNAL_GATES = Object.freeze([
   "viewerProcessing",
   "viewerPublicShares",
   "viewerClientSessions",
+  "viewerClientShares",
 ]);
 
 // A bare "ready" attestation is not enough for any external capability. These
@@ -306,6 +317,11 @@ export const REQUIRED_EXTERNAL_GATE_PROOFS = Object.freeze({
     "oneTimeGrantVerified", "scopedSessionVerified", "silentRenewalVerified",
     "refreshFailureStatePreserved", "expiryAndRevocationVerified", "desktopMobileVerified",
   ]),
+  viewerClientShares: Object.freeze([
+    "explicitEntitlementVerified", "ownerIsolationVerified", "sourceExpiryCapVerified",
+    "incomingHmacVerified", "fiveSecondRevocationVerified", "nestedAssetBurstVerified",
+    "redactedAuditVerified", "desktopMobileVerified",
+  ]),
 });
 
 // Every default-off flag is either tied to current evidence gates or explicitly
@@ -324,6 +340,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: Object.freeze({ prohibitedReason: "Identity denylist activation requires a reviewed Operations mutation and audit surface" }),
     AUTHENTICATED_DELIVERY_GRANTS_ENABLED: Object.freeze({ prohibitedReason: "Authenticated Delivery grants require migration 0137, Project Alpha hierarchy parity, and end-to-end grant/revoke/restore evidence" }),
     CLIENT_VIEWER_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerClientSessions"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
+    CLIENT_VIEWER_SHARES_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "viewerDeployment", "viewerPublicShares", "viewerClientShares"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
     CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
     CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: Object.freeze({ gates: Object.freeze(["workspaceAccessEnrollment", "workspaceStaffRecovery"]) }),
     CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: Object.freeze({ gates: Object.freeze(["workspaceAccessEnrollment"]) }),
@@ -344,6 +361,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     VIEWER_PROCESSING_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerProcessing"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
     VIEWER_PUBLIC_SHARES_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerPublicShares"]), stagingGates: Object.freeze(["viewerDeployment"]) }),
     CLIENT_VIEWER_SESSION_ISSUER_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerClientSessions"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
+    CLIENT_VIEWER_SHARES_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "viewerDeployment", "viewerPublicShares", "viewerClientShares"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
     DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
     DIRECT_DELIVERY_UPLOADS_ENABLED: Object.freeze({ prohibitedReason: "Direct Delivery upload activation requires its separate media acceptance packet" }),
     DROPBOX_IMPORT_ENABLED: Object.freeze({ prohibitedReason: "Dropbox import is outside this release packet" }),
@@ -389,6 +407,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "false",
     AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "false",
     CLIENT_VIEWER_ENABLED: "false",
+    CLIENT_VIEWER_SHARES_ENABLED: "false",
     CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "false",
     CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "false",
     CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: "false",
@@ -426,6 +445,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     VIEWER_EVENT_PREVIOUS_KEY_ID: "",
     DEFAULT_UNITS: "imperial",
     CLIENT_VIEWER_SESSION_ISSUER_ENABLED: "false",
+    CLIENT_VIEWER_SHARES_ENABLED: "false",
     DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED: "false",
     DIRECT_DELIVERY_UPLOADS_ENABLED: "false",
     DROPBOX_IMPORT_ENABLED: "false",
@@ -454,7 +474,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "PROJECT_ALPHA_PRICING_HINT_CURRENCIES", "CLIENT_REQUEST_ATTACHMENTS_ENABLED",
     "CLIENT_PORTAL_TEAM_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
-    "CLIENT_VIEWER_ENABLED",
+    "CLIENT_VIEWER_ENABLED", "CLIENT_VIEWER_SHARES_ENABLED",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
     "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY", "CLIENT_PORTAL_INVITATION_EMAIL_ENABLED",
     "CLIENT_PORTAL_INVITATION_FROM", "CLIENT_PORTAL_INVITATION_FROM_NAME",
@@ -476,7 +496,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
     "VIEWER_INTEGRATION_ENABLED", "VIEWER_PROCESSING_ENABLED", "VIEWER_PUBLIC_SHARES_ENABLED", "VIEWER_BASE_URL",
     "VIEWER_SERVICE_KEY_ID", "VIEWER_EVENT_KEY_ID", "VIEWER_EVENT_PREVIOUS_KEY_ID", "DEFAULT_UNITS",
-    "CLIENT_VIEWER_SESSION_ISSUER_ENABLED",
+    "CLIENT_VIEWER_SESSION_ISSUER_ENABLED", "CLIENT_VIEWER_SHARES_ENABLED",
     "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED", "APPLICATION_KEY", "TFR_REGION",
     "DISPLAY_TIMEZONE", "MAP_STYLE_URL", "MAPBOX_PUBLIC_TOKEN", "STREAM_ACCOUNT_ID",
     "STREAM_CUSTOMER_CODE", "R2_ACCOUNT_ID", "R2_BUCKET_NAME", "R2_PURGE_ENABLED",

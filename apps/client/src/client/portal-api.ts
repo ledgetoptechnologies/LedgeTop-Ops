@@ -1,5 +1,5 @@
 import { requestJson, selectClientWorkspaceId, selectedClientWorkspaceId } from "./bulk-download";
-import type { DeliveryLocationCollection } from "@ltds/shared";
+import type { DeliveryLocationCollection, ViewerPublicShareCreation, ViewerPublicShareSummary } from "@ltds/shared";
 
 export interface PortalCapabilities {
   manageTeam: boolean;
@@ -12,6 +12,7 @@ export interface PortalCapabilities {
   invitationEmailDelivery: boolean;
   delegatedShares: boolean;
   viewer: boolean;
+  viewerShares: boolean;
 }
 
 export interface PortalAccount {
@@ -146,6 +147,7 @@ export interface PortalBootstrap {
   mapboxPublicToken: string | null;
   workspaces?: PortalWorkspace[];
   selectedWorkspaceId?: string | null;
+  viewerDisplayUnits: "imperial" | "metric";
 }
 
 export interface PortalNotification {
@@ -192,6 +194,7 @@ export async function loadPortalBootstrap(
   const session = await request<{
     account: PortalAccount;
     capabilities?: Partial<PortalCapabilities>;
+    viewerDisplayUnits?: "imperial" | "metric";
   }>("/api/client/session");
   let workspaces: PortalWorkspace[] = [];
   let selectedWorkspaceId: string | null = null;
@@ -224,12 +227,14 @@ export async function loadPortalBootstrap(
       invitationEmailDelivery: session.capabilities?.invitationEmailDelivery === true,
       delegatedShares: session.capabilities?.delegatedShares === true,
       viewer: session.capabilities?.viewer === true,
+      viewerShares: session.capabilities?.viewerShares === true,
     },
     projects: projects.projects,
     requests: requests.requests,
     mapboxPublicToken: mapConfig.mapboxPublicToken,
     workspaces,
     selectedWorkspaceId,
+    viewerDisplayUnits: session.viewerDisplayUnits === "metric" ? "metric" : "imperial",
   };
 }
 
@@ -240,7 +245,11 @@ export interface PortalViewerModel {
   modelId: string;
   modelVersionId: string;
   updatedAt: string;
+  canShare: boolean;
 }
+
+export type PortalViewerShare = ViewerPublicShareSummary;
+export type PortalViewerShareCreation = ViewerPublicShareCreation & { replayed: boolean };
 
 export interface PortalViewerSession {
   grant: string;
@@ -269,6 +278,49 @@ export async function createPortalViewerSession(
   return request<PortalViewerSession>(
     `/api/client/projects/${encodeURIComponent(projectId)}/models/${encodeURIComponent(associationId)}/session`,
     { method: "POST", headers: { "Idempotency-Key": idempotency }, body: JSON.stringify({ displayUnits }) },
+  );
+}
+
+export async function updatePortalViewerUnits(
+  displayUnits: "imperial" | "metric",
+  request: PortalRequest = requestJson,
+): Promise<{ displayUnits: "imperial" | "metric" }> {
+  return request("/api/client/viewer/preferences", { method: "PATCH", body: JSON.stringify({ displayUnits }) });
+}
+
+export async function loadPortalViewerShares(
+  projectId: string,
+  associationId: string,
+  request: PortalRequest = requestJson,
+): Promise<PortalViewerShare[]> {
+  return (await request<{ shares: PortalViewerShare[] }>(
+    `/api/client/projects/${encodeURIComponent(projectId)}/models/${encodeURIComponent(associationId)}/shares`,
+  )).shares;
+}
+
+export async function createPortalViewerShare(
+  projectId: string,
+  associationId: string,
+  input: { label: string | null; expiresAt: string | null; password?: string; displayUnits: "imperial" | "metric" },
+  idempotency: string,
+  request: PortalRequest = requestJson,
+): Promise<PortalViewerShareCreation> {
+  return request(
+    `/api/client/projects/${encodeURIComponent(projectId)}/models/${encodeURIComponent(associationId)}/shares`,
+    { method: "POST", headers: { "Idempotency-Key": idempotency }, body: JSON.stringify(input) },
+  );
+}
+
+export async function revokePortalViewerShare(
+  projectId: string,
+  associationId: string,
+  shareId: string,
+  idempotency: string,
+  request: PortalRequest = requestJson,
+): Promise<void> {
+  await request(
+    `/api/client/projects/${encodeURIComponent(projectId)}/models/${encodeURIComponent(associationId)}/shares/${encodeURIComponent(shareId)}`,
+    { method: "DELETE", headers: { "Idempotency-Key": idempotency } },
   );
 }
 

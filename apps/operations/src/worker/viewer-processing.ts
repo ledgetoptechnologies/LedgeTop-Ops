@@ -11,6 +11,7 @@ import { sqlScope } from "./acl";
 import { sendAdminAlert } from "./alerts";
 import { sendNotificationMail } from "./mailer";
 import type { Env, StaffPrincipal } from "./types";
+import { introspectClientViewerSourceAuthorization } from "./viewer-session-issuer";
 import { viewerIntegrationEnabled, viewerServiceClient } from "./viewer-integration";
 import { defaultViewerUnits, resolveViewerUnits } from "./viewer-units";
 
@@ -29,7 +30,9 @@ const eventSchema = z.object({
   type: z.enum(["processing.ready_for_review", "processing.failed"]),
   occurredAt: z.iso.datetime({ offset: true }),
   projectId: opaqueId,
+  projectDisplayName: z.string().trim().min(1).max(160).optional(),
   taskId: opaqueId,
+  taskDisplayName: z.string().trim().min(1).max(160).optional(),
   attemptId: opaqueId,
   requestedBySubject: z.string().regex(/^ops:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
   status: z.string().trim().min(1).max(80),
@@ -218,11 +221,21 @@ export async function pruneViewerEventNonces(env: Pick<Env, "OPS_DB">): Promise<
   return expired.meta.changes || 0;
 }
 
+export async function pruneViewerMachineRateLimits(env: Pick<Env, "OPS_DB">): Promise<number> {
+  const expired = await env.OPS_DB.prepare(`DELETE FROM viewer_machine_rate_limits WHERE rowid IN (
+    SELECT rowid FROM viewer_machine_rate_limits WHERE datetime(window_start)<=datetime('now','-10 minutes') LIMIT 1000
+  )`).run();
+  return expired.meta.changes || 0;
+}
+
 interface NotificationRow {
   id: string;
   event_id: string;
   event_type: "processing.ready_for_review" | "processing.failed";
   task_id: string;
+  project_id: string;
+  project_display_name: string | null;
+  task_display_name: string | null;
   attempt_id: string;
   requested_by_subject: string;
   error_message: string | null;
@@ -235,7 +248,7 @@ export async function processViewerProcessingNotifications(env: Env): Promise<nu
   let processed = 0;
   for (; processed < 20; processed += 1) {
     const row = await env.OPS_DB.prepare(`SELECT outbox.id,outbox.event_id,outbox.attempt_count,
-      event.event_type,event.task_id,event.attempt_id,event.requested_by_subject,event.error_message,event.review_url
+      event.event_type,event.project_id,event.project_display_name,event.task_id,event.task_display_name,event.attempt_id,event.requested_by_subject,event.error_message,event.review_url
       FROM viewer_processing_notification_outbox outbox
       JOIN viewer_processing_events event ON event.event_id=outbox.event_id
       WHERE ((outbox.status='pending' AND datetime(outbox.next_attempt_at)<=datetime('now'))
@@ -260,9 +273,11 @@ export async function processViewerProcessingNotifications(env: Env): Promise<nu
     }
     const failed = row.event_type === "processing.failed";
     const subject = failed ? "3D processing failed" : "3D model ready for review";
+    const projectLabel = row.project_display_name ? `${row.project_display_name} (${row.project_id})` : row.project_id;
+    const taskLabel = row.task_display_name ? `${row.task_display_name} (${row.task_id})` : row.task_id;
     const text = failed
-      ? `Task ${row.task_id}, attempt ${row.attempt_id}: ${row.error_message || "Processing failed"}`
-      : `Task ${row.task_id}, attempt ${row.attempt_id} is ready for review.${row.review_url ? `\n\nReview: ${row.review_url}` : ""}`;
+      ? `Project ${projectLabel}\nTask ${taskLabel}, attempt ${row.attempt_id}: ${row.error_message || "Processing failed"}`
+      : `Project ${projectLabel}\nTask ${taskLabel}, attempt ${row.attempt_id} is ready for review.${row.review_url ? `\n\nReview: ${row.review_url}` : ""}`;
     try {
       await sendNotificationMail(env, {
         to: recipient, fromName: "LTDS 3D Processing", subject, text,
@@ -286,10 +301,75 @@ export async function processViewerProcessingNotifications(env: Env): Promise<nu
 }
 
 export function viewerMachineEventRequest(method: string, path: string): boolean {
-  return method.toUpperCase() === "POST" && path === "/api/viewer/events";
+  return method.toUpperCase() === "POST" && (
+    path === "/api/viewer/events" || path === "/api/viewer/source-authorizations/introspect"
+  );
+}
+
+export function viewerMachineHostRequest(
+  requestUrl: string,
+  method: string,
+  env: Pick<Env, "INCOMING_EXPECTED_HOST">,
+): boolean {
+  try {
+    const url = new URL(requestUrl);
+    return url.host === env.INCOMING_EXPECTED_HOST && viewerMachineEventRequest(method, url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+const sourceAuthorizationIntrospectionSchema = z.object({
+  authorizationId: opaqueId,
+  authorizationVersion: z.number().int().min(1),
+  subject: z.string().min(1).max(512),
+  modelId: opaqueId,
+  shareId: opaqueId,
+}).strict();
+
+async function consumeViewerMachineRate(env: Env, scope: "event" | "source-introspection"): Promise<boolean> {
+  const maximum = scope === "source-introspection" ? 600 : 120;
+  const result = await env.OPS_DB.prepare(`INSERT INTO viewer_machine_rate_limits(scope,window_start,request_count)
+    VALUES(?,strftime('%Y-%m-%dT%H:%M:00Z','now'),1)
+    ON CONFLICT(scope,window_start) DO UPDATE SET request_count=request_count+1
+    WHERE request_count<? RETURNING request_count`).bind(scope, maximum).first<number>("request_count");
+  return typeof result === "number" && result <= maximum;
+}
+
+async function reserveViewerMachineNonce(
+  env: Env,
+  authenticated: { keyId: string; nonce: string },
+): Promise<void> {
+  const nonceCount = await env.OPS_DB.prepare(
+    "SELECT COUNT(*) count FROM viewer_event_nonces WHERE datetime(expires_at)>datetime('now')",
+  ).first<number>("count") || 0;
+  if (nonceCount >= 20_000)
+    throw new HTTPException(503, { message: "Viewer machine replay protection is temporarily at capacity" });
+  const expiry = new Date(Date.now() + EVENT_CLOCK_SKEW_SECONDS * 2 * 1000).toISOString();
+  const inserted = await env.OPS_DB.prepare(`INSERT OR IGNORE INTO viewer_event_nonces(key_id,nonce,expires_at)
+    VALUES(?,?,?)`).bind(authenticated.keyId, authenticated.nonce, expiry).run();
+  if (!inserted.meta.changes)
+    throw new HTTPException(409, { message: "Viewer machine request was already received" });
 }
 
 export function registerViewerProcessingRoutes(app: ViewerApp): void {
+  app.post("/api/viewer/source-authorizations/introspect", async c => {
+    if (c.env.CLIENT_VIEWER_SHARES_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
+    const rawBody = await boundedBody(c.req.raw);
+    const authenticated = await verifyEventSignature(c.env, c.req.raw, rawBody);
+    let decoded: unknown;
+    try { decoded = JSON.parse(rawBody); }
+    catch { throw new HTTPException(400, { message: "Source authorization introspection must be JSON" }); }
+    const parsed = sourceAuthorizationIntrospectionSchema.safeParse(decoded);
+    if (!parsed.success) throw new HTTPException(400, { message: "Source authorization introspection is invalid" });
+    if (!await consumeViewerMachineRate(c.env, "source-introspection"))
+      throw new HTTPException(429, { message: "Too many source authorization requests" });
+    await reserveViewerMachineNonce(c.env, authenticated);
+    const result = await introspectClientViewerSourceAuthorization(c.env, parsed.data);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
+
   app.post("/api/viewer/events", async c => {
     if (!viewerProcessingEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
     const rawBody = await boundedBody(c.req.raw);
@@ -304,6 +384,8 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     const event: ViewerProcessingEventV1 = parsed.data;
     if (Math.abs(Date.now() - Date.parse(event.occurredAt)) > 24 * 60 * 60 * 1000)
       throw new HTTPException(400, { message: "Viewer event time is invalid" });
+    if (!await consumeViewerMachineRate(c.env, "event"))
+      throw new HTTPException(429, { message: "Too many Viewer event requests" });
     const reviewUrl = validateReviewUrl(c.env, event.reviewUrl, event.attemptId);
     const errorMessage = event.error ? safeEventMessage(event.error.message) : null;
     const sanitized = JSON.stringify({
@@ -326,10 +408,10 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
       c.env.OPS_DB.prepare(`INSERT OR IGNORE INTO viewer_event_nonces(key_id,nonce,expires_at)
         VALUES(?,?,?)`).bind(authenticated.keyId, authenticated.nonce, expiry),
       c.env.OPS_DB.prepare(`INSERT OR IGNORE INTO viewer_processing_events(
-        event_id,event_type,occurred_at,project_id,task_id,attempt_id,requested_by_subject,status,
+        event_id,event_type,occurred_at,project_id,project_display_name,task_id,task_display_name,attempt_id,requested_by_subject,status,
         error_code,error_message,review_url,request_fingerprint,idempotency_key,payload_json)
-        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE changes()=1`).bind(
-        event.eventId, event.type, event.occurredAt, event.projectId, event.taskId, event.attemptId,
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,? WHERE changes()=1`).bind(
+        event.eventId, event.type, event.occurredAt, event.projectId, event.projectDisplayName || null, event.taskId, event.taskDisplayName || null, event.attemptId,
         event.requestedBySubject, event.status, event.error?.code || null, errorMessage, reviewUrl,
         authenticated.bodyHash, suppliedIdempotency.data, sanitized,
       ),
@@ -362,7 +444,7 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
       throw new HTTPException(403, { message: "Global viewer.view permission required" });
     const units = await resolveViewerUnits(c.env, principal.id);
     const events = viewerProcessingEnabled(c.env)
-      ? await c.env.OPS_DB.prepare(`SELECT event_id,event_type,occurred_at,project_id,task_id,attempt_id,
+      ? await c.env.OPS_DB.prepare(`SELECT event_id,event_type,occurred_at,project_id,project_display_name,task_id,task_display_name,attempt_id,
           status,error_code,error_message,review_url,acknowledged_at,received_at
           FROM viewer_processing_events ORDER BY received_at DESC LIMIT 50`).all()
       : { results: [] };

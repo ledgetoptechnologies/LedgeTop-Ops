@@ -4,7 +4,14 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("cloudflare:workers", () => ({ WorkerEntrypoint: class {} }));
 
 import type { ClientViewerSessionRequestV1 } from "@ltds/shared";
-import { authorizeClientViewerAssociation } from "../src/worker/viewer-session-issuer";
+import {
+  authorizeClientViewerAssociation,
+  createClientViewerShare,
+  introspectClientViewerSourceAuthorization,
+  listClientViewerShares,
+  pruneClientViewerShareReceipts,
+  revokeClientViewerShare,
+} from "../src/worker/viewer-session-issuer";
 import { persistViewerAssociation } from "../src/worker/viewer-integration";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
@@ -63,6 +70,16 @@ async function fixture(): Promise<{ database: D1Database; env: Env }> {
       status TEXT,revoked_at TEXT,valid_from TEXT,expires_at TEXT,scope_type TEXT,scope_public_id TEXT);
     CREATE TABLE portal_v2_identity_denials(identity_id TEXT,status TEXT,revoked_at TEXT,valid_from TEXT,
       expires_at TEXT,scope_type TEXT,workspace_id TEXT,scope_public_id TEXT);
+    CREATE TABLE client_viewer_source_authorizations(
+      id TEXT PRIMARY KEY,authorization_version INTEGER NOT NULL DEFAULT 1,workspace_id TEXT,identity_id TEXT,legacy_account_id TEXT,
+      legacy_identity_id TEXT,principal_issuer TEXT,principal_subject TEXT,project_id TEXT,association_id TEXT,
+      association_version INTEGER,viewer_model_id TEXT,viewer_model_version_id TEXT,authorization_expires_at TEXT,
+      idempotency_key TEXT,request_fingerprint TEXT,status TEXT NOT NULL DEFAULT 'pending',share_id TEXT,created_at TEXT,updated_at TEXT,
+      revoked_at TEXT,last_denial_reason TEXT,last_denial_at TEXT,UNIQUE(identity_id,idempotency_key),UNIQUE(share_id));
+    CREATE TABLE client_viewer_share_revocation_receipts(identity_id TEXT,idempotency_key TEXT,share_id TEXT,
+      response_json TEXT,created_at TEXT,PRIMARY KEY(identity_id,idempotency_key));
+    CREATE TABLE audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT,actor_type TEXT,actor_id TEXT,action TEXT,
+      entity_type TEXT,entity_id TEXT,details_json TEXT);
     INSERT INTO projects VALUES ('project-one','pa-project-one','source-v1',1);
     INSERT INTO viewer_model_associations VALUES (
       'association-one','project-one','pa-project-one','source-v1','viewer-model-one','viewer-version-one',
@@ -93,10 +110,37 @@ async function fixture(): Promise<{ database: D1Database; env: Env }> {
     CLIENT_VIEWER_SESSION_ISSUER_ENABLED: "true",
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+    CLIENT_VIEWER_SHARES_ENABLED: "true",
+    VIEWER_INTEGRATION_ENABLED: "true",
+    VIEWER_PUBLIC_SHARES_ENABLED: "true",
+    VIEWER_BASE_URL: "https://viewer.example.test",
+    VIEWER_SERVICE_KEY_ID: "ops-v1",
+    VIEWER_SERVICE_HMAC_SECRET: "viewer-service-secret-32-characters-minimum",
+    OPS_DB: database,
   } as Env };
 }
 
-afterEach(async () => Promise.all(active.splice(0).map(instance => instance.dispose())));
+async function grantViewerSharing(database: D1Database, identityId = "identity-one"): Promise<void> {
+  await database.prepare(`INSERT INTO portal_v2_entitlements VALUES (
+    'workspace-one',?,'viewer.share.create','allow','active',NULL,
+    datetime('now','-1 minute'),NULL,'workspace','workspace-one')`).bind(identityId).run();
+}
+
+async function addSourceAuthorization(database: D1Database): Promise<void> {
+  await database.prepare(`INSERT INTO client_viewer_source_authorizations(
+    id,authorization_version,workspace_id,identity_id,legacy_account_id,legacy_identity_id,principal_issuer,
+    principal_subject,project_id,association_id,association_version,viewer_model_id,viewer_model_version_id,
+    authorization_expires_at,idempotency_key,request_fingerprint,status,share_id,created_at,updated_at)
+    VALUES('source-auth-one',1,'workspace-one','identity-one','account-one','legacy-identity-one',
+      'https://clients.example.test','subject-one','project-one','association-one',1,'viewer-model-one',
+      'viewer-version-one',datetime('now','+15 minutes'),'share-create-key-0001','fingerprint','active',
+      'share-one',datetime('now'),datetime('now'))`).run();
+}
+
+afterEach(async () => {
+  vi.unstubAllGlobals();
+  await Promise.all(active.splice(0).map(instance => instance.dispose()));
+});
 
 describe("client Viewer authorization", () => {
   it("returns only an exact live project/model association with delivery.view", async () => {
@@ -153,6 +197,165 @@ describe("client Viewer authorization", () => {
     await database.prepare(`INSERT INTO portal_v2_identity_denials VALUES (
       'identity-one','active',NULL,datetime('now','-1 minute'),NULL,'global',NULL,NULL)`).run();
     expect(await authorizeClientViewerAssociation(env, request)).toBeNull();
+  });
+
+  it("requires the distinct viewer.share.create opt-in with deny precedence", async () => {
+    const { database, env } = await fixture();
+    expect(await authorizeClientViewerAssociation(env, request, "viewer.share.create")).toBeNull();
+    await grantViewerSharing(database);
+    expect(await authorizeClientViewerAssociation(env, request, "viewer.share.create")).toMatchObject({ id: "association-one" });
+    await database.prepare(`INSERT INTO portal_v2_entitlements VALUES (
+      'workspace-one','identity-one','viewer.share.create','deny','active',NULL,
+      datetime('now','-1 minute'),NULL,'project','pa-project-one')`).run();
+    expect(await authorizeClientViewerAssociation(env, request, "viewer.share.create")).toBeNull();
+  });
+
+  it("introspects the exact live authorization and fails after version drift or a feature rollback", async () => {
+    const { database, env } = await fixture();
+    await grantViewerSharing(database);
+    await addSourceAuthorization(database);
+    const input = { authorizationId: "source-auth-one", authorizationVersion: 1, subject: "subject-one",
+      modelId: "viewer-model-one", shareId: "share-one" };
+    expect(await introspectClientViewerSourceAuthorization(env, input)).toMatchObject({
+      active: true, authorizationId: input.authorizationId, authorizationVersion: input.authorizationVersion,
+      subject: input.subject, modelId: input.modelId,
+    });
+    expect(await introspectClientViewerSourceAuthorization({ ...env, VIEWER_PUBLIC_SHARES_ENABLED: "false" }, input))
+      .toMatchObject({ active: false });
+    await database.prepare("UPDATE viewer_model_associations SET association_version=2 WHERE id='association-one'").run();
+    expect(await introspectClientViewerSourceAuthorization(env, input)).toMatchObject({ active: false });
+    expect(await introspectClientViewerSourceAuthorization(env, input)).toMatchObject({ active: false });
+    expect(await database.prepare("SELECT COUNT(*) FROM audit_events WHERE action='viewer.client_share.authorization_denied'")
+      .first<number>("COUNT(*)")).toBe(1);
+    expect(await introspectClientViewerSourceAuthorization(env, { ...input, modelId: "other-model" }))
+      .toMatchObject({ active: false });
+  });
+
+  it("does not let another identity in the workspace enumerate or revoke the creator's shares", async () => {
+    const { database, env } = await fixture();
+    await grantViewerSharing(database);
+    await addSourceAuthorization(database);
+    await applySql(database, `
+      INSERT INTO portal_v2_identities VALUES ('identity-two','https://clients.example.test','subject-two','active',NULL);
+      INSERT INTO portal_v2_workspace_memberships VALUES ('workspace-one','identity-two','active',NULL,datetime('now','+20 minutes'));
+      INSERT INTO client_identity_links VALUES ('legacy-identity-two','account-one',NULL);
+      INSERT INTO client_account_members VALUES ('account-one','legacy-identity-two','manager',NULL);
+      INSERT INTO portal_v2_entitlements VALUES ('workspace-one','identity-two','delivery.view','allow','active',NULL,
+        datetime('now','-1 minute'),NULL,'workspace','workspace-one');
+      INSERT INTO portal_v2_entitlements VALUES ('workspace-one','identity-two','viewer.share.create','allow','active',NULL,
+        datetime('now','-1 minute'),NULL,'workspace','workspace-one');
+    `);
+    const other = {
+      protocolVersion: 1 as const, workspaceId: request.workspaceId, identityId: "identity-two",
+      legacyAccountId: request.legacyAccountId, legacyIdentityId: "legacy-identity-two",
+      principalIssuer: request.principalIssuer, principalSubject: "subject-two",
+      projectId: request.projectId, associationId: request.associationId,
+    };
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ shares: [{
+      id: "share-one", modelId: "viewer-model-one", versionPolicy: "latest", modelVersionId: null,
+      hasPassword: false, permissions: { view: true, measure: true, cameras: true, download: false },
+      label: null, createdBy: "identity-one", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      expiresAt: null, revokedAt: null, revokedBy: null, revokeReason: null, accessCount: 0, lastAccessedAt: null,
+      shareClass: "client", sourceAuthorization: { type: "client_grant", id: "source-auth-one", version: 1,
+        subject: "subject-one", expiresAt: null },
+    }] })));
+    expect(await listClientViewerShares(env, other)).toEqual({ ok: true, protocolVersion: 1, shares: [] });
+    expect(await revokeClientViewerShare(env, { ...other, shareId: "share-one", idempotencyKey: "share-revoke-key-0002" }))
+      .toEqual({ ok: false, protocolVersion: 1, code: "not_found" });
+  });
+
+  it("derives a service idempotency namespace and replays without storing access codes or bearer URLs", async () => {
+    const { database, env } = await fixture();
+    await grantViewerSharing(database);
+    const serviceKeys: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string>;
+      serviceKeys.push(headers["Idempotency-Key"]!);
+      const body = JSON.parse(String(init?.body));
+      return Response.json({
+        share: {
+          id: "share-created", modelId: "viewer-model-one", versionPolicy: "latest", modelVersionId: null,
+          hasPassword: true, permissions: { view: true, measure: true, cameras: true, download: false },
+          label: "Engineer", createdBy: "identity-one", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+          expiresAt: body.expiresAt, revokedAt: null, revokedBy: null, revokeReason: null, accessCount: 0, lastAccessedAt: null,
+          displayUnits: "imperial", shareClass: "client", sourceAuthorization: body.sourceAuthorization,
+        },
+        token: "secure_client_share_token_00000001",
+        viewUrl: "https://viewer.example.test/view/secure_client_share_token_00000001",
+        embedUrl: "https://viewer.example.test/embed/secure_client_share_token_00000001",
+      }, { status: 201 });
+    }));
+    const createRequest = {
+      protocolVersion: 1 as const, workspaceId: request.workspaceId, identityId: request.identityId,
+      legacyAccountId: request.legacyAccountId, legacyIdentityId: request.legacyIdentityId,
+      principalIssuer: request.principalIssuer, principalSubject: request.principalSubject,
+      projectId: request.projectId, associationId: request.associationId,
+      idempotencyKey: "browser-chosen-key-0001", label: "Engineer", expiresAt: null,
+      password: "model-passcode", displayUnits: "imperial" as const,
+    };
+    expect(await createClientViewerShare(env, createRequest)).toMatchObject({ ok: true, replayed: false });
+    expect(await createClientViewerShare(env, createRequest)).toMatchObject({ ok: true, replayed: true });
+    expect(serviceKeys).toHaveLength(2);
+    expect(serviceKeys[0]).toBe(serviceKeys[1]);
+    expect(serviceKeys[0]).toMatch(/^client-share-[A-Za-z0-9_-]{43}$/);
+    expect(serviceKeys[0]!).not.toContain(createRequest.idempotencyKey);
+    expect(await createClientViewerShare(env, { ...createRequest, password: "different-passcode" }))
+      .toEqual({ ok: false, protocolVersion: 1, code: "idempotency_conflict" });
+    const stored = await database.prepare("SELECT request_fingerprint FROM client_viewer_source_authorizations")
+      .first<string>("request_fingerprint");
+    expect(stored).not.toContain("model-passcode");
+    const audits = await database.prepare("SELECT details_json FROM audit_events WHERE action LIKE 'viewer.client_share.%'")
+      .all<{ details_json: string }>();
+    expect(JSON.stringify(audits.results)).not.toMatch(/model-passcode|secure_client_share_token|viewer\.example\.test/);
+  });
+
+  it("prunes only old revocation receipts and retains source authorization tombstones", async () => {
+    const { database, env } = await fixture();
+    await addSourceAuthorization(database);
+    await database.prepare("UPDATE client_viewer_source_authorizations SET status='revoked',revoked_at=datetime('now','-1 year')").run();
+    await database.prepare(`INSERT INTO client_viewer_share_revocation_receipts VALUES
+      ('identity-one','old-receipt-key-0001','share-one','{}',datetime('now','-91 days')),
+      ('identity-one','new-receipt-key-0002','share-two','{}',datetime('now'))`).run();
+    expect(await pruneClientViewerShareReceipts(env)).toBe(1);
+    expect(await database.prepare("SELECT COUNT(*) FROM client_viewer_share_revocation_receipts").first<number>("COUNT(*)")).toBe(2);
+    expect(await database.prepare("SELECT response_json FROM client_viewer_share_revocation_receipts WHERE idempotency_key='old-receipt-key-0001'")
+      .first("response_json")).toBeNull();
+    expect(await database.prepare("SELECT response_json FROM client_viewer_share_revocation_receipts WHERE idempotency_key='new-receipt-key-0002'")
+      .first<string>("response_json")).toBe("{}");
+    expect(await database.prepare("SELECT COUNT(*) FROM client_viewer_source_authorizations").first<number>("COUNT(*)")).toBe(1);
+  });
+
+  it("keeps redacted revocation keys conflict-safe and reconstructs same-share replay", async () => {
+    const { database, env } = await fixture();
+    await addSourceAuthorization(database);
+    await database.prepare(`INSERT INTO client_viewer_share_revocation_receipts
+      (identity_id,idempotency_key,share_id,response_json,created_at)
+      VALUES('identity-one','revoke-browser-key-0001','share-one',NULL,datetime('now','-91 days'))`).run();
+    const serviceKeys: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      serviceKeys.push((init?.headers as Record<string, string>)["Idempotency-Key"]!);
+      return Response.json({ share: {
+        id: "share-one", modelId: "viewer-model-one", versionPolicy: "latest", modelVersionId: null,
+        hasPassword: false, permissions: { view: true, measure: true, cameras: true, download: false }, label: null,
+        createdBy: "identity-one", createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+        expiresAt: null, revokedAt: new Date().toISOString(), revokedBy: "ops-v1", revokeReason: "client_owner_revoked",
+        accessCount: 0, lastAccessedAt: null, shareClass: "client",
+        sourceAuthorization: { type: "client_grant", id: "source-auth-one", version: 1, subject: "subject-one", expiresAt: null },
+      } });
+    }));
+    const authorization = {
+      protocolVersion: 1 as const, workspaceId: request.workspaceId, identityId: request.identityId,
+      legacyAccountId: request.legacyAccountId, legacyIdentityId: request.legacyIdentityId,
+      principalIssuer: request.principalIssuer, principalSubject: request.principalSubject,
+      projectId: request.projectId, associationId: request.associationId,
+    };
+    expect(await revokeClientViewerShare(env, { ...authorization, shareId: "share-one", idempotencyKey: "revoke-browser-key-0001" }))
+      .toMatchObject({ ok: true, replayed: true });
+    expect(serviceKeys[0]).toMatch(/^client-share-revoke-[A-Za-z0-9_-]{43}$/);
+    expect(serviceKeys[0]).not.toContain("revoke-browser-key-0001");
+    expect(await revokeClientViewerShare(env, { ...authorization, shareId: "share-two", idempotencyKey: "revoke-browser-key-0001" }))
+      .toEqual({ ok: false, protocolVersion: 1, code: "idempotency_conflict" });
+    expect(serviceKeys).toHaveLength(1);
   });
 
   it("stays unavailable until both rollout gates are enabled", async () => {

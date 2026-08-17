@@ -106,6 +106,8 @@ export type Env = Omit<
   DEFAULT_UNITS?: string;
   /** Default-off private Client -> Operations Viewer session issuer. */
   CLIENT_VIEWER_SESSION_ISSUER_ENABLED?: string;
+  /** Separate default-off client creation/revocation of Viewer public links. */
+  CLIENT_VIEWER_SHARES_ENABLED?: string;
   MAPBOX_PUBLIC_TOKEN?: string;
   SUA_GATEWAY_USER?: string;
   SUA_GATEWAY_PASSWORD?: string;

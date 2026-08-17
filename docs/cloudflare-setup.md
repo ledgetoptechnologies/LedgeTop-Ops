@@ -539,11 +539,15 @@ login page; Operations deliberately rejects redirects to protect its HMAC
 request headers. Keep
 `VIEWER_INTEGRATION_ENABLED=false`, `VIEWER_PROCESSING_ENABLED=false`,
 `VIEWER_PUBLIC_SHARES_ENABLED=false`, and
-`CLIENT_VIEWER_SESSION_ISSUER_ENABLED=false`. In Client, bind
+`CLIENT_VIEWER_SESSION_ISSUER_ENABLED=false`, `CLIENT_VIEWER_SHARES_ENABLED=false`. In Client, bind
 `VIEWER_SESSION_ISSUER` to Operations entrypoint `ViewerSessionIssuer` and keep
-`CLIENT_VIEWER_ENABLED=false`. Apply Client migration
-`0138_viewer_model_associations.sql` and Operations migration
-`0026_viewer_permissions.sql` plus `0027_viewer_processing_control_plane.sql`,
+`CLIENT_VIEWER_ENABLED=false` and `CLIENT_VIEWER_SHARES_ENABLED=false`. Client
+model-share creation additionally requires an explicit PA-projected
+`viewer.share.create` allow with normal deny precedence; it is never implied by
+manager role or `delegated_share.create`. Apply Client migrations
+`0138_viewer_model_associations.sql`, `0141_viewer_client_preferences.sql`, and
+`0142_client_viewer_shares.sql`, plus Operations migrations
+`0026_viewer_permissions.sql` through `0029_viewer_machine_rate_limits.sql`,
 deploy both Workers, and verify both shared HMAC/route fixtures, reverse callback
 key overlap and durable notification outbox, direct browser upload/CORS/CSP,
 storage recovery/preflight, provider-outage viewing independence, rate limits,
@@ -554,6 +558,25 @@ in staging before enabling Operations first, public demo shares only after the
 Viewer public-route policy is verified, its client issuer second, and the Client
 UI last. Roll back by disabling the Client UI, issuer, and public-share gates;
 no model asset is stored or proxied by LTDS.
+
+Viewer-to-Operations automation uses the already-public exact origin
+`https://incoming.ledgetopdroneservices.com`, not the Access-protected staff
+origin. Only `POST /api/viewer/events` and
+`POST /api/viewer/source-authorizations/introspect` are dispatched to the HMAC
+machine handlers on that host; those paths return 404 on the staff host and all
+other Incoming paths retain the existing Incoming policy. Do not add an Access
+Bypass to the staff hostname. Invalid HMAC requests fail before JSON parsing or
+D1 authorization work. Successful client-source introspection is cached and
+coalesced by Viewer for at most five seconds (negative results for at most one
+second), which defines the client-share revocation SLA without serializing
+nested tile/range loads.
+
+The scheduled Worker removes replay-safe machine rate windows after ten minutes
+and redacts client share revocation response payloads after 90 days while
+retaining the compact identity/key/share conflict tombstone. Active source
+authorization rows and revoked/pending compact tombstones are retained: they
+contain no password, bearer token, or share URL, and preserve the unique
+identity/idempotency boundary so cleanup cannot mint a duplicate share.
 
 ## 9. Migrations and Workflow rollout
 

@@ -145,7 +145,10 @@ export class ViewerAdminClient {
       if (response.ok) throw error;
       payload = {} as T & { error?: string };
     }
-    if (!response.ok) throw new Error(payload.error || `3D Viewer request failed (${response.status})`);
+    if (!response.ok) throw new ViewerAdminRequestError(
+      payload.error || `3D Viewer request failed (${response.status})`,
+      response.status,
+    );
     const retryAfter = Number(response.headers.get("Retry-After"));
     return {
       payload,
@@ -242,5 +245,12 @@ export class ViewerAdminClient {
 
   status(): { expiresAt: number; renewalError: string | null } {
     return { expiresAt: this.expiresAt, renewalError: this.renewalError };
+  }
+}
+
+export class ViewerAdminRequestError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = "ViewerAdminRequestError";
   }
 }

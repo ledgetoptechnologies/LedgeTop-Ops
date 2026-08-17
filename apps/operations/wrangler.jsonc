@@ -44,6 +44,7 @@
       "VIEWER_EVENT_PREVIOUS_KEY_ID": "",
     "DEFAULT_UNITS": "imperial",
     "CLIENT_VIEWER_SESSION_ISSUER_ENABLED": "false",
+    "CLIENT_VIEWER_SHARES_ENABLED": "false",
     "APPLICATION_KEY": "ltds_ops",
     "TFR_REGION": "WI",
     "DISPLAY_TIMEZONE": "America/Chicago",

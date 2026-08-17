@@ -6,7 +6,7 @@ import { signViewerServiceRequest } from "@ltds/shared";
 import type {
   ViewerDatasetImportPreview, ViewerDatasetSummary, ViewerDurableOperationResponse, ViewerProcessingAttemptDetail, ViewerProcessingProject,
   ViewerOutputSummary, ViewerProcessingTask, ViewerProjectStorageResponse, ViewerProviderSummary,
-  ViewerStorageSummary, ViewerTaskStorageResponse,
+  ViewerReviewSessionGrant, ViewerStorageSummary, ViewerTaskStorageResponse,
 } from "@ltds/shared";
 import { signViewerProcessingEvent } from "../src/worker/viewer-processing";
 
@@ -23,7 +23,7 @@ const routes = JSON.parse(routeBytes);
 describe("Viewer processing cross-service contract", () => {
   it("pins the byte-identical cross-repository route fixture", () => {
     expect(createHash("sha256").update(routeBytes).digest("hex").toUpperCase())
-      .toBe("54BB20112E37322F43B7C1B9C40C1F94244942097AE54CA378DE8C90A438E443");
+      .toBe("26BA67C5ECC3A534E3C067A6B4B0CD80E2D3823D766830EDC3FE77CE71152B5E");
   });
   it("pins the exact admin-grant body and service HMAC", async () => {
     const value = fixture.adminGrant;
@@ -71,8 +71,8 @@ describe("Viewer processing cross-service contract", () => {
     expect(attempt.logs[0]).toMatchObject({ level: "info", created_at: expect.any(String) });
     expect(storage.trash.items[0]).toMatchObject({ entityType: "dataset", entityId: "dataset-old" });
     expect(storage.trash).toMatchObject({ totalCount: 1, totalBytes: 99, nextCursor: null });
-    expect(Object.keys(routes.presets.presets[0]).sort()).toEqual(["builtIn", "capabilityFingerprint", "displayName", "id", "options", "providerType"]);
-    expect(routes.presets.presets[0]).toMatchObject({ providerType: null, capabilityFingerprint: null });
+    expect(Object.keys(routes.presets.presets[0]).sort()).toEqual(["builtIn", "capabilityFingerprint", "createdAt", "description", "displayName", "enabled", "id", "options", "providerType", "updatedAt"]);
+    expect(routes.presets.presets[0]).toMatchObject({ providerType: "clusterodm", capabilityFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/), builtIn: false, enabled: true });
     expect(routes.tasks.tasks[0].latestAttempt).toMatchObject({ status: "running", providerOutputCursor: 0, capabilityFingerprint: null });
     expect(routes.projects.nextCursor).toBeNull();
     expect(routes.taskPatched.task).toMatchObject({
@@ -105,6 +105,35 @@ describe("Viewer processing cross-service contract", () => {
       output: { id: output.id, status: "trashed" },
       trash: { entityType: "output", entityId: output.id, permanentlyDeletedAt: null },
     });
+  });
+
+  it("pins admin-only unpublished review issue and subject-scoped revoke shapes", () => {
+    const created = routes.reviewSessionCreated;
+    const grant = created.body as ViewerReviewSessionGrant;
+    expect(created).toMatchObject({ status: 201, headers: { "Cache-Control": "no-store" } });
+    expect(Object.keys(grant).sort()).toEqual([
+      "assetKinds", "attemptId", "embedUrl", "grant", "grantExpiresAt", "modelId",
+      "modelVersionId", "redeemUrl", "sessionMode", "sessionTtlSeconds",
+    ]);
+    expect(grant).toEqual({
+      grant: "77777777-7777-4777-8777-777777777777",
+      grantExpiresAt: "2027-01-15T08:50:00.000Z",
+      sessionTtlSeconds: 900,
+      sessionMode: "review",
+      attemptId: "attempt-import-two",
+      modelId: "model-one",
+      modelVersionId: "version-import-two",
+      assetKinds: ["ept", "glb"],
+      redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem",
+      embedUrl: "https://viewer.example.test/session/77777777-7777-4777-8777-777777777777",
+    });
+    expect(routes.reviewSessionsRevoked).toEqual({
+      status: 200,
+      headers: { "Cache-Control": "no-store" },
+      body: { attemptId: grant.attemptId, revokedGrants: 1, revokedSessions: 1 },
+    });
+    expect(grant).not.toHaveProperty("shareId");
+    expect(grant).not.toHaveProperty("published");
   });
 
   it("pins durable finalize/import 202, Location, polling, and terminal result shapes", () => {

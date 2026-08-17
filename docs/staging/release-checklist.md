@@ -87,7 +87,7 @@ all three ignored staging configs immediately before each mutation phase;
 
 Before collecting deployment evidence, replace every `FINAL_*` value in
 `scripts/staging-requirements.mjs` with the settled Ops, Viewer, and Project
-Alpha commits, the immutable Viewer tag-plus-digest, and the two Project Alpha
+Alpha commits, the immutable Viewer tag-plus-digest, and all Project Alpha
 migration hashes. Set `RELEASE_CONTRACT_FINALIZED=true` only after independent
 comparison with those repositories. The verifier intentionally fails while any
 release-candidate placeholder remains.
@@ -104,7 +104,7 @@ processing Compose profile, WebODM discovery, `PROXY_SHARED_SECRET`, and
 part of the required manifest for this release.
 
 Project Alpha evidence must identify its exact commit and immutable web/cron
-image digests, migration `0066`/`0067` ledger and source hashes, all seven
+image digests, migration `0066`/`0067`/`0068` ledger and source hashes, all seven
 installation settings and profile capabilities/delivery still off, the inert
 one-minute outbound sender, non-secret delivery key IDs, encrypted-secret and
 redacted-evidence proof, retry/dead-letter/revocation behavior, fresh backup,

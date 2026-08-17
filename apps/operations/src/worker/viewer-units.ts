@@ -1,8 +1,8 @@
 import type { ViewerDisplayUnits } from "@ltds/shared";
 import type { Env } from "./types";
 
-export function defaultViewerUnits(_env: Pick<Env, "DEFAULT_UNITS">): "imperial" {
-  return "imperial";
+export function defaultViewerUnits(env: Pick<Env, "DEFAULT_UNITS">): ViewerDisplayUnits {
+  return env.DEFAULT_UNITS === "metric" ? "metric" : "imperial";
 }
 
 export async function resolveViewerUnits(

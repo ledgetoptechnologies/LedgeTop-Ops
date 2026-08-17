@@ -44,7 +44,7 @@ const share = {
   label: "Client demo", createdBy: "ops:staff-one",
   createdAt: "2026-08-16T12:00:00.000Z", updatedAt: "2026-08-16T12:00:00.000Z",
   expiresAt: "2026-08-23T12:00:00.000Z", revokedAt: null, revokedBy: null, revokeReason: null,
-  accessCount: 0, lastAccessedAt: null,
+  accessCount: 0, lastAccessedAt: null, shareClass: "staff", sourceAuthorization: null,
 };
 
 function environment(publicSharesEnabled = true) {

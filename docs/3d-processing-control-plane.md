@@ -79,6 +79,19 @@ stopping status checks never cancels server work. Success is accepted only when
 the terminal result contains the expected finalized dataset; terminal failures
 surface their sanitized code/message and remain recoverable for review.
 
+Before the first mutation byte is sent, Ops also stores a bounded,
+credential-free receipt locator containing only the idempotency key, exact API
+path, operation type, expected public IDs, and timestamp. It never stores the
+request body, request hash, headers, upload token, preview token, grant, or
+bearer. After an interrupted response or a new administrative session, Ops uses
+`GET /api/v1/operation-receipts/:key` to recover the atomically linked operation;
+it validates subject, method, path, key, request-hash shape, operation ID/type,
+and expected dataset/upload IDs before creating the normal checkpoint. A
+Viewer-confirmed `404` removes the locator, an unlinked reservation remains
+visible as reconciling, and network or contract ambiguity fails closed without
+discarding recovery state. The Processing UI exposes an explicit **Recover
+accepted requests** action after reload.
+
 Import preview exposes one normalized public storage preflight DTO:
 `destinationSpace.{availableBytes,totalBytes,reserveBytes,requiredBytes,sufficient}`.
 Operations enables confirmation only when `sufficient` is true and displays the
@@ -87,13 +100,25 @@ must not leak across this API boundary.
 
 ## Reverse callback and notifications
 
-Viewer posts at most 16 KiB of exact JSON to `POST /api/viewer/events` with `X-LTDS-Viewer-Key-Id`, timestamp, nonce, content hash, signature, and `Idempotency-Key=eventId`. Operations verifies the selected current/previous rotation key, time window, nonce syntax, body hash, and HMAC before parsing JSON.
+Viewer posts at most 16 KiB of exact JSON to `https://incoming.ledgetopdroneservices.com/api/viewer/events` with `X-LTDS-Viewer-Key-Id`, timestamp, nonce, content hash, signature, and `Idempotency-Key=eventId`. Operations verifies the selected current/previous rotation key, time window, nonce syntax, body hash, and HMAC before parsing JSON. The same exact Incoming origin and signature protocol protects `/api/viewer/source-authorizations/introspect`; neither machine route is accepted on the Access-protected staff origin.
 
 A ready-for-review callback carries exactly
 `PUBLIC_BASE_URL/operations/processing?attemptId=<opaque-id>`. Operations
 requires HTTPS, its configured public origin, the exact path, one canonical
 `attemptId` query matching the signed event, and no credentials, extra query,
 or fragment. Viewer-origin review links and open redirects are rejected.
+
+An operator with `viewer.processing.publish` reviews an unpublished output by
+asking Viewer directly for a subject-scoped, short-lived review grant at
+`POST /api/v1/attempts/:attemptId/review-sessions`. Operations accepts the
+grant only when its attempt, model, immutable version, Viewer origin, exact
+`/session/:grant` embed URL, redemption URL, TTL, and derivative allowlist all
+match the selected ready-for-review attempt. Renewal uses the mounted
+`ViewerEmbed` message protocol so camera and layer state survive transient
+authorization failures. Closing the embed calls the matching subject-scoped
+`DELETE`; publishing, cancelling, or changing the bound attempt/version also
+invalidates Viewer review access. Review authorization never publishes a model,
+creates a public share, or exposes raw dataset/provider assets.
 
 Nonce consumption, event fingerprint, outbox row, and audit event are committed in one D1 batch. Same event ID/body replays; same ID/different body or reused nonce/new ID returns `409`. Only expired nonces are pruned. At the live nonce cap, callbacks backpressure instead of evicting unexpired replay protection.
 

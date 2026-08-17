@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { Brand, Card, EmptyState, Loading, StatusPill, ViewerEmbed } from "@ltds/ui";
+import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, ViewerEmbed } from "@ltds/ui";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
@@ -49,6 +49,10 @@ import {
   submitPortalServiceDraft,
   uploadPortalAttachmentPart,
   updatePortalNotification,
+  updatePortalViewerUnits,
+  loadPortalViewerShares,
+  createPortalViewerShare,
+  revokePortalViewerShare,
   updatePortalServiceRequest,
   type PortalBootstrap,
   type PortalFile,
@@ -63,6 +67,7 @@ import {
   type PortalProject,
   type PortalViewerModel,
   type PortalViewerSession,
+  type PortalViewerShare,
   type PortalServiceRequest,
   type PortalServiceCatalogItem,
   type PortalServiceDraft,
@@ -1719,15 +1724,13 @@ function LegacyServiceRequestForm({
   );
 }
 
-function ProjectViewerModels({ projectId }: { projectId: string }) {
+function ProjectViewerModels({ projectId, initialDisplayUnits }: { projectId: string; initialDisplayUnits: "imperial" | "metric" }) {
   const [models, setModels] = useState<PortalViewerModel[] | null>(null);
   const [selected, setSelected] = useState<PortalViewerModel | null>(null);
   const [session, setSession] = useState<PortalViewerSession | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  // The client portal does not yet expose a server-backed profile preference;
-  // keep this explicit browser-only fallback scoped to Viewer measurements.
-  const [displayUnits, setDisplayUnits] = useState<"imperial" | "metric">(readClientViewerUnits);
+  const [displayUnits, setDisplayUnits] = useState<"imperial" | "metric">(initialDisplayUnits || readClientViewerUnits());
 
   useEffect(() => {
     let active = true;
@@ -1762,18 +1765,103 @@ function ProjectViewerModels({ projectId }: { projectId: string }) {
     {error && <div className="notice error" role="alert">{error}</div>}
     <label className="portal-viewer-units">Measurement units<select value={displayUnits} onChange={event => {
       const next = event.target.value as "imperial" | "metric";
-      // The active page keeps the preference in memory even when privacy
-      // settings or quota make browser persistence unavailable.
       setDisplayUnits(next); writeClientViewerUnits(next);
+      void updatePortalViewerUnits(next).catch(caught => setError((caught as Error).message));
     }}><option value="imperial">Imperial</option><option value="metric">Metric</option></select></label>
     {!models.length ? <EmptyState title="No 3D models available" detail="Your LTDS team has not associated a 3D model with this project." /> :
       <div className="portal-viewer-model-grid">{models.map(model => <article key={model.associationId}>
         <div><span>Interactive model</span><h3>{model.title}</h3><p>{model.provider} · secure Viewer session</p></div>
-        <button type="button" className="button-orange" disabled={busy} onClick={() => void open(model)}>
+        <div className="portal-form-actions"><button type="button" className="button-orange" disabled={busy} onClick={() => void open(model)}>
           {busy ? "Opening…" : "Open 3D model"}
-        </button>
+        </button></div>
+        {model.canShare && <PortalViewerShares projectId={projectId} model={model} displayUnits={displayUnits} />}
       </article>)}</div>}
   </Card>;
+}
+
+function PortalViewerShares({
+  projectId,
+  model,
+  displayUnits,
+}: {
+  projectId: string;
+  model: PortalViewerModel;
+  displayUnits: "imperial" | "metric";
+}) {
+  const [open, setOpen] = useState(false);
+  const [shares, setShares] = useState<PortalViewerShare[]>([]);
+  const [label, setLabel] = useState("");
+  const [lifetime, setLifetime] = useState<"7" | "30" | "source">("7");
+  const [password, setPassword] = useState("");
+  const [createdUrl, setCreatedUrl] = useState("");
+  const [copyStatus, setCopyStatus] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const refresh = useCallback(async () => {
+    setBusy(true); setError("");
+    try { setShares(await loadPortalViewerShares(projectId, model.associationId)); }
+    catch (caught) { setError((caught as Error).message); }
+    finally { setBusy(false); }
+  }, [model.associationId, projectId]);
+
+  const toggle = () => {
+    const next = !open;
+    setOpen(next);
+    if (!next) { setPassword(""); setCreatedUrl(""); setCopyStatus(""); }
+    if (next) void refresh();
+  };
+
+  const create = async (event: FormEvent) => {
+    event.preventDefault(); setBusy(true); setError(""); setCreatedUrl(""); setCopyStatus("");
+    const expiresAt = lifetime === "source" ? null : new Date(Date.now() + Number(lifetime) * 24 * 60 * 60 * 1000).toISOString();
+    try {
+      const result = await createPortalViewerShare(projectId, model.associationId, {
+        label: label.trim() || null,
+        expiresAt,
+        ...(password ? { password } : {}),
+        displayUnits,
+      }, crypto.randomUUID());
+      setCreatedUrl(result.viewUrl); setLabel(""); setPassword("");
+      await refresh();
+    } catch (caught) { setError((caught as Error).message); setBusy(false); }
+  };
+
+  const revoke = async (shareId: string) => {
+    setBusy(true); setError("");
+    try { await revokePortalViewerShare(projectId, model.associationId, shareId, crypto.randomUUID()); await refresh(); }
+    catch (caught) { setError((caught as Error).message); setBusy(false); }
+  };
+
+  const now = Date.now();
+  const activeShares = shares.filter(share => !share.revokedAt &&
+    (share.expiresAt === null || Date.parse(share.expiresAt) > now) &&
+    (share.sourceAuthorization?.expiresAt === null || share.sourceAuthorization?.expiresAt === undefined ||
+      Date.parse(share.sourceAuthorization.expiresAt) > now));
+
+  return <section className="portal-viewer-shares">
+    <button type="button" className="button-ghost" aria-expanded={open} onClick={toggle}>Share public link</button>
+    {open && <div>
+      <p className="muted">Only this published model is shared. Source photos and processing files stay private.</p>
+      {error && <div className="notice error" role="alert">{error}</div>}
+      {createdUrl && <div className="notice" role="status"><strong>Copy this link now.</strong><input readOnly value={createdUrl} aria-label="New public 3D model link" /><button type="button" className="button-ghost" onClick={() => {
+        void navigator.clipboard.writeText(createdUrl).then(() => setCopyStatus("Link copied."), () => setCopyStatus("Copy failed. Select and copy the link manually."));
+      }}>Copy</button>{copyStatus && <span>{copyStatus}</span>}</div>}
+      <form onSubmit={event => void create(event)}>
+        <label>Link label<input value={label} maxLength={120} onChange={event => setLabel(event.target.value)} placeholder="Optional" /></label>
+        <label>Link lifetime<select value={lifetime} onChange={event => setLifetime(event.target.value as "7" | "30" | "source")}>
+          <option value="7">7 days</option><option value="30">30 days</option><option value="source">Until source access ends</option>
+        </select></label>
+        <label>Access code<input type="password" autoComplete="new-password" value={password} minLength={8} maxLength={128} onChange={event => setPassword(event.target.value)} placeholder="Optional, 8+ characters" /></label>
+        <button type="submit" className="button-orange" disabled={busy}>{busy ? "Creating…" : "Create link"}</button>
+      </form>
+      <h4>Your active links</h4>
+      {!activeShares.length ? <p className="muted">No active links.</p> : <ul>{activeShares.map(share => <li key={share.id}>
+        <span>{share.label || "3D model link"} · {share.expiresAt ? `expires ${new Date(share.expiresAt).toLocaleDateString()}` : "no fixed expiry"}</span>
+        <button type="button" className="button-ghost" disabled={busy} onClick={() => void revoke(share.id)}>Revoke</button>
+      </li>)}</ul>}
+    </div>}
+  </section>;
 }
 
 function ProjectWorkspace({
@@ -1783,6 +1871,7 @@ function ProjectWorkspace({
   requestV2,
   requestAttachments,
   viewer,
+  viewerDisplayUnits,
   onSaved,
   onBack,
 }: {
@@ -1792,6 +1881,7 @@ function ProjectWorkspace({
   requestV2: boolean;
   requestAttachments: boolean;
   viewer: boolean;
+  viewerDisplayUnits: "imperial" | "metric";
   onSaved: (request: PortalServiceRequest) => void;
   onBack: () => void;
 }) {
@@ -1946,7 +2036,7 @@ function ProjectWorkspace({
           />
         </Card>
       )}
-      {tab === "models" && viewer && <ProjectViewerModels projectId={project.id} />}
+      {tab === "models" && viewer && <ProjectViewerModels projectId={project.id} initialDisplayUnits={viewerDisplayUnits} />}
       {tab === "requests" && (
         <>
           <Card title="Request additional service" className="portal-request-card">
@@ -2437,6 +2527,7 @@ export function ClientPortalApp({
         requestV2={capabilities.requestV2}
         requestAttachments={capabilities.requestAttachments}
         viewer={capabilities.viewer}
+        viewerDisplayUnits={gate.data.viewerDisplayUnits}
         onSaved={onSaved}
         onBack={() => navigate("projects")}
       />
@@ -2789,13 +2880,9 @@ export function ClientPortalApp({
         </nav>
         <PortalNotificationCenter />
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
-        <button
-          className="portal-account-button"
-          onClick={() => navigate("account")}
-          aria-label="Open account"
-        >
-          {account.displayName.slice(0, 2).toUpperCase()}
-        </button>
+        <AccountMenu className="portal-account-menu" displayName={account.displayName}
+          avatar={account.displayName.slice(0, 2).toUpperCase()} accountHref={clientPortalPath("account")}
+          onAccount={() => navigate("account")} />
       </header>
       {mobileNavOpen && <div className="portal-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
         <div ref={mobileNavPanel} id="portal-mobile-navigation" className="portal-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">

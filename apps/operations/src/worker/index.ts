@@ -172,14 +172,17 @@ import {
   validateStaffRequestArea,
   validateStaffRequestPois,
 } from "./request-area-revision";
-import { registerViewerIntegrationRoutes } from "./viewer-integration";
+import { pruneViewerSessionIssuanceReceipts, registerViewerIntegrationRoutes } from "./viewer-integration";
 import {
   registerViewerProcessingRoutes,
   processViewerProcessingNotifications,
   pruneViewerEventNonces,
+  pruneViewerMachineRateLimits,
   viewerMachineEventRequest,
+  viewerMachineHostRequest,
   viewerProcessingEnabled,
 } from "./viewer-processing";
+import { pruneClientViewerShareReceipts } from "./viewer-session-issuer";
 import { defaultViewerUnits, resolveViewerUnits } from "./viewer-units";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
@@ -304,7 +307,10 @@ app.use("*", (c, next) =>
     : lockedSecurityHeaders(c, next),
 );
 app.use("*", async (c, next) => {
-  if (!requestHostAllowed(c.req.url, c.env)) return c.json({ error: "Not found" }, 404);
+  const machine = viewerMachineEventRequest(c.req.method, c.req.path);
+  const machineHostAllowed = viewerMachineHostRequest(c.req.url, c.req.method, c.env);
+  if (machine ? !machineHostAllowed : !requestHostAllowed(c.req.url, c.env))
+    return c.json({ error: "Not found" }, 404);
   await next();
   c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
   c.header("X-Robots-Tag", "noindex, nofollow");
@@ -3015,6 +3021,9 @@ async function scheduled(
   if (env.DROPBOX_IMPORT_TOKEN_SECRET)
     ctx.waitUntil(cleanupDropboxImports(env));
   ctx.waitUntil(pruneViewerEventNonces(env));
+  ctx.waitUntil(pruneViewerMachineRateLimits(env));
+  ctx.waitUntil(pruneClientViewerShareReceipts(env));
+  ctx.waitUntil(pruneViewerSessionIssuanceReceipts(env));
 }
 async function fetch(
   request: Request,
@@ -3025,6 +3034,8 @@ async function fetch(
   if (thumbnailIngest) return thumbnailIngest;
   const rendererApi = await dispatchThumbnailRendererApi(request, env);
   if (rendererApi) return rendererApi;
+  if (viewerMachineHostRequest(request.url, request.method, env))
+    return app.fetch(request, env, ctx);
   const incoming = dispatchIncomingPublicRequest(request, env, ctx);
   if (incoming) return await incoming;
   return app.fetch(request, env, ctx);
@@ -3046,4 +3057,4 @@ export { DropboxImportWorkflow } from "./dropbox-import";
 export { ThumbnailRendererContainer } from "./thumbnail-renderer-container";
 export { dispatchThumbnailRendererApi } from "./thumbnail-renderer-api";
 export { ClientDelegatedShareSigner } from "./client-delegated-share-signer";
-export { ViewerSessionIssuer } from "./viewer-session-issuer";
+export { ViewerSessionIssuer } from "./viewer-session-issuer-entrypoint";

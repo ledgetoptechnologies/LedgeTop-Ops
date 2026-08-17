@@ -1,12 +1,33 @@
 import { expect, test } from "@playwright/test";
 import { mkdir, writeFile } from "node:fs/promises";
 
-test("processing controls remain usable at 390px and send metadata directly to Viewer", async ({ page }, testInfo) => {
+test("processing controls remain usable at 320/390px and send metadata directly to Viewer", async ({ page }, testInfo) => {
   let operationsMetadata = 0, viewerMetadata = 0;
   let projectPatch: Record<string, unknown> | null = null, datasetPatch: Record<string, unknown> | null = null, outputTrash = false, importAdopt = false;
+  let catalogScan = false, catalogMap: Record<string, unknown> | null = null, presetCreate: Record<string, unknown> | null = null;
   let previewStarts = 0, previewCancelled = false, allowPreviewCompletion = false;
+  let reviewSessions = 0, reviewEmbedLoads = 0, reviewRevoked = false;
+  const interruptedKey = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+  const interruptedOperationId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
   const consoleErrors: string[] = [];
   page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
+  await page.route("https://viewer.ledgetopdroneservices.com/session/*", async route => {
+    reviewEmbedLoads += 1;
+    await route.fulfill({ contentType: "text/html", body: `<!doctype html><body><div id="review-camera">camera-review-42</div><script>
+      const expiresAt = new Date(Date.now() + 10000).toISOString();
+      addEventListener("message", event => {
+        if (event.data?.type !== "ltds-viewer:renew-session") return;
+        document.body.dataset.renewedGrant = event.data.grant;
+        parent.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-one",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
+      });
+      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-one",expiresAt}, "*"), 50);
+      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-one",expiresAt}, "*"), 100);
+    </script></body>` });
+  });
+  await page.addInitScript(({ key, createdAt }) => localStorage.setItem("ltds.viewer.pending-operation-requests.v1", JSON.stringify([{
+    version: 1, key, method: "POST", path: "/api/v1/processing/catalog-imports/scans", type: "catalog_scan",
+    datasetId: null, uploadId: null, createdAt,
+  }])), { key: interruptedKey, createdAt: new Date().toISOString() });
   await page.route("**/api/**", async route => {
     const request = route.request(), url = new URL(request.url());
     if (url.hostname === "viewer.ledgetopdroneservices.com") {
@@ -18,6 +39,35 @@ test("processing controls remain usable at 390px and send metadata directly to V
         units: { default: "imperial", resolved: "imperial" },
       } });
       const key = url.pathname.split("/").at(-1);
+      const interruptedOperation = { id: interruptedOperationId, type: "catalog_scan", subject: "ops:staff-one", datasetId: null, uploadId: null, status: "queued", progress: 0, result: null, errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null };
+      if (url.pathname === "/api/v1/attempts/attempt-one/review-sessions" && request.method() === "POST") {
+        reviewSessions += 1;
+        if (reviewSessions === 2) return route.fulfill({ status: 503, json: { error: "temporary review authorization failure" } });
+        const grant = reviewSessions === 1 ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222";
+        return route.fulfill({ status: 201, json: {
+          grant, grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
+          sessionMode: "review", attemptId: "attempt-one", modelId: "model-one", modelVersionId: "version-one", assetKinds: ["glb","tiles","ept"],
+          redeemUrl: "https://viewer.ledgetopdroneservices.com/api/v1/sessions/redeem", embedUrl: `https://viewer.ledgetopdroneservices.com/session/${grant}`,
+        } });
+      }
+      if (url.pathname === "/api/v1/attempts/attempt-one/review-sessions" && request.method() === "DELETE") { reviewRevoked = true; return route.fulfill({ json: { attemptId: "attempt-one", revokedGrants: 1, revokedSessions: 1 } }); }
+      if (url.pathname === `/api/v1/operation-receipts/${interruptedKey}`) return route.fulfill({ json: { receipt: {
+        subject: "ops:staff-one", key: interruptedKey, method: "POST", path: "/api/v1/processing/catalog-imports/scans",
+        requestHash: "e".repeat(64), responseStatus: null, response: null, operationId: interruptedOperationId,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
+      }, operation: interruptedOperation } });
+      if (url.pathname === `/api/v1/operations/${interruptedOperationId}`) return route.fulfill({ json: { operation: {
+        ...interruptedOperation, status: "succeeded", progress: 1,
+        result: { scan: { id: "recovered-scan", provider: "webodm", generation: 1, candidateCount: 1, seenAt: new Date().toISOString() }, candidatesSeen: 1 },
+        updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+      } } });
+      const candidate = { id: "candidate-one", provider: "webodm", externalProjectId: "34", externalTaskId: "abc-123", sourceRootKey: "webodm", sourceRelativePath: "project/34/task/abc-123", sourceFingerprint: "d".repeat(64), suggestedProjectName: "Wrightstown", suggestedTaskName: "August 2026 Survey", assetKinds: ["tiles","pointCloud"], state: catalogMap ? "mapped" : "unmapped", staleReason: null, scanGeneration: 1, lastSeenAt: "2026-08-16T00:00:00Z", mapping: catalogMap ? { projectId: "project-one", taskId: "imported-task", datasetId: "imported-dataset", attemptId: "imported-attempt", modelId: "imported-model", modelVersionId: "imported-version", mappedAt: "2026-08-16T00:00:00Z" } : null };
+      if (url.pathname === "/api/v1/processing/catalog-imports/candidates") return route.fulfill({ json: { candidates: url.searchParams.get("state") === candidate.state ? [candidate] : [], nextCursor: null } });
+      if (url.pathname === "/api/v1/processing/catalog-imports/scans" && request.method() === "POST") { catalogScan = true; return route.fulfill({ status: 202, headers: { Location: "/api/v1/operations/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "Retry-After": "2" }, json: { operation: { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", type: "catalog_scan", subject: "ops:staff-one", datasetId: null, uploadId: null, status: "queued", progress: 0, result: null, errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null } } }); }
+      if (url.pathname === "/api/v1/operations/bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb") return route.fulfill({ json: { operation: { id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", type: "catalog_scan", subject: "ops:staff-one", datasetId: null, uploadId: null, status: "succeeded", progress: 1, result: { scan: { id: "scan-one", provider: "webodm", generation: 1, candidateCount: 1, seenAt: new Date().toISOString() }, candidatesSeen: 1 }, errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: new Date().toISOString() } } });
+      if (url.pathname === "/api/v1/processing/catalog-imports/candidates/candidate-one/map" && request.method() === "POST") { catalogMap = request.postDataJSON(); return route.fulfill({ status: 202, headers: { Location: "/api/v1/operations/cccccccc-cccc-4ccc-8ccc-cccccccccccc", "Retry-After": "2" }, json: { operation: { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", type: "catalog_map", subject: "ops:staff-one", datasetId: null, uploadId: null, status: "queued", progress: 0, result: null, errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null } } }); }
+      if (url.pathname === "/api/v1/operations/cccccccc-cccc-4ccc-8ccc-cccccccccccc") return route.fulfill({ json: { operation: { id: "cccccccc-cccc-4ccc-8ccc-cccccccccccc", type: "catalog_map", subject: "ops:staff-one", datasetId: null, uploadId: null, status: "succeeded", progress: 1, result: { project: { id: "project-one", displayName: "North site" }, task: { id: "imported-task", displayName: "August 2026 Survey" }, attempt: { id: "imported-attempt" }, model: { id: "imported-model" }, candidate: { ...candidate, state: "mapped", mapping: { projectId: "project-one", taskId: "imported-task", datasetId: "imported-dataset", attemptId: "imported-attempt", modelId: "imported-model", modelVersionId: "imported-version", mappedAt: new Date().toISOString() } } }, errorCode: null, errorMessage: null, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: new Date().toISOString() } } });
+      if (url.pathname === "/api/v1/processing/presets" && request.method() === "POST") { presetCreate = request.postDataJSON(); return route.fulfill({ status: 201, json: { preset: { id: "preset-custom", ...presetCreate, description: null, builtIn: false, providerType: "clusterodm", capabilityFingerprint: "f".repeat(64), enabled: true } } }); }
       if (url.pathname === "/api/v1/projects/project-one" && request.method() === "PATCH") { projectPatch = request.postDataJSON(); return route.fulfill({ json: { project: { id: "project-one" } } }); }
       if (url.pathname === "/api/v1/projects/project-one/storage") return route.fulfill({ json: { project: { projectId: "project-one", datasetBytes: 10, outputBytes: 20, totalBytes: 30 }, tasks: [{ taskId: "task-one", projectId: "project-one", datasetBytes: 10, outputBytes: 20, totalBytes: 30 }], nextCursor: null } });
       if (url.pathname === "/api/v1/tasks/task-one/storage") return route.fulfill({ json: { task: { taskId: "task-one", projectId: "project-one", datasetBytes: 10, outputBytes: 20, totalBytes: 30 }, outputs: [{ id: "version-one", modelId: "model-one", taskId: "task-one", attemptId: "attempt-one", projectId: "project-one", displayName: "Map flight one", status: "archived", byteSize: 20, assetCount: 2, createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: "2026-08-16T00:00:00Z", trashedAt: null }], nextCursor: null } });
@@ -119,11 +169,11 @@ test("processing controls remain usable at 390px and send metadata directly to V
       } } });
       if (key === "projects") return route.fulfill({ json: { projects: [{ id: url.searchParams.has("cursor") ? "project-two" : "project-one", displayName: url.searchParams.has("cursor") ? "South site" : "North site", description: null, metadata: {}, tags: [], defaultUnits: "imperial", status: "active", createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: null }], nextCursor: url.searchParams.has("cursor") ? null : "opaque-next" } });
       if (key === "datasets") return route.fulfill({ json: { datasets: [{ id: "dataset-one", projectId: "project-one", displayName: "Flight one", description: null, sourceType: "upload", storageMode: "managed", rootKey: "datasets", relativePath: "flight-one", status: "finalized", manifestSha256: "a".repeat(64), fileCount: 1, byteSize: 10, metadata: {}, tags: [], createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", finalizedAt: "2026-08-16T00:00:00Z", archivedAt: null, trashedAt: null }], nextCursor: null } });
-      if (key === "tasks") return route.fulfill({ json: { tasks: [{ id: "task-one", projectId: "project-one", datasetId: "dataset-one", displayName: "Map flight one", description: null, status: "ready_for_review", activeAttemptId: "attempt-one", publishedModelId: null, metadata: {}, createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: null, latestAttempt: { id: "attempt-one", taskId: "task-one", attemptNumber: 1, providerId: "provider-one", providerTaskId: null, presetId: null, options: {}, status: "ready_for_review", progress: 1, providerOutputCursor: 0, capabilityFingerprint: null, errorCode: null, errorMessage: null, resultModelId: null, resultModelVersionId: null, createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", startedAt: null, upstreamCompletedAt: null, ingestedAt: null, completedAt: null } }], nextCursor: null } });
+      if (key === "tasks") return route.fulfill({ json: { tasks: [{ id: "task-one", projectId: "project-one", datasetId: "dataset-one", displayName: "Map flight one", description: null, status: "ready_for_review", activeAttemptId: "attempt-one", publishedModelId: null, metadata: {}, createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: null, latestAttempt: { id: "attempt-one", taskId: "task-one", datasetId: "dataset-one", attemptNumber: 1, providerId: "provider-one", providerTaskId: null, presetId: null, options: {}, status: "ready_for_review", progress: 1, providerOutputCursor: 0, capabilityFingerprint: null, errorCode: null, errorMessage: null, resultModelId: "model-one", resultModelVersionId: "version-one", createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", startedAt: null, upstreamCompletedAt: null, ingestedAt: null, completedAt: null } }], nextCursor: null } });
       if (key === "outputs") return route.fulfill({ json: { outputs: [{ id: "version-one", modelId: "model-one", taskId: "task-one", attemptId: "attempt-one", projectId: "project-one", displayName: "Map flight one", status: "archived", byteSize: 20, assetCount: 2, createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: "2026-08-16T00:00:00Z", trashedAt: null }], nextCursor: null, totalCount: 1, totalBytes: 20 } });
-      if (key === "providers") return route.fulfill({ json: { providers: [], nextCursor: null } });
+      if (key === "providers") return route.fulfill({ json: { providers: [{ id: "provider-one", displayName: "Cluster", type: "clusterodm", endpoint: "http://nodeodm:3000", enabled: true, admissionLimit: 4, activeAttempts: 0, credential: { configured: true, updatedAt: "2026-08-16T00:00:00Z" }, capabilities: { apiVersion: "1", engine: "ODM", engineVersion: "2.2.3", maxImages: null, maxParallelTasks: null, taskQueueCount: 0, totalMemory: null, availableMemory: null, cpuCores: null, providerType: "clusterodm", testedBaseline: "1.5.5", compatibilityWarning: null, options: [{ name: "dsm", type: "bool", domain: [true,false], help: "Generate DSM", value: false }, { name: "orthophoto-resolution", type: "float", domain: { min: 1, max: 20 }, help: "Orthophoto resolution", value: 5 }] }, capabilityFingerprint: "f".repeat(64), lastHealth: "healthy", lastHealthAt: "2026-08-16T00:00:00Z", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z" }], nextCursor: null } });
       if (key === "presets") return route.fulfill({ json: { presets: [] } });
-      if (key === "attempt-one") return route.fulfill({ json: { attempt: { id: "attempt-one", taskId: "task-one", attemptNumber: 1, providerId: "provider-one", providerTaskId: null, presetId: null, options: {}, status: "ready_for_review", progress: 1, providerOutputCursor: 0, errorCode: null, errorMessage: null, resultModelId: null, resultModelVersionId: null, createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", startedAt: null, upstreamCompletedAt: null, ingestedAt: null, completedAt: null }, logs: [] } });
+      if (key === "attempt-one") return route.fulfill({ json: { attempt: { id: "attempt-one", taskId: "task-one", datasetId: "dataset-one", attemptNumber: 1, providerId: "provider-one", providerTaskId: null, presetId: null, options: {}, status: "ready_for_review", progress: 1, providerOutputCursor: 0, errorCode: null, errorMessage: null, resultModelId: "model-one", resultModelVersionId: "version-one", createdBy: "ops:staff-one", createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", startedAt: null, upstreamCompletedAt: null, ingestedAt: null, completedAt: null }, logs: [] } });
       if (key === "storage") return route.fulfill({ json: { storage: {
         datasets: { available: 900, total: 1000, reserve: 100, required: 0, ok: true },
         models: { available: 900, total: 1000, reserve: 100, required: 0, ok: true },
@@ -156,6 +206,16 @@ test("processing controls remain usable at 390px and send metadata directly to V
   await expect(page.getByRole("heading", { name: "Processing platform" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Projects" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Requested processing review" })).toBeVisible();
+  await page.getByRole("button", { name: "Recover accepted requests" }).click();
+  await expect(page.getByText(/1 accepted operation restored/)).toBeVisible();
+  await expect(page.getByRole("button", { name: "Recover accepted requests" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Resume status" }).click();
+  await expect(page.getByText(/Scan 1 found 1 candidate/)).toBeVisible();
+  for (const width of [390, 320]) {
+    await page.setViewportSize({ width, height: 844 });
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.getByRole("button", { name: "Projects" }).click();
   await expect(page.getByText("North site")).toBeVisible();
   await page.getByText("North site").locator("xpath=ancestor::article").getByText("Storage accounting").click();
@@ -185,6 +245,15 @@ test("processing controls remain usable at 390px and send metadata directly to V
   await page.getByRole("button", { name: "Upload dataset" }).click();
   await expect(page.getByText("Dataset finalized. The source manifest is now immutable.")).toBeVisible();
   await page.getByRole("button", { name: "Tasks" }).click();
+  await page.getByRole("button", { name: "Preview unpublished model" }).click();
+  const reviewFrame = page.frameLocator('iframe[title="3D model: Map flight one — unpublished review"]');
+  await expect(reviewFrame.locator("#review-camera")).toHaveText("camera-review-42");
+  await expect(page.getByText("Viewer renewal is retrying…")).toBeVisible();
+  await expect(reviewFrame.locator("#review-camera")).toHaveText("camera-review-42");
+  await expect(reviewFrame.locator("body")).toHaveAttribute("data-renewed-grant", "22222222-2222-4222-8222-222222222222", { timeout: 5_000 });
+  expect(reviewSessions).toBe(3); expect(reviewEmbedLoads).toBe(1);
+  await page.getByRole("button", { name: "Close viewer" }).click();
+  await expect.poll(() => reviewRevoked).toBe(true);
   await page.getByText("Map flight one").locator("xpath=ancestor::article").getByText("Task storage & model outputs").click();
   await expect(page.getByText("20 B outputs").first()).toBeVisible();
   await page.getByRole("button", { name: "Outputs" }).click();
@@ -193,6 +262,12 @@ test("processing controls remain usable at 390px and send metadata directly to V
   await page.getByRole("button", { name: "Trash output" }).click();
   await expect.poll(() => outputTrash).toBe(true);
   await page.getByRole("button", { name: "Imports" }).click();
+  await expect(page.getByText("August 2026 Survey")).toBeVisible();
+  await page.getByRole("button", { name: "Scan WebODM" }).click();
+  await expect.poll(() => catalogScan).toBe(true);
+  await page.getByText("August 2026 Survey").locator("xpath=ancestor::article").getByText("Map into LTDS").click();
+  await page.getByText("August 2026 Survey").locator("xpath=ancestor::article").getByRole("button", { name: "Map and register model" }).click();
+  await expect.poll(() => catalogMap).toMatchObject({ projectId: "project-one", taskDisplayName: "August 2026 Survey", storageMode: "external_reference" });
   await page.getByLabel("Relative path").fill("north/import-flight");
   await page.getByRole("button", { name: "Preview import" }).click();
   await expect(page.getByText(/Inspecting source content: 25%/)).toBeVisible();
@@ -216,8 +291,16 @@ test("processing controls remain usable at 390px and send metadata directly to V
   await page.getByRole("button", { name: "Confirm import" }).click();
   await expect.poll(() => importAdopt).toBe(true);
   await expect(page.getByText("Dataset import completed and indexed.")).toBeVisible();
+  await page.getByRole("button", { name: "Settings" }).click();
+  await page.getByLabel("Friendly name").fill("LTDS Standard");
+  await page.getByText("Terrain/DEM").click();
+  await page.getByLabel(/Generate DSM/).selectOption("false");
+  await page.getByRole("button", { name: "Save custom preset" }).click();
+  await expect.poll(() => presetCreate).toMatchObject({ displayName: "LTDS Standard", providerId: "provider-one", options: { dsm: false } });
   expect(previewStarts).toBe(3);
   expect(consoleErrors.filter(message => /worker-src|content security policy/i.test(message))).toEqual([]);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  await page.setViewportSize({ width: 320, height: 700 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   expect(viewerMetadata).toBeGreaterThanOrEqual(6);
   expect(operationsMetadata).toBeLessThan(viewerMetadata);

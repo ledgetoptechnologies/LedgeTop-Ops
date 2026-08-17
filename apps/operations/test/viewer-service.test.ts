@@ -25,6 +25,8 @@ const share = {
   revokeReason: null,
   accessCount: 0,
   lastAccessedAt: null,
+  shareClass: "staff" as const,
+  sourceAuthorization: null,
 };
 
 describe("Viewer service client", () => {

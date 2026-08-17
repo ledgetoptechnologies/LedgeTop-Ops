@@ -90,7 +90,7 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "d8a631d7319de6cd088fe97bd3d48c05a375926cbf3217aaa27dcd96a3c13e0a");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "aee8a8c89d039a7ac8faeb8f99cdf99fc8e57e9838da7b1472c5425ba7a30ef2");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");

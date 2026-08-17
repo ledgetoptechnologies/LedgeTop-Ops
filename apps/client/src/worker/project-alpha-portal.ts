@@ -10,7 +10,7 @@ const PUBLIC_ID = /^(?=.{1,128}$)(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9_-]*$/;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const ENTITY_TYPES = ["organization", "standalone_client", "department", "client", "project", "contact"] as const;
-const CAPABILITIES = ["workspace.view", "directory.read", "delivery.view", "request.create", "member.manage", "delegated_share.create"] as const;
+const CAPABILITIES = ["workspace.view", "directory.read", "delivery.view", "request.create", "member.manage", "delegated_share.create", "viewer.share.create"] as const;
 const SCOPE_TYPES = ["workspace", "organization", "department", "client", "project"] as const;
 const RELATION_TYPES = ["contains", "contact_assignment"] as const;
 const CONTAINS_RELATION_DIRECTIONS = new Set([

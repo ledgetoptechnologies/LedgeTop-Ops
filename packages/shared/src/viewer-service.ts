@@ -25,6 +25,14 @@ export interface ViewerSessionGrant {
   embedUrl: string;
 }
 
+export interface ViewerReviewSessionGrant extends ViewerSessionGrant {
+  sessionMode: "review";
+  attemptId: string;
+  modelId: string;
+  modelVersionId: string;
+  assetKinds: Array<"glb" | "tiles" | "ept" | "ortho" | "dsm" | "dtm">;
+}
+
 export type ViewerDisplayUnits = "imperial" | "metric";
 
 export type ViewerProcessingPermission =
@@ -57,7 +65,7 @@ export interface ViewerAdminSession {
     permissions: ViewerProcessingPermission[];
     expiresAt: string;
   };
-  units: { default: "imperial"; resolved: ViewerDisplayUnits };
+  units: { default: ViewerDisplayUnits; resolved: ViewerDisplayUnits };
 }
 
 export type ViewerAssetOwnership = "managed" | "adopted" | "external_reference";
@@ -113,16 +121,23 @@ export interface ViewerProviderSummary {
   capabilityFingerprint: string | null;
   lastHealth: "healthy" | "degraded" | "unavailable" | "unknown" | null;
   lastHealthAt: string | null;
+  runtimeHealth?: "healthy" | "degraded" | "unavailable" | "unknown" | null;
+  runtimeHealthAt?: string | null;
+  runtimeHealthError?: string | null;
   createdAt: string;
   updatedAt: string;
 }
 export interface ViewerProcessingPreset {
   id: string;
   displayName: string;
+  description: string | null;
   builtIn: boolean;
+  enabled: boolean;
   options: Record<string, unknown>;
   providerType: "nodeodm" | "clusterodm" | null;
   capabilityFingerprint: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 export interface ViewerProviderCapabilityOption {
   name: string;
@@ -153,6 +168,7 @@ export type ViewerProcessingAttemptState =
 export interface ViewerProcessingAttempt {
   id: string;
   taskId: string;
+  datasetId: string;
   attemptNumber: number;
   providerId: string;
   providerTaskId: string | null;
@@ -307,7 +323,52 @@ export interface ViewerDatasetImportPreview {
   };
 }
 
-export type ViewerDurableOperationType = "upload_finalize" | "import_preview" | "import_adopt";
+export type ViewerCatalogImportProvider = "webodm" | "terra";
+export type ViewerCatalogImportCandidateState = "unmapped" | "mapped" | "stale";
+export interface ViewerCatalogImportCandidate {
+  id: string;
+  provider: ViewerCatalogImportProvider;
+  externalProjectId: string;
+  externalTaskId: string;
+  sourceRootKey: string;
+  sourceRelativePath: string;
+  sourceFingerprint: string;
+  suggestedProjectName: string;
+  suggestedTaskName: string;
+  assetKinds: string[];
+  state: ViewerCatalogImportCandidateState;
+  staleReason: "source_changed" | "not_seen" | null;
+  scanGeneration: number;
+  lastSeenAt: string;
+  mapping: null | {
+    projectId: string;
+    taskId: string;
+    datasetId: string;
+    attemptId: string;
+    modelId: string;
+    modelVersionId: string;
+    mappedAt: string;
+  };
+}
+export interface ViewerCatalogImportScanResult {
+  scan: {
+    id: string;
+    provider: ViewerCatalogImportProvider;
+    generation: number;
+    candidateCount: number;
+    seenAt: string;
+  };
+  candidatesSeen: number;
+}
+export interface ViewerCatalogImportMapResult {
+  project: ViewerProcessingProject;
+  task: ViewerProcessingTask;
+  attempt: ViewerProcessingAttempt;
+  model: ViewerModelSummary;
+  candidate: ViewerCatalogImportCandidate;
+}
+
+export type ViewerDurableOperationType = "upload_finalize" | "import_preview" | "import_adopt" | "catalog_scan" | "catalog_map";
 export type ViewerDurableOperationStatus = "queued" | "leased" | "succeeded" | "failed" | "cancelled";
 export interface ViewerDurableOperation {
   id: string;
@@ -317,7 +378,7 @@ export interface ViewerDurableOperation {
   uploadId: string | null;
   status: ViewerDurableOperationStatus;
   progress: number;
-  result: { dataset: ViewerDatasetSummary } | ViewerDatasetImportPreview | null;
+  result: { dataset: ViewerDatasetSummary } | ViewerDatasetImportPreview | ViewerCatalogImportScanResult | ViewerCatalogImportMapResult | null;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: string;
@@ -335,7 +396,9 @@ export interface ViewerProcessingEventV1 {
   type: "processing.ready_for_review" | "processing.failed";
   occurredAt: string;
   projectId: string;
+  projectDisplayName?: string;
   taskId: string;
+  taskDisplayName?: string;
   attemptId: string;
   requestedBySubject: string;
   status: string;
@@ -368,6 +431,14 @@ export interface ViewerPublicShareSummary {
   accessCount: number;
   lastAccessedAt: string | null;
   displayUnits?: ViewerDisplayUnits | null;
+  shareClass: "staff" | "client";
+  sourceAuthorization: {
+    type: "client_grant";
+    id: string;
+    version: number;
+    subject: string;
+    expiresAt: string | null;
+  } | null;
 }
 
 export interface ViewerPublicShareCreation {
@@ -556,6 +627,8 @@ function nullableDate(value: unknown): value is string | null {
 
 function publicShare(value: unknown): ViewerPublicShareSummary | null {
   const row = record(value), sharePermissions = record(row?.permissions);
+  const sourceAuthorization = record(row?.sourceAuthorization);
+  const shareClass = row?.shareClass === undefined ? "staff" : row?.shareClass;
   if (!row || !sharePermissions || typeof row.id !== "string" || typeof row.modelId !== "string" ||
     row.versionPolicy !== "latest" || !nullableString(row.modelVersionId) ||
     typeof row.hasPassword !== "boolean" || typeof row.createdBy !== "string" ||
@@ -566,7 +639,13 @@ function publicShare(value: unknown): ViewerPublicShareSummary | null {
     !Number.isSafeInteger(row.accessCount) || (row.accessCount as number) < 0 ||
     typeof sharePermissions.view !== "boolean" || typeof sharePermissions.measure !== "boolean" ||
     typeof sharePermissions.cameras !== "boolean" || typeof sharePermissions.download !== "boolean" ||
-    (row.displayUnits !== undefined && row.displayUnits !== null && row.displayUnits !== "imperial" && row.displayUnits !== "metric")) return null;
+    (row.displayUnits !== undefined && row.displayUnits !== null && row.displayUnits !== "imperial" && row.displayUnits !== "metric") ||
+    (shareClass !== "staff" && shareClass !== "client") ||
+    (shareClass === "staff" && row.sourceAuthorization !== null && row.sourceAuthorization !== undefined) ||
+    (shareClass === "client" && (!sourceAuthorization || sourceAuthorization.type !== "client_grant" ||
+      typeof sourceAuthorization.id !== "string" || !Number.isSafeInteger(sourceAuthorization.version) ||
+      (sourceAuthorization.version as number) < 1 || typeof sourceAuthorization.subject !== "string" ||
+      !nullableDate(sourceAuthorization.expiresAt)))) return null;
   return {
     id: row.id,
     modelId: row.modelId,
@@ -590,6 +669,14 @@ function publicShare(value: unknown): ViewerPublicShareSummary | null {
     accessCount: row.accessCount as number,
     lastAccessedAt: row.lastAccessedAt,
     ...(row.displayUnits === "imperial" || row.displayUnits === "metric" ? { displayUnits: row.displayUnits } : {}),
+    shareClass,
+    sourceAuthorization: shareClass === "client" ? {
+      type: "client_grant",
+      id: sourceAuthorization!.id as string,
+      version: sourceAuthorization!.version as number,
+      subject: sourceAuthorization!.subject as string,
+      expiresAt: sourceAuthorization!.expiresAt as string | null,
+    } : null,
   };
 }
 
@@ -748,6 +835,14 @@ export class ViewerServiceClient {
     displayUnits?: ViewerDisplayUnits;
     password?: string;
     permissions?: { view: true; measure?: boolean; cameras?: boolean; download?: boolean };
+    shareClass?: "staff" | "client";
+    sourceAuthorization?: {
+      type: "client_grant";
+      id: string;
+      version: number;
+      subject: string;
+      expiresAt: string | null;
+    };
   }): Promise<ViewerPublicShareCreation> {
     const path = `/api/v1/models/${encodeURIComponent(input.modelId)}/shares`;
     const body = JSON.stringify({
@@ -758,6 +853,8 @@ export class ViewerServiceClient {
       displayUnits: input.displayUnits || "imperial",
       ...(input.password ? { password: input.password } : {}),
       permissions: input.permissions || { view: true, measure: true, cameras: true, download: false },
+      shareClass: input.shareClass || "staff",
+      ...(input.sourceAuthorization ? { sourceAuthorization: input.sourceAuthorization } : {}),
     });
     const payload = record(await this.request(path, { method: "POST", body, idempotencyKey: input.idempotencyKey }));
     const share = publicShare(payload?.share);
@@ -770,6 +867,11 @@ export class ViewerServiceClient {
       : share?.expiresAt === null;
     if (!payload || !share || !viewUrl || !embedUrl || share.modelId !== input.modelId ||
       share.modelVersionId !== null || !expiryMatches || share.hasPassword !== Boolean(input.password) ||
+      share.shareClass !== (input.shareClass || "staff") ||
+      (input.sourceAuthorization && (share.sourceAuthorization?.id !== input.sourceAuthorization.id ||
+        share.sourceAuthorization.version !== input.sourceAuthorization.version ||
+        share.sourceAuthorization.subject !== input.sourceAuthorization.subject ||
+        share.sourceAuthorization.expiresAt !== input.sourceAuthorization.expiresAt)) ||
       share.permissions.view !== true || share.permissions.measure !== (expectedPermissions.measure !== false) ||
       share.permissions.cameras !== (expectedPermissions.cameras !== false) ||
       share.permissions.download !== (expectedPermissions.download === true) ||

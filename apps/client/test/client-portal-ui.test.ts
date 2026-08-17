@@ -71,7 +71,7 @@ describe("client portal browser API boundary", () => {
     await Promise.resolve();
     expect(calls).toEqual(["/api/client/session"]);
     resolveSession({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false } });
-    await expect(bootstrap).resolves.toEqual({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false, workspaceHierarchyV2: false, workspaceMembershipManagement: false, hierarchyScopedInvitations: false, invitationEmailDelivery: false, delegatedShares: false, viewer: false }, projects: [], requests: [], mapboxPublicToken: null, workspaces: [], selectedWorkspaceId: null });
+    await expect(bootstrap).resolves.toEqual({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false, workspaceHierarchyV2: false, workspaceMembershipManagement: false, hierarchyScopedInvitations: false, invitationEmailDelivery: false, delegatedShares: false, viewer: false, viewerShares: false }, projects: [], requests: [], mapboxPublicToken: null, workspaces: [], selectedWorkspaceId: null, viewerDisplayUnits: "imperial" });
     expect(calls).toEqual(["/api/client/session", "/api/client/projects", "/api/client/service-requests", "/api/client/map-config"]);
   });
 

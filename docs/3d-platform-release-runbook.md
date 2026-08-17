@@ -1,31 +1,30 @@
 # 3D processing and delivery release runbook
 
-Status: **release contract complete and source/image pins frozen; live staging
-evidence and activation pending**. Every
+Status: **release remediation is active; live staging evidence and activation
+remain pending**. Every
 Viewer, Operations, Client, processing, public-share, and Project Alpha portal
 feature gate remains off until the corresponding live evidence below is
 captured.
 
 ## Frozen source candidates
 
-- 3D Viewer: `8691ba68b20b4b6985bc1bf345f67dc7af889448` and
-  `ghcr.io/ledgetoptechnologies/3d-viewer:sha-8691ba6@sha256:c80582711664a59c47f23162c43e082c6f38c3f4ddef8e70f93d6d24b846cdd5`
+- 3D Viewer: `8f6c4025368f0157bcd1e1c575d2fb4fab56564c` and
+  `ghcr.io/ledgetoptechnologies/3d-viewer:sha-8f6c402@sha256:994f6dbba8995e083df0bc1da634fb50ee1e46217a1e3633a1761199f533381a`
 - LTDS-Ops product code: `be786b724d13838dc54023e0ee0a194c83fae6a8` on
   `codex/3d-processing-control-plane`. The final pin must contain the desktop
   Administration-menu fix equivalent to `09e3443`; never substitute a mutable
   branch tip.
-- Project Alpha: `af2864547d59743300879472bedb276f5694f662` on
-  `codex/generic-portal-v2-integration`
+- Project Alpha: `769df9320dbf4dfc512d364173d5cb7d8ad8a97c` on `main`
 
-The corresponding constants in `scripts/staging-requirements.mjs` are frozen
-with `RELEASE_CONTRACT_FINALIZED=true`. Any source or image change must first
-set it back to `false`, refresh every immutable pin, and repeat independent
-cross-repository verification.
+The corresponding constants in `scripts/staging-requirements.mjs` intentionally
+remain unfrozen with `RELEASE_CONTRACT_FINALIZED=false` while Viewer and Ops
+remediation is active. Set it to `true` only after every immutable pin is final
+and independent cross-repository verification has been repeated.
 
 The Viewer/Ops signed-processing corpus has SHA-256
-`5e412f9b57a9b8495b2c11736fdb6e7aeed57b15a1cb96ba219c1f2398b50572`.
+`13ab12919e624be6a048c058774ccff2031f865855e64ab3b726e9b31cffab82`.
 The route-response corpus has SHA-256
-`54bb20112e37322f43b7c1b9c40c1f94244942097ae54ca378de8c90a438e443`.
+`26ba67c5ecc3a534e3c067a6b4b0cd80e2d3823d766830edc3fe77ce71152b5e`.
 The five generic Project Alpha fixtures are byte-pinned by both repositories.
 Do not substitute a later commit or hand-edit a fixture during activation.
 
@@ -39,8 +38,8 @@ Do not substitute a later commit or hand-edit a fixture during activation.
    as one unit; its SQLite database and managed assets must remain consistent.
 3. Confirm these production variables remain the literal string `false`:
    `VIEWER_INTEGRATION_ENABLED`, `VIEWER_PROCESSING_ENABLED`,
-   `VIEWER_PUBLIC_SHARES_ENABLED`, `CLIENT_VIEWER_SESSION_ISSUER_ENABLED`, and
-   `CLIENT_VIEWER_ENABLED`.
+   `VIEWER_PUBLIC_SHARES_ENABLED`, `CLIENT_VIEWER_SESSION_ISSUER_ENABLED`,
+   `CLIENT_VIEWER_SHARES_ENABLED`, and `CLIENT_VIEWER_ENABLED`.
 4. In Project Alpha confirm the installation-wide portal integration,
    relations, catalog, pricing, draft quote, outbound delivery, and
    authoritative-hook flags are all off. New profiles and profile delivery are
@@ -116,15 +115,16 @@ restart. Exact origins remain available for explicitly reviewed DNS providers.
 Apply each repository's normal migration command and every pending migration
 in lexical/ledger order; never cherry-pick only a later file.
 
-- Client/delivery D1: apply all pending migrations through `0140`. The Viewer
+- Client/delivery D1: apply all pending migrations through `0142`. The Viewer
   dependency begins at `0138_viewer_model_associations.sql`; `0139` and `0140`
   also carry the thumbnail queue/provenance fixes and must not be skipped.
-- Operations D1: apply all pending migrations through
-  `0027_viewer_processing_control_plane.sql`; `0026` establishes the base
+- Operations D1: apply all pending migrations through `0029`. Migration `0026`
+  establishes the base
   Viewer permissions.
-- Project Alpha: apply `0066` and then `0067` through the normal migration
-  runner. Both are replay-safe but must still be recorded once in the ledger.
-- Viewer: startup applies its internal SQLite migrations through schema v12.
+- Project Alpha: apply `0066`, `0067`, and `0068` through the normal migration
+  runner. All are replay-safe but must still be recorded once in the ledger.
+- Viewer: startup applies every internal SQLite migration through schema v15;
+  verify integrity, foreign keys, and the final schema ledger after restart.
 
 After each database, verify the migration ledger, integrity/foreign-key checks,
 new permissions, default-off flag values, and backup restore point. Do not
@@ -159,8 +159,12 @@ results for each item:
    correspondences, immutable attempt snapshot, NodeODM `gcp_list.txt`, and
    cross-dataset denial. Keep canonical elevations in metres while proving both
    imperial-default and metric UI editing.
-5. Review and publish selected derived outputs only. Prove raw imagery, GCP
-   files, provider archives, logs, and processing internals cannot be shared.
+5. Review the exact unpublished attempt/version through the admin-only embedded
+   review session, including transient renewal without camera-state loss and
+   immediate invalidation on publish/cancel/version change. Then publish
+   selected derived outputs only. Prove review creates no public share and raw
+   imagery, GCP files, provider archives, logs, and processing internals cannot
+   be reviewed or shared.
 6. Real point-cloud and mesh viewing on desktop and mobile: protected range
    requests, nested EPT/3D Tiles children, close-range full-detail LOD evidence,
    zoom-out quality reduction, and point-cloud camera framing.

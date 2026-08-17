@@ -1,7 +1,12 @@
 import { Hono, type Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { isMovedSourceMarker } from "@ltds/shared";
-import type { ClientDelegatedShareSignerRequestV1, ClientViewerSessionRequestV1 } from "@ltds/shared";
+import type {
+  ClientDelegatedShareSignerRequestV1,
+  ClientViewerSessionRequestV1,
+  ClientViewerShareAuthorizationV1,
+  ClientViewerShareCreateRequestV1,
+} from "@ltds/shared";
 import { z } from "zod";
 import type { Env } from "../types";
 import { serveAuthorizedThumbnail } from "../thumbnails";
@@ -237,6 +242,12 @@ const pricingHint = z.discriminatedUnion("kind", [
 ]);
 const notificationActionBody = z.object({ action: z.enum(["read", "dismiss"]) }).strict();
 const viewerAssociationId = opaqueId;
+const viewerShareCreateBody = z.object({
+  label: z.string().trim().max(120).nullable().default(null),
+  expiresAt: z.iso.datetime({ offset: true }).nullable(),
+  password: z.string().min(8).max(128).optional(),
+  displayUnits: z.enum(["imperial", "metric"]),
+}).strict();
 const attachmentInitBody = z.object({
   clientUploadId: idempotencyKey,
   name: z.string().min(1).max(255),
@@ -428,10 +439,23 @@ export function createClientPortalRouter(
     await next();
   });
 
-  router.get("/session", (c) => {
+  router.get("/session", async (c) => {
     const session = c.get("clientSession");
+    const workspace = selectedWorkspace(c);
+    let viewerDisplayUnits: "imperial" | "metric" = "imperial";
+    if (workspace) {
+      try {
+        const stored = await c.env.DELIVERY_DB.withSession("first-primary").prepare(
+          "SELECT display_units FROM viewer_client_preferences WHERE identity_id=?",
+        ).bind(workspace.identityId).first<string>("display_units");
+        viewerDisplayUnits = stored === "metric" ? "metric" : "imperial";
+      } catch (error) {
+        if (!/no such table: viewer_client_preferences/i.test(error instanceof Error ? error.message : String(error))) throw error;
+      }
+    }
     return c.json({
       account: { id: session.accountId, displayName: session.displayName },
+      viewerDisplayUnits,
       capabilities: {
         manageTeam:
           c.env.CLIENT_PORTAL_TEAM_ENABLED === "true" &&
@@ -450,6 +474,8 @@ export function createClientPortalRouter(
         delegatedShares: clientDelegatedShareCreationCapability(c.env).enabled,
         viewer: c.env.CLIENT_VIEWER_ENABLED === "true" &&
           portalHierarchyV2Enabled(c.env) && Boolean(c.env.VIEWER_SESSION_ISSUER),
+        viewerShares: c.env.CLIENT_VIEWER_SHARES_ENABLED === "true" &&
+          portalHierarchyV2Enabled(c.env) && Boolean(c.env.VIEWER_SESSION_ISSUER),
         viewBilling: session.canViewBilling,
       },
     });
@@ -461,6 +487,19 @@ export function createClientPortalRouter(
   router.get("/v2/workspaces", async (c) => {
     if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
     return c.json({ workspaces: await listPortalWorkspaces(c.env, c.get("clientPrincipal")) });
+  });
+  router.patch("/viewer/preferences", async c => {
+    if (c.env.CLIENT_VIEWER_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const workspace = selectedWorkspace(c);
+    const value = z.object({ displayUnits: z.enum(["imperial", "metric"]) }).strict()
+      .safeParse(await c.req.json().catch(() => null));
+    if (!workspace || !value.success) throw new HTTPException(400, { message: "Viewer preference is invalid" });
+    await c.env.DELIVERY_DB.prepare(`INSERT INTO viewer_client_preferences(identity_id,display_units,updated_at)
+      VALUES(?,?,datetime('now')) ON CONFLICT(identity_id) DO UPDATE SET
+      display_units=excluded.display_units,updated_at=excluded.updated_at`)
+      .bind(workspace.identityId, value.data.displayUnits).run();
+    return c.json({ displayUnits: value.data.displayUnits });
   });
 
   function selectedWorkspace(c: { get(name: "clientWorkspace"): EffectivePortalWorkspaceContext | null }): EffectivePortalWorkspaceContext | null {
@@ -484,7 +523,7 @@ export function createClientPortalRouter(
 
   async function authorizeProject(
     c: ClientPortalContext,
-    capability: "delivery.view" | "request.create",
+    capability: "delivery.view" | "request.create" | "viewer.share.create",
     projectId: string,
   ): Promise<boolean> {
     const workspace = selectedWorkspace(c);
@@ -844,6 +883,8 @@ export function createClientPortalRouter(
         viewer_model_version_id: string; updated_at: string;
       }>();
     if (rows.results.length > 100) throw new HTTPException(503, { message: "Too many 3D models are associated with this project" });
+    const canShare = c.env.CLIENT_VIEWER_SHARES_ENABLED === "true" && Boolean(c.env.VIEWER_SESSION_ISSUER) &&
+      await authorizeProject(c, "viewer.share.create", projectId.data);
     return c.json({ models: rows.results.map(row => ({
       associationId: row.id,
       title: row.model_title,
@@ -851,7 +892,97 @@ export function createClientPortalRouter(
       modelId: row.viewer_model_id,
       modelVersionId: row.viewer_model_version_id,
       updatedAt: row.updated_at,
+      canShare,
     })) });
+  });
+
+  function viewerShareAuthorization(
+    c: ClientPortalContext,
+    projectId: string,
+    associationId: string,
+  ): ClientViewerShareAuthorizationV1 | null {
+    const workspace = selectedWorkspace(c);
+    if (!workspace) return null;
+    const principal = c.get("clientPrincipal");
+    return {
+      protocolVersion: 1,
+      workspaceId: workspace.workspaceId,
+      identityId: workspace.identityId,
+      legacyAccountId: workspace.legacyAccountId,
+      legacyIdentityId: workspace.legacyIdentityId,
+      principalIssuer: principal.issuer,
+      principalSubject: principal.subject,
+      projectId,
+      associationId,
+    };
+  }
+
+  function viewerShareFailure(code: string): never {
+    if (code === "invalid_request") throw new HTTPException(400, { message: "Viewer share request is invalid" });
+    if (code === "idempotency_conflict") throw new HTTPException(409, { message: "Idempotency-Key was already used" });
+    if (code === "denied" || code === "not_found") throw new HTTPException(404, { message: "Viewer share not found" });
+    throw new HTTPException(503, { message: "Viewer sharing is temporarily unavailable" });
+  }
+
+  router.get("/projects/:projectId/models/:associationId/shares", async c => {
+    if (c.env.CLIENT_VIEWER_ENABLED !== "true" || c.env.CLIENT_VIEWER_SHARES_ENABLED !== "true" || !c.env.VIEWER_SESSION_ISSUER)
+      throw new HTTPException(404, { message: "Not found" });
+    const projectId = opaqueId.safeParse(c.req.param("projectId"));
+    const associationId = viewerAssociationId.safeParse(c.req.param("associationId"));
+    if (!projectId.success || !associationId.success || !(await authorizeProject(c, "delivery.view", projectId.data)) ||
+      !(await authorizeProject(c, "viewer.share.create", projectId.data)))
+      throw new HTTPException(404, { message: "3D model not found" });
+    const authorization = viewerShareAuthorization(c, projectId.data, associationId.data);
+    if (!authorization) throw new HTTPException(404, { message: "3D model not found" });
+    const result = await c.env.VIEWER_SESSION_ISSUER.listClientViewerShares(authorization);
+    if (!result.ok) viewerShareFailure(result.code);
+    return c.json({ shares: result.shares });
+  });
+
+  router.post("/projects/:projectId/models/:associationId/shares", async c => {
+    if (c.env.CLIENT_VIEWER_ENABLED !== "true" || c.env.CLIENT_VIEWER_SHARES_ENABLED !== "true" || !c.env.VIEWER_SESSION_ISSUER)
+      throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const projectId = opaqueId.safeParse(c.req.param("projectId"));
+    const associationId = viewerAssociationId.safeParse(c.req.param("associationId"));
+    const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    const input = viewerShareCreateBody.safeParse(await readBoundedJson(c.req.raw, 4096));
+    if (!projectId.success || !associationId.success || !key.success || !input.success ||
+      !(await authorizeProject(c, "delivery.view", projectId.data)) ||
+      !(await authorizeProject(c, "viewer.share.create", projectId.data)))
+      throw new HTTPException(404, { message: "3D model not found" });
+    const authorization = viewerShareAuthorization(c, projectId.data, associationId.data);
+    if (!authorization) throw new HTTPException(404, { message: "3D model not found" });
+    const request: ClientViewerShareCreateRequestV1 = {
+      ...authorization,
+      idempotencyKey: key.data,
+      label: input.data.label,
+      expiresAt: input.data.expiresAt,
+      displayUnits: input.data.displayUnits,
+      ...(input.data.password ? { password: input.data.password } : {}),
+    };
+    const result = await c.env.VIEWER_SESSION_ISSUER.createClientViewerShare(request);
+    if (!result.ok) viewerShareFailure(result.code);
+    return c.json({ ...result.creation, replayed: result.replayed }, result.replayed ? 200 : 201);
+  });
+
+  router.delete("/projects/:projectId/models/:associationId/shares/:shareId", async c => {
+    if (c.env.CLIENT_VIEWER_ENABLED !== "true" || c.env.CLIENT_VIEWER_SHARES_ENABLED !== "true" || !c.env.VIEWER_SESSION_ISSUER)
+      throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const projectId = opaqueId.safeParse(c.req.param("projectId"));
+    const associationId = viewerAssociationId.safeParse(c.req.param("associationId"));
+    const shareId = opaqueId.safeParse(c.req.param("shareId"));
+    const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    if (!projectId.success || !associationId.success || !shareId.success || !key.success)
+      throw new HTTPException(400, { message: "Viewer share revocation is invalid" });
+    const authorization = viewerShareAuthorization(c, projectId.data, associationId.data);
+    if (!authorization) throw new HTTPException(404, { message: "Viewer share not found" });
+    const result = await c.env.VIEWER_SESSION_ISSUER.revokeClientViewerShare({
+      ...authorization, shareId: shareId.data, idempotencyKey: key.data,
+    });
+    if (!result.ok) viewerShareFailure(result.code);
+    return c.json({ share: result.share, replayed: result.replayed });
   });
 
   router.post("/projects/:projectId/models/:associationId/session", async (c) => {

@@ -74,6 +74,8 @@ export interface Env {
   CLIENT_DELEGATED_SHARE_SIGNER?: ClientDelegatedShareSignerBinding;
   /** Default-off portal Viewer launch surface; the HMAC key stays in Operations. */
   CLIENT_VIEWER_ENABLED?: string;
+  /** Separate default-off client creation/revocation of Viewer public links. */
+  CLIENT_VIEWER_SHARES_ENABLED?: string;
   VIEWER_SESSION_ISSUER?: ViewerSessionIssuerBinding;
   CLIENT_DELEGATED_SHARE_SESSION_SECRET?: string;
   CLIENT_DELEGATED_SHARE_KEY_ID?: string;
