@@ -46,6 +46,12 @@ This is inode/index/recovery evidence only;
 the same rehearsal still must run on the disposable TrueNAS storage class with
 representative imagery before activation.
 
+The exact candidate also passed 151 repository-owned tests inside the Linux
+build image, including the real symlink-escape gate. Its separate Docker test
+proved UID/GID 568 named-volume initialization and byte/database persistence
+across restart and same-image upgrade. Together these close the two expected
+Windows-host skips; they do not replace the real TrueNAS ACL/mount drill.
+
 ## 1. Back up and prove the disabled baseline
 
 1. Back up both Cloudflare D1 databases and the Project Alpha database before
