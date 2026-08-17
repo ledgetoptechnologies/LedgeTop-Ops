@@ -9,7 +9,7 @@ export interface ViewerOperationCheckpoint {
   version: 1;
   operationId: string;
   type: ViewerDurableOperationType;
-  datasetId: string;
+  datasetId: string | null;
   uploadId: string | null;
   createdAt: string;
 }
@@ -34,14 +34,16 @@ export function parseViewerOperationCheckpoints(raw: string | null, now = Date.n
       const item = value as Record<string, unknown>;
       const created = typeof item.createdAt === "string" ? Date.parse(item.createdAt) : Number.NaN;
       if (item.version !== 1 || typeof item.operationId !== "string" || !UUID.test(item.operationId) ||
-        (item.type !== "upload_finalize" && item.type !== "import_adopt") ||
-        typeof item.datasetId !== "string" || !UUID.test(item.datasetId) ||
+        (item.type !== "upload_finalize" && item.type !== "import_preview" && item.type !== "import_adopt") ||
+        !(item.datasetId === null || typeof item.datasetId === "string" && UUID.test(item.datasetId)) ||
         !(item.uploadId === null || typeof item.uploadId === "string" && UUID.test(item.uploadId)) ||
         !Number.isFinite(created) || created > now + 5 * 60_000 || now - created > MAX_CHECKPOINT_AGE_MS ||
         "accessToken" in item || "uploadToken" in item || "previewToken" in item || "grant" in item ||
         seen.has(item.operationId)) return [];
       if (item.type === "upload_finalize" && item.uploadId === null) return [];
-      if (item.type === "import_adopt" && item.uploadId !== null) return [];
+      if (item.type === "upload_finalize" && item.datasetId === null) return [];
+      if (item.type === "import_adopt" && (item.datasetId === null || item.uploadId !== null)) return [];
+      if (item.type === "import_preview" && (item.datasetId !== null || item.uploadId !== null)) return [];
       seen.add(item.operationId);
       checkpoints.push(item as unknown as ViewerOperationCheckpoint);
     }
@@ -120,10 +122,34 @@ function validFinalizedDataset(value: unknown, datasetId: string): boolean {
     dataset.archivedAt === null && dataset.trashedAt === null;
 }
 
+function validImportPreview(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const response = value as Record<string, unknown>;
+  const preview = response.preview as Record<string, unknown> | null;
+  const space = preview?.destinationSpace as Record<string, unknown> | null;
+  const files = preview?.files;
+  return typeof response.id === "string" && UUID.test(response.id) &&
+    typeof response.previewToken === "string" && response.previewToken.length >= 16 && response.previewToken.length <= 512 &&
+    typeof response.expiresAt === "string" && Number.isFinite(Date.parse(response.expiresAt)) &&
+    Boolean(preview) && ["dataset_import", "terra_import", "webodm"].includes(String(preview?.rootKey)) &&
+    typeof preview?.relativePath === "string" && Number.isSafeInteger(preview.fileCount) && (preview.fileCount as number) >= 0 &&
+    Number.isSafeInteger(preview.byteSize) && (preview.byteSize as number) >= 0 &&
+    typeof preview.treeFingerprint === "string" && /^[a-f0-9]{64}$/.test(preview.treeFingerprint) &&
+    Array.isArray(files) && files.length <= 1000 && files.every(file => {
+      if (!file || typeof file !== "object" || Array.isArray(file)) return false;
+      const item = file as Record<string, unknown>;
+      return typeof item.relativePath === "string" && Number.isSafeInteger(item.byteSize) && (item.byteSize as number) >= 0 &&
+        Number.isSafeInteger(item.mtimeMs) && Number.isSafeInteger(item.ctimeMs);
+    }) && typeof preview.truncated === "boolean" && typeof preview.sameFilesystem === "boolean" && Boolean(space) &&
+    ["availableBytes", "totalBytes", "reserveBytes", "requiredBytes"].every(key =>
+      Number.isSafeInteger(space?.[key]) && (space?.[key] as number) >= 0) && typeof space?.sufficient === "boolean";
+}
+
 export function assertViewerOperation(value: ViewerDurableOperation, expected?: Pick<ViewerOperationCheckpoint, "operationId" | "type" | "datasetId" | "uploadId">): ViewerDurableOperation {
   if (!value || !UUID.test(value.id) || (expected && value.id !== expected.operationId) ||
-    (value.type !== "upload_finalize" && value.type !== "import_adopt") || (expected && value.type !== expected.type) ||
-    typeof value.subject !== "string" || !value.subject.startsWith("ops:") || !UUID.test(value.datasetId) ||
+    (value.type !== "upload_finalize" && value.type !== "import_preview" && value.type !== "import_adopt") || (expected && value.type !== expected.type) ||
+    typeof value.subject !== "string" || !value.subject.startsWith("ops:") ||
+    !(value.datasetId === null || UUID.test(value.datasetId)) ||
     !(value.uploadId === null || UUID.test(value.uploadId)) || !["queued", "leased", "succeeded", "failed", "cancelled"].includes(value.status) ||
     !Number.isFinite(value.progress) || value.progress < 0 || value.progress > 1 ||
     !(value.errorCode === null || typeof value.errorCode === "string") ||
@@ -133,9 +159,13 @@ export function assertViewerOperation(value: ViewerDurableOperation, expected?: 
     throw new ViewerOperationContractError("3D Viewer returned an invalid durable operation");
   if (expected && (value.datasetId !== expected.datasetId || value.uploadId !== expected.uploadId))
     throw new ViewerOperationContractError("3D Viewer returned a mismatched durable operation");
-  if (value.type === "upload_finalize" && value.uploadId === null) throw new ViewerOperationContractError("3D Viewer returned an invalid finalize operation");
-  if (value.type === "import_adopt" && value.uploadId !== null) throw new ViewerOperationContractError("3D Viewer returned an invalid import operation");
-  if (value.status === "succeeded" && !validFinalizedDataset(value.result?.dataset, value.datasetId))
+  if (value.type === "upload_finalize" && (value.datasetId === null || value.uploadId === null)) throw new ViewerOperationContractError("3D Viewer returned an invalid finalize operation");
+  if (value.type === "import_adopt" && (value.datasetId === null || value.uploadId !== null)) throw new ViewerOperationContractError("3D Viewer returned an invalid import operation");
+  if (value.type === "import_preview" && (value.datasetId !== null || value.uploadId !== null)) throw new ViewerOperationContractError("3D Viewer returned an invalid import preview operation");
+  if (value.status === "succeeded" && value.type === "import_preview" && !validImportPreview(value.result))
+    throw new ViewerOperationContractError("3D Viewer returned an invalid import preview result");
+  if (value.status === "succeeded" && value.type !== "import_preview" &&
+    (value.datasetId === null || !validFinalizedDataset((value.result as { dataset?: unknown } | null)?.dataset, value.datasetId)))
     throw new ViewerOperationContractError("3D Viewer returned an invalid operation result");
   if (value.status !== "succeeded" && value.result !== null)
     throw new ViewerOperationContractError("3D Viewer returned a premature operation result");
@@ -147,7 +177,7 @@ export async function startViewerOperation(
   path: string,
   init: RequestInit,
   expectedType: ViewerDurableOperationType,
-  expectedIdentity: { datasetId?: string; uploadId?: string | null } = {},
+  expectedIdentity: { datasetId?: string | null; uploadId?: string | null } = {},
 ): Promise<{ operation: ViewerDurableOperation; checkpoint: ViewerOperationCheckpoint; checkpointStored: boolean }> {
   const headers = new Headers(init.headers);
   if (!headers.get("Idempotency-Key")) throw new Error("Durable Viewer operations require an idempotency key");

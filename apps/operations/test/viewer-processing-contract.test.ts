@@ -23,7 +23,7 @@ const routes = JSON.parse(routeBytes);
 describe("Viewer processing cross-service contract", () => {
   it("pins the byte-identical cross-repository route fixture", () => {
     expect(createHash("sha256").update(routeBytes).digest("hex").toUpperCase())
-      .toBe("D46543EBA16ED892C1FDFE33F22692A1D3F84DB4F8E65793D87A720C10914BCF");
+      .toBe("54BB20112E37322F43B7C1B9C40C1F94244942097AE54CA378DE8C90A438E443");
   });
   it("pins the exact admin-grant body and service HMAC", async () => {
     const value = fixture.adminGrant;
@@ -108,20 +108,28 @@ describe("Viewer processing cross-service contract", () => {
   });
 
   it("pins durable finalize/import 202, Location, polling, and terminal result shapes", () => {
+    const previewAccepted = routes.operations.importPreviewAccepted;
+    const previewSucceeded = routes.operations.importPreviewSucceeded as ViewerDurableOperationResponse;
     const finalize = routes.operations.uploadFinalizeAccepted;
     const adopt = routes.operations.importAdoptAccepted;
     const succeeded = routes.operations.uploadFinalizeSucceeded as ViewerDurableOperationResponse;
+    expect(previewAccepted).toMatchObject({ status: 202, headers: { "Retry-After": "2" } });
+    expect(previewAccepted.headers.Location).toBe(`/api/v1/operations/${previewAccepted.body.operation.id}`);
+    expect(previewAccepted.body.operation).toMatchObject({ type: "import_preview", datasetId: null, uploadId: null, status: "queued", result: null });
+    expect(previewSucceeded.operation).toMatchObject({ type: "import_preview", status: "succeeded", datasetId: null, uploadId: null, progress: 1 });
+    expect(previewSucceeded.operation.result).toEqual(routes.importPreview);
     expect(finalize).toMatchObject({ status: 202, headers: { "Retry-After": "2" } });
     expect(finalize.headers.Location).toBe(`/api/v1/operations/${finalize.body.operation.id}`);
     expect(finalize.body.operation).toMatchObject({ type: "upload_finalize", status: "queued", uploadId: expect.any(String), result: null });
     expect(adopt.headers.Location).toBe(`/api/v1/operations/${adopt.body.operation.id}`);
     expect(adopt.body.operation).toMatchObject({ type: "import_adopt", status: "queued", uploadId: null, result: null });
     expect(succeeded.operation).toMatchObject({ status: "succeeded", progress: 1, completedAt: expect.any(String) });
-    expect(succeeded.operation.result?.dataset).toMatchObject({ id: succeeded.operation.datasetId, status: "finalized" });
+    expect(succeeded.operation.result && "dataset" in succeeded.operation.result ? succeeded.operation.result.dataset : null)
+      .toMatchObject({ id: succeeded.operation.datasetId, status: "finalized" });
   });
 
   it("pins the normalized import storage preflight DTO without internal storage aliases", () => {
-    const response = routes.importPreview as ViewerDatasetImportPreview;
+    const response = (routes.operations.importPreviewSucceeded as ViewerDurableOperationResponse).operation.result as ViewerDatasetImportPreview;
     expect(response).toMatchObject({
       id: expect.any(String), previewToken: expect.any(String), expiresAt: expect.any(String),
       preview: {

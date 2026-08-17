@@ -4,6 +4,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 test("processing controls remain usable at 390px and send metadata directly to Viewer", async ({ page }, testInfo) => {
   let operationsMetadata = 0, viewerMetadata = 0;
   let projectPatch: Record<string, unknown> | null = null, datasetPatch: Record<string, unknown> | null = null, outputTrash = false, importAdopt = false;
+  let previewStarts = 0, previewCancelled = false, allowPreviewCompletion = false;
   const consoleErrors: string[] = [];
   page.on("console", message => { if (message.type() === "error") consoleErrors.push(message.text()); });
   await page.route("**/api/**", async route => {
@@ -22,13 +23,59 @@ test("processing controls remain usable at 390px and send metadata directly to V
       if (url.pathname === "/api/v1/tasks/task-one/storage") return route.fulfill({ json: { task: { taskId: "task-one", projectId: "project-one", datasetBytes: 10, outputBytes: 20, totalBytes: 30 }, outputs: [{ id: "version-one", modelId: "model-one", taskId: "task-one", attemptId: "attempt-one", projectId: "project-one", displayName: "Map flight one", status: "archived", byteSize: 20, assetCount: 2, createdAt: "2026-08-16T00:00:00Z", updatedAt: "2026-08-16T00:00:00Z", archivedAt: "2026-08-16T00:00:00Z", trashedAt: null }], nextCursor: null } });
       if (url.pathname === "/api/v1/datasets/dataset-one" && request.method() === "PATCH") { datasetPatch = request.postDataJSON(); return route.fulfill({ json: { dataset: { id: "dataset-one" } } }); }
       if (url.pathname === "/api/v1/processing/outputs/version-one/archive" && request.method() === "DELETE") { outputTrash = true; return route.fulfill({ json: { output: { id: "version-one", status: "trashed" }, trash: { id: "trash-output" } } }); }
-      if (url.pathname === "/api/v1/dataset-imports/preview" && request.method() === "POST") return route.fulfill({ json: {
-        preview: { rootKey: "dataset_import", relativePath: "north/import-flight", fileCount: 3, byteSize: 30,
-          treeFingerprint: "c".repeat(64),
-          files: [{ relativePath: "IMG_0001.JPG", byteSize: 10, mtimeMs: 1799999000000, ctimeMs: 1799999000000 }], truncated: false, sameFilesystem: true,
-          destinationSpace: { availableBytes: 1000, totalBytes: 2000, reserveBytes: 100, requiredBytes: 30, sufficient: true } },
-        id: "77777777-7777-4777-8777-777777777777", previewToken: "preview-token", expiresAt: new Date(Date.now() + 60_000).toISOString(),
-      } });
+      if (url.pathname === "/api/v1/dataset-imports/preview" && request.method() === "POST") {
+        previewStarts += 1;
+        expect(request.postDataJSON()).toEqual({ rootKey: "dataset_import", relativePath: "north/import-flight" });
+        const id = previewStarts === 1 ? "88888888-8888-4888-8888-888888888888" :
+          previewStarts === 2 ? "99999999-9999-4999-8999-999999999999" : "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+        return route.fulfill({ status: 202, headers: { Location: `/api/v1/operations/${id}`, "Retry-After": "2", "Access-Control-Expose-Headers": "Location, Retry-After" }, json: { operation: {
+          id, type: "import_preview", subject: "ops:staff-one", datasetId: null, uploadId: null,
+          status: "queued", progress: 0, result: null, errorCode: null, errorMessage: null,
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null,
+        } } });
+      }
+      if (url.pathname === "/api/v1/operations/88888888-8888-4888-8888-888888888888/cancel" && request.method() === "POST") {
+        previewCancelled = true;
+        return route.fulfill({ json: { operation: {
+          id: "88888888-8888-4888-8888-888888888888", type: "import_preview", subject: "ops:staff-one", datasetId: null, uploadId: null,
+          status: "cancelled", progress: 0, result: null, errorCode: null, errorMessage: null,
+          createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+        } } });
+      }
+      if (url.pathname === "/api/v1/operations/88888888-8888-4888-8888-888888888888") return route.fulfill({ json: { operation: {
+        id: "88888888-8888-4888-8888-888888888888", type: "import_preview", subject: "ops:staff-one", datasetId: null, uploadId: null,
+        status: "leased", progress: 0.25, result: null, errorCode: null, errorMessage: null,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null,
+      } } });
+      if (url.pathname === "/api/v1/operations/99999999-9999-4999-8999-999999999999" && !allowPreviewCompletion) return route.fulfill({ json: { operation: {
+        id: "99999999-9999-4999-8999-999999999999", type: "import_preview", subject: "ops:staff-one", datasetId: null, uploadId: null,
+        status: "leased", progress: 0.5, result: null, errorCode: null, errorMessage: null,
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: null,
+      } } });
+      if (url.pathname === "/api/v1/operations/99999999-9999-4999-8999-999999999999") return route.fulfill({ json: { operation: {
+        id: "99999999-9999-4999-8999-999999999999", type: "import_preview", subject: "ops:staff-one", datasetId: null, uploadId: null,
+        status: "succeeded", progress: 1, errorCode: null, errorMessage: null,
+        result: {
+          preview: { rootKey: "dataset_import", relativePath: "north/import-flight", fileCount: 3, byteSize: 30,
+            treeFingerprint: "c".repeat(64),
+            files: [{ relativePath: "IMG_0001.JPG", byteSize: 10, mtimeMs: 1799999000000, ctimeMs: 1799999000000 }], truncated: false, sameFilesystem: true,
+            destinationSpace: { availableBytes: 1000, totalBytes: 2000, reserveBytes: 100, requiredBytes: 30, sufficient: true } },
+          id: "77777777-7777-4777-8777-777777777777", previewToken: "p".repeat(43), expiresAt: new Date(Date.now() - 1_000).toISOString(),
+        },
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+      } } });
+      if (url.pathname === "/api/v1/operations/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa") return route.fulfill({ json: { operation: {
+        id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", type: "import_preview", subject: "ops:staff-one", datasetId: null, uploadId: null,
+        status: "succeeded", progress: 1, errorCode: null, errorMessage: null,
+        result: {
+          preview: { rootKey: "dataset_import", relativePath: "north/import-flight", fileCount: 3, byteSize: 30,
+            treeFingerprint: "c".repeat(64),
+            files: [{ relativePath: "IMG_0001.JPG", byteSize: 10, mtimeMs: 1799999000000, ctimeMs: 1799999000000 }], truncated: false, sameFilesystem: true,
+            destinationSpace: { availableBytes: 1000, totalBytes: 2000, reserveBytes: 100, requiredBytes: 30, sufficient: true } },
+          id: "77777777-7777-4777-8777-777777777777", previewToken: "q".repeat(43), expiresAt: new Date(Date.now() + 60_000).toISOString(),
+        },
+        createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
+      } } });
       if (url.pathname === "/api/v1/dataset-imports/adopt" && request.method() === "POST") { importAdopt = true; return route.fulfill({ status: 202, headers: { Location: "/api/v1/operations/44444444-4444-4444-8444-444444444444", "Retry-After": "2", "Access-Control-Expose-Headers": "Location, Retry-After" }, json: { operation: {
         id: "44444444-4444-4444-8444-444444444444", type: "import_adopt", subject: "ops:staff-one", datasetId: "55555555-5555-4555-8555-555555555555", uploadId: null,
         status: "queued", progress: 0, result: null, errorCode: null, errorMessage: null,
@@ -148,12 +195,28 @@ test("processing controls remain usable at 390px and send metadata directly to V
   await page.getByRole("button", { name: "Imports" }).click();
   await page.getByLabel("Relative path").fill("north/import-flight");
   await page.getByRole("button", { name: "Preview import" }).click();
+  await expect(page.getByText(/Inspecting source content: 25%/)).toBeVisible();
+  await page.getByRole("button", { name: "Cancel preview scan" }).click();
+  await expect.poll(() => previewCancelled).toBe(true);
+  await expect(page.getByText("Import preview cancelled.")).toBeVisible();
+  await page.getByRole("button", { name: "Preview import" }).click();
+  await expect(page.getByText(/Inspecting source content: 50%/)).toBeVisible();
+  await page.getByRole("button", { name: "Projects" }).click();
+  await expect(page.getByRole("button", { name: "Load 50 more" })).toBeEnabled();
+  allowPreviewCompletion = true;
+  await page.reload();
+  // The attemptId deep link intentionally selects Tasks after bootstrap; the
+  // durable checkpoint must still resume when Imports remounts after reload.
+  await page.getByRole("button", { name: "Imports" }).click();
+  await expect(page.getByText("Import preview expired. The source must be inspected again before adoption.")).toBeVisible();
+  await page.getByRole("button", { name: "Preview again" }).click();
   await expect(page.getByText("Storage reserve passes.")).toBeVisible();
   await expect(page.getByText("30 B required · 1000 B available of 2.0 KB · 100 B reserved")).toBeVisible();
   await expect(page.getByRole("button", { name: "Confirm import" })).toBeEnabled();
   await page.getByRole("button", { name: "Confirm import" }).click();
   await expect.poll(() => importAdopt).toBe(true);
   await expect(page.getByText("Dataset import completed and indexed.")).toBeVisible();
+  expect(previewStarts).toBe(3);
   expect(consoleErrors.filter(message => /worker-src|content security policy/i.test(message))).toEqual([]);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
   expect(viewerMetadata).toBeGreaterThanOrEqual(6);

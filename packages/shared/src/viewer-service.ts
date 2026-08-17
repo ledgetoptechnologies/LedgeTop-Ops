@@ -307,17 +307,17 @@ export interface ViewerDatasetImportPreview {
   };
 }
 
-export type ViewerDurableOperationType = "upload_finalize" | "import_adopt";
+export type ViewerDurableOperationType = "upload_finalize" | "import_preview" | "import_adopt";
 export type ViewerDurableOperationStatus = "queued" | "leased" | "succeeded" | "failed" | "cancelled";
 export interface ViewerDurableOperation {
   id: string;
   type: ViewerDurableOperationType;
   subject: string;
-  datasetId: string;
+  datasetId: string | null;
   uploadId: string | null;
   status: ViewerDurableOperationStatus;
   progress: number;
-  result: { dataset: ViewerDatasetSummary } | null;
+  result: { dataset: ViewerDatasetSummary } | ViewerDatasetImportPreview | null;
   errorCode: string | null;
   errorMessage: string | null;
   createdAt: string;

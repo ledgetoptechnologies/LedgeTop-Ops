@@ -4,6 +4,7 @@ import type {
   ViewerDatasetSummary,
   ViewerDatasetUploadGrant,
   ViewerDisplayUnits,
+  ViewerDurableOperationResponse,
   ViewerProcessingAttemptDetail,
   ViewerProcessingPreset,
   ViewerProcessingProject,
@@ -30,6 +31,7 @@ import { GcpWorkspace } from "./GcpWorkspace";
 import { providerCredentialError } from "./provider-credential";
 import { defaultViewerProviderOverrides } from "./provider-options";
 import {
+  assertViewerOperation,
   pollViewerOperation,
   readViewerOperationCheckpoints,
   removeViewerOperationCheckpoint,
@@ -111,7 +113,8 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
   const [cursors, setCursors] = useState<PageCursors>({ projects: null, datasets: null, tasks: null, outputs: null, providers: null });
   const [tab, setTab] = useState<Tab>(() => {
     const pending = readViewerOperationCheckpoints()[0];
-    return pending?.type === "upload_finalize" ? "datasets" : pending?.type === "import_adopt" ? "imports" : "projects";
+    return pending?.type === "upload_finalize" ? "datasets" :
+      pending?.type === "import_adopt" || pending?.type === "import_preview" ? "imports" : "projects";
   });
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -204,7 +207,7 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
     if (!client || busy) return;
     setBusy(true); setError(""); setMessage("");
     try { await action(client); await load(); setMessage(success); }
-    catch (caught) { setError((caught as Error).message); }
+    catch (caught) { if ((caught as Error).name !== "AbortError") setError((caught as Error).message); }
     finally { setBusy(false); }
   };
   const query = async (action: (client: ViewerAdminClient) => Promise<unknown>) => {
@@ -246,7 +249,7 @@ export function ViewerProcessingPanel({ mapToken }: { mapToken: string | null })
     {tab === "gcp" && clientRef.current && <GcpWorkspace client={clientRef.current} datasets={datasets} tasks={tasks} mapToken={mapToken} units={bootstrap.units.resolved} canRead={can("viewer.gcp.read")} canWrite={can("viewer.gcp.write")} />}
     {tab === "tasks" && <Tasks tasks={tasks} datasets={datasets} providers={providers} presets={presets} canWrite={can("viewer.processing.write")} canPublish={can("viewer.processing.publish")} busy={busy} mutate={mutate} query={query} nextCursor={cursors.tasks} loadMore={() => loadMore("tasks")} />}
     {tab === "outputs" && <Outputs outputs={outputs} totals={outputTotals} canPublish={can("viewer.processing.publish")} busy={busy} mutate={mutate} nextCursor={cursors.outputs} loadMore={() => loadMore("outputs")} />}
-    {tab === "imports" && <Imports projects={projects} canImport={can("viewer.datasets.import")} busy={busy} mutate={mutate} />}
+    {tab === "imports" && <Imports client={clientRef.current} projects={projects} canImport={can("viewer.datasets.import")} busy={busy} mutate={mutate} />}
     {tab === "providers" && <Providers providers={providers} canWrite={can("viewer.providers.write")} busy={busy} mutate={mutate} nextCursor={cursors.providers} loadMore={() => loadMore("providers")} />}
     {tab === "storage" && <Storage summary={storage} canPurge={can("viewer.storage.purge")} busy={busy} mutate={mutate} loadMore={loadMoreTrash} />}
     {tab === "shares" && <Card title="Shares"><p>Published-model demo links, expiry, revocation, passwords, units, and download policy are managed in Public demo links below. Raw dataset inputs and processing logs are never share candidates.</p><a className="button-orange button-small" href="#viewer-public-shares">Go to public demo links</a></Card>}
@@ -526,49 +529,155 @@ function Outputs({ outputs, totals, canPublish, busy, mutate, nextCursor, loadMo
   </Card>;
 }
 
-function Imports({ projects, canImport, busy, mutate }: { projects: ViewerProcessingProject[]; canImport: boolean; busy: boolean; mutate: Mutate }) {
+function Imports({ client, projects, canImport, busy, mutate }: { client: ViewerAdminClient | null; projects: ViewerProcessingProject[]; canImport: boolean; busy: boolean; mutate: Mutate }) {
   const [rootKey, setRootKey] = useState<"dataset_import" | "terra_import" | "webodm">("dataset_import"); const [relativePath, setRelativePath] = useState(""); const [projectId, setProjectId] = useState(""); const [preview, setPreview] = useState<ViewerDatasetImportPreview | null>(null); const [storageMode, setStorageMode] = useState<"adopted" | "external_reference">("adopted");
   const [operationProgress, setOperationProgress] = useState("");
   const [operationWarning, setOperationWarning] = useState("");
-  const [savedOperation, setSavedOperation] = useState<ViewerOperationCheckpoint | null>(() =>
+  const [previewBusy, setPreviewBusy] = useState(false);
+  const [previewExpired, setPreviewExpired] = useState(false);
+  const [previewOperation, setPreviewOperation] = useState<ViewerOperationCheckpoint | null>(() =>
+    readViewerOperationCheckpoints().find(item => item.type === "import_preview") || null,
+  );
+  const [adoptOperation, setAdoptOperation] = useState<ViewerOperationCheckpoint | null>(() =>
     readViewerOperationCheckpoints().find(item => item.type === "import_adopt") || null,
   );
-  const watcher = useRef<AbortController | null>(null), operationResumeStarted = useRef(false);
+  const previewWatcher = useRef<AbortController | null>(null), adoptWatcher = useRef<AbortController | null>(null);
+  const previewGeneration = useRef(0), operationResumeStarted = useRef(false);
   useEffect(() => { if (!projectId && projects[0]) setProjectId(projects[0].id); }, [projectId, projects]);
-  const watchOperation = async (client: ViewerAdminClient, checkpoint: ViewerOperationCheckpoint, controller: AbortController) => {
-    const terminal = await pollViewerOperation(client, checkpoint, operation => {
+  useEffect(() => {
+    if (!preview) { setPreviewExpired(false); return; }
+    const delay = Date.parse(preview.expiresAt) - Date.now();
+    if (delay <= 0) { setPreviewExpired(true); return; }
+    setPreviewExpired(false);
+    const timeout = window.setTimeout(() => setPreviewExpired(true), Math.min(delay + 25, 2_147_483_647));
+    return () => clearTimeout(timeout);
+  }, [preview]);
+  const watchPreview = async (viewer: ViewerAdminClient, checkpoint: ViewerOperationCheckpoint, controller: AbortController, generation: number) => {
+    const terminal = await pollViewerOperation(viewer, checkpoint, operation => {
+      if (generation === previewGeneration.current)
+        setOperationProgress(`Inspecting source content: ${Math.round(operation.progress * 100)}% · ${operation.status}`);
+    }, controller.signal);
+    if (generation !== previewGeneration.current) return;
+    previewWatcher.current = null;
+    if (terminal.status !== "succeeded")
+      throw new Error(terminal.errorMessage || `Import preview ${terminal.status}. The durable operation is saved for review.`);
+    const result = terminal.result as ViewerDatasetImportPreview;
+    setRootKey(result.preview.rootKey); setRelativePath(result.preview.relativePath); setPreview(result);
+    setOperationProgress("Import preview ready. Review before adoption."); setOperationWarning("");
+  };
+  const watchAdopt = async (viewer: ViewerAdminClient, checkpoint: ViewerOperationCheckpoint, controller: AbortController) => {
+    const terminal = await pollViewerOperation(viewer, checkpoint, operation => {
       setOperationProgress(`Importing verified dataset: ${Math.round(operation.progress * 100)}% · ${operation.status}`);
     }, controller.signal);
     if (terminal.status !== "succeeded")
       throw new Error(terminal.errorMessage || `Dataset import ${terminal.status}. The durable operation is saved for review.`);
-    removeViewerOperationCheckpoint(checkpoint.operationId); setSavedOperation(null); setPreview(null);
-    setOperationProgress(""); setOperationWarning(""); watcher.current = null;
+    removeViewerOperationCheckpoint(checkpoint.operationId); setAdoptOperation(null); setPreview(null);
+    setOperationProgress(""); setOperationWarning(""); adoptWatcher.current = null;
   };
   useEffect(() => {
-    if (!canImport || !savedOperation || operationResumeStarted.current) return;
+    const saved = adoptOperation || previewOperation;
+    if (!canImport || !client || !saved || operationResumeStarted.current) return;
     operationResumeStarted.current = true;
-    const controller = new AbortController(); watcher.current = controller;
-    void mutate(client => watchOperation(client, savedOperation, controller), "Dataset import completed and indexed.");
+    const controller = new AbortController();
+    if (saved.type === "import_adopt") {
+      adoptWatcher.current = controller;
+      void mutate(viewer => watchAdopt(viewer, saved, controller), "Dataset import completed and indexed.");
+    } else {
+      previewWatcher.current = controller;
+      const generation = ++previewGeneration.current;
+      setPreviewBusy(true);
+      void watchPreview(client, saved, controller, generation)
+        .catch(caught => { if ((caught as Error).name !== "AbortError") setOperationWarning((caught as Error).message); })
+        .finally(() => { if (generation === previewGeneration.current) setPreviewBusy(false); });
+    }
   // Resume exactly once on mount; a visible action below handles later retries.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  useEffect(() => () => {
+    previewGeneration.current += 1;
+    operationResumeStarted.current = false;
+    previewWatcher.current?.abort(); adoptWatcher.current?.abort();
+  }, []);
+  const discardPreview = () => {
+    previewGeneration.current += 1;
+    previewWatcher.current?.abort(); previewWatcher.current = null;
+    if (previewOperation) removeViewerOperationCheckpoint(previewOperation.operationId);
+    setPreviewOperation(null); setPreview(null); setOperationProgress(""); setOperationWarning("");
+  };
+  const startPreview = async () => {
+    if (!client || busy || previewBusy || !relativePath) return;
+    const controller = new AbortController(); previewWatcher.current = controller;
+    const generation = ++previewGeneration.current;
+    setPreviewBusy(true); setPreview(null); setOperationProgress("Starting durable source inspection…"); setOperationWarning("");
+    try {
+      const started = await startViewerOperation(client, "/api/v1/dataset-imports/preview", {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ rootKey, relativePath }), signal: controller.signal,
+      }, "import_preview", { datasetId: null, uploadId: null });
+      if (generation !== previewGeneration.current) return;
+      setPreviewOperation(started.checkpoint);
+      if (!started.checkpointStored) setOperationWarning("Browser storage denied the preview checkpoint. Inspection continues, but automatic recovery after closing this page is unavailable.");
+      await watchPreview(client, started.checkpoint, controller, generation);
+    } catch (caught) {
+      if ((caught as Error).name !== "AbortError" && generation === previewGeneration.current)
+        setOperationWarning((caught as Error).message);
+    } finally {
+      if (generation === previewGeneration.current) setPreviewBusy(false);
+    }
+  };
+  const resumePreview = async () => {
+    if (!client || !previewOperation || busy || previewBusy) return;
+    const controller = new AbortController(); previewWatcher.current = controller;
+    const generation = ++previewGeneration.current;
+    setPreviewBusy(true); setOperationWarning("");
+    try { await watchPreview(client, previewOperation, controller, generation); }
+    catch (caught) {
+      if ((caught as Error).name !== "AbortError" && generation === previewGeneration.current)
+        setOperationWarning((caught as Error).message);
+    } finally {
+      if (generation === previewGeneration.current) setPreviewBusy(false);
+    }
+  };
+  const cancelPreview = async () => {
+    if (!client || !previewOperation) return;
+    const checkpoint = previewOperation;
+    previewGeneration.current += 1;
+    previewWatcher.current?.abort(); previewWatcher.current = null;
+    setPreviewBusy(true); setOperationWarning("");
+    try {
+      const payload = await client.request<ViewerDurableOperationResponse>(`/api/v1/operations/${encodeURIComponent(checkpoint.operationId)}/cancel`, {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}",
+      });
+      const cancelled = assertViewerOperation(payload.operation, checkpoint);
+      if (cancelled.status !== "cancelled") throw new Error("3D Viewer did not cancel the import preview operation");
+      removeViewerOperationCheckpoint(checkpoint.operationId); setPreviewOperation(null); setPreview(null);
+      setOperationProgress("Import preview cancelled.");
+    } catch (caught) {
+      setOperationWarning(`${(caught as Error).message} The saved operation can still be resumed.`);
+    } finally { setPreviewBusy(false); }
+  };
   if (!canImport) return <Card title="Server imports"><EmptyState title="Import permission required" detail="Server paths are never accepted directly; imports use configured root aliases." /></Card>;
-  return <Card title="Server imports"><form className="viewer-processing-form" onSubmit={event => { event.preventDefault(); void mutate(async client => { const value = await client.request<ViewerDatasetImportPreview>("/api/v1/dataset-imports/preview", { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({ rootKey, relativePath }) }); setPreview(value); return value; }, "Import preview ready. Review before adoption."); }}>
-    <label>Configured root<select value={rootKey} onChange={event => setRootKey(event.target.value as typeof rootKey)}><option value="dataset_import">Dataset staging</option><option value="terra_import">DJI Terra staging</option><option value="webodm">WebODM read-only</option></select></label><label>Relative path<input value={relativePath} onChange={event => setRelativePath(event.target.value)} placeholder="project/flight" /></label><button className="button-ghost" disabled={busy || !relativePath}>Preview import</button></form>
-    {preview && <div className="viewer-import-preview"><p>{preview.preview.fileCount} files. {preview.preview.sameFilesystem ? "Atomic adoption is available." : "Verified copy is required."} {preview.preview.destinationSpace.sufficient ? "Storage reserve passes." : "Insufficient safe free space."}</p><p>{formatBytes(preview.preview.destinationSpace.requiredBytes)} required · {formatBytes(preview.preview.destinationSpace.availableBytes)} available of {formatBytes(preview.preview.destinationSpace.totalBytes)} · {formatBytes(preview.preview.destinationSpace.reserveBytes)} reserved</p><label>Project<select value={projectId} onChange={event => setProjectId(event.target.value)}>{projects.map(project => <option key={project.id} value={project.id}>{project.displayName}</option>)}</select></label><label>Storage ownership<select value={storageMode} onChange={event => setStorageMode(event.target.value as typeof storageMode)}><option value="adopted">Adopt into LTDS storage</option><option value="external_reference">Reference read-only source</option></select></label><button className="button-orange" type="button" disabled={busy || !projectId || !preview.preview.destinationSpace.sufficient} onClick={() => void mutate(async client => {
-      const controller = new AbortController(); watcher.current = controller;
+  return <Card title="Server imports"><form className="viewer-processing-form" onSubmit={event => { event.preventDefault(); void startPreview(); }}>
+    <label>Configured root<select disabled={busy || previewBusy} value={rootKey} onChange={event => { discardPreview(); setRootKey(event.target.value as typeof rootKey); }}><option value="dataset_import">Dataset staging</option><option value="terra_import">DJI Terra staging</option><option value="webodm">WebODM read-only</option></select></label><label>Relative path<input disabled={busy || previewBusy} value={relativePath} onChange={event => { discardPreview(); setRelativePath(event.target.value); }} placeholder="project/flight" /></label><button className="button-ghost" disabled={busy || previewBusy || !relativePath || Boolean(previewOperation)}>Preview import</button></form>
+    {preview && !previewExpired && <div className="viewer-import-preview"><p>{preview.preview.fileCount} files. {preview.preview.sameFilesystem ? "Atomic adoption is available." : "Verified copy is required."} {preview.preview.destinationSpace.sufficient ? "Storage reserve passes." : "Insufficient safe free space."}</p><p>{formatBytes(preview.preview.destinationSpace.requiredBytes)} required · {formatBytes(preview.preview.destinationSpace.availableBytes)} available of {formatBytes(preview.preview.destinationSpace.totalBytes)} · {formatBytes(preview.preview.destinationSpace.reserveBytes)} reserved</p><label>Project<select value={projectId} onChange={event => setProjectId(event.target.value)}>{projects.map(project => <option key={project.id} value={project.id}>{project.displayName}</option>)}</select></label><label>Storage ownership<select value={storageMode} onChange={event => setStorageMode(event.target.value as typeof storageMode)}><option value="adopted">Adopt into LTDS storage</option><option value="external_reference">Reference read-only source</option></select></label><button className="button-orange" type="button" disabled={busy || !projectId || !preview.preview.destinationSpace.sufficient} onClick={() => void mutate(async client => {
+      if (Date.parse(preview.expiresAt) <= Date.now()) throw new Error("Import preview expired. Scan the source again before adoption.");
+      const controller = new AbortController(); adoptWatcher.current = controller;
       const started = await startViewerOperation(client, "/api/v1/dataset-imports/adopt", {
         method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify({ previewToken: preview.previewToken, projectId, displayName: relativePath.split(/[\\/]/).at(-1) || "Imported dataset", storageMode }), signal: controller.signal,
       }, "import_adopt");
-      setSavedOperation(started.checkpoint);
+      if (previewOperation) removeViewerOperationCheckpoint(previewOperation.operationId);
+      setPreviewOperation(null); setAdoptOperation(started.checkpoint);
       if (!started.checkpointStored) setOperationWarning("Browser storage denied the operation checkpoint. Import continues, but automatic recovery after closing this page is unavailable.");
-      await watchOperation(client, started.checkpoint, controller);
+      await watchAdopt(client, started.checkpoint, controller);
     }, "Dataset import completed and indexed.")}>Confirm import</button></div>}
+    {preview && previewExpired && <p className="viewer-processing-warning" role="alert">Import preview expired. The source must be inspected again before adoption. <button type="button" className="button-ghost button-small" disabled={busy || previewBusy} onClick={() => { discardPreview(); void startPreview(); }}>Preview again</button></p>}
     {operationProgress && <p role="status">{operationProgress}</p>}
     {operationWarning && <p className="viewer-processing-warning" role="alert">{operationWarning}</p>}
-    {busy && watcher.current && <button type="button" className="button-ghost button-small" onClick={() => watcher.current?.abort()}>Stop watching (import continues)</button>}
-    {savedOperation && !busy && <p className="viewer-upload-resume" role="status">Durable import {savedOperation.operationId} continues in Viewer; no preview token or credentials are stored here. <button type="button" className="button-ghost button-small" onClick={() => { const controller = new AbortController(); watcher.current = controller; void mutate(client => watchOperation(client, savedOperation, controller), "Dataset import completed and indexed."); }}>Resume status check</button> <button type="button" className="button-ghost button-small" onClick={() => { removeViewerOperationCheckpoint(savedOperation.operationId); setSavedOperation(null); }}>Dismiss local status</button></p>}
+    {previewBusy && previewOperation && <button type="button" className="button-ghost button-small" onClick={() => void cancelPreview()}>Cancel preview scan</button>}
+    {busy && adoptWatcher.current && <button type="button" className="button-ghost button-small" onClick={() => adoptWatcher.current?.abort()}>Stop watching (import continues)</button>}
+    {previewOperation && !previewBusy && <p className="viewer-upload-resume" role="status">Durable preview {previewOperation.operationId} {preview ? "is ready for this session" : "continues in Viewer"}; no preview token or credentials are stored in the browser. {!preview && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void resumePreview()}>Resume preview</button>} <button type="button" className="button-ghost button-small" disabled={busy} onClick={discardPreview}>Dismiss preview</button></p>}
+    {adoptOperation && !busy && <p className="viewer-upload-resume" role="status">Durable import {adoptOperation.operationId} continues in Viewer; no preview token or credentials are stored here. <button type="button" className="button-ghost button-small" onClick={() => { const controller = new AbortController(); adoptWatcher.current = controller; void mutate(viewer => watchAdopt(viewer, adoptOperation, controller), "Dataset import completed and indexed."); }}>Resume status check</button> <button type="button" className="button-ghost button-small" onClick={() => { removeViewerOperationCheckpoint(adoptOperation.operationId); setAdoptOperation(null); }}>Dismiss local status</button></p>}
   </Card>;
 }
 
