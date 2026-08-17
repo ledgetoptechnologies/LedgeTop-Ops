@@ -125,9 +125,14 @@ const NAV: Array<{
   { page: "sops", label: "SOP Library", permissions: ["sops.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
   { page: "delivery", label: "Delivery", permissions: ["delivery.browse"] },
-  { page: "viewer", label: "3D Models", permissions: ["viewer.view"] },
 ];
 const MANAGE_NAV: typeof NAV = [
+  {
+    page: "viewer",
+    label: "3D Viewer",
+    href: "/operations/processing",
+    permissions: ["viewer.view"],
+  },
   { page: "team", label: "Team", permissions: ["team.view"] },
   {
     page: "administration",
@@ -350,8 +355,8 @@ function PageHeading({ page }: { page: Page }) {
       "Browse the live R2 hierarchy and create secure client links.",
     ],
     viewer: [
-      "3D Models",
-      "Open Viewer models and manage explicit client-project associations.",
+      "3D Viewer",
+      "Process, review, publish, and share Viewer models from the Operations control plane.",
     ],
     team: [
       "Team",

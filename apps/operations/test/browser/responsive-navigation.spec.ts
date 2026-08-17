@@ -18,7 +18,7 @@ async function mockSession(page: Page, permissions: string[], identity?: { displ
   });
 }
 
-const allNavigationPermissions = ["dashboard.view", "operations.view", "operations.manage", "sops.view", "airspace.view", "delivery.browse", "team.view", "administration.view"];
+const allNavigationPermissions = ["dashboard.view", "operations.view", "operations.manage", "sops.view", "airspace.view", "delivery.browse", "viewer.view", "team.view", "administration.view"];
 
 test("desktop navigation exposes canonical client requests and independently authorizes Administration items", async ({ page }) => {
   await mockSession(page, allNavigationPermissions);
@@ -37,6 +37,9 @@ test("desktop navigation exposes canonical client requests and independently aut
   await expect(page).toHaveURL(/\/operations\/client-requests$/);
 
   await primary.getByRole("button", { name: "Administration" }).click();
+  const viewerLink = primary.getByRole("link", { name: "3D Viewer" });
+  await expect(viewerLink).toBeVisible();
+  await expect(viewerLink).toHaveAttribute("href", "/operations/processing");
   await expect(primary.getByRole("link", { name: "Team" })).toBeVisible();
   await expect(primary.getByRole("link", { name: "Administration" })).toBeVisible();
   const menuLayout = await page.locator(".ops-header").evaluate((header) => {
@@ -61,6 +64,12 @@ test("desktop navigation exposes canonical client requests and independently aut
   expect(menuLayout.navigationOverflowY).toBe("visible");
   expect(menuLayout.popoverTop).toBeGreaterThanOrEqual(menuLayout.headerBottom - 1);
   expect(menuLayout.popoverRight).toBeLessThanOrEqual(menuLayout.viewportWidth);
+
+  await viewerLink.click();
+  await expect(page).toHaveURL(/\/operations\/processing$/);
+  await expect(page.getByRole("heading", { name: "3D Viewer" })).toBeVisible();
+  await primary.getByRole("button", { name: "Administration" }).click();
+  await expect(primary.getByRole("link", { name: "3D Viewer" })).toHaveAttribute("aria-current", "page");
 });
 
 test("Team remains visible without Administration permission", async ({ page }) => {
@@ -70,6 +79,7 @@ test("Team remains visible without Administration permission", async ({ page }) 
   const primary = page.getByRole("navigation", { name: "Primary navigation" });
   await primary.getByRole("button", { name: "Administration" }).click();
   await expect(primary.getByRole("link", { name: "Team" })).toBeVisible();
+  await expect(primary.getByRole("link", { name: "3D Viewer" })).toHaveCount(0);
   await expect(primary.getByRole("link", { name: "Administration" })).toHaveCount(0);
 });
 
@@ -128,6 +138,8 @@ for (const width of [320, 390, 768]) {
     await expect(drawer.locator(".ops-mobile-nav-label")).toHaveText("Administration");
     await expect(drawer.getByRole("link", { name: "Dashboard" })).toBeFocused();
     await expect(drawer.getByRole("link", { name: "Client Requests" })).toHaveCSS("min-height", "44px");
+    await expect(drawer.getByRole("link", { name: "3D Viewer" })).toHaveAttribute("href", "/operations/processing");
+    await expect(drawer.getByRole("link", { name: "3D Viewer" })).toHaveCSS("min-height", "44px");
     await drawer.getByRole("link", { name: "Administration" }).focus();
     await page.keyboard.press("Tab");
     await expect(drawer.getByRole("button", { name: "Close navigation" })).toBeFocused();
