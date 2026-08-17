@@ -129,7 +129,7 @@
   "viewer": {
     "hostname": "viewer-staging.ledgetopdroneservices.com",
     "origin": "https://viewer-staging.ledgetopdroneservices.com",
-    "releaseCommit": "9ed172cd0c83147c56b1dad97a0525754910ff4b",
+    "releaseCommit": "0ad110b77dce5a6044f7d93f92512ec250d58c20",
     "image": "FINAL_VIEWER_IMAGE_PENDING",
     "configSha256": "<SHA256>",
     "deployedAt": "<ISO_8601_TIMESTAMP>",

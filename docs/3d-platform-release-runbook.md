@@ -9,7 +9,7 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `9ed172cd0c83147c56b1dad97a0525754910ff4b`.
+- 3D Viewer source: `0ad110b77dce5a6044f7d93f92512ec250d58c20`.
   The final GHCR tag and manifest digest are deliberately pending; the local
   verification image ID is not a substitute for a registry manifest digest.
 - LTDS-Ops product code: `89a3a4566b9de3e1b9a7c8ad90aed15bfdec087a` on
@@ -31,16 +31,16 @@ The Viewer/Ops signed-processing corpus has SHA-256
 `13ab12919e624be6a048c058774ccff2031f865855e64ab3b726e9b31cffab82`.
 The route-response corpus has SHA-256
 `8df468634c41ff84ceda6e74c34c732e2c28ee6472cdd3f28b9d658d19cacc01`.
-The five generic Project Alpha fixtures are byte-pinned by both repositories.
+The six generic Project Alpha fixtures are byte-pinned by both repositories.
 Do not substitute a later commit or hand-edit a fixture during activation.
 
 The candidate also passed the guarded disposable-volume scale rehearsal with
 exactly 100,000 one-byte files: full scan/fingerprint, authoritative adoption,
 index/accounting, database reopen and re-fingerprint, low-space refusal, and
-sentinel-verified cleanup. The build-stamped production replay completed in
-70.165 seconds with peak RSS 602,533,888 bytes. Its pre-generation disk check
+sentinel-verified cleanup. The exact repinned build-stamped replay completed in
+70.931 seconds with peak RSS 608,956,416 bytes. Its pre-generation disk check
 required 11,811,260,064 bytes (payload, 10 GiB reserve, and safety margin)
-against 936,637,571,072 available bytes. Production mode rejects mutable image
+against 932,662,820,864 available bytes. Production mode rejects mutable image
 tags, source-stamp mismatches, and insufficient space before creating a target.
 This is inode/index/recovery evidence only;
 the same rehearsal still must run on the disposable TrueNAS storage class with
@@ -52,13 +52,22 @@ proved UID/GID 568 named-volume initialization and byte/database persistence
 across restart and same-image upgrade. Together these close the two expected
 Windows-host skips; they do not replace the real TrueNAS ACL/mount drill.
 
-The same Linux candidate completed a read-only probe against the official
-`opendronemap/nodeodm:2.2.3` container on an isolated Docker network. It
-reported NodeODM API `2.2.3`, ODM engine `3.5.0`, 80 options, and capability
-fingerprint
+The same Linux candidate completed the destructive compatibility gate against
+`opendronemap/nodeodm@sha256:b5260d56e96e24fd70a44f5bd892e6f2e3ee8a7a37b1247c1667b7ffc5758361`
+on an isolated Docker network. The official ODMdata `banana` starter corpus was
+pinned to commit `2778294e4a73aec8f37747e0d2edfc4cb38b23a6`: 16 images,
+15,294,677 bytes, sorted content-manifest SHA-256
+`0521a4583c8a9bab746ad5c5f4bf45e82547fa5e9c82e0250407f148f07c4013`.
+The capability result was NodeODM API `2.2.3`, ODM engine `3.5.0`, 80 options,
+and fingerprint
 `7e0410ff352d6bdf286b9f1d22de9d2e7408a6275eec1b5ff6d77cc6160f62fe`.
-The disposable container/network were removed. This proves the real baseline
-capability contract, not an actual corpus job, cancellation, or ClusterODM.
+The processing task completed and streamed a 694,062,035-byte `all.zip` with
+SHA-256 `ac7ecaf548ca5fc8b932ce4513bc83c04d4bba788ef4789c1e48f2b276f7cddd`;
+a second uploaded and committed task settled at `cancelled`. Both tasks were
+removed, the provider data directory was empty, and the disposable provider,
+network, and corpus checkout were removed. This proves the small real NodeODM
+baseline workflow and cancellation. ClusterODM 1.5.5, representative imagery,
+GCP/LOD review, and interruption/restart remain live gates.
 
 ## 1. Back up and prove the disabled baseline
 
