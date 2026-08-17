@@ -38,7 +38,7 @@ const input: ClientPricingHintInput = {
 function env(overrides: Partial<Env> = {}): Env {
   return {
     PROJECT_ALPHA_PRICING_HINTS_ENABLED: "true",
-    PROJECT_ALPHA_PRICING_HINT_URL: "https://alpha.example/api/v2/integrations/ltds/pricing-hints",
+    PROJECT_ALPHA_PRICING_HINT_URL: "https://alpha.example/api/v2/integrations/ltds-client-production/pricing-hints",
     PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN: "https://alpha.example",
     PROJECT_ALPHA_PRICING_HINT_API_KEY: bearer,
     PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET: secret,
@@ -69,7 +69,7 @@ async function signature(value: string): Promise<string> {
 describe("Project Alpha pricing hint provider", () => {
   it("sends only canonical server coverage and public service identities with an exact-body signature", async () => {
     const fetcher = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
-      expect(String(url)).toBe("https://alpha.example/api/v2/integrations/ltds/pricing-hints");
+      expect(String(url)).toBe("https://alpha.example/api/v2/integrations/ltds-client-production/pricing-hints");
       const body = String(init?.body);
       expect(JSON.parse(body)).toEqual(pricingFixture.request);
       expect(body).not.toContain("browserControlledAnswer");
@@ -78,14 +78,15 @@ describe("Project Alpha pricing hint provider", () => {
       expect(body).not.toContain("project-a");
       const headers = new Headers(init?.headers);
       expect(headers.get("Authorization")).toBe(`Bearer ${bearer}`);
-      expect(headers.get("X-LTDS-Scope")).toBe("portal.pricing.preview");
+      expect(headers.get("X-Portal-Integration-Application-Key")).toBe("ltds-client-production");
+      expect(headers.get("X-Portal-Integration-Scope")).toBe("portal.pricing.preview");
       expect(init?.signal).toBeInstanceOf(AbortSignal);
       const bodyHash = await hexDigest(body);
-      expect(headers.get("X-LTDS-Body-SHA256")).toBe(bodyHash);
-      const signed = `${now.toISOString()}\nPOST\n/api/v2/integrations/ltds/pricing-hints\nportal.pricing.preview\n${bodyHash}`;
-      expect(headers.get("X-LTDS-Signature")).toBe(`sha256=${await signature(signed)}`);
+      expect(headers.get("X-Portal-Integration-Body-SHA256")).toBe(bodyHash);
+      const signed = `${now.toISOString()}\nPOST\n/api/v2/integrations/ltds-client-production/pricing-hints\nportal.pricing.preview\n${bodyHash}`;
+      expect(headers.get("X-Portal-Integration-Signature")).toBe(`sha256=${await signature(signed)}`);
       const tamperedHash = await hexDigest(body.replace("889000.000000", "1.000000"));
-      expect(await signature(signed.replace(bodyHash, tamperedHash))).not.toBe(headers.get("X-LTDS-Signature")?.slice(7));
+      expect(await signature(signed.replace(bodyHash, tamperedHash))).not.toBe(headers.get("X-Portal-Integration-Signature")?.slice(7));
       return response();
     });
     await expect(fetchProjectAlphaPricingHint(input, env(), { fetcher: fetcher as typeof fetch, now })).resolves.toEqual({
@@ -121,12 +122,12 @@ describe("Project Alpha pricing hint provider", () => {
     for (const candidate of [
       env({ PROJECT_ALPHA_PRICING_HINTS_ENABLED: "false" }),
       env({ PROJECT_ALPHA_PRICING_HINT_HMAC_SECRET: "short" }),
-      env({ PROJECT_ALPHA_PRICING_HINT_URL: "https://attacker.example/api/v2/integrations/ltds/pricing-hints" }),
+      env({ PROJECT_ALPHA_PRICING_HINT_URL: "https://attacker.example/api/v2/integrations/ltds-client-production/pricing-hints" }),
       env({ PROJECT_ALPHA_PRICING_HINT_URL: "https://alpha.example/other" }),
-      env({ PROJECT_ALPHA_PRICING_HINT_URL: "http://alpha.example/api/v2/integrations/ltds/pricing-hints" }),
-      env({ PROJECT_ALPHA_PRICING_HINT_URL: "https://user:pass@alpha.example/api/v2/integrations/ltds/pricing-hints" }),
-      env({ PROJECT_ALPHA_PRICING_HINT_URL: "https://127.0.0.1/api/v2/integrations/ltds/pricing-hints", PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN: "https://127.0.0.1" }),
-      env({ PROJECT_ALPHA_PRICING_HINT_URL: "https://alpha.internal/api/v2/integrations/ltds/pricing-hints", PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN: "https://alpha.internal" }),
+      env({ PROJECT_ALPHA_PRICING_HINT_URL: "http://alpha.example/api/v2/integrations/ltds-client-production/pricing-hints" }),
+      env({ PROJECT_ALPHA_PRICING_HINT_URL: "https://user:pass@alpha.example/api/v2/integrations/ltds-client-production/pricing-hints" }),
+      env({ PROJECT_ALPHA_PRICING_HINT_URL: "https://127.0.0.1/api/v2/integrations/ltds-client-production/pricing-hints", PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN: "https://127.0.0.1" }),
+      env({ PROJECT_ALPHA_PRICING_HINT_URL: "https://alpha.internal/api/v2/integrations/ltds-client-production/pricing-hints", PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN: "https://alpha.internal" }),
     ]) {
       expect(projectAlphaPricingHintCapability(candidate).enabled).toBe(false);
       await expect(fetchProjectAlphaPricingHint(input, candidate, { fetcher, now })).resolves.toBeNull();

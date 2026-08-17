@@ -9,14 +9,16 @@ import type { Env } from "../src/worker/types";
 
 const applicationKey = "field_operations_catalog";
 const secret = "catalog-test-secret-at-least-thirty-two-bytes";
+const keyId = "catalog-test-v1";
 const snapshotHash = "a".repeat(64);
 const access = async () => undefined;
 
-async function signature(body: string, timestamp: string): Promise<string> {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}.${body}`));
+async function signature(body: string, timestamp: string, deliveryId: string, signingKeyId = keyId, signingSecret = secret): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(signingSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}\nPOST\n/api/internal/project-alpha/catalog-v2\n${signingKeyId}\n${deliveryId}\n${body}`));
   return `sha256=${[...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
 }
+async function bodyHash(body:string):Promise<string>{const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(body));return[...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,"0")).join("");}
 
 function item(publicId: string, sourceVersion = "v1") {
   return {
@@ -83,22 +85,27 @@ describe("Project Alpha sanitized service catalog projection", () => {
       DELIVERY_DB: db,
       PROJECT_ALPHA_CATALOG_SYNC_ENABLED: "true",
       PROJECT_ALPHA_CATALOG_APPLICATION_KEY: applicationKey,
+      PROJECT_ALPHA_CATALOG_HMAC_KEY_ID: keyId,
       PROJECT_ALPHA_CATALOG_HMAC_SECRET: secret,
     } as Env;
   });
 
   afterAll(async () => miniflare.dispose());
 
-  async function deliver(payload: Record<string, unknown>, options: { timestamp?: string; signature?: string; accessVerifier?: typeof access } = {}) {
+  async function deliver(payload: Record<string, unknown>, options: { timestamp?: string; signature?: string; keyId?: string; secret?: string; accessVerifier?: typeof access } = {}) {
     const body = JSON.stringify(payload);
     const timestamp = options.timestamp ?? new Date().toISOString();
+    const signingKeyId = options.keyId ?? keyId;
     return handleProjectAlphaCatalogRequest(new Request("https://client.test/api/internal/project-alpha/catalog-v2", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-PA-Timestamp": timestamp,
-        "X-PA-Delivery-ID": String(payload.deliveryId),
-        "X-PA-Signature": options.signature ?? await signature(body, timestamp),
+        "X-Portal-Integration-Application-Key": applicationKey,
+        "X-Portal-Integration-Timestamp": timestamp,
+        "X-Portal-Integration-Body-SHA256": await bodyHash(body),
+        "X-Portal-Integration-Key-Id": signingKeyId,
+        "X-Portal-Integration-Delivery-Id": String(payload.deliveryId),
+        "X-Portal-Integration-Signature": options.signature ?? await signature(body, timestamp,String(payload.deliveryId), signingKeyId, options.secret ?? secret),
       },
       body,
     }), env, options.accessVerifier ?? access);
@@ -182,6 +189,19 @@ describe("Project Alpha sanitized service catalog projection", () => {
     expect((await deliver(envelope("event", "catalog-auth-bad-access", 14, { event: { action: "tombstone", publicId: "svc-map", sourceVersion: "v4" } }), { accessVerifier: async () => { throw new Error("catalog-access-invalid"); } })).status).toBe(401);
     expect((await deliver(envelope("event", "catalog-auth-expired", 14, { event: { action: "tombstone", publicId: "svc-map", sourceVersion: "v4" } }), { timestamp: "2020-01-01T00:00:00.000Z" })).status).toBe(401);
     expect((await deliver(envelope("event", "catalog-auth-signature", 14, { event: { action: "tombstone", publicId: "svc-map", sourceVersion: "v4" } }), { signature: `sha256=${"0".repeat(64)}` })).status).toBe(401);
+  });
+
+  it("accepts only the configured current or previous rotation key", async () => {
+    const previousKeyId = "catalog-test-v0";
+    const previousSecret = "catalog-previous-secret-at-least-thirty-two-bytes";
+    env.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID = previousKeyId;
+    const payload = envelope("event", "catalog-rotation-14", 14, { event: { action: "tombstone", publicId: "svc-map", sourceVersion: "v4" } });
+    expect((await deliver(payload, { keyId: previousKeyId, secret: previousSecret })).status).toBe(404);
+    env.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET = previousSecret;
+    expect((await deliver(payload, { keyId: previousKeyId, secret: previousSecret })).status).toBe(200);
+    expect((await deliver({ ...payload, deliveryId: "catalog-rotation-unknown" }, { keyId: "catalog-test-unknown" })).status).toBe(401);
+    delete env.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID;
+    delete env.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET;
   });
 
   it("rejects an oversized streamed body even when Content-Length is absent", async () => {

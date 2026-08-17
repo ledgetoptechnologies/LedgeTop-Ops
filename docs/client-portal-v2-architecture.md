@@ -316,8 +316,9 @@ out of scope.
 
 LTDS never derives a price by copying PA's unit price or implementing a local
 pricing formula. After authoritative acreage is available, the LTDS server may
-call a dedicated PA preview endpoint, for example
-`POST /api/v2/integrations/ltds/pricing-hints`, with scope
+call the dedicated PA preview endpoint whose path is bound to the configured
+application key,
+`POST /api/v2/integrations/{applicationKey}/pricing-hints`, with scope
 `portal.pricing.preview`.
 
 The request includes only the active PA service public IDs/versions, canonical
@@ -372,7 +373,7 @@ its authoritative policy.
 
 After a submitted request is reviewed, an authorized Operations user may select
 **Create Project Alpha draft**. Operations sends a server-to-server command to
-`POST /api/v2/integrations/ltds/draft-quotes` using a principal with only
+`POST /api/v2/integrations/{applicationKey}/draft-quotes` using a principal with only
 `portal.quote-draft.create`.
 
 The command includes:

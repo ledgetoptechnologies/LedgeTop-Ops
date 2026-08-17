@@ -83,19 +83,19 @@ describe("Project Alpha private draft command", () => {
     const now = new Date("2026-08-13T12:34:56.000Z");
     const idempotencyKey = "ltds-pa-draft:request-public-a:r4:a2";
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      expect(String(input)).toBe("https://project-alpha.example/api/v2/integrations/ltds/draft-quotes");
+      expect(String(input)).toBe("https://project-alpha.example/api/v2/integrations/ltds_ops/draft-quotes");
       const headers = new Headers(init?.headers);
       const rawBody = String(init?.body);
       const bodyHash = await sha256Hex(rawBody);
       expect(rawBody).toBe(canonicalProjectAlphaJson(payload));
       expect(headers.get("Authorization")).toBe("Bearer draft-only-key");
       expect(headers.get("Idempotency-Key")).toBe(idempotencyKey);
-      expect(headers.get("X-LTDS-Application-Key")).toBe("ltds_ops");
-      expect(headers.get("X-LTDS-Body-SHA256")).toBe(bodyHash);
-      expect(headers.get("X-LTDS-Timestamp")).toBe(now.toISOString());
+      expect(headers.get("X-Portal-Integration-Application-Key")).toBe("ltds_ops");
+      expect(headers.get("X-Portal-Integration-Body-SHA256")).toBe(bodyHash);
+      expect(headers.get("X-Portal-Integration-Timestamp")).toBe(now.toISOString());
       expect(init?.redirect).toBe("error");
-      const signed = `${now.toISOString()}\nPOST\n/api/v2/integrations/ltds/draft-quotes\n${idempotencyKey}\n${bodyHash}`;
-      expect(headers.get("X-LTDS-Signature")).toBe(`sha256=${await expectedHmac("0123456789abcdef0123456789abcdef", signed)}`);
+      const signed = `${now.toISOString()}\nPOST\n/api/v2/integrations/ltds_ops/draft-quotes\n${idempotencyKey}\n${bodyHash}`;
+      expect(headers.get("X-Portal-Integration-Signature")).toBe(`sha256=${await expectedHmac("0123456789abcdef0123456789abcdef", signed)}`);
       return Response.json(draftQuoteFixture.valid.response);
     });
     await expect(sendProjectAlphaDraftQuoteCommand(environment(), payload, idempotencyKey, { now, fetcher }))

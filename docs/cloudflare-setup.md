@@ -355,7 +355,13 @@ then add the dedicated receiver secret:
 
 ```powershell
 npx.cmd wrangler secret put PROJECT_ALPHA_CATALOG_HMAC_SECRET --name ltds-clients
+npx.cmd wrangler secret put PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET --name ltds-clients
 ```
+
+Set `PROJECT_ALPHA_CATALOG_HMAC_KEY_ID` to the sender's current key ID. During
+rotation only, set a distinct `PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID` and
+the previous secret above; delete both previous values after old pending rows
+drain. An unknown key ID is rejected even if its signature matches another key.
 
 Do not reuse an Access audience, service token, or HMAC secret from Ops Sync or
 the draft-quote caller. Keep `PROJECT_ALPHA_CATALOG_SYNC_ENABLED=false` until
@@ -374,7 +380,12 @@ Configure its exact issuer/audience as
 
 ```powershell
 npx.cmd wrangler secret put PROJECT_ALPHA_PORTAL_HMAC_SECRET --name ltds-clients
+npx.cmd wrangler secret put PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET --name ltds-clients
 ```
+
+Set `PROJECT_ALPHA_PORTAL_HMAC_KEY_ID` to the sender's current key ID. Use the
+distinct `PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID`/previous-secret pair only
+for a bounded rotation overlap, then remove both after pending delivery drains.
 
 Keep `PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false` until additive migration 0125
 and snapshot/activation/replay/gap/tombstone/Access-denial tests pass in

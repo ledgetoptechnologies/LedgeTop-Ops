@@ -559,11 +559,11 @@ describe("verified Project Alpha quote linkage", () => {
       PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET: "0123456789abcdef0123456789abcdef",
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-      expect(new URL(String(input)).pathname).toBe("/api/v2/integrations/ltds/draft-quotes");
+      expect(new URL(String(input)).pathname).toBe("/api/v2/integrations/ltds_ops/draft-quotes");
       const headers = new Headers(init?.headers);
       expect(headers.get("Authorization")).toBe("Bearer draft-only-key");
       expect(headers.get("Idempotency-Key")).toBe("ltds-pa-draft:request-a:r3:a0");
-      expect(headers.get("X-LTDS-Signature")).toMatch(/^sha256=[a-f0-9]{64}$/);
+      expect(headers.get("X-Portal-Integration-Signature")).toMatch(/^sha256=[a-f0-9]{64}$/);
       const command = JSON.parse(String(init?.body));
       expect(command).toMatchObject({
         request: { publicId: "request-a", revision: 3 },

@@ -3,10 +3,10 @@
 The approved next-generation ownership, service-catalog, pricing-hint, and
 draft-quote command contract is documented in
 [the locked client portal v2 compatibility contract](client-portal-v2-architecture.md).
-The LTDS caller and immutable receipt ledger are implemented behind
-`PROJECT_ALPHA_DRAFT_QUOTES_ENABLED=false`. Project Alpha has not yet
-implemented the compatible write endpoint, so the integration must remain
-disabled until the contract tests below pass in staging.
+The LTDS caller, Project Alpha write endpoint, and immutable receipt ledger are
+implemented behind `PROJECT_ALPHA_DRAFT_QUOTES_ENABLED=false`. The integration
+must remain disabled until the byte-pinned neutral wire corpus and the staging
+replay, conflict, stale-catalog, scope, timeout, and no-side-effect gates pass.
 
 ## Client request pilot boundary
 
@@ -28,20 +28,30 @@ LTDS accepts a server-only catalog v2 projection at
 has no CORS allowance, and is separate from client-session authentication.
 Configure a dedicated Cloudflare Access service application/audience in
 `PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN` and
-`PROJECT_ALPHA_CATALOG_ACCESS_AUD`. Store a unique secret of at least 32 bytes
-as `PROJECT_ALPHA_CATALOG_HMAC_SECRET`; do not reuse the Operations projection,
+`PROJECT_ALPHA_CATALOG_ACCESS_AUD`. Configure an exact current key ID in
+`PROJECT_ALPHA_CATALOG_HMAC_KEY_ID` and store its unique 32+ byte secret as
+`PROJECT_ALPHA_CATALOG_HMAC_SECRET`; do not reuse the Operations projection,
 pricing-preview, or draft-quote secrets. Both systems use the same bounded
 deployment identifier in `PROJECT_ALPHA_CATALOG_APPLICATION_KEY`.
+
+During a coordinated rotation only, set a distinct
+`PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID` and its 32+ byte
+`PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET`. The receiver selects key material
+only by an exact current/previous ID match and rejects unknown IDs. Remove the
+previous pair only after every pending delivery signed with it is drained.
 
 Every request is JSON no larger than 128 KiB and carries:
 
 ```text
 Cf-Access-Client-Id / Cf-Access-Client-Secret: dedicated service token
 Cf-Access-Jwt-Assertion: issued by the dedicated Access application
-X-PA-Timestamp: current ISO timestamp (five-minute window)
-X-PA-Delivery-ID: exact deliveryId from the body
-X-PA-Signature: sha256=<lowercase HMAC-SHA-256 hex>
-signature input: <X-PA-Timestamp>.<exact request body bytes>
+X-Portal-Integration-Application-Key: exact configured application key
+X-Portal-Integration-Timestamp: current ISO timestamp (five-minute window)
+X-Portal-Integration-Body-SHA256: lowercase SHA-256 of the exact body
+X-Portal-Integration-Key-Id: sender-selected bounded rotation key ID
+X-Portal-Integration-Delivery-Id: exact deliveryId from the body
+X-Portal-Integration-Signature: sha256=<lowercase HMAC-SHA-256 hex>
+signature input: <timestamp>\nPOST\n/api/internal/project-alpha/catalog-v2\n<keyId>\n<deliveryId>\n<exact body bytes>
 ```
 
 The strict envelope has `schemaVersion: 2`, `applicationKey`, `deliveryId`,
@@ -121,9 +131,15 @@ exactly `true` and all five dedicated configuration values are present:
 PROJECT_ALPHA_PORTAL_APPLICATION_KEY
 PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN
 PROJECT_ALPHA_PORTAL_ACCESS_AUD
+PROJECT_ALPHA_PORTAL_HMAC_KEY_ID
 PROJECT_ALPHA_PORTAL_HMAC_SECRET (32+ bytes, secret)
 PROJECT_ALPHA_PORTAL_SYNC_ENABLED=false
 ```
+
+An optional, distinct `PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID` plus
+`PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET` provides the same bounded overlap
+window as catalog delivery. Supplying only half the pair, reusing the current
+ID, or sending any unconfigured key ID fails closed.
 
 This flag only opens the server-to-server inbox. It does not enable client
 hierarchy reads; `CLIENT_PORTAL_HIERARCHY_V2_ENABLED` remains an independent,
@@ -132,12 +148,13 @@ service token, application key, audience, and HMAC secret from catalog, pricing,
 draft-quote, Operations projection, and browser credentials.
 
 Requests are JSON up to 256 KiB. The Access assertion must have the configured
-exact issuer and audience. Headers include a current ISO `X-PA-Timestamp`
-(five-minute window), body-matching `X-PA-Delivery-ID`, and:
+exact issuer and audience. Headers use the same neutral projection set as the
+catalog: application key, current ISO timestamp, exact-body SHA-256, bounded key
+ID, body-matching delivery ID, and signature:
 
 ```text
-X-PA-Signature: sha256=<lowercase HMAC-SHA-256 hex>
-signature input: <timestamp>\nPOST\n/api/internal/project-alpha/portal-v2\n<exact body bytes>
+X-Portal-Integration-Signature: sha256=<lowercase HMAC-SHA-256 hex>
+signature input: <timestamp>\nPOST\n/api/internal/project-alpha/portal-v2\n<keyId>\n<deliveryId>\n<exact body bytes>
 ```
 
 The strict schema-v2 envelope carries an opaque `workspaceId`, delivery ID,
@@ -279,8 +296,8 @@ gated v3 corpus before either producer is enabled.
 
 ## Non-binding pricing preview (implemented, disabled)
 
-The Client Worker can call Project Alpha's server-only endpoint at exactly
-`POST /api/v2/integrations/ltds/pricing-hints`. The caller is independently
+The Client Worker calls Project Alpha's server-only endpoint at
+`POST /api/v2/integrations/{PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY}/pricing-hints`. The caller is independently
 disabled unless `PROJECT_ALPHA_PRICING_HINTS_ENABLED` is exactly `true` and all
 configuration validates. The browser never receives Project Alpha credentials
 and cannot supply coverage, acreage, currency, or money to this call.
@@ -333,13 +350,13 @@ or Project Alpha numeric IDs, and all money. The canonical JSON body is capped
 by construction and signed as follows:
 
 ```text
-signature input = <ISO timestamp>\nPOST\n/api/v2/integrations/ltds/pricing-hints\nportal.pricing.preview\n<SHA-256 body hex>
+signature input = <ISO timestamp>\nPOST\n/api/v2/integrations/<applicationKey>/pricing-hints\nportal.pricing.preview\n<SHA-256 body hex>
 Authorization: Bearer <dedicated preview-only key>
-X-LTDS-Scope: portal.pricing.preview
-X-LTDS-Timestamp: <same ISO timestamp>
-X-LTDS-Body-SHA256: <same body digest>
-X-LTDS-Signature: sha256=<HMAC-SHA-256 hex>
-X-LTDS-Application-Key: <pricing application key>
+X-Portal-Integration-Scope: portal.pricing.preview
+X-Portal-Integration-Timestamp: <same ISO timestamp>
+X-Portal-Integration-Body-SHA256: <same body digest>
+X-Portal-Integration-Signature: sha256=<HMAC-SHA-256 hex>
+X-Portal-Integration-Application-Key: <pricing application key>
 ```
 
 Project Alpha returns one strict aggregate for the complete selected-service
@@ -380,7 +397,7 @@ manual verification fallback.
 The disabled caller targets:
 
 ```text
-POST /api/v2/integrations/ltds/draft-quotes
+POST /api/v2/integrations/{APPLICATION_KEY}/draft-quotes
 required Project Alpha credential scope: portal.quote-draft.create
 ```
 
@@ -453,11 +470,11 @@ The stable idempotency key is
 the exact body with:
 
 ```text
-signature input = <ISO timestamp>\nPOST\n/api/v2/integrations/ltds/draft-quotes\n<Idempotency-Key>\n<SHA-256 body hex>
-X-LTDS-Signature: sha256=<HMAC-SHA-256 hex>
-X-LTDS-Timestamp: <same ISO timestamp>
-X-LTDS-Body-SHA256: <same body digest>
-X-LTDS-Application-Key: <APPLICATION_KEY>
+signature input = <ISO timestamp>\nPOST\n/api/v2/integrations/<APPLICATION_KEY>/draft-quotes\n<Idempotency-Key>\n<SHA-256 body hex>
+X-Portal-Integration-Signature: sha256=<HMAC-SHA-256 hex>
+X-Portal-Integration-Timestamp: <same ISO timestamp>
+X-Portal-Integration-Body-SHA256: <same body digest>
+X-Portal-Integration-Application-Key: <APPLICATION_KEY>
 Authorization: Bearer <dedicated draft-only key>
 ```
 
@@ -494,8 +511,8 @@ persists the result in
 the immutable `request_pa_draft_quote_receipts` ledger with the payload hash,
 request/area revisions, staff actor, and public result identifiers. A changed
 request or area revision gets a new key. A transient failure leaves no LTDS
-receipt and is safe to retry. The Project Alpha endpoint and scope remain the
-release blocker; no flag should be enabled until staging proves replay,
+receipt and is safe to retry. The endpoint and scope are implemented, but the
+live integration remains a release blocker; no flag should be enabled until staging proves replay,
 conflict, stale-catalog, scope-denial, timeout, and no-side-effect behavior.
 
 ## Projection and visibility

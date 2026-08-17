@@ -259,11 +259,11 @@ async function sha256Hex(value: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function verifyHmac(rawBody: Uint8Array, timestamp: string, suppliedHeader: string | null, secret: string | undefined): Promise<void> {
+async function verifyHmac(rawBody: Uint8Array, timestamp: string, keyId: string, deliveryId: string, suppliedHeader: string | null, secret: string | undefined): Promise<void> {
   if (!secret || secret.length < 32 || !suppliedHeader?.startsWith("sha256=")) throw new Error("catalog-signature-required");
   const suppliedHex = suppliedHeader.slice(7).toLowerCase();
   if (!SHA256_HEX.test(suppliedHex)) throw new Error("catalog-signature-invalid");
-  const prefix = new TextEncoder().encode(`${timestamp}.`);
+  const prefix = new TextEncoder().encode(`${timestamp}\nPOST\n/api/internal/project-alpha/catalog-v2\n${keyId}\n${deliveryId}\n`);
   const message = new Uint8Array(prefix.length + rawBody.length);
   message.set(prefix);
   message.set(rawBody, prefix.length);
@@ -436,26 +436,48 @@ async function processDelivery(env: Env, delivery: CatalogProjectionDelivery, pa
 
 function statusForError(error: unknown): number {
   const message = error instanceof Error ? error.message : "catalog-internal-error";
-  if (message.includes("access") || message.includes("signature") || message.includes("timestamp")) return 401;
+  if (message.includes("access") || message.includes("signature") || message.includes("signing-key") || message.includes("timestamp")) return 401;
   if (message.includes("conflict") || message.includes("stale") || message.includes("sequence") || message.includes("generation")) return 409;
   if (message.includes("size")) return 413;
   if (message.startsWith("catalog-")) return 422;
   return 500;
 }
 
+function projectionConfigurationReady(env: Env): boolean {
+  if (env.PROJECT_ALPHA_CATALOG_SYNC_ENABLED !== "true") return false;
+  if (!env.PROJECT_ALPHA_CATALOG_APPLICATION_KEY || !SAFE_ID.test(env.PROJECT_ALPHA_CATALOG_APPLICATION_KEY)) return false;
+  if (!env.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID || !SAFE_ID.test(env.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID)) return false;
+  if (!env.PROJECT_ALPHA_CATALOG_HMAC_SECRET || env.PROJECT_ALPHA_CATALOG_HMAC_SECRET.length < 32) return false;
+  const previousId = env.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID;
+  const previousSecret = env.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET;
+  return !(previousId || previousSecret) || Boolean(previousId && SAFE_ID.test(previousId) && previousId !== env.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID && previousSecret && previousSecret.length >= 32);
+}
+
 export async function handleProjectAlphaCatalogRequest(request: Request, env: Env, accessVerifier: AccessVerifier = verifyCatalogAccessAssertion): Promise<Response> {
-  if (env.PROJECT_ALPHA_CATALOG_SYNC_ENABLED !== "true") return json(404, { error: "not-found" });
+  if (!projectionConfigurationReady(env)) return json(404, { error: "not-found" });
   try {
     if (request.method !== "POST") return json(404, { error: "not-found" });
     if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return json(415, { error: "content-type-required" });
     await accessVerifier(request, env);
     const rawBody = await readBoundedRequestBody(request, MAX_BODY_BYTES);
     if (rawBody.byteLength === 0 || rawBody.byteLength > MAX_BODY_BYTES) throw new Error("catalog-size-invalid");
-    const timestamp = request.headers.get("X-PA-Timestamp");
+    const timestamp = request.headers.get("X-Portal-Integration-Timestamp");
     if (!timestamp || !Number.isFinite(Date.parse(timestamp)) || Math.abs(Date.now() - Date.parse(timestamp)) > MAX_CLOCK_SKEW_MS) throw new Error("catalog-timestamp-invalid");
-    await verifyHmac(rawBody, timestamp, request.headers.get("X-PA-Signature"), env.PROJECT_ALPHA_CATALOG_HMAC_SECRET);
+    if (request.headers.get("X-Portal-Integration-Application-Key") !== env.PROJECT_ALPHA_CATALOG_APPLICATION_KEY) throw new Error("catalog-application-mismatch");
+    const digest = request.headers.get("X-Portal-Integration-Body-SHA256")?.toLowerCase();
+    if (!digest || !SHA256_HEX.test(digest) || digest !== await sha256Hex(rawBody)) throw new Error("catalog-body-digest-invalid");
+    const keyId = request.headers.get("X-Portal-Integration-Key-Id");
+    const deliveryId = request.headers.get("X-Portal-Integration-Delivery-Id");
+    if (!keyId || !SAFE_ID.test(keyId) || !deliveryId || !SAFE_ID.test(deliveryId)) throw new Error("catalog-signing-key-invalid");
+    const signingSecret = keyId === env.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID
+      ? env.PROJECT_ALPHA_CATALOG_HMAC_SECRET
+      : keyId === env.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID
+        ? env.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET
+        : undefined;
+    if (!signingSecret) throw new Error("catalog-signing-key-invalid");
+    await verifyHmac(rawBody, timestamp, keyId, deliveryId, request.headers.get("X-Portal-Integration-Signature"), signingSecret);
     const parsed = parseCatalogProjectionDelivery(JSON.parse(new TextDecoder().decode(rawBody)) as unknown, env.PROJECT_ALPHA_CATALOG_APPLICATION_KEY ?? "");
-    if (request.headers.get("X-PA-Delivery-ID") !== parsed.deliveryId) throw new Error("catalog-delivery-id-mismatch");
+    if (deliveryId !== parsed.deliveryId) throw new Error("catalog-delivery-id-mismatch");
     const status = await processDelivery(env, parsed, await sha256Hex(rawBody));
     return json(200, { ok: true, deliveryId: parsed.deliveryId, status });
   } catch (error) {

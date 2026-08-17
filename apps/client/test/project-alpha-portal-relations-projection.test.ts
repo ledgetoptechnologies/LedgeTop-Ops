@@ -12,6 +12,7 @@ import portalV2Fixture from "../../../packages/shared/fixtures/project-alpha-por
 
 const applicationKey = "field_operations_portal";
 const secret = "relations-test-secret-at-least-thirty-two-bytes";
+const keyId = "relations-test-v1";
 const snapshotHash = "d".repeat(64);
 const principal: VerifiedClientPrincipal = { issuer: "https://access.example.test", subject: "manager-subject", email: "manager@example.test" };
 const workspace = { publicId: "pa-workspace-relations", rootType: "organization", rootPublicId: "pa-org-relations", displayName: "Relations Inc", sourceVersion: "workspace-v1", active: true } as const;
@@ -44,11 +45,12 @@ async function migrate(db: D1Database, sql: string): Promise<void> {
   await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
 }
 
-async function signature(body: string, timestamp: string): Promise<string> {
+async function signature(body: string, timestamp: string, deliveryId: string): Promise<string> {
   const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const signed = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}\nPOST\n/api/internal/project-alpha/portal-v2\n${body}`));
+  const signed = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}\nPOST\n/api/internal/project-alpha/portal-v2\n${keyId}\n${deliveryId}\n${body}`));
   return `sha256=${[...new Uint8Array(signed)].map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
 }
+async function bodyHash(body:string):Promise<string>{const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(body));return[...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,"0")).join("");}
 
 function failActiveContractReadOnce(database: D1Database): D1Database {
   let failed = false;
@@ -93,13 +95,13 @@ describe("Project Alpha relation/lifecycle projection receiver", () => {
       CREATE TABLE client_folder_associations(id TEXT PRIMARY KEY,scope_type TEXT NOT NULL,project_id TEXT,account_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),revoked_at TEXT);
     `.replace(/\s*\n\s*/g, " "));
     await migrate(db, hierarchyMigration); await migrate(db, projectionMigration); await migrate(db, relationMigration);
-    env = { DELIVERY_DB: db, PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey, PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret, PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN: "https://access.example.test", PROJECT_ALPHA_PORTAL_ACCESS_AUD: "portal-aud", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true" } as Env;
+    env = { DELIVERY_DB: db, PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey, PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId, PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret, PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN: "https://access.example.test", PROJECT_ALPHA_PORTAL_ACCESS_AUD: "portal-aud", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true" } as Env;
   }, 30_000);
   afterAll(async () => mf.dispose());
 
   async function deliver(payload: Record<string, unknown>, environment: Env = env) {
     const body = JSON.stringify(payload); const timestamp = new Date().toISOString();
-    return handleProjectAlphaPortalProjectionRequest(new Request("https://client.test/api/internal/project-alpha/portal-v2", { method: "POST", headers: { "Content-Type": "application/json", "X-PA-Timestamp": timestamp, "X-PA-Delivery-ID": String(payload.deliveryId), "X-PA-Signature": await signature(body, timestamp) }, body }), environment, async () => undefined);
+    return handleProjectAlphaPortalProjectionRequest(new Request("https://client.test/api/internal/project-alpha/portal-v2", { method: "POST", headers: { "Content-Type": "application/json","X-Portal-Integration-Application-Key":applicationKey,"X-Portal-Integration-Timestamp":timestamp,"X-Portal-Integration-Body-SHA256":await bodyHash(body),"X-Portal-Integration-Key-Id":keyId,"X-Portal-Integration-Delivery-Id":String(payload.deliveryId),"X-Portal-Integration-Signature":await signature(body,timestamp,String(payload.deliveryId)) }, body }), environment, async () => undefined);
   }
 
   it("keeps schema v3 fail-closed behind the independent relation flag", async () => {

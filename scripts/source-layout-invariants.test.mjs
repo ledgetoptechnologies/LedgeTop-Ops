@@ -18,6 +18,7 @@ const projectAlphaCompatibilityFixtures = [
   "packages/shared/fixtures/project-alpha-pricing-hint-v1.json",
   "packages/shared/fixtures/project-alpha-draft-quote-v1.json",
 ];
+const portalWireFixture = "packages/shared/fixtures/portal-integration-wire-v1.json";
 
 const expectedRateLimits = [
   ["ACCESS_CODE_RATE_LIMITER", "19462026", 10],
@@ -89,7 +90,7 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "07c5197769c31a035a844dd6485d8733a5ef6e0194d0a118efc0c8ff8eaa5160");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "d8a631d7319de6cd088fe97bd3d48c05a375926cbf3217aaa27dcd96a3c13e0a");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -107,6 +108,10 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.EXPECTED_HOST, "client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
+  assert.equal(config.vars.PROJECT_ALPHA_CATALOG_HMAC_KEY_ID, "");
+  assert.equal(config.vars.PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID, "");
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID, "");
+  assert.equal(config.vars.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID, "");
   assert.equal(config.vars.CLIENT_PORTAL_TEAM_ENABLED, "false");
   assert.equal(config.vars.CLIENT_PORTAL_REQUEST_V2_ENABLED, "false");
   assert.equal(config.vars.CLIENT_REQUEST_ATTACHMENTS_ENABLED, "false");
@@ -190,6 +195,46 @@ test("the Project Alpha handoff stays pinned to the reviewed compatibility corpu
       `${fixtureName} digest in the Project Alpha handoff is stale`,
     );
   }
+});
+
+test("the neutral Project Alpha wire contract stays byte-pinned across every route", () => {
+  assert.equal(normalizedSha256(portalWireFixture), "063c993d8d1a20d7860517342e132efcf65a00b98b251b89ebf979333979d88a");
+  const fixture = readJson(portalWireFixture);
+  for (const name of ["portalProjection", "catalogProjection"]) {
+    const value = fixture.cases[name];
+    assert.equal(crypto.createHash("sha256").update(value.body).digest("hex"), value.bodySha256);
+    const canonical = [value.timestamp, value.method, value.path, value.keyId, value.deliveryId, value.body].join("\n");
+    assert.equal(canonical, value.canonical.replaceAll("\\n", "\n"));
+    assert.equal(`sha256=${crypto.createHmac("sha256", fixture.testSecret).update(canonical).digest("hex")}`, value.signature);
+  }
+  for (const name of ["pricing", "draft"]) {
+    const value = fixture.cases[name];
+    assert.equal(crypto.createHash("sha256").update(value.body).digest("hex"), value.bodySha256);
+    const canonical = [value.timestamp, value.method, value.path, value.scopeOrIdempotencyKey, value.bodySha256].join("\n");
+    assert.equal(canonical, value.canonical.replaceAll("\\n", "\n"));
+    assert.equal(`sha256=${crypto.createHmac("sha256", fixture.testSecret).update(canonical).digest("hex")}`, value.signature);
+  }
+  const rotation = fixture.rotationOverlap;
+  const portal = fixture.cases.portalProjection;
+  const previousCanonical = [portal.timestamp, portal.method, portal.path, rotation.previousKeyId, portal.deliveryId, portal.body].join("\n");
+  assert.equal(previousCanonical, rotation.previousCanonical.replaceAll("\\n", "\n"));
+  assert.equal(`sha256=${crypto.createHmac("sha256", rotation.previousTestSecret).update(previousCanonical).digest("hex")}`, rotation.previousSignature);
+  assert.notEqual(rotation.currentKeyId, rotation.previousKeyId);
+  assert.notEqual(rotation.unknownKeyId, rotation.currentKeyId);
+  assert.notEqual(rotation.unknownKeyId, rotation.previousKeyId);
+  const runtime = [
+    "apps/client/src/worker/project-alpha-portal.ts",
+    "apps/client/src/worker/project-alpha-catalog.ts",
+    "apps/client/src/worker/client-portal/project-alpha-pricing-hint.ts",
+    "apps/operations/src/worker/project-alpha-draft-quote.ts",
+  ].map(read).join("\n");
+  for (const header of fixture.commandHeaders) assert(runtime.includes(header), `${header} is missing from runtime`);
+  for (const name of [
+    "PROJECT_ALPHA_PORTAL_HMAC_KEY_ID", "PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID", "PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET",
+    "PROJECT_ALPHA_CATALOG_HMAC_KEY_ID", "PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_KEY_ID", "PROJECT_ALPHA_CATALOG_PREVIOUS_HMAC_SECRET",
+  ]) assert(runtime.includes(name), `${name} is missing from receiver rotation handling`);
+  assert(!runtime.includes("X-PA-Timestamp"));
+  assert(!runtime.includes("X-LTDS-Scope"));
 });
 
 test("the TrueNAS thumbnail runbooks retain the production edge and lease contract", () => {

@@ -10,14 +10,16 @@ import portalFixture from "../../../packages/shared/fixtures/project-alpha-porta
 
 const applicationKey = "field_operations_portal";
 const secret = "portal-test-secret-at-least-thirty-two-bytes";
+const keyId = "portal-test-v1";
 const access = async () => undefined;
 const principal: VerifiedClientPrincipal = { issuer: "https://team.cloudflareaccess.com", subject: "verified-subject", email: "manager@example.test" };
 
-async function signature(body: string, timestamp: string): Promise<string> {
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
-  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}\nPOST\n/api/internal/project-alpha/portal-v2\n${body}`));
+async function signature(body: string, timestamp: string, deliveryId: string, signingKeyId = keyId, signingSecret = secret): Promise<string> {
+  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(signingSecret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+  const digest = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${timestamp}\nPOST\n/api/internal/project-alpha/portal-v2\n${signingKeyId}\n${deliveryId}\n${body}`));
   return `sha256=${[...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("")}`;
 }
+async function bodyHash(body:string):Promise<string>{const digest=await crypto.subtle.digest("SHA-256",new TextEncoder().encode(body));return[...new Uint8Array(digest)].map(byte=>byte.toString(16).padStart(2,"0")).join("");}
 
 const workspace = {
   publicId: "pa-workspace-acme", rootType: "organization", rootPublicId: "pa-org-acme",
@@ -62,6 +64,7 @@ describe("Project Alpha portal hierarchy projection", () => {
       DELIVERY_DB: db,
       PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true",
       PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey,
+      PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId,
       PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret,
       PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN: "https://team.cloudflareaccess.com",
       PROJECT_ALPHA_PORTAL_ACCESS_AUD: "portal-sync-audience",
@@ -71,12 +74,13 @@ describe("Project Alpha portal hierarchy projection", () => {
 
   afterAll(async () => miniflare.dispose());
 
-  async function deliver(payload: Record<string, unknown>, options: { timestamp?: string; signature?: string; accessVerifier?: typeof access } = {}) {
+  async function deliver(payload: Record<string, unknown>, options: { timestamp?: string; signature?: string; keyId?: string; secret?: string; accessVerifier?: typeof access } = {}) {
     const body = JSON.stringify(payload);
     const timestamp = options.timestamp ?? new Date().toISOString();
+    const signingKeyId = options.keyId ?? keyId;
     return handleProjectAlphaPortalProjectionRequest(new Request("https://client.test/api/internal/project-alpha/portal-v2", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "X-PA-Timestamp": timestamp, "X-PA-Delivery-ID": String(payload.deliveryId), "X-PA-Signature": options.signature ?? await signature(body, timestamp) },
+      headers: { "Content-Type": "application/json", "X-Portal-Integration-Application-Key":applicationKey,"X-Portal-Integration-Timestamp": timestamp,"X-Portal-Integration-Body-SHA256":await bodyHash(body),"X-Portal-Integration-Key-Id":signingKeyId, "X-Portal-Integration-Delivery-Id": String(payload.deliveryId), "X-Portal-Integration-Signature": options.signature ?? await signature(body, timestamp,String(payload.deliveryId), signingKeyId, options.secret ?? secret) },
       body,
     }), env, options.accessVerifier ?? access);
   }
@@ -149,6 +153,19 @@ describe("Project Alpha portal hierarchy projection", () => {
     expect(() => parsePortalProjectionDelivery({ ...payload, apiKey: "forbidden" }, applicationKey)).toThrow();
     expect(() => parsePortalProjectionDelivery({ ...payload, workspaceId: 42 }, applicationKey)).toThrow();
     expect(() => parsePortalProjectionDelivery({ ...payload, workspaceId: "42" }, applicationKey)).toThrow();
+  });
+
+  it("accepts only the configured current or previous rotation key", async () => {
+    const previousKeyId = "portal-test-v0";
+    const previousSecret = "portal-previous-secret-at-least-thirty-two-bytes";
+    env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID = previousKeyId;
+    const payload = envelope("event", "portal-rotation-13", 13, { event: { resource: "workspace", action: "tombstone", publicId: workspace.publicId, sourceVersion: "org-v2" } });
+    expect((await deliver(payload, { keyId: previousKeyId, secret: previousSecret })).status).toBe(404);
+    env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET = previousSecret;
+    expect((await deliver(payload, { keyId: previousKeyId, secret: previousSecret })).status).toBe(200);
+    expect((await deliver({ ...payload, deliveryId: "portal-rotation-unknown" }, { keyId: "portal-test-unknown" })).status).toBe(401);
+    delete env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID;
+    delete env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET;
   });
 
   it("rejects an oversized streamed body without relying on Content-Length", async () => {

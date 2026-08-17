@@ -12,7 +12,6 @@ type AppEnv = {
 };
 type App = Hono<AppEnv>;
 
-const COMMAND_PATH = "/api/v2/integrations/ltds/draft-quotes";
 const COMMAND_SCOPE = "portal.quote-draft.create";
 const COMMAND_TIMEOUT_MS = 8_000;
 const MAX_COMMAND_BYTES = 96 * 1024;
@@ -20,6 +19,7 @@ const SQUARE_METERS_PER_ACRE = 4_046.8564224;
 const EARTH_RADIUS_METERS = 6_371_008.8;
 const SAFE_PUBLIC_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const OPAQUE_PUBLIC_ID = /^(?=.{1,128}$)(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const commandPath = (applicationKey: string): string => `/api/v2/integrations/${encodeURIComponent(applicationKey)}/draft-quotes`;
 const SHA256_HEX = /^[a-f0-9]{64}$/;
 
 interface RequestRow {
@@ -241,7 +241,7 @@ function integrationConfiguration(env: Env): {
   if ((base.protocol !== "https:" && !(local && base.protocol === "http:")) || base.username || base.password)
     return null;
   return {
-    url: new URL(COMMAND_PATH, base),
+    url: new URL(commandPath(env.APPLICATION_KEY), base),
     apiKey: env.PROJECT_ALPHA_DRAFT_QUOTE_API_KEY,
     signingSecret: env.PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET,
     applicationKey: env.APPLICATION_KEY,
@@ -385,7 +385,7 @@ export async function sendProjectAlphaDraftQuoteCommand(
     throw new ProjectAlphaDraftQuoteError(409, "invalid_response", "The Project Alpha draft command is too large");
   const bodyHash = await sha256Hex(rawBody);
   const timestamp = (options.now ?? new Date()).toISOString();
-  const signatureInput = `${timestamp}\nPOST\n${COMMAND_PATH}\n${idempotencyKey}\n${bodyHash}`;
+  const signatureInput = `${timestamp}\nPOST\n${commandPath(configuration.applicationKey)}\n${idempotencyKey}\n${bodyHash}`;
   const signature = await hmacHex(configuration.signingSecret, signatureInput);
   let response: Response;
   try {
@@ -396,10 +396,10 @@ export async function sendProjectAlphaDraftQuoteCommand(
         Authorization: `Bearer ${configuration.apiKey}`,
         "Content-Type": "application/json",
         "Idempotency-Key": idempotencyKey,
-        "X-LTDS-Application-Key": configuration.applicationKey,
-        "X-LTDS-Body-SHA256": bodyHash,
-        "X-LTDS-Signature": `sha256=${signature}`,
-        "X-LTDS-Timestamp": timestamp,
+        "X-Portal-Integration-Application-Key": configuration.applicationKey,
+        "X-Portal-Integration-Body-SHA256": bodyHash,
+        "X-Portal-Integration-Signature": `sha256=${signature}`,
+        "X-Portal-Integration-Timestamp": timestamp,
       },
       body: rawBody,
       redirect: "error",

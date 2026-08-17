@@ -361,11 +361,11 @@ async function sha256Hex(value: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function verifyHmac(rawBody: Uint8Array, timestamp: string, suppliedHeader: string | null, secret: string | undefined): Promise<void> {
+async function verifyHmac(rawBody: Uint8Array, timestamp: string, keyId: string, deliveryId: string, suppliedHeader: string | null, secret: string | undefined): Promise<void> {
   if (!secret || secret.length < 32 || !suppliedHeader?.startsWith("sha256=")) throw new Error("portal-signature-required");
   const suppliedHex = suppliedHeader.slice(7).toLowerCase();
   if (!SHA256_HEX.test(suppliedHex)) throw new Error("portal-signature-invalid");
-  const prefix = new TextEncoder().encode(`${timestamp}\nPOST\n${SIGNED_PATH}\n`);
+  const prefix = new TextEncoder().encode(`${timestamp}\nPOST\n${SIGNED_PATH}\n${keyId}\n${deliveryId}\n`);
   const message = new Uint8Array(prefix.length + rawBody.length);
   message.set(prefix);
   message.set(rawBody, prefix.length);
@@ -957,7 +957,7 @@ async function processDelivery(env: Env, delivery: PortalProjectionDelivery, pay
 
 function statusForError(error: unknown): number {
   const message = error instanceof Error ? error.message : "portal-internal-error";
-  if (message.includes("access") || message.includes("signature") || message.includes("timestamp")) return 401;
+  if (message.includes("access") || message.includes("signature") || message.includes("signing-key") || message.includes("timestamp")) return 401;
   if (message.includes("conflict") || message.includes("stale") || message.includes("sequence") || message.includes("generation") || message.includes("reparent")) return 409;
   if (message.includes("size")) return 413;
   if (message.startsWith("portal-")) return 422;
@@ -967,7 +967,11 @@ function statusForError(error: unknown): number {
 function projectionConfigurationReady(env: Env): boolean {
   if (env.PROJECT_ALPHA_PORTAL_SYNC_ENABLED !== "true") return false;
   if (!env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY || !SAFE_ID.test(env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY)) return false;
+  if (!env.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID || !SAFE_ID.test(env.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID)) return false;
   if (!env.PROJECT_ALPHA_PORTAL_HMAC_SECRET || env.PROJECT_ALPHA_PORTAL_HMAC_SECRET.length < 32) return false;
+  const previousId = env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID;
+  const previousSecret = env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET;
+  if ((previousId || previousSecret) && (!previousId || !SAFE_ID.test(previousId) || previousId === env.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID || !previousSecret || previousSecret.length < 32)) return false;
   if (!env.PROJECT_ALPHA_PORTAL_ACCESS_AUD || env.PROJECT_ALPHA_PORTAL_ACCESS_AUD.length > 512) return false;
   try {
     const team = new URL(env.PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN ?? "");
@@ -985,15 +989,27 @@ export async function handleProjectAlphaPortalProjectionRequest(request: Request
     await accessVerifier(request, env);
     const rawBody = await readBoundedRequestBody(request, MAX_BODY_BYTES);
     if (rawBody.byteLength === 0 || rawBody.byteLength > MAX_BODY_BYTES) throw new Error("portal-size-invalid");
-    const timestamp = request.headers.get("X-PA-Timestamp");
+    const timestamp = request.headers.get("X-Portal-Integration-Timestamp");
     if (!timestamp || !Number.isFinite(Date.parse(timestamp)) || Math.abs(Date.now() - Date.parse(timestamp)) > MAX_CLOCK_SKEW_MS) throw new Error("portal-timestamp-invalid");
-    await verifyHmac(rawBody, timestamp, request.headers.get("X-PA-Signature"), env.PROJECT_ALPHA_PORTAL_HMAC_SECRET);
+    if (request.headers.get("X-Portal-Integration-Application-Key") !== env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY) throw new Error("portal-application-mismatch");
+    const digest = request.headers.get("X-Portal-Integration-Body-SHA256")?.toLowerCase();
+    if (!digest || !SHA256_HEX.test(digest) || digest !== await sha256Hex(rawBody)) throw new Error("portal-body-digest-invalid");
+    const keyId = request.headers.get("X-Portal-Integration-Key-Id");
+    const deliveryId = request.headers.get("X-Portal-Integration-Delivery-Id");
+    if (!keyId || !SAFE_ID.test(keyId) || !deliveryId || !SAFE_ID.test(deliveryId)) throw new Error("portal-signing-key-invalid");
+    const signingSecret = keyId === env.PROJECT_ALPHA_PORTAL_HMAC_KEY_ID
+      ? env.PROJECT_ALPHA_PORTAL_HMAC_SECRET
+      : keyId === env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID
+        ? env.PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET
+        : undefined;
+    if (!signingSecret) throw new Error("portal-signing-key-invalid");
+    await verifyHmac(rawBody, timestamp, keyId, deliveryId, request.headers.get("X-Portal-Integration-Signature"), signingSecret);
     const parsed = parsePortalProjectionDelivery(
       JSON.parse(new TextDecoder().decode(rawBody)) as unknown,
       env.PROJECT_ALPHA_PORTAL_APPLICATION_KEY!,
       env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true",
     );
-    if (request.headers.get("X-PA-Delivery-ID") !== parsed.deliveryId) throw new Error("portal-delivery-id-mismatch");
+    if (deliveryId !== parsed.deliveryId) throw new Error("portal-delivery-id-mismatch");
     const status = await processDelivery(env, parsed, await sha256Hex(rawBody));
     return json(200, { ok: true, deliveryId: parsed.deliveryId, status });
   } catch (error) {

@@ -104,6 +104,9 @@ operator owns that dependency:
 - the private Operations delegated-share signer binding and complete public
   authorization path;
 - projection parity/staleness monitors and alerts.
+- the byte-pinned neutral `portal-integration-wire-v1.json` corpus passing in
+  both repositories, including dynamic application-key command paths and the
+  exact projection body/path/key-ID canonical string;
 - PA relation/lifecycle contract fixtures, many-to-many scope parity, deny
   precedence, completed-project day-30 cutoff, and reopen restoration. Keep
   `CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED=false` until all are recorded.

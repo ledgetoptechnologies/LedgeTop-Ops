@@ -3,7 +3,6 @@ import type { Env } from "../types";
 import type { ClientPricingHint, ClientPricingHintInput, ClientPricingHintProvider } from "./types";
 import type { EffectivePortalWorkspaceContext } from "./workspace-v2";
 
-const PRICING_PATH = "/api/v2/integrations/ltds/pricing-hints";
 const PRICING_SCOPE = "portal.pricing.preview";
 const PRICING_TIMEOUT_MS = 4_000;
 const MAX_RESPONSE_BYTES = 16 * 1024;
@@ -11,6 +10,7 @@ const REQUIRED_DISCLAIMER = "Planning guidance only. Final quote after staff rev
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const OPAQUE_PA_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const MONEY = /^(?:0|[1-9][0-9]{0,10})\.[0-9]{2}$/;
+const pricingPath = (applicationKey: string): string => `/api/v2/integrations/${encodeURIComponent(applicationKey)}/pricing-hints`;
 
 export const projectAlphaPricingRequestSchema = z.object({
   schemaVersion: z.literal(1),
@@ -145,7 +145,7 @@ function configuration(env: Env): PricingConfiguration | null {
   const hostIsIpLiteral = /^\d{1,3}(?:\.\d{1,3}){3}$/.test(endpointHost) || endpointHost.includes(":");
   if (
     url.protocol !== "https:" || url.username || url.password || url.search || url.hash ||
-    url.pathname !== PRICING_PATH ||
+    url.pathname !== pricingPath(env.PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY) ||
     allowedOrigin.protocol !== "https:" || allowedOrigin.username || allowedOrigin.password ||
     allowedOrigin.pathname !== "/" || allowedOrigin.search || allowedOrigin.hash ||
     url.origin !== allowedOrigin.origin || !endpointHost.includes(".") || hostIsIpLiteral ||
@@ -263,7 +263,7 @@ export async function fetchProjectAlphaPricingHint(
   const bodyHash = await sha256Hex(body);
   const now = options.now ?? new Date();
   const timestamp = now.toISOString();
-  const signatureInput = `${timestamp}\nPOST\n${PRICING_PATH}\n${PRICING_SCOPE}\n${bodyHash}`;
+  const signatureInput = `${timestamp}\nPOST\n${pricingPath(config.applicationKey)}\n${PRICING_SCOPE}\n${bodyHash}`;
   const signature = await hmacHex(config.hmacSecret, signatureInput);
   try {
     const response = await (options.fetcher ?? globalThis.fetch)(config.url.toString(), {
@@ -272,11 +272,11 @@ export async function fetchProjectAlphaPricingHint(
         Accept: "application/json",
         Authorization: `Bearer ${config.bearer}`,
         "Content-Type": "application/json",
-        "X-LTDS-Application-Key": config.applicationKey,
-        "X-LTDS-Body-SHA256": bodyHash,
-        "X-LTDS-Scope": PRICING_SCOPE,
-        "X-LTDS-Signature": `sha256=${signature}`,
-        "X-LTDS-Timestamp": timestamp,
+        "X-Portal-Integration-Application-Key": config.applicationKey,
+        "X-Portal-Integration-Body-SHA256": bodyHash,
+        "X-Portal-Integration-Scope": PRICING_SCOPE,
+        "X-Portal-Integration-Signature": `sha256=${signature}`,
+        "X-Portal-Integration-Timestamp": timestamp,
       },
       body,
       signal: AbortSignal.timeout(PRICING_TIMEOUT_MS),
