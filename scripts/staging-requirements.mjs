@@ -12,7 +12,7 @@ export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
   operations: "89a3a4566b9de3e1b9a7c8ad90aed15bfdec087a",
   viewer: "a4ff4629a170bc89be72263a6f7d8f00c2630299",
-  projectAlpha: "769df9320dbf4dfc512d364173d5cb7d8ad8a97c",
+  projectAlpha: "3c0059e538067718abd91bc28e67a9714305260b",
 });
 
 export const STAGING_VIEWER = Object.freeze({

@@ -16,7 +16,10 @@ captured.
   `codex/3d-processing-control-plane`. This pin contains the desktop
   Administration-menu fix equivalent to `09e3443`; never substitute a mutable
   branch tip.
-- Project Alpha: `769df9320dbf4dfc512d364173d5cb7d8ad8a97c` on `main`
+- Project Alpha: `3c0059e538067718abd91bc28e67a9714305260b` on
+  `codex/portal-scope-ci`. Its direct parent is runtime candidate
+  `769df9320dbf4dfc512d364173d5cb7d8ad8a97c`; the tip additionally makes the
+  real isolated MySQL scope-lock regression a mandatory CI gate.
 
 The corresponding constants in `scripts/staging-requirements.mjs` remain
 fail-closed with `RELEASE_CONTRACT_FINALIZED=false`. After the final Viewer
