@@ -215,14 +215,29 @@ Use the bounded service-auth result as follows:
 - `invalid_response`: compare the running Viewer revision/schema headers with
   the frozen candidate and reject the deployment if they differ.
 - `unavailable`: confirm DNS/Tunnel/Nginx reachability, no redirect or Access
-  interstitial is inserted, and the proxy preserves signed headers. Inspect
-  only the bounded Viewer log code; do not retain raw request headers.
+  interstitial is inserted, and the proxy preserves signed headers. If public
+  health and readiness pass but the signed request produces no Viewer access
+  log and Operations records `viewer.service.request_failed` at stage `fetch`,
+  verify the shared Viewer client invokes a stored native Cloudflare `fetch`
+  as an unbound function. Calling it as an object method supplies the wrong
+  receiver and Workers throws before dispatching any HTTP request; this is not
+  an HMAC mismatch. Inspect only the bounded event, failure kind, stage, and
+  upstream status fields; do not add URLs, request headers, response bodies,
+  or secret values to logs.
 
 After a Viewer environment change, restart both Viewer services against the
 same persistent volume. After an Operations Worker secret change, wait for the
 new Worker version to become active. Rerun the preflight and require
 `connected`; do not enable a feature flag merely because public health and
 readiness pass.
+
+Any change to the shared Viewer service client must pass the focused
+`viewer-service.test.ts` suite before deployment. Its native-style fetch
+regression requires the injected function to be called without a
+`ViewerServiceClient` receiver. After deployment, require this exact preflight
+relationship: both public probes are healthy, `serviceAuthReachable` is true,
+`serviceAuthStatus` is `connected`, and both model counts are nonnegative
+integers (zero is valid for an empty catalog).
 
 `SESSION_SECRET` stays Viewer-only. Set
 `PROVIDER_CREDENTIALS_KEY_ID=provider-v1` and the 64-hex
