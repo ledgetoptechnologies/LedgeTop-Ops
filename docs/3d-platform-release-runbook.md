@@ -9,14 +9,14 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `cf40597ebb7d048267262184bce72c18c88c7579`.
+- 3D Viewer source: `0f6de19e43ce83abf68ae508f1ac6598605971a6`.
   The reviewed release-candidate image is
-  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:c6e63ec7980bb3ea7a7ee11e85719d0587740f943fe6560f570487570c6e1d8c`.
-  GitHub Actions run `32154753213` published only tags
-  `v0.2.0-rc.cf40597` and `sha-cf40597`; it did not publish `latest`. The
+  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:d37b65b720d2a66c722b8f073afd6964e64c83b521c578213f9084c774f80b3f`.
+  GitHub Actions run `32156471332` published only tags
+  `v0.2.0-rc.0f6de19` and `sha-0f6de19`; it did not publish `latest`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
   UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
-- LTDS-Ops product code: `5672b4bf2623bccbee9addf1bf43fe27bee74ff1` on
+- LTDS-Ops product code: `75fdce881a51cfb88f78c1983202845a53bb04e0` on
   `codex/3d-processing-control-plane`. This pin moves processing management to
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
   overview; never substitute a mutable branch tip.
@@ -100,7 +100,7 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091`, published-session revocation
 commit `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06`, and subsequent hardening commits
-through `cf40597ebb7d048267262184bce72c18c88c7579` retain the reviewed provider adapter,
+through `0f6de19e43ce83abf68ae508f1ac6598605971a6` retain the reviewed provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
@@ -147,7 +147,7 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`cf40597ebb7d048267262184bce72c18c88c7579` and schema version `18`. Confirm
+`0f6de19e43ce83abf68ae508f1ac6598605971a6` and schema version `18`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
 `X-LTDS-Viewer-Revision`, `18` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
