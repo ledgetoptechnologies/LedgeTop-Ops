@@ -43,7 +43,8 @@ async function fixture() {
       actor_staff_id TEXT,details_json TEXT);
     INSERT INTO pa_portal_principals VALUES('workspace-one','principal-one','Acme Client','CLIENT@EXAMPLE.TEST','v1','active');
   `);
-  return { database, env: { DELIVERY_DB: database, CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true" } as Env };
+  return { database, env: { DELIVERY_DB: database, CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+    CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as Env };
 }
 
 afterEach(async () => { vi.clearAllMocks(); await Promise.all(active.splice(0).map(item => item.dispose())); });
@@ -58,6 +59,7 @@ describe("client identity eligibility administration", () => {
     await expect(createEligibilityBlock(env, principal, { ...input, reasonCode: "changed" }, "eligibility-key-0001"))
       .rejects.toMatchObject({ status: 409 });
     const listed = await listClientIdentityEligibility(env, principal);
+    expect(listed.canManageEligibilityBlocks).toBe(true);
     expect(listed.clients).toEqual([expect.objectContaining({ display_name: "Acme Client", blocked: 1 })]);
     expect(listed.blocks).toEqual([expect.objectContaining({ id: created.id, normalized_email: "client@example.test", status: "active" })]);
     expect(await revokeEligibilityBlock(env, principal, created.id, "operator_opt_in", "eligibility-key-0002"))
@@ -66,15 +68,21 @@ describe("client identity eligibility administration", () => {
       .first<number>("count")).toBe(2);
   });
 
-  it("fails closed when the feature or global permissions are unavailable", async () => {
+  it("keeps reads available while mutations require both rollout flags and administrator authority", async () => {
     const { env } = await fixture();
     await expect(listClientIdentityEligibility({ ...env, CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "false" }, principal))
-      .rejects.toMatchObject({ status: 404 });
+      .resolves.toMatchObject({ canManageEligibilityBlocks: false, clients: [expect.any(Object)] });
     acl.sqlScope.mockResolvedValueOnce({ global: false, deniedGlobal: false });
     await expect(listClientIdentityEligibility(env, principal)).rejects.toMatchObject({ status: 403 });
+    await expect(createEligibilityBlock({ ...env, CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "false" }, principal,
+      { matchType: "email", email: "client@example.test", reasonCode: "operator_opt_out" }, "eligibility-key-0003"))
+      .rejects.toMatchObject({ status: 404 });
+    await expect(createEligibilityBlock({ ...env, CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "false" }, principal,
+      { matchType: "email", email: "client@example.test", reasonCode: "operator_opt_out" }, "eligibility-key-0004"))
+      .rejects.toMatchObject({ status: 404 });
     acl.isAdministrator.mockResolvedValueOnce(false);
     await expect(createEligibilityBlock(env, principal,
-      { matchType: "email", email: "client@example.test", reasonCode: "operator_opt_out" }, "eligibility-key-0003"))
+      { matchType: "email", email: "client@example.test", reasonCode: "operator_opt_out" }, "eligibility-key-0005"))
       .rejects.toMatchObject({ status: 403 });
   });
 });

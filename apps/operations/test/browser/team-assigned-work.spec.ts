@@ -9,7 +9,7 @@ const operation = {
   status: "scheduled",
 };
 
-async function mock(page: Page) {
+async function mock(page: Page, options: { administrator?: boolean; canManageEligibilityBlocks?: boolean } = {}) {
   let assignedWorkRequests = 0;
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
@@ -21,7 +21,7 @@ async function mock(page: Page) {
           displayName: "Viewer",
           status: "Active",
           profileType: "Employee",
-          isAdministrator: false,
+          isAdministrator: options.administrator ?? false,
           permissions: ["team.view", "operations.view", "sops.view"],
           divisions: [],
         },
@@ -45,7 +45,7 @@ async function mock(page: Page) {
         workspace_id: "workspace-one", public_id: "principal-one", display_name: "Alex Client",
         email_hint: "alex@example.test", status: "active", identity_id: null, issuer: null, subject: null,
         has_workspace_access: 0, blocked: 0,
-      }], blocks: [] } });
+      }], blocks: [], canManageEligibilityBlocks: options.canManageEligibilityBlocks ?? false } });
     } else if (path === "/api/team/staff/staff-pilot/assigned-work") {
       assignedWorkRequests += 1;
       await route.fulfill({ json: {
@@ -150,4 +150,13 @@ test("Team keeps Staff and Clients as responsive keyboard-accessible directories
   await expect(page.getByText("No data access is implied by directory eligibility.")).toBeVisible();
   expect((await clients.boundingBox())?.height).toBeGreaterThanOrEqual(44);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("Team hides client eligibility mutations when management rollout is off", async ({ page }) => {
+  await mock(page, { administrator: true, canManageEligibilityBlocks: false });
+  await page.goto("/team");
+  await page.getByRole("tab", { name: "Clients" }).click();
+  await expect(page.getByRole("heading", { name: "Alex Client" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Block portal eligibility" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Remove opt-out" })).toHaveCount(0);
 });

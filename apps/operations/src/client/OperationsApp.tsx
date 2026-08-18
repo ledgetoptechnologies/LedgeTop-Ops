@@ -5617,6 +5617,7 @@ type ClientIdentityDirectoryState = {
     has_workspace_access: number; blocked: number }>;
   blocks: Array<{ id: string; match_type: string; issuer: string | null; subject: string | null;
     normalized_email: string | null; reason_code: string; status: string; expires_at: string | null }>;
+  canManageEligibilityBlocks: boolean;
 };
 function ClientIdentityDirectory({ administrator }: { administrator: boolean }) {
   const state = useLoad(() => api<ClientIdentityDirectoryState>("/api/team/clients"), []);
@@ -5663,7 +5664,7 @@ function ClientIdentityDirectory({ administrator }: { administrator: boolean }) 
             </div>
             <h3>{client.display_name}</h3><p>{client.email_hint}</p>
             <small>No data access is implied by directory eligibility.</small>
-            {administrator && (activeBlock
+            {administrator && state.data?.canManageEligibilityBlocks && (activeBlock
               ? <button disabled={busy === activeBlock.id} onClick={() => void revoke(activeBlock.id)}>Remove opt-out</button>
               : <button className="danger" disabled={busy === client.public_id} onClick={() => void block(client)}>Block portal eligibility</button>)}
           </div>

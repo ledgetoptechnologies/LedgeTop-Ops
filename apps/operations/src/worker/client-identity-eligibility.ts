@@ -7,8 +7,13 @@ export interface EligibilityBlockInput { matchType: "issuer_subject" | "email"; 
 
 function db(env: Env) { return env.DELIVERY_DB.withSession("first-primary"); }
 async function requireAdmin(env: Env, principal: StaffPrincipal): Promise<void> {
-  if (env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
+  if (!eligibilityBlockManagementEnabled(env)) throw new HTTPException(404, { message: "Not found" });
   if (!(await isAdministrator(env, principal))) throw new HTTPException(403, { message: "Administrator access is required" });
+}
+export function eligibilityBlockManagementEnabled(env: Partial<Pick<Env,
+  "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED" | "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED">>): boolean {
+  return env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED === "true" &&
+    env.CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED === "true";
 }
 function email(value: string): string | null {
   const normalized = value.trim().toLocaleLowerCase("en-US");
@@ -17,7 +22,6 @@ function email(value: string): string | null {
 function validKey(value: string): boolean { return /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(value); }
 
 export async function listClientIdentityEligibility(env: Env, principal: StaffPrincipal) {
-  if (env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
   const scope = await sqlScope(env, principal, "team.view");
   if (!scope.global || scope.deniedGlobal) throw new HTTPException(403, { message: "Global team.view permission required" });
   const [principals, blocks] = await Promise.all([
@@ -43,7 +47,8 @@ export async function listClientIdentityEligibility(env: Env, principal: StaffPr
   ]);
   if (principals.results.length > 500 || blocks.results.length > 500)
     throw new HTTPException(503, { message: "Client identity directory is too large" });
-  return { clients: principals.results, blocks: blocks.results };
+  return { clients: principals.results, blocks: blocks.results,
+    canManageEligibilityBlocks: eligibilityBlockManagementEnabled(env) && await isAdministrator(env, principal) };
 }
 
 export async function createEligibilityBlock(env: Env, principal: StaffPrincipal, input: EligibilityBlockInput, key: string) {
