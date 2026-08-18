@@ -67,7 +67,11 @@ async function fixture(): Promise<{ database: D1Database; env: Env }> {
     CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,source_updated_at TEXT,active INTEGER);
     CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT);
     CREATE TABLE client_project_grants(project_id TEXT,account_id TEXT,revoked_at TEXT);
-    CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT,status TEXT,revoked_at TEXT);
+    CREATE TABLE viewer_client_grants(id TEXT PRIMARY KEY,account_id TEXT,project_id TEXT,scope_type TEXT,
+      association_id TEXT,include_future_published INTEGER,can_measure INTEGER,can_view_cameras INTEGER,
+      can_download INTEGER,authorization_expires_at TEXT,grant_version INTEGER,status TEXT,
+      created_by_staff_id TEXT,created_at TEXT,updated_at TEXT,revoked_at TEXT,revoked_by_staff_id TEXT,revoke_reason TEXT);
+    CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT,verified_email TEXT,status TEXT,revoked_at TEXT);
     CREATE TABLE portal_v2_workspace_memberships(workspace_id TEXT,identity_id TEXT,status TEXT,revoked_at TEXT,expires_at TEXT);
     CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT,pa_organization_public_id TEXT,
       pa_client_public_id TEXT,status TEXT,legacy_account_id TEXT);
@@ -82,6 +86,8 @@ async function fixture(): Promise<{ database: D1Database; env: Env }> {
       status TEXT,revoked_at TEXT,valid_from TEXT,expires_at TEXT,scope_type TEXT,scope_public_id TEXT);
     CREATE TABLE portal_v2_identity_denials(identity_id TEXT,status TEXT,revoked_at TEXT,valid_from TEXT,
       expires_at TEXT,scope_type TEXT,workspace_id TEXT,scope_public_id TEXT);
+    CREATE TABLE portal_v2_identity_eligibility_blocks(id TEXT PRIMARY KEY,match_type TEXT,issuer TEXT,subject TEXT,
+      normalized_email TEXT,status TEXT,valid_from TEXT,expires_at TEXT);
     CREATE TABLE client_viewer_source_authorizations(
       id TEXT PRIMARY KEY,authorization_version INTEGER NOT NULL DEFAULT 1,workspace_id TEXT,identity_id TEXT,legacy_account_id TEXT,
       legacy_identity_id TEXT,principal_issuer TEXT,principal_subject TEXT,project_id TEXT,association_id TEXT,
@@ -99,8 +105,10 @@ async function fixture(): Promise<{ database: D1Database; env: Env }> {
       datetime('now'),datetime('now'),NULL,NULL,NULL);
     INSERT INTO client_accounts VALUES ('account-one','active');
     INSERT INTO client_project_grants VALUES ('project-one','account-one',NULL);
+    INSERT INTO viewer_client_grants VALUES ('viewer-grant-one','account-one','project-one','project',NULL,1,1,1,0,
+      NULL,1,'active','staff-one',datetime('now'),datetime('now'),NULL,NULL,NULL);
     INSERT INTO portal_v2_identities VALUES (
-      'identity-one','https://clients.example.test','subject-one','active',NULL);
+      'identity-one','https://clients.example.test','subject-one','client@example.test','active',NULL);
     INSERT INTO portal_v2_workspace_memberships VALUES (
       'workspace-one','identity-one','active',NULL,datetime('now','+20 minutes'));
     INSERT INTO portal_v2_workspaces VALUES (
@@ -279,10 +287,31 @@ describe("client Viewer authorization", () => {
     expect(await authorizeClientViewerAssociation(env, request)).toBeNull();
   });
 
+  it("requires a live authenticated-client project or task grant", async () => {
+    const { database, env } = await fixture();
+    await database.prepare("UPDATE viewer_client_grants SET status='revoked',revoked_at=datetime('now')").run();
+    expect(await authorizeClientViewerAssociation(env, request)).toBeNull();
+    await database.prepare(`INSERT INTO viewer_client_grants VALUES (
+      'viewer-task-grant','account-one','project-one','task','association-one',0,1,1,0,
+      datetime('now','+10 minutes'),1,'active','staff-one',datetime('now'),datetime('now'),NULL,NULL,NULL)`).run();
+    const task = await authorizeClientViewerAssociation(env, request);
+    expect(task).toMatchObject({ id: "association-one" });
+    expect(Date.parse(task!.authorization_expires_at!)).toBeLessThanOrEqual(Date.now() + 10 * 60_000);
+    await database.prepare("UPDATE viewer_client_grants SET authorization_expires_at=datetime('now','-1 minute') WHERE id='viewer-task-grant'").run();
+    expect(await authorizeClientViewerAssociation(env, request)).toBeNull();
+  });
+
   it("fails closed for a live identity denial", async () => {
     const { database, env } = await fixture();
     await database.prepare(`INSERT INTO portal_v2_identity_denials VALUES (
       'identity-one','active',NULL,datetime('now','-1 minute'),NULL,'global',NULL,NULL)`).run();
+    expect(await authorizeClientViewerAssociation(env, request)).toBeNull();
+  });
+
+  it("fails closed for an active eligibility blacklist entry on every Viewer authorization", async () => {
+    const { database, env } = await fixture();
+    await database.prepare(`INSERT INTO portal_v2_identity_eligibility_blocks VALUES (
+      'block-one','email',NULL,NULL,'client@example.test','active',datetime('now','-1 minute'),NULL)`).run();
     expect(await authorizeClientViewerAssociation(env, request)).toBeNull();
   });
 
@@ -323,7 +352,7 @@ describe("client Viewer authorization", () => {
     await grantViewerSharing(database);
     await addSourceAuthorization(database);
     await applySql(database, `
-      INSERT INTO portal_v2_identities VALUES ('identity-two','https://clients.example.test','subject-two','active',NULL);
+      INSERT INTO portal_v2_identities VALUES ('identity-two','https://clients.example.test','subject-two','other@example.test','active',NULL);
       INSERT INTO portal_v2_workspace_memberships VALUES ('workspace-one','identity-two','active',NULL,datetime('now','+20 minutes'));
       INSERT INTO client_identity_links VALUES ('legacy-identity-two','account-one',NULL);
       INSERT INTO client_account_members VALUES ('account-one','legacy-identity-two','manager',NULL);

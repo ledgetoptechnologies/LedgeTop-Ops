@@ -1387,6 +1387,14 @@ tbody tr:last-child td { border: 0; }
 }
 
 .viewer-admin-layout { display: grid; gap: 1rem; min-width: 0; }
+.viewer-overview { display: grid; gap: 1rem; min-width: 0; }
+.viewer-overview-actions { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: 1rem 1.15rem; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.viewer-overview-actions h2 { margin: 0 0 .35rem; }
+.viewer-overview-actions p { margin: 0; color: var(--muted); max-width: 760px; }
+.viewer-overview-grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(190px,1fr)); gap: .85rem; }
+.viewer-overview-grid .card { min-width: 0; }
+.viewer-overview-grid strong { display: block; font-size: clamp(1.25rem,3vw,1.8rem); margin-bottom: .35rem; }
+.viewer-overview-grid small { display: block; color: var(--muted); overflow-wrap: anywhere; }
 .viewer-processing { display: grid; gap: 1rem; min-width: 0; }
 .viewer-processing *, .viewer-processing *::before, .viewer-processing *::after { box-sizing: border-box; }
 .viewer-processing > *, .viewer-processing-toolbar > * { min-width: 0; max-width: 100%; }
@@ -1472,6 +1480,10 @@ tbody tr:last-child td { border: 0; }
 .viewer-storage-grid p { margin: .2rem 0; color: var(--muted); }
 .viewer-import-preview { display: grid; grid-template-columns: minmax(200px,1fr) minmax(200px,1fr) auto; align-items: end; gap: .75rem; padding: 1rem; border: 1px solid var(--line); border-radius: 10px; background: #f8fafb; }
 .viewer-association-form { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 1fr) auto; align-items: end; gap: .85rem; }
+.team-tabs { display: inline-flex; gap: .35rem; padding: .3rem; margin: 0 0 1rem; border: 1px solid var(--line); border-radius: 10px; background: #f4f6f8; }
+.team-tabs button { min-width: 110px; padding: .65rem 1rem; border: 0; border-radius: 8px; background: transparent; font-weight: 800; }
+.team-tabs button[aria-selected="true"] { color: #fff; background: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
+.client-directory .staff-card > button { width: 100%; margin-top: .75rem; }
 .viewer-association-form label { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 800; }
 .viewer-association-form select { width: 100%; min-width: 0; padding: .7rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
 .viewer-association-help { margin: .8rem 0 0; color: var(--muted); font-size: .8rem; }
@@ -1493,6 +1505,8 @@ tbody tr:last-child td { border: 0; }
 .viewer-share-list h3 { margin: .35rem 0 .15rem; overflow-wrap: anywhere; }
 .viewer-share-list p, .viewer-share-list small { margin: 0; color: var(--muted); }
 @media (max-width: 760px) {
+  .team-tabs { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
+  .team-tabs button { min-height: 44px; min-width: 0; }
   .viewer-processing-toolbar,
   .viewer-processing-list article { align-items: stretch; flex-direction: column; }
   .viewer-processing-form,
@@ -1665,6 +1679,8 @@ tbody tr:last-child td { border: 0; }
 .job-brief-sop-selector label > span { display: grid; gap: .15rem; min-width: 0; overflow-wrap: anywhere; }
 .job-brief-sop-selector input { margin-top: .15rem; accent-color: var(--orange); }
 @media (max-width: 640px) {
+  .viewer-overview-actions { align-items: stretch; flex-direction: column; }
+  .viewer-overview-actions .button-orange { width: 100%; min-height: 44px; }
   .job-brief-sop summary { grid-template-columns: 1fr; }
   .job-brief-sop-selector button { min-height: 44px; }
   .job-brief-quick-sop-links { display: grid; }

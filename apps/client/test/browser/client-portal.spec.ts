@@ -1065,7 +1065,7 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
       modelId: "model-one", modelVersionId: "version-one", updatedAt: "2026-08-16T12:00:00.000Z", canShare: true,
     }] } });
     if (path === "/api/client/viewer/preferences" && request.method() === "PATCH") { preferenceUnits = String((request.postDataJSON() as { displayUnits?: string }).displayUnits || ""); return route.fulfill({ json: { displayUnits: preferenceUnits } }); }
-    if (path === "/api/client/projects/project-a/models/association-one/session" && request.method() === "POST") { sessionUnits = String((request.postDataJSON() as { displayUnits?: string }).displayUnits || ""); return route.fulfill({ status: 201, json: { grant: "s".repeat(43), grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionExpiresAt: new Date(Date.now() + 30 * 60_000).toISOString(), embedUrl: "https://viewer.example.test/embed/model-one" } }); }
+    if (path === "/api/client/projects/project-a/models/association-one/session" && request.method() === "POST") { sessionUnits = String((request.postDataJSON() as { displayUnits?: string }).displayUnits || ""); return route.fulfill({ status: 201, json: { grant: "11111111-1111-4111-8111-111111111111", grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800, redeemUrl: "https://viewer.example.test/api/v1/sessions/redeem", embedUrl: "https://viewer.example.test/session/11111111-1111-4111-8111-111111111111" } }); }
     if (path === "/api/client/projects/project-a/models/association-one/shares" && request.method() === "GET") return route.fulfill({ json: { shares: [...(active ? [{
       id: "share-one", modelId: "model-one", versionPolicy: "latest", modelVersionId: null, hasPassword: true,
       permissions: { view: true, measure: true, cameras: true, download: false }, label: "Engineer review",
@@ -1097,16 +1097,19 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
     }
     return route.fulfill({ status: 404, json: { error: "Not found" } });
   });
-  await page.route("https://viewer.example.test/**", route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Viewer</title>" }));
+  await page.context().route("https://viewer.example.test/**", route => route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Viewer</title>" }));
   await page.goto("/portal");
   await navigatePortal(page, "Projects");
   await page.getByRole("button", { name: /North Site/ }).click();
   await page.getByRole("button", { name: "Models" }).click();
   await page.getByLabel("Measurement units").selectOption("metric");
   await expect.poll(() => preferenceUnits).toBe("metric");
+  const viewerPopupPromise = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Open 3D model" }).click();
+  const viewerPopup = await viewerPopupPromise;
   await expect.poll(() => sessionUnits).toBe("metric");
-  await page.getByRole("button", { name: "Close viewer" }).click();
+  await expect(viewerPopup).toHaveURL("https://viewer.example.test/session/11111111-1111-4111-8111-111111111111");
+  await viewerPopup.close();
   await page.getByRole("button", { name: "Share public link" }).click();
   await expect(page.getByText("Expired engineer review")).toHaveCount(0);
   await page.getByLabel("Link label").fill("Engineer review");
@@ -1126,23 +1129,23 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
   await expect(page.getByText("No active links.")).toBeVisible();
 });
 
-test("Viewer renewal keeps the iframe and camera state mounted across a transient authorization failure", async ({ page }) => {
-  let sessionRequests = 0, embedLoads = 0;
+test("Viewer renewal keeps the dedicated tab and camera state mounted across a transient authorization failure", async ({ page }) => {
+  let sessionRequests = 0, viewerLoads = 0;
   const sessionDisplayUnits: string[] = [];
   const viewerOrigin = "https://viewer.ledgetopdroneservices.com";
-  await page.route(`${viewerOrigin}/**`, async route => {
-    if (new URL(route.request().url()).pathname !== "/embed/model-one")
+  await page.context().route(`${viewerOrigin}/**`, async route => {
+    if (!new URL(route.request().url()).pathname.startsWith("/session/"))
       return route.fulfill({ status: 404, body: "not found" });
-    embedLoads += 1;
+    viewerLoads += 1;
     await route.fulfill({ contentType: "text/html", body: `<!doctype html><body><div id="camera-state">camera-position-42</div><script>
       const expiresAt = new Date(Date.now() + 10000).toISOString();
       addEventListener("message", event => {
         if (event.data?.type !== "ltds-viewer:renew-session") return;
         document.body.dataset.renewedGrant = event.data.grant;
-        parent.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-one",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
+        opener.postMessage({version:1,type:"ltds-viewer:session-renewed",modelId:"model-one",expiresAt:new Date(Date.now()+60000).toISOString()}, "*");
       });
-      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-one",expiresAt}, "*"), 50);
-      setTimeout(() => parent.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-one",expiresAt}, "*"), 100);
+      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:ready",modelId:"model-one",expiresAt}, "*"), 50);
+      setTimeout(() => opener.postMessage({version:1,type:"ltds-viewer:session-expiring",modelId:"model-one",expiresAt}, "*"), 100);
     </script></body>` });
   });
   await page.route("**/api/client/**", async route => {
@@ -1161,9 +1164,9 @@ test("Viewer renewal keeps the iframe and camera state mounted across a transien
       sessionDisplayUnits.push(String((request.postDataJSON() as { displayUnits?: string }).displayUnits || ""));
       if (sessionRequests === 2) return route.fulfill({ status: 503, json: { error: "temporary authorization failure" } });
       return route.fulfill({ status: 201, json: {
-        grant: sessionRequests === 1 ? "initial-grant" : "renewed-grant",
+        grant: sessionRequests === 1 ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222",
         grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
-        redeemUrl: `${viewerOrigin}/api/v1/client-sessions/redeem`, embedUrl: `${viewerOrigin}/embed/model-one`,
+        redeemUrl: `${viewerOrigin}/api/v1/sessions/redeem`, embedUrl: `${viewerOrigin}/session/${sessionRequests === 1 ? "11111111-1111-4111-8111-111111111111" : "22222222-2222-4222-8222-222222222222"}`,
       } });
     }
     return route.fulfill({ status: 404, json: { error: "Not found" } });
@@ -1173,17 +1176,17 @@ test("Viewer renewal keeps the iframe and camera state mounted across a transien
   await navigatePortal(page, "Projects");
   await page.getByRole("button", { name: /North Site/ }).click();
   await page.getByRole("button", { name: "Models" }).click();
+  const viewerPopupPromise = page.waitForEvent("popup");
   await page.getByRole("button", { name: "Open 3D model" }).click();
-  await expect.poll(() => embedLoads).toBe(1);
-  await expect(page.locator('iframe[title="3D model: North Site point cloud"]')).toHaveAttribute("src", `${viewerOrigin}/embed/model-one`);
-  const frame = page.frameLocator('iframe[title="3D model: North Site point cloud"]');
-  await expect(frame.locator("#camera-state")).toHaveText("camera-position-42");
-  await expect(page.getByText("Viewer renewal is retrying…")).toBeVisible();
-  await expect(frame.locator("#camera-state")).toHaveText("camera-position-42");
-  await expect(frame.locator("body")).toHaveAttribute("data-renewed-grant", "renewed-grant", { timeout: 5_000 });
+  const viewerPopup = await viewerPopupPromise;
+  await expect.poll(() => viewerLoads).toBe(1);
+  await expect(viewerPopup.locator("#camera-state")).toHaveText("camera-position-42");
+  await expect(viewerPopup.locator("body")).toHaveAttribute("data-renewed-grant", "22222222-2222-4222-8222-222222222222", { timeout: 5_000 });
+  await expect(viewerPopup.locator("#camera-state")).toHaveText("camera-position-42");
   expect(sessionRequests).toBe(3);
   expect(sessionDisplayUnits).toEqual(["metric", "metric", "metric"]);
-  expect(embedLoads).toBe(1);
+  expect(viewerLoads).toBe(1);
+  await viewerPopup.close();
 });
 
 test("disabled or unavailable session stops before account data requests", async ({ page }) => {

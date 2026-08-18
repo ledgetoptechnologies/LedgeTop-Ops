@@ -2,6 +2,7 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import hierarchyMigration from "../migrations/0121_client_workspace_hierarchy_v2.sql?raw";
 import projectionMigration from "../migrations/0125_project_alpha_portal_projection.sql?raw";
+import eligibilityMigration from "../migrations/0145_portal_identity_eligibility.sql?raw";
 import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
 import { handleProjectAlphaPortalProjectionRequest, parsePortalProjectionDelivery } from "../src/worker/project-alpha-portal";
@@ -59,6 +60,7 @@ describe("Project Alpha portal hierarchy projection", () => {
     `.replace(/\s*\n\s*/g, " "));
     await applyMigration(db, hierarchyMigration);
     await applyMigration(db, projectionMigration);
+    await applyMigration(db, eligibilityMigration);
     await db.prepare("PRAGMA foreign_keys=ON").run();
     env = {
       DELIVERY_DB: db,
@@ -112,10 +114,16 @@ describe("Project Alpha portal hierarchy projection", () => {
 
   it("does not treat email hints or primary contacts as identity proof, then projects grants only after an explicit verified binding", async () => {
     await db.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status) VALUES ('verified-identity',?,?,?,'active')").bind(principal.issuer, principal.subject, principal.email).run();
+    await db.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status) VALUES ('eligible-identity','https://eligible.example','eligible-subject',?,'active')").bind(principal.email).run();
+    await db.prepare(`INSERT INTO portal_v2_identity_eligibility_bindings
+      (identity_id,workspace_id,principal_public_id,principal_source_version,verified_email)
+      VALUES('eligible-identity',?,?,?,?)`).bind(workspace.publicId, projectedPrincipal.publicId, projectedPrincipal.sourceVersion, principal.email).run();
     expect(await authorizePortalWorkspaceCapability(env, principal, workspace.publicId, "delivery.view", { scopeType: "project", publicId: project.publicId })).toBe(false);
     await db.prepare("UPDATE pa_portal_principals SET identity_id='verified-identity' WHERE workspace_id=? AND public_id=?").bind(workspace.publicId, projectedPrincipal.publicId).run();
     const refresh = envelope("event", "portal-event-11", 11, { event: { resource: "principal", action: "upsert", principal: { ...projectedPrincipal, sourceVersion: "principal-v2" } } });
     expect((await deliver(refresh)).status).toBe(200);
+    expect(await db.prepare(`SELECT principal_source_version FROM portal_v2_identity_eligibility_bindings
+      WHERE identity_id='eligible-identity'`).first("principal_source_version")).toBe("principal-v2");
     expect(await authorizePortalWorkspaceCapability(env, principal, workspace.publicId, "delivery.view", { scopeType: "project", publicId: project.publicId })).toBe(true);
     expect(await authorizePortalWorkspaceCapability(env, principal, workspace.publicId, "member.manage", { scopeType: "workspace", publicId: workspace.publicId })).toBe(false);
   });
@@ -126,6 +134,8 @@ describe("Project Alpha portal hierarchy projection", () => {
     expect((await deliver({ ...replay, occurredAt: "2026-08-13T18:01:00.000Z" })).status).toBe(409);
     expect((await deliver(envelope("event", "portal-event-13", 13, { event: { resource: "principal", action: "tombstone", publicId: projectedPrincipal.publicId, sourceVersion: "principal-v3" } }))).status).toBe(409);
     expect((await deliver(envelope("event", "portal-event-12", 12, { event: { resource: "principal", action: "tombstone", publicId: projectedPrincipal.publicId, sourceVersion: "principal-v3" } }))).status).toBe(200);
+    expect(await db.prepare(`SELECT principal_source_version FROM portal_v2_identity_eligibility_bindings
+      WHERE identity_id='eligible-identity'`).first("principal_source_version")).toBe("principal-v2");
     expect(await authorizePortalWorkspaceCapability(env, principal, workspace.publicId, "delivery.view", { scopeType: "project", publicId: project.publicId })).toBe(false);
   });
 

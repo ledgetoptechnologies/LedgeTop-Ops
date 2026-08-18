@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import hierarchyMigration from "../migrations/0121_client_workspace_hierarchy_v2.sql?raw";
 import projectionMigration from "../migrations/0125_project_alpha_portal_projection.sql?raw";
 import relationMigration from "../migrations/0129_portal_hierarchy_relations.sql?raw";
+import eligibilityMigration from "../migrations/0145_portal_identity_eligibility.sql?raw";
 import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
 import { handleProjectAlphaPortalProjectionRequest, parsePortalProjectionDelivery } from "../src/worker/project-alpha-portal";
@@ -94,7 +95,7 @@ describe("Project Alpha relation/lifecycle projection receiver", () => {
       CREATE TABLE client_member_project_grants(account_id TEXT NOT NULL,identity_id TEXT NOT NULL,project_id TEXT NOT NULL,revoked_at TEXT,PRIMARY KEY(account_id,identity_id,project_id));
       CREATE TABLE client_folder_associations(id TEXT PRIMARY KEY,scope_type TEXT NOT NULL,project_id TEXT,account_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),revoked_at TEXT);
     `.replace(/\s*\n\s*/g, " "));
-    await migrate(db, hierarchyMigration); await migrate(db, projectionMigration); await migrate(db, relationMigration);
+    await migrate(db, hierarchyMigration); await migrate(db, projectionMigration); await migrate(db, relationMigration); await migrate(db, eligibilityMigration);
     env = { DELIVERY_DB: db, PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey, PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId, PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret, PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN: "https://access.example.test", PROJECT_ALPHA_PORTAL_ACCESS_AUD: "portal-aud", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true" } as Env;
   }, 30_000);
   afterAll(async () => mf.dispose());
@@ -233,6 +234,7 @@ describe("Project Alpha relation/lifecycle projection receiver", () => {
       `.replace(/\s*\n\s*/g, " "));
       await migrate(upgradeDb, hierarchyMigration);
       await migrate(upgradeDb, projectionMigration);
+      await migrate(upgradeDb, eligibilityMigration);
       const upgradeEnv = { ...env, DELIVERY_DB: upgradeDb, CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "false" } as Env;
       const activePage = structuredClone(portalV2Fixture.valid.snapshotPage) as Record<string, unknown>;
       const activeActivate = structuredClone(portalV2Fixture.valid.snapshotActivate) as Record<string, unknown>;

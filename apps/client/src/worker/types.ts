@@ -47,6 +47,7 @@ export interface Env {
   CLIENT_PORTAL_TEAM_ENABLED?: string;
   /** Additive PA-backed workspace hierarchy. Default-off until shadow parity is proven. */
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
+  CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED?: string;
   /** Enables live global/scoped identity denials. Default off for additive rollout. */
   CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED?: string;
   /** Requires an explicit live authenticated delivery grant in addition to portal-v2 entitlement. */

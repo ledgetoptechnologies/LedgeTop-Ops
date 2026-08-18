@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
-import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, ViewerEmbed } from "@ltds/ui";
+import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerWindow } from "@ltds/ui";
 import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
@@ -66,7 +66,6 @@ import {
   type PortalNotification,
   type PortalProject,
   type PortalViewerModel,
-  type PortalViewerSession,
   type PortalViewerShare,
   type PortalServiceRequest,
   type PortalServiceCatalogItem,
@@ -1726,15 +1725,13 @@ function LegacyServiceRequestForm({
 
 function ProjectViewerModels({ projectId, initialDisplayUnits }: { projectId: string; initialDisplayUnits: "imperial" | "metric" }) {
   const [models, setModels] = useState<PortalViewerModel[] | null>(null);
-  const [selected, setSelected] = useState<PortalViewerModel | null>(null);
-  const [session, setSession] = useState<PortalViewerSession | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [displayUnits, setDisplayUnits] = useState<"imperial" | "metric">(initialDisplayUnits || readClientViewerUnits());
 
   useEffect(() => {
     let active = true;
-    setModels(null); setSelected(null); setSession(null); setError("");
+    setModels(null); setError("");
     loadPortalViewerModels(projectId)
       .then(value => { if (active) setModels(value); })
       .catch(caught => { if (active) { setModels([]); setError((caught as Error).message); } });
@@ -1747,19 +1744,18 @@ function ProjectViewerModels({ projectId, initialDisplayUnits }: { projectId: st
   const open = async (model: PortalViewerModel) => {
     setBusy(true); setError("");
     try {
-      const next = await requestSession(model.associationId);
-      setSelected(model); setSession(next);
+      await openViewerWindow({
+        modelId: model.modelId,
+        title: model.title,
+        issueSession: () => requestSession(model.associationId),
+        onStatus: (status, message) => {
+          if (status === "at-risk") setError(message);
+        },
+      });
     } catch (caught) { setError((caught as Error).message); }
     finally { setBusy(false); }
   };
 
-  if (selected && session) return <ViewerEmbed
-    modelId={selected.modelId}
-    title={selected.title}
-    session={session}
-    renew={() => requestSession(selected.associationId)}
-    onClose={() => { setSelected(null); setSession(null); }}
-  />;
   if (!models) return <Card title="3D models"><Loading /></Card>;
   return <Card title="3D models">
     {error && <div className="notice error" role="alert">{error}</div>}
@@ -1772,7 +1768,7 @@ function ProjectViewerModels({ projectId, initialDisplayUnits }: { projectId: st
       <div className="portal-viewer-model-grid">{models.map(model => <article key={model.associationId}>
         <div><span>Interactive model</span><h3>{model.title}</h3><p>{model.provider} · secure Viewer session</p></div>
         <div className="portal-form-actions"><button type="button" className="button-orange" disabled={busy} onClick={() => void open(model)}>
-          {busy ? "Opening…" : "Open 3D model"}
+          {busy ? "Opening…" : "Open 3D model in new tab"}
         </button></div>
         {model.canShare && <PortalViewerShares projectId={projectId} model={model} displayUnits={displayUnits} />}
       </article>)}</div>}

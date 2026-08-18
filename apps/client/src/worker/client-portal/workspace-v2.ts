@@ -8,6 +8,7 @@ import {
 
 export const PORTAL_HIERARCHY_V2_FLAG = "CLIENT_PORTAL_HIERARCHY_V2_ENABLED";
 export const PORTAL_IDENTITY_DENYLIST_FLAG = "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED";
+export const PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_FLAG = "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED";
 
 export type PortalWorkspaceCapability =
   | "workspace.view"
@@ -160,6 +161,12 @@ function validPrincipalPart(value: string): boolean {
   return value.length >= 1 && value.length <= 512;
 }
 
+function canonicalPrincipalEmail(value: string): string | null {
+  const normalized = value.trim().toLocaleLowerCase("en-US");
+  if (normalized.length < 3 || normalized.length > 254 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalized)) return null;
+  return normalized;
+}
+
 function isPreLegacyBridgeDatabase(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /no such table:\s*(?:main\.)?portal_v2_legacy_member_bridges\b/i.test(message);
@@ -170,11 +177,93 @@ async function resolveGlobalIdentity(
   principal: VerifiedClientPrincipal,
 ): Promise<IdentityRow | null> {
   if (!validPrincipalPart(principal.issuer) || !validPrincipalPart(principal.subject)) return null;
-  return portalDb(env)
+  let identity = await portalDb(env)
     .prepare(`SELECT id FROM portal_v2_identities
       WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL`)
     .bind(principal.issuer, principal.subject)
     .first<IdentityRow>();
+  const email = canonicalPrincipalEmail(principal.email);
+  if (identity) {
+    try {
+      const blocked = await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_identity_eligibility_blocks
+        WHERE status='active' AND datetime(valid_from)<=datetime('now')
+          AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+          AND ((match_type='issuer_subject' AND issuer=? AND subject=?)
+            OR (match_type='email' AND normalized_email=?)) LIMIT 1`)
+        .bind(principal.issuer, principal.subject, email ?? "").first("ok");
+      if (blocked !== null) return null;
+    } catch (error) {
+      if (!/no such table:\s*(?:main\.)?portal_v2_identity_eligibility_blocks\b/i.test(error instanceof Error ? error.message : String(error))) throw error;
+    }
+  }
+  if (!identity && email && env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED === "true") {
+    try {
+      const blocked = await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_identity_eligibility_blocks
+        WHERE status='active' AND datetime(valid_from)<=datetime('now')
+          AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+          AND ((match_type='issuer_subject' AND issuer=? AND subject=?)
+            OR (match_type='email' AND normalized_email=?)) LIMIT 1`)
+        .bind(principal.issuer, principal.subject, email).first("ok");
+      if (blocked !== null) return null;
+      const eligible = await portalDb(env).prepare(`SELECT principal.workspace_id,principal.public_id,principal.source_version,
+          workspace.legacy_account_id
+        FROM pa_portal_principals principal
+        JOIN portal_v2_workspaces workspace ON workspace.id=principal.workspace_id AND workspace.status='active'
+          AND workspace.legacy_account_id IS NOT NULL
+        JOIN client_accounts account ON account.id=workspace.legacy_account_id AND account.status='active'
+        WHERE principal.status='active' AND principal.identity_id IS NULL AND lower(principal.email_hint)=?
+        ORDER BY principal.workspace_id,principal.public_id LIMIT 101`).bind(email)
+        .all<{ workspace_id: string; public_id: string; source_version: string; legacy_account_id: string }>();
+      if (eligible.results.length === 0 || eligible.results.length > 100) return null;
+      const identityId = crypto.randomUUID();
+      const shells = eligible.results.map(row => ({ ...row, legacyIdentityId: crypto.randomUUID() }));
+      await portalDb(env).batch([
+        portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_identities
+          (id,issuer,subject,verified_email,status) VALUES(?,?,?,?,'active')`)
+          .bind(identityId, principal.issuer, principal.subject, email),
+        ...shells.map(row => portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_identity_eligibility_bindings
+          (identity_id,workspace_id,principal_public_id,principal_source_version,verified_email)
+          SELECT id,?,?,?,? FROM portal_v2_identities WHERE issuer=? AND subject=?
+            AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?`)
+          .bind(row.workspace_id, row.public_id, row.source_version, email,
+            principal.issuer, principal.subject, email)),
+        ...shells.map(row => portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_workspace_memberships
+          (id,workspace_id,identity_id,source_type,status) SELECT ?,?,id,'operations','active'
+          FROM portal_v2_identities WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL`)
+          .bind(`eligibility-membership:${row.workspace_id}:${identityId}`, row.workspace_id, principal.issuer, principal.subject)),
+        ...shells.map(row => portalDb(env).prepare(`INSERT OR IGNORE INTO client_identity_links
+          (id,account_id,issuer,subject,email) VALUES(?,?,?,?,?)`)
+          .bind(row.legacyIdentityId, row.legacy_account_id, `ltds-eligibility:${row.workspace_id}`.slice(0, 512), identityId, email)),
+        ...shells.map(row => portalDb(env).prepare(`INSERT OR IGNORE INTO client_account_members
+          (account_id,identity_id,role,can_view_billing) VALUES (?,?,'member',0)`)
+          .bind(row.legacy_account_id, row.legacyIdentityId)),
+        ...shells.map(row => portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_identity_eligibility_legacy_bridges
+          (workspace_id,identity_id,legacy_account_id,legacy_identity_id)
+          SELECT ?,id,?,? FROM portal_v2_identities WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL`)
+          .bind(row.workspace_id, row.legacy_account_id, row.legacyIdentityId, principal.issuer, principal.subject)),
+      ]);
+      identity = await portalDb(env).prepare(`SELECT id FROM portal_v2_identities
+        WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?`)
+        .bind(principal.issuer, principal.subject, email).first<IdentityRow>();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (!/no such table:\s*(?:main\.)?(?:pa_portal_principals|portal_v2_identity_eligibility_(?:bindings|blocks))\b/i.test(message)) throw error;
+      return null;
+    }
+  }
+  if (!identity) return null;
+  if (portalIdentityDenylistEnabled(env)) {
+    const denied = await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_identity_denials
+      WHERE identity_id=? AND scope_type='global' AND status='active' AND revoked_at IS NULL
+        AND datetime(valid_from)<=datetime('now') AND (expires_at IS NULL OR datetime(expires_at)>datetime('now')) LIMIT 1`)
+      .bind(identity.id).first("ok");
+    if (denied !== null) return null;
+  }
+  return identity;
+}
+
+export async function portalIdentityAccepted(env: Env, principal: VerifiedClientPrincipal): Promise<boolean> {
+  return Boolean(await resolveGlobalIdentity(env, principal));
 }
 
 async function activeWorkspace(
@@ -191,6 +280,26 @@ async function activeWorkspace(
     WHERE w.id=? AND w.status='active'`)
     .bind(identityId, workspaceId)
     .first<WorkspaceRow>();
+}
+
+async function eligiblePortalShell(env: Env, identityId: string, workspaceId: string, requireBridge = false): Promise<boolean> {
+  try {
+    const bridge = requireBridge ? `JOIN portal_v2_identity_eligibility_legacy_bridges bridge
+      ON bridge.workspace_id=eligibility.workspace_id AND bridge.identity_id=eligibility.identity_id
+      AND bridge.status='active' AND bridge.revoked_at IS NULL` : "";
+    return await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_identity_eligibility_bindings eligibility
+      JOIN pa_portal_principals principal ON principal.workspace_id=eligibility.workspace_id
+        AND principal.public_id=eligibility.principal_public_id AND principal.status='active'
+        AND principal.source_version=eligibility.principal_source_version
+        AND lower(principal.email_hint)=lower(eligibility.verified_email)
+      JOIN portal_v2_identities identity ON identity.id=eligibility.identity_id AND identity.status='active'
+        AND identity.revoked_at IS NULL AND lower(identity.verified_email)=lower(eligibility.verified_email)
+      ${bridge} WHERE eligibility.workspace_id=? AND eligibility.identity_id=? LIMIT 1`)
+      .bind(workspaceId, identityId).first("ok") !== null;
+  } catch (error) {
+    if (/no such table:\s*(?:main\.)?portal_v2_identity_eligibility_(?:bindings|legacy_bridges)\b/i.test(error instanceof Error ? error.message : String(error))) return false;
+    throw error;
+  }
 }
 
 /**
@@ -211,7 +320,8 @@ export async function resolveEffectivePortalWorkspaceContext(
   if (!identity) return null;
   const workspace = await activeWorkspace(env, identity.id, workspaceId);
   if (!workspace?.legacy_account_id || !(await activeRootExists(env, workspace))) return null;
-  if (!(await authorizePortalWorkspaceCapability(
+  const shellEligible = await eligiblePortalShell(env, identity.id, workspaceId, true);
+  if (!shellEligible && !(await authorizePortalWorkspaceCapability(
     env,
     principal,
     workspaceId,
@@ -234,6 +344,16 @@ export async function resolveEffectivePortalWorkspaceContext(
       .first<{ identity_id: string; role: "manager" | "member"; can_view_billing: number }>();
   } catch (error) {
     if (!isPreLegacyBridgeDatabase(error)) throw error;
+  }
+  if (!legacy) try {
+    legacy = await portalDb(env).prepare(`SELECT bridge.legacy_identity_id identity_id,member.role,member.can_view_billing
+      FROM portal_v2_identity_eligibility_legacy_bridges bridge
+      JOIN client_account_members member ON member.account_id=bridge.legacy_account_id
+        AND member.identity_id=bridge.legacy_identity_id AND member.revoked_at IS NULL
+      WHERE bridge.workspace_id=? AND bridge.identity_id=? AND bridge.status='active' AND bridge.revoked_at IS NULL`)
+      .bind(workspaceId, identity.id).first<{ identity_id: string; role: "manager" | "member"; can_view_billing: number }>();
+  } catch (error) {
+    if (!/no such table:\s*(?:main\.)?portal_v2_identity_eligibility_legacy_bridges\b/i.test(error instanceof Error ? error.message : String(error))) throw error;
   }
   legacy ??= await portalDb(env).prepare(`
     SELECT i.id identity_id,m.role,m.can_view_billing
@@ -524,7 +644,8 @@ export async function listPortalWorkspaces(
   if (candidates.results.length > 100) return [];
   const authorized: PortalWorkspaceSummary[] = [];
   for (const workspace of candidates.results) {
-    if (!(await authorizePortalWorkspaceCapability(
+    const shellEligible = await eligiblePortalShell(env, identity.id, workspace.id);
+    if (!shellEligible && !(await authorizePortalWorkspaceCapability(
       env,
       principal,
       workspace.id,

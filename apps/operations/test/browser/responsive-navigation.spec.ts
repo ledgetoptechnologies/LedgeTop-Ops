@@ -14,6 +14,16 @@ async function mockSession(page: Page, permissions: string[], identity?: { displ
       await route.fulfill({ json: { requests: [] } });
       return;
     }
+    if (path === "/api/viewer/overview") {
+      await route.fulfill({ json: { enabled: true, viewerBaseUrl: "https://viewer.ledgetopdroneservices.com", overview: {
+        schemaVersion: 1, generatedAt: "2026-08-18T14:00:00.000Z",
+        projects: { active: 3, total: 4 }, models: { published: 7, total: 9, bytes: 123456 },
+        jobs: { queued: 1, running: 2, reviewReady: 1, failed: 0 },
+        providers: { enabled: 2, healthy: 1, total: 3 }, storage: { usedBytes: 456789, availableBytes: null },
+        platform: { ready: true, workerLive: true, lifecycleBlocked: false },
+      } } });
+      return;
+    }
     await route.fulfill({ status: 404, json: { error: "Not found" } });
   });
 }
@@ -36,10 +46,16 @@ test("desktop navigation exposes canonical client requests and independently aut
   await page.goForward();
   await expect(page).toHaveURL(/\/operations\/client-requests$/);
 
+  const dataLink = primary.getByRole("link", { name: "Data" });
+  await expect(dataLink).toHaveAttribute("href", "/delivery");
+  await dataLink.click();
+  await expect(page.getByRole("heading", { name: "Data", exact: true })).toBeVisible();
+  await page.getByRole("tab", { name: "3D models" }).click();
+  await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
+  await expect(page.getByText(/9 total · 12[01](?:\.\d)? KB/)).toBeVisible();
+
   await primary.getByRole("button", { name: "Administration" }).click();
-  const viewerLink = primary.getByRole("link", { name: "3D Viewer" });
-  await expect(viewerLink).toBeVisible();
-  await expect(viewerLink).toHaveAttribute("href", "/operations/processing");
+  await expect(primary.getByRole("link", { name: "3D Viewer" })).toHaveCount(0);
   await expect(primary.getByRole("link", { name: "Team" })).toBeVisible();
   await expect(primary.getByRole("link", { name: "Administration" })).toBeVisible();
   const menuLayout = await page.locator(".ops-header").evaluate((header) => {
@@ -65,11 +81,7 @@ test("desktop navigation exposes canonical client requests and independently aut
   expect(menuLayout.popoverTop).toBeGreaterThanOrEqual(menuLayout.headerBottom - 1);
   expect(menuLayout.popoverRight).toBeLessThanOrEqual(menuLayout.viewportWidth);
 
-  await viewerLink.click();
-  await expect(page).toHaveURL(/\/operations\/processing$/);
-  await expect(page.getByRole("heading", { name: "3D Viewer" })).toBeVisible();
-  await primary.getByRole("button", { name: "Administration" }).click();
-  await expect(primary.getByRole("link", { name: "3D Viewer" })).toHaveAttribute("aria-current", "page");
+  await expect(dataLink).toHaveAttribute("aria-current", "page");
 });
 
 test("Team remains visible without Administration permission", async ({ page }) => {
@@ -138,8 +150,9 @@ for (const width of [320, 390, 768]) {
     await expect(drawer.locator(".ops-mobile-nav-label")).toHaveText("Administration");
     await expect(drawer.getByRole("link", { name: "Dashboard" })).toBeFocused();
     await expect(drawer.getByRole("link", { name: "Client Requests" })).toHaveCSS("min-height", "44px");
-    await expect(drawer.getByRole("link", { name: "3D Viewer" })).toHaveAttribute("href", "/operations/processing");
-    await expect(drawer.getByRole("link", { name: "3D Viewer" })).toHaveCSS("min-height", "44px");
+    await expect(drawer.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/delivery");
+    await expect(drawer.getByRole("link", { name: "Data" })).toHaveCSS("min-height", "44px");
+    await expect(drawer.getByRole("link", { name: "3D Viewer" })).toHaveCount(0);
     await drawer.getByRole("link", { name: "Administration" }).focus();
     await page.keyboard.press("Tab");
     await expect(drawer.getByRole("button", { name: "Close navigation" })).toBeFocused();

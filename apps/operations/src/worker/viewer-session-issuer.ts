@@ -64,6 +64,31 @@ export async function pruneClientViewerShareReceipts(env: Pick<Env, "DELIVERY_DB
 
 const AUTHORIZED_ASSOCIATION_SQL = (capability: "delivery.view" | "viewer.share.create") => `WITH RECURSIVE live AS (
   SELECT association.*,project.project_alpha_project_id live_project_public_id,membership.expires_at membership_expires_at,
+    (SELECT MIN(viewer_grant.authorization_expires_at) FROM viewer_client_grants viewer_grant
+      WHERE viewer_grant.account_id=project_grant.account_id AND viewer_grant.project_id=project.id
+        AND viewer_grant.status='active' AND viewer_grant.revoked_at IS NULL
+        AND viewer_grant.authorization_expires_at IS NOT NULL
+        AND datetime(viewer_grant.authorization_expires_at)>datetime('now')
+        AND ((viewer_grant.scope_type='project' AND viewer_grant.include_future_published=1)
+          OR (viewer_grant.scope_type='task' AND viewer_grant.association_id=association.id))) viewer_grant_expires_at,
+    (SELECT MAX(viewer_grant.can_measure) FROM viewer_client_grants viewer_grant
+      WHERE viewer_grant.account_id=project_grant.account_id AND viewer_grant.project_id=project.id
+        AND viewer_grant.status='active' AND viewer_grant.revoked_at IS NULL
+        AND (viewer_grant.authorization_expires_at IS NULL OR datetime(viewer_grant.authorization_expires_at)>datetime('now'))
+        AND ((viewer_grant.scope_type='project' AND viewer_grant.include_future_published=1)
+          OR (viewer_grant.scope_type='task' AND viewer_grant.association_id=association.id))) authorization_can_measure,
+    (SELECT MAX(viewer_grant.can_view_cameras) FROM viewer_client_grants viewer_grant
+      WHERE viewer_grant.account_id=project_grant.account_id AND viewer_grant.project_id=project.id
+        AND viewer_grant.status='active' AND viewer_grant.revoked_at IS NULL
+        AND (viewer_grant.authorization_expires_at IS NULL OR datetime(viewer_grant.authorization_expires_at)>datetime('now'))
+        AND ((viewer_grant.scope_type='project' AND viewer_grant.include_future_published=1)
+          OR (viewer_grant.scope_type='task' AND viewer_grant.association_id=association.id))) authorization_can_view_cameras,
+    (SELECT MAX(viewer_grant.can_download) FROM viewer_client_grants viewer_grant
+      WHERE viewer_grant.account_id=project_grant.account_id AND viewer_grant.project_id=project.id
+        AND viewer_grant.status='active' AND viewer_grant.revoked_at IS NULL
+        AND (viewer_grant.authorization_expires_at IS NULL OR datetime(viewer_grant.authorization_expires_at)>datetime('now'))
+        AND ((viewer_grant.scope_type='project' AND viewer_grant.include_future_published=1)
+          OR (viewer_grant.scope_type='task' AND viewer_grant.association_id=association.id))) authorization_can_download,
     workspace.root_type,COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) root_public_id
   FROM viewer_model_associations association
   JOIN projects project ON project.id=association.project_id AND project.active=1
@@ -85,6 +110,22 @@ const AUTHORIZED_ASSOCIATION_SQL = (capability: "delivery.view" | "viewer.share.
     AND member.revoked_at IS NULL
   WHERE association.id=? AND association.project_id=? AND association.state='active'
     AND association.model_status='ready' AND association.revoked_at IS NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM portal_v2_identity_eligibility_blocks eligibility_block
+      WHERE eligibility_block.status='active'
+        AND datetime(eligibility_block.valid_from)<=datetime('now')
+        AND (eligibility_block.expires_at IS NULL OR datetime(eligibility_block.expires_at)>datetime('now'))
+        AND ((eligibility_block.match_type='issuer_subject'
+            AND eligibility_block.issuer=identity.issuer AND eligibility_block.subject=identity.subject)
+          OR (eligibility_block.match_type='email'
+            AND eligibility_block.normalized_email=lower(identity.verified_email)))
+    )
+    AND EXISTS (SELECT 1 FROM viewer_client_grants viewer_grant
+      WHERE viewer_grant.account_id=project_grant.account_id AND viewer_grant.project_id=project.id
+        AND viewer_grant.status='active' AND viewer_grant.revoked_at IS NULL
+        AND (viewer_grant.authorization_expires_at IS NULL OR datetime(viewer_grant.authorization_expires_at)>datetime('now'))
+        AND ((viewer_grant.scope_type='project' AND viewer_grant.include_future_published=1)
+          OR (viewer_grant.scope_type='task' AND viewer_grant.association_id=association.id)))
     AND (member.role='manager' OR EXISTS (
       SELECT 1 FROM client_member_project_grants member_grant
       WHERE member_grant.account_id=account.id AND member_grant.identity_id=legacy_identity.id
@@ -194,7 +235,13 @@ export async function authorizeClientViewerAssociation(
     env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED || "false",
     input.identityId, input.workspaceId, input.workspaceId, input.workspaceId,
   ).all<AssociationRow>();
-  return result.results.length === 1 ? result.results[0]! : null;
+  if (result.results.length !== 1) return null;
+  const association = result.results[0]!;
+  association.authorization_expires_at = minimumExpiry(
+    association.authorization_expires_at,
+    association.viewer_grant_expires_at,
+  );
+  return association;
 }
 
 function failure(code: Exclude<ClientViewerSessionResultV1, { ok: true }>["code"]): ClientViewerSessionResultV1 {
@@ -214,7 +261,9 @@ function authorizationRequest(input: ClientViewerShareAuthorizationV1): ClientVi
 }
 
 function minimumExpiry(...values: Array<string | null | undefined>): string | null {
-  const dates = values.filter((value): value is string => Boolean(value)).map(value => Date.parse(value));
+  const dates = values.filter((value): value is string => Boolean(value)).map(value =>
+    Date.parse(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(" ", "T")}Z` : value),
+  );
   return dates.length ? new Date(Math.min(...dates)).toISOString() : null;
 }
 

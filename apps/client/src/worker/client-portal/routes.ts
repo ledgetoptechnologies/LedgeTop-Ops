@@ -53,6 +53,7 @@ import {
   listPortalWorkspaces,
   PORTAL_WORKSPACE_HEADER,
   portalHierarchyV2Enabled,
+  portalIdentityAccepted,
   resolveEffectivePortalWorkspaceContext,
 } from "./workspace-v2";
 import {
@@ -400,6 +401,9 @@ export function createClientPortalRouter(
       throw new HTTPException(401, {
         message: "Client authentication is required",
       });
+    const invitationRequest = /\/v2\/invitations(?:\/|$)/.test(c.req.path);
+    if (portalHierarchyV2Enabled(c.env) && !invitationRequest && !(await portalIdentityAccepted(c.env, principal)))
+      throw new HTTPException(403, { message: "Client access is not provisioned" });
     let session = await repository.resolveSession(c.env, principal);
     const workspaceV2Request = /\/v2\/(?:workspaces|invitations)(?:\/|$)/.test(c.req.path);
     let workspace: EffectivePortalWorkspaceContext | null = null;
@@ -877,8 +881,14 @@ export function createClientPortalRouter(
         AND project.source_updated_at=association.project_source_version
       WHERE association.project_id=? AND association.state='active' AND association.revoked_at IS NULL
         AND association.model_status='ready'
+        AND EXISTS (SELECT 1 FROM viewer_client_grants viewer_grant
+          WHERE viewer_grant.account_id=? AND viewer_grant.project_id=project.id
+            AND viewer_grant.status='active' AND viewer_grant.revoked_at IS NULL
+            AND (viewer_grant.authorization_expires_at IS NULL OR datetime(viewer_grant.authorization_expires_at)>datetime('now'))
+            AND ((viewer_grant.scope_type='project' AND viewer_grant.include_future_published=1)
+              OR (viewer_grant.scope_type='task' AND viewer_grant.association_id=association.id)))
       ORDER BY association.model_title COLLATE NOCASE,association.id LIMIT 101`)
-      .bind(projectId.data).all<{
+      .bind(projectId.data, c.get("clientSession").accountId).all<{
         id: string; model_title: string; model_provider: string; viewer_model_id: string;
         viewer_model_version_id: string; updated_at: string;
       }>();

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerModelSummary, type ViewerPublicShareSummary, type ViewerSessionGrant } from "@ltds/shared";
-import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, ViewerEmbed } from "@ltds/ui";
+import { BRAND, type DeliveryLocationCollection, type Permission, type SessionUser, type ViewerAdminSessionGrant, type ViewerModelSummary, type ViewerPlatformOverview, type ViewerPublicShareSummary, type ViewerSessionGrant } from "@ltds/shared";
+import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerWindow } from "@ltds/ui";
 import { ApiError, api, setCsrf } from "./api";
 import { generateSecureAccessCode } from "./access-code";
 import {
@@ -124,15 +124,9 @@ const NAV: Array<{
   { page: "client-requests", label: "Client Requests", href: "/operations/client-requests", permissions: ["operations.manage"] },
   { page: "sops", label: "SOP Library", permissions: ["sops.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
-  { page: "delivery", label: "Delivery", permissions: ["delivery.browse"] },
+  { page: "delivery", label: "Data", permissions: ["delivery.browse", "viewer.view"] },
 ];
 const MANAGE_NAV: typeof NAV = [
-  {
-    page: "viewer",
-    label: "3D Viewer",
-    href: "/operations/processing",
-    permissions: ["viewer.view"],
-  },
   { page: "team", label: "Team", permissions: ["team.view"] },
   {
     page: "administration",
@@ -310,11 +304,11 @@ export function OperationsApp() {
           <SopLibrary user={session.user} />
         )}{" "}
         {page === "airspace" && <Airspace />}{" "}
-        {page === "delivery" && allowed(session.user, "delivery.browse") && (
+        {page === "delivery" && (allowed(session.user, "delivery.browse") || allowed(session.user, "viewer.view")) && (
           <DeliveryHub {...props} />
         )}{" "}
         {page === "viewer" && allowed(session.user, "viewer.view") && (
-          <ViewerModels session={session} />
+          <DeliveryHub session={session} initialTab="models" />
         )}{" "}
         {page === "team" && allowed(session.user, "team.view") && (
           <Team {...props} />
@@ -351,12 +345,12 @@ function PageHeading({ page }: { page: Page }) {
       "Official FAA TFR and special-use airspace information for Wisconsin.",
     ],
     delivery: [
-      "Client delivery",
-      "Browse the live R2 hierarchy and create secure client links.",
+      "Data",
+      "Manage client delivery and monitor the dedicated 3D Viewer workspace.",
     ],
     viewer: [
-      "3D Viewer",
-      "Process, review, publish, and share Viewer models from the Operations control plane.",
+      "3D models overview",
+      "Monitor Viewer storage, processing, and provider health, then open the dedicated workspace.",
     ],
     team: [
       "Team",
@@ -3466,11 +3460,67 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     </>
   );
 }
-function DeliveryHub({ session }: { session: Session }) {
-  const [tab, setTab] = useState<"delivery" | "incoming">("delivery");
+type ViewerOverviewResponse = {
+  enabled: boolean;
+  viewerBaseUrl: string | null;
+  overview: ViewerPlatformOverview | null;
+};
+type ViewerWorkspaceGrant = ViewerAdminSessionGrant & { workspaceUrl: string };
+
+function ViewerDataOverview() {
+  const { data, error, reload } = useLoad<ViewerOverviewResponse>(() => api("/api/viewer/overview"), []);
+  const [opening, setOpening] = useState(false), [actionError, setActionError] = useState("");
+  const openWorkspace = async () => {
+    const popup = window.open("about:blank", "_blank");
+    if (!popup) { setActionError("Allow pop-ups for Operations, then try again."); return; }
+    popup.opener = null;
+    popup.document.title = "Opening LTDS Viewer";
+    popup.document.body.textContent = "Opening the secure LTDS Viewer workspace…";
+    setOpening(true); setActionError("");
+    try {
+      const grant = await api<ViewerWorkspaceGrant>("/api/viewer/admin-grant", {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+      });
+      const target = new URL(grant.workspaceUrl), expected = data?.viewerBaseUrl ? new URL(data.viewerBaseUrl) : null;
+      if (!expected || target.origin !== expected.origin || target.pathname !== `/workspace/${encodeURIComponent(grant.grant)}` || target.search || target.hash)
+        throw new Error("3D Viewer returned an invalid workspace link");
+      popup.location.replace(target.href);
+    } catch (caught) {
+      popup.close(); setActionError((caught as Error).message);
+    } finally { setOpening(false); }
+  };
+  if (!data && !error) return <Card><PanelSkeleton /></Card>;
+  if (error) return <><ErrorLine error={error} /><button type="button" className="button-ghost" onClick={() => void reload()}>Retry overview</button></>;
+  if (!data?.enabled || !data.overview) return <Card><EmptyState title="3D Viewer overview is off" detail="The Viewer integration remains unavailable until its reviewed runtime flags are enabled." /></Card>;
+  const value = data.overview;
+  return <div className="viewer-overview">
+    <ErrorLine error={actionError} />
+    <div className="viewer-overview-actions">
+      <div><h2>3D models</h2><p>Project management, imports, processing, review, sharing, and model interaction open on the dedicated Viewer domain.</p></div>
+      <button type="button" className="button-orange" disabled={opening} onClick={() => void openWorkspace()}>{opening ? "Opening…" : "Open Viewer workspace"}</button>
+    </div>
+    <div className="viewer-overview-grid" aria-label="3D Viewer platform overview">
+      <Card title="Projects"><strong>{value.projects.active}</strong><small>{value.projects.total} total</small></Card>
+      <Card title="Published models"><strong>{value.models.published}</strong><small>{value.models.total} total · {bytes(value.models.bytes)}</small></Card>
+      <Card title="Active work"><strong>{value.jobs.queued + value.jobs.running}</strong><small>{value.jobs.queued} queued · {value.jobs.running} running · {value.jobs.reviewReady} ready for review</small></Card>
+      <Card title="Providers"><strong>{value.providers.healthy} healthy</strong><small>{value.providers.enabled} enabled · {value.providers.total} configured</small></Card>
+      <Card title="Storage"><strong>{bytes(value.storage.usedBytes)}</strong><small>{value.storage.availableBytes === null ? "Available space unavailable" : `${bytes(value.storage.availableBytes)} available`}</small></Card>
+      <Card title="Platform"><StatusPill tone={value.platform.ready && value.platform.workerLive && !value.platform.lifecycleBlocked ? "success" : "warning"}>{value.platform.ready ? "ready" : "attention"}</StatusPill><small>{value.platform.workerLive ? "Worker online" : "Worker offline"}{value.platform.lifecycleBlocked ? " · lifecycle blocked" : ""}</small></Card>
+    </div>
+    {value.jobs.failed > 0 && <p className="notice warning">{value.jobs.failed} processing job{value.jobs.failed === 1 ? " needs" : "s need"} attention in Viewer.</p>}
+    <small>Updated {date(value.generatedAt)}. This overview contains totals only; no model files or internal storage paths pass through Operations.</small>
+  </div>;
+}
+
+function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; initialTab?: "delivery" | "incoming" | "models" }) {
+  const canViewDelivery = allowed(session.user, "delivery.browse");
   const canViewIncoming =
     allowed(session.user, "file_requests.view") &&
     session.capabilities?.incomingUploads?.enabled === true;
+  const canViewModels = allowed(session.user, "viewer.view");
+  const firstTab = initialTab === "models" && canViewModels ? "models" :
+    canViewDelivery ? "delivery" : canViewIncoming ? "incoming" : "models";
+  const [tab, setTab] = useState<"delivery" | "incoming" | "models">(firstTab);
   return (
     <>
       <div
@@ -3478,14 +3528,7 @@ function DeliveryHub({ session }: { session: Session }) {
         role="tablist"
         aria-label="Delivery tools"
       >
-        <button
-          role="tab"
-          aria-selected={tab === "delivery"}
-          className={tab === "delivery" ? "active" : ""}
-          onClick={() => setTab("delivery")}
-        >
-          Client delivery
-        </button>
+        {canViewDelivery && <button role="tab" aria-selected={tab === "delivery"} className={tab === "delivery" ? "active" : ""} onClick={() => setTab("delivery")}>Client delivery</button>}
         {canViewIncoming && (
           <button
             role="tab"
@@ -3496,12 +3539,15 @@ function DeliveryHub({ session }: { session: Session }) {
             Incoming uploads
           </button>
         )}
+        {canViewModels && (
+          <button role="tab" aria-selected={tab === "models"} className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>3D models</button>
+        )}
       </div>
-      {tab === "delivery" || !canViewIncoming ? (
+      {tab === "models" && canViewModels ? <ViewerDataOverview /> : tab === "delivery" && canViewDelivery ? (
         <DeliveryWorkspaceV2 session={session} />
-      ) : (
+      ) : tab === "incoming" && canViewIncoming ? (
         <IncomingUploads />
-      )}
+      ) : <EmptyState title="No Data tools available" detail="Your account does not have access to Delivery or the 3D Viewer overview." />}
     </>
   );
 }
@@ -5455,6 +5501,7 @@ const STAFF_CONTROL_LABELS = {
 } as const;
 type StaffControl = keyof typeof STAFF_CONTROL_LABELS;
 function Team({ session }: { session: Session }) {
+  const [tab, setTab] = useState<"staff" | "clients">("staff");
   const { data, error, reload } = useLoad(
     () => api<{ staff: any[] }>("/api/team/staff"),
     [],
@@ -5482,6 +5529,11 @@ function Team({ session }: { session: Session }) {
   };
   return (
     <>
+      <div className="team-tabs" role="tablist" aria-label="Team directory">
+        <button role="tab" aria-selected={tab === "staff"} onClick={() => setTab("staff")}>Staff</button>
+        <button role="tab" aria-selected={tab === "clients"} onClick={() => setTab("clients")}>Clients</button>
+      </div>
+      {tab === "clients" ? <ClientIdentityDirectory administrator={session.user.isAdministrator} /> : <>
       <ManagedNotice
         detail={
           session.user.isAdministrator
@@ -5554,8 +5606,71 @@ function Team({ session }: { session: Session }) {
           </Card>
         ))}
       </div>
+      </>}
     </>
   );
+}
+
+type ClientIdentityDirectoryState = {
+  clients: Array<{ workspace_id: string; public_id: string; display_name: string; email_hint: string;
+    status: string; identity_id: string | null; issuer: string | null; subject: string | null;
+    has_workspace_access: number; blocked: number }>;
+  blocks: Array<{ id: string; match_type: string; issuer: string | null; subject: string | null;
+    normalized_email: string | null; reason_code: string; status: string; expires_at: string | null }>;
+};
+function ClientIdentityDirectory({ administrator }: { administrator: boolean }) {
+  const state = useLoad(() => api<ClientIdentityDirectoryState>("/api/team/clients"), []);
+  const [busy, setBusy] = useState("");
+  const block = async (client: ClientIdentityDirectoryState["clients"][number]) => {
+    if (!administrator || busy) return;
+    setBusy(client.public_id);
+    try {
+      await api("/api/team/clients/eligibility-blocks", { method: "POST",
+        headers: { "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify({
+          matchType: "email", email: client.email_hint, reasonCode: "operator_opt_out", expiresAt: null,
+        }) });
+      await state.reload();
+    } catch (caught) { alert((caught as Error).message); }
+    finally { setBusy(""); }
+  };
+  const revoke = async (blockId: string) => {
+    if (!administrator || busy) return;
+    setBusy(blockId);
+    try {
+      await api(`/api/team/clients/eligibility-blocks/${encodeURIComponent(blockId)}/revoke`, {
+        method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+        body: JSON.stringify({ reasonCode: "operator_opt_in" }),
+      });
+      await state.reload();
+    } catch (caught) { alert((caught as Error).message); }
+    finally { setBusy(""); }
+  };
+  return <>
+    <ManagedNotice detail="Client identity eligibility only opens the Client Portal shell. Projects, deliveries, Viewer models, and all other data remain unavailable until explicitly shared." />
+    <ErrorLine error={state.error} />
+    <div className="card-grid client-directory">
+      {state.data?.clients.map(client => {
+        const activeBlock = state.data?.blocks.find(block => block.status === "active" &&
+          block.match_type === "email" && block.normalized_email === client.email_hint.toLowerCase());
+        return <Card key={`${client.workspace_id}:${client.public_id}`}>
+          <div className="staff-card">
+            <span>{client.display_name.slice(0, 1).toUpperCase()}</span>
+            <div className="record-badges">
+              <StatusPill tone={client.blocked ? "danger" : client.identity_id ? "success" : "neutral"}>
+                {client.blocked ? "Blocked" : client.identity_id ? "Eligible · signed in" : "Eligible"}
+              </StatusPill>
+              <span className="managed-badge">{client.has_workspace_access ? "Portal shell" : "Awaiting first login"}</span>
+            </div>
+            <h3>{client.display_name}</h3><p>{client.email_hint}</p>
+            <small>No data access is implied by directory eligibility.</small>
+            {administrator && (activeBlock
+              ? <button disabled={busy === activeBlock.id} onClick={() => void revoke(activeBlock.id)}>Remove opt-out</button>
+              : <button className="danger" disabled={busy === client.public_id} onClick={() => void block(client)}>Block portal eligibility</button>)}
+          </div>
+        </Card>;
+      })}
+    </div>
+  </>;
 }
 
 type DelegatedShareAdminState = {
@@ -5712,7 +5827,7 @@ function ClientAccountRootActivation() {
       Workspace migration 0121 is active. Linking creates the complete legacy projection in one audited transaction. Existing partial or conflicting projections remain blocked for manual review.
     </div>}
     {eligible.length && state.data?.sources.length ? <div className="form-grid">
-      <label>Legacy client account<select value={account?.id ?? ""} disabled={busy} onChange={event => setAccountId(event.target.value)}>
+      <label>Existing portal account<select value={account?.id ?? ""} disabled={busy} onChange={event => setAccountId(event.target.value)}>
         {eligible.map(item => <option key={item.id} value={item.id}>{item.displayName}{item.activationState === "projection_missing" ? " · projection repair" : ""}</option>)}
       </select></label>
       <label>Project Alpha client<select value={source?.clientId ?? ""}
@@ -6044,7 +6159,6 @@ function ViewerModels({ session }: { session: Session }) {
   const [projectId, setProjectId] = useState("");
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState("");
-  const [opened, setOpened] = useState<{ association: ViewerAssociation; session: ViewerSessionGrant } | null>(null);
   const [shareModelId, setShareModelId] = useState("");
   const [shares, setShares] = useState<ViewerPublicShareSummary[]>([]);
   const [sharesLoaded, setSharesLoaded] = useState(false);
@@ -6103,7 +6217,6 @@ function ViewerModels({ session }: { session: Session }) {
         headers: { "Idempotency-Key": crypto.randomUUID() },
         body: JSON.stringify({ reason: "Removed by Operations administrator" }),
       });
-      if (opened?.association.id === association.id) setOpened(null);
       await reload();
     } catch (caught) { setActionError((caught as Error).message); }
     finally { setBusy(false); }
@@ -6116,7 +6229,14 @@ function ViewerModels({ session }: { session: Session }) {
 
   const open = async (association: ViewerAssociation) => {
     setBusy(true); setActionError("");
-    try { setOpened({ association, session: await requestSession(association.id) }); }
+    try {
+      await openViewerWindow({
+        modelId: association.viewerModelId,
+        title: association.modelTitle,
+        issueSession: () => requestSession(association.id),
+        onStatus: (status, message) => { if (status === "at-risk") setActionError(message); },
+      });
+    }
     catch (caught) { setActionError((caught as Error).message); }
     finally { setBusy(false); }
   };
@@ -6189,13 +6309,6 @@ function ViewerModels({ session }: { session: Session }) {
   };
 
   if (loading && !data) return <Loading />;
-  if (opened) return <ViewerEmbed
-    modelId={opened.association.viewerModelId}
-    title={opened.association.modelTitle}
-    session={opened.session}
-    renew={() => requestSession(opened.association.id)}
-    onClose={() => setOpened(null)}
-  />;
   return <div className="viewer-admin-layout">
     <ErrorLine error={error || actionError} />
     <ViewerProcessingPanel mapToken={session.mapboxPublicToken} />
@@ -6231,7 +6344,7 @@ function ViewerModels({ session }: { session: Session }) {
       {!data.associations.length ? <EmptyState title="No model associations" detail="Associate a ready Viewer model with an active client project to make it available." /> :
         <div className="viewer-association-list">{data.associations.map(association => <article key={association.id}>
           <div><StatusPill tone={association.state === "active" ? "success" : association.state === "source_stale" ? "warning" : "danger"}>{association.state.replace("_", " ")}</StatusPill><h3>{association.modelTitle}</h3><p>{association.clientName} · {association.projectName}</p><small>{association.modelProvider} · model version {association.viewerModelVersionId}</small></div>
-          <div>{association.state === "active" && <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void open(association)}>Open model</button>}{canManage && association.state === "active" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revoke(association)}>Remove access</button>}</div>
+          <div>{association.state === "active" && <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void open(association)}>Open model in new tab</button>}{canManage && association.state === "active" && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void revoke(association)}>Remove access</button>}</div>
         </article>)}</div>}
     </Card>}
     {data?.enabled && data.publicSharesEnabled && <section id="viewer-public-shares"><Card title="Public demo links">

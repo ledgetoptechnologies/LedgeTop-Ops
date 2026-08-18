@@ -559,6 +559,18 @@ async function stagedResources(db: D1Database, generationId: string, relationsEn
 
 function authorizationRefreshStatements(db: D1Database, workspaceId: string, sourceSequence: number): D1PreparedStatement[] {
   return [
+    db.prepare(`UPDATE portal_v2_identity_eligibility_bindings AS eligibility
+      SET principal_source_version=(SELECT principal.source_version FROM pa_portal_principals principal
+          WHERE principal.workspace_id=eligibility.workspace_id AND principal.public_id=eligibility.principal_public_id),
+        last_verified_at=datetime('now')
+      WHERE eligibility.workspace_id=? AND EXISTS (
+        SELECT 1 FROM pa_portal_principals principal
+        JOIN portal_v2_identities identity ON identity.id=eligibility.identity_id
+          AND identity.status='active' AND identity.revoked_at IS NULL
+        WHERE principal.workspace_id=eligibility.workspace_id AND principal.public_id=eligibility.principal_public_id
+          AND principal.status='active' AND lower(principal.email_hint)=lower(eligibility.verified_email)
+          AND lower(identity.verified_email)=lower(eligibility.verified_email)
+      )`).bind(workspaceId),
     db.prepare("UPDATE portal_v2_workspace_memberships SET status='suspended',updated_at=datetime('now') WHERE workspace_id=? AND source_type='project_alpha'").bind(workspaceId),
     db.prepare(`INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status,source_version)
       SELECT 'pa-membership:' || p.workspace_id || ':' || p.public_id,p.workspace_id,p.identity_id,'project_alpha','active',p.source_version

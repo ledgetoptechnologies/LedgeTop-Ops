@@ -154,15 +154,20 @@ redeeming or serving a session. Authorization defaults to deny in both systems.
 - Clear protected Viewer state immediately on a definitive authorization,
   revocation, source-removal, or deny decision.
 
-The embedded renewal protocol is versioned. Every message includes
-`version: 1`; the parent validates both the exact Viewer origin and the exact
-iframe `contentWindow`. Viewer emits `ltds-viewer:ready` and
+The dedicated Viewer-tab renewal protocol is versioned. Every message includes
+`version: 1`; the control-plane tab validates both the exact Viewer origin and
+the exact script-opened Viewer `Window`. Viewer performs the reciprocal exact
+opener/origin checks. Viewer emits `ltds-viewer:ready` and
 `ltds-viewer:session-expiring`; LTDS responds with
 `ltds-viewer:renew-session`. Viewer acknowledges with
 `ltds-viewer:session-renewed` or `ltds-viewer:session-renewal-failed`. Missing
 acknowledgements retry with bounded backoff only until the current session
-expires, then fail closed. The iframe remains mounted so camera, layer, and LOD
-loader state survive successful renewal.
+expires, then fail closed. The full Viewer tab remains mounted so camera,
+layer, and LOD loader state survive successful renewal. The opener relationship
+is retained only for this authenticated renewal channel; using `noopener` would
+break renewal, so exact source/origin/model validation is mandatory. If a
+browser blocks the synchronous new tab, the one-time session opens in the
+current tab as a usable fallback.
 
 ## LTDS routes, permissions, and gates
 

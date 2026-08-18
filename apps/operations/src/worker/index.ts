@@ -159,6 +159,11 @@ import {
   searchPortalDenyScopes,
 } from "./client-portal-deny-policies";
 import {
+  createEligibilityBlock,
+  listClientIdentityEligibility,
+  revokeEligibilityBlock,
+} from "./client-identity-eligibility";
+import {
   authenticatedDeliveryGrantsEnabled,
   createAuthenticatedDeliveryGrant,
   listAuthenticatedDeliveryGrants,
@@ -482,6 +487,17 @@ const identityDenialSchema = z.object({
 }).strict();
 const identityDenialRevokeSchema = z.object({
   expectedUpdatedAt: z.iso.datetime({ offset: true }),
+  reasonCode: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/),
+}).strict();
+const identityEligibilityBlockSchema = z.object({
+  matchType: z.enum(["issuer_subject", "email"]),
+  issuer: z.string().min(1).max(512).optional(),
+  subject: z.string().min(1).max(512).optional(),
+  email: z.email().max(254).optional(),
+  reasonCode: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/),
+  expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
+}).strict();
+const identityEligibilityBlockRevokeSchema = z.object({
   reasonCode: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/),
 }).strict();
 const authenticatedGrantSchema = z.object({
@@ -1043,6 +1059,19 @@ app.post("/api/client-portal/identity-denials/:denialId/revoke", async (c) => {
     c.env, c.get("principal"), c.req.param("denialId"), input.expectedUpdatedAt,
     input.reasonCode, c.req.header("Idempotency-Key") || "",
   ));
+});
+app.get("/api/team/clients", async c => c.json(
+  await listClientIdentityEligibility(c.env, c.get("principal")),
+));
+app.post("/api/team/clients/eligibility-blocks", async c => {
+  const result = await createEligibilityBlock(c.env, c.get("principal"),
+    await body(c, identityEligibilityBlockSchema), c.req.header("Idempotency-Key") || "");
+  return c.json(result, result.replayed ? 200 : 201);
+});
+app.post("/api/team/clients/eligibility-blocks/:blockId/revoke", async c => {
+  const input = await body(c, identityEligibilityBlockRevokeSchema);
+  return c.json(await revokeEligibilityBlock(c.env, c.get("principal"), c.req.param("blockId"),
+    input.reasonCode, c.req.header("Idempotency-Key") || ""));
 });
 app.get("/api/delivery/authenticated-grants/audiences", async (c) => c.json(
   await searchAuthenticatedDeliveryGrantAudiences(

@@ -57,7 +57,7 @@ export function viewerProcessingEnabled(
 const viewerPermissionMapping: ReadonlyArray<{
   ops: Extract<Permission,
     "viewer.view" | "viewer.datasets.manage" | "viewer.processing.manage" |
-    "viewer.publish" | "viewer.storage.purge">;
+    "viewer.publish" | "viewer.share.create" | "viewer.share.revoke" | "viewer.storage.purge">;
   viewer: readonly ViewerProcessingPermission[];
 }> = [
   { ops: "viewer.view", viewer: [
@@ -70,6 +70,8 @@ const viewerPermissionMapping: ReadonlyArray<{
     "viewer.gcp.write", "viewer.processing.write", "viewer.providers.write",
   ] },
   { ops: "viewer.publish", viewer: ["viewer.processing.publish"] },
+  { ops: "viewer.share.create", viewer: ["viewer.shares.read", "viewer.shares.create"] },
+  { ops: "viewer.share.revoke", viewer: ["viewer.shares.read", "viewer.shares.revoke"] },
   { ops: "viewer.storage.purge", viewer: ["viewer.storage.purge"] },
 ];
 
@@ -457,6 +459,24 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
     });
   });
 
+  app.get("/api/viewer/overview", async c => {
+    const principal = c.get("principal");
+    const permissions = await viewerAdminPermissions(c.env, principal);
+    if (!permissions.includes("viewer.projects.read"))
+      throw new HTTPException(403, { message: "Global viewer.view permission required" });
+    const enabled = viewerIntegrationEnabled(c.env);
+    if (!enabled) return c.json({ enabled: false, viewerBaseUrl: c.env.VIEWER_BASE_URL || null, overview: null });
+    try {
+      return c.json({
+        enabled: true,
+        viewerBaseUrl: c.env.VIEWER_BASE_URL || null,
+        overview: await viewerServiceClient(c.env).overview(),
+      });
+    } catch (error) {
+      return viewerError(error);
+    }
+  });
+
   app.post("/api/viewer/admin-grant", async c => {
     if (!viewerProcessingEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
     const principal = c.get("principal");
@@ -473,7 +493,13 @@ export function registerViewerProcessingRoutes(app: ViewerApp): void {
         displayUnits: units,
         idempotencyKey: key.data,
       });
-      return c.json({ ...grant, units: { default: defaultViewerUnits(c.env), resolved: units } }, 201);
+      const origin = new URL(c.env.VIEWER_BASE_URL!);
+      const workspaceUrl = new URL(`/workspace/${encodeURIComponent(grant.grant)}`, origin);
+      return c.json({
+        ...grant,
+        workspaceUrl: workspaceUrl.href,
+        units: { default: defaultViewerUnits(c.env), resolved: units },
+      }, 201);
     } catch (error) { return viewerError(error); }
   });
 

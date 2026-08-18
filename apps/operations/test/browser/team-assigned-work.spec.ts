@@ -40,6 +40,12 @@ async function mock(page: Page) {
         roles: "Pilot",
         sync_protected: 0,
       }] } });
+    } else if (path === "/api/team/clients") {
+      await route.fulfill({ json: { clients: [{
+        workspace_id: "workspace-one", public_id: "principal-one", display_name: "Alex Client",
+        email_hint: "alex@example.test", status: "active", identity_id: null, issuer: null, subject: null,
+        has_workspace_access: 0, blocked: 0,
+      }], blocks: [] } });
     } else if (path === "/api/team/staff/staff-pilot/assigned-work") {
       assignedWorkRequests += 1;
       await route.fulfill({ json: {
@@ -128,5 +134,20 @@ test("Team lazily exposes only visible assigned work and opens its pinned-SOP br
   await page.keyboard.press("Enter");
   await expect(page).toHaveURL(/#job-brief-sop-revision-mapping-3$/);
   await expect(page.locator(".job-brief-sop strong", { hasText: "Mapping Flight SOP" })).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("Team keeps Staff and Clients as responsive keyboard-accessible directories", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await mock(page);
+  await page.goto("/team");
+  const clients = page.getByRole("tab", { name: "Clients" });
+  await clients.focus();
+  await page.keyboard.press("Enter");
+  await expect(clients).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByRole("heading", { name: "Alex Client" })).toBeVisible();
+  await expect(page.getByText("Awaiting first login")).toBeVisible();
+  await expect(page.getByText("No data access is implied by directory eligibility.")).toBeVisible();
+  expect((await clients.boundingBox())?.height).toBeGreaterThanOrEqual(44);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

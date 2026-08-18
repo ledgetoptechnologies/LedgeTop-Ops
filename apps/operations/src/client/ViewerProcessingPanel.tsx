@@ -18,7 +18,7 @@ import type {
   ViewerStorageSummary,
   ViewerTaskStorageResponse,
 } from "@ltds/shared";
-import { Card, EmptyState, Loading, StatusPill, ViewerEmbed } from "@ltds/ui";
+import { Card, EmptyState, Loading, StatusPill, openViewerWindow, type ViewerWindowHandle } from "@ltds/ui";
 import { api } from "./api";
 import { hashFileOffThread } from "./file-hash";
 import {
@@ -611,11 +611,18 @@ function TaskRow({ client, task, providers, presets, canWrite, canPublish, busy,
   const [detail, setDetail] = useState<ViewerProcessingAttemptDetail | null>(null);
   const [detailError, setDetailError] = useState("");
   const [history, setHistory] = useState<ViewerProcessingAttemptPage | null>(null);
-  const [reviewSession, setReviewSession] = useState<ViewerReviewSessionGrant | null>(null);
+  const reviewWindow = useRef<ViewerWindowHandle<ViewerReviewSessionGrant> | null>(null);
+  const [reviewOpen, setReviewOpen] = useState(false);
   const [reviewAssetKinds, setReviewAssetKinds] = useState<ViewerReviewSessionGrant["assetKinds"]>([]);
   const [reviewBusy, setReviewBusy] = useState(false), [reviewError, setReviewError] = useState("");
   const attempt = task.latestAttempt;
-  useEffect(() => { setReviewSession(null); setReviewAssetKinds([]); }, [attempt?.id, attempt?.resultModelVersionId]);
+  useEffect(() => {
+    reviewWindow.current?.close();
+    reviewWindow.current = null;
+    setReviewOpen(false);
+    setReviewAssetKinds([]);
+  }, [attempt?.id, attempt?.resultModelVersionId]);
+  useEffect(() => () => reviewWindow.current?.close(), []);
   const active = Boolean(attempt && ["pending","admitted","initializing","uploading","committed","queued_upstream","running","ingesting","derivatives"].includes(attempt.status));
   const issueReviewSession = async (): Promise<ViewerReviewSessionGrant> => {
     if (!client || !attempt) throw new Error("Viewer review is unavailable");
@@ -627,13 +634,29 @@ function TaskRow({ client, task, providers, presets, canWrite, canPublish, busy,
   const openReview = async () => {
     if (reviewBusy) return;
     setReviewBusy(true); setReviewError("");
-    try { const session = await issueReviewSession(); setReviewSession(session); setReviewAssetKinds(session.assetKinds); }
+    try {
+      const opened = await openViewerWindow({
+        modelId: attempt?.resultModelId || "",
+        title: `${task.displayName} — unpublished review`,
+        issueSession: issueReviewSession,
+        onStatus: (status, message) => {
+          if (status === "at-risk") setReviewError(message);
+          if (status === "closed") { reviewWindow.current = null; setReviewOpen(false); }
+        },
+      });
+      reviewWindow.current = opened;
+      setReviewOpen(true);
+      setReviewAssetKinds(opened.initialSession.assetKinds);
+    }
     catch (caught) { setReviewError((caught as Error).message); }
     finally { setReviewBusy(false); }
   };
   const closeReview = async () => {
-    if (!client || !attempt) { setReviewSession(null); return; }
-    setReviewSession(null); setReviewError("");
+    reviewWindow.current?.close();
+    reviewWindow.current = null;
+    setReviewOpen(false);
+    if (!client || !attempt) return;
+    setReviewError("");
     try { await client.request(`/api/v1/attempts/${encodeURIComponent(attempt.id)}/review-sessions`, {
       method: "DELETE", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}",
     }); }
@@ -645,12 +668,12 @@ function TaskRow({ client, task, providers, presets, canWrite, canPublish, busy,
     {reviewError && <p className="viewer-processing-error" role="alert">{reviewError}</p>}
     {detail && <details open className="viewer-attempt-detail"><summary>Attempt logs</summary><progress max={1} value={detail.attempt.progress || 0} />{detail.logs.length ? <ol>{detail.logs.map((log, index) => <li key={`${log.created_at}-${index}`}><time>{log.created_at}</time> <strong>{log.level}</strong> {log.message}</li>)}</ol> : <p>No provider logs yet.</p>}</details>}
     {history && <details open className="viewer-attempt-history"><summary>Attempt and model-version history</summary>{history.attempts.length ? <ol>{history.attempts.map(item => <AttemptHistoryItem key={item.id} attempt={item} provider={providers.find(provider => provider.id === item.providerId)} />)}</ol> : <p>No attempts have been created.</p>}{history.nextCursor && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void query(async viewer => { const next = await viewer.request<ViewerProcessingAttemptPage>(`/api/v1/tasks/${encodeURIComponent(task.id)}/attempts?limit=20&cursor=${encodeURIComponent(history.nextCursor!)}`); setHistory(current => current ? { attempts: [...current.attempts, ...next.attempts], nextCursor: next.nextCursor } : next); })}>Load older attempts</button>}</details>}
-    {reviewSession && <ViewerEmbed modelId={reviewSession.modelId} title={`${task.displayName} — unpublished review`} session={reviewSession} renew={issueReviewSession} onClose={() => void closeReview()} />}
+    {reviewOpen && <p className="viewer-upload-resume" role="status">The unpublished model is open in the dedicated Viewer tab. <button type="button" className="button-ghost button-small" onClick={() => void closeReview()}>Close preview session</button></p>}
     <TaskStorageDetails task={task} busy={busy} query={query} />
   </div><div>
     {attempt && <button type="button" className="button-ghost button-small" onClick={() => void clientFor(mutate, async client => { try { setDetail(await client.request<ViewerProcessingAttemptDetail>(`/api/v1/attempts/${encodeURIComponent(attempt.id)}`)); setDetailError(""); } catch (caught) { setDetailError((caught as Error).message); } })}>Progress & logs</button>}
     <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void query(async viewer => setHistory(await viewer.request<ViewerProcessingAttemptPage>(`/api/v1/tasks/${encodeURIComponent(task.id)}/attempts?limit=20`)))}>Attempt history</button>
-    {canPublish && attempt?.status === "ready_for_review" && !reviewSession && <button type="button" className="button-orange button-small" disabled={busy || reviewBusy || !client} onClick={() => void openReview()}>{reviewBusy ? "Opening review…" : "Preview unpublished model"}</button>}
+    {canPublish && attempt?.status === "ready_for_review" && !reviewOpen && <button type="button" className="button-orange button-small" disabled={busy || reviewBusy || !client} onClick={() => void openReview()}>{reviewBusy ? "Opening review…" : "Preview unpublished model in new tab"}</button>}
     {canWrite && task.status === "draft" && !task.activeAttemptId && <DraftAttemptControls task={task} providers={providers} presets={presets} busy={busy} mutate={mutate} />}
     {canWrite && attempt?.status === "failed" && <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/attempts/${encodeURIComponent(attempt.id)}/retry`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "A new retry attempt was created.")}>Retry</button>}
     {canWrite && active && <button type="button" className="button-danger button-small" disabled={busy} onClick={() => void mutate(client => client.request(`/api/v1/attempts/${encodeURIComponent(attempt!.id)}/cancel`, { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() }, body: "{}" }), "Cancellation requested.")}>Cancel</button>}

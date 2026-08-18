@@ -25,10 +25,31 @@ verification fingerprint, and observed metadata. LTDS must not create or edit PA
 projects or artifacts, send PA financial notices, or treat an operational
 estimate as a quote, contract, invoice, or payment approval.
 
-The portal's local authorization is authoritative for LTDS access. A PA client,
-organization, project, email address, billing contact, or notification recipient
-does not grant portal or staff access. Service-enabled project links require an
-exact PA client match; organization-only links are view-only.
+The portal's local authorization is authoritative for LTDS data access. An
+active Project Alpha portal principal with one canonical email address may
+automatically establish a Client Portal identity and enter the matching empty
+workspace shell. A PA billing contact, notification recipient, shared mailbox,
+or arbitrary email field is never an identity source. Automatic eligibility
+creates no capability entitlement, project grant, Delivery grant, or Viewer
+grant; every data surface remains empty until staff explicitly share it.
+Service-enabled project links require an exact PA client match;
+organization-only links are view-only.
+
+Operations exposes this boundary under **Team → Staff** and **Team → Clients**.
+The Clients directory is an eligibility directory, not a list of data grants.
+Administrators may opt a principal out before or after first login using an
+email or exact issuer/subject block. Active blocks are checked on every portal
+identity resolution and every Viewer authorization/introspection, so they take
+precedence over memberships, entitlements, project grants, and Viewer grants;
+previously issued Viewer sessions fail at their next bounded live-introspection
+check. Removing a block restores eligibility only;
+it does not create or restore any data grant.
+
+Migrations `0144_viewer_client_grants.sql` and
+`0145_portal_identity_eligibility.sql` add authenticated project/task Viewer
+grants, opt-out eligibility, the minimal empty-shell bridge, durable mutation
+receipts, and audit history. Apply them in that order before deploying code that
+uses these tables.
 
 ## Workflow
 
@@ -585,7 +606,8 @@ Production activation order:
    intentionally leaves an account with neither PA ID unprojected, so the
    pending migrations do not guess a root or grant access.
 3. In Operations Administration, review the displayed effective root and link
-   the unrooted legacy account. With `0121` present, the same transaction also
+   the unrooted existing portal account (called a legacy account in the schema
+   and migration code). With `0121` present, the same transaction also
    creates the complete legacy projection. Confirm exactly one
    `client.account.project_alpha_root_linked` audit event exists. Do not edit
    the IDs or seed projection rows with ad-hoc SQL. (For a fresh environment,

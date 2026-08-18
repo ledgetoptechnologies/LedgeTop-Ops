@@ -22,6 +22,21 @@ import {
 } from "../src/client/portal-api";
 import { neutralMapLocation } from "../src/client/MapAreaSelector";
 import { clientPortalPath, clientProjectPath, clientRequestNewPath, parseClientPortalRoute } from "../src/client/portal-route";
+import { isSafeViewerSessionUrl } from "@ltds/ui";
+
+describe("Viewer session navigation", () => {
+  it.each([
+    ["https://viewer.ledgetopdroneservices.com/session/grant", true],
+    ["http://localhost:8080/session/grant", true],
+    ["http://127.0.0.1:8080/session/grant", true],
+    ["http://viewer.ledgetopdroneservices.com/session/grant", false],
+    ["javascript:alert(1)", false],
+    ["data:text/html,viewer", false],
+    ["file:///session/grant", false],
+  ])("classifies %s", (value, expected) => {
+    expect(isSafeViewerSessionUrl(value)).toBe(expected);
+  });
+});
 
 describe("client portal browser routing", () => {
   it.each([

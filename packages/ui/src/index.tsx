@@ -98,6 +98,172 @@ type ViewerMessage = {
   error?: string;
 };
 
+export type ViewerWindowStatus = "opening" | "ready" | "renewing" | "retrying" | "at-risk" | "closed";
+
+export type ViewerWindowHandle<T extends ViewerSessionGrant = ViewerSessionGrant> = {
+  initialSession: T;
+  openedIn: "new-tab" | "same-tab";
+  close: () => void;
+  isClosed: () => boolean;
+};
+
+export function isSafeViewerSessionUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ||
+      (url.protocol === "http:" && (url.hostname === "localhost" || url.hostname === "127.0.0.1"));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Opens the full Viewer as a separate, script-owned tab and keeps only a
+ * narrow postMessage renewal channel to it. The opener relationship is
+ * intentional: removing it with `noopener` would also remove silent renewal.
+ * Both applications validate the exact peer Window, exact Viewer origin,
+ * protocol version, and model id before accepting a message. If a browser
+ * blocks the synchronous tab, the same one-time grant opens in the current
+ * tab so the model remains usable.
+ */
+export function openViewerWindow<T extends ViewerSessionGrant>({
+  modelId,
+  title,
+  issueSession,
+  onStatus,
+  onClosed,
+}: {
+  modelId: string;
+  title: string;
+  issueSession: () => Promise<T>;
+  onStatus?: (status: ViewerWindowStatus, message: string) => void;
+  onClosed?: () => void;
+}): Promise<ViewerWindowHandle<T>> {
+  // This must happen before the first await so normal popup policies recognize
+  // the launch as part of the user's click. The blank document runs no code.
+  const viewerWindow = window.open("about:blank", "_blank");
+  if (viewerWindow) {
+    try {
+      viewerWindow.document.title = `Opening ${title}`;
+      viewerWindow.document.body.textContent = "Opening secure 3D Viewer…";
+    } catch { /* The blank placeholder is best effort only. */ }
+  }
+  onStatus?.("opening", "Opening secure 3D Viewer…");
+
+  return (async () => {
+    let initialSession: T;
+    try {
+      initialSession = await issueSession();
+    } catch (error) {
+      viewerWindow?.close();
+      throw error;
+    }
+    const initialUrl = new URL(initialSession.embedUrl);
+    if (!isSafeViewerSessionUrl(initialUrl.href)) {
+      viewerWindow?.close();
+      throw new Error("Viewer returned an unsafe session URL");
+    }
+
+    if (!viewerWindow) {
+      onStatus?.("opening", "The new tab was blocked; opening the Viewer in this tab instead.");
+      window.location.assign(initialUrl.href);
+      return { initialSession, openedIn: "same-tab", close: () => undefined, isClosed: () => false };
+    }
+
+    const viewerOrigin = initialUrl.origin;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let acknowledgementTimer: ReturnType<typeof setTimeout> | null = null;
+    let closedTimer: ReturnType<typeof setInterval> | null = null;
+    let renewing: Promise<void> | null = null;
+    let retryAttempt = 0;
+    let currentExpiry = "";
+    let cleaned = false;
+
+    const cleanup = (notify = false) => {
+      if (cleaned) return;
+      cleaned = true;
+      window.removeEventListener("message", receive);
+      if (retryTimer) clearTimeout(retryTimer);
+      if (acknowledgementTimer) clearTimeout(acknowledgementTimer);
+      if (closedTimer) clearInterval(closedTimer);
+      if (notify) {
+        onStatus?.("closed", "Viewer tab closed.");
+        onClosed?.();
+      }
+    };
+
+    const requestRenewal = (expiresAt: string): Promise<void> => {
+      const remaining = Date.parse(expiresAt) - Date.now();
+      if (!Number.isFinite(remaining) || remaining <= 2_000 || viewerWindow.closed) {
+        onStatus?.("at-risk", "This Viewer session could not be renewed. Reopen the model to reconnect.");
+        return Promise.resolve();
+      }
+      if (renewing || acknowledgementTimer) return renewing || Promise.resolve();
+      const run = async () => {
+        onStatus?.("renewing", "Renewing secure Viewer session…");
+        try {
+          const next = await issueSession();
+          if (new URL(next.embedUrl).origin !== viewerOrigin) throw new Error("Viewer origin changed");
+          viewerWindow.postMessage({ version: 1, type: "ltds-viewer:renew-session", grant: next.grant }, viewerOrigin);
+          acknowledgementTimer = setTimeout(() => {
+            acknowledgementTimer = null;
+            void requestRenewal(currentExpiry);
+          }, 8_000);
+          retryAttempt = 0;
+        } catch {
+          const retryWindow = Date.parse(expiresAt) - Date.now();
+          if (!Number.isFinite(retryWindow) || retryWindow <= 2_000) {
+            onStatus?.("at-risk", "This Viewer session could not be renewed. Reopen the model to reconnect.");
+            return;
+          }
+          const delay = Math.min(15_000, 1_000 * 2 ** Math.min(retryAttempt++, 4), Math.max(500, retryWindow - 1_000));
+          onStatus?.("retrying", "Viewer renewal is retrying…");
+          retryTimer = setTimeout(() => void requestRenewal(expiresAt), delay);
+        } finally {
+          renewing = null;
+        }
+      };
+      renewing = run();
+      return renewing;
+    };
+
+    const receive = (event: MessageEvent<ViewerMessage>) => {
+      if (event.source !== viewerWindow || event.origin !== viewerOrigin || event.data?.version !== 1 ||
+        !event.data || event.data.modelId !== modelId) return;
+      if (event.data.type === "ltds-viewer:ready" && event.data.expiresAt) {
+        currentExpiry = event.data.expiresAt;
+        onStatus?.("ready", "Viewer opened in a new tab.");
+      } else if (event.data.type === "ltds-viewer:session-expiring" && event.data.expiresAt) {
+        currentExpiry = event.data.expiresAt;
+        void requestRenewal(event.data.expiresAt);
+      } else if (event.data.type === "ltds-viewer:session-renewed" && event.data.expiresAt) {
+        if (acknowledgementTimer) clearTimeout(acknowledgementTimer);
+        acknowledgementTimer = null;
+        currentExpiry = event.data.expiresAt;
+        retryAttempt = 0;
+        onStatus?.("ready", "Viewer session renewed.");
+      } else if (event.data.type === "ltds-viewer:session-renewal-failed") {
+        if (acknowledgementTimer) clearTimeout(acknowledgementTimer);
+        acknowledgementTimer = null;
+        void requestRenewal(currentExpiry);
+      }
+    };
+
+    window.addEventListener("message", receive);
+    closedTimer = setInterval(() => {
+      if (viewerWindow.closed) cleanup(true);
+    }, 1_000);
+    viewerWindow.location.replace(initialUrl.href);
+
+    return {
+      initialSession,
+      openedIn: "new-tab",
+      close: () => { cleanup(); viewerWindow.close(); },
+      isClosed: () => viewerWindow.closed,
+    };
+  })();
+}
+
 /**
  * Keeps the Viewer iframe mounted while renewing its authorization in place.
  * Camera/layer/loader state therefore survives renewal. The parent accepts

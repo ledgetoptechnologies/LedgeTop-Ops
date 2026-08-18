@@ -58,6 +58,9 @@ export type ViewerProcessingPermission =
   | "viewer.processing.read"
   | "viewer.processing.write"
   | "viewer.processing.publish"
+  | "viewer.shares.read"
+  | "viewer.shares.create"
+  | "viewer.shares.revoke"
   | "viewer.providers.read"
   | "viewer.providers.write"
   | "viewer.storage.purge";
@@ -67,6 +70,17 @@ export interface ViewerAdminSessionGrant {
   grantExpiresAt: string;
   sessionTtlSeconds: number;
   redeemUrl: string;
+}
+
+export interface ViewerPlatformOverview {
+  schemaVersion: 1;
+  generatedAt: string;
+  projects: { active: number; total: number };
+  models: { published: number; total: number; bytes: number };
+  jobs: { queued: number; running: number; reviewReady: number; failed: number };
+  providers: { enabled: number; healthy: number; total: number };
+  storage: { usedBytes: number; availableBytes: number | null };
+  platform: { ready: boolean; workerLive: boolean; lifecycleBlocked: boolean };
 }
 
 export interface ViewerAdminSession {
@@ -761,6 +775,60 @@ export class ViewerServiceClient {
     if (models.some(item => item === null))
       throw new ViewerServiceError("3D Viewer returned an invalid model catalog", "invalid_response");
     return models as ViewerModelSummary[];
+  }
+
+  async overview(): Promise<ViewerPlatformOverview> {
+    const payload = record(await this.request("/api/v1/overview"));
+    const projects = record(payload?.projects), models = record(payload?.models),
+      jobs = record(payload?.jobs), providers = record(payload?.providers),
+      storage = record(payload?.storage), platform = record(payload?.platform);
+    const counts = [
+      projects?.active, projects?.total, models?.published, models?.total, models?.bytes,
+      jobs?.queued, jobs?.running, jobs?.reviewReady, jobs?.failed,
+      providers?.enabled, providers?.healthy, providers?.total, storage?.usedBytes,
+    ];
+    if (!payload || payload.schemaVersion !== 1 || typeof payload.generatedAt !== "string" ||
+      !Number.isFinite(Date.parse(payload.generatedAt)) || !projects || !models || !jobs ||
+      !providers || !storage || !platform ||
+      counts.some(value => !Number.isSafeInteger(value) || (value as number) < 0) ||
+      (storage.availableBytes !== null && (!Number.isSafeInteger(storage.availableBytes) || (storage.availableBytes as number) < 0)) ||
+      typeof platform.ready !== "boolean" || typeof platform.workerLive !== "boolean" ||
+      typeof platform.lifecycleBlocked !== "boolean" ||
+      (projects.active as number) > (projects.total as number) ||
+      (models.published as number) > (models.total as number) ||
+      (providers.enabled as number) > (providers.total as number) ||
+      (providers.healthy as number) > (providers.total as number))
+      throw new ViewerServiceError("3D Viewer returned an invalid platform overview", "invalid_response");
+    return {
+      schemaVersion: 1,
+      generatedAt: payload.generatedAt as string,
+      projects: { active: projects.active as number, total: projects.total as number },
+      models: {
+        published: models.published as number,
+        total: models.total as number,
+        bytes: models.bytes as number,
+      },
+      jobs: {
+        queued: jobs.queued as number,
+        running: jobs.running as number,
+        reviewReady: jobs.reviewReady as number,
+        failed: jobs.failed as number,
+      },
+      providers: {
+        enabled: providers.enabled as number,
+        healthy: providers.healthy as number,
+        total: providers.total as number,
+      },
+      storage: {
+        usedBytes: storage.usedBytes as number,
+        availableBytes: storage.availableBytes as number | null,
+      },
+      platform: {
+        ready: platform.ready as boolean,
+        workerLive: platform.workerLive as boolean,
+        lifecycleBlocked: platform.lifecycleBlocked as boolean,
+      },
+    };
   }
 
   async createSession(input: {

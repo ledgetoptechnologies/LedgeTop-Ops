@@ -147,6 +147,51 @@ describe("Viewer service client", () => {
     await expect(client.listModels()).rejects.toMatchObject({ code: "invalid_response" });
   });
 
+  it("accepts only the bounded aggregate Viewer overview contract", async () => {
+    const overview = {
+      schemaVersion: 1 as const,
+      generatedAt: "2026-08-18T14:00:00.000Z",
+      projects: { active: 3, total: 4 },
+      models: { published: 7, total: 9, bytes: 123456 },
+      jobs: { queued: 1, running: 2, reviewReady: 1, failed: 0 },
+      providers: { enabled: 2, healthy: 1, total: 3 },
+      storage: { usedBytes: 456789, availableBytes: null },
+      platform: { ready: true, workerLive: true, lifecycleBlocked: false },
+    };
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(new URL(String(input)).pathname).toBe("/api/v1/overview");
+      expect(init?.method).toBe("GET");
+      expect(init?.cache).toBe("no-store");
+      expect(init?.redirect).toBe("manual");
+      return Response.json(overview);
+    });
+    const client = new ViewerServiceClient(
+      { baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret },
+      fetcher as typeof fetch,
+    );
+    await expect(client.overview()).resolves.toEqual(overview);
+
+    for (const invalid of [
+      { ...overview, schemaVersion: 2 },
+      { ...overview, jobs: { ...overview.jobs, running: -1 } },
+      { ...overview, providers: { ...overview.providers, healthy: 4 } },
+      { ...overview, storage: { ...overview.storage, availableBytes: Number.MAX_SAFE_INTEGER + 1 } },
+      { ...overview, internalPath: "/app/storage/private" },
+    ]) {
+      const invalidClient = new ViewerServiceClient(
+        { baseUrl: "https://viewer.example.test", keyId: "ops-v1", secret },
+        vi.fn(async () => Response.json(invalid)) as typeof fetch,
+      );
+      if ("internalPath" in invalid) {
+        // Unknown top-level fields are not surfaced by the typed aggregate.
+        const value = await invalidClient.overview();
+        expect(value).not.toHaveProperty("internalPath");
+      } else {
+        await expect(invalidClient.overview()).rejects.toMatchObject({ code: "invalid_response" });
+      }
+    }
+  });
+
   it("creates, lists, and revokes public shares without returning the raw token", async () => {
     const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = new URL(String(input));
