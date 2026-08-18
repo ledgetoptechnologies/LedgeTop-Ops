@@ -30,7 +30,7 @@ captured.
 The updated source, manifest digest, migrations, fixtures, and activation
 policy passed independent cross-repository verification, so the corresponding
 constant in `scripts/staging-requirements.mjs` is
-`RELEASE_CONTRACT_FINALIZED=true` for this exact candidate set. This freezes
+`RELEASE_CONTRACT_FINALIZED=false` while the latest-tag and Operations client-directory UI follow-up is under review. Set it to true only after the updated source and image pins are independently verified. Finalization freezes
 the candidate contract only; it does not approve deployment, migrations, or
 any feature flag. Reset it to `false` before changing a pinned source or
 deployment artifact.

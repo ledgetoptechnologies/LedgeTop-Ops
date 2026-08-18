@@ -141,10 +141,13 @@ test("Team keeps Staff and Clients as responsive keyboard-accessible directories
   await page.setViewportSize({ width: 390, height: 844 });
   await mock(page);
   await page.goto("/team");
+  const staff = page.getByRole("tab", { name: "Staff" });
   const clients = page.getByRole("tab", { name: "Clients" });
+  await expect(clients).toHaveCSS("color", "rgb(21, 27, 34)");
   await clients.focus();
   await page.keyboard.press("Enter");
   await expect(clients).toHaveAttribute("aria-selected", "true");
+  await expect(staff).toHaveCSS("color", "rgb(21, 27, 34)");
   await expect(page.getByRole("heading", { name: "Alex Client" })).toBeVisible();
   await expect(page.getByText("Awaiting first login")).toBeVisible();
   await expect(page.getByText("No data access is implied by directory eligibility.")).toBeVisible();

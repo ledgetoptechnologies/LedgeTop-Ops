@@ -6441,7 +6441,6 @@ function Administration({ session }: { session: Session }) {
           </ul>
         </Card>
       </div>
-      {session.user.isAdministrator && allowed(session.user, "operations.manage") && <ClientAccountRootActivation />}
       {session.capabilities?.clientWorkspaceManagerRecovery?.enabled === true && allowed(session.user, "operations.manage") && <ClientWorkspaceManagerRecovery />}
       {session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <DelegatedShareAdministration />}
       {session.capabilities?.portalIdentityDenials?.enabled === true && session.user.isAdministrator && <PortalIdentityDenyAdministration />}
