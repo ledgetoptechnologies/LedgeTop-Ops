@@ -730,6 +730,7 @@ export class ViewerServiceClient {
   private async request(pathWithQuery: string, init: { method?: string; body?: string; idempotencyKey?: string } = {}): Promise<unknown> {
     const method = (init.method || "GET").toUpperCase(), body = init.body || "";
     const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 10_000);
+    let stage: "sign" | "fetch" | "response" = "sign";
     try {
       const signed = await signViewerServiceRequest({
         ...this.configuration,
@@ -737,6 +738,7 @@ export class ViewerServiceClient {
         pathWithQuery,
         body,
       });
+      stage = "fetch";
       const response = await this.fetcher(`${this.origin}${pathWithQuery}`, {
         method,
         body: method === "GET" || method === "HEAD" ? undefined : body,
@@ -753,6 +755,7 @@ export class ViewerServiceClient {
         redirect: "manual",
         signal: controller.signal,
       });
+      stage = "response";
       if (response.status === 401 || response.status === 403)
         throw new ViewerServiceError("3D Viewer service authentication failed", "authentication_failed", 503);
       if (response.status === 404) throw new ViewerServiceError("3D model not found", "not_found", 404);
@@ -768,6 +771,7 @@ export class ViewerServiceClient {
       console.error(JSON.stringify({
         event: "viewer.service.request_failed",
         kind: error instanceof Error ? error.name : "unknown",
+        stage,
       }));
       throw new ViewerServiceError("3D Viewer is temporarily unavailable", "unavailable", 503);
     } finally {
