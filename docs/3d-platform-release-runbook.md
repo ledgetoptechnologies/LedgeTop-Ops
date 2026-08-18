@@ -16,7 +16,7 @@ captured.
   `v0.2.0-rc.0f6de19` and `sha-0f6de19`; it did not publish `latest`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
   UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
-- LTDS-Ops product code: `75fdce881a51cfb88f78c1983202845a53bb04e0` on
+- LTDS-Ops product code: `ea4287695afcef9ce170d934561de37d6b6ba1cb` on
   `codex/3d-processing-control-plane`. This pin moves processing management to
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
   overview; never substitute a mutable branch tip.
