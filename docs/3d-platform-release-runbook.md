@@ -30,9 +30,10 @@ captured.
 The updated source, manifest digest, migrations, fixtures, and activation
 policy passed independent cross-repository verification, so the corresponding
 constant in `scripts/staging-requirements.mjs` is
-`RELEASE_CONTRACT_FINALIZED=false` while the Viewer/Ops client-grant bridge is under review. Set it to true only after new commits, immutable Viewer image digest pull-back, migrations, and independent freeze audit. This freezes the candidate contract only;
-it does not approve deployment, migrations, or any feature flag. Reset it to
-`false` before changing a pinned source or deployment artifact.
+`RELEASE_CONTRACT_FINALIZED=true` for this exact candidate set. This freezes
+the candidate contract only; it does not approve deployment, migrations, or
+any feature flag. Reset it to `false` before changing a pinned source or
+deployment artifact.
 
 The Viewer/Ops signed-processing corpus has SHA-256
 `0ed7a7c40ad23583b9e741667b99aecc31cc01f7617c73ab63ad314a7ba344a0`.
