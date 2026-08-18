@@ -12,8 +12,8 @@ captured.
 - 3D Viewer source: `9cd1d1c98342c401f1017490e959b3790b330037`.
   The reviewed release-candidate image is
   `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:f6ec58c5f25eb0a6f79cbabccf1406901454e4c2b95193a5079efe1e9b7383c9`.
-  GitHub Actions run `32156471332` published only tags
-  `v0.2.0-rc.0f6de19` and `sha-0f6de19`; it did not publish `latest`. The
+  GitHub Actions run `32183500777` published only tags
+  `v0.2.0-rc.9cd1d1c` and `sha-9cd1d1c`; it did not publish `latest`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
   UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
 - LTDS-Ops product code: `ea4287695afcef9ce170d934561de37d6b6ba1cb` on
@@ -21,9 +21,10 @@ captured.
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
   overview; never substitute a mutable branch tip.
 - Project Alpha: `f646f3b308d993bd90d256975f140eac6ed65e15` on
-  `codex/portal-scope-ci`. Its direct parent is runtime candidate
-  `769df9320dbf4dfc512d364173d5cb7d8ad8a97c`; the tip additionally makes the
-  real isolated MySQL scope-lock regression a mandatory CI gate.
+  `codex/portal-scope-ci`. Its direct parent is the prior reviewed candidate
+  `3c0059e538067718abd91bc28e67a9714305260b`; the tip adds the default-off
+  managed-delivery handoff while preserving the mandatory isolated MySQL
+  scope-lock CI gate.
 
 The updated source, manifest digest, migrations, fixtures, and activation
 policy passed independent cross-repository verification, so the corresponding
