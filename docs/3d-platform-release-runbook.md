@@ -1,36 +1,35 @@
 # 3D processing and delivery release runbook
 
-Status: **source candidates and the immutable Viewer registry image are
-frozen and independently signed off; live staging evidence and activation
-remain pending**. Every
+Status: **updated source candidates and the immutable Viewer registry image
+are pinned for re-verification; the release contract, live staging evidence,
+and activation remain pending**. Every
 Viewer, Operations, Client, processing, public-share, and Project Alpha portal
 feature gate remains off until the corresponding live evidence below is
 captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `ab6e65e3db8963a03e2ea8b4518d5cc23acc203e`.
+- 3D Viewer source: `cf40597ebb7d048267262184bce72c18c88c7579`.
   The reviewed release-candidate image is
-  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:9be49534d3cae15672f1e70a8eafe005695dc23c0a4679aabea78a29c79590bf`.
-  GitHub Actions run `32055416240` published only tags
-  `v0.2.0-rc.ab6e65e` and `sha-ab6e65e`; it did not publish `latest`. The
+  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:c6e63ec7980bb3ea7a7ee11e85719d0587740f943fe6560f570487570c6e1d8c`.
+  GitHub Actions run `32154753213` published only tags
+  `v0.2.0-rc.cf40597` and `sha-cf40597`; it did not publish `latest`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
   UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
-- LTDS-Ops product code: `c74c4da030dddd089f46008dfffffbe148ec76fb` on
-  `codex/3d-processing-control-plane`. This pin contains the desktop
-  Administration-menu fix equivalent to `09e3443`; never substitute a mutable
-  branch tip.
+- LTDS-Ops product code: `5672b4bf2623bccbee9addf1bf43fe27bee74ff1` on
+  `codex/3d-processing-control-plane`. This pin moves processing management to
+  the dedicated Viewer workspace and leaves Operations as the aggregate Data
+  overview; never substitute a mutable branch tip.
 - Project Alpha: `3c0059e538067718abd91bc28e67a9714305260b` on
   `codex/portal-scope-ci`. Its direct parent is runtime candidate
   `769df9320dbf4dfc512d364173d5cb7d8ad8a97c`; the tip additionally makes the
   real isolated MySQL scope-lock regression a mandatory CI gate.
 
-The pinned source, manifest digest, migrations, fixtures, and activation policy
-passed independent cross-repository verification, so the corresponding
-constant in `scripts/staging-requirements.mjs` is
-`RELEASE_CONTRACT_FINALIZED=true`. This freezes the candidate contract only;
-it does not approve deployment, migrations, or any feature flag. Reset it to
-`false` before changing a pinned source or deployment artifact.
+The updated source, manifest digest, migrations, fixtures, and activation
+policy must pass the independent cross-repository verification again, so the
+corresponding constant in `scripts/staging-requirements.mjs` is
+`RELEASE_CONTRACT_FINALIZED=false`. Do not deploy, activate, or treat this as a
+frozen contract until that review explicitly completes.
 
 The Viewer/Ops signed-processing corpus has SHA-256
 `13ab12919e624be6a048c058774ccff2031f865855e64ab3b726e9b31cffab82`.
@@ -101,7 +100,7 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091`, published-session revocation
 commit `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06`, and subsequent hardening commits
-through `ab6e65e3db8963a03e2ea8b4518d5cc23acc203e` do not change the provider adapter,
+through `cf40597ebb7d048267262184bce72c18c88c7579` retain the reviewed provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
@@ -121,7 +120,8 @@ TrueNAS staging rehearsal remain live gates.
 3. Confirm these production variables remain the literal string `false`:
    `VIEWER_INTEGRATION_ENABLED`, `VIEWER_PROCESSING_ENABLED`,
    `VIEWER_PUBLIC_SHARES_ENABLED`, `CLIENT_VIEWER_SESSION_ISSUER_ENABLED`,
-   `CLIENT_VIEWER_SHARES_ENABLED`, `CLIENT_VIEWER_ENABLED`, and Viewer
+   `CLIENT_VIEWER_SHARES_ENABLED`, `CLIENT_VIEWER_ENABLED`,
+   `CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED`, and Viewer
    `PUBLISHED_SESSION_SOURCE_REVOCATION_ENABLED`.
 4. In Project Alpha confirm the installation-wide portal integration,
    relations, catalog, pricing, draft quote, outbound delivery, and
@@ -147,9 +147,9 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`ab6e65e3db8963a03e2ea8b4518d5cc23acc203e` and schema version `17`. Confirm
+`cf40597ebb7d048267262184bce72c18c88c7579` and schema version `18`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
-`X-LTDS-Viewer-Revision`, `17` in `X-LTDS-Viewer-Schema-Version`, and
+`X-LTDS-Viewer-Revision`, `18` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
 body alone is not deployment-identity evidence.
 
@@ -242,17 +242,20 @@ restart. Exact origins remain available for explicitly reviewed DNS providers.
 Apply each repository's normal migration command and every pending migration
 in lexical/ledger order; never cherry-pick only a later file.
 
-- Client/delivery D1: apply all pending migrations through `0143`. The Viewer
+- Client/delivery D1: apply all pending migrations through `0145`. The Viewer
   dependency begins at `0138_viewer_model_associations.sql`; `0139` and `0140`
   also carry the thumbnail queue/provenance fixes and must not be skipped.
   `0143` adds the durable association-session revocation outbox and must be
   present before live Viewer session issuance is enabled.
+  `0144` adds explicit project/task Viewer grants. `0145` adds the separately
+  default-off Project Alpha email-eligibility shell and blacklist records;
+  neither migration grants project, delivery, or Viewer data access by itself.
 - Operations D1: apply all pending migrations through `0029`. Migration `0026`
   establishes the base
   Viewer permissions.
 - Project Alpha: apply `0066`, `0067`, and `0068` through the normal migration
   runner. All are replay-safe but must still be recorded once in the ledger.
-- Viewer: startup applies every internal SQLite migration through schema v17;
+- Viewer: startup applies every internal SQLite migration through schema v18;
   verify integrity, foreign keys, and the final schema ledger after restart.
 
 After each database, verify the migration ledger, integrity/foreign-key checks,

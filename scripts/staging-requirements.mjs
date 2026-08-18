@@ -8,18 +8,18 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 // Final commits, image digest, fixtures, and migration checksums passed the
 // independent cross-repository gate. Set this back to false before changing
 // any pinned source or deployment artifact.
-export const RELEASE_CONTRACT_FINALIZED = true;
+export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
-  operations: "c74c4da030dddd089f46008dfffffbe148ec76fb",
-  viewer: "ab6e65e3db8963a03e2ea8b4518d5cc23acc203e",
+  operations: "5672b4bf2623bccbee9addf1bf43fe27bee74ff1",
+  viewer: "cf40597ebb7d048267262184bce72c18c88c7579",
   projectAlpha: "3c0059e538067718abd91bc28e67a9714305260b",
 });
 
 export const STAGING_VIEWER = Object.freeze({
   hostname: "viewer-staging.ledgetopdroneservices.com",
   origin: "https://viewer-staging.ledgetopdroneservices.com",
-  image: "ghcr.io/ledgetoptechnologies/3d-viewer@sha256:9be49534d3cae15672f1e70a8eafe005695dc23c0a4679aabea78a29c79590bf",
-  schemaVersion: 17,
+  image: "ghcr.io/ledgetoptechnologies/3d-viewer@sha256:c6e63ec7980bb3ea7a7ee11e85719d0587740f943fe6560f570487570c6e1d8c",
+  schemaVersion: 18,
   serviceKeyId: "ops-staging-v1",
   eventKeyId: "viewer-staging-v1",
   providerCredentialsKeyId: "provider-staging-v1",
@@ -156,6 +156,8 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0141_viewer_client_preferences.sql",
     "0142_client_viewer_shares.sql",
     "0143_viewer_session_revocation_outbox.sql",
+    "0144_viewer_client_grants.sql",
+    "0145_portal_identity_eligibility.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -191,6 +193,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "CLIENT_PORTAL_TEAM_ENABLED",
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
+    "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
     "CLIENT_VIEWER_ENABLED",
     "CLIENT_VIEWER_SHARES_ENABLED",
@@ -341,6 +344,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     CLIENT_PORTAL_TEAM_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "workspaceStaffRecovery"]) }),
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: Object.freeze({ prohibitedReason: "Identity denylist activation requires a reviewed Operations mutation and audit surface" }),
+    CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: Object.freeze({ prohibitedReason: "Automatic Project Alpha email eligibility requires migration 0145 and explicit opt-out onboarding approval" }),
     AUTHENTICATED_DELIVERY_GRANTS_ENABLED: Object.freeze({ prohibitedReason: "Authenticated Delivery grants require migration 0137, Project Alpha hierarchy parity, and end-to-end grant/revoke/restore evidence" }),
     CLIENT_VIEWER_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerClientSessions"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
     CLIENT_VIEWER_SHARES_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "viewerDeployment", "viewerPublicShares", "viewerClientShares"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
@@ -454,6 +458,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     CLIENT_PORTAL_TEAM_ENABLED: "false",
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "false",
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "false",
+    CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "false",
     AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "false",
     CLIENT_VIEWER_ENABLED: "false",
     CLIENT_VIEWER_SHARES_ENABLED: "false",
@@ -523,6 +528,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "PROJECT_ALPHA_PRICING_HINT_ALLOWED_ORIGIN", "PROJECT_ALPHA_PRICING_HINT_APPLICATION_KEY",
     "PROJECT_ALPHA_PRICING_HINT_CURRENCIES", "CLIENT_REQUEST_ATTACHMENTS_ENABLED",
     "CLIENT_PORTAL_TEAM_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED", "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
+    "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
     "CLIENT_VIEWER_ENABLED", "CLIENT_VIEWER_SHARES_ENABLED",
     "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED", "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED",
