@@ -20,11 +20,12 @@ captured.
   `codex/3d-processing-control-plane`. This pin moves processing management to
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
   overview; never substitute a mutable branch tip.
-- Project Alpha: `f646f3b308d993bd90d256975f140eac6ed65e15` on
+- Project Alpha: `e3355875d86250628ad630c1d02baa1ecc127a77` on
   `codex/portal-scope-ci`. Its direct parent is the prior reviewed candidate
-  `3c0059e538067718abd91bc28e67a9714305260b`; the tip adds the default-off
-  managed-delivery handoff while preserving the mandatory isolated MySQL
-  scope-lock CI gate.
+  `f646f3b308d993bd90d256975f140eac6ed65e15`; the tip ensures the default-off
+  managed-delivery schema is applied by migration 0069 only after its portal
+  profile dependency while preserving the mandatory isolated MySQL scope-lock
+  CI gate.
 
 The updated source, manifest digest, migrations, fixtures, and activation
 policy passed independent cross-repository verification, so the corresponding

@@ -53,7 +53,7 @@
     "ed25519Ready": false,
     "paymentBillingContractReady": false,
     "authorizationBypassUsed": false,
-    "releaseCommit": "f646f3b308d993bd90d256975f140eac6ed65e15",
+    "releaseCommit": "e3355875d86250628ad630c1d02baa1ecc127a77",
     "sourceCommitVerified": false,
     "remoteRef": "<PROJECT_ALPHA_REMOTE_REF>",
     "webImageDigest": "sha256:<64_HEX_DIGEST>",
