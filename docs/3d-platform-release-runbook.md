@@ -9,9 +9,9 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `0f6de19e43ce83abf68ae508f1ac6598605971a6`.
+- 3D Viewer source: `9cd1d1c98342c401f1017490e959b3790b330037`.
   The reviewed release-candidate image is
-  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:d37b65b720d2a66c722b8f073afd6964e64c83b521c578213f9084c774f80b3f`.
+  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:f6ec58c5f25eb0a6f79cbabccf1406901454e4c2b95193a5079efe1e9b7383c9`.
   GitHub Actions run `32156471332` published only tags
   `v0.2.0-rc.0f6de19` and `sha-0f6de19`; it did not publish `latest`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
@@ -20,7 +20,7 @@ captured.
   `codex/3d-processing-control-plane`. This pin moves processing management to
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
   overview; never substitute a mutable branch tip.
-- Project Alpha: `3c0059e538067718abd91bc28e67a9714305260b` on
+- Project Alpha: `f646f3b308d993bd90d256975f140eac6ed65e15` on
   `codex/portal-scope-ci`. Its direct parent is runtime candidate
   `769df9320dbf4dfc512d364173d5cb7d8ad8a97c`; the tip additionally makes the
   real isolated MySQL scope-lock regression a mandatory CI gate.
@@ -28,14 +28,14 @@ captured.
 The updated source, manifest digest, migrations, fixtures, and activation
 policy passed independent cross-repository verification, so the corresponding
 constant in `scripts/staging-requirements.mjs` is
-`RELEASE_CONTRACT_FINALIZED=true`. This freezes the candidate contract only;
+`RELEASE_CONTRACT_FINALIZED=false` while the Viewer/Ops client-grant bridge is under review. Set it to true only after new commits, immutable Viewer image digest pull-back, migrations, and independent freeze audit. This freezes the candidate contract only;
 it does not approve deployment, migrations, or any feature flag. Reset it to
 `false` before changing a pinned source or deployment artifact.
 
 The Viewer/Ops signed-processing corpus has SHA-256
-`13ab12919e624be6a048c058774ccff2031f865855e64ab3b726e9b31cffab82`.
+`0ed7a7c40ad23583b9e741667b99aecc31cc01f7617c73ab63ad314a7ba344a0`.
 The route-response corpus has SHA-256
-`2ea39cd2b36c037c95831c708f9c29b6804d272f403b43f0a9ad0eed4af76154`.
+`0fd00d7dfb6440a04084bc84b27eb2a223081d3f51fca36f1e521144f86a6703`.
 The six generic Project Alpha fixtures are byte-pinned by both repositories.
 Do not substitute a later commit or hand-edit a fixture during activation.
 
@@ -101,7 +101,7 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091`, published-session revocation
 commit `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06`, and subsequent hardening commits
-through `0f6de19e43ce83abf68ae508f1ac6598605971a6` retain the reviewed provider adapter,
+through `9cd1d1c98342c401f1017490e959b3790b330037` retain the reviewed provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
@@ -148,7 +148,7 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`0f6de19e43ce83abf68ae508f1ac6598605971a6` and schema version `18`. Confirm
+`9cd1d1c98342c401f1017490e959b3790b330037` and schema version `18`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
 `X-LTDS-Viewer-Revision`, `18` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
@@ -243,7 +243,7 @@ restart. Exact origins remain available for explicitly reviewed DNS providers.
 Apply each repository's normal migration command and every pending migration
 in lexical/ledger order; never cherry-pick only a later file.
 
-- Client/delivery D1: apply all pending migrations through `0145`. The Viewer
+- Client/delivery D1: apply all pending migrations through `0147`. The Viewer
   dependency begins at `0138_viewer_model_associations.sql`; `0139` and `0140`
   also carry the thumbnail queue/provenance fixes and must not be skipped.
   `0143` adds the durable association-session revocation outbox and must be
@@ -251,10 +251,14 @@ in lexical/ledger order; never cherry-pick only a later file.
   `0144` adds explicit project/task Viewer grants. `0145` adds the separately
   default-off Project Alpha email-eligibility shell and blacklist records;
   neither migration grants project, delivery, or Viewer data access by itself.
-- Operations D1: apply all pending migrations through `0029`. Migration `0026`
+- Operations D1: apply all pending migrations through `0031`. Migration `0026`
   establishes the base
   Viewer permissions.
-- Project Alpha: apply `0066`, `0067`, and `0068` through the normal migration
+
+The Project Alpha delivery-intent wire fixture is LF-pinned at
+`packages/shared/fixtures/project-alpha-delivery-intent-v1.json`; its frozen
+SHA-256 is `f16d540bcfbcf4c77c356fc37e2c046a23a473ebec701d526e3b8d45f38c90e8`.
+- Project Alpha: apply `0066`, `0067`, `0068`, and `0069` through the normal migration
   runner. All are replay-safe but must still be recorded once in the ledger.
 - Viewer: startup applies every internal SQLite migration through schema v18;
   verify integrity, foreign keys, and the final schema ledger after restart.

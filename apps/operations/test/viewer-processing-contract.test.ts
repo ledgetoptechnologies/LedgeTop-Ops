@@ -23,7 +23,7 @@ const routes = JSON.parse(routeBytes);
 describe("Viewer processing cross-service contract", () => {
   it("pins the byte-identical cross-repository route fixture", () => {
     expect(createHash("sha256").update(routeBytes).digest("hex").toUpperCase())
-      .toBe("2EA39CD2B36C037C95831C708F9C29B6804D272F403B43F0A9AD0EED4AF76154");
+      .toBe("0FD00D7DFB6440A04084BC84B27EB2A223081D3F51FCA36F1E521144F86A6703");
   });
   it("pins the exact admin-grant body and service HMAC", async () => {
     const value = fixture.adminGrant;
@@ -46,6 +46,16 @@ describe("Viewer processing cross-service contract", () => {
     expect(signed.signature).toBe(value.signature);
     expect(JSON.parse(value.body)).toMatchObject({ requestedBySubject: "ops:staff-one" });
     expect(JSON.parse(value.body)).toEqual(routes.processingEvent);
+  });
+
+  it("pins the Viewer client-grant bridge HMAC and DTO", async () => {
+    const value = fixture.viewerClientGrantWorkspace;
+    expect(await signViewerProcessingEvent({ secret:value.secret,method:value.method,path:value.path,
+      body:value.body,timestamp:value.timestamp,nonce:value.nonce }))
+      .toEqual({contentSha256:value.contentSha256,signature:value.signature});
+    expect(routes.clientGrantWorkspaceListed.projects[0].accountId).toBe("account-one");
+    expect(routes.clientGrantWorkspaceCreated.grants[0].scopeType).toBe("project");
+    expect(routes.clientGrantWorkspaceRevoked.grants).toEqual([]);
   });
 
   it("pins actual Viewer list/detail response names without legacy DTO aliases", () => {

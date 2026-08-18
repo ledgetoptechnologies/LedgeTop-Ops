@@ -111,7 +111,7 @@ processing Compose profile, WebODM discovery, `PROXY_SHARED_SECRET`, and
 part of the required manifest for this release.
 
 Project Alpha evidence must identify its exact commit and immutable web/cron
-image digests, migration `0066`/`0067`/`0068` ledger and source hashes, all seven
+image digests, migration `0066`/`0067`/`0068`/`0069` ledger and source hashes, all eleven
 installation settings and profile capabilities/delivery still off, the inert
 one-minute outbound sender, non-secret delivery key IDs, encrypted-secret and
 redacted-evidence proof, retry/dead-letter/revocation behavior, fresh backup,

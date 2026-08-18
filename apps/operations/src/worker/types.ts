@@ -21,6 +21,14 @@ export type Env = Omit<
   PROJECT_ALPHA_DRAFT_QUOTE_API_KEY?: string;
   /** HMAC secret for timestamped, replay-protected PA draft commands. */
   PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET?: string;
+  PROJECT_ALPHA_PORTAL_APPLICATION_KEY?: string;
+  PROJECT_ALPHA_PORTAL_HMAC_KEY_ID?: string;
+  PROJECT_ALPHA_PORTAL_HMAC_SECRET?: string;
+  PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID?: string;
+  PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET?: string;
+  PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED?: string;
+  PROJECT_ALPHA_DELIVERY_GUEST_ENABLED?: string;
+  CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED?: string;
   /** Enables staff public-share recipient lookup from the PA portal projection. */
   DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED?: string;
   /** Defense-in-depth gate for the private Client -> Operations share signer RPC. */

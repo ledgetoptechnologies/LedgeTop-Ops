@@ -11,6 +11,7 @@ import { thumbnailSourceEligible, thumbnailStateForObject, type ThumbnailJobRow 
 import {
   latestShareAudienceSnapshot,
   resolveShareAudience,
+  resolveProjectAlphaDeliveryPrincipal,
   shareAudienceSnapshotStatements,
   shareDirectoryRecipientsEnabled,
   type AudienceType,
@@ -343,8 +344,8 @@ export function deriveShareMetadata(prefix:string,input:Pick<ShareInput,"clientN
 
 interface ProjectRow { id:string;division_id:string|null;r2_prefix:string }
 interface ActiveShareRow {
-  id:string;project_id:string;public_id:string|null;password_hash:string|null;password_salt:string|null;password_iterations:number|null;password_algorithm:string|null;
-  expires_at:string|null;idempotency_key:string|null;share_version:number;secret_ciphertext:string|null;secret_iv:string|null;division_id:string|null;recipient_email:string|null;image_location_map_enabled:number;
+  id:string;project_id:string;public_id:string|null;label:string|null;password_hash:string|null;password_salt:string|null;password_iterations:number|null;password_algorithm:string|null;
+  expires_at:string|null;idempotency_key:string|null;share_version:number;secret_ciphertext:string|null;secret_iv:string|null;division_id:string|null;recipient_email:string|null;image_location_map_enabled:number;created_by_type:string;created_by_id:string|null;
 }
 
 export interface ShareLifecycleResult {
@@ -379,7 +380,7 @@ export async function authorizeSharePrefix(env:Env,principal:StaffPrincipal,pref
 }
 
 export async function activeShareForPrefix(env:Env,prefix:string):Promise<ActiveShareRow|null>{
-  const current=await env.DELIVERY_DB.prepare(`SELECT s.id,s.project_id,s.public_id,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.idempotency_key,s.share_version,s.secret_ciphertext,s.secret_iv,s.recipient_email,s.image_location_map_enabled,COALESCE(s.division_id,p.division_id) AS division_id
+  const current=await env.DELIVERY_DB.prepare(`SELECT s.id,s.project_id,s.public_id,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.idempotency_key,s.share_version,s.secret_ciphertext,s.secret_iv,s.recipient_email,s.image_location_map_enabled,s.created_by_type,s.created_by_id,COALESCE(s.division_id,p.division_id) AS division_id
     FROM shares s JOIN projects p ON p.id=s.project_id
     WHERE s.r2_prefix=? AND s.revoked_at IS NULL AND p.active=1
       AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))
@@ -388,7 +389,7 @@ export async function activeShareForPrefix(env:Env,prefix:string):Promise<Active
   // Shares created before r2_prefix was backfilled may still rely on their project.
   // Keep that compatibility lookup explicit and bounded instead of applying
   // COALESCE to every active share row in the normal path.
-  return env.DELIVERY_DB.prepare(`SELECT s.id,s.project_id,s.public_id,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.idempotency_key,s.share_version,s.secret_ciphertext,s.secret_iv,s.recipient_email,s.image_location_map_enabled,COALESCE(s.division_id,p.division_id) AS division_id
+  return env.DELIVERY_DB.prepare(`SELECT s.id,s.project_id,s.public_id,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.idempotency_key,s.share_version,s.secret_ciphertext,s.secret_iv,s.recipient_email,s.image_location_map_enabled,s.created_by_type,s.created_by_id,COALESCE(s.division_id,p.division_id) AS division_id
     FROM shares s JOIN projects p ON p.id=s.project_id
     WHERE s.r2_prefix IS NULL AND p.r2_prefix=? AND s.revoked_at IS NULL AND p.active=1
       AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))
@@ -520,6 +521,94 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
   await env.DELIVERY_DB.batch(statements);
   await env.OPS_DB.batch([await auditStatement(env,request,principal,"delivery.share.created","share",shareId,divisionId,{projectId,r2Prefix:prefix,expiresAt,imageLocationMapEnabled:Boolean(input.imageLocationMapEnabled)})]);
   return{id:shareId,shareUrl:shareUrl(env,publicId,secret),accessCode,passwordProtected:Boolean(password),expiresAt,lifecycle:"created",idempotentReplay:false};
+}
+
+/** Dedicated PA path: it may create an absent share or reuse an exactly
+ * compatible one, but never enters the staff update/rotation branch. */
+export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
+  deliveryId:string;receiptId:string;fingerprint:string;r2Prefix:string;label:string|null;expiresAt:string;
+  audience:{type:AudienceType;publicId:string;sourceVersion:string};
+}):Promise<{shareId:string;reused:boolean}>{
+  const prefix=normalizePrefix(input.r2Prefix),project=await env.DELIVERY_DB.prepare(`SELECT id,division_id,client_name,project_name
+    FROM projects WHERE active=1 AND r2_prefix=? LIMIT 2`).bind(prefix).all<{id:string;division_id:string;client_name:string;project_name:string}>();
+  if(project.results.length!==1)throw new HTTPException(409,{message:"Delivery project is not uniquely live"});
+  const target=project.results[0]!,selected=await resolveProjectAlphaDeliveryPrincipal(env,prefix,input.audience.publicId,input.audience.sourceVersion);
+  if(!selected.recipients.length)throw new HTTPException(409,{message:"Delivery audience has no eligible recipients"});
+  await env.DELIVERY_DB.prepare(`UPDATE shares SET revoked_at=datetime('now'),revoked_reason='expired'
+    WHERE revoked_at IS NULL AND expires_at IS NOT NULL AND datetime(expires_at)<=datetime('now')
+      AND COALESCE(r2_prefix,(SELECT r2_prefix FROM projects WHERE id=shares.project_id))=?`).bind(prefix).run();
+  const active=await activeShareForPrefix(env,prefix);
+  if(active){
+    const paOwned=active.created_by_type==="integration"&&Boolean(await env.DELIVERY_DB.prepare(`SELECT 1 ok FROM project_alpha_delivery_intent_receipts WHERE access_mode='guest' AND resource_id=? LIMIT 1`).bind(active.id).first("ok"));
+    const current=await latestShareAudienceSnapshot(env,active.id),secret=await recoverShareSecret(env,active);
+    const authority=paOwned?await env.DELIVERY_DB.prepare(`SELECT workspace_id,folder_binding_id,binding_source_version,directory_generation_id,
+      principal_public_id,principal_source_version,label FROM project_alpha_delivery_guest_authority WHERE share_id=? AND status='active'`)
+      .bind(active.id).first<{workspace_id:string;folder_binding_id:string;binding_source_version:string;directory_generation_id:string;principal_public_id:string;principal_source_version:string;label:string|null}>():null;
+    const compatible=Boolean(paOwned&&authority&&current&&secret&&active.public_id&&active.label===(input.label??null)&&authority.label===(input.label??null)&&
+      authority.workspace_id===selected.workspaceId&&authority.folder_binding_id===selected.folderBindingId&&
+      authority.binding_source_version===(await env.DELIVERY_DB.prepare(`SELECT source_version FROM portal_v2_folder_bindings
+        WHERE id=? AND workspace_id=? AND status='active' AND revoked_at IS NULL`).bind(selected.folderBindingId,selected.workspaceId).first<string>("source_version"))&&
+      authority.directory_generation_id===selected.directoryGenerationId&&authority.principal_public_id===selected.audiencePublicId&&
+      authority.principal_source_version===input.audience.sourceVersion&&!active.password_hash&&!active.image_location_map_enabled&&
+      active.expires_at===input.expiresAt&&current.audienceType===selected.audienceType&&
+      current.audiencePublicId===selected.audiencePublicId);
+    if(!compatible)throw new HTTPException(409,{message:"An active share already exists for this delivery"});
+    const statements:D1PreparedStatement[]=[
+      env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_receipts(receipt_id,delivery_id,request_fingerprint,access_mode,resource_id) VALUES(?,?,?,?,?)`).bind(input.receiptId,input.deliveryId,input.fingerprint,"guest",active.id),
+      env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_audit(id,receipt_id,action,actor_id,details_json) VALUES(?,?,'guest.accepted',?,?)`).bind(crypto.randomUUID(),input.receiptId,input.deliveryId,JSON.stringify({reused:true,audienceType:selected.audienceType,audiencePublicId:selected.audiencePublicId})),
+      ...selected.recipients.map(member=>notificationStatement(env,{shareId:active.id,kind:"share_created",recipientEmail:member.email,
+        dedupeKey:notificationDedupeKey("share_created",active.id,`${input.deliveryId}:${member.principalPublicId}`),
+        payload:{shareUrl:shareUrl(env,active.public_id!,secret!),clientName:target.client_name,projectName:target.project_name,r2Prefix:prefix,expiresAt:input.expiresAt}})!),
+    ];
+    await env.DELIVERY_DB.batch(statements);return{shareId:active.id,reused:true};
+  }
+  const liveBindingSource=await env.DELIVERY_DB.prepare(`SELECT source_version FROM portal_v2_folder_bindings
+    WHERE id=? AND workspace_id=? AND status='active' AND revoked_at IS NULL LIMIT 2`)
+    .bind(selected.folderBindingId,selected.workspaceId).all<{source_version:string}>();
+  if(liveBindingSource.results.length!==1)throw new HTTPException(409,{message:"Delivery folder authority is no longer live"});
+  const shareId=crypto.randomUUID(),publicId=randomToken(16),secret=randomToken(32),encrypted=await encryptDeliveryToken(secret,env.DELIVERY_TOKEN_SECRET,shareId);
+  await env.DELIVERY_DB.batch([
+    env.DELIVERY_DB.prepare(`INSERT INTO shares(id,project_id,token_hash,public_id,label,expires_at,recipient_email,image_location_map_enabled,
+      created_by_type,created_by_id,idempotency_key,share_version,secret_ciphertext,secret_iv,r2_prefix,division_id)
+      VALUES(?,?,?,?,?,?,?,0,'integration',?,?,2,?,?,?,?)`).bind(shareId,target.id,await sha256(secret),publicId,input.label,
+      input.expiresAt,selected.recipients[0]?.email??null,input.deliveryId,input.deliveryId,encrypted.ciphertext,encrypted.iv,prefix,target.division_id),
+    ...shareAudienceSnapshotStatements(env,shareId,2,selected,input.deliveryId),
+    env.DELIVERY_DB.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES('integration',?,'share.created','share',?,?)`).bind(input.deliveryId,shareId,JSON.stringify({r2Prefix:prefix,audienceType:selected.audienceType,audiencePublicId:selected.audiencePublicId})),
+    env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_receipts(receipt_id,delivery_id,request_fingerprint,access_mode,resource_id) VALUES(?,?,?,?,?)`).bind(input.receiptId,input.deliveryId,input.fingerprint,"guest",shareId),
+    env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_guest_authority(share_id,workspace_id,folder_binding_id,binding_source_version,directory_generation_id,principal_public_id,principal_source_version,label)
+      VALUES(?,?,?,(SELECT source_version FROM portal_v2_folder_bindings WHERE id=? AND workspace_id=? AND source_version=?
+        AND status='active' AND revoked_at IS NULL),?,?,?,?)`).bind(shareId,selected.workspaceId,selected.folderBindingId,
+      selected.folderBindingId,selected.workspaceId,liveBindingSource.results[0]!.source_version,
+      selected.directoryGenerationId,selected.audiencePublicId,input.audience.sourceVersion,input.label),
+    env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_audit(id,receipt_id,action,actor_id,details_json) VALUES(?,?,'guest.accepted',?,?)`).bind(crypto.randomUUID(),input.receiptId,input.deliveryId,JSON.stringify({reused:false,audienceType:selected.audienceType,audiencePublicId:selected.audiencePublicId})),
+    ...selected.recipients.map(member=>notificationStatement(env,{shareId,kind:"share_created",recipientEmail:member.email,
+      dedupeKey:notificationDedupeKey("share_created",shareId,`${input.deliveryId}:${member.principalPublicId}`),payload:{shareUrl:shareUrl(env,publicId,secret),clientName:target.client_name,projectName:target.project_name,r2Prefix:prefix,expiresAt:input.expiresAt}})!),
+  ]);
+  return{shareId,reused:false};
+}
+
+export async function revokeProjectAlphaDeliveryGuestShare(env:Env,input:{shareId:string;deliveryId:string;
+  revokeReceiptId:string;originalReceiptId:string;fingerprint:string}):Promise<void>{
+  const share=await env.DELIVERY_DB.prepare(`SELECT s.id,s.r2_prefix,p.client_name,p.project_name FROM shares s
+    JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.created_by_type='integration' AND s.revoked_at IS NULL
+    AND EXISTS(SELECT 1 FROM project_alpha_delivery_intent_receipts r WHERE r.receipt_id=? AND r.access_mode='guest' AND r.resource_id=s.id)`)
+    .bind(input.shareId,input.originalReceiptId).first<{id:string;r2_prefix:string;client_name:string;project_name:string}>();
+  if(!share)throw new HTTPException(409,{message:"Delivery share is not active"});
+  const audience=await latestShareAudienceSnapshot(env,share.id);
+  if(!audience)throw new HTTPException(409,{message:"Delivery share audience is unavailable"});
+  const results=await env.DELIVERY_DB.batch([
+    env.DELIVERY_DB.prepare(`UPDATE shares SET revoked_at=datetime('now'),revoked_reason='project_alpha_delivery_revoked',share_version=share_version+1
+      WHERE id=? AND revoked_at IS NULL AND created_by_type='integration'
+        AND EXISTS(SELECT 1 FROM project_alpha_delivery_guest_authority WHERE share_id=shares.id AND status='active')`).bind(share.id),
+    env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_guest_authority SET status='revoked',revoked_at=datetime('now') WHERE share_id=? AND status='active' AND changes()=1`).bind(share.id),
+    env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_revocation_receipts(receipt_id,delivery_id,original_receipt_id,request_fingerprint) SELECT ?,?,?,? WHERE changes()=1`).bind(input.revokeReceiptId,input.deliveryId,input.originalReceiptId,input.fingerprint),
+    env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_audit(id,receipt_id,action,actor_id,details_json) SELECT ?,?,'guest.revoked',?,? WHERE changes()=1`).bind(crypto.randomUUID(),input.originalReceiptId,input.deliveryId,JSON.stringify({reasonCode:"project_alpha_delivery_revoked"})),
+    ...audience.recipients.map(member=>env.DELIVERY_DB.prepare(`INSERT OR IGNORE INTO delivery_notifications
+      (id,dedupe_key,share_id,kind,recipient_email,payload_json) SELECT ?,?,?,'share_revoked',?,? WHERE changes()=1`)
+      .bind(crypto.randomUUID(),notificationDedupeKey("share_revoked",share.id,`${input.deliveryId}:${member.principalPublicId}`),
+        share.id,member.email,JSON.stringify({clientName:share.client_name,projectName:share.project_name,r2Prefix:share.r2_prefix}))),
+  ]);
+  if(!results[0]?.meta.changes)throw new HTTPException(409,{message:"Delivery share is not active"});
 }
 
 export async function listDeliveryShares(env:Env,principal:StaffPrincipal){await requirePermission(env,principal,"delivery.share.audit");const scope=await sqlScope(env,principal,"delivery.share.audit");if(scope.deniedGlobal)return[];let where="1=1",values:unknown[]=[];if(!scope.global){if(!scope.divisions.length)return[];where=`COALESCE(s.division_id,p.division_id) IN (${scope.divisions.map(()=>"?").join(",")})`;values=scope.divisions;}const result=await env.DELIVERY_DB.prepare(`SELECT s.id,s.public_id,s.label,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.created_at,s.last_accessed_at,s.access_count,(s.password_hash IS NOT NULL) password_protected,p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) AS r2_prefix,COALESCE(s.division_id,p.division_id) AS division_id FROM shares s JOIN projects p ON p.id=s.project_id WHERE ${where} ORDER BY s.created_at DESC LIMIT 200`).bind(...values).all<any>();const aliases=await aliasMap(env,result.results.map(row=>row.r2_prefix));return result.results.map(row=>({...row,display_name:aliases.get(row.r2_prefix)||row.r2_prefix.replace(/\/$/,"").split("/").pop()}));}

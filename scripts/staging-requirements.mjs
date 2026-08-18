@@ -8,17 +8,17 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 // Final commits, image digest, fixtures, and migration checksums passed the
 // independent cross-repository gate. Set this back to false before changing
 // any pinned source or deployment artifact.
-export const RELEASE_CONTRACT_FINALIZED = true;
+export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
   operations: "75fdce881a51cfb88f78c1983202845a53bb04e0",
-  viewer: "0f6de19e43ce83abf68ae508f1ac6598605971a6",
-  projectAlpha: "3c0059e538067718abd91bc28e67a9714305260b",
+  viewer: "9cd1d1c98342c401f1017490e959b3790b330037",
+  projectAlpha: "f646f3b308d993bd90d256975f140eac6ed65e15",
 });
 
 export const STAGING_VIEWER = Object.freeze({
   hostname: "viewer-staging.ledgetopdroneservices.com",
   origin: "https://viewer-staging.ledgetopdroneservices.com",
-  image: "ghcr.io/ledgetoptechnologies/3d-viewer@sha256:d37b65b720d2a66c722b8f073afd6964e64c83b521c578213f9084c774f80b3f",
+  image: "ghcr.io/ledgetoptechnologies/3d-viewer@sha256:f6ec58c5f25eb0a6f79cbabccf1406901454e4c2b95193a5079efe1e9b7383c9",
   schemaVersion: 18,
   serviceKeyId: "ops-staging-v1",
   eventKeyId: "viewer-staging-v1",
@@ -35,12 +35,15 @@ export const PROJECT_ALPHA_STAGING = Object.freeze({
     "0066_generic_portal_v2_integration.sql": "12cfd32e4854bddf763a5fe80653fe7494ab5f9e82b592bf0da05eed78f3e886",
     "0067_portal_projection_delivery.sql": "a8150facbd25ff8c3275a591b09c2e75a50302abdc9c212477e3cc36d0cf11ea",
     "0068_portal_contract_completeness.sql": "6d35f540edd176d192503d69d2d9c8914cd3e40f3f9d5f0e522eeef96ffdab37",
+    "0069_managed_delivery_intents.sql": "76369a571d771bf28b3778f61bccf536827457538ba04244a0135ab7672c6364",
   }),
   defaultOffSettings: Object.freeze([
     "portal_v2_integration_enabled", "portal_v2_relations_enabled",
     "portal_catalog_v2_enabled", "portal_pricing_preview_enabled",
     "portal_draft_quotes_enabled", "portal_outbound_delivery_enabled",
     "portal_authoritative_hooks_enabled",
+    "managed_delivery_enabled", "managed_delivery_intent_url",
+    "managed_delivery_profile_id", "managed_delivery_guest_links_enabled",
   ]),
   outboundSchedule: "* * * * *",
 });
@@ -158,6 +161,8 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0143_viewer_session_revocation_outbox.sql",
     "0144_viewer_client_grants.sql",
     "0145_portal_identity_eligibility.sql",
+    "0146_viewer_client_grant_audit.sql",
+    "0147_project_alpha_delivery_intents.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -176,6 +181,8 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0027_viewer_processing_control_plane.sql",
     "0028_viewer_processing_labels.sql",
     "0029_viewer_machine_rate_limits.sql",
+    "0030_viewer_client_grant_bridge_rate_limit.sql",
+    "0031_project_alpha_delivery_intent_rate_limits.sql",
   ]),
 });
 
@@ -208,6 +215,8 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
   ]),
   operations: Object.freeze([
     "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
+    "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED",
+    "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED",
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
@@ -359,6 +368,8 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
   }),
   operations: Object.freeze({
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaDraftQuotes", "projectAlphaCatalogProjection"]) }),
+    PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: Object.freeze({ prohibitedReason: "Project Alpha managed delivery requires migration 0069/0147/0031 and an independently approved end-to-end intent, notification, and revocation activation window" }),
+    PROJECT_ALPHA_DELIVERY_GUEST_ENABLED: Object.freeze({ prohibitedReason: "Guest delivery remains explicit-only and requires a separate public-bearer notification and revocation approval after the portal intent path is proven" }),
     CLIENT_DELEGATED_SHARE_SIGNER_ENABLED: Object.freeze({ gates: Object.freeze(["delegatedShareSignerBinding", "delegatedSharePublicAuthorization"]) }),
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: Object.freeze({ prohibitedReason: "Identity denylist activation requires reviewed staging denial and last-manager evidence" }),
@@ -486,6 +497,8 @@ export const STAGING_STATIC_VARS = Object.freeze({
     THUMBNAIL_RENDERER_EXPECTED_HOST: STAGING_HOSTS.incoming,
     APPLICATION_KEY: "ltds_ops_staging",
     PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "false",
+    PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: "false",
+    PROJECT_ALPHA_DELIVERY_GUEST_ENABLED: "false",
     CLIENT_DELEGATED_SHARE_SIGNER_ENABLED: "false",
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "false",
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "false",
@@ -547,6 +560,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "INCOMING_BASE_URL", "INCOMING_EXPECTED_HOST", "THUMBNAIL_INGEST_EXPECTED_HOST", "THUMBNAIL_RENDERER_EXPECTED_HOST",
     "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD", "DELIVERY_BASE_URL",
     "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
+    "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",

@@ -90,6 +90,7 @@ import {
   enqueueExpiringNotifications,
   processClientPortalRequestNotifications,
   processDeliveryNotifications,
+  processProjectAlphaDeliveryPortalNotifications,
 } from "./notifications";
 import {
   createIncomingStaffRouter,
@@ -193,6 +194,14 @@ import {
 } from "./viewer-processing";
 import { pruneClientViewerShareReceipts } from "./viewer-session-issuer";
 import { defaultViewerUnits, resolveViewerUnits } from "./viewer-units";
+import {
+  handleProjectAlphaDeliveryIntent,
+  handleProjectAlphaDeliveryIntentRevoke,
+  handleProjectAlphaDeliveryPreflight,
+  pruneProjectAlphaDeliveryIntentRateLimits,
+  projectAlphaDeliveryMachineHostRequest,
+  projectAlphaDeliveryMachineRequest,
+} from "./project-alpha-delivery-intents";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
 const app = new Hono<{ Bindings: Env; Variables: Variables }>();
@@ -318,7 +327,9 @@ app.use("*", (c, next) =>
 app.use("*", async (c, next) => {
   const machine = viewerMachineEventRequest(c.req.method, c.req.path);
   const machineHostAllowed = viewerMachineHostRequest(c.req.url, c.req.method, c.env);
-  if (machine ? !machineHostAllowed : !requestHostAllowed(c.req.url, c.env))
+  const paMachine=projectAlphaDeliveryMachineRequest(c.req.method,c.req.path);
+  const paMachineHostAllowed=projectAlphaDeliveryMachineHostRequest(c.req.url,c.req.method,c.env);
+  if (machine ? !machineHostAllowed : paMachine ? !paMachineHostAllowed : !requestHostAllowed(c.req.url, c.env))
     return c.json({ error: "Not found" }, 404);
   await next();
   c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
@@ -330,7 +341,7 @@ app.use("*", async (c, next) => {
   }
 });
 app.use("/api/*", async (c, next) => {
-  if (viewerMachineEventRequest(c.req.method, c.req.path)) {
+  if (viewerMachineEventRequest(c.req.method, c.req.path) || projectAlphaDeliveryMachineRequest(c.req.method, c.req.path)) {
     await next();
     return;
   }
@@ -1377,6 +1388,9 @@ registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerViewerIntegrationRoutes(app);
 registerViewerProcessingRoutes(app);
+app.post("/api/internal/project-alpha/delivery-intents/preflight", handleProjectAlphaDeliveryPreflight);
+app.post("/api/internal/project-alpha/delivery-intents", handleProjectAlphaDeliveryIntent);
+app.post("/api/internal/project-alpha/delivery-intents/revoke",handleProjectAlphaDeliveryIntentRevoke);
 
 app.get("/api/tasks", async (c) => {
   const principal = c.get("principal");
@@ -3052,10 +3066,12 @@ async function scheduled(
       processDeliveryNotifications(env),
     ),
   );
+  ctx.waitUntil(processProjectAlphaDeliveryPortalNotifications(env));
   if (env.DROPBOX_IMPORT_TOKEN_SECRET)
     ctx.waitUntil(cleanupDropboxImports(env));
   ctx.waitUntil(pruneViewerEventNonces(env));
   ctx.waitUntil(pruneViewerMachineRateLimits(env));
+  ctx.waitUntil(pruneProjectAlphaDeliveryIntentRateLimits(env));
   ctx.waitUntil(pruneClientViewerShareReceipts(env));
   ctx.waitUntil(pruneViewerSessionIssuanceReceipts(env));
   ctx.waitUntil(drainViewerSessionRevocations(env));
@@ -3071,6 +3087,8 @@ async function fetch(
   if (rendererApi) return rendererApi;
   if (viewerMachineHostRequest(request.url, request.method, env))
     return app.fetch(request, env, ctx);
+  if (projectAlphaDeliveryMachineHostRequest(request.url,request.method,env))
+    return app.fetch(request,env,ctx);
   const incoming = dispatchIncomingPublicRequest(request, env, ctx);
   if (incoming) return await incoming;
   return app.fetch(request, env, ctx);

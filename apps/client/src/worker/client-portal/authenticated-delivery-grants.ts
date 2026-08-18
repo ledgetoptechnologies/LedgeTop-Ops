@@ -6,6 +6,7 @@ const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const AUTHORIZED_BINDING_LIMIT = 100;
 
 interface GrantCandidate {
+  source: "staff" | "project_alpha_delivery";
   folder_binding_id: string;
   r2_prefix: string;
   owner_scope_type: "organization" | "department" | "client" | "project";
@@ -30,7 +31,7 @@ async function candidates(
   workspaceId: string,
   folderBindingId?: string,
 ): Promise<GrantCandidate[] | null> {
-  const rows = await portalDb(env).prepare(`SELECT DISTINCT binding.id folder_binding_id,binding.r2_prefix,
+  const rows = await portalDb(env).prepare(`SELECT DISTINCT 'staff' source,binding.id folder_binding_id,binding.r2_prefix,
       binding.owner_scope_type,binding.owner_public_id,grant_record.audience_type,
       grant_record.audience_public_id,grant_record.audience_source_version
     FROM portal_v2_identities identity
@@ -61,7 +62,65 @@ async function candidates(
     .bind(workspaceId, principal.issuer, principal.subject,
       folderBindingId ?? null, folderBindingId ?? null, AUTHORIZED_BINDING_LIMIT + 1)
     .all<GrantCandidate>();
-  return rows.results.length > AUTHORIZED_BINDING_LIMIT ? null : rows.results;
+  const integration = await portalDb(env).prepare(`SELECT DISTINCT 'project_alpha_delivery' source,binding.id folder_binding_id,binding.r2_prefix,
+      binding.owner_scope_type,binding.owner_public_id,grant_record.audience_type,
+      grant_record.audience_public_id,grant_record.audience_source_version
+    FROM portal_v2_identities identity
+    JOIN portal_v2_workspace_memberships membership ON membership.identity_id=identity.id AND membership.workspace_id=?
+      AND membership.status='active' AND membership.revoked_at IS NULL
+      AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
+    JOIN project_alpha_delivery_portal_grants grant_record ON grant_record.workspace_id=membership.workspace_id
+      AND grant_record.audience_type='principal' AND grant_record.status='active'
+      AND (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))
+    JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id
+      AND binding.workspace_id=grant_record.workspace_id AND binding.status='active' AND binding.revoked_at IS NULL
+      AND binding.source_version=grant_record.binding_source_version
+    JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=binding.workspace_id
+    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+      AND generation.workspace_id=checkpoint.workspace_id AND generation.status='active' AND generation.complete=1
+    JOIN portal_v2_directory_entities owner ON owner.workspace_id=binding.workspace_id
+      AND owner.generation_id=checkpoint.active_generation_id AND owner.entity_type=binding.owner_scope_type
+      AND owner.public_id=binding.owner_public_id AND owner.source_version=binding.source_version AND owner.active=1
+    LEFT JOIN pa_portal_principals principal_record ON principal_record.workspace_id=membership.workspace_id
+      AND principal_record.public_id=grant_record.audience_public_id
+      AND principal_record.status='active' AND principal_record.source_version=grant_record.audience_source_version
+    LEFT JOIN portal_v2_identity_eligibility_bindings eligibility ON eligibility.identity_id=identity.id
+      AND eligibility.workspace_id=membership.workspace_id AND eligibility.principal_public_id=principal_record.public_id
+      AND eligibility.principal_source_version=principal_record.source_version
+      AND eligibility.verified_email=identity.verified_email
+    WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
+      AND principal_record.public_id IS NOT NULL
+      AND (principal_record.identity_id=identity.id OR eligibility.identity_id=identity.id)
+      AND (? IS NULL OR binding.id=?) ORDER BY binding.id LIMIT ?`)
+    .bind(workspaceId,principal.issuer,principal.subject,folderBindingId??null,folderBindingId??null,
+      AUTHORIZED_BINDING_LIMIT+1).all<GrantCandidate>();
+  const combined=[...rows.results,...integration.results];
+  return combined.length > AUTHORIZED_BINDING_LIMIT ? null : combined;
+}
+
+async function integrationDenied(env:Env,principal:VerifiedClientPrincipal,workspaceId:string,row:GrantCandidate):Promise<boolean>{
+  if(env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED!=="true")return false;
+  const denied=await portalDb(env).prepare(`WITH RECURSIVE lineage(entity_type,public_id,parent_public_id,depth) AS (
+    SELECT entity.entity_type,entity.public_id,entity.parent_public_id,0
+    FROM portal_v2_directory_checkpoints checkpoint JOIN portal_v2_directory_entities entity
+      ON entity.workspace_id=checkpoint.workspace_id AND entity.generation_id=checkpoint.active_generation_id
+      AND entity.entity_type=? AND entity.public_id=? AND entity.active=1 WHERE checkpoint.workspace_id=?
+    UNION SELECT parent.entity_type,parent.public_id,parent.parent_public_id,lineage.depth+1 FROM lineage
+      JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=?
+      JOIN portal_v2_directory_entities parent ON parent.workspace_id=checkpoint.workspace_id
+        AND parent.generation_id=checkpoint.active_generation_id AND parent.public_id=lineage.parent_public_id AND parent.active=1
+      WHERE lineage.parent_public_id IS NOT NULL AND lineage.depth<12
+  ) SELECT 1 ok FROM portal_v2_identities identity JOIN portal_v2_identity_denials denial ON denial.identity_id=identity.id
+    WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
+      AND denial.status='active' AND denial.revoked_at IS NULL AND datetime(denial.valid_from)<=datetime('now')
+      AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))
+      AND (denial.scope_type='global' OR (denial.workspace_id=? AND
+        ((denial.scope_type='workspace' AND denial.scope_public_id=?) OR
+         (denial.scope_type='folder' AND denial.scope_public_id=?) OR
+         EXISTS(SELECT 1 FROM lineage WHERE entity_type=denial.scope_type AND public_id=denial.scope_public_id)))) LIMIT 1`)
+    .bind(row.owner_scope_type,row.owner_public_id,workspaceId,workspaceId,principal.issuer,principal.subject,
+      workspaceId,workspaceId,row.folder_binding_id).first("ok");
+  return denied!==null;
 }
 
 async function audienceLiveAndContained(env: Env, workspaceId: string, row: GrantCandidate): Promise<boolean> {
@@ -119,14 +178,15 @@ export async function authorizeAuthenticatedDeliveryGrant(
   folderBindingId: string,
 ): Promise<boolean> {
   if (!authenticatedDeliveryGrantsEnabled(env) || !OPAQUE.test(workspaceId) || !OPAQUE.test(folderBindingId)) return false;
-  const authorizedByHierarchy = await authorizePortalWorkspaceCapability(
-    env, principal, workspaceId, "delivery.view", { scopeType: "folder", publicId: folderBindingId },
-  );
-  if (!authorizedByHierarchy) return false;
   const rows = await candidates(env, principal, workspaceId, folderBindingId);
   if (!rows) return false;
   for (const row of rows) {
-    if (await audienceLiveAndContained(env, workspaceId, row)) return true;
+    if(!await audienceLiveAndContained(env,workspaceId,row))continue;
+    if(row.source==="project_alpha_delivery"){
+      if(!await integrationDenied(env,principal,workspaceId,row))return true;
+      continue;
+    }
+    if(await authorizePortalWorkspaceCapability(env,principal,workspaceId,"delivery.view",{scopeType:"folder",publicId:folderBindingId}))return true;
   }
   return false;
 }
@@ -256,5 +316,15 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
       AUTHORIZED_BINDING_LIMIT + 1)
     .all<{ r2_prefix: string }>();
   if (rows.results.length > AUTHORIZED_BINDING_LIMIT) return new Set();
-  return new Set(rows.results.map(row => row.r2_prefix));
+  const prefixes=new Set(rows.results.map(row => row.r2_prefix));
+  const integration=await candidates(env,principal,workspaceId);
+  if(!integration)return new Set();
+  for(const row of integration){
+    if(!row.r2_prefix || prefixes.has(row.r2_prefix))continue;
+    if(!await audienceLiveAndContained(env,workspaceId,row))continue;
+    if(row.source==="project_alpha_delivery"){
+      if(!await integrationDenied(env,principal,workspaceId,row))prefixes.add(row.r2_prefix);
+    }else if(await authorizePortalWorkspaceCapability(env,principal,workspaceId,"delivery.view",{scopeType:"folder",publicId:row.folder_binding_id}))prefixes.add(row.r2_prefix);
+  }
+  return prefixes;
 }

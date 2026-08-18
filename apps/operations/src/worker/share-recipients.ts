@@ -64,7 +64,7 @@ export async function searchShareRecipients(env:Env,prefix:string,queryValue:str
 
 export async function resolveShareAudience(env:Env,prefix:string,audienceType:AudienceType,publicIdValue:string):Promise<ShareAudienceSnapshot>{
   if(!shareDirectoryRecipientsEnabled(env))throw new HTTPException(404,{message:"Not found"});
-  const publicId=publicIdValue.trim();if(!publicId||publicId.length>200)throw new HTTPException(400,{message:"Recipient selection is invalid"});
+  const publicId=publicIdValue.trim();if(!publicId||publicId.length>128)throw new HTTPException(400,{message:"Recipient selection is invalid"});
   const context=await bindingContext(env,prefix);let audienceDisplayName="",recipients:ShareRecipient[];
   if(audienceType==="principal"){
     recipients=await authorizedRecipients(env,context,null,publicId,1);if(!recipients.length||recipients[0]!.principalPublicId!==publicId)throw new HTTPException(404,{message:"Recipient is not available for this folder"});audienceDisplayName=recipients[0]!.displayName;
@@ -75,6 +75,52 @@ export async function resolveShareAudience(env:Env,prefix:string,audienceType:Au
     if(recipients.length>GROUP_RECIPIENT_LIMIT)throw new HTTPException(409,{message:"This audience is too large for one delivery notification group"});
   }
   return{...context,audienceType,audiencePublicId:publicId,audienceDisplayName,recipients};
+}
+
+export async function resolveProjectAlphaDeliveryPrincipal(env:Env,prefix:string,publicIdValue:string,sourceVersion:string):Promise<ShareAudienceSnapshot>{
+  const publicId=publicIdValue.trim();if(!publicId||publicId.length>128)throw new HTTPException(400,{message:"Recipient selection is invalid"});
+  const context=await bindingContext(env,prefix),rows=await env.DELIVERY_DB.withSession("first-primary").prepare(`${ancestryCte()} SELECT DISTINCT
+    principal.display_name,identity.id identity_id,identity.issuer,identity.subject,lower(identity.verified_email) verified_email
+    FROM pa_portal_principals principal
+    JOIN portal_v2_identities identity ON identity.status='active' AND identity.revoked_at IS NULL
+      AND (identity.id=principal.identity_id OR EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings eligibility
+        WHERE eligibility.identity_id=identity.id AND eligibility.workspace_id=principal.workspace_id
+          AND eligibility.principal_public_id=principal.public_id AND eligibility.principal_source_version=principal.source_version
+          AND eligibility.verified_email=identity.verified_email))
+    JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=principal.workspace_id
+      AND membership.identity_id=identity.id AND membership.status='active' AND membership.revoked_at IS NULL
+      AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
+    WHERE principal.workspace_id=? AND principal.public_id=? AND principal.source_version=? AND principal.status='active'
+      AND lower(trim(principal.email_hint))=lower(identity.verified_email)
+      AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_blocks block WHERE block.status='active'
+        AND datetime(block.valid_from)<=datetime('now') AND (block.expires_at IS NULL OR datetime(block.expires_at)>datetime('now'))
+        AND ((block.match_type='issuer_subject' AND block.issuer=identity.issuer AND block.subject=identity.subject)
+          OR (block.match_type='email' AND block.normalized_email=identity.verified_email)))
+      AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_denials denial WHERE denial.identity_id=identity.id
+        AND denial.status='active' AND denial.revoked_at IS NULL AND datetime(denial.valid_from)<=datetime('now')
+        AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))
+        AND (denial.scope_type='global' OR (denial.workspace_id=principal.workspace_id AND
+          ((denial.scope_type='workspace' AND denial.scope_public_id=principal.workspace_id)
+           OR (denial.scope_type='folder' AND denial.scope_public_id=?)
+           OR EXISTS(SELECT 1 FROM owner_ancestry WHERE entity_type=denial.scope_type AND public_id=denial.scope_public_id))))) LIMIT 2`)
+    .bind(...contextBindings(context),context.workspaceId,publicId,sourceVersion,context.folderBindingId)
+    .all<{display_name:string;identity_id:string;issuer:string;subject:string;verified_email:string}>();
+  let eligible=rows.results;
+  if(!eligible.length&&env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==="true"){
+    const unclaimed=await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT display_name,
+      lower(trim(email_hint)) verified_email FROM pa_portal_principals principal
+      WHERE workspace_id=? AND public_id=? AND source_version=? AND status='active' AND identity_id IS NULL
+        AND length(trim(email_hint)) BETWEEN 3 AND 254 AND instr(email_hint,'@')>1
+        AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_blocks block WHERE block.match_type='email'
+          AND block.normalized_email=lower(trim(principal.email_hint)) AND block.status='active' AND datetime(block.valid_from)<=datetime('now')
+          AND (block.expires_at IS NULL OR datetime(block.expires_at)>datetime('now'))) LIMIT 2`)
+      .bind(context.workspaceId,publicId,sourceVersion).all<{display_name:string;verified_email:string}>();
+    eligible=unclaimed.results.map(row=>({...row,identity_id:"",issuer:"",subject:""}));
+  }
+  if(eligible.length!==1)throw new HTTPException(409,{message:"Delivery recipient is not uniquely eligible"});
+  const recipient=eligible[0]!;
+  return{...context,audienceType:"principal",audiencePublicId:publicId,audienceDisplayName:recipient.display_name,
+    recipients:[{principalPublicId:publicId,displayName:recipient.display_name,email:recipient.verified_email}]};
 }
 
 export async function latestShareAudienceSnapshot(env:Env,shareId:string):Promise<ShareAudienceSnapshot|null>{

@@ -41,6 +41,11 @@ describe("authenticated delivery grant live authorization", () => {
         r2_prefix TEXT NOT NULL,source_version TEXT,status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,UNIQUE(id,workspace_id),FOREIGN KEY(workspace_id) REFERENCES portal_v2_workspaces(id));
       CREATE TABLE pa_portal_principals(workspace_id TEXT NOT NULL,public_id TEXT NOT NULL,identity_id TEXT,email_hint TEXT,display_name TEXT NOT NULL,
         source_version TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',PRIMARY KEY(workspace_id,public_id),UNIQUE(workspace_id,identity_id),FOREIGN KEY(workspace_id) REFERENCES portal_v2_workspaces(id),FOREIGN KEY(identity_id) REFERENCES portal_v2_identities(id));
+      CREATE TABLE portal_v2_identity_eligibility_bindings(identity_id TEXT NOT NULL,workspace_id TEXT NOT NULL,
+        principal_public_id TEXT NOT NULL,principal_source_version TEXT NOT NULL,verified_email TEXT NOT NULL);
+      CREATE TABLE project_alpha_delivery_portal_grants(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,folder_binding_id TEXT NOT NULL,
+        binding_source_version TEXT NOT NULL,audience_type TEXT NOT NULL,audience_public_id TEXT NOT NULL,
+        audience_source_version TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',expires_at TEXT);
     `));
     await db.exec(executable(denialMigration));
     await db.exec(executable(grantMigration));

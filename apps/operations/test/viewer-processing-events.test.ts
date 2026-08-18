@@ -47,6 +47,8 @@ async function setup(): Promise<void> {
   await database.exec(labelsMigration.replace(/--.*$/gm, "").replace(/\s*\n\s*/g, " "));
   const machineRateMigration = readFileSync(new URL("../migrations/0029_viewer_machine_rate_limits.sql", import.meta.url), "utf8");
   await database.exec(machineRateMigration.replace(/--.*$/gm, "").replace(/\s*\n\s*/g, " "));
+  const workspaceGrantRateMigration = readFileSync(new URL("../migrations/0030_viewer_client_grant_bridge_rate_limit.sql", import.meta.url), "utf8");
+  await database.exec(workspaceGrantRateMigration.replace(/--.*$/gm, "").replace(/\s*\n\s*/g, " "));
   env = {
     OPS_DB: database, VIEWER_INTEGRATION_ENABLED: "true", VIEWER_PROCESSING_ENABLED: "true",
     PUBLIC_BASE_URL: "https://ops.example.test",

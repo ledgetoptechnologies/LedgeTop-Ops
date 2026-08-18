@@ -61,6 +61,7 @@ export type ViewerProcessingPermission =
   | "viewer.shares.read"
   | "viewer.shares.create"
   | "viewer.shares.revoke"
+  | "viewer.client_grants.manage"
   | "viewer.providers.read"
   | "viewer.providers.write"
   | "viewer.storage.purge";

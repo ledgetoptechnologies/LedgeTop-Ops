@@ -233,16 +233,130 @@ async function listAssociations(env: Env): Promise<ReturnType<typeof association
   return rows.results.map(associationView);
 }
 
-async function listClientViewerGrants(env: Env) {
+export async function listViewerClientGrants(env: Env, principal: StaffPrincipal) {
+  await requireGlobalViewer(env, principal, "viewer.manage");
   const rows = await primaryDeliveryDb(env).prepare(`SELECT grant_record.*,account.display_name account_name,
     project.project_name,association.model_title
     FROM viewer_client_grants grant_record
     JOIN client_accounts account ON account.id=grant_record.account_id
     JOIN projects project ON project.id=grant_record.project_id
     LEFT JOIN viewer_model_associations association ON association.id=grant_record.association_id
+    WHERE grant_record.status='active' AND grant_record.revoked_at IS NULL
     ORDER BY grant_record.created_at DESC,grant_record.id LIMIT 501`).all<Record<string, unknown>>();
   if (rows.results.length > 500) throw new HTTPException(503, { message: "The Viewer client-grant list is too large" });
   return rows.results;
+}
+
+export async function createViewerClientGrant(input: {
+  env: Env; principal: StaffPrincipal; grant: z.infer<typeof clientGrantInput>;
+  idempotencyKey: string; request: Request;
+}): Promise<{ grant: Record<string, unknown> | undefined; replayed: boolean }> {
+  await requireGlobalViewer(input.env, input.principal, "viewer.manage");
+  const parsed = clientGrantInput.safeParse(input.grant);
+  const key = idempotencyKey.safeParse(input.idempotencyKey);
+  if (!parsed.success || !key.success) throw new HTTPException(400, { message: "Viewer client grant is invalid" });
+  const fingerprint = await associationMutationFingerprint("grant.create", parsed.data);
+  const database = primaryDeliveryDb(input.env);
+  const prior = await database.prepare(`SELECT request_fingerprint,grant_id FROM viewer_client_grant_mutation_receipts
+    WHERE actor_staff_id=? AND idempotency_key=?`).bind(input.principal.id, key.data)
+    .first<{ request_fingerprint: string; grant_id: string }>();
+  if (prior) {
+    if (prior.request_fingerprint !== fingerprint) throw new HTTPException(409, { message: "Idempotency-Key was already used" });
+    return { grant: (await listViewerClientGrants(input.env, input.principal)).find(row => row.id === prior.grant_id), replayed: true };
+  }
+  const target = await database.prepare(`SELECT project.id FROM projects project
+    JOIN client_project_grants project_grant ON project_grant.project_id=project.id AND project_grant.account_id=?
+      AND project_grant.revoked_at IS NULL
+    JOIN client_accounts account ON account.id=project_grant.account_id AND account.status='active'
+    WHERE project.id=? AND project.active=1`).bind(parsed.data.accountId, parsed.data.projectId).first<{ id: string }>();
+  if (!target) throw new HTTPException(404, { message: "Active client project not found" });
+  if (parsed.data.associationId) {
+    const association = await currentStaffAssociation(input.env, parsed.data.associationId);
+    if (!association || association.project_id !== parsed.data.projectId)
+      throw new HTTPException(404, { message: "Published Viewer task not found" });
+  }
+  const grantCount = await database.prepare("SELECT COUNT(*) count FROM viewer_client_grants WHERE status='active' AND revoked_at IS NULL").first<number>("count") || 0;
+  if (grantCount >= 500) throw new HTTPException(503, { message: "The Viewer client-grant list is at capacity" });
+  const grantId = crypto.randomUUID();
+  try {
+    await database.batch([
+      database.prepare(`INSERT INTO viewer_client_grants(id,account_id,project_id,scope_type,association_id,
+        include_future_published,can_measure,can_view_cameras,can_download,authorization_expires_at,created_by_staff_id)
+        SELECT ?,?,?,?,?,?,?,?,?,?,? WHERE (SELECT COUNT(*) FROM viewer_client_grants WHERE status='active' AND revoked_at IS NULL)<500`).bind(grantId, parsed.data.accountId, parsed.data.projectId, parsed.data.scopeType,
+        parsed.data.associationId, parsed.data.scopeType === "project" && parsed.data.includeFuturePublished ? 1 : 0,
+        parsed.data.permissions.measure ? 1 : 0, parsed.data.permissions.cameras ? 1 : 0,
+        parsed.data.permissions.download ? 1 : 0, parsed.data.expiresAt, input.principal.id),
+      database.prepare(`INSERT INTO viewer_client_grant_mutation_receipts
+        (actor_staff_id,idempotency_key,action,request_fingerprint,grant_id) VALUES(?,?,?,?,?)`)
+        .bind(input.principal.id, key.data, "grant.create", fingerprint, grantId),
+      database.prepare(`INSERT INTO viewer_client_grant_audit
+        (id,grant_id,action,actor_staff_id,idempotency_key,details_json) VALUES(?,?,'grant.created',?,?,?)`)
+        .bind(crypto.randomUUID(), grantId, input.principal.id, key.data, JSON.stringify({
+          accountId: parsed.data.accountId, projectId: parsed.data.projectId,
+          scopeType: parsed.data.scopeType, associationId: parsed.data.associationId,
+        })),
+    ]);
+  } catch (error) {
+    const raced = await database.prepare(`SELECT request_fingerprint,grant_id FROM viewer_client_grant_mutation_receipts
+      WHERE actor_staff_id=? AND idempotency_key=?`).bind(input.principal.id, key.data)
+      .first<{ request_fingerprint: string; grant_id: string }>();
+    if (raced?.request_fingerprint === fingerprint)
+      return { grant: (await listViewerClientGrants(input.env, input.principal)).find(row => row.id === raced.grant_id), replayed: true };
+    const conflict = await database.prepare(`SELECT id FROM viewer_client_grants WHERE account_id=? AND project_id=?
+      AND scope_type=? AND COALESCE(association_id,'')=COALESCE(?,'') AND status='active' AND revoked_at IS NULL`)
+      .bind(parsed.data.accountId, parsed.data.projectId, parsed.data.scopeType, parsed.data.associationId).first();
+    if (conflict) throw new HTTPException(409, { message: "An active Viewer client grant already exists" });
+    throw error;
+  }
+  await input.env.OPS_DB.batch([await auditStatement(input.env, input.request, input.principal, "viewer.client_grant.created",
+    "viewer_client_grant", grantId, null, { accountId: parsed.data.accountId, projectId: parsed.data.projectId,
+      scopeType: parsed.data.scopeType, associationId: parsed.data.associationId })]);
+  return { grant: (await listViewerClientGrants(input.env, input.principal)).find(row => row.id === grantId), replayed: false };
+}
+
+export async function revokeViewerClientGrant(input: {
+  env: Env; principal: StaffPrincipal; grantId: string; reason: string;
+  idempotencyKey: string; request: Request;
+}): Promise<{ success: true; replayed: boolean; sessionRevocation: { delivered: number; pending: number } }> {
+  await requireGlobalViewer(input.env, input.principal, "viewer.manage");
+  const grantId = opaqueId.safeParse(input.grantId), value = revokeInput.safeParse({ reason: input.reason });
+  const key = idempotencyKey.safeParse(input.idempotencyKey);
+  if (!grantId.success || !value.success || !key.success)
+    throw new HTTPException(400, { message: "Viewer client-grant revocation is invalid" });
+  const database = primaryDeliveryDb(input.env);
+  const grant = await database.prepare(`SELECT id,project_id,association_id,status,grant_version FROM viewer_client_grants WHERE id=?`)
+    .bind(grantId.data).first<{ id: string; project_id: string; association_id: string | null; status: string; grant_version: number }>();
+  if (!grant) throw new HTTPException(404, { message: "Viewer client grant not found" });
+  const fingerprint = await associationMutationFingerprint("grant.revoke", { grantId: grantId.data, reason: value.data.reason });
+  const prior = await database.prepare(`SELECT request_fingerprint FROM viewer_client_grant_mutation_receipts
+    WHERE actor_staff_id=? AND idempotency_key=?`).bind(input.principal.id, key.data).first<string>("request_fingerprint");
+  if (prior && prior !== fingerprint) throw new HTTPException(409, { message: "Idempotency-Key was already used" });
+  if (!prior && grant.status !== "active")
+    throw new HTTPException(409, { message: "Viewer client grant is already revoked" });
+  if (!prior) await database.batch([
+    database.prepare(`UPDATE viewer_client_grants SET status='revoked',grant_version=grant_version+1,
+      revoked_at=COALESCE(revoked_at,datetime('now')),revoked_by_staff_id=COALESCE(revoked_by_staff_id,?),
+      revoke_reason=COALESCE(revoke_reason,?),updated_at=datetime('now') WHERE id=? AND status='active'`)
+      .bind(input.principal.id, value.data.reason, grant.id),
+    database.prepare(`INSERT INTO viewer_client_grant_mutation_receipts
+      (actor_staff_id,idempotency_key,action,request_fingerprint,grant_id) VALUES(?,?,?,?,?)`)
+      .bind(input.principal.id, key.data, "grant.revoke", fingerprint, grant.id),
+    database.prepare(`INSERT INTO viewer_client_grant_audit
+      (id,grant_id,action,actor_staff_id,idempotency_key,details_json) VALUES(?,?,'grant.revoked',?,?,?)`)
+      .bind(crypto.randomUUID(), grant.id, input.principal.id, key.data, JSON.stringify({ reason: value.data.reason })),
+    database.prepare(`INSERT OR IGNORE INTO viewer_session_revocation_outbox(id,association_id,association_version,idempotency_key)
+      SELECT lower(hex(randomblob(16))),association.id,association.association_version,
+        'viewer-session-revoke:'||lower(hex(randomblob(16))) FROM viewer_model_associations association
+      WHERE association.project_id=? AND (? IS NULL OR association.id=?) AND association.state='active'`)
+      .bind(grant.project_id, grant.association_id, grant.association_id),
+    database.prepare(`UPDATE viewer_model_associations SET association_version=association_version+1,
+      updated_at=datetime('now') WHERE project_id=? AND (? IS NULL OR id=?) AND state='active'`)
+      .bind(grant.project_id, grant.association_id, grant.association_id),
+  ]);
+  if (!prior) await input.env.OPS_DB.batch([await auditStatement(input.env, input.request, input.principal,
+    "viewer.client_grant.revoked", "viewer_client_grant", grant.id, null, { reason: value.data.reason })]);
+  const sessionRevocation = await drainViewerSessionRevocations(input.env);
+  return { success: true, replayed: Boolean(prior), sessionRevocation };
 }
 
 async function listProjectOptions(env: Env): Promise<PortalProjectRow[]> {
@@ -271,6 +385,36 @@ async function currentStaffAssociation(env: Env, associationId: string): Promise
     "SELECT updated_at FROM pa_projects WHERE id=? AND active=1",
   ).bind(row.project_alpha_project_id).first<{ updated_at: string }>();
   return source?.updated_at === row.project_source_version ? row : null;
+}
+
+export async function listViewerClientGrantWorkspace(env: Env, principal: StaffPrincipal) {
+  await requireGlobalViewer(env, principal, "viewer.manage");
+  const database = primaryDeliveryDb(env);
+  const [grantRows, projectRows, associationRows] = await Promise.all([
+    listViewerClientGrants(env, principal),
+    database.prepare(`SELECT DISTINCT project.id,project_grant.account_id account_id,
+      project.client_name,project.project_name FROM projects project
+      JOIN client_project_grants project_grant ON project_grant.project_id=project.id AND project_grant.revoked_at IS NULL
+      JOIN client_accounts account ON account.id=project_grant.account_id AND account.status='active'
+      WHERE project.active=1 ORDER BY project.client_name COLLATE NOCASE,project.project_name COLLATE NOCASE LIMIT 501`).all<{
+        id:string;account_id:string;client_name:string;project_name:string;
+      }>(),
+    listAssociations(env),
+  ]);
+  if (projectRows.results.length > 500) throw new HTTPException(503,{message:"The Viewer client project list is too large"});
+  const liveAssociations = (await Promise.all(associationRows.slice(0,501).map(async row =>
+    await currentStaffAssociation(env,row.id) ? row : null))).filter((row): row is NonNullable<typeof row> => row !== null);
+  if (associationRows.length > 500 || liveAssociations.length > 500)
+    throw new HTTPException(503,{message:"The Viewer client task list is too large"});
+  return {
+    grants: grantRows.map(row => ({ id:row.id, accountId:row.account_id, clientName:row.account_name,
+      projectId:row.project_id, projectName:row.project_name, scopeType:row.scope_type,
+      associationId:row.association_id, modelTitle:row.model_title, includeFuturePublished:Boolean(row.include_future_published),
+      permissions:{measure:Boolean(row.can_measure),cameras:Boolean(row.can_view_cameras),download:Boolean(row.can_download)},
+      expiresAt:row.authorization_expires_at, status:row.status, createdAt:row.created_at, revokedAt:row.revoked_at })),
+    projects: projectRows.results.map(row=>({id:row.id,accountId:row.account_id,clientName:row.client_name,projectName:row.project_name})),
+    associations: liveAssociations.map(row=>({id:row.id,projectId:row.projectId,modelTitle:row.modelTitle})),
+  };
 }
 
 async function associationMutationFingerprint(action: string, value: unknown): Promise<string> {
@@ -553,7 +697,8 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
     });
     try {
       const [models, projects, associations, clientGrants] = await Promise.all([
-        viewerServiceClient(c.env).listModels(), listProjectOptions(c.env), listAssociations(c.env), listClientViewerGrants(c.env),
+        viewerServiceClient(c.env).listModels(), listProjectOptions(c.env), listAssociations(c.env),
+        listViewerClientGrants(c.env, c.get("principal")),
       ]);
       return c.json({
         enabled: true,
@@ -568,91 +713,26 @@ export function registerViewerIntegrationRoutes(app: ViewerApp): void {
 
   app.post("/api/viewer/client-grants", async c => {
     const principal = c.get("principal");
-    await requireGlobalViewer(c.env, principal, "viewer.manage");
     const parsed = clientGrantInput.safeParse(await c.req.json().catch(() => null));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     if (!parsed.success || !key.success) throw new HTTPException(400, { message: "Viewer client grant is invalid" });
-    const fingerprint = await associationMutationFingerprint("grant.create", parsed.data);
-    const database = primaryDeliveryDb(c.env);
-    const prior = await database.prepare(`SELECT request_fingerprint,grant_id FROM viewer_client_grant_mutation_receipts
-      WHERE actor_staff_id=? AND idempotency_key=?`).bind(principal.id, key.data)
-      .first<{ request_fingerprint: string; grant_id: string }>();
-    if (prior) {
-      if (prior.request_fingerprint !== fingerprint) throw new HTTPException(409, { message: "Idempotency-Key was already used" });
-      return c.json({ grant: (await listClientViewerGrants(c.env)).find(row => row.id === prior.grant_id), replayed: true });
-    }
-    const target = await database.prepare(`SELECT project.id FROM projects project
-      JOIN client_project_grants project_grant ON project_grant.project_id=project.id AND project_grant.account_id=?
-        AND project_grant.revoked_at IS NULL
-      JOIN client_accounts account ON account.id=project_grant.account_id AND account.status='active'
-      WHERE project.id=? AND project.active=1`).bind(parsed.data.accountId, parsed.data.projectId).first<{ id: string }>();
-    if (!target) throw new HTTPException(404, { message: "Active client project not found" });
-    if (parsed.data.associationId && !await database.prepare(`SELECT id FROM viewer_model_associations
-      WHERE id=? AND project_id=? AND state='active' AND model_status='ready' AND revoked_at IS NULL`)
-      .bind(parsed.data.associationId, parsed.data.projectId).first())
-      throw new HTTPException(404, { message: "Published Viewer task not found" });
-    const grantId = crypto.randomUUID();
-    try {
-      await database.batch([
-        database.prepare(`INSERT INTO viewer_client_grants(id,account_id,project_id,scope_type,association_id,
-          include_future_published,can_measure,can_view_cameras,can_download,authorization_expires_at,created_by_staff_id)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(grantId, parsed.data.accountId, parsed.data.projectId, parsed.data.scopeType,
-          parsed.data.associationId, parsed.data.scopeType === "project" && parsed.data.includeFuturePublished ? 1 : 0,
-          parsed.data.permissions.measure ? 1 : 0, parsed.data.permissions.cameras ? 1 : 0,
-          parsed.data.permissions.download ? 1 : 0, parsed.data.expiresAt, principal.id),
-        database.prepare(`INSERT INTO viewer_client_grant_mutation_receipts
-          (actor_staff_id,idempotency_key,action,request_fingerprint,grant_id) VALUES(?,?,?,?,?)`)
-          .bind(principal.id, key.data, "grant.create", fingerprint, grantId),
-      ]);
-    } catch (error) {
-      const conflict = await database.prepare(`SELECT id FROM viewer_client_grants WHERE account_id=? AND project_id=?
-        AND scope_type=? AND COALESCE(association_id,'')=COALESCE(?,'') AND status='active' AND revoked_at IS NULL`)
-        .bind(parsed.data.accountId, parsed.data.projectId, parsed.data.scopeType, parsed.data.associationId).first();
-      if (conflict) throw new HTTPException(409, { message: "An active Viewer client grant already exists" });
-      throw error;
-    }
-    await c.env.OPS_DB.batch([await auditStatement(c.env, c.req.raw, principal, "viewer.client_grant.created",
-      "viewer_client_grant", grantId, null, { accountId: parsed.data.accountId, projectId: parsed.data.projectId,
-        scopeType: parsed.data.scopeType, associationId: parsed.data.associationId })]);
-    return c.json({ grant: (await listClientViewerGrants(c.env)).find(row => row.id === grantId), replayed: false }, 201);
+    const result = await createViewerClientGrant({
+      env: c.env, principal, grant: parsed.data, idempotencyKey: key.data, request: c.req.raw,
+    });
+    return c.json(result, result.replayed ? 200 : 201);
   });
 
   app.delete("/api/viewer/client-grants/:grantId", async c => {
     const principal = c.get("principal");
-    await requireGlobalViewer(c.env, principal, "viewer.manage");
     const grantId = opaqueId.safeParse(c.req.param("grantId"));
     const value = revokeInput.safeParse(await c.req.json().catch(() => null));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     if (!grantId.success || !value.success || !key.success) throw new HTTPException(400, { message: "Viewer client-grant revocation is invalid" });
-    const database = primaryDeliveryDb(c.env);
-    const grant = await database.prepare(`SELECT id,project_id,association_id,status,grant_version FROM viewer_client_grants WHERE id=?`)
-      .bind(grantId.data).first<{ id: string; project_id: string; association_id: string | null; status: string; grant_version: number }>();
-    if (!grant) throw new HTTPException(404, { message: "Viewer client grant not found" });
-    const fingerprint = await associationMutationFingerprint("grant.revoke", { grantId: grantId.data, reason: value.data.reason });
-    const prior = await database.prepare(`SELECT request_fingerprint FROM viewer_client_grant_mutation_receipts
-      WHERE actor_staff_id=? AND idempotency_key=?`).bind(principal.id, key.data).first<string>("request_fingerprint");
-    if (prior && prior !== fingerprint) throw new HTTPException(409, { message: "Idempotency-Key was already used" });
-    if (!prior) await database.batch([
-      database.prepare(`UPDATE viewer_client_grants SET status='revoked',grant_version=grant_version+1,
-        revoked_at=COALESCE(revoked_at,datetime('now')),revoked_by_staff_id=COALESCE(revoked_by_staff_id,?),
-        revoke_reason=COALESCE(revoke_reason,?),updated_at=datetime('now') WHERE id=? AND status='active'`)
-        .bind(principal.id, value.data.reason, grant.id),
-      database.prepare(`INSERT INTO viewer_client_grant_mutation_receipts
-        (actor_staff_id,idempotency_key,action,request_fingerprint,grant_id) VALUES(?,?,?,?,?)`)
-        .bind(principal.id, key.data, "grant.revoke", fingerprint, grant.id),
-      database.prepare(`INSERT OR IGNORE INTO viewer_session_revocation_outbox(id,association_id,association_version,idempotency_key)
-        SELECT lower(hex(randomblob(16))),association.id,association.association_version,
-          'viewer-session-revoke:'||lower(hex(randomblob(16))) FROM viewer_model_associations association
-        WHERE association.project_id=? AND (? IS NULL OR association.id=?) AND association.state='active'`)
-        .bind(grant.project_id, grant.association_id, grant.association_id),
-      database.prepare(`UPDATE viewer_model_associations SET association_version=association_version+1,
-        updated_at=datetime('now') WHERE project_id=? AND (? IS NULL OR id=?) AND state='active'`)
-        .bind(grant.project_id, grant.association_id, grant.association_id),
-    ]);
-    await c.env.OPS_DB.batch([await auditStatement(c.env, c.req.raw, principal, "viewer.client_grant.revoked",
-      "viewer_client_grant", grant.id, null, { reason: value.data.reason })]);
-    const sessionRevocation = await drainViewerSessionRevocations(c.env);
-    return c.json({ success: true, replayed: Boolean(prior), sessionRevocation }, sessionRevocation.pending ? 202 : 200);
+    const result = await revokeViewerClientGrant({
+      env: c.env, principal, grantId: grantId.data, reason: value.data.reason,
+      idempotencyKey: key.data, request: c.req.raw,
+    });
+    return c.json(result, result.sessionRevocation.pending ? 202 : 200);
   });
 
   app.post("/api/viewer/associations", async c => {

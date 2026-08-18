@@ -22,6 +22,17 @@
     "contentSha256": "e5a203baed7c61aa62664ee49d5c0948e27c182419766ffa5d89e5560e1d0b22",
     "signature": "pyHRt2dEmVvaQ7rphy3hWAw7Xb72usge9lXlyl_SlwU"
   },
+  "viewerClientGrantWorkspace": {
+    "secret": "viewer-event-secret-32-characters-minimum",
+    "keyId": "viewer-v1",
+    "method": "POST",
+    "path": "/api/viewer/workspace/client-grants",
+    "timestamp": 1800000003,
+    "nonce": "client-grants-nonce-1234567890",
+    "body": "{\"subject\":\"ops:staff-one\",\"action\":\"list\"}",
+    "contentSha256": "02488bb41e205bc919ac39e693ba55923e1c28a4a91113f365dc4005b376e638",
+    "signature": "GsipUK2b1fqZno57wfUsix6iAv9H_pdEjiqIiKGbWVg"
+  },
   "sourceAuthorizationIntrospection": {
     "secret": "viewer-event-secret-32-characters-minimum",
     "keyId": "viewer-v1",

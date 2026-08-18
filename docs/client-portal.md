@@ -45,11 +45,20 @@ previously issued Viewer sessions fail at their next bounded live-introspection
 check. Removing a block restores eligibility only;
 it does not create or restore any data grant.
 
-Migrations `0144_viewer_client_grants.sql` and
-`0145_portal_identity_eligibility.sql` add authenticated project/task Viewer
+Migrations `0144_viewer_client_grants.sql`,
+`0145_portal_identity_eligibility.sql`, and
+`0146_viewer_client_grant_audit.sql` add authenticated project/task Viewer
 grants, opt-out eligibility, the minimal empty-shell bridge, durable mutation
-receipts, and audit history. Apply them in that order before deploying code that
-uses these tables.
+receipts, and an authoritative grant audit colocated with its mutations. Apply
+them in that order before deploying code that uses these tables.
+
+Migration `0147_project_alpha_delivery_intents.sql` adds the default-off,
+portal-first Project Alpha delivery-intent receipts, principal-only portal
+grants, revocation history, authoritative audit, and durable notification
+outbox. Operations migration `0031_project_alpha_delivery_intent_rate_limits.sql`
+adds its isolated bounded machine-rate counters. The signed wire corpus is
+`packages/shared/fixtures/project-alpha-delivery-intent-v1.json` with SHA-256
+`f16d540bcfbcf4c77c356fc37e2c046a23a473ebec701d526e3b8d45f38c90e8`.
 
 ## Workflow
 

@@ -12,7 +12,13 @@ import { sendAdminAlert } from "./alerts";
 import { sendNotificationMail } from "./mailer";
 import type { Env, StaffPrincipal } from "./types";
 import { introspectClientViewerSourceAuthorization } from "./viewer-session-issuer";
-import { viewerIntegrationEnabled, viewerServiceClient } from "./viewer-integration";
+import {
+  createViewerClientGrant,
+  listViewerClientGrantWorkspace,
+  revokeViewerClientGrant,
+  viewerIntegrationEnabled,
+  viewerServiceClient,
+} from "./viewer-integration";
 import { defaultViewerUnits, resolveViewerUnits } from "./viewer-units";
 
 type Variables = { principal: StaffPrincipal; administrator: boolean };
@@ -57,7 +63,7 @@ export function viewerProcessingEnabled(
 const viewerPermissionMapping: ReadonlyArray<{
   ops: Extract<Permission,
     "viewer.view" | "viewer.datasets.manage" | "viewer.processing.manage" |
-    "viewer.publish" | "viewer.share.create" | "viewer.share.revoke" | "viewer.storage.purge">;
+    "viewer.publish" | "viewer.share.create" | "viewer.share.revoke" | "viewer.manage" | "viewer.storage.purge">;
   viewer: readonly ViewerProcessingPermission[];
 }> = [
   { ops: "viewer.view", viewer: [
@@ -72,6 +78,7 @@ const viewerPermissionMapping: ReadonlyArray<{
   { ops: "viewer.publish", viewer: ["viewer.processing.publish"] },
   { ops: "viewer.share.create", viewer: ["viewer.shares.read", "viewer.shares.create"] },
   { ops: "viewer.share.revoke", viewer: ["viewer.shares.read", "viewer.shares.revoke"] },
+  { ops: "viewer.manage", viewer: ["viewer.client_grants.manage"] },
   { ops: "viewer.storage.purge", viewer: ["viewer.storage.purge"] },
 ];
 
@@ -224,10 +231,12 @@ export async function pruneViewerEventNonces(env: Pick<Env, "OPS_DB">): Promise<
 }
 
 export async function pruneViewerMachineRateLimits(env: Pick<Env, "OPS_DB">): Promise<number> {
-  const expired = await env.OPS_DB.prepare(`DELETE FROM viewer_machine_rate_limits WHERE rowid IN (
+  const [expired, workspaceExpired] = await env.OPS_DB.batch([env.OPS_DB.prepare(`DELETE FROM viewer_machine_rate_limits WHERE rowid IN (
     SELECT rowid FROM viewer_machine_rate_limits WHERE datetime(window_start)<=datetime('now','-10 minutes') LIMIT 1000
-  )`).run();
-  return expired.meta.changes || 0;
+  )`), env.OPS_DB.prepare(`DELETE FROM viewer_workspace_client_grant_rate_limits WHERE rowid IN (
+    SELECT rowid FROM viewer_workspace_client_grant_rate_limits WHERE datetime(window_start)<=datetime('now','-10 minutes') LIMIT 1000
+  )`)]);
+  return (expired?.meta.changes || 0) + (workspaceExpired?.meta.changes || 0);
 }
 
 interface NotificationRow {
@@ -304,7 +313,8 @@ export async function processViewerProcessingNotifications(env: Env): Promise<nu
 
 export function viewerMachineEventRequest(method: string, path: string): boolean {
   return method.toUpperCase() === "POST" && (
-    path === "/api/viewer/events" || path === "/api/viewer/source-authorizations/introspect"
+    path === "/api/viewer/events" || path === "/api/viewer/source-authorizations/introspect" ||
+    path === "/api/viewer/workspace/client-grants"
   );
 }
 
@@ -329,8 +339,14 @@ const sourceAuthorizationIntrospectionSchema = z.object({
   shareId: opaqueId,
 }).strict();
 
-async function consumeViewerMachineRate(env: Env, scope: "event" | "source-introspection"): Promise<boolean> {
+async function consumeViewerMachineRate(env: Env, scope: "event" | "source-introspection" | "client-grants"): Promise<boolean> {
   const maximum = scope === "source-introspection" ? 600 : 120;
+  if (scope === "client-grants") {
+    const count = await env.OPS_DB.prepare(`INSERT INTO viewer_workspace_client_grant_rate_limits(window_start,request_count)
+      VALUES(strftime('%Y-%m-%dT%H:%M:00Z','now'),1) ON CONFLICT(window_start) DO UPDATE SET request_count=request_count+1
+      WHERE request_count<? RETURNING request_count`).bind(maximum).first<number>("request_count");
+    return typeof count === "number" && count <= maximum;
+  }
   const result = await env.OPS_DB.prepare(`INSERT INTO viewer_machine_rate_limits(scope,window_start,request_count)
     VALUES(?,strftime('%Y-%m-%dT%H:%M:00Z','now'),1)
     ON CONFLICT(scope,window_start) DO UPDATE SET request_count=request_count+1
@@ -355,6 +371,61 @@ async function reserveViewerMachineNonce(
 }
 
 export function registerViewerProcessingRoutes(app: ViewerApp): void {
+  app.post("/api/viewer/workspace/client-grants", async c => {
+    if (!viewerIntegrationEnabled(c.env) || c.env.CLIENT_VIEWER_SESSION_ISSUER_ENABLED !== "true")
+      throw new HTTPException(404, { message: "Not found" });
+    const rawBody = await boundedBody(c.req.raw);
+    const authenticated = await verifyEventSignature(c.env, c.req.raw, rawBody);
+    let decoded: unknown;
+    try { decoded = JSON.parse(rawBody); }
+    catch { throw new HTTPException(400, { message: "Viewer client-grant request must be JSON" }); }
+    const envelopeSchema = z.object({
+      subject: z.string().regex(/^ops:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
+      action: z.enum(["list", "create", "revoke"]),
+      idempotencyKey: idempotencyKey.optional(),
+      grant: z.unknown().optional(),
+      grantId: opaqueId.optional(),
+      reason: z.string().trim().min(1).max(240).optional(),
+    }).strict().superRefine((value, context) => {
+      if (value.action === "list" && (value.idempotencyKey || value.grant || value.grantId || value.reason))
+        context.addIssue({ code: "custom", message: "List does not accept mutation fields" });
+      if (value.action === "create" && (!value.idempotencyKey || !value.grant || value.grantId || value.reason))
+        context.addIssue({ code: "custom", message: "Create fields are invalid" });
+      if (value.action === "revoke" && (!value.idempotencyKey || !value.grantId || !value.reason || value.grant))
+        context.addIssue({ code: "custom", message: "Revoke fields are invalid" });
+    });
+    const parsed = envelopeSchema.safeParse(decoded);
+    if (!parsed.success) throw new HTTPException(400, { message: "Viewer client-grant request is invalid" });
+    if (!await consumeViewerMachineRate(c.env, "client-grants"))
+      throw new HTTPException(429, { message: "Too many Viewer client-grant requests" });
+    await reserveViewerMachineNonce(c.env, authenticated);
+    const staffId = parsed.data.subject.slice(4);
+    const row = await c.env.OPS_DB.withSession("first-primary").prepare(`SELECT id,email,display_name,access_subject,
+      project_alpha_user_id FROM staff_users WHERE id=? AND status='active' AND access_subject IS NOT NULL
+      AND length(trim(access_subject))>0`).bind(staffId).first<{
+        id: string; email: string; display_name: string; access_subject: string; project_alpha_user_id: string | null;
+      }>();
+    if (!row) throw new HTTPException(403, { message: "Viewer client-grant subject is not authorized" });
+    const principal: StaffPrincipal = {
+      id: row.id, email: row.email, displayName: row.display_name,
+      accessSubject: row.access_subject, projectAlphaUserId: row.project_alpha_user_id,
+    };
+    if (parsed.data.action === "list") return c.json(await listViewerClientGrantWorkspace(c.env, principal));
+    if (parsed.data.action === "create") {
+      const result = await createViewerClientGrant({ env: c.env, principal,
+        grant: parsed.data.grant as Parameters<typeof createViewerClientGrant>[0]["grant"],
+        idempotencyKey: parsed.data.idempotencyKey!, request: c.req.raw });
+      const snapshot = await listViewerClientGrantWorkspace(c.env, principal);
+      return c.json({ ...snapshot, replayed: result.replayed }, result.replayed ? 200 : 201);
+    }
+    const result = await revokeViewerClientGrant({ env: c.env, principal,
+      grantId: parsed.data.grantId!, reason: parsed.data.reason!,
+      idempotencyKey: parsed.data.idempotencyKey!, request: c.req.raw });
+    const snapshot = await listViewerClientGrantWorkspace(c.env, principal);
+    return c.json({ ...snapshot, replayed: result.replayed,
+      sessionRevocation: result.sessionRevocation }, result.sessionRevocation.pending ? 202 : 200);
+  });
+
   app.post("/api/viewer/source-authorizations/introspect", async c => {
     if (c.env.CLIENT_VIEWER_SHARES_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
     const rawBody = await boundedBody(c.req.raw);
