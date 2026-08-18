@@ -758,10 +758,17 @@ export class ViewerServiceClient {
       if (response.status === 404) throw new ViewerServiceError("3D model not found", "not_found", 404);
       if (response.status === 409)
         throw new ViewerServiceError("3D Viewer request conflicts with an earlier request", "conflict", 409);
-      if (!response.ok) throw new ViewerServiceError("3D Viewer is temporarily unavailable", "unavailable", 503);
+      if (!response.ok) {
+        console.error(JSON.stringify({ event: "viewer.service.upstream_rejected", status: response.status }));
+        throw new ViewerServiceError("3D Viewer is temporarily unavailable", "unavailable", 503);
+      }
       return await boundedJson(response);
     } catch (error) {
       if (error instanceof ViewerServiceError) throw error;
+      console.error(JSON.stringify({
+        event: "viewer.service.request_failed",
+        kind: error instanceof Error ? error.name : "unknown",
+      }));
       throw new ViewerServiceError("3D Viewer is temporarily unavailable", "unavailable", 503);
     } finally {
       clearTimeout(timeout);
