@@ -739,7 +739,11 @@ export class ViewerServiceClient {
         body,
       });
       stage = "fetch";
-      const response = await this.fetcher(`${this.origin}${pathWithQuery}`, {
+      // Keep native Cloudflare fetch unbound. Calling a stored native fetch as
+      // `this.fetcher(...)` supplies ViewerServiceClient as its receiver and
+      // Workers rejects the invocation before an HTTP request is dispatched.
+      const fetcher = this.fetcher;
+      const response = await fetcher(`${this.origin}${pathWithQuery}`, {
         method,
         body: method === "GET" || method === "HEAD" ? undefined : body,
         headers: {

@@ -307,4 +307,17 @@ describe("Viewer service client", () => {
     await expect(client.listModels()).rejects.toMatchObject({ code: "unavailable", status: 503 });
     expect(redirected).toHaveBeenCalledOnce();
   });
+
+  it("invokes a stored native-style fetch function without a client receiver", async () => {
+    const fetcher = vi.fn(function (this: unknown) {
+      expect(this).toBeUndefined();
+      return Promise.resolve(Response.json({ models: [] }));
+    });
+    const client = new ViewerServiceClient({
+      baseUrl: "https://viewer.example.test",
+      keyId: "ops-v1",
+      secret,
+    }, fetcher as typeof fetch);
+    await expect(client.listModels()).resolves.toEqual([]);
+  });
 });
