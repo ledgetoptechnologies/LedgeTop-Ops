@@ -16,7 +16,7 @@ corresponding live evidence below is captured.
   `sha-ad50555`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
   UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
-- LTDS-Ops product code: `67a443cdb73c71dc57f1840db4f0685eccbd6a3c` on
+- LTDS-Ops product code: `df715e65ae337f47037fdce765eea64a32bdf2df` on
   `codex/3d-processing-control-plane`. This pin moves processing management to
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
   overview; never substitute a mutable branch tip.
@@ -29,10 +29,9 @@ corresponding live evidence below is captured.
 
 The updated source, manifest digest, migrations, fixtures, and activation
 policy passed independent cross-repository verification, so the corresponding
-constant in `scripts/staging-requirements.mjs` is temporarily
-`RELEASE_CONTRACT_FINALIZED=false` while the regenerated Worker declarations
-are repinned. The broader workspace completion and live acceptance gates
-remain under review. Finalization freezes
+constant in `scripts/staging-requirements.mjs` is
+`RELEASE_CONTRACT_FINALIZED=true`. The broader workspace completion and live
+acceptance gates remain under review. Finalization freezes
 the candidate contract only; it does not approve deployment, migrations, or
 any feature flag. Reset it to `false` before changing a pinned source or
 deployment artifact.
