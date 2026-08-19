@@ -30,7 +30,7 @@ corresponding live evidence below is captured.
 The updated source, manifest digest, migrations, fixtures, and activation
 policy passed independent cross-repository verification, so the corresponding
 constant in `scripts/staging-requirements.mjs` is
-`RELEASE_CONTRACT_FINALIZED=true`. The broader workspace completion and live
+`RELEASE_CONTRACT_FINALIZED=false` while the managed import-browser Viewer image is built and its immutable digest is captured. The broader workspace completion and live
 acceptance gates remain under review. Finalization freezes
 the candidate contract only; it does not approve deployment, migrations, or
 any feature flag. Reset it to `false` before changing a pinned source or
