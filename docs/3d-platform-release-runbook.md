@@ -9,14 +9,14 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `9cd1d1c98342c401f1017490e959b3790b330037`.
+- 3D Viewer source: `625d6578e0a87cce31f1b8d1da45e6e2147dcbff`.
   The reviewed release-candidate image is
-  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:f6ec58c5f25eb0a6f79cbabccf1406901454e4c2b95193a5079efe1e9b7383c9`.
-  GitHub Actions run `32183500777` published only tags
-  `v0.2.0-rc.9cd1d1c` and `sha-9cd1d1c`; it did not publish `latest`. The
+  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:c05ec9c8f82e3890d06c911b4d08077041655bd67bb3ae4794777ba7420a11ae`.
+  GitHub Actions run `32216833734` published tags `latest` and
+  `sha-625d657`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
   UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
-- LTDS-Ops product code: `ea4287695afcef9ce170d934561de37d6b6ba1cb` on
+- LTDS-Ops product code: `f636aab92ff2bfb31577593445dc7d6f81280f56` on
   `codex/3d-processing-control-plane`. This pin moves processing management to
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
   overview; never substitute a mutable branch tip.
@@ -30,7 +30,7 @@ captured.
 The updated source, manifest digest, migrations, fixtures, and activation
 policy passed independent cross-repository verification, so the corresponding
 constant in `scripts/staging-requirements.mjs` is
-`RELEASE_CONTRACT_FINALIZED=false` while the latest-tag and Operations client-directory UI follow-up is under review. Set it to true only after the updated source and image pins are independently verified. Finalization freezes
+`RELEASE_CONTRACT_FINALIZED=false` while the project-first workspace and silent staff-session renewal follow-up is under review. Set it to true only after the updated source and image pins are independently verified. Finalization freezes
 the candidate contract only; it does not approve deployment, migrations, or
 any feature flag. Reset it to `false` before changing a pinned source or
 deployment artifact.
@@ -52,17 +52,20 @@ against 923,211,886,592 available bytes. The local source-stamped image ID was
 `sha256:799b17aa0795fc17c5e884b70518581c4b1f28cd95556b60fa0841d4f56ca0af`;
 it is local scale-rehearsal evidence, not the separately reviewed GHCR
 manifest digest pinned above. Production mode
-rejects mutable image tags, source-stamp mismatches, and insufficient space
+accepts the official `latest` tag for routine internal rollouts while retaining
+immutable digest/source-stamp evidence for approval and rollback. It still rejects
+unrecognized mutable tags, source-stamp mismatches, and insufficient space
 before creating a target.
 This is inode/index/recovery evidence only;
 the same rehearsal still must run on the disposable TrueNAS storage class with
 representative imagery before activation.
 
-The exact candidate also passed 188 repository-owned tests inside the Linux
-build image, including the real symlink-escape gate. Its separate Docker test
-proved UID/GID 568 named-volume initialization and byte/database persistence
-across restart and same-image upgrade. Together these close the two expected
-Windows-host skips; they do not replace the real TrueNAS ACL/mount drill.
+The exact candidate passed 240 of 241 repository-owned tests in the Linux
+workflow with zero failures and one environment-only skip, then completed the
+production build. The suite covers the real symlink-escape gate, UID/GID 568
+storage admission, persistent-bind byte/database behavior, project-first
+workspace, staff renewal, GCP provenance/ranking, and provider auto-detection.
+It does not replace the real TrueNAS ACL/mount drill.
 
 The candidate's executable and test tree completed the destructive
 compatibility gate against
@@ -104,7 +107,7 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091`, published-session revocation
 commit `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06`, and subsequent hardening commits
-through `9cd1d1c98342c401f1017490e959b3790b330037` retain the reviewed provider adapter,
+through `625d6578e0a87cce31f1b8d1da45e6e2147dcbff` retain the reviewed provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
@@ -118,9 +121,9 @@ TrueNAS staging rehearsal remain live gates.
 1. Back up both Cloudflare D1 databases and the Project Alpha database before
    applying migrations. Record database IDs, migration ledgers, backup IDs,
    row counts, and restore commands.
-2. Back up `/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env`. After the
-   first Viewer start, back up the complete `ltds-viewer-storage` Docker volume
-   as one unit; its SQLite database and managed assets must remain consistent.
+2. Back up `/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env` and the complete
+   `/mnt/Plugins/App_Data/Model-Viewer/Storage` tree as one consistency unit; its
+   SQLite database and managed assets must remain together.
 3. Confirm these production variables remain the literal string `false`:
    `VIEWER_INTEGRATION_ENABLED`, `VIEWER_PROCESSING_ENABLED`,
    `VIEWER_PUBLIC_SHARES_ENABLED`, `CLIENT_VIEWER_SESSION_ISSUER_ENABLED`,
@@ -134,12 +137,14 @@ TrueNAS staging rehearsal remain live gates.
 
 ## 2. Start the Viewer without activating processing
 
-Use the reviewed Viewer Compose file, not the superseded bind-mount/root
-bootstrap version. It runs as TrueNAS Apps UID/GID `568:568`, has no privileged
-entrypoint or added capabilities, and lets Docker create the fixed
-`ltds-viewer-storage` volume. Do not retain old `/app/data`, `/app/datasets`,
-or `/app/models` bind mounts. If they contain real data, stop and migrate it
-before switching; never silently start an empty catalog over existing bytes.
+Use the reviewed Viewer Compose file. It runs as TrueNAS Apps UID/GID `568:568`,
+has no privileged entrypoint or added capabilities, and bind-mounts the exact
+pre-created host path `/mnt/Plugins/App_Data/Model-Viewer/Storage` at
+`/app/storage` with automatic host-path creation disabled. The path, sentinel,
+managed directories, and ownership must pass the guarded updater checks. If an
+older named volume contains real data, copy and verify it first and retain the
+old volume until the new catalog and bytes are proven; never silently start an
+empty catalog over existing data.
 
 Keep `PROCESSING_PLATFORM_ENABLED=false` for the first boot. The API should
 be healthy without the worker or any provider. Verify inside the container:
@@ -151,16 +156,17 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`9cd1d1c98342c401f1017490e959b3790b330037` and schema version `18`. Confirm
+`625d6578e0a87cce31f1b8d1da45e6e2147dcbff` and schema version `19`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
-`X-LTDS-Viewer-Revision`, `18` in `X-LTDS-Viewer-Schema-Version`, and
+`X-LTDS-Viewer-Revision`, `19` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
 body alone is not deployment-identity evidence.
 
 Expected identity is `568:568`; `CapEff`, `CapBnd`, and the other capability
 sets in `/proc/1/status` must be zero. Confirm the SQLite file is under
-`/app/storage/data`, every managed directory is writable, WebODM Media and
-legacy Derivatives are read-only, and direct-IP Host requests fail while the
+`/app/storage/data`, every managed directory is writable, the optional WebODM
+Media source is read-only when configured, there is no permanent legacy
+Derivatives mount, and direct-IP Host requests fail while the
 canonical Viewer host succeeds through external Nginx.
 
 Run the symlink-escape test in this Linux image. Its Windows skip is not
@@ -252,9 +258,15 @@ PROCESSING_PROVIDER_ALLOWED_CIDRS=192.168.50.0/24,192.168.10.0/24
 PROCESSING_PROVIDER_TOKENS_JSON={}
 ```
 
-Administrators can then create a disabled IP-literal node, store or rotate its
-token, probe it, and enable it from Ops without another environment edit or
-restart. Exact origins remain available for explicitly reviewed DNS providers.
+Administrators can then enter a label, endpoint, and optional token. Viewer
+probes `/info` and `/options` before storing the node, detects the supported
+NodeODM-compatible direct-node or ClusterODM proxy behavior, and records its
+API/engine versions, queue, limits, and processing options. Unsupported or
+ambiguous endpoints create nothing. Tokens remain write-only; an endpoint that
+successfully probes without authentication stores an explicit no-auth mode.
+The detected node is created disabled and can be enabled without another
+environment edit or restart. Exact origins remain available for explicitly
+reviewed DNS providers.
 
 ## 4. Apply migrations with flags still off
 
@@ -278,7 +290,7 @@ The Project Alpha delivery-intent wire fixture is LF-pinned at
 SHA-256 is `f16d540bcfbcf4c77c356fc37e2c046a23a473ebec701d526e3b8d45f38c90e8`.
 - Project Alpha: apply `0066`, `0067`, `0068`, and `0069` through the normal migration
   runner. All are replay-safe but must still be recorded once in the ledger.
-- Viewer: startup applies every internal SQLite migration through schema v18;
+- Viewer: startup applies every internal SQLite migration through schema v19;
   verify integrity, foreign keys, and the final schema ledger after restart.
 
 After each database, verify the migration ledger, integrity/foreign-key checks,
