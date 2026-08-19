@@ -9,11 +9,11 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `dd3d3efd189373e216140286e6f6ba5c2da08d00`.
+- 3D Viewer source: `e2e66cb64f98bceea428d4d0fa79dacf121b46ee`.
   The reviewed release-candidate image is
-  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:e6fc74c99e0a50de183ee518b36ea6a697d2b8e1b8b7cded0401ceaced425cc5`.
-  GitHub Actions run `32219077242` published tags `latest` and
-  `sha-dd3d3ef`. The
+  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:98b577e01a5820611076e582b1f005d150ab7d0f15e1f13bf382e7aad30af581`.
+  GitHub Actions run `32224663581` published tags `latest` and
+  `sha-e2e66cb`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
   UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
 - LTDS-Ops product code: `f636aab92ff2bfb31577593445dc7d6f81280f56` on
@@ -60,11 +60,12 @@ This is inode/index/recovery evidence only;
 the same rehearsal still must run on the disposable TrueNAS storage class with
 representative imagery before activation.
 
-The exact candidate passed 244 of 245 repository-owned tests in the Linux
-workflow with zero failures and one environment-only skip, then completed the
+The exact candidate passed 256 of 259 repository-owned tests in the Linux
+workflow with zero failures and three environment-only skips, then completed the
 production build. The suite covers the real symlink-escape gate, UID/GID 568
 storage admission, persistent-bind byte/database behavior, project-first
-workspace, staff renewal, GCP provenance/ranking, and provider auto-detection.
+workspace, staff renewal, GCP import/marking/ranking, provider auto-detection
+and administration, output/report integrity, and desktop/390/320 Edge flows.
 It does not replace the real TrueNAS ACL/mount drill.
 
 The candidate's executable and test tree completed the destructive
@@ -107,7 +108,7 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091`, published-session revocation
 commit `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06`, and subsequent hardening commits
-through `dd3d3efd189373e216140286e6f6ba5c2da08d00` retain the reviewed provider adapter,
+through `e2e66cb64f98bceea428d4d0fa79dacf121b46ee` retain the reviewed provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
@@ -156,7 +157,7 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`dd3d3efd189373e216140286e6f6ba5c2da08d00` and schema version `19`. Confirm
+`e2e66cb64f98bceea428d4d0fa79dacf121b46ee` and schema version `19`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
 `X-LTDS-Viewer-Revision`, `19` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
