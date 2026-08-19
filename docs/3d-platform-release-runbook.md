@@ -9,11 +9,11 @@ captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `625d6578e0a87cce31f1b8d1da45e6e2147dcbff`.
+- 3D Viewer source: `dd3d3efd189373e216140286e6f6ba5c2da08d00`.
   The reviewed release-candidate image is
-  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:c05ec9c8f82e3890d06c911b4d08077041655bd67bb3ae4794777ba7420a11ae`.
-  GitHub Actions run `32216833734` published tags `latest` and
-  `sha-625d657`. The
+  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:e6fc74c99e0a50de183ee518b36ea6a697d2b8e1b8b7cded0401ceaced425cc5`.
+  GitHub Actions run `32219077242` published tags `latest` and
+  `sha-dd3d3ef`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
   UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
 - LTDS-Ops product code: `f636aab92ff2bfb31577593445dc7d6f81280f56` on
@@ -30,7 +30,7 @@ captured.
 The updated source, manifest digest, migrations, fixtures, and activation
 policy passed independent cross-repository verification, so the corresponding
 constant in `scripts/staging-requirements.mjs` is
-`RELEASE_CONTRACT_FINALIZED=false` while the project-first workspace and silent staff-session renewal follow-up is under review. Set it to true only after the updated source and image pins are independently verified. Finalization freezes
+`RELEASE_CONTRACT_FINALIZED=false` while the broader workspace completion and live acceptance gates remain under review. Set it to true only after the updated source and image pins are independently verified. Finalization freezes
 the candidate contract only; it does not approve deployment, migrations, or
 any feature flag. Reset it to `false` before changing a pinned source or
 deployment artifact.
@@ -60,7 +60,7 @@ This is inode/index/recovery evidence only;
 the same rehearsal still must run on the disposable TrueNAS storage class with
 representative imagery before activation.
 
-The exact candidate passed 240 of 241 repository-owned tests in the Linux
+The exact candidate passed 244 of 245 repository-owned tests in the Linux
 workflow with zero failures and one environment-only skip, then completed the
 production build. The suite covers the real symlink-escape gate, UID/GID 568
 storage admission, persistent-bind byte/database behavior, project-first
@@ -107,7 +107,7 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091`, published-session revocation
 commit `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06`, and subsequent hardening commits
-through `625d6578e0a87cce31f1b8d1da45e6e2147dcbff` retain the reviewed provider adapter,
+through `dd3d3efd189373e216140286e6f6ba5c2da08d00` retain the reviewed provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
@@ -156,7 +156,7 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`625d6578e0a87cce31f1b8d1da45e6e2147dcbff` and schema version `19`. Confirm
+`dd3d3efd189373e216140286e6f6ba5c2da08d00` and schema version `19`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
 `X-LTDS-Viewer-Revision`, `19` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
