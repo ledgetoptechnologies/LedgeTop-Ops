@@ -17,6 +17,7 @@ import {
   listViewerClientGrantWorkspace,
   revokeViewerClientGrant,
   viewerIntegrationEnabled,
+  viewerPublicSharesEnabled,
   viewerServiceClient,
 } from "./viewer-integration";
 import { defaultViewerUnits, resolveViewerUnits } from "./viewer-units";
@@ -89,7 +90,11 @@ export async function viewerAdminPermissions(
   const permissions: ViewerProcessingPermission[] = [];
   for (const mapping of viewerPermissionMapping) {
     const scope = await sqlScope(env, principal, mapping.ops);
-    if (scope.global && !scope.deniedGlobal) permissions.push(...mapping.viewer);
+    if (scope.global && !scope.deniedGlobal) {
+      permissions.push(...(mapping.ops === "viewer.share.create" && !viewerPublicSharesEnabled(env)
+        ? mapping.viewer.filter(permission => permission !== "viewer.shares.create")
+        : mapping.viewer));
+    }
   }
   return permissions;
 }

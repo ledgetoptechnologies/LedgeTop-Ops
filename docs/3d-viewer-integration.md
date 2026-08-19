@@ -1,6 +1,7 @@
 # 3D Viewer integration boundary
 
-Status: **implemented behind default-off rollout gates; not enabled or deployed**.
+Status: **staff integration and processing are enabled for pre-production
+validation; public-share and Client Viewer issuance remain separately gated**.
 
 The LTDS side now includes the signed service client, deny-by-default model to
 project associations, explicit staff permissions, private Client-to-Operations
@@ -198,11 +199,14 @@ generation and lineage, `delivery.view` allowance, explicit entitlement
 denials, identity denials, association/source version, and pinned Viewer model
 version before issuing or renewing.
 
-Keep `VIEWER_INTEGRATION_ENABLED`, `VIEWER_PUBLIC_SHARES_ENABLED`,
+The reviewed pre-production Operations deployment deliberately has
+`VIEWER_INTEGRATION_ENABLED=true`. Keep `VIEWER_PUBLIC_SHARES_ENABLED`,
 `CLIENT_VIEWER_SESSION_ISSUER_ENABLED`, and `CLIENT_VIEWER_ENABLED` false until
-coordinated staging verification. `VIEWER_PUBLIC_SHARES_ENABLED` is a separate
-Operations kill switch and has no effect unless `VIEWER_INTEGRATION_ENABLED`
-is also true. Client
+their coordinated verification. `VIEWER_PUBLIC_SHARES_ENABLED` is a separate
+Operations issuance kill switch: while false, new staff workspace grants omit
+`viewer.shares.create` but retain read/revoke authority where granted so
+existing links can be cleaned up. It has no effect unless
+`VIEWER_INTEGRATION_ENABLED` is also true. Client
 issuance also requires `CLIENT_PORTAL_HIERARCHY_V2_ENABLED=true`. The only
 shared service secret is `VIEWER_SERVICE_HMAC_SECRET`, stored on Operations;
 `VIEWER_BASE_URL` must be a bare HTTPS origin and `VIEWER_SERVICE_KEY_ID` must

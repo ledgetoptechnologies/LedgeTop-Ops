@@ -2,10 +2,10 @@
 
 Status: **source candidates and the immutable Viewer registry image are frozen
 and independently signed off; live staging evidence and activation remain
-pending**. Every
-Viewer, Operations, Client, processing, public-share, and Project Alpha portal
-feature gate remains off until the corresponding live evidence below is
-captured.
+pending**. The staff Viewer integration and processing workspace are already
+deliberately enabled for pre-production validation. New Viewer public-share,
+Client Viewer, and Project Alpha portal capabilities remain gated until their
+corresponding live evidence below is captured.
 
 ## Frozen source candidates
 
@@ -126,12 +126,16 @@ TrueNAS staging rehearsal remain live gates.
 2. Back up `/mnt/Plugins/App_Data/Model-Viewer/Config/viewer.env` and the complete
    `/mnt/Plugins/App_Data/Model-Viewer/Storage` tree as one consistency unit; its
    SQLite database and managed assets must remain together.
-3. Confirm these production variables remain the literal string `false`:
-   `VIEWER_INTEGRATION_ENABLED`, `VIEWER_PROCESSING_ENABLED`,
+3. Confirm the deliberate pre-production staff activation has
+   `VIEWER_INTEGRATION_ENABLED=true` and `VIEWER_PROCESSING_ENABLED=true`, and
+   confirm these production variables remain the literal string `false`:
    `VIEWER_PUBLIC_SHARES_ENABLED`, `CLIENT_VIEWER_SESSION_ISSUER_ENABLED`,
    `CLIENT_VIEWER_SHARES_ENABLED`, `CLIENT_VIEWER_ENABLED`,
    `CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED`, and Viewer
    `PUBLISHED_SESSION_SOURCE_REVOCATION_ENABLED`.
+   With `VIEWER_PUBLIC_SHARES_ENABLED=false`, Operations must omit
+   `viewer.shares.create` from newly issued staff workspace grants while
+   retaining read/revoke access for cleanup of existing links.
 4. In Project Alpha confirm the installation-wide portal integration,
    relations, catalog, pricing, draft quote, outbound delivery, and
    authoritative-hook flags are all off. New profiles and profile delivery are

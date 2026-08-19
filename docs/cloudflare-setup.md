@@ -536,9 +536,10 @@ Set `VIEWER_BASE_URL` to the bare HTTPS Viewer origin and
 `VIEWER_SERVICE_KEY_ID` to the matching Viewer key ID. That origin must return
 the Viewer service response directly rather than redirecting to another host or
 login page; Operations deliberately rejects redirects to protect its HMAC
-request headers. Keep
-`VIEWER_INTEGRATION_ENABLED=false`, `VIEWER_PROCESSING_ENABLED=false`,
-`VIEWER_PUBLIC_SHARES_ENABLED=false`, and
+request headers. The reviewed pre-production staff deployment uses
+`VIEWER_INTEGRATION_ENABLED=true` and `VIEWER_PROCESSING_ENABLED=true`; new
+environments and staging templates still begin with both false. Keep
+`VIEWER_PUBLIC_SHARES_ENABLED=false` and
 `CLIENT_VIEWER_SESSION_ISSUER_ENABLED=false`, `CLIENT_VIEWER_SHARES_ENABLED=false`. In Client, bind
 `VIEWER_SESSION_ISSUER` to Operations entrypoint `ViewerSessionIssuer` and keep
 `CLIENT_VIEWER_ENABLED=false` and `CLIENT_VIEWER_SHARES_ENABLED=false`. Client

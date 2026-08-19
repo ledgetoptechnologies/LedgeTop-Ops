@@ -84,6 +84,9 @@ still requires its own compatibility and representative-corpus evidence.
 ## Activation rule
 
 Only an isolated staging deployment may turn on one corresponding staging
-gate while collecting its evidence. Production flags remain off. Any candidate
+gate while collecting its evidence. The staff Viewer integration and
+processing gates are deliberately enabled for pre-production validation;
+new public-share, Client Viewer, and Project Alpha adapter gates remain off.
+Any candidate
 commit, image digest, fixture, migration, or secret-name change invalidates the
 frozen release packet and requires a new full matrix run.

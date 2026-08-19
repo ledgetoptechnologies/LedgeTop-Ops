@@ -1,6 +1,6 @@
 # 3D processing control plane
 
-Status: **implemented behind `VIEWER_PROCESSING_ENABLED=false`; not enabled or deployed**.
+Status: **implemented and deliberately enabled for pre-production staff validation**.
 
 This subsystem lets authenticated Operations staff catalog projects and immutable datasets, upload source files, adopt configured server-side imports, submit/retry/cancel processing attempts, review derived outputs, publish selected model assets, inspect provider health, and recover or purge storage. Existing published-model viewing is independent: a provider outage, disabled processing flag, or failed ClusterODM/NodeODM job must never make an already-published model unavailable.
 
@@ -19,7 +19,10 @@ Apply Operations migration `0027_viewer_processing_control_plane.sql` before ena
 
 Installation and user defaults are imperial. Staff can persist `imperial` or `metric`; the resolved value is carried in the one-time administrative grant. Projects and public shares may explicitly override display units without changing stored model geometry.
 
-Keep `VIEWER_PROCESSING_ENABLED=false` until the Viewer deployment, migration, secrets, callback, storage preflight, recovery, provider admission, browser tests, and rollback evidence all match reviewed commits.
+The reviewed pre-production deployment has `VIEWER_INTEGRATION_ENABLED=true`
+and `VIEWER_PROCESSING_ENABLED=true` for the staff workspace. Keep staging
+templates disabled by default, and do not enable public-share, Client Viewer,
+or Project Alpha adapter gates merely because staff processing is active.
 
 ## Administrative grant protocol
 
