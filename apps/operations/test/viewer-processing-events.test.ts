@@ -166,6 +166,16 @@ describe("Viewer processing event callback", () => {
     expect(await database.prepare("SELECT COUNT(*) FROM viewer_event_nonces").first<number>("COUNT(*)")).toBe(1);
   });
 
+  it("suppresses initiator mail instead of falling back to an unrelated alert recipient", async () => {
+    env.ALERT_TO = "admin-alerts@example.test";
+    await database.prepare("UPDATE staff_users SET status='inactive' WHERE id='staff-one'").run();
+    expect((await request(body("event-ready-inactive"), "event-nonce-inactive-123")).status).toBe(202);
+    expect(await processViewerProcessingNotifications(env)).toBe(1);
+    expect(await database.prepare("SELECT status FROM viewer_processing_notification_outbox").first<string>("status"))
+      .toBe("suppressed");
+    expect(env.NOTIFICATION_EMAIL?.send).not.toHaveBeenCalled();
+  });
+
   it("bounds machine-rate windows without deleting the current window", async () => {
     await database.prepare("INSERT INTO viewer_machine_rate_limits VALUES('event',datetime('now','-20 minutes'),7)").run();
     await database.prepare("INSERT INTO viewer_machine_rate_limits VALUES('source-introspection',strftime('%Y-%m-%dT%H:%M:00Z','now'),2)").run();

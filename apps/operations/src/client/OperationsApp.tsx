@@ -3467,23 +3467,99 @@ type ViewerOverviewResponse = {
 };
 type ViewerWorkspaceGrant = ViewerAdminSessionGrant & { workspaceUrl: string };
 
+const VIEWER_WORKSPACE_PROTOCOL_VERSION = 1;
+const VIEWER_WORKSPACE_MESSAGE_ID = /^[A-Za-z0-9_-]{16,128}$/;
+const VIEWER_WORKSPACE_SUBJECT = /^ops:[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+
+function viewerWorkspaceMessage(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function exactViewerWorkspaceMessage(
+  value: unknown,
+  type: string,
+  keys: string[],
+): Record<string, unknown> | null {
+  const message = viewerWorkspaceMessage(value);
+  return message && message.version === VIEWER_WORKSPACE_PROTOCOL_VERSION && message.type === type &&
+    Object.keys(message).sort().join(",") === keys.slice().sort().join(",")
+    ? message
+    : null;
+}
+
 function ViewerDataOverview() {
   const { data, error, reload } = useLoad<ViewerOverviewResponse>(() => api("/api/viewer/overview"), []);
   const [opening, setOpening] = useState(false), [actionError, setActionError] = useState("");
   const openWorkspace = async () => {
     const popup = window.open("about:blank", "_blank");
     if (!popup) { setActionError("Allow pop-ups for Operations, then try again."); return; }
-    popup.opener = null;
     popup.document.title = "Opening LTDS Viewer";
     popup.document.body.textContent = "Opening the secure LTDS Viewer workspace…";
     setOpening(true); setActionError("");
     try {
-      const grant = await api<ViewerWorkspaceGrant>("/api/viewer/admin-grant", {
+      const expected = data?.viewerBaseUrl ? new URL(data.viewerBaseUrl) : null;
+      if (!expected || expected.protocol !== "https:" || expected.pathname !== "/" || expected.search || expected.hash)
+        throw new Error("3D Viewer returned an invalid workspace origin");
+      const issueGrant = () => api<ViewerWorkspaceGrant>("/api/viewer/admin-grant", {
         method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
       });
-      const target = new URL(grant.workspaceUrl), expected = data?.viewerBaseUrl ? new URL(data.viewerBaseUrl) : null;
-      if (!expected || target.origin !== expected.origin || target.pathname !== `/workspace/${encodeURIComponent(grant.grant)}` || target.search || target.hash)
+      const grant = await issueGrant();
+      const target = new URL(grant.workspaceUrl);
+      if (target.origin !== expected.origin || target.pathname !== `/workspace/${encodeURIComponent(grant.grant)}` || target.search || target.hash)
         throw new Error("3D Viewer returned an invalid workspace link");
+
+      let pinnedSessionId = "", pinnedSubject = "", closed = false;
+      const handled = new Set<string>();
+      const cleanup = () => {
+        if (closed) return;
+        closed = true;
+        window.removeEventListener("message", receive);
+        clearInterval(closedTimer);
+      };
+      const receive = (event: MessageEvent) => {
+        if (event.source !== popup || event.origin !== expected.origin) return;
+        const ready = exactViewerWorkspaceMessage(event.data, "ltds-viewer:workspace-ready",
+          ["version", "type", "sessionId", "subject", "expiresAt"]);
+        if (ready) {
+          if (typeof ready.sessionId !== "string" || !VIEWER_WORKSPACE_MESSAGE_ID.test(ready.sessionId) ||
+            typeof ready.subject !== "string" || !VIEWER_WORKSPACE_SUBJECT.test(ready.subject) ||
+            typeof ready.expiresAt !== "string" || !Number.isFinite(Date.parse(ready.expiresAt))) return;
+          if (pinnedSessionId && (pinnedSessionId !== ready.sessionId || pinnedSubject !== ready.subject)) return;
+          pinnedSessionId = ready.sessionId; pinnedSubject = ready.subject;
+          return;
+        }
+        const request = exactViewerWorkspaceMessage(event.data, "ltds-viewer:workspace-session-expiring",
+          ["version", "type", "requestId", "sessionId", "subject", "expiresAt"]);
+        if (!request || !pinnedSessionId || request.sessionId !== pinnedSessionId || request.subject !== pinnedSubject ||
+          typeof request.requestId !== "string" || !VIEWER_WORKSPACE_MESSAGE_ID.test(request.requestId) ||
+          typeof request.expiresAt !== "string" || !Number.isFinite(Date.parse(request.expiresAt)) ||
+          handled.has(request.requestId)) return;
+        handled.add(request.requestId);
+        while (handled.size > 100) handled.delete(handled.values().next().value!);
+        void issueGrant().then(next => {
+          const nextTarget = new URL(next.workspaceUrl);
+          if (nextTarget.origin !== expected.origin ||
+            nextTarget.pathname !== `/workspace/${encodeURIComponent(next.grant)}` || nextTarget.search || nextTarget.hash)
+            throw new Error("3D Viewer returned an invalid workspace renewal");
+          popup.postMessage({
+            version: VIEWER_WORKSPACE_PROTOCOL_VERSION,
+            type: "ltds-viewer:renew-workspace-session",
+            requestId: request.requestId,
+            grant: next.grant,
+          }, expected.origin);
+        }).catch(error => {
+          popup.postMessage({
+            version: VIEWER_WORKSPACE_PROTOCOL_VERSION,
+            type: "ltds-viewer:workspace-session-renewal-failed",
+            requestId: request.requestId,
+            retryable: !(error instanceof ApiError && [401, 403].includes(error.status)),
+          }, expected.origin);
+        });
+      };
+      window.addEventListener("message", receive);
+      const closedTimer = window.setInterval(() => { if (popup.closed) cleanup(); }, 1_000);
       popup.location.replace(target.href);
     } catch (caught) {
       popup.close(); setActionError((caught as Error).message);

@@ -272,10 +272,10 @@ export async function processViewerProcessingNotifications(env: Env): Promise<nu
         OR (status='processing' AND datetime(lease_expires_at)<=datetime('now')))`)
       .bind(row.id).run();
     if (!claimed.meta.changes) { processed -= 1; continue; }
-    const staffId = row.requested_by_subject.slice(4);
+    const staffId = row.requested_by_subject.startsWith("ops:") ? row.requested_by_subject.slice(4) : "";
     const recipient = await env.OPS_DB.prepare(
       "SELECT email FROM staff_users WHERE id=? AND status='active'",
-    ).bind(staffId).first<string>("email") || env.ALERT_TO || null;
+    ).bind(staffId).first<string>("email") || null;
     if (!recipient || !/^\S+@\S+\.\S+$/.test(recipient)) {
       await env.OPS_DB.prepare(`UPDATE viewer_processing_notification_outbox SET
         status='suppressed',lease_expires_at=NULL,last_error='recipient-unavailable',updated_at=datetime('now') WHERE id=?`)
