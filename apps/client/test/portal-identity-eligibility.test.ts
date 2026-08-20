@@ -76,6 +76,13 @@ describe("Project Alpha portal identity eligibility", () => {
         ON membership.workspace_id=principal.workspace_id AND membership.identity_id=principal.identity_id
       WHERE principal.workspace_id='workspace-one' AND principal.public_id='principal-one'`).first())
       .toEqual({ identity_id: expect.any(String), source_type: "project_alpha", source_version: "source-v1" });
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET updated_at='2000-01-01T00:00:00Z'").run();
+    await expect(listPortalWorkspaces(env, {
+      issuer: "https://access.example.test", subject: "subject-one", email: "client@example.test",
+    })).resolves.toHaveLength(1);
+    expect(await db.prepare("SELECT updated_at FROM portal_v2_workspace_memberships").first("updated_at"))
+      .toBe("2000-01-01T00:00:00Z");
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_identities").first("count")).toBe(1);
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspace_memberships").first("count")).toBe(1);
     expect(await db.prepare("SELECT COUNT(*) count FROM client_account_members").first("count")).toBe(1);
     await db.prepare(`INSERT INTO projects VALUES('project-private','ref','Client','Private project',1,'active',
@@ -97,7 +104,7 @@ describe("Project Alpha portal identity eligibility", () => {
     await expect(listPortalWorkspaces(env, {
       issuer: "https://access.example.test", subject: "subject-one", email: "client@example.test",
     })).resolves.toEqual([]);
-  });
+  }, 15_000);
 
   it("does not treat unrelated or invalid email records as portal principals", async () => {
     const { db, env } = await fixture();

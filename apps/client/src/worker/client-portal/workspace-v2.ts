@@ -205,6 +205,17 @@ async function resolveGlobalIdentity(
             OR (match_type='email' AND normalized_email=?)) LIMIT 1`)
         .bind(principal.issuer, principal.subject, email).first("ok");
       if (blocked !== null) return null;
+      const authorityTablesReady = (await portalDb(env).prepare(`SELECT COUNT(*) count FROM sqlite_master
+        WHERE type='table' AND name IN ('pa_portal_entitlement_intents','portal_v2_directory_checkpoints','portal_v2_directory_generations')`)
+        .first<number>("count")) === 3;
+      const identityIdForRepair = identity?.id ?? "";
+      const authorityRepair = authorityTablesReady ? ` OR EXISTS(SELECT 1 FROM pa_portal_entitlement_intents intent
+        WHERE intent.workspace_id=principal.workspace_id AND intent.principal_public_id=principal.public_id
+          AND intent.status='active' AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements entitlement
+            WHERE entitlement.id='pa-entitlement:' || intent.workspace_id || ':' || intent.public_id
+              AND entitlement.workspace_id=intent.workspace_id AND entitlement.identity_id=?
+              AND entitlement.source_type='project_alpha' AND entitlement.source_version=intent.source_version
+              AND entitlement.status='active' AND entitlement.revoked_at IS NULL))` : "";
       const eligible = await portalDb(env).prepare(`SELECT principal.workspace_id,principal.public_id,principal.source_version,
           workspace.legacy_account_id
         FROM pa_portal_principals principal
@@ -212,14 +223,29 @@ async function resolveGlobalIdentity(
           AND workspace.legacy_account_id IS NOT NULL
         JOIN client_accounts account ON account.id=workspace.legacy_account_id AND account.status='active'
         WHERE principal.status='active' AND (principal.identity_id IS NULL OR principal.identity_id=?) AND lower(principal.email_hint)=?
-        ORDER BY principal.workspace_id,principal.public_id LIMIT 101`).bind(identity?.id ?? "",email)
+          AND (principal.identity_id IS NULL
+            OR NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings eligibility
+              WHERE eligibility.identity_id=? AND eligibility.workspace_id=principal.workspace_id
+                AND eligibility.principal_public_id=principal.public_id
+                AND eligibility.principal_source_version=principal.source_version
+                AND lower(eligibility.verified_email)=lower(principal.email_hint))
+            OR NOT EXISTS(SELECT 1 FROM portal_v2_workspace_memberships membership
+              WHERE membership.workspace_id=principal.workspace_id AND membership.identity_id=?
+                AND membership.source_type='project_alpha' AND membership.source_version=principal.source_version
+                AND membership.status='active' AND membership.revoked_at IS NULL
+                AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now')))
+            OR NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_legacy_bridges bridge
+              WHERE bridge.workspace_id=principal.workspace_id AND bridge.identity_id=?
+                AND bridge.status='active' AND bridge.revoked_at IS NULL)
+            ${authorityRepair})
+        ORDER BY principal.workspace_id,principal.public_id LIMIT 101`)
+        .bind(identityIdForRepair,email,identityIdForRepair,identityIdForRepair,identityIdForRepair,
+          ...(authorityTablesReady ? [identityIdForRepair] : []))
         .all<{ workspace_id: string; public_id: string; source_version: string; legacy_account_id: string }>();
-      if (eligible.results.length === 0 || eligible.results.length > 100) return null;
+      if (eligible.results.length === 0) return identity;
+      if (eligible.results.length > 100) return null;
       const identityId = crypto.randomUUID();
       const shells = eligible.results;
-      const authorityTablesReady = (await portalDb(env).prepare(`SELECT COUNT(*) count FROM sqlite_master
-        WHERE type='table' AND name IN ('pa_portal_entitlement_intents','portal_v2_directory_checkpoints','portal_v2_directory_generations')`)
-        .first<number>("count")) === 3;
       await portalDb(env).batch([
         portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_identities
           (id,issuer,subject,verified_email,status) VALUES(?,?,?,?,'active')`)
