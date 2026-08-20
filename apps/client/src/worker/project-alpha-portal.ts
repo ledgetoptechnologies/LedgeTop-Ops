@@ -1,4 +1,4 @@
-import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import type { Env } from "./types";
 
 const MAX_BODY_BYTES = 256 * 1024;
@@ -373,13 +373,21 @@ async function verifyHmac(rawBody: Uint8Array, timestamp: string, keyId: string,
   if (!await crypto.subtle.verify("HMAC", key, bytesFromHex(suppliedHex).buffer as ArrayBuffer, message.buffer as ArrayBuffer)) throw new Error("portal-signature-invalid");
 }
 
-export async function verifyPortalProjectionAccessAssertion(request: Request, env: Env): Promise<void> {
+export async function verifyPortalProjectionAccessAssertion(
+  request: Request,
+  env: Env,
+  getKey?: JWTVerifyGetKey,
+): Promise<void> {
   const assertion = request.headers.get("Cf-Access-Jwt-Assertion");
   const teamDomain = env.PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN?.replace(/\/$/, "");
   const audience = env.PROJECT_ALPHA_PORTAL_ACCESS_AUD;
   if (!assertion || !teamDomain?.startsWith("https://") || !audience) throw new Error("portal-access-required");
   try {
-    await jwtVerify(assertion, createRemoteJWKSet(new URL(`${teamDomain}/cdn-cgi/access/certs`)), { issuer: teamDomain, audience, algorithms: ["RS256"] });
+    await jwtVerify(assertion, getKey ?? createRemoteJWKSet(new URL(`${teamDomain}/cdn-cgi/access/certs`)), {
+      issuer: teamDomain,
+      audience,
+      algorithms: ["RS256"],
+    });
   } catch {
     throw new Error("portal-access-invalid");
   }
