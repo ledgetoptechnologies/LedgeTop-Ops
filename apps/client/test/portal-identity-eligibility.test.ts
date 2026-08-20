@@ -29,7 +29,7 @@ async function fixture(): Promise<{ db: D1Database; env: Env }> {
     CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT,pa_organization_public_id TEXT,
       pa_client_public_id TEXT,display_name TEXT,status TEXT,legacy_account_id TEXT);
     CREATE TABLE portal_v2_workspace_memberships(id TEXT,workspace_id TEXT,identity_id TEXT,source_type TEXT,status TEXT,
-      revoked_at TEXT,expires_at TEXT,PRIMARY KEY(workspace_id,identity_id));
+      source_version TEXT,revoked_at TEXT,expires_at TEXT,updated_at TEXT DEFAULT (datetime('now')),PRIMARY KEY(workspace_id,identity_id));
     CREATE TABLE portal_v2_identity_denials(identity_id TEXT,scope_type TEXT,status TEXT,revoked_at TEXT,
       valid_from TEXT,expires_at TEXT);
     CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT,active_generation_id TEXT);
@@ -71,6 +71,11 @@ describe("Project Alpha portal identity eligibility", () => {
       .toEqual({ issuer: "https://access.example.test", subject: "subject-one", verified_email: "client@example.test" });
     expect(await db.prepare(`SELECT workspace_id,principal_public_id FROM portal_v2_identity_eligibility_bindings`).first())
       .toEqual({ workspace_id: "workspace-one", principal_public_id: "principal-one" });
+    expect(await db.prepare(`SELECT principal.identity_id,membership.source_type,membership.source_version
+      FROM pa_portal_principals principal JOIN portal_v2_workspace_memberships membership
+        ON membership.workspace_id=principal.workspace_id AND membership.identity_id=principal.identity_id
+      WHERE principal.workspace_id='workspace-one' AND principal.public_id='principal-one'`).first())
+      .toEqual({ identity_id: expect.any(String), source_type: "project_alpha", source_version: "source-v1" });
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspace_memberships").first("count")).toBe(1);
     expect(await db.prepare("SELECT COUNT(*) count FROM client_account_members").first("count")).toBe(1);
     await db.prepare(`INSERT INTO projects VALUES('project-private','ref','Client','Private project',1,'active',

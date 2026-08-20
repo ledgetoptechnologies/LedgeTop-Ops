@@ -196,7 +196,7 @@ async function resolveGlobalIdentity(
       if (!/no such table:\s*(?:main\.)?portal_v2_identity_eligibility_blocks\b/i.test(error instanceof Error ? error.message : String(error))) throw error;
     }
   }
-  if (!identity && email && env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED === "true") {
+  if (email && env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED === "true") {
     try {
       const blocked = await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_identity_eligibility_blocks
         WHERE status='active' AND datetime(valid_from)<=datetime('now')
@@ -211,12 +211,15 @@ async function resolveGlobalIdentity(
         JOIN portal_v2_workspaces workspace ON workspace.id=principal.workspace_id AND workspace.status='active'
           AND workspace.legacy_account_id IS NOT NULL
         JOIN client_accounts account ON account.id=workspace.legacy_account_id AND account.status='active'
-        WHERE principal.status='active' AND principal.identity_id IS NULL AND lower(principal.email_hint)=?
-        ORDER BY principal.workspace_id,principal.public_id LIMIT 101`).bind(email)
+        WHERE principal.status='active' AND (principal.identity_id IS NULL OR principal.identity_id=?) AND lower(principal.email_hint)=?
+        ORDER BY principal.workspace_id,principal.public_id LIMIT 101`).bind(identity?.id ?? "",email)
         .all<{ workspace_id: string; public_id: string; source_version: string; legacy_account_id: string }>();
       if (eligible.results.length === 0 || eligible.results.length > 100) return null;
       const identityId = crypto.randomUUID();
-      const shells = eligible.results.map(row => ({ ...row, legacyIdentityId: crypto.randomUUID() }));
+      const shells = eligible.results;
+      const authorityTablesReady = (await portalDb(env).prepare(`SELECT COUNT(*) count FROM sqlite_master
+        WHERE type='table' AND name IN ('pa_portal_entitlement_intents','portal_v2_directory_checkpoints','portal_v2_directory_generations')`)
+        .first<number>("count")) === 3;
       await portalDb(env).batch([
         portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_identities
           (id,issuer,subject,verified_email,status) VALUES(?,?,?,?,'active')`)
@@ -227,20 +230,58 @@ async function resolveGlobalIdentity(
             AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?`)
           .bind(row.workspace_id, row.public_id, row.source_version, email,
             principal.issuer, principal.subject, email)),
-        ...shells.map(row => portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_workspace_memberships
-          (id,workspace_id,identity_id,source_type,status) SELECT ?,?,id,'operations','active'
-          FROM portal_v2_identities WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL`)
-          .bind(`eligibility-membership:${row.workspace_id}:${identityId}`, row.workspace_id, principal.issuer, principal.subject)),
+        ...shells.map(row => portalDb(env).prepare(`UPDATE pa_portal_principals SET identity_id=(SELECT id FROM portal_v2_identities
+            WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?)
+          WHERE workspace_id=? AND public_id=? AND source_version=? AND status='active'
+            AND (identity_id IS NULL OR identity_id=(SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?))`)
+          .bind(principal.issuer,principal.subject,email,row.workspace_id,row.public_id,row.source_version,principal.issuer,principal.subject)),
+        ...shells.map(row => portalDb(env).prepare(`UPDATE portal_v2_workspace_memberships SET source_type='project_alpha',
+            source_version=?,status='active',revoked_at=NULL,updated_at=datetime('now')
+          WHERE workspace_id=? AND identity_id=(SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?)
+            AND source_type='operations' AND id LIKE 'eligibility-membership:%'`)
+          .bind(row.source_version,row.workspace_id,principal.issuer,principal.subject)),
+        ...shells.map(row => portalDb(env).prepare(`INSERT INTO portal_v2_workspace_memberships
+          (id,workspace_id,identity_id,source_type,status,source_version)
+          SELECT 'pa-membership:' || projected.workspace_id || ':' || projected.public_id,projected.workspace_id,identity.id,
+            'project_alpha','active',projected.source_version
+          FROM pa_portal_principals projected JOIN portal_v2_identities identity ON identity.id=projected.identity_id
+          WHERE projected.workspace_id=? AND projected.public_id=? AND projected.source_version=? AND projected.status='active'
+            AND identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
+          ON CONFLICT(workspace_id,identity_id) DO UPDATE SET status='active',source_version=excluded.source_version,
+            revoked_at=NULL,updated_at=datetime('now') WHERE portal_v2_workspace_memberships.source_type='project_alpha'`)
+          .bind(row.workspace_id,row.public_id,row.source_version,principal.issuer,principal.subject)),
         ...shells.map(row => portalDb(env).prepare(`INSERT OR IGNORE INTO client_identity_links
-          (id,account_id,issuer,subject,email) VALUES(?,?,?,?,?)`)
-          .bind(row.legacyIdentityId, row.legacy_account_id, `ltds-eligibility:${row.workspace_id}`.slice(0, 512), identityId, email)),
+          (id,account_id,issuer,subject,email)
+          SELECT ?,?, ?, identity.id,? FROM portal_v2_identities identity
+          WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL`)
+          .bind(`eligibility-legacy:${row.workspace_id}:${row.public_id}`,row.legacy_account_id,
+            `ltds-eligibility:${row.workspace_id}`.slice(0,512),email,principal.issuer,principal.subject)),
         ...shells.map(row => portalDb(env).prepare(`INSERT OR IGNORE INTO client_account_members
           (account_id,identity_id,role,can_view_billing) VALUES (?,?,'member',0)`)
-          .bind(row.legacy_account_id, row.legacyIdentityId)),
+          .bind(row.legacy_account_id,`eligibility-legacy:${row.workspace_id}:${row.public_id}`)),
         ...shells.map(row => portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_identity_eligibility_legacy_bridges
           (workspace_id,identity_id,legacy_account_id,legacy_identity_id)
           SELECT ?,id,?,? FROM portal_v2_identities WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL`)
-          .bind(row.workspace_id, row.legacy_account_id, row.legacyIdentityId, principal.issuer, principal.subject)),
+          .bind(row.workspace_id,row.legacy_account_id,`eligibility-legacy:${row.workspace_id}:${row.public_id}`,principal.issuer,principal.subject)),
+        ...(authorityTablesReady ? shells.map(row => portalDb(env).prepare(`INSERT INTO portal_v2_entitlements
+          (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,
+           source_type,source_version,status,valid_from,expires_at)
+          SELECT 'pa-entitlement:' || intent.workspace_id || ':' || intent.public_id,intent.workspace_id,projected.identity_id,
+            intent.capability,intent.effect,intent.scope_type,intent.scope_public_id,
+            generation.source_sequence,'project_alpha',intent.source_version,'active',intent.valid_from,intent.expires_at
+          FROM pa_portal_entitlement_intents intent
+          JOIN pa_portal_principals projected ON projected.workspace_id=intent.workspace_id
+            AND projected.public_id=intent.principal_public_id AND projected.status='active' AND projected.identity_id IS NOT NULL
+          JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=intent.workspace_id
+          JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+            AND generation.workspace_id=checkpoint.workspace_id AND generation.status='active' AND generation.complete=1
+          JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=intent.workspace_id
+            AND membership.identity_id=projected.identity_id AND membership.status='active' AND membership.source_type='project_alpha'
+          WHERE intent.workspace_id=? AND intent.principal_public_id=? AND intent.status='active'
+          ON CONFLICT(id) DO UPDATE SET identity_id=excluded.identity_id,capability=excluded.capability,effect=excluded.effect,
+            scope_type=excluded.scope_type,scope_public_id=excluded.scope_public_id,entitlement_version=excluded.entitlement_version,
+            source_version=excluded.source_version,status='active',valid_from=excluded.valid_from,expires_at=excluded.expires_at,revoked_at=NULL`)
+          .bind(row.workspace_id,row.public_id)) : []),
       ]);
       identity = await portalDb(env).prepare(`SELECT id FROM portal_v2_identities
         WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?`)

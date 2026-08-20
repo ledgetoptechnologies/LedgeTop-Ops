@@ -757,7 +757,9 @@ describe("client workspace hierarchy v2", () => {
     expect((await projects.json() as { projects: Array<{ id: string }> }).projects.map(project => project.id)).toEqual(["project-a"]);
     const allowedFiles = await router.request("https://client.test/projects/project-a/files", { headers }, env);
     expect(allowedFiles.status).toBe(200);
-    expect((await allowedFiles.json() as { files: Array<{ name: string }> }).files.map(file => file.name)).toEqual(["photo.jpg"]);
+    // A v2 workspace fails closed when authenticated delivery grants are off;
+    // legacy project membership alone never authorizes an R2 read.
+    expect((await allowedFiles.json() as { files: Array<{ name: string }> }).files).toEqual([]);
     expect((await router.request("https://client.test/projects/project-b/files", { headers }, env)).status).toBe(404);
     const requestHeaders = {
       ...headers, Origin: "https://client.test", "Content-Type": "application/json",

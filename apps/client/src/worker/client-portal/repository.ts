@@ -205,7 +205,7 @@ function base64Url(bytes: Uint8Array): string {
 }
 
 async function deliveryGrantPrefixes(env: Env, session: ClientPortalSession): Promise<Set<string> | null> {
-  if (env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED !== "true") return null;
+  if (env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED !== "true") return session.workspaceId ? new Set() : null;
   if (!session.workspaceId || !session.principalIssuer || !session.principalSubject) return new Set();
   return listAuthorizedAuthenticatedDeliveryPrefixes(env, {
     issuer: session.principalIssuer,
