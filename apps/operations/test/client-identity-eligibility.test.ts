@@ -10,6 +10,7 @@ vi.mock("../src/worker/acl", () => acl);
 import {
   createEligibilityBlock,
   listClientIdentityEligibility,
+  retryClientPortalInvitation,
   revokeEligibilityBlock,
 } from "../src/worker/client-identity-eligibility";
 import type { Env, StaffPrincipal } from "../src/worker/types";
@@ -30,9 +31,18 @@ async function fixture() {
   const database = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
   await applySql(database, `
     CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,display_name TEXT,email_hint TEXT,source_version TEXT,status TEXT);
+    CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,display_name TEXT);
     CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT);
     CREATE TABLE portal_v2_identity_eligibility_bindings(identity_id TEXT,workspace_id TEXT,principal_public_id TEXT);
     CREATE TABLE portal_v2_workspace_memberships(identity_id TEXT,status TEXT,revoked_at TEXT,expires_at TEXT);
+    CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT,active_generation_id TEXT);
+    CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,display_name TEXT);
+    CREATE TABLE portal_v2_entitlements(workspace_id TEXT,identity_id TEXT,capability TEXT,effect TEXT,scope_type TEXT,
+      scope_public_id TEXT,status TEXT,revoked_at TEXT,valid_from TEXT,expires_at TEXT);
+    CREATE TABLE portal_v2_invitations(id TEXT,workspace_id TEXT,invited_email TEXT,status TEXT,expires_at TEXT,created_at TEXT,
+      PRIMARY KEY(id,workspace_id));
+    CREATE TABLE portal_v2_invitation_email_outbox(invitation_id TEXT,email_status TEXT,status TEXT,payload_json TEXT,attempts INTEGER,
+      last_error_code TEXT,next_attempt_at TEXT,lease_expires_at TEXT,updated_at TEXT);
     CREATE TABLE portal_v2_identity_eligibility_blocks(id TEXT PRIMARY KEY,match_type TEXT,issuer TEXT,subject TEXT,
       normalized_email TEXT,reason_code TEXT,status TEXT DEFAULT 'active',valid_from TEXT DEFAULT (datetime('now')),
       expires_at TEXT,created_by_actor_type TEXT,created_by_actor_id TEXT,created_at TEXT DEFAULT (datetime('now')),
@@ -41,6 +51,12 @@ async function fixture() {
       request_fingerprint TEXT,block_id TEXT,PRIMARY KEY(actor_staff_id,idempotency_key));
     CREATE TABLE portal_v2_identity_eligibility_block_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,block_id TEXT,action TEXT,
       actor_staff_id TEXT,details_json TEXT);
+    CREATE TABLE portal_v2_operations_management_mutations(actor_staff_id TEXT,idempotency_key TEXT,action TEXT,
+      request_fingerprint TEXT,workspace_id TEXT,principal_public_id TEXT,invitation_id TEXT,outcome TEXT,
+      PRIMARY KEY(actor_staff_id,idempotency_key));
+    CREATE TABLE portal_v2_operations_management_audit(id TEXT,actor_staff_id TEXT,action TEXT,workspace_id TEXT,
+      principal_public_id TEXT,invitation_id TEXT,details_json TEXT);
+    INSERT INTO portal_v2_workspaces VALUES('workspace-one','Acme Workspace');
     INSERT INTO pa_portal_principals VALUES('workspace-one','principal-one','Acme Client','CLIENT@EXAMPLE.TEST','v1','active');
   `);
   return { database, env: { DELIVERY_DB: database, CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
@@ -66,6 +82,71 @@ describe("client identity eligibility administration", () => {
       .toEqual({ id: created.id, replayed: false });
     expect(await database.prepare("SELECT COUNT(*) count FROM portal_v2_identity_eligibility_block_audit")
       .first<number>("count")).toBe(2);
+  });
+
+  it("retries only a still-valid invitation with an intact delivery secret", async () => {
+    const { database, env } = await fixture();
+    await database.prepare(`INSERT INTO portal_v2_invitations VALUES
+      ('invite-one','workspace-one','client@example.test','pending',datetime('now','+1 day'),datetime('now'))`).run();
+    await database.prepare(`INSERT INTO portal_v2_invitation_email_outbox
+      (invitation_id,status,payload_json,attempts,last_error_code,next_attempt_at,updated_at)
+      VALUES('invite-one','failed','{"token":"kept"}',3,'E_TEMP',datetime('now','+1 hour'),datetime('now'))`).run();
+    const enabled = { ...env, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
+      CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED: "true" };
+    await expect(retryClientPortalInvitation(enabled,principal,"workspace-one","principal-one","retry-invitation-0001"))
+      .resolves.toMatchObject({ outcome: "queued", replayed: false });
+    await expect(retryClientPortalInvitation(enabled,principal,"workspace-one","principal-one","retry-invitation-0001"))
+      .resolves.toMatchObject({ outcome: "queued", replayed: true });
+    expect(await database.prepare("SELECT status FROM portal_v2_invitation_email_outbox WHERE invitation_id='invite-one'").first("status"))
+      .toBe("pending");
+    expect(await database.prepare("SELECT COUNT(*) count FROM portal_v2_operations_management_audit").first("count")).toBe(1);
+  });
+
+  it("keeps portal recovery default-off, administrator-only, and idempotency scoped to one principal", async () => {
+    const { database, env } = await fixture();
+    await expect(retryClientPortalInvitation(env,principal,"workspace-one","principal-one","retry-invitation-0002"))
+      .rejects.toMatchObject({ status: 404 });
+    expect(await database.prepare("SELECT COUNT(*) count FROM portal_v2_operations_management_mutations").first("count")).toBe(0);
+    const enabled = { ...env, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
+      CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED: "true" };
+    acl.isAdministrator.mockResolvedValueOnce(false);
+    await expect(retryClientPortalInvitation(enabled,principal,"workspace-one","principal-one","retry-invitation-0003"))
+      .rejects.toMatchObject({ status: 403 });
+    await retryClientPortalInvitation(enabled,principal,"workspace-one","principal-one","retry-invitation-0004");
+    await expect(retryClientPortalInvitation(enabled,principal,"workspace-one","different-principal","retry-invitation-0004"))
+      .rejects.toMatchObject({ status: 409 });
+  });
+
+  it("records terminal invitations as not repairable without changing their outbox", async () => {
+    const { database, env } = await fixture();
+    await database.prepare(`INSERT INTO portal_v2_invitations VALUES
+      ('invite-redacted','workspace-one','client@example.test','accepted',datetime('now','+1 day'),datetime('now'))`).run();
+    await database.prepare(`INSERT INTO portal_v2_invitation_email_outbox
+      (invitation_id,status,payload_json,attempts,last_error_code,next_attempt_at,updated_at)
+      VALUES('invite-redacted','failed','{"redacted":true}',8,'invalid_payload',datetime('now'),datetime('now'))`).run();
+    const enabled = { ...env, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
+      CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED: "true" };
+    await expect(retryClientPortalInvitation(enabled,principal,"workspace-one","principal-one","retry-invitation-0005"))
+      .resolves.toMatchObject({ outcome: "not_repairable" });
+    expect(await database.prepare("SELECT status FROM portal_v2_invitation_email_outbox WHERE invitation_id='invite-redacted'").first("status"))
+      .toBe("failed");
+  });
+
+  it("rolls the outbox retry back when its immutable receipt cannot be audited", async () => {
+    const { database, env } = await fixture();
+    await database.prepare(`INSERT INTO portal_v2_invitations VALUES
+      ('invite-race','workspace-one','client@example.test','pending',datetime('now','+1 day'),datetime('now'))`).run();
+    await database.prepare(`INSERT INTO portal_v2_invitation_email_outbox
+      (invitation_id,status,payload_json,attempts,last_error_code,next_attempt_at,updated_at)
+      VALUES('invite-race','failed','{"token":"kept"}',3,'E_TEMP',datetime('now'),datetime('now'))`).run();
+    await database.exec("CREATE TRIGGER reject_portal_retry_audit BEFORE INSERT ON portal_v2_operations_management_audit BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;");
+    const enabled = { ...env, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
+      CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED: "true" };
+    await expect(retryClientPortalInvitation(enabled,principal,"workspace-one","principal-one","retry-invitation-0006"))
+      .rejects.toThrow();
+    expect(await database.prepare("SELECT status FROM portal_v2_invitation_email_outbox WHERE invitation_id='invite-race'").first("status"))
+      .toBe("failed");
+    expect(await database.prepare("SELECT COUNT(*) count FROM portal_v2_operations_management_mutations").first("count")).toBe(0);
   });
 
   it("keeps reads available while mutations require both rollout flags and administrator authority", async () => {

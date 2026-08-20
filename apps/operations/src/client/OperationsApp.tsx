@@ -5762,12 +5762,16 @@ function Team({ session }: { session: Session }) {
 }
 
 type ClientIdentityDirectoryState = {
-  clients: Array<{ workspace_id: string; public_id: string; display_name: string; email_hint: string;
+  clients: Array<{ workspace_id: string; workspace_name: string; public_id: string; display_name: string; email_hint: string;
     status: string; identity_id: string | null; issuer: string | null; subject: string | null;
-    has_workspace_access: number; blocked: number }>;
+    has_workspace_access: number; blocked: number;
+    access: Array<{ capability: string; effect: "allow" | "deny"; scope_type: string; scope_public_id: string; scope_label: string }>;
+    invitation: null | { id: string; status: string; expires_at: string; email_status: string | null;
+      attempts: number | null; last_error_code: string | null } }>;
   blocks: Array<{ id: string; match_type: string; issuer: string | null; subject: string | null;
     normalized_email: string | null; reason_code: string; status: string; expires_at: string | null }>;
   canManageEligibilityBlocks: boolean;
+  canManagePortal: boolean;
 };
 function ClientIdentityDirectory({ administrator }: { administrator: boolean }) {
   const state = useLoad(() => api<ClientIdentityDirectoryState>("/api/team/clients"), []);
@@ -5796,6 +5800,18 @@ function ClientIdentityDirectory({ administrator }: { administrator: boolean }) 
     } catch (caught) { alert((caught as Error).message); }
     finally { setBusy(""); }
   };
+  const retryInvitation = async (client: ClientIdentityDirectoryState["clients"][number]) => {
+    if (!administrator || busy) return;
+    setBusy(client.public_id);
+    try {
+      const result = await api<{ outcome: string }>(`/api/team/clients/${encodeURIComponent(client.workspace_id)}/${encodeURIComponent(client.public_id)}/invitation/retry`,
+        { method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() } });
+      alert(result.outcome === "queued" ? "Invitation delivery queued." : result.outcome === "already_queued"
+        ? "Invitation delivery is already queued." : "This invitation cannot be retried. Create a new invitation from an authorized client manager.");
+      await state.reload();
+    } catch (caught) { alert((caught as Error).message); }
+    finally { setBusy(""); }
+  };
   return <>
     <ManagedNotice detail="Client identity eligibility only opens the Client Portal shell. Projects, deliveries, Viewer models, and all other data remain unavailable until explicitly shared." />
     <ErrorLine error={state.error} />
@@ -5813,7 +5829,19 @@ function ClientIdentityDirectory({ administrator }: { administrator: boolean }) 
               <span className="managed-badge">{client.has_workspace_access ? "Portal shell" : "Awaiting first login"}</span>
             </div>
             <h3>{client.display_name}</h3><p>{client.email_hint}</p>
-            <small>No data access is implied by directory eligibility.</small>
+            <small>{client.workspace_name} · Project Alpha principal</small>
+            <dl className="client-portal-status">
+              <div><dt>Login</dt><dd>{client.blocked ? "Blocked" : client.identity_id
+                ? (client.has_workspace_access ? "Verified and active" : "Verified; workspace inactive")
+                : client.invitation?.status === "pending" ? `Invitation ${client.invitation.email_status || "pending"}` : "Awaiting verified sign-in"}</dd></div>
+              <div><dt>Project and content access</dt><dd>{client.access.length ? client.access.map(item =>
+                `${item.effect === "deny" ? "Denied" : "Allowed"}: ${item.scope_label} (${item.capability})`).join(" · ") : "None explicitly granted"}</dd></div>
+              {client.invitation?.last_error_code && <div><dt>Delivery error</dt><dd>{client.invitation.last_error_code}</dd></div>}
+            </dl>
+            <small>Eligibility and login never grant project files or Viewer content by themselves.</small>
+            {administrator && state.data?.canManagePortal && client.invitation?.status === "pending" &&
+              ["failed","pending"].includes(client.invitation.email_status || "") &&
+              <button disabled={busy === client.public_id} onClick={() => void retryInvitation(client)}>Retry invitation delivery</button>}
             {administrator && state.data?.canManageEligibilityBlocks && (activeBlock
               ? <button disabled={busy === activeBlock.id} onClick={() => void revoke(activeBlock.id)}>Remove opt-out</button>
               : <button className="danger" disabled={busy === client.public_id} onClick={() => void block(client)}>Block portal eligibility</button>)}

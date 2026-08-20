@@ -1484,6 +1484,10 @@ tbody tr:last-child td { border: 0; }
 .team-tabs button { min-width: 110px; padding: .65rem 1rem; border: 0; border-radius: 8px; background: transparent; color: var(--ink); font-weight: 800; }
 .team-tabs button[aria-selected="true"] { color: #fff; background: var(--ink); box-shadow: inset 0 -2px 0 var(--accent); }
 .client-directory .staff-card > button { width: 100%; margin-top: .75rem; }
+.client-portal-status { display: grid; gap: .55rem; margin: .8rem 0; }
+.client-portal-status > div { display: grid; gap: .18rem; }
+.client-portal-status dt { color: var(--muted); font-size: .75rem; font-weight: 700; text-transform: uppercase; }
+.client-portal-status dd { margin: 0; overflow-wrap: anywhere; }
 .viewer-association-form label { display: grid; gap: .35rem; color: var(--muted); font-size: .78rem; font-weight: 800; }
 .viewer-association-form select { width: 100%; min-width: 0; padding: .7rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
 .viewer-association-help { margin: .8rem 0 0; color: var(--muted); font-size: .8rem; }

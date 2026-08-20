@@ -162,6 +162,7 @@ import {
 import {
   createEligibilityBlock,
   listClientIdentityEligibility,
+  retryClientPortalInvitation,
   revokeEligibilityBlock,
 } from "./client-identity-eligibility";
 import {
@@ -1073,6 +1074,10 @@ app.post("/api/client-portal/identity-denials/:denialId/revoke", async (c) => {
 });
 app.get("/api/team/clients", async c => c.json(
   await listClientIdentityEligibility(c.env, c.get("principal")),
+));
+app.post("/api/team/clients/:workspaceId/:principalPublicId/invitation/retry", async c => c.json(
+  await retryClientPortalInvitation(c.env,c.get("principal"),c.req.param("workspaceId"),
+    c.req.param("principalPublicId"),c.req.header("Idempotency-Key") || ""),
 ));
 app.post("/api/team/clients/eligibility-blocks", async c => {
   const result = await createEligibilityBlock(c.env, c.get("principal"),

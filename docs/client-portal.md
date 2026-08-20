@@ -570,6 +570,16 @@ identity, active workspace membership, a complete active directory generation,
 an active source entity, and an explicit capability. A matching deny wins.
 Email and `primary_contact` are presentation data and never grant access.
 
+Operations client administration is independently default-off through
+`CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED`. With both flags enabled, Team →
+Clients shows the Project Alpha principal, the exact Operations-owned identity
+binding state, effective allow/deny scopes, and invitation delivery status.
+Eligibility and email hints never create a membership or data grant. Staff may
+retry only an existing, unexpired invitation whose secret-bearing outbox row
+is intact; its conditional update, idempotency receipt, and audit entry commit
+atomically. New invitations remain an authorized client-manager action, and
+content requires an explicit authenticated delivery grant.
+
 ### Existing-account Project Alpha root activation
 
 Operations Administration exposes the bounded **Client account Project Alpha

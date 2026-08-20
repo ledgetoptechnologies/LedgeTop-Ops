@@ -165,6 +165,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0146_viewer_client_grant_audit.sql",
     "0147_project_alpha_delivery_intents.sql",
     "0148_single_file_delivery_shares.sql",
+    "0149_portal_operations_management.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
