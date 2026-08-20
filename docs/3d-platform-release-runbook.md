@@ -1,23 +1,26 @@
 # 3D processing and delivery release runbook
 
-Status: **the source-candidate packet has been refreshed for the exact-file
-Delivery, Viewer import/workspace changes, and bounded incoming-request JSON
-handling; the immutable Viewer image is
-published and verified, and the immutable source contract is finalized; live
-staging evidence and activation remain pending**. The staff Viewer integration and processing workspace are already
-deliberately enabled for pre-production validation. New Viewer public-share,
-Client Viewer, and Project Alpha portal capabilities remain gated until their
+Status: **the source-candidate packet has been repinned for the exact-file
+Delivery, Viewer import/workspace/streaming-derivative changes, and bounded
+incoming-request JSON handling; the replacement immutable Viewer image digest
+and independent cross-repository review are pending, so the immutable release
+contract is not finalized and no staging activation is authorized**. Existing
+pre-production instances may have the staff Viewer integration and processing
+workspace enabled for validation, but that operational state does not change
+the checked-in default-off release contract. New Viewer public-share, Client
+Viewer, and Project Alpha portal capabilities remain gated until their
 corresponding live evidence below is captured.
 
-## Frozen source candidates
+## Pinned source candidates (release contract open)
 
-- 3D Viewer source: `cde930730af2a50966a771f24454e8d98f9a25b7`.
-  The reviewed release-candidate image is
-  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:1a3d1c333a03b51b0bf3c95a4fd3541a5de696e0b821c8898e396f3795852011`.
-  GitHub Actions run `32331386543` published tags `latest` and
-  `sha-cde9307`. The
-  workflow then pulled that exact digest back from GHCR and verified runtime
-  UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
+- 3D Viewer source: `dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e`.
+  Its replacement immutable GHCR digest and publishing run are pending
+  credentialed registry/workflow evidence. The packet deliberately records
+  `PENDING_VIEWER_IMAGE_FOR_dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e`
+  until the workflow has pulled the exact manifest back and verified runtime
+  UID/GID `568:568`, OCI revision, the read-only source-commit stamp, and the
+  pinned derivative tools. The former `cde9307` digest is rollback history only
+  and must not be paired with this source candidate.
 - LTDS-Ops product code: `5c35268722289730dfdfe5b908593b50c0510ee9` on
   `main`. This pin moves processing management to
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
@@ -29,15 +32,14 @@ corresponding live evidence below is captured.
   profile dependency while preserving the mandatory isolated MySQL scope-lock
   CI gate.
 
-The updated source, manifest digest, migrations, fixtures, and activation
-policy passed independent cross-repository verification, so the corresponding
-constant in `scripts/staging-requirements.mjs` is
-`RELEASE_CONTRACT_FINALIZED=true` after the refreshed Viewer, exact-file
-Delivery, and incoming-request hardening packet passed final cross-repository
-evidence review. The broader live acceptance gates remain pending. Finalization freezes
-the candidate contract only; it does not approve deployment, migrations, or
-any feature flag. Reset it to `false` before changing a pinned source or
-deployment artifact.
+The updated Viewer source passed its repository-owned local gate, but its new
+manifest digest and refreshed independent cross-repository packet have not yet
+been frozen. Accordingly, `scripts/staging-requirements.mjs` has
+`RELEASE_CONTRACT_FINALIZED=false`; staging acceptance must fail closed. After
+the exact Viewer digest, source identity, migrations, fixtures, and activation
+policy pass independent comparison, replace the pending image value and only
+then set the constant to `true`. Finalization freezes the candidate contract
+only; it never approves deployment, migrations, or a feature flag.
 
 The Viewer/Ops signed-processing corpus has SHA-256
 `0ed7a7c40ad23583b9e741667b99aecc31cc01f7617c73ab63ad314a7ba344a0`.
@@ -64,13 +66,16 @@ This is inode/index/recovery evidence only;
 the same rehearsal still must run on the disposable TrueNAS storage class with
 representative imagery before activation.
 
-The exact candidate passed 287 of 290 repository-owned tests in the Linux
-workflow with zero failures and three environment-only skips, then completed the
-production build. The suite covers the real symlink-escape gate, UID/GID 568
+The repinned Viewer source passed 309 of 312 repository-owned tests with zero
+failures and three environment-only skips, then completed the production build
+and local rootless image checks. The replacement registry manifest remains
+pending as described above. The suite covers the real symlink-escape gate, UID/GID 568
 storage admission, persistent-bind byte/database behavior, project-first
 workspace, staff renewal, GCP import/marking/ranking, provider auto-detection
 and administration, output/report integrity, model and whole-project public
-sharing, lifecycle recovery, and serialized desktop/390/320 Edge flows.
+sharing, classic-EPT point-cloud loading, bounded restart-safe LOD backfill and
+manual derivative retry, lifecycle recovery, and serialized desktop/390/320
+Edge flows.
 It does not replace the real TrueNAS ACL/mount drill.
 
 The candidate's executable and test tree completed the destructive
@@ -113,7 +118,7 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091`, published-session revocation
 commit `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06`, and subsequent hardening commits
-through `cde930730af2a50966a771f24454e8d98f9a25b7` retain the reviewed provider adapter,
+through `dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e` retain the reviewed provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
@@ -166,7 +171,7 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`cde930730af2a50966a771f24454e8d98f9a25b7` and schema version `21`. Confirm
+`dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e` and schema version `21`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
 `X-LTDS-Viewer-Revision`, `21` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful

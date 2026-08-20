@@ -16,9 +16,12 @@ Status meanings:
 - **Retired** — an earlier requirement was deliberately removed from the
   operator workflow and is retained only as compatibility code where noted.
 
-All processing, Viewer-public-share, client-Viewer, and Project Alpha adapter
-flags remain default-off until the staging evidence contract passes. Existing
-published-model viewing must remain independent of every processing provider.
+All staging processing, Viewer-public-share, client-Viewer, and Project Alpha
+adapter flags remain default-off until the staging evidence contract passes.
+The existing pre-production staff Viewer/processing installation is a documented
+operational exception; it does not authorize a staging or public/client flag.
+Existing published-model viewing must remain independent of every processing
+provider.
 
 | Locked requirement | Status | Required evidence |
 | --- | --- | --- |
@@ -34,7 +37,7 @@ published-model viewing must remain independent of every processing provider.
 | NodeODM/ClusterODM provider abstraction and LTDS admission ahead of upstream scheduling | Proven + live gate | Source contract tests, `/info.maxImages`, LTDS high-water and active-storage reservation enforcement, real isolated NodeODM 2.2.3 and ClusterODM 1.5.5 capability plus 16-image job/download/cancel/verified cleanup; representative TrueNAS job remains live evidence |
 | Restart-safe init/upload/auxiliary/commit reconciliation; every retry is a new attempt | Proven | Submission-phase checkpoints, explicit private/provider input roles, ambiguity restart, lease/fencing/fault tests |
 | Bounded streamed `all.zip` ingestion without retaining a duplicate archive | Proven + live gate | Safe streaming ZIP tests plus real NodeODM and ClusterODM streamed archives parsed through the production ZIP path; representative large-result interruption test remains live |
-| Native EPT, GLB and 3D Tiles requested; full-detail LOD equivalence fails closed | Proven + live gate | Capability validation and real-provider discovery of EPT, GLB and native 3D Tiles, LOD-v2 proof tests; representative real model close-range QA remains live |
+| Native EPT, GLB and 3D Tiles requested; missing LOD is generated once and full-detail equivalence fails closed | Proven + live gate | Capability validation, pinned Obj2Tiles runtime, classic-EPT Potree correction, one-attempt/manual-retry policy, bounded existing-model backfill, native-tile audit/quarantine, GLB fallback and LOD-v2 worker/proof tests are proven; exact GHCR attestation, representative deployed EPT render, generated/backfilled close-range model QA and TrueNAS worker restart remain live evidence |
 | Provider `/options`, boolean-false preservation, familiar grouped controls, built-in and reusable presets | Proven + live gate | Custom preset CRUD, capability binding and responsive UI tests; real-provider option corpus remains live evidence |
 | NodeODM/ClusterODM type is detected from one Add Node form | Proven + live gate | Label, endpoint, and optional token only; `/info` plus `/options` positive evidence, safe ambiguous-endpoint rejection, explicit no-auth mode, and real provider probe remain the live gate |
 | Provider credentials, endpoints, probe, enable/disable, rotation and admission managed after bootstrap in Viewer UI | Proven + live gate | Reachable project-first UI covers endpoint/label/admission editing, encrypted write-only token rotation/removal, auto-detect-before-save, probe, enable/disable and capability-bound preset CRUD; live provider mutation remains staging evidence |

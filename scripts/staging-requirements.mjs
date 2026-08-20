@@ -5,20 +5,21 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 // This lets evidence and documentation evolve without silently changing the
 // exact application bytes approved for staging. Set this back to false whenever
 // any candidate changes, then refresh every immutable commit/image/migration pin.
-// Final commits, image digest, fixtures, and migration checksums passed the
-// independent cross-repository gate. Set this back to false before changing
-// any pinned source or deployment artifact.
-export const RELEASE_CONTRACT_FINALIZED = true;
+// A false value permits an explicit PENDING_VIEWER_IMAGE_FOR_<commit> sentinel
+// while a replacement image is publishing. Set this to true only after final
+// commits, the image digest, fixtures, and migration checksums pass the
+// independent cross-repository gate; reset it before changing any pin.
+export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
   operations: "5c35268722289730dfdfe5b908593b50c0510ee9",
-  viewer: "cde930730af2a50966a771f24454e8d98f9a25b7",
+  viewer: "dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e",
   projectAlpha: "e3355875d86250628ad630c1d02baa1ecc127a77",
 });
 
 export const STAGING_VIEWER = Object.freeze({
   hostname: "viewer-staging.ledgetopdroneservices.com",
   origin: "https://viewer-staging.ledgetopdroneservices.com",
-  image: "ghcr.io/ledgetoptechnologies/3d-viewer@sha256:1a3d1c333a03b51b0bf3c95a4fd3541a5de696e0b821c8898e396f3795852011",
+  image: "PENDING_VIEWER_IMAGE_FOR_dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e",
   schemaVersion: 21,
   serviceKeyId: "ops-staging-v1",
   eventKeyId: "viewer-staging-v1",

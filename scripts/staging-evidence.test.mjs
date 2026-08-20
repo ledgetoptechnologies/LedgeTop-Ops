@@ -249,6 +249,12 @@ test("operational verification reflects the final cross-repository pin gate", ()
   assert.equal(errors.some((error) => error.includes("FINAL_* candidate placeholders")), !RELEASE_CONTRACT_FINALIZED, errors.join(" | "));
 });
 
+test("Viewer image state is bound to the candidate and release-finalization state", () => {
+  const immutable = /^ghcr\.io\/ledgetoptechnologies\/3d-viewer@sha256:[a-f0-9]{64}$/;
+  if (RELEASE_CONTRACT_FINALIZED) assert.match(STAGING_VIEWER.image, immutable);
+  else assert.equal(STAGING_VIEWER.image, `PENDING_VIEWER_IMAGE_FOR_${RELEASE_CANDIDATES.viewer}`);
+});
+
 test("fails closed on Viewer and Project Alpha deployment-contract drift", () => {
   const base = fs.mkdtempSync(path.join(os.tmpdir(), "ltds-evidence-cross-repo-"));
   const { configs, evidence, configHashes } = fixture(base);
