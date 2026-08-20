@@ -239,11 +239,11 @@ export async function listDeliveryFolder(env:Env,principal:StaffPrincipal,prefix
   const prefix=prefixValue?normalizePrefix(prefixValue):"";
   if(prefix&&!access.global&&!access.roots.some(root=>prefix.startsWith(root.prefix)))throw new HTTPException(404,{message:"Folder not found"});
   const tombstones=await activeTombstones(env); const trashed=(key:string)=>tombstones.some(tombstone=>tombstoneMatches(tombstone,key));
-  if(!access.global&&!prefixValue){const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string}>();const shared=(key:string)=>activeShares.results.some(share=>{try{return key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});const roots=access.roots.filter(root=>!trashed(root.prefix));const aliases=await aliasMap(env,roots.map(root=>root.prefix));return{prefix:"",folders:roots.map(root=>({id:encodeRef(root.prefix.slice(0,-1)),prefix:root.prefix,name:aliases.get(root.prefix)||root.name,isShared:shared(root.prefix)})),files:[],nextCursor:null,mediaHydrated:true,reconciliationNeeded:false};}
+  if(!access.global&&!prefixValue){const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.r2_object_key FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string;r2_object_key:string|null}>();const shared=(key:string)=>activeShares.results.some(share=>{try{return share.r2_object_key?key===share.r2_object_key:key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});const roots=access.roots.filter(root=>!trashed(root.prefix));const aliases=await aliasMap(env,roots.map(root=>root.prefix));return{prefix:"",folders:roots.map(root=>({id:encodeRef(root.prefix.slice(0,-1)),prefix:root.prefix,name:aliases.get(root.prefix)||root.name,isShared:shared(root.prefix)})),files:[],nextCursor:null,mediaHydrated:true,reconciliationNeeded:false};}
   if(prefix)await assertNotTrashed(env,prefix);
   const listed=await env.DATA_BUCKET.list({prefix,delimiter:"/",limit:DELIVERY_FOLDER_PAGE_SIZE,cursor,include:["httpMetadata","customMetadata"]});
-  const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string}>();
-  const shared=(key:string)=>activeShares.results.some(share=>{try{return key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});
+  const activeShares=await env.DELIVERY_DB.prepare(`SELECT COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix,s.r2_object_key FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`).all<{r2_prefix:string;r2_object_key:string|null}>();
+  const shared=(key:string)=>activeShares.results.some(share=>{try{return share.r2_object_key?key===share.r2_object_key:key.startsWith(normalizePrefix(share.r2_prefix));}catch{return false;}});
   const folderCandidates=listed.delimitedPrefixes.filter(value=>!hidden(value)&&!trashed(value));
   const folderVisibility=await visibleDeliveryFolders(env,folderCandidates);
   const folders=folderCandidates.filter(value=>folderVisibility.visible.has(value));
@@ -339,13 +339,13 @@ export async function searchDeliveryItems(env:Env,principal:StaffPrincipal,query
 
 export async function authorizeItem(env:Env,principal:StaffPrincipal,itemRef:string):Promise<string>{await requirePermission(env,principal,"delivery.browse");const key=decodeRef(itemRef);if(hidden(key))throw new HTTPException(404,{message:"Item not found"});const access=await browseRoots(env,principal);if(!access.global&&!access.roots.some(root=>key.startsWith(root.prefix)))throw new HTTPException(404,{message:"Item not found"});await assertNotTrashed(env,key);return key;}
 
-export interface ShareInput{clientName?:string;projectName?:string;r2Prefix?:string;projectId?:string;externalRef?:string;label?:string;accessCode?:string;generateAccessCode?:boolean;removeAccessCode?:boolean;expiresAt?:string|null;recipientEmail?:string|null;recipientAudience?:{type:AudienceType;publicId:string}|null;imageLocationMapEnabled?:boolean;}
+export interface ShareInput{clientName?:string;projectName?:string;r2Prefix?:string;itemRef?:string;projectId?:string;externalRef?:string;label?:string;accessCode?:string;generateAccessCode?:boolean;removeAccessCode?:boolean;expiresAt?:string|null;recipientEmail?:string|null;recipientAudience?:{type:AudienceType;publicId:string}|null;imageLocationMapEnabled?:boolean;}
 export function deriveShareMetadata(prefix:string,input:Pick<ShareInput,"clientName"|"projectName">={}):{clientName:string;projectName:string}{const folderName=normalizePrefix(prefix).slice(0,-1).split("/").pop()||"Shared folder";return{clientName:input.clientName?.trim()||folderName,projectName:input.projectName?.trim()||folderName};}
 
 interface ProjectRow { id:string;division_id:string|null;r2_prefix:string }
 interface ActiveShareRow {
   id:string;project_id:string;public_id:string|null;label:string|null;password_hash:string|null;password_salt:string|null;password_iterations:number|null;password_algorithm:string|null;
-  expires_at:string|null;idempotency_key:string|null;share_version:number;secret_ciphertext:string|null;secret_iv:string|null;division_id:string|null;recipient_email:string|null;image_location_map_enabled:number;created_by_type:string;created_by_id:string|null;
+  expires_at:string|null;idempotency_key:string|null;share_version:number;secret_ciphertext:string|null;secret_iv:string|null;division_id:string|null;recipient_email:string|null;image_location_map_enabled:number;created_by_type:string;created_by_id:string|null;r2_object_key:string|null;
 }
 
 export interface ShareLifecycleResult {
@@ -379,17 +379,18 @@ export async function authorizeSharePrefix(env:Env,principal:StaffPrincipal,pref
   return{project,divisionId};
 }
 
-export async function activeShareForPrefix(env:Env,prefix:string):Promise<ActiveShareRow|null>{
-  const current=await env.DELIVERY_DB.prepare(`SELECT s.id,s.project_id,s.public_id,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.idempotency_key,s.share_version,s.secret_ciphertext,s.secret_iv,s.recipient_email,s.image_location_map_enabled,s.created_by_type,s.created_by_id,COALESCE(s.division_id,p.division_id) AS division_id
+export async function activeShareForPrefix(env:Env,prefix:string,objectKey:string|null=null):Promise<ActiveShareRow|null>{
+  const current=await env.DELIVERY_DB.prepare(`SELECT s.id,s.project_id,s.public_id,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.idempotency_key,s.share_version,s.secret_ciphertext,s.secret_iv,s.recipient_email,s.image_location_map_enabled,s.created_by_type,s.created_by_id,s.r2_object_key,COALESCE(s.division_id,p.division_id) AS division_id
     FROM shares s JOIN projects p ON p.id=s.project_id
-    WHERE s.r2_prefix=? AND s.revoked_at IS NULL AND p.active=1
+    WHERE s.r2_prefix=? AND ((? IS NULL AND s.r2_object_key IS NULL) OR s.r2_object_key=?) AND s.revoked_at IS NULL AND p.active=1
       AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))
-    ORDER BY s.created_at DESC LIMIT 1`).bind(prefix).first<ActiveShareRow>();
+    ORDER BY s.created_at DESC LIMIT 1`).bind(prefix,objectKey,objectKey).first<ActiveShareRow>();
   if(current)return current;
   // Shares created before r2_prefix was backfilled may still rely on their project.
   // Keep that compatibility lookup explicit and bounded instead of applying
   // COALESCE to every active share row in the normal path.
-  return env.DELIVERY_DB.prepare(`SELECT s.id,s.project_id,s.public_id,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.idempotency_key,s.share_version,s.secret_ciphertext,s.secret_iv,s.recipient_email,s.image_location_map_enabled,s.created_by_type,s.created_by_id,COALESCE(s.division_id,p.division_id) AS division_id
+  if(objectKey)return null;
+  return env.DELIVERY_DB.prepare(`SELECT s.id,s.project_id,s.public_id,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.idempotency_key,s.share_version,s.secret_ciphertext,s.secret_iv,s.recipient_email,s.image_location_map_enabled,s.created_by_type,s.created_by_id,NULL AS r2_object_key,COALESCE(s.division_id,p.division_id) AS division_id
     FROM shares s JOIN projects p ON p.id=s.project_id
     WHERE s.r2_prefix IS NULL AND p.r2_prefix=? AND s.revoked_at IS NULL AND p.active=1
       AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))
@@ -421,16 +422,23 @@ export function resolveShareUpdateSecurity(input:{accessCodeChanged:boolean;reci
   return{mustRotateCredential,versionIncrement:mustRotateCredential||input.publicIdChanged?1:0};
 }
 
-export async function getActiveDeliveryShare(env:Env,principal:StaffPrincipal,prefixValue:string){
-  const prefix=normalizePrefix(prefixValue);await authorizeSharePrefix(env,principal,prefix);const share=await activeShareForPrefix(env,prefix);
+export async function getActiveDeliveryShare(env:Env,principal:StaffPrincipal,prefixValue:string,itemRef?:string){
+  const prefix=normalizePrefix(prefixValue),objectKey=itemRef?await authorizeItem(env,principal,itemRef):null;
+  if(objectKey&&!objectKey.startsWith(prefix))throw new HTTPException(404,{message:"File not found"});
+  await authorizeSharePrefix(env,principal,prefix);const share=await activeShareForPrefix(env,prefix,objectKey);
   if(!share)return null;await requirePermission(env,principal,"delivery.share.create",{divisionId:share.division_id},true);const secret=await recoverShareSecret(env,share);
-  const [aliases,audience]=await Promise.all([aliasMap(env,[prefix]),shareDirectoryRecipientsEnabled(env)?latestShareAudienceSnapshot(env,share.id):Promise.resolve(null)]);return{id:share.id,shareUrl:secret&&share.public_id?shareUrl(env,share.public_id,secret):null,passwordProtected:Boolean(share.password_hash),expiresAt:share.expires_at,recoverable:Boolean(secret&&share.public_id),recipientEmail:share.recipient_email,audience:audience?{audienceType:audience.audienceType,publicId:audience.audiencePublicId,displayName:audience.audienceDisplayName,recipientCount:audience.recipients.length,email:audience.audienceType==="principal"?audience.recipients[0]?.email:null}:null,imageLocationMapEnabled:share.image_location_map_enabled===1,displayName:aliases.get(prefix)||prefix.slice(0,-1).split("/").pop()};
+  const [aliases,audience]=await Promise.all([aliasMap(env,[prefix,...(objectKey?[objectKey]:[])]),shareDirectoryRecipientsEnabled(env)?latestShareAudienceSnapshot(env,share.id):Promise.resolve(null)]);return{id:share.id,shareUrl:secret&&share.public_id?shareUrl(env,share.public_id,secret):null,passwordProtected:Boolean(share.password_hash),expiresAt:share.expires_at,recoverable:Boolean(secret&&share.public_id),recipientEmail:share.recipient_email,audience:audience?{audienceType:audience.audienceType,publicId:audience.audiencePublicId,displayName:audience.audienceDisplayName,recipientCount:audience.recipients.length,email:audience.audienceType==="principal"?audience.recipients[0]?.email:null}:null,imageLocationMapEnabled:share.image_location_map_enabled===1,targetType:objectKey?"file":"folder",displayName:aliases.get(objectKey||prefix)||(objectKey||prefix.slice(0,-1)).split("/").pop()};
 }
 
 export async function createDeliveryShare(env:Env,request:Request,principal:StaffPrincipal,input:ShareInput,idempotencyKey:string):Promise<ShareLifecycleResult>{
   if(!idempotencyKey||idempotencyKey.length>120)throw new HTTPException(400,{message:"Idempotency-Key is required"});
   if(!input.r2Prefix)throw new HTTPException(400,{message:"r2Prefix is required"});
-  const prefix=normalizePrefix(input.r2Prefix),{clientName,projectName}=deriveShareMetadata(prefix,input);
+  const prefix=normalizePrefix(input.r2Prefix),objectKey=input.itemRef?await authorizeItem(env,principal,input.itemRef):null,{clientName,projectName}=deriveShareMetadata(prefix,input);
+  if(objectKey){
+    if(!objectKey.startsWith(prefix))throw new HTTPException(404,{message:"File not found"});
+    const object=await env.DATA_BUCKET.head(objectKey);
+    if(!object||objectKey.endsWith("/")||isMovedSourceMarker(object))throw new HTTPException(404,{message:"File not found"});
+  }
   const{project,divisionId}=await authorizeSharePrefix(env,principal,prefix,input.projectId);
   const owner=Boolean(await env.OPS_DB.prepare("SELECT 1 ok FROM staff_role_assignments WHERE staff_id=? AND role_id='role-owner' AND scope='global'").bind(principal.id).first());
   const requestedExpiration=input.expiresAt===undefined?undefined:resolveShareExpiration(input.expiresAt,owner?365:90);
@@ -445,11 +453,13 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
   const codeChange=resolveAccessCodeChange(input);
 
   await env.DELIVERY_DB.prepare(`UPDATE shares SET revoked_at=datetime('now'),revoked_reason='expired' WHERE revoked_at IS NULL AND expires_at IS NOT NULL
-    AND datetime(expires_at)<=datetime('now') AND COALESCE(r2_prefix,(SELECT r2_prefix FROM projects WHERE id=shares.project_id))=?`).bind(prefix).run();
+    AND datetime(expires_at)<=datetime('now') AND COALESCE(r2_prefix,(SELECT r2_prefix FROM projects WHERE id=shares.project_id))=?
+    AND ((? IS NULL AND r2_object_key IS NULL) OR r2_object_key=?)`).bind(prefix,objectKey,objectKey).run();
   await env.DELIVERY_DB.prepare(`UPDATE shares SET revoked_at=datetime('now'),revoked_reason='project_inactive' WHERE revoked_at IS NULL
     AND COALESCE(r2_prefix,(SELECT r2_prefix FROM projects WHERE id=shares.project_id))=?
-    AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=0)`).bind(prefix).run();
-  let active=await activeShareForPrefix(env,prefix);
+    AND ((? IS NULL AND r2_object_key IS NULL) OR r2_object_key=?)
+    AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=0)`).bind(prefix,objectKey,objectKey).run();
+  let active=await activeShareForPrefix(env,prefix,objectKey);
   if(active){
     for(let attempt=0;attempt<2;attempt+=1){
       await requirePermission(env,principal,"delivery.share.create",{divisionId:active.division_id},true);
@@ -490,9 +500,9 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
       const passwordAlgorithm=effectiveCodeChange.kind==="preserve"?active.password_algorithm:password?.algorithm||null;
       const lifecycle:ShareLifecycleResult["lifecycle"]=mustRotate?"rotated":"updated",tokenHash=mustRotate?await sha256(nextSecret):null;
       const effectiveMapEnabled=input.imageLocationMapEnabled===undefined?active.image_location_map_enabled:Number(input.imageLocationMapEnabled);
-      const updateStatement=env.DELIVERY_DB.prepare(`UPDATE shares SET token_hash=COALESCE(?,token_hash),public_id=COALESCE(public_id,?),secret_ciphertext=?,secret_iv=?,password_hash=?,password_salt=?,password_iterations=?,password_algorithm=?,expires_at=?,recipient_email=?,image_location_map_enabled=?,idempotency_key=?,r2_prefix=?,division_id=COALESCE(division_id,?),share_version=share_version+? WHERE id=? AND share_version=? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=1)`).bind(tokenHash,nextPublicId,encrypted.ciphertext,encrypted.iv,passwordHash,passwordSalt,passwordIterations,passwordAlgorithm,expiresAt,effectiveRecipient,effectiveMapEnabled,idempotencyKey,prefix,divisionId,updateSecurity.versionIncrement,active.id,active.share_version);
+      const updateStatement=env.DELIVERY_DB.prepare(`UPDATE shares SET token_hash=COALESCE(?,token_hash),public_id=COALESCE(public_id,?),secret_ciphertext=?,secret_iv=?,password_hash=?,password_salt=?,password_iterations=?,password_algorithm=?,expires_at=?,recipient_email=?,image_location_map_enabled=?,idempotency_key=?,r2_prefix=?,r2_object_key=?,division_id=COALESCE(division_id,?),share_version=share_version+? WHERE id=? AND share_version=? AND revoked_at IS NULL AND EXISTS (SELECT 1 FROM projects WHERE projects.id=shares.project_id AND projects.active=1)`).bind(tokenHash,nextPublicId,encrypted.ciphertext,encrypted.iv,passwordHash,passwordSalt,passwordIterations,passwordAlgorithm,expiresAt,effectiveRecipient,effectiveMapEnabled,idempotencyKey,prefix,objectKey,divisionId,updateSecurity.versionIncrement,active.id,active.share_version);
       const updated=await env.DELIVERY_DB.batch([updateStatement,...(directoryRecipients&&effectiveDirectoryRecipient&&updateSecurity.versionIncrement?shareAudienceSnapshotStatements(env,active.id,nextShareVersion,effectiveDirectoryRecipient,principal.id,true):[])]);
-      if(!updated[0]?.meta.changes){const latest=await activeShareForPrefix(env,prefix);if(!latest)throw new HTTPException(409,{message:"This share changed while you were editing it. Reopen the share and try again."});active=latest;continue;}
+      if(!updated[0]?.meta.changes){const latest=await activeShareForPrefix(env,prefix,objectKey);if(!latest)throw new HTTPException(409,{message:"This share changed while you were editing it. Reopen the share and try again."});active=latest;continue;}
 
       const notificationShareId=active.id,notificationShareVersion=nextShareVersion,notificationRevision=`${notificationShareVersion}:${idempotencyKey}`;
       const notifications = effectiveDirectoryRecipient ? effectiveDirectoryRecipient.recipients.map(member=>notificationStatement(env,{shareId:notificationShareId,kind:"share_updated",recipientEmail:member.email,dedupeKey:notificationDedupeKey("share_updated",notificationShareId,`${notificationRevision}:${member.principalPublicId}`),payload:{shareUrl:shareUrl(env,nextPublicId,nextSecret),r2Prefix:prefix,expiresAt}})!) : [notificationStatement(env, { shareId: notificationShareId, kind: "share_updated", recipientEmail: effectiveRecipient, dedupeKey: notificationDedupeKey("share_updated", notificationShareId, notificationRevision), payload: { shareUrl: shareUrl(env, nextPublicId, nextSecret), r2Prefix: prefix, expiresAt } })].filter((value):value is D1PreparedStatement=>Boolean(value));
@@ -513,7 +523,7 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
   const statements:D1PreparedStatement[]=[];
   if(!project)statements.push(env.DELIVERY_DB.prepare("INSERT INTO projects (id,external_ref,client_name,project_name,r2_prefix,division_id,created_by) VALUES (?,?,?,?,?,?,NULL)").bind(projectId,input.externalRef?.trim()||null,clientName,projectName,prefix,divisionId));
   statements.push(
-    env.DELIVERY_DB.prepare(`INSERT INTO shares (id,project_id,token_hash,public_id,label,password_hash,password_salt,password_iterations,password_algorithm,expires_at,recipient_email,image_location_map_enabled,created_by_type,created_by_id,idempotency_key,share_version,secret_ciphertext,secret_iv,r2_prefix,division_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'staff',?,?,2,?,?,?,?)`).bind(shareId,projectId,await sha256(secret),publicId,input.label?.trim()||null,password?.hash||null,password?.salt||null,password?.iterations||null,password?.algorithm||null,expiresAt,recipientEmail,Number(Boolean(input.imageLocationMapEnabled)),principal.id,idempotencyKey,encrypted.ciphertext,encrypted.iv,prefix,divisionId),
+    env.DELIVERY_DB.prepare(`INSERT INTO shares (id,project_id,token_hash,public_id,label,password_hash,password_salt,password_iterations,password_algorithm,expires_at,recipient_email,image_location_map_enabled,created_by_type,created_by_id,idempotency_key,share_version,secret_ciphertext,secret_iv,r2_prefix,r2_object_key,division_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?, 'staff',?,?,2,?,?,?,?,?)`).bind(shareId,projectId,await sha256(secret),publicId,input.label?.trim()||null,password?.hash||null,password?.salt||null,password?.iterations||null,password?.algorithm||null,expiresAt,recipientEmail,Number(Boolean(input.imageLocationMapEnabled&&!objectKey)),principal.id,idempotencyKey,encrypted.ciphertext,encrypted.iv,prefix,objectKey,divisionId),
     ...(selectedRecipient?shareAudienceSnapshotStatements(env,shareId,2,selectedRecipient,principal.id):[]),
     env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES ('staff',?,'share.created','share',?,?)").bind(principal.id,shareId,JSON.stringify({divisionId,r2Prefix:prefix,projectId,expiresAt,imageLocationMapEnabled:Boolean(input.imageLocationMapEnabled)})),
     ...createdNotifications,

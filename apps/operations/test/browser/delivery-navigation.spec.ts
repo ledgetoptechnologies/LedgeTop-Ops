@@ -963,3 +963,41 @@ test("Share dialog selects a scoped directory recipient without presenting it as
   expect(posted).toMatchObject({ r2Prefix: "Jobs/Clients/Acme/", recipientAudience: { type: "principal", publicId: "pa-principal-acme" } });
   expect(posted).not.toHaveProperty("recipientEmail");
 });
+
+test("an individual video card creates and revokes an exact-file share",async({page})=>{
+  let posted:Record<string,unknown>|null=null,deleted="";
+  await page.route("**/api/**",async route=>{
+    const request=route.request(),url=new URL(request.url());
+    if(url.pathname==="/api/session")return route.fulfill({json:{user:{id:"staff-file-share",email:"staff@example.test",displayName:"File Share Staff",status:"Active",profileType:"Administrator",isAdministrator:true,permissions:["delivery.browse","delivery.share.create","delivery.share.revoke"],divisions:[]},csrfToken:"csrf-file-share",timezone:"America/Chicago",mapStyleUrl:null,mapboxPublicToken:null,capabilities:{deliveryJobsRoot:{enabled:true}}}});
+    if(url.pathname==="/api/delivery/folders")return route.fulfill({json:{prefix:"Jobs/Clients/",folders:[],files:[{id:"opaque-video-2",physicalKey:"Jobs/Clients/Video 2.mov",name:"Video 2.mov",displayName:"Video 2.mov",kind:"video",size:65011712,sourceUrl:"/api/delivery/items/opaque-video-2/source",downloadUrl:"/api/delivery/items/opaque-video-2/download"}],nextCursor:null}});
+    if(url.pathname==="/api/delivery/folders/media")return route.fulfill({json:{items:[]}});
+    if(url.pathname==="/api/delivery/folders/locations")return route.fulfill({json:{points:[],imageCount:0,truncated:false}});
+    if(url.pathname==="/api/delivery/shares/active"){
+      expect(url.searchParams.get("prefix")).toBe("Jobs/Clients/");
+      expect(url.searchParams.get("itemRef")).toBe("opaque-video-2");
+      return route.fulfill({json:{share:null}});
+    }
+    if(url.pathname==="/api/delivery/shares"&&request.method()==="POST"){
+      posted=request.postDataJSON();
+      return route.fulfill({status:201,json:{share:{id:"share-video-2",shareUrl:"https://client.example.test/s/video-2#secret",accessCode:null,passwordProtected:false,expiresAt:null,lifecycle:"created",idempotentReplay:false}}});
+    }
+    if(url.pathname==="/api/delivery/shares/share-video-2"&&request.method()==="DELETE"){
+      deleted=url.pathname;return route.fulfill({status:204,body:""});
+    }
+    if(url.pathname==="/api/delivery/shares")return route.fulfill({json:{shares:[]}});
+    return route.fulfill({status:404,json:{error:"Not found"}});
+  });
+  await page.goto("/delivery");
+  await page.getByRole("button",{name:"Actions for Video 2.mov"}).click();
+  await page.getByRole("menuitem",{name:"Share"}).click();
+  await expect(page.getByText("Share file",{exact:true})).toBeVisible();
+  await expect(page.getByRole("code").filter({hasText:"Video 2.mov"})).toBeVisible();
+  await expect(page.getByRole("checkbox",{name:/Show photo locations/})).toHaveCount(0);
+  await page.getByRole("button",{name:"Create link"}).click();
+  await expect.poll(()=>posted).not.toBeNull();
+  expect(posted).toMatchObject({r2Prefix:"Jobs/Clients/",itemRef:"opaque-video-2",imageLocationMapEnabled:false});
+  await expect(page.getByRole("button",{name:"Copy link"})).toBeVisible();
+  page.once("dialog",dialog=>dialog.accept());
+  await page.getByRole("button",{name:"Unshare file"}).click();
+  await expect.poll(()=>deleted).toBe("/api/delivery/shares/share-video-2");
+});

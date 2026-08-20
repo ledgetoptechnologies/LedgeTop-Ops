@@ -321,7 +321,8 @@
         "0144_viewer_client_grants.sql",
         "0145_portal_identity_eligibility.sql",
         "0146_viewer_client_grant_audit.sql",
-        "0147_project_alpha_delivery_intents.sql"
+        "0147_project_alpha_delivery_intents.sql",
+        "0148_single_file_delivery_shares.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",

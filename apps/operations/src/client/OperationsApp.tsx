@@ -73,6 +73,7 @@ interface ActiveDeliveryShare {
   recipientEmail?: string | null;
   audience?: ShareDirectoryAudience | null;
   imageLocationMapEnabled?: boolean;
+  targetType?: "folder" | "file";
 }
 interface DeliveryShareResult {
   id: string;
@@ -3375,11 +3376,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
                   open={() =>
                     item.prefix ? openFolder(item.prefix) : setPreview(item)
                   }
-                  share={
-                    item.prefix && canShare
-                      ? () => setPreview({ shareFolder: item })
-                      : undefined
-                  }
+                  share={canShare ? () => setPreview({ shareTarget: item }) : undefined}
                   actions={{ rename: canMove, copy: canCopy, move: canMove, delete: canDelete }}
                   act={(action) => itemAction(action, item)}
                 />
@@ -3397,7 +3394,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
                   open={() =>
                     item.prefix ? openFolder(item.prefix) : setPreview(item)
                   }
-                  share={item.prefix && canShare ? () => setPreview({ shareFolder: item }) : undefined}
+                  share={canShare ? () => setPreview({ shareTarget: item }) : undefined}
                   actions={{ rename: canMove, copy: canCopy, move: canMove, delete: canDelete }}
                   act={(action) => itemAction(action, item)}
                 />
@@ -3422,9 +3419,9 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           </div>
         )}
       </div>
-      {preview?.shareFolder && (
+      {preview?.shareTarget && (
         <ShareDialog
-          folder={preview.shareFolder}
+          folder={preview.shareTarget}
           canRevoke={allowed(session.user, "delivery.share.revoke")}
           canProvisionDelegated={session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.create")}
           authenticatedGrantsEnabled={session.capabilities?.authenticatedDeliveryGrants?.enabled === true}
@@ -3436,7 +3433,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           }}
         />
       )}{" "}
-      {preview && !preview.shareFolder && (
+      {preview && !preview.shareTarget && (
         <FilePreview
           item={preview}
           items={previewItems}
@@ -4616,6 +4613,9 @@ function ShareDialog({
   close: () => void;
   changed: () => void;
 }) {
+  const fileTarget = folder.kind !== "folder" && !folder.prefix;
+  const targetLabel = fileTarget ? "file" : "folder";
+  const targetPrefix = folder.prefix || String(folder.physicalKey || "").slice(0, String(folder.physicalKey || "").lastIndexOf("/") + 1);
   const [active, setActive] = useState<ActiveDeliveryShare | null | undefined>(
     undefined,
   );
@@ -4644,7 +4644,7 @@ function ShareDialog({
     setActive(undefined);
     setActiveLoadError("");
     api<{ share: ActiveDeliveryShare | null }>(
-      "/api/delivery/shares/active?prefix=" + encodeURIComponent(folder.prefix),
+      "/api/delivery/shares/active?prefix=" + encodeURIComponent(targetPrefix) + (fileTarget ? "&itemRef=" + encodeURIComponent(folder.id) : ""),
       { signal: deadline.signal },
     )
       .then((value) => {
@@ -4683,7 +4683,7 @@ function ShareDialog({
       mounted = false;
       deadline.cancel();
     };
-  }, [folder.prefix, activeLoadAttempt]);
+  }, [folder.id, fileTarget, targetPrefix, activeLoadAttempt]);
 
   useEffect(() => {
     if (!directoryRecipientsEnabled || selectedRecipient || recipientQuery.trim().length < 2) {
@@ -4694,7 +4694,7 @@ function ShareDialog({
     const controller = new AbortController();
     const timer = window.setTimeout(() => {
       api<{ audiences: ShareDirectoryAudience[] }>(
-        `/api/delivery/share-recipients?prefix=${encodeURIComponent(folder.prefix)}&q=${encodeURIComponent(recipientQuery.trim())}`,
+        `/api/delivery/share-recipients?prefix=${encodeURIComponent(targetPrefix)}&q=${encodeURIComponent(recipientQuery.trim())}`,
         { signal: controller.signal },
       ).then(value => {
         setRecipientOptions(value.audiences);
@@ -4704,7 +4704,7 @@ function ShareDialog({
       });
     }, 250);
     return () => { window.clearTimeout(timer); controller.abort(); };
-  }, [directoryRecipientsEnabled, folder.prefix, recipientQuery, selectedRecipient]);
+  }, [directoryRecipientsEnabled, targetPrefix, recipientQuery, selectedRecipient]);
 
   const shown = result
     ? {
@@ -4727,7 +4727,7 @@ function ShareDialog({
     if (
       !shown ||
       !confirm(
-        "Unshare this folder? Anyone using the current link will lose access.",
+        `Unshare this ${targetLabel}? Anyone using the current link will lose access.`,
       )
     )
       return;
@@ -4751,7 +4751,7 @@ function ShareDialog({
   return (
     <div className="modal-backdrop">
       <Card
-        title="Share folder"
+        title={`Share ${targetLabel}`}
         action={
           <button
             className="button-ghost button-small"
@@ -4776,13 +4776,13 @@ function ShareDialog({
         ) : (
           <>
             <div className="share-folder-path">
-              <span>Folder</span>
-              <code>{folder.prefix}</code>
+              <span>{fileTarget ? "File" : "Folder"}</span>
+              <code>{fileTarget ? displayName(folder) : folder.prefix}</code>
             </div>
-            {authenticatedGrantsEnabled
+            {!fileTarget && (authenticatedGrantsEnabled
               ? <AuthenticatedDeliveryGrantPanel folder={folder} />
-              : <ClientWorkspaceGrant prefix={folder.prefix} />}
-            {canProvisionDelegated && <ClientDelegatedFolderProvisioning folder={folder} />}
+              : <ClientWorkspaceGrant prefix={folder.prefix} />)}
+            {!fileTarget && canProvisionDelegated && <ClientDelegatedFolderProvisioning folder={folder} />}
             {shown && (
               <div className="current-share">
                 <div>
@@ -4830,12 +4830,13 @@ function ShareDialog({
                 setError("");
                 try {
                   const body: Record<string, unknown> = {
-                    r2Prefix: folder.prefix,
+                    r2Prefix: targetPrefix,
+                    ...(fileTarget ? { itemRef: folder.id } : {}),
                     expiresAt:
                       expirationMode === "custom" && expiresAt
                         ? new Date(expiresAt).toISOString()
                         : null,
-                    imageLocationMapEnabled,
+                    imageLocationMapEnabled: fileTarget ? false : imageLocationMapEnabled,
                   };
                   if (directoryRecipientsEnabled) {
                     if (recipientQuery.trim() && !selectedRecipient)
@@ -4957,7 +4958,7 @@ function ShareDialog({
                   codes are never emailed.
                 </small>
               </label>}
-              <label className="check full">
+              {!fileTarget && <label className="check full">
                 <input
                   type="checkbox"
                   checked={imageLocationMapEnabled}
@@ -4966,7 +4967,7 @@ function ShareDialog({
                 />{" "}
                 Show photo locations on this client share
                 <small>On by default for a new share. Turn this off to hide validated GPS coordinates for photos inside the shared folder. Existing shares keep their current setting.</small>
-              </label>
+              </label>}
               <label className="full">
                 Access code
                 <div className="access-code-field">
@@ -5051,7 +5052,7 @@ function ShareDialog({
                     disabled={busy}
                     onClick={() => void unshare()}
                   >
-                    Unshare folder
+                    Unshare {targetLabel}
                   </button>
                 )}
               </div>

@@ -280,7 +280,7 @@ reviewed DNS providers.
 Apply each repository's normal migration command and every pending migration
 in lexical/ledger order; never cherry-pick only a later file.
 
-- Client/delivery D1: apply all pending migrations through `0147`. The Viewer
+- Client/delivery D1: apply all pending migrations through `0148`. The Viewer
   dependency begins at `0138_viewer_model_associations.sql`; `0139` and `0140`
   also carry the thumbnail queue/provenance fixes and must not be skipped.
   `0143` adds the durable association-session revocation outbox and must be
@@ -288,6 +288,8 @@ in lexical/ledger order; never cherry-pick only a later file.
   `0144` adds explicit project/task Viewer grants. `0145` adds the separately
   default-off Project Alpha email-eligibility shell and blacklist records;
   neither migration grants project, delivery, or Viewer data access by itself.
+  `0148` adds exact-object public delivery links while preserving existing
+  folder shares; it must be applied before deploying the matching Workers.
 - Operations D1: apply all pending migrations through `0031`. Migration `0026`
   establishes the base
   Viewer permissions.

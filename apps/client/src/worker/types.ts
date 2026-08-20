@@ -141,6 +141,7 @@ export interface ShareRow {
   client_name: string;
   project_name: string;
   r2_prefix: string;
+  r2_object_key?: string | null;
   recipient_email?: string | null;
   image_location_map_enabled?: number;
 }

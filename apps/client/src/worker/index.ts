@@ -141,13 +141,13 @@ app.use("*", async (c, next) => {
 });
 
 function activeShareSql(extra: string): string {
-  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,s.recipient_email,s.image_location_map_enabled,
+  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,s.recipient_email,s.image_location_map_enabled,s.r2_object_key,
     p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) AS r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id
     WHERE ${extra} AND s.revoked_at IS NULL AND p.active=1 AND (s.expires_at IS NULL OR datetime(s.expires_at)>datetime('now'))`;
 }
 
 function lifecycleShareSql(extra: string): string {
-  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,s.recipient_email,s.image_location_map_enabled,
+  return `SELECT s.id,s.public_id,s.project_id,s.token_hash,s.label,s.password_hash,s.password_salt,s.password_iterations,s.password_algorithm,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.share_version,s.recipient_email,s.image_location_map_enabled,s.r2_object_key,
     COALESCE(p.client_name,'') client_name,COALESCE(p.project_name,'') project_name,COALESCE(s.r2_prefix,p.r2_prefix,'') AS r2_prefix,
     CASE WHEN p.id IS NULL THEN 0 ELSE 1 END project_exists,COALESCE(p.active,0) project_active
     FROM shares s LEFT JOIN projects p ON p.id=s.project_id WHERE ${extra}`;
@@ -180,13 +180,23 @@ export async function markUnavailableFolder(env:{DELIVERY_DB:PublicIdDatabase},s
 
 async function requireAvailableFolder(env:Env,share:ShareRow):Promise<void>{
   let browsable=false;
-  try{browsable=await prefixHasBrowsableEntry(env.DATA_BUCKET,share.r2_prefix);}
+  try{browsable=share.r2_object_key?Boolean(await env.DATA_BUCKET.head(share.r2_object_key)):await prefixHasBrowsableEntry(env.DATA_BUCKET,share.r2_prefix);}
   catch{throw temporaryPublicShareException("storage");}
   if(!browsable)await markUnavailableFolder(env,share);
   if(share.unavailable_since){
     try{await sessionDb(env.DELIVERY_DB).prepare("UPDATE shares SET unavailable_since=NULL WHERE id=? AND revoked_at IS NULL").bind(share.id).run();}
     catch{throw temporaryPublicShareException("database");}
   }
+}
+
+function keyWithinShare(share:ShareRow,itemRef:string):string{
+  const key=keyWithinRoot(share.r2_prefix,decodeItemRef(itemRef));
+  if(share.r2_object_key&&key!==share.r2_object_key)throw new HTTPException(404,{message:"File not found"});
+  return key;
+}
+
+function requireFolderShareFeature(share:ShareRow):void{
+  if(share.r2_object_key)throw new HTTPException(404,{message:"This action is not available for a single-file link"});
 }
 
 interface PublicIdStatement {
@@ -448,6 +458,18 @@ app.get("/api/public/shares/:publicId/manifest", async c => {
   const started=Date.now();
   const share = c.get("share"); const root = normalizeRoot(share.r2_prefix);
   const folderRef = c.req.query("folder") || ""; const relativeFolder = folderRef ? decodeItemRef(folderRef) : "";
+  if(share.r2_object_key){
+    if(folderRef||c.req.query("cursor"))throw new HTTPException(404,{message:"Folder not found"});
+    const object=await c.env.DATA_BUCKET.head(share.r2_object_key);
+    if(!object||isMovedSourceMarker(object)){await markUnavailableFolder(c.env,share);throw publicShareLifecycleException("resource_removed");}
+    const relative=share.r2_object_key.slice(root.length),id=encodeItemRef(relative),kind=kindForKey(share.r2_object_key),base=`/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${id}`;
+    const aliases=await loadAliases(c.env,[root,share.r2_object_key]);
+    const item:DeliveryItem={id,name:aliases.get(share.r2_object_key)||relative.split("/").pop()||relative,kind,size:object.size,uploadedAt:object.uploaded.toISOString(),downloadUrl:`${base}/download`,previewStatus:kind==="video"?"processing":undefined,...thumbnailFieldsForObject(share.r2_object_key,kind,base,object.httpEtag,null,object.size,object.httpMetadata?.contentType)};
+    item.sourceUrl=sourceUrlForItem(base,kind);if(kind==="image"&&!['dng','arw','cr2','cr3','crw','nef','raf','rw2','orf','pef','srw','3fr','rwl','srf','sr2','x3f'].includes((share.r2_object_key.split('.').pop()||'').toLowerCase()))item.previewUrl=item.sourceUrl;else if(kind==="audio"||kind==="text")item.previewUrl=`${base}/preview`;
+    const manifest:DeliveryManifest={share:{publicId:share.public_id!,label:share.label,clientName:share.client_name,projectName:share.project_name,expiresAt:share.expires_at},folder:{id:"",name:item.name,breadcrumbs:[]},items:[item],nextCursor:null,capabilities:{cloudTransfer:{dropbox:false,googleDrive:false,googlePicker:false}}};
+    c.executionCtx.waitUntil(Promise.all([audit(c.env,c.req.raw,share.id,"manifest.viewed",id),primaryDb(c.env).prepare("UPDATE shares SET access_count=access_count+1,last_accessed_at=datetime('now') WHERE id=?").bind(share.id).run()]));
+    return c.json(manifest);
+  }
   const prefix = relativeFolder ? `${keyWithinRoot(root, relativeFolder).replace(/\/$/, "")}/` : root;
   const tombstones = await loadTombstones(c.env,prefix);
   const storageStarted=Date.now();
@@ -500,8 +522,8 @@ app.post("/api/public/shares/:publicId/manifest/media", async c => {
   const candidates=[...new Set(requestedItems)].flatMap(value=>{
     if(typeof value!=="string")return[];
     let relative:string;try{relative=decodeItemRef(value);}catch{return[];}
-    const key=keyWithinRoot(root,relative),immediate=key.slice(prefix.length);
-    if(!key.startsWith(prefix)||!immediate||immediate.includes("/")||isHiddenKey(key)||isTrashed(tombstones,key))return[];
+    let key:string;try{key=keyWithinShare(share,value);}catch{return[];}const immediate=key.slice(prefix.length);
+    if(!key.startsWith(prefix)||!immediate||(!share.r2_object_key&&immediate.includes("/"))||isHiddenKey(key)||isTrashed(tombstones,key))return[];
     const kind=kindForKey(key);if(kind!=="image"&&kind!=="pdf"&&kind!=="video")return[];
     return[{id:value,key,kind,base:`/api/public/shares/${encodeURIComponent(share.public_id!)}/items/${encodeURIComponent(value)}`}];
   });
@@ -531,6 +553,7 @@ app.post("/api/public/shares/:publicId/manifest/media", async c => {
 
 app.get("/api/public/shares/:publicId/download-summary", async c => {
   const share = c.get("share"); await requireAvailableFolder(c.env, share);
+  if(share.r2_object_key){const object=await c.env.DATA_BUCKET.head(share.r2_object_key);if(!object)throw new HTTPException(404,{message:"File not found"});return c.json(summarizeDownloadableObjects([object]));}
   const folderRef = c.req.query("folder") || "";
   const prefix = folderRef ? `${keyWithinRoot(share.r2_prefix, decodeItemRef(folderRef))}/` : normalizeRoot(share.r2_prefix);
   const tombstones = await loadTombstones(c.env,prefix);
@@ -540,19 +563,19 @@ app.get("/api/public/shares/:publicId/download-summary", async c => {
 
 app.get("/api/public/shares/:publicId/locations", async c => {
   const share = c.get("share"); await requireAvailableFolder(c.env, share);
-  if (share.image_location_map_enabled !== 1) return c.json({ locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null });
+  if (share.r2_object_key||share.image_location_map_enabled !== 1) return c.json({ locations: { points: [], imageCount: 0, truncated: false }, mapboxPublicToken: null });
   const locations = await listPublicShareLocations(c.env, share, c.req.query("folder") || "");
   return c.json({ locations, mapboxPublicToken: locations.points.length ? c.env.MAPBOX_PUBLIC_TOKEN || null : null });
 });
 
 app.get("/api/public/shares/:publicId/locations/:assetRef", async c => {
   const share = c.get("share"); await requireAvailableFolder(c.env, share);
-  if (share.image_location_map_enabled !== 1) throw new HTTPException(404, { message: "Mapped image not found" });
+  if (share.r2_object_key||share.image_location_map_enabled !== 1) throw new HTTPException(404, { message: "Mapped image not found" });
   return c.json({ item: await resolvePublicShareLocation(c.env, share, c.req.param("assetRef"), c.req.query("folder") || "") });
 });
 
 export async function streamItem(c: any, disposition: "inline" | "attachment", raw = false, requiredKind?: "pdf"): Promise<Response> {
-  const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const relative = decodeItemRef(itemRef); const key = keyWithinRoot(share.r2_prefix, relative);
+  const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const key = keyWithinShare(share,itemRef);
   await assertNotTrashed(c.env, key);
   const kind = kindForKey(key);
   if (requiredKind && kind !== requiredKind) throw new HTTPException(415, { message: "PDF preview is not available for this file" });
@@ -573,7 +596,7 @@ export async function streamItem(c: any, disposition: "inline" | "attachment", r
 }
 
 app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/preview", async c => {
-  const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
+  const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinShare(share,itemRef);
   await assertNotTrashed(c.env, key);
   const kind = kindForKey(key);
   if (kind === "image") return streamItem(c, "inline", true);
@@ -587,7 +610,7 @@ app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/pdf", c => 
 
 async function downloadItem(c: any): Promise<Response> {
   const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string;
-  const relative = decodeItemRef(itemRef); const key = keyWithinRoot(share.r2_prefix, relative);
+  const key = keyWithinShare(share,itemRef);
   await assertNotTrashed(c.env, key);
   const head = await c.env.DATA_BUCKET.head(key); if (!head || isMovedSourceMarker(head)) throw new HTTPException(404, { message: "File not found" });
   const alias = await primaryDb(c.env).prepare("SELECT display_name FROM file_aliases WHERE physical_key=?").bind(key).first<{ display_name: string }>();
@@ -614,7 +637,7 @@ async function downloadItem(c: any): Promise<Response> {
 
 app.get("/api/public/shares/:publicId/items/:itemRef/download-ticket", async c => {
   const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string;
-  const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
+  const key = keyWithinShare(share,itemRef);
   await assertNotTrashed(c.env, key);
   const head = await c.env.DATA_BUCKET.head(key); if (!head || isMovedSourceMarker(head)) throw new HTTPException(404, { message: "File not found" });
   const base = baseForItem(share, itemRef);
@@ -626,7 +649,7 @@ app.get("/api/public/shares/:publicId/items/:itemRef/download-ticket", async c =
 app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/download", c => downloadItem(c));
 
 async function createStreamTicket(c: any): Promise<{ url: string; expiresAt: string }> {
-  const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
+  const share = c.get("share") as ShareRow; const itemRef = c.req.param("itemRef") as string; const key = keyWithinShare(share,itemRef);
   await assertNotTrashed(c.env, key);
   if (kindForKey(key) !== "video") throw new HTTPException(415, { message: "Stream preview unavailable" });
   const row = await primaryDb(c.env).prepare("SELECT stream_uid,stream_status FROM file_index WHERE r2_key=?").bind(key).first<{ stream_uid: string | null; stream_status: string | null }>();
@@ -639,7 +662,7 @@ async function createStreamTicket(c: any): Promise<{ url: string; expiresAt: str
 app.post("/api/public/shares/:publicId/items/:itemRef/stream-ticket", async c => c.json(await createStreamTicket(c)));
 
 app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/thumbnail", async c => {
-  const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinRoot(share.r2_prefix, decodeItemRef(itemRef));
+  const share = c.get("share"); const itemRef = c.req.param("itemRef"); const key = keyWithinShare(share,itemRef);
   await assertNotTrashed(c.env, key);
   const kind = kindForKey(key);
   if (kind !== "image" && kind !== "pdf" && kind !== "video")
@@ -727,7 +750,7 @@ async function expireReadyBulkJob(c: any, job: any): Promise<void> {
 }
 
 app.post("/api/public/shares/:publicId/bulk-download", async c => {
-  const share = c.get("share") as ShareRow; const request = validateBulkRequest(await c.req.json().catch(() => ({}))); await consumeBulkQuota(c, share);
+  const share = c.get("share") as ShareRow;requireFolderShareFeature(share); const request = validateBulkRequest(await c.req.json().catch(() => ({}))); await consumeBulkQuota(c, share);
   const jobId = randomSecret(16); const encodedShare = encodeURIComponent(share.public_id!); const manifestKey = `_ltds/tmp-downloads/${share.public_id}/${jobId}/manifest.json`; const archiveKey = `_ltds/tmp-downloads/${share.public_id}/${jobId}/archive.zip`; const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
   await primaryDb(c.env).prepare("INSERT INTO bulk_download_jobs (id,share_id,share_version,request_json,status,manifest_key,archive_key,expires_at) VALUES (?,?,?,?,?,?,?,?)").bind(jobId, share.id, share.share_version, JSON.stringify(request), "queued", manifestKey, archiveKey, expiresAt).run();
   try { await c.env.BULK_DOWNLOAD_WORKFLOW.create({ id: jobId, params: { jobId } }); }
@@ -742,6 +765,7 @@ app.post("/api/public/shares/:publicId/bulk-download", async c => {
 });
 
 app.get("/api/public/shares/:publicId/bulk-download/:jobId", async c => {
+  requireFolderShareFeature(c.get("share") as ShareRow);
   const job = await getBulkJob(c, c.req.param("jobId")); if (!job) throw new HTTPException(404, { message: "Download job not found" });
   await expireReadyBulkJob(c, job);
   const share = c.get("share") as ShareRow;
@@ -754,6 +778,7 @@ app.get("/api/public/shares/:publicId/bulk-download/:jobId", async c => {
 });
 
 app.on(["GET", "HEAD"], "/api/public/shares/:publicId/bulk-download/:jobId/file", async c => {
+  requireFolderShareFeature(c.get("share") as ShareRow);
   const job = await getBulkJob(c, c.req.param("jobId")); if (!job) throw new HTTPException(404, { message: "Download is not ready" });
   await expireReadyBulkJob(c, job);
   if (job.status !== "ready") throw new HTTPException(job.status === "expired" ? 410 : 404, { message: job.status === "expired" ? "This prepared download has expired." : "Download is not ready" });
@@ -761,7 +786,7 @@ app.on(["GET", "HEAD"], "/api/public/shares/:publicId/bulk-download/:jobId/file"
 });
 
 app.post("/api/public/shares/:publicId/cloud-transfers/oauth/:provider/start",async c=>{
- requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow;const provider=cloudProvider(c.req.param("provider"));if(!cloudProviderEnabled(c.env,provider))throw new HTTPException(503,{message:"This cloud provider is not available yet"});
+ requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow;requireFolderShareFeature(share);const provider=cloudProvider(c.req.param("provider"));if(!cloudProviderEnabled(c.env,provider))throw new HTTPException(503,{message:"This cloud provider is not available yet"});
  const body=await c.req.json().catch(()=>({})) as {selection?:unknown;destination?:unknown;conflictMode?:unknown;callbackNonce?:unknown};
  const selection=validateBulkRequest(body.selection);const conflictMode=body.conflictMode==="skip"?"skip":"autorename";if(typeof body.callbackNonce!=="string"||!/^[A-Za-z0-9_-]{24,128}$/.test(body.callbackNonce))throw new HTTPException(400,{message:"Invalid callback nonce"});
  const windowStart=Math.floor(Date.now()/3600000);const quota=await primaryDb(c.env).prepare(`INSERT INTO cloud_transfer_quota(share_id,window_start,created_count,total_bytes) VALUES(?,?,1,0)
@@ -782,6 +807,7 @@ app.get("/api/public/cloud-transfers/oauth/:provider/callback",async c=>{
  if(!row)throw new HTTPException(400,{message:"Cloud authorization expired"});const consumed=await primaryDb(c.env).prepare("UPDATE cloud_oauth_states SET consumed_at=datetime('now') WHERE state_hash=? AND consumed_at IS NULL").bind(stateHash).run();if(!consumed.meta.changes)throw new HTTPException(400,{message:"Cloud authorization was already used"});
  const env=cloudEnv(c.env);const secret=await decryptCloudSecret<{verifier:string;callbackNonce:string}>(row.pkce_ciphertext,row.pkce_iv,env.CLOUD_TRANSFER_TOKEN_SECRET,`oauth-state:${stateHash}:${provider}`);
  const share=await primaryDb(c.env).prepare(activeShareSql("s.id=? AND s.share_version=?")).bind(row.share_id,row.share_version).first<ShareRow>();if(!share||!share.public_id)throw new HTTPException(404,{message:"This delivery is no longer available"});
+ requireFolderShareFeature(share);
  const redirectUri=cloudRedirectUri(c.env,provider);const token=provider==="dropbox"?await exchangeDropboxCode({clientId:c.env.DROPBOX_CLIENT_ID!,clientSecret:c.env.DROPBOX_CLIENT_SECRET!,redirectUri,code,verifier:secret.verifier}):await exchangeGoogleCode({clientId:c.env.GOOGLE_CLIENT_ID!,clientSecret:c.env.GOOGLE_CLIENT_SECRET!,redirectUri,code,verifier:secret.verifier});
  const authorizationId=randomSecret(16),jobId=randomSecret(16);const credential=await encryptCloudSecret(token,env.CLOUD_TRANSFER_TOKEN_SECRET,`authorization:${authorizationId}:${provider}`);const expiresAt=new Date(Date.now()+24*3600000).toISOString();
  const pendingGoogle=provider==="google";const destination=pendingGoogle?JSON.stringify({pendingPicker:true}):row.destination_json;
@@ -796,14 +822,14 @@ app.get("/api/public/cloud-transfers/oauth/:provider/callback",async c=>{
 });
 
 app.post("/api/public/shares/:publicId/cloud-transfers/google/authorizations/:authorizationId/token",async c=>{
- requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow,env=cloudEnv(c.env),authorizationId=c.req.param("authorizationId");
+ requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow;requireFolderShareFeature(share);const env=cloudEnv(c.env),authorizationId=c.req.param("authorizationId");
  const row=await getGooglePickerAuthorization(env,authorizationId,share.id,share.share_version);
  if(!row)throw new HTTPException(404,{message:"Google authorization not found"});const credential=await googlePickerCredential(env,authorizationId,row);if(!credential.accessToken)throw new HTTPException(401,{message:"Google authorization expired"});
  c.header("Cache-Control","no-store");c.header("Pragma","no-cache");c.header("Referrer-Policy","no-referrer");return c.json({accessToken:credential.accessToken,expiresAt:credential.expiresAt||null});
 });
 
 app.post("/api/public/shares/:publicId/cloud-transfers",async c=>{
- requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow,env=cloudEnv(c.env);const body=await c.req.json().catch(()=>({})) as {authorizationId?:unknown;folderId?:unknown};
+ requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow;requireFolderShareFeature(share);const env=cloudEnv(c.env);const body=await c.req.json().catch(()=>({})) as {authorizationId?:unknown;folderId?:unknown};
  if(typeof body.authorizationId!=="string"||!/^[A-Za-z0-9_-]{16,128}$/.test(body.authorizationId)||!validGoogleFolderId(body.folderId))throw new HTTPException(400,{message:"A valid Google Drive destination is required"});
  const job=await activatePendingGoogleJob(env,{authorizationId:body.authorizationId,shareId:share.id,shareVersion:share.share_version,folderId:body.folderId});if(!job)throw new HTTPException(404,{message:"Google authorization not found or already used"});
  try{await c.env.CLOUD_TRANSFER_WORKFLOW.create({id:job.id,params:{jobId:job.id}});}catch(error){console.error(JSON.stringify({event:"cloud-transfer.workflow-create-failed",jobId:job.id,provider:"google",error:error instanceof Error?error.message:String(error)}));await cloudDb(env).prepare("UPDATE cloud_transfer_jobs SET status='failed',error_code='transfer-failed',error_message=?,updated_at=datetime('now') WHERE id=?").bind(friendlyCloudFailure("transfer-failed").message,job.id).run();throw new HTTPException(503,{message:"The cloud transfer could not be queued"});}
@@ -811,16 +837,16 @@ app.post("/api/public/shares/:publicId/cloud-transfers",async c=>{
 });
 
 app.get("/api/public/shares/:publicId/cloud-transfers/:jobId",async c=>{
- const share=c.get("share") as ShareRow,job=await getAuthorizedCloudJob(cloudEnv(c.env),c.req.param("jobId"),share.id,share.share_version);if(!job)throw new HTTPException(404,{message:"Cloud transfer not found"});const items=await listCloudItems(cloudEnv(c.env),job.id);
+ const share=c.get("share") as ShareRow;requireFolderShareFeature(share);const job=await getAuthorizedCloudJob(cloudEnv(c.env),c.req.param("jobId"),share.id,share.share_version);if(!job)throw new HTTPException(404,{message:"Cloud transfer not found"});const items=await listCloudItems(cloudEnv(c.env),job.id);
  return c.json({id:job.id,provider:providerPublicName(job.provider),status:cloudStatus(job.status),processedFiles:job.processed_files,totalFiles:job.file_count,processedBytes:job.processed_bytes,totalBytes:job.total_bytes,error:job.error_code?friendlyCloudFailure(job.error_code):null,items:items.map(item=>({id:item.id,name:item.relative_path,status:item.status==="completed"?"copied":item.status==="queued"?"waiting":item.status==="running"?"copying":item.status,processedBytes:item.uploaded_bytes,totalBytes:item.source_size,message:item.error_message||undefined}))});
 });
 
 app.post("/api/public/shares/:publicId/cloud-transfers/:jobId/cancel",async c=>{
- requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow;const env=cloudEnv(c.env);if(!(await requestCloudCancellation(env,c.req.param("jobId"),share.id,share.share_version)))throw new HTTPException(409,{message:"This transfer can no longer be cancelled"});const job=await getAuthorizedCloudJob(env,c.req.param("jobId"),share.id,share.share_version);return c.json({id:job!.id,provider:providerPublicName(job!.provider),status:"cancelling"});
+ requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow;requireFolderShareFeature(share);const env=cloudEnv(c.env);if(!(await requestCloudCancellation(env,c.req.param("jobId"),share.id,share.share_version)))throw new HTTPException(409,{message:"This transfer can no longer be cancelled"});const job=await getAuthorizedCloudJob(env,c.req.param("jobId"),share.id,share.share_version);return c.json({id:job!.id,provider:providerPublicName(job!.provider),status:"cancelling"});
 });
 
 app.post("/api/public/shares/:publicId/cloud-transfers/:jobId/retry",async c=>{
- requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow,env=cloudEnv(c.env),jobId=c.req.param("jobId");const count=await retryFailedCloudItems(env,jobId,share.id,share.share_version);if(!count)throw new HTTPException(409,{message:"There are no failed files to retry"});
+ requireSameOrigin(c.req.raw,c.env);const share=c.get("share") as ShareRow;requireFolderShareFeature(share);const env=cloudEnv(c.env),jobId=c.req.param("jobId");const count=await retryFailedCloudItems(env,jobId,share.id,share.share_version);if(!count)throw new HTTPException(409,{message:"There are no failed files to retry"});
  await c.env.CLOUD_TRANSFER_WORKFLOW.create({id:`${jobId}-retry-${randomSecret(8)}`,params:{jobId}});const job=(await getAuthorizedCloudJob(env,jobId,share.id,share.share_version))!;return c.json({id:job.id,provider:providerPublicName(job.provider),status:"running"});
 });
 

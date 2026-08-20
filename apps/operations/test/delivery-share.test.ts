@@ -97,7 +97,7 @@ describe("active delivery share lookup", () => {
     expect(calls).toHaveLength(1);
     expect(calls[0]!.query).toContain("WHERE s.r2_prefix=?");
     expect(calls[0]!.query).not.toContain("COALESCE(s.r2_prefix,p.r2_prefix)=?");
-    expect(calls[0]!.values).toEqual(["Jobs/Clients/Acme/"]);
+    expect(calls[0]!.values).toEqual(["Jobs/Clients/Acme/", null, null]);
   });
 
   it("falls back only to legacy null-prefix rows after an indexed miss", async () => {
@@ -107,5 +107,14 @@ describe("active delivery share lookup", () => {
     expect(calls[1]!.query).toContain("s.r2_prefix IS NULL AND p.r2_prefix=?");
     expect(calls[1]!.query).not.toContain("COALESCE(s.r2_prefix,p.r2_prefix)=?");
     expect(calls[1]!.values).toEqual(["Jobs/Clients/Legacy/"]);
+  });
+
+  it("looks up an exact-file share by both its parent prefix and object key without folder fallback", async () => {
+    const row = { id: "share-file", r2_object_key: "Jobs/Clients/Acme/video.mov" };
+    const { env, calls } = lookupEnv([row]);
+    await expect(activeShareForPrefix(env, "Jobs/Clients/Acme/", row.r2_object_key)).resolves.toBe(row);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.query).toContain("r2_object_key=?");
+    expect(calls[0]!.values).toEqual(["Jobs/Clients/Acme/", row.r2_object_key, row.r2_object_key]);
   });
 });

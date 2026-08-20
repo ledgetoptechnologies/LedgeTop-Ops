@@ -2558,7 +2558,7 @@ app.get("/api/delivery/shares/active", async (c) => {
   const prefix = c.req.query("prefix");
   if (!prefix) throw new HTTPException(400, { message: "prefix is required" });
   return c.json({
-    share: await getActiveDeliveryShare(c.env, c.get("principal"), prefix),
+    share: await getActiveDeliveryShare(c.env, c.get("principal"), prefix, c.req.query("itemRef")),
   });
 });
 app.get("/api/delivery/share-recipients", async (c) => {
