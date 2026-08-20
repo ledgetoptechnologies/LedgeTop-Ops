@@ -1,22 +1,23 @@
 # 3D processing and delivery release runbook
 
-Status: **source candidates and the immutable Viewer registry image are frozen
-and independently signed off; live staging evidence and activation remain
-pending**. The staff Viewer integration and processing workspace are already
+Status: **the source-candidate packet has been refreshed for the exact-file
+Delivery and Viewer import/workspace changes; the immutable Viewer image is
+published and verified, while contract finalization, live staging evidence,
+and activation remain pending**. The staff Viewer integration and processing workspace are already
 deliberately enabled for pre-production validation. New Viewer public-share,
 Client Viewer, and Project Alpha portal capabilities remain gated until their
 corresponding live evidence below is captured.
 
 ## Frozen source candidates
 
-- 3D Viewer source: `ad505557ce89c0c6a8aa76777c4a2f7d798e80b5`.
+- 3D Viewer source: `cde930730af2a50966a771f24454e8d98f9a25b7`.
   The reviewed release-candidate image is
-  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:2a37add7d5ffb8486b663c6a0288b800a9b5944313e6eb06aafd447399e4a322`.
-  GitHub Actions run `32232338063` published tags `latest` and
-  `sha-ad50555`. The
+  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:1a3d1c333a03b51b0bf3c95a4fd3541a5de696e0b821c8898e396f3795852011`.
+  GitHub Actions run `32331386543` published tags `latest` and
+  `sha-cde9307`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
   UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
-- LTDS-Ops product code: `df715e65ae337f47037fdce765eea64a32bdf2df` on
+- LTDS-Ops product code: `5ebbf7ff7eda088c1805e1aef0802ce35389057e` on
   `codex/3d-processing-control-plane`. This pin moves processing management to
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
   overview; never substitute a mutable branch tip.
@@ -30,8 +31,9 @@ corresponding live evidence below is captured.
 The updated source, manifest digest, migrations, fixtures, and activation
 policy passed independent cross-repository verification, so the corresponding
 constant in `scripts/staging-requirements.mjs` is
-`RELEASE_CONTRACT_FINALIZED=false` while the managed import-browser Viewer image is built and its immutable digest is captured. The broader workspace completion and live
-acceptance gates remain under review. Finalization freezes
+`RELEASE_CONTRACT_FINALIZED=false` while the refreshed Viewer and exact-file
+Delivery packet receives its final cross-repository evidence review. The broader
+workspace completion and live acceptance gates remain under review. Finalization freezes
 the candidate contract only; it does not approve deployment, migrations, or
 any feature flag. Reset it to `false` before changing a pinned source or
 deployment artifact.
@@ -61,7 +63,7 @@ This is inode/index/recovery evidence only;
 the same rehearsal still must run on the disposable TrueNAS storage class with
 representative imagery before activation.
 
-The exact candidate passed 270 of 273 repository-owned tests in the Linux
+The exact candidate passed 287 of 290 repository-owned tests in the Linux
 workflow with zero failures and three environment-only skips, then completed the
 production build. The suite covers the real symlink-escape gate, UID/GID 568
 storage admission, persistent-bind byte/database behavior, project-first
@@ -110,7 +112,7 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091`, published-session revocation
 commit `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06`, and subsequent hardening commits
-through `ad505557ce89c0c6a8aa76777c4a2f7d798e80b5` retain the reviewed provider adapter,
+through `cde930730af2a50966a771f24454e8d98f9a25b7` retain the reviewed provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
@@ -163,9 +165,9 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`ad505557ce89c0c6a8aa76777c4a2f7d798e80b5` and schema version `20`. Confirm
+`cde930730af2a50966a771f24454e8d98f9a25b7` and schema version `21`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
-`X-LTDS-Viewer-Revision`, `20` in `X-LTDS-Viewer-Schema-Version`, and
+`X-LTDS-Viewer-Revision`, `21` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
 body alone is not deployment-identity evidence.
 
