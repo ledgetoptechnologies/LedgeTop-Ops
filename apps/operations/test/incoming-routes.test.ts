@@ -70,7 +70,7 @@ describe("incoming upload public routes", () => {
   });
 
   beforeEach(async () => {
-    await db.exec("DELETE FROM file_request_upload_parts; DELETE FROM file_request_uploads; DELETE FROM file_request_contributors; DELETE FROM file_requests;");
+    await db.exec("DELETE FROM public_rate_limits; DELETE FROM file_request_upload_parts; DELETE FROM file_request_uploads; DELETE FROM file_request_contributors; DELETE FROM file_requests;");
     await db.batch([
       db.prepare("INSERT INTO file_requests(id,public_id,title,created_by,expires_at,max_files,max_bytes,session_version) VALUES('request-a','public-a','Upload','staff',datetime('now','+1 day'),10,1000,1)"),
       db.prepare("INSERT INTO file_request_contributors(id,request_id,name,email,client_address_hash) VALUES('contributor-a','request-a','Client','client@example.test','hash')"),
@@ -119,6 +119,37 @@ describe("incoming upload public routes", () => {
     expect(await (await request(`/api/public/requests/public-a/files/${init.fileId}/complete`, "POST", { parts: [{ partNumber: 1, etag }] })).json()).toMatchObject({ status: "quarantined", idempotent: true });
   });
 
+  it("accepts a legitimate multipart completion body above the small-route JSON limit", async () => {
+    const partCount = 1_200;
+    const declaredSize = partCount * 32 * 1024 ** 2;
+    await db.prepare("UPDATE file_requests SET max_bytes=? WHERE id='request-a'").bind(declaredSize + 1).run();
+    const initResponse = await request("/api/public/requests/public-a/files/init", "POST", {
+      clientUploadId: "upload-client-large-completion",
+      name: "large-video.mp4",
+      size: declaredSize,
+      contentType: "video/mp4",
+      resumeFingerprint: "f".repeat(64),
+    });
+    expect(initResponse.status).toBe(200);
+    const { fileId } = await initResponse.json() as { fileId: string };
+    const parts = Array.from({ length: partCount }, (_, index) => ({
+      partNumber: index + 1,
+      etag: (index + 1).toString(16).padStart(32, "0"),
+    }));
+    expect(JSON.stringify({ parts }).length).toBeGreaterThan(64 * 1024);
+    for (let offset = 0; offset < parts.length; offset += 100) {
+      const values = parts.slice(offset, offset + 100)
+        .map((part) => `('${fileId}',${part.partNumber},'${part.etag}',${32 * 1024 ** 2})`)
+        .join(",");
+      await db.exec(`INSERT INTO file_request_upload_parts(upload_id,part_number,etag,size) VALUES ${values}`);
+    }
+    (bucket as any).checkpointSize = declaredSize;
+
+    const complete = await request(`/api/public/requests/public-a/files/${fileId}/complete`, "POST", { parts });
+    expect(complete.status).toBe(200);
+    expect(await complete.json()).toMatchObject({ status: "quarantined", idempotent: false });
+  }, 15_000);
+
   it("rejects resume fingerprint replay and cancels owned multipart exactly once", async () => {
     const body = { clientUploadId: "upload-client-0002", name: "report.pdf", size: 4, contentType: "application/pdf", resumeFingerprint: "c".repeat(64) };
     const first = await (await request("/api/public/requests/public-a/files/init", "POST", body)).json() as { fileId: string };
@@ -138,5 +169,42 @@ describe("incoming upload public routes", () => {
     }), env, {} as ExecutionContext) as Response;
     expect(response.status).toBe(403);
     expect(await db.prepare("SELECT COUNT(*) count FROM file_request_uploads").first()).toEqual({ count: 0 });
+  });
+
+  it("rejects declared and streamed JSON bodies above the route limit", async () => {
+    const declared = await dispatchIncomingPublicRequest(new Request("https://incoming.test/api/public/requests/public-a/files/init", {
+      method: "POST",
+      headers: {
+        Origin: "https://incoming.test",
+        Cookie: cookie,
+        "Content-Type": "application/json",
+        "Content-Length": "65537",
+      },
+      body: "{}",
+    }), env, {} as ExecutionContext) as Response;
+    expect(declared.status).toBe(413);
+
+    const streamed = await dispatchIncomingPublicRequest(new Request("https://incoming.test/api/public/requests/public-a/files/init", {
+      method: "POST",
+      headers: { Origin: "https://incoming.test", Cookie: cookie, "Content-Type": "application/json" },
+      body: new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(65_537).fill(32));
+          controller.close();
+        },
+      }),
+      duplex: "half",
+    } as RequestInit & { duplex: "half" }), env, {} as ExecutionContext) as Response;
+    expect(streamed.status).toBe(413);
+  });
+
+  it("rate limits public authorization before parsing malformed JSON", async () => {
+    const response = await dispatchIncomingPublicRequest(new Request("https://incoming.test/api/public/requests/public-a/authorize", {
+      method: "POST",
+      headers: { Origin: "https://incoming.test", "Content-Type": "application/json", "CF-Connecting-IP": "192.0.2.10" },
+      body: "{",
+    }), env, {} as ExecutionContext) as Response;
+    expect(response.status).toBe(400);
+    expect(await db.prepare("SELECT SUM(count) count FROM public_rate_limits").first()).toEqual({ count: 1 });
   });
 });

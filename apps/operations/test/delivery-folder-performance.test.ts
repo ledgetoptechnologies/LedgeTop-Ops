@@ -45,7 +45,7 @@ describe("Delivery folder-only listing performance",()=>{
     await applySql(deliveryDb,`CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,uploaded_at TEXT NOT NULL,content_type TEXT,media_kind TEXT NOT NULL,stream_uid TEXT,stream_status TEXT);
       CREATE TABLE delivery_tombstones(id TEXT PRIMARY KEY,physical_key TEXT NOT NULL,tombstone_kind TEXT NOT NULL,deleted_by TEXT,deleted_at TEXT,purge_after TEXT,restored_by TEXT,restored_at TEXT);
       CREATE TABLE projects(id TEXT PRIMARY KEY,r2_prefix TEXT NOT NULL,active INTEGER NOT NULL);
-      CREATE TABLE shares(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,r2_prefix TEXT,revoked_at TEXT,expires_at TEXT);
+      CREATE TABLE shares(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,r2_prefix TEXT,r2_object_key TEXT,revoked_at TEXT,expires_at TEXT);
       CREATE TABLE file_aliases(physical_key TEXT PRIMARY KEY,display_name TEXT NOT NULL);
       CREATE TABLE image_thumbnail_jobs(source_key TEXT PRIMARY KEY,source_etag TEXT NOT NULL,thumbnail_key TEXT NOT NULL,
         thumbnail_etag TEXT,thumbnail_size INTEGER,status TEXT NOT NULL,error_code TEXT);`);

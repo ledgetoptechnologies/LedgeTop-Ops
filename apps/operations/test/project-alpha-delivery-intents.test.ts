@@ -56,10 +56,11 @@ async function prepareGuestDeliveryDatabase(db:D1Database):Promise<void>{
       password_hash TEXT,password_salt TEXT,password_iterations INTEGER,password_algorithm TEXT,expires_at TEXT,
       revoked_at TEXT,revoked_reason TEXT,created_by_type TEXT NOT NULL,created_by_id TEXT NOT NULL,
       idempotency_key TEXT,share_version INTEGER NOT NULL DEFAULT 1,secret_ciphertext TEXT,secret_iv TEXT,
-      r2_prefix TEXT,division_id TEXT,recipient_email TEXT,image_location_map_enabled INTEGER NOT NULL DEFAULT 0,
+      r2_prefix TEXT,r2_object_key TEXT,division_id TEXT,recipient_email TEXT,image_location_map_enabled INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT(datetime('now')),FOREIGN KEY(project_id) REFERENCES projects(id)
     );
-    CREATE UNIQUE INDEX idx_shares_one_active_prefix ON shares(r2_prefix) WHERE revoked_at IS NULL AND r2_prefix IS NOT NULL;
+    CREATE UNIQUE INDEX idx_shares_one_active_prefix ON shares(r2_prefix) WHERE revoked_at IS NULL AND r2_prefix IS NOT NULL AND r2_object_key IS NULL;
+    CREATE UNIQUE INDEX idx_shares_one_active_object ON shares(r2_object_key) WHERE revoked_at IS NULL AND r2_object_key IS NOT NULL;
     CREATE TABLE audit_log(
       id INTEGER PRIMARY KEY AUTOINCREMENT,actor_type TEXT NOT NULL,actor_id TEXT,action TEXT NOT NULL,
       entity_type TEXT,entity_id TEXT,details_json TEXT,created_at TEXT NOT NULL DEFAULT(datetime('now'))

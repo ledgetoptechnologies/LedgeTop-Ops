@@ -79,6 +79,9 @@ interface PartCheckpoint {
 
 const SESSION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 const NEVER_EXPIRES = "9999-12-31T23:59:59.000Z";
+const DEFAULT_JSON_BODY_BYTES = 64 * 1024;
+const AUTHORIZE_JSON_BODY_BYTES = 16 * 1024;
+const COMPLETE_JSON_BODY_BYTES = 4 * 1024 * 1024;
 
 function parseJson<T extends z.ZodType>(schema: T, value: unknown): z.infer<T> {
   const result = schema.safeParse(value);
@@ -86,11 +89,54 @@ function parseJson<T extends z.ZodType>(schema: T, value: unknown): z.infer<T> {
   return result.data;
 }
 
-async function jsonBody<T extends z.ZodType>(request: Request, schema: T): Promise<z.infer<T>> {
-  const value = await request.json().catch(() => {
+async function jsonBody<T extends z.ZodType>(
+  request: Request,
+  schema: T,
+  maxBytes = DEFAULT_JSON_BODY_BYTES,
+): Promise<z.infer<T>> {
+  const declaredLength = request.headers.get("Content-Length");
+  if (declaredLength !== null) {
+    const parsedLength = Number(declaredLength);
+    if (!Number.isSafeInteger(parsedLength) || parsedLength < 0) {
+      throw new HTTPException(400, { message: "Invalid Content-Length" });
+    }
+    if (parsedLength > maxBytes) {
+      throw new HTTPException(413, { message: "Request body is too large" });
+    }
+  }
+  if (!request.body) throw new HTTPException(400, { message: "Request body must be JSON" });
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      totalBytes += value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel("request_body_too_large");
+        throw new HTTPException(413, { message: "Request body is too large" });
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return parseJson(schema, JSON.parse(text));
+  } catch (error) {
+    if (error instanceof HTTPException) throw error;
     throw new HTTPException(400, { message: "Request body must be JSON" });
-  });
-  return parseJson(schema, value);
+  }
 }
 
 function safeName(value: string): string {
@@ -256,6 +302,8 @@ publicApp.get("/r/:publicId", async (c) => {
 publicApp.post("/api/public/requests/:publicId/authorize", async (c) => {
   requirePublicOrigin(c.req.raw, c.env);
   const row = await activeRequest(c.env, c.req.param("publicId"));
+  const address = await addressHash(c.env, c.req.raw);
+  await exactLimit(c.env, `incoming:authorize:${row.id}:${address}`, 10, 60);
   const input = await jsonBody(c.req.raw, z.object({
     name: z.string().trim().min(1).max(120),
     email: z.string().trim().email().max(254).transform((value) => value.toLowerCase()),
@@ -263,9 +311,7 @@ publicApp.post("/api/public/requests/:publicId/authorize", async (c) => {
     accessCode: z.string().max(128).optional().default(""),
     turnstileToken: z.string().max(4096),
     website: z.string().max(200).optional().default(""),
-  }));
-  const address = await addressHash(c.env, c.req.raw);
-  await exactLimit(c.env, `incoming:authorize:${row.id}:${address}`, 10, 60);
+  }), AUTHORIZE_JSON_BODY_BYTES);
   if (input.website.trim()) throw new HTTPException(400, { message: "Invalid request" });
   await validateTurnstile(c.env, c.req.raw, input.turnstileToken);
   if (row.access_code_hash) {
@@ -565,7 +611,7 @@ publicApp.post("/api/public/requests/:publicId/files/:fileId/complete", async (c
       partNumber: z.number().int().min(1).max(10_000),
       etag: z.string().min(1).max(256),
     })).min(1).max(10_000),
-  }));
+  }), COMPLETE_JSON_BODY_BYTES);
   const requestedParts = input.parts.map((part) => {
     const etag = canonicalMultipartEtag(part.etag);
     if (!etag) throw new HTTPException(400, { message: "Invalid upload part ETag" });
