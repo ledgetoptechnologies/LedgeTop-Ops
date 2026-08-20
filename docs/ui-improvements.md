@@ -1,5 +1,15 @@
 # UI/UX Improvements
 
+## 2026-08-20 — Durable workspace navigation
+
+Operations Data workspaces use durable browser-history routes: `/delivery` for
+Client Delivery, `/delivery/incoming` for incoming transfers, and `/viewer` for
+3D Models. Refresh, Back, and Forward preserve the selected workspace. The SOP
+library is canonical at `/operations/sops`; `/sops` remains a compatibility
+alias. `/configurations` is the generic connection hub for Project Alpha,
+Viewer, delivery, and future providers, while detailed security and audit
+controls remain in Administration.
+
 ## 2026-08-02 — Zebra Striping and Airspace Spacing
 
 A second CSS pass focused on list readability and airspace page spacing.

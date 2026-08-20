@@ -106,3 +106,35 @@ test("Operations keeps disabled Viewer management out of the Data hub", async ({
   expect(requests.some(value => value.includes("/api/viewer/processing"))).toBe(false);
   expect(requests.some(value => value.includes("/api/viewer/connection-preflight"))).toBe(false);
 });
+
+test("an authenticated Viewer bounce issues one fixed-origin grant and returns the same browser nonce", async ({ page, context }) => {
+  const state = "r".repeat(32);
+  const grant = "z".repeat(43);
+  let issued = 0;
+  await context.route("https://viewer.ledgetopdroneservices.com/workspace/**", route =>
+    route.fulfill({ contentType: "text/html", body: "<!doctype html><title>Reauthorized Viewer</title>" }));
+  await page.route("**/api/**", route => {
+    const request = route.request(), url = new URL(request.url());
+    if (url.pathname === "/api/session") return route.fulfill({ json: {
+      user: { id: "staff-one", email: "staff@example.test", displayName: "Staff", status: "Active",
+        profileType: "Administrator", isAdministrator: true, permissions: ["viewer.view"], divisions: [] },
+      csrfToken: "csrf", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
+    } });
+    if (url.pathname === "/api/viewer/overview") return route.fulfill({ json: {
+      enabled: true, viewerBaseUrl: "https://viewer.ledgetopdroneservices.com", overview: null,
+    } });
+    if (url.pathname === "/api/viewer/admin-grant" && request.method() === "POST") {
+      issued += 1;
+      return route.fulfill({ status: 201, json: {
+        grant, grantExpiresAt: new Date(Date.now() + 60_000).toISOString(), sessionTtlSeconds: 1800,
+        redeemUrl: "https://viewer.ledgetopdroneservices.com/api/v1/admin-sessions/redeem",
+        workspaceUrl: `https://viewer.ledgetopdroneservices.com/workspace/${grant}`,
+      } });
+    }
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  await page.goto(`/viewer/reauthorize?state=${state}`);
+  await page.waitForURL(`https://viewer.ledgetopdroneservices.com/workspace/${grant}#reauthorize=${state}`);
+  expect(issued).toBe(1);
+});

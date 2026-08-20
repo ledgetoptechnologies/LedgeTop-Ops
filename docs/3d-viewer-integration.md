@@ -167,7 +167,17 @@ expires, then fail closed. The full Viewer tab remains mounted so camera,
 layer, and LOD loader state survive successful renewal. The opener relationship
 is retained only for this authenticated renewal channel; using `noopener` would
 break renewal, so exact source/origin/model validation is mandatory. If a
-browser blocks the synchronous new tab, the one-time session opens in the
+dedicated workspace loses its opener or is refreshed after the Viewer bearer
+expires, Viewer stores only the previously validated Operations origin, creates
+a five-minute same-browser nonce, and navigates to `/viewer/reauthorize`.
+Operations reauthorizes the current Cloudflare Access and staff application
+session, re-evaluates `viewer.view`, and issues the existing one-use,
+subject-bound grant. The return destination is constructed exclusively from
+`VIEWER_BASE_URL`; no caller-controlled return URL is accepted. Viewer verifies
+and consumes the nonce before redemption. One-time redemption, nonce expiry,
+fixed origins, and subject binding prevent replay, subject switching, and open
+redirects. The opener protocol remains preferred because it preserves mounted
+camera, layer, and LOD state. If a browser blocks the synchronous new tab, the one-time session opens in the
 current tab as a usable fallback.
 
 ## LTDS routes, permissions, and gates

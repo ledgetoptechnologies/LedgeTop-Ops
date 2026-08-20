@@ -95,6 +95,43 @@ test("Team remains visible without Administration permission", async ({ page }) 
   await expect(primary.getByRole("link", { name: "Administration" })).toHaveCount(0);
 });
 
+test("direct and history navigation normalize unauthorized global pages before rendering", async ({ page }) => {
+  let viewerOverviewRequested = false;
+  await page.route("**/api/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/session") return route.fulfill({ json: {
+      user: { id: "dashboard-only", email: "staff@example.test", displayName: "Staff", status: "Active",
+        profileType: "Employee", isAdministrator: false, permissions: ["dashboard.view"], divisions: [] },
+      csrfToken: "csrf-test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
+    } });
+    if (path === "/api/dashboard") return route.fulfill({ json: { operations: [], tasks: [], integrations: [], airspace: {}, recentShares: [] } });
+    if (path === "/api/viewer/overview") viewerOverviewRequested = true;
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+  await page.goto("/viewer");
+  await expect(page).toHaveURL(/\/$/);
+  await expect(page.getByRole("heading", { name: "Operations dashboard" })).toBeVisible();
+  await page.evaluate(() => { history.pushState(null, "", "/administration"); dispatchEvent(new PopStateEvent("popstate")); });
+  await expect(page).toHaveURL(/\/$/);
+  expect(viewerOverviewRequested).toBe(false);
+});
+
+test("Data Back and Forward normalize an unavailable nested tab without exposing it", async ({ page }) => {
+  await mockSession(page, ["dashboard.view", "delivery.browse", "viewer.view"]);
+  await page.goto("/delivery");
+  await page.getByRole("tab", { name: "3D models" }).click();
+  await expect(page).toHaveURL(/\/viewer$/);
+  await page.evaluate(() => { history.pushState(null, "", "/delivery/incoming"); dispatchEvent(new PopStateEvent("popstate")); });
+  await expect(page).toHaveURL(/\/delivery$/);
+  await expect(page.getByRole("tab", { name: "Incoming uploads" })).toHaveCount(0);
+  await page.goBack();
+  await expect(page).toHaveURL(/\/viewer$/);
+  await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
+  await page.goForward();
+  await expect(page).toHaveURL(/\/delivery$/);
+  await expect(page.getByRole("tab", { name: "Client delivery" })).toHaveAttribute("aria-selected", "true");
+});
+
 test("administration.view opens the read-only Administration page without privileged API probes", async ({ page }) => {
   let privilegedProbe = false;
   await page.route("**/api/**", async (route) => {

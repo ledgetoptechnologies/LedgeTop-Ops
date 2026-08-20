@@ -11,7 +11,9 @@ import {
   prefixFromDeliveryPath,
 } from "./delivery-route";
 import {
+  deliverySectionPath,
   operationsSectionPath,
+  pathDeliverySection,
   pathOperationsSection,
   pathPage,
   type OperationsPage as Page,
@@ -123,12 +125,13 @@ const NAV: Array<{
     permissions: ["operations.view", "projects.view", "tasks.view"],
   },
   { page: "client-requests", label: "Client Requests", href: "/operations/client-requests", permissions: ["operations.manage"] },
-  { page: "sops", label: "SOP Library", permissions: ["sops.view"] },
+  { page: "sops", label: "SOP Library", href: "/operations/sops", permissions: ["sops.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
   { page: "delivery", label: "Data", permissions: ["delivery.browse", "viewer.view"] },
 ];
 const MANAGE_NAV: typeof NAV = [
   { page: "team", label: "Team", permissions: ["team.view"] },
+  { page: "configurations", label: "Configurations", permissions: ["administration.view"] },
   {
     page: "administration",
     label: "Administration",
@@ -172,6 +175,28 @@ export function OperationsApp() {
     mobileNavPanel = useRef<HTMLDivElement>(null),
     manageMenu = useRef<HTMLDivElement>(null),
     manageTrigger = useRef<HTMLButtonElement>(null);
+  const routeForPage = (requested: Page, user: OperationsUser): { page: Page; href: string } | null => {
+    if (requested === "viewer") {
+      if (allowed(user, "viewer.view")) return { page: "viewer", href: "/viewer" };
+      if (allowed(user, "delivery.browse")) return { page: "delivery", href: "/delivery" };
+      return null;
+    }
+    const item = [...NAV, ...MANAGE_NAV].find(candidate => candidate.page === requested);
+    return item && navAllowed(user, item)
+      ? { page: item.page, href: item.href || (item.page === "dashboard" ? "/" : `/${item.page}`) }
+      : null;
+  };
+  const normalizeLocation = (value: Session) => {
+    const requested = pathPage(location.pathname);
+    const authorized = routeForPage(requested, value.user);
+    const fallbackItem = [...NAV, ...MANAGE_NAV].find(item => navAllowed(value.user, item));
+    const fallback = fallbackItem ? routeForPage(fallbackItem.page, value.user) : null;
+    const target = authorized || fallback;
+    if (!target) return;
+    setPage(target.page);
+    if (!authorized && location.pathname !== target.href)
+      history.replaceState(null, "", target.href);
+  };
   useEffect(() => {
     api<Session>("/api/session")
       .then((value) => {
@@ -184,21 +209,15 @@ export function OperationsApp() {
           jobsRoot: value.capabilities?.deliveryJobsRoot?.enabled === true,
         }));
         setSession(value);
-        const allNavigation = [...NAV, ...MANAGE_NAV];
-        const current = allNavigation.find((item) => item.page === page),
-          visible = current && navAllowed(value.user, current);
-        if (!visible) {
-          const first = allNavigation.find((item) => navAllowed(value.user, item));
-          if (first) navigate(first.page, first.href);
-        }
+        normalizeLocation(value);
       })
       .catch((caught) => setError(caught.message));
   }, []);
   useEffect(() => {
-    const pop = () => setPage(pathPage(location.pathname));
+    const pop = () => { if (session) normalizeLocation(session); };
     addEventListener("popstate", pop);
     return () => removeEventListener("popstate", pop);
-  }, []);
+  }, [session]);
   useEffect(() => {
     if (!mobileNavOpen) return;
     const previousOverflow = document.body.style.overflow;
@@ -314,6 +333,9 @@ export function OperationsApp() {
         {page === "team" && allowed(session.user, "team.view") && (
           <Team {...props} />
         )}{" "}
+        {page === "configurations" && allowed(session.user, "administration.view") && (
+          <Configurations session={session} />
+        )}{" "}
         {page === "administration" &&
           allowed(session.user, "administration.view") && (
             <Administration {...props} />
@@ -356,6 +378,10 @@ function PageHeading({ page }: { page: Page }) {
     team: [
       "Team",
       "Project Alpha-managed staff access, divisions, and role assignments.",
+    ],
+    configurations: [
+      "Configurations",
+      "Connections to Project Alpha, the 3D Viewer, delivery services, and future platform providers.",
     ],
     administration: [
       "Administration",
@@ -566,7 +592,7 @@ function Dashboard({ session }: { session: Session }) {
             />
           )}
         </Card>
-        <Card title="Project Alpha integration">
+        <Card title="Configurations" action={session.user.isAdministrator ? <a href="/configurations">Open configurations</a> : undefined}>
           {integrations.length ? (
             integrations.map((item: any) => (
               <div className="health-row" key={item.integration}>
@@ -593,8 +619,8 @@ function Dashboard({ session }: { session: Session }) {
             ))
           ) : (
             <EmptyState
-              title="No integration status"
-              detail="Project Alpha synchronization has not reported yet."
+              title="No connection status"
+              detail="Configured platform connections will appear here."
             />
           )}
         </Card>
@@ -3489,6 +3515,31 @@ function exactViewerWorkspaceMessage(
 function ViewerDataOverview() {
   const { data, error, reload } = useLoad<ViewerOverviewResponse>(() => api("/api/viewer/overview"), []);
   const [opening, setOpening] = useState(false), [actionError, setActionError] = useState("");
+  const reauthorizationState = new URLSearchParams(location.search).get("state");
+  useEffect(() => {
+    if (!data?.viewerBaseUrl || !reauthorizationState || !/^[A-Za-z0-9_-]{32,128}$/.test(reauthorizationState)) return;
+    let active = true;
+    const run = async () => {
+      setOpening(true); setActionError("");
+      try {
+        const expected = new URL(data.viewerBaseUrl!);
+        if (expected.protocol !== "https:" || expected.pathname !== "/" || expected.search || expected.hash)
+          throw new Error("3D Viewer returned an invalid workspace origin");
+        const grant = await api<ViewerWorkspaceGrant>("/api/viewer/admin-grant", {
+          method: "POST", headers: { "Idempotency-Key": crypto.randomUUID() },
+        });
+        const target = new URL(grant.workspaceUrl);
+        if (target.origin !== expected.origin || target.pathname !== `/workspace/${encodeURIComponent(grant.grant)}` || target.search || target.hash)
+          throw new Error("3D Viewer returned an invalid reauthorization link");
+        target.hash = `reauthorize=${reauthorizationState}`;
+        if (active) location.replace(target.href);
+      } catch (caught) {
+        if (active) setActionError((caught as Error).message);
+      } finally { if (active) setOpening(false); }
+    };
+    void run();
+    return () => { active = false; };
+  }, [data?.viewerBaseUrl, reauthorizationState]);
   const openWorkspace = async () => {
     const popup = window.open("about:blank", "_blank");
     if (!popup) { setActionError("Allow pop-ups for Operations, then try again."); return; }
@@ -3563,6 +3614,7 @@ function ViewerDataOverview() {
     } finally { setOpening(false); }
   };
   if (!data && !error) return <Card><PanelSkeleton /></Card>;
+  if (reauthorizationState) return <Card><ErrorLine error={error || actionError} />{opening && <Loading />}{!opening && !error && !actionError && <p>Reauthorizing the Viewer workspace…</p>}</Card>;
   if (error) return <><ErrorLine error={error} /><button type="button" className="button-ghost" onClick={() => void reload()}>Retry overview</button></>;
   if (!data?.enabled || !data.overview) return <Card><EmptyState title="3D Viewer overview is off" detail="The Viewer integration remains unavailable until its reviewed runtime flags are enabled." /></Card>;
   const value = data.overview;
@@ -3591,9 +3643,30 @@ function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; i
     allowed(session.user, "file_requests.view") &&
     session.capabilities?.incomingUploads?.enabled === true;
   const canViewModels = allowed(session.user, "viewer.view");
-  const firstTab = initialTab === "models" && canViewModels ? "models" :
+  const requestedTab = pathDeliverySection(location.pathname);
+  const authorizedTab = (requested: "delivery" | "incoming" | "models") =>
+    requested === "delivery" ? canViewDelivery : requested === "incoming" ? canViewIncoming : canViewModels;
+  const fallbackTab = initialTab === "models" && canViewModels ? "models" :
     canViewDelivery ? "delivery" : canViewIncoming ? "incoming" : "models";
+  const normalizedTab = (requested: "delivery" | "incoming" | "models") =>
+    authorizedTab(requested) ? requested : fallbackTab;
+  const firstTab = normalizedTab(requestedTab);
   const [tab, setTab] = useState<"delivery" | "incoming" | "models">(firstTab);
+  const selectTab = (next: "delivery" | "incoming" | "models") => {
+    setTab(next);
+    history.pushState(null, "", deliverySectionPath(next));
+  };
+  useEffect(() => {
+    const normalize = () => {
+      const requested = pathDeliverySection(location.pathname), next = normalizedTab(requested);
+      setTab(next);
+      if (next !== requested) history.replaceState(null, "", deliverySectionPath(next));
+    };
+    normalize();
+    const pop = () => normalize();
+    addEventListener("popstate", pop);
+    return () => removeEventListener("popstate", pop);
+  }, [canViewDelivery, canViewIncoming, canViewModels, fallbackTab]);
   return (
     <>
       <div
@@ -3601,19 +3674,19 @@ function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; i
         role="tablist"
         aria-label="Delivery tools"
       >
-        {canViewDelivery && <button role="tab" aria-selected={tab === "delivery"} className={tab === "delivery" ? "active" : ""} onClick={() => setTab("delivery")}>Client delivery</button>}
+        {canViewDelivery && <button role="tab" aria-selected={tab === "delivery"} className={tab === "delivery" ? "active" : ""} onClick={() => selectTab("delivery")}>Client delivery</button>}
         {canViewIncoming && (
           <button
             role="tab"
             aria-selected={tab === "incoming"}
             className={tab === "incoming" ? "active" : ""}
-            onClick={() => setTab("incoming")}
+            onClick={() => selectTab("incoming")}
           >
             Incoming uploads
           </button>
         )}
         {canViewModels && (
-          <button role="tab" aria-selected={tab === "models"} className={tab === "models" ? "active" : ""} onClick={() => setTab("models")}>3D models</button>
+          <button role="tab" aria-selected={tab === "models"} className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>3D models</button>
         )}
       </div>
       {tab === "models" && canViewModels ? <ViewerDataOverview /> : tab === "delivery" && canViewDelivery ? (
@@ -6462,6 +6535,23 @@ function ViewerModels({ session }: { session: Session }) {
       })}</div> : <EmptyState title="No demo links" detail="Create an expiring link above. Existing links cannot reveal their bearer URL." />)}
     </Card></section>}
     {data?.enabled && !data.publicSharesEnabled && (canCreateShare || canRevokeShare) && <Card><EmptyState title="Public Viewer links are disabled" detail="Enable the separate public-share rollout gate after the Viewer hostname, rate limits, and public-route policy are verified." /></Card>}
+  </div>;
+}
+
+function Configurations({ session }: { session: Session }) {
+  return <div className="dashboard-grid configurations-grid">
+    <Card title="Project Alpha">
+      <p>Client identity, portal eligibility, projects, and operational records synchronize through the configured Project Alpha connection.</p>
+      <a className="button-ghost button-small" href="/administration">Open connection administration</a>
+    </Card>
+    <Card title="3D Viewer">
+      <p>Review Viewer health, processing capacity, storage, and model access from the dedicated workspace.</p>
+      {allowed(session.user, "viewer.view") && <a className="button-ghost button-small" href="/viewer">Open 3D models</a>}
+    </Card>
+    <Card title="Delivery service">
+      <p>Client deliveries and incoming transfers use the Operations delivery service; storage credentials remain server-side.</p>
+      {allowed(session.user, "delivery.browse") && <a className="button-ghost button-small" href="/delivery">Open client delivery</a>}
+    </Card>
   </div>;
 }
 
