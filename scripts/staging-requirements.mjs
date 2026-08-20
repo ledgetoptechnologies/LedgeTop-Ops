@@ -8,9 +8,9 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 // Final commits, image digest, fixtures, and migration checksums passed the
 // independent cross-repository gate. Set this back to false before changing
 // any pinned source or deployment artifact.
-export const RELEASE_CONTRACT_FINALIZED = false;
+export const RELEASE_CONTRACT_FINALIZED = true;
 export const RELEASE_CANDIDATES = Object.freeze({
-  operations: "5ebbf7ff7eda088c1805e1aef0802ce35389057e",
+  operations: "5c35268722289730dfdfe5b908593b50c0510ee9",
   viewer: "cde930730af2a50966a771f24454e8d98f9a25b7",
   projectAlpha: "e3355875d86250628ad630c1d02baa1ecc127a77",
 });

@@ -1,9 +1,10 @@
 # 3D processing and delivery release runbook
 
 Status: **the source-candidate packet has been refreshed for the exact-file
-Delivery and Viewer import/workspace changes; the immutable Viewer image is
-published and verified, while contract finalization, live staging evidence,
-and activation remain pending**. The staff Viewer integration and processing workspace are already
+Delivery, Viewer import/workspace changes, and bounded incoming-request JSON
+handling; the immutable Viewer image is
+published and verified, and the immutable source contract is finalized; live
+staging evidence and activation remain pending**. The staff Viewer integration and processing workspace are already
 deliberately enabled for pre-production validation. New Viewer public-share,
 Client Viewer, and Project Alpha portal capabilities remain gated until their
 corresponding live evidence below is captured.
@@ -17,8 +18,8 @@ corresponding live evidence below is captured.
   `sha-cde9307`. The
   workflow then pulled that exact digest back from GHCR and verified runtime
   UID/GID `568:568`, OCI revision, and the read-only source-commit stamp.
-- LTDS-Ops product code: `5ebbf7ff7eda088c1805e1aef0802ce35389057e` on
-  `codex/3d-processing-control-plane`. This pin moves processing management to
+- LTDS-Ops product code: `5c35268722289730dfdfe5b908593b50c0510ee9` on
+  `main`. This pin moves processing management to
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
   overview; never substitute a mutable branch tip.
 - Project Alpha: `e3355875d86250628ad630c1d02baa1ecc127a77` on
@@ -31,9 +32,9 @@ corresponding live evidence below is captured.
 The updated source, manifest digest, migrations, fixtures, and activation
 policy passed independent cross-repository verification, so the corresponding
 constant in `scripts/staging-requirements.mjs` is
-`RELEASE_CONTRACT_FINALIZED=false` while the refreshed Viewer and exact-file
-Delivery packet receives its final cross-repository evidence review. The broader
-workspace completion and live acceptance gates remain under review. Finalization freezes
+`RELEASE_CONTRACT_FINALIZED=true` after the refreshed Viewer, exact-file
+Delivery, and incoming-request hardening packet passed final cross-repository
+evidence review. The broader live acceptance gates remain pending. Finalization freezes
 the candidate contract only; it does not approve deployment, migrations, or
 any feature flag. Reset it to `false` before changing a pinned source or
 deployment artifact.
@@ -301,7 +302,7 @@ The Project Alpha delivery-intent wire fixture is LF-pinned at
 SHA-256 is `f16d540bcfbcf4c77c356fc37e2c046a23a473ebec701d526e3b8d45f38c90e8`.
 - Project Alpha: apply `0066`, `0067`, `0068`, and `0069` through the normal migration
   runner. All are replay-safe but must still be recorded once in the ledger.
-- Viewer: startup applies every internal SQLite migration through schema v19;
+- Viewer: startup applies every internal SQLite migration through schema v21;
   verify integrity, foreign keys, and the final schema ledger after restart.
 
 After each database, verify the migration ledger, integrity/foreign-key checks,
