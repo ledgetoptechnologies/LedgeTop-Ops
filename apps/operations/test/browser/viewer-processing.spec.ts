@@ -60,6 +60,8 @@ test("Operations shows a bounded Viewer overview and opens management on the Vie
   await expect(page.getByText("2 healthy")).toBeVisible();
   await expect(page.getByText(/1 processing job needs attention/)).toBeVisible();
   await expect(page.getByRole("heading", { name: "Processing platform" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Tasks" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Providers" })).toHaveCount(0);
   expect(operationsRequests.some(value => value.includes("/api/viewer/processing"))).toBe(false);
 
   for (const width of [390, 320]) {
@@ -74,4 +76,33 @@ test("Operations shows a bounded Viewer overview and opens management on the Vie
   expect(opened.url()).toBe(`https://viewer.ledgetopdroneservices.com/workspace/${"g".repeat(43)}`);
   await expect.poll(() => opened.evaluate(() => document.body.dataset.renewalGrant)).toBe("h".repeat(43));
   expect(operationsRequests.filter(value => value === "POST /api/viewer/admin-grant")).toHaveLength(2);
+});
+
+test("Operations keeps disabled Viewer management out of the Data hub", async ({ page }) => {
+  const requests: string[] = [];
+  await page.route("**/api/**", async route => {
+    const request = route.request(), url = new URL(request.url());
+    requests.push(`${request.method()} ${url.pathname}`);
+    if (url.pathname === "/api/session") return route.fulfill({ json: {
+      user: {
+        id: "staff-viewer", email: "staff@example.test", displayName: "Staff", status: "Active",
+        profileType: "Employee", isAdministrator: false,
+        permissions: ["viewer.view", "viewer.manage"], divisions: [],
+      },
+      csrfToken: "csrf", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null,
+      units: { default: "imperial", resolved: "imperial" }, capabilities: {},
+    } });
+    if (url.pathname === "/api/viewer/overview") return route.fulfill({ json: {
+      enabled: false, viewerBaseUrl: null, overview: null,
+    } });
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+
+  await page.goto("/operations/processing");
+  await expect(page.getByText("3D Viewer overview is off", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Test Viewer connection" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Tasks" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Providers" })).toHaveCount(0);
+  expect(requests.some(value => value.includes("/api/viewer/processing"))).toBe(false);
+  expect(requests.some(value => value.includes("/api/viewer/connection-preflight"))).toBe(false);
 });

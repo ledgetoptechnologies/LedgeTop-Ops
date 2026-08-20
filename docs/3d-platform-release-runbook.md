@@ -331,12 +331,13 @@ changes immediately revoke older grants and redeemed sessions; migration v17
 fails closed on unbound legacy live authorization instead of inventing a
 source descriptor. Do not silently add another flag, carry a dependency into the
 next check, or interpret a multi-flag staging window as production activation
-approval. Do not use production data, production provider
-credentials, or production share recipients for these checks. If staging
-cannot reproduce a production-only network boundary, use a documented,
-time-bounded, one-gate-at-a-time production canary with an assigned operator
-and tested rollback; never enable the next production gate merely to unblock
-validation of the current one.
+approval. Do not use production data, production provider credentials, or
+production share recipients for these checks.
+If isolated staging cannot reproduce a production-only network boundary, leave
+that gate blocked and record the missing evidence. This release packet does not
+authorize a production canary, production deployment, or remote production
+migration; a separately reviewed and explicitly authorized production plan is
+required before any such action.
 
 Capture request IDs, timestamps, bounded logs, screenshots, and rollback
 results for each item:

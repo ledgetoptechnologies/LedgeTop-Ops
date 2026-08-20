@@ -69,9 +69,9 @@ function deferred() {
 async function deliveryNavigationLink(page: Page) {
   if ((page.viewportSize()?.width || 0) <= 960) {
     await page.getByRole("button", { name: "Open navigation" }).click();
-    return page.getByRole("dialog", { name: "Navigation" }).getByRole("link", { name: "Delivery" });
+    return page.getByRole("dialog", { name: "Navigation" }).getByRole("link", { name: "Data" });
   }
-  return page.locator(".ops-header").getByRole("link", { name: "Delivery" });
+  return page.locator(".ops-header").getByRole("link", { name: "Data" });
 }
 
 async function mockDeliveryNavigationRace(page: Page) {
