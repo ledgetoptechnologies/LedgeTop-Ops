@@ -284,10 +284,10 @@ Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
 `0112_public_share_location_privacy.sql`, then `0114_delivery_share_prefix_lookup.sql`
-through `0135_security_scan_followups.sql` (`0113` is intentionally
+through `0149_portal_operations_management.sql` (`0113` is intentionally
 reserved), and Operations
 `0014_staff_acl_controls.sql` through
-`0023_project_task_sop_links.sql`. Migration `0100` removes
+`0031_project_alpha_delivery_intent_rate_limits.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any
@@ -297,7 +297,7 @@ five-minute notification consumer; `0106`/`0107`/`0108` must be present before
 thumbnail jobs or cleanup; `0109` must be present before photo location
 extraction or map routes run; `0110` must be present before a `Jobs/` backfill
 run; `0111` must precede prebuilt registration, Container fallback activation,
-or exact-ETag derivative reconciliation. Migrations `0112` and `0114`-`0135`
+or exact-ETag derivative reconciliation. Migrations `0112` and `0114`-`0149`
 must precede public location privacy, indexed share lookup, client notification,
 request-v2, attachment, workspace hierarchy, membership, delegated-share,
 catalog/hierarchy projection, and directory-recipient activation.

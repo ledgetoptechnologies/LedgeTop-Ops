@@ -13,24 +13,22 @@ corresponding live evidence below is captured.
 
 ## Pinned source candidates (release contract open)
 
-- 3D Viewer source: `dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e`.
+- 3D Viewer source: `32cece808289a942ce902797535ccff6e24763e3`.
   Its replacement immutable GHCR digest and publishing run are pending
   credentialed registry/workflow evidence. The packet deliberately records
-  `PENDING_VIEWER_IMAGE_FOR_dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e`
+  `PENDING_VIEWER_IMAGE_FOR_32cece808289a942ce902797535ccff6e24763e3`
   until the workflow has pulled the exact manifest back and verified runtime
   UID/GID `568:568`, OCI revision, the read-only source-commit stamp, and the
   pinned derivative tools. The former `cde9307` digest is rollback history only
   and must not be paired with this source candidate.
-- LTDS-Ops product code: `5c35268722289730dfdfe5b908593b50c0510ee9` on
-  `main`. This pin moves processing management to
+- LTDS-Ops product code: `ccfd7328034721aca74b60783a5101e55269781e` on
+  `codex/3d-processing-control-plane`. This pin moves processing management to
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
   overview; never substitute a mutable branch tip.
-- Project Alpha: `e3355875d86250628ad630c1d02baa1ecc127a77` on
-  `codex/portal-scope-ci`. Its direct parent is the prior reviewed candidate
-  `f646f3b308d993bd90d256975f140eac6ed65e15`; the tip ensures the default-off
-  managed-delivery schema is applied by migration 0069 only after its portal
-  profile dependency while preserving the mandatory isolated MySQL scope-lock
-  CI gate.
+- Project Alpha: `b847852bd33055e71a6dc94f80bdd6d78da5baaa` on
+  `codex/dev-recurring-expenses`. The tip retains the generic, default-off portal
+  contract and adds reviewed pricing snapshots, assignments, settlement drafts,
+  and guarded project close-out through migration 0075.
 
 The updated Viewer source passed its repository-owned local gate, but its new
 manifest digest and refreshed independent cross-repository packet have not yet
@@ -118,7 +116,7 @@ The destructive provider runs were recorded on executable commit
 `1bb6681c4b8b54407433e991a5dfcb860ed262c4`, and exact-readiness commit
 `72f3d1a9c36a7d366ca3e129d0516f72eb281091`, published-session revocation
 commit `f7ecfe9d91ba9189b9093a4894210be2eeaa4f06`, and subsequent hardening commits
-through `dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e` retain the reviewed provider adapter,
+through `32cece808289a942ce902797535ccff6e24763e3` retain the reviewed provider adapter,
 provider harness, or production ZIP ingestion path. The exact final Linux test
 and production images, UID-568 volume gate, health/readiness smoke, and scale
 rehearsal were last rebuilt and rerun against
@@ -171,7 +169,7 @@ node scripts/production-readiness.mjs --verify-mount-options
 ```
 
 The readiness command must report build revision
-`dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e` and schema version `21`. Confirm
+`32cece808289a942ce902797535ccff6e24763e3` and schema version `21`. Confirm
 both `/api/v1/health` and `/api/v1/ready` return that exact revision in
 `X-LTDS-Viewer-Revision`, `21` in `X-LTDS-Viewer-Schema-Version`, and
 `Cache-Control: no-store`. A tag, container creation timestamp, or successful
@@ -305,8 +303,11 @@ in lexical/ledger order; never cherry-pick only a later file.
 The Project Alpha delivery-intent wire fixture is LF-pinned at
 `packages/shared/fixtures/project-alpha-delivery-intent-v1.json`; its frozen
 SHA-256 is `f16d540bcfbcf4c77c356fc37e2c046a23a473ebec701d526e3b8d45f38c90e8`.
-- Project Alpha: apply `0066`, `0067`, `0068`, and `0069` through the normal migration
-  runner. All are replay-safe but must still be recorded once in the ledger.
+- Project Alpha: apply every pending migration through `0075` with the normal
+  migration runner. Migrations `0066`–`0069` provide the generic portal and
+  managed-delivery contract; `0070`–`0075` add default-off pricing adjustment,
+  snapshot lineage, idempotency, and settlement close-out foundations. All are
+  replay-safe but must still be recorded once in the ledger.
 - Viewer: startup applies every internal SQLite migration through schema v21;
   verify integrity, foreign keys, and the final schema ledger after restart.
 

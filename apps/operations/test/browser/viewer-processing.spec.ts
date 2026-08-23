@@ -54,7 +54,7 @@ test("Operations shows a bounded Viewer overview and opens management on the Vie
   });
 
   await page.goto("/operations/processing");
-  await expect(page.getByRole("heading", { name: "3D models" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "3D models", exact: true })).toBeVisible();
   await expect(page.getByText("11 total · 4.0 GB")).toBeVisible();
   await expect(page.getByText("3", { exact: true })).toBeVisible();
   await expect(page.getByText("2 healthy")).toBeVisible();

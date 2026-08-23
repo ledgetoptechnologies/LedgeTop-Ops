@@ -11,15 +11,15 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 // independent cross-repository gate; reset it before changing any pin.
 export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
-  operations: "5c35268722289730dfdfe5b908593b50c0510ee9",
-  viewer: "dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e",
-  projectAlpha: "e3355875d86250628ad630c1d02baa1ecc127a77",
+  operations: "ccfd7328034721aca74b60783a5101e55269781e",
+  viewer: "32cece808289a942ce902797535ccff6e24763e3",
+  projectAlpha: "b847852bd33055e71a6dc94f80bdd6d78da5baaa",
 });
 
 export const STAGING_VIEWER = Object.freeze({
   hostname: "viewer-staging.ledgetopdroneservices.com",
   origin: "https://viewer-staging.ledgetopdroneservices.com",
-  image: "PENDING_VIEWER_IMAGE_FOR_dd5055c8563a5b67ecb1dce7cd4046ce8f833f7e",
+  image: "PENDING_VIEWER_IMAGE_FOR_32cece808289a942ce902797535ccff6e24763e3",
   schemaVersion: 21,
   serviceKeyId: "ops-staging-v1",
   eventKeyId: "viewer-staging-v1",
@@ -33,10 +33,16 @@ export const STAGING_VIEWER = Object.freeze({
 export const PROJECT_ALPHA_STAGING = Object.freeze({
   releaseCommit: RELEASE_CANDIDATES.projectAlpha,
   migrations: Object.freeze({
-    "0066_generic_portal_v2_integration.sql": "12cfd32e4854bddf763a5fe80653fe7494ab5f9e82b592bf0da05eed78f3e886",
-    "0067_portal_projection_delivery.sql": "a8150facbd25ff8c3275a591b09c2e75a50302abdc9c212477e3cc36d0cf11ea",
-    "0068_portal_contract_completeness.sql": "6d35f540edd176d192503d69d2d9c8914cd3e40f3f9d5f0e522eeef96ffdab37",
-    "0069_managed_delivery_intents.sql": "76369a571d771bf28b3778f61bccf536827457538ba04244a0135ab7672c6364",
+    "0066_generic_portal_v2_integration.sql": "be1377207ff9e34e0bdf4de2c7f01b7239115fca8c7144f2024ed26014ada286",
+    "0067_portal_projection_delivery.sql": "c58924d36e46e2781430e405a8a89b36e3c7cb8ebc63ff00ca1c8ccd2086ff97",
+    "0068_portal_contract_completeness.sql": "18385c48fb7a16796629a41c05c55eef710acb5e2b331fc0f1602ca65eba9af2",
+    "0069_managed_delivery_intents.sql": "94de5e024d624a195b96ad07f1f6126f2b577b75000847206fa3f16cfbc85914",
+    "0070_pricing_adjustment_foundation.sql": "5ca37edb106673766caf92b42e1aae197a82ffbddfacababa284c9be649fcc47",
+    "0071_pricing_adjustment_scopes.sql": "596add9e3fd6a295cc22706b5f6e554d07151014d46bc62e554477e0f84ef38f",
+    "0072_pricing_snapshot_lineage.sql": "489f0e7411b69862eccd1e1377275cb81d4b39b03f00d822e28099064ba8c91b",
+    "0073_on_demand_invoice_idempotency.sql": "5168e12dbaa3c5dc125f1bb6845e5374d6f70fb5c56fc628a01928601fce0e56",
+    "0074_invoice_adjustment_calculation_role.sql": "179e6872db2c0417d7d39e98af90146640f592852fa330ee17fb9db6f141595a",
+    "0075_contract_settlement_closeout_foundation.sql": "c4bffb505f4668254abe989d80ca4a6496ce226f4601ac36c0010b8bf32a5b37",
   }),
   defaultOffSettings: Object.freeze([
     "portal_v2_integration_enabled", "portal_v2_relations_enabled",
@@ -45,6 +51,7 @@ export const PROJECT_ALPHA_STAGING = Object.freeze({
     "portal_authoritative_hooks_enabled",
     "managed_delivery_enabled", "managed_delivery_intent_url",
     "managed_delivery_profile_id", "managed_delivery_guest_links_enabled",
+    "pricing_adjustments_enabled", "contract_settlement_enabled",
   ]),
   outboundSchedule: "* * * * *",
 });
@@ -224,6 +231,7 @@ export const REQUIRED_DISABLED_FEATURE_FLAGS = Object.freeze({
     "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
     "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED",
     "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED",
+    "CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
     "VIEWER_INTEGRATION_ENABLED",
     "VIEWER_PROCESSING_ENABLED",
@@ -377,6 +385,7 @@ export const FEATURE_FLAG_ACTIVATION_POLICIES = Object.freeze({
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED: Object.freeze({ gates: Object.freeze(["projectAlphaPortalProjection", "projectionParityAndAlerts"]) }),
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: Object.freeze({ prohibitedReason: "Identity denylist activation requires reviewed staging denial and last-manager evidence" }),
     CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: Object.freeze({ prohibitedReason: "Staff deny-policy management remains disabled until Client enforcement and audit evidence are recorded together" }),
+    CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED: Object.freeze({ prohibitedReason: "Operations portal management remains disabled until Project Alpha eligibility, tenant isolation, and Client enforcement evidence are recorded together" }),
     AUTHENTICATED_DELIVERY_GRANTS_ENABLED: Object.freeze({ prohibitedReason: "Authenticated Delivery grants require migration 0137 and end-to-end Operations-to-portal evidence" }),
     VIEWER_INTEGRATION_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract"]), stagingGates: Object.freeze(["viewerDeployment"]) }),
     VIEWER_PROCESSING_ENABLED: Object.freeze({ gates: Object.freeze(["viewerDeployment", "viewerServiceContract", "viewerProcessing"]), stagingGates: Object.freeze(["viewerDeployment", "viewerServiceContract"]) }),
@@ -506,6 +515,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
     CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "false",
     CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "false",
     CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "false",
+    CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED: "false",
     AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "false",
     VIEWER_INTEGRATION_ENABLED: "false",
     VIEWER_PROCESSING_ENABLED: "false",
@@ -565,7 +575,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
     "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
-    "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED",
+    "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED", "CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED", "CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED",
     "AUTHENTICATED_DELIVERY_GRANTS_ENABLED",
     "VIEWER_INTEGRATION_ENABLED", "VIEWER_PROCESSING_ENABLED", "VIEWER_PUBLIC_SHARES_ENABLED", "VIEWER_BASE_URL",
     "VIEWER_SERVICE_KEY_ID", "VIEWER_EVENT_KEY_ID", "VIEWER_EVENT_PREVIOUS_KEY_ID", "DEFAULT_UNITS",

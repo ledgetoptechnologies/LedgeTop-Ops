@@ -65,7 +65,7 @@ provider.
 | PA pricing/draft commands: exact scope/HMAC, replay/conflict/rate/stale handling, complete audit/correlation | Proven locally + live gate | Current/previous key tests and exact normative response corpus; staging command exercise remains |
 | TrueNAS rootless UID/GID 568, fixed durable host bind, source-attested image, health-gated update/rollback and backup/restore helpers | Proven + live gate | Exact Linux suite (including real symlink semantics), `/mnt/Plugins/App_Data/Model-Viewer/Storage` bind checks, revision/schema health attestation, plus real host ACL and backup/restore drill |
 | Cloudflare DNS/Tunnel/Access/CORS/WAF/rate limits and matching secrets/key overlap | Live gate | Staging evidence packet; production stays off while collecting |
-| Client and Ops D1 migrations, PA 0066/0067/0068/0069 and Viewer schema migration/replay | Proven locally + live gate | Fresh/replay clone evidence, then backup and remote migration ledgers |
+| Client and Ops D1 migrations, PA 0066–0075 and Viewer schema migration/replay | Proven locally + live gate | Fresh/replay clone evidence, then backup and remote migration ledgers |
 | Representative large drone/GCP corpus through real provider, Viewer, Client Portal and public link | Live gate | Actual processing, callback, publish, range assets, mobile/desktop and revocation evidence |
 
 ## Upstream contract evidence

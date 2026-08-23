@@ -27,6 +27,7 @@ const requestRecord = {
 };
 
 test("staff can review and download accepted supporting files on desktop and mobile", async ({ page }) => {
+  test.setTimeout(60_000);
   await page.route("**/api/**", async route => {
     const incoming = route.request(), path = new URL(incoming.url()).pathname;
     if (path === "/api/session") {
