@@ -183,7 +183,7 @@ test("Operations and staging find the canonical client migration history", () =>
 });
 
 test("the Project Alpha handoff stays pinned to the reviewed compatibility corpus", () => {
-  const prompt = read("docs/project-alpha-client-portal-agent-prompt.md");
+  const prompt = read("docs/project-alpha-client-portal-agent-prompt.md").replaceAll("\r\n", "\n");
   assert(prompt.includes("Project Alpha commit `60e735265e0d50ef880fde33e058d213a8b70c4b`"));
   assert(prompt.includes("LTDS-Ops.git` commit\n`b1ee064d8e9a78ff1fbc43c671bff4c2c58d4c38`"));
 

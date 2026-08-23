@@ -4,7 +4,7 @@ import { spawnSync } from "node:child_process";
 import test from "node:test";
 
 const scriptUrl = new URL("../truenas/thumbnail-generation/thumbnail-queue-worker.sh", import.meta.url);
-const script = await readFile(scriptUrl, "utf8");
+const script = (await readFile(scriptUrl, "utf8")).replaceAll("\r\n", "\n");
 
 test("video queue worker has valid Bash syntax", (t) => {
   if (process.platform === "win32") {

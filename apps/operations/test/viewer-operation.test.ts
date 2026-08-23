@@ -16,6 +16,11 @@ import {
   type ViewerPendingOperationRequest,
 } from "../src/client/viewer-operation";
 
+const TEST_NOW = Date.now();
+const TEST_CREATED_AT = new Date(TEST_NOW - 60_000).toISOString();
+const TEST_UPDATED_AT = new Date(TEST_NOW).toISOString();
+const TEST_COMPLETED_AT = new Date(TEST_NOW + 60_000).toISOString();
+
 const dataset = {
   id: "22222222-2222-4222-8222-222222222222", projectId: "66666666-6666-4666-8666-666666666666",
   displayName: "Flight", description: null, sourceType: "upload", storageMode: "managed" as const,
@@ -26,15 +31,15 @@ const dataset = {
 const queued: ViewerDurableOperation = {
   id: "11111111-1111-4111-8111-111111111111", type: "upload_finalize", subject: "ops:staff-one",
   datasetId: dataset.id, uploadId: "33333333-3333-4333-8333-333333333333", status: "queued", progress: 0,
-  result: null, errorCode: null, errorMessage: null, createdAt: "2026-08-16T12:00:00.000Z",
-  updatedAt: "2026-08-16T12:00:00.000Z", completedAt: null,
+  result: null, errorCode: null, errorMessage: null, createdAt: TEST_CREATED_AT,
+  updatedAt: TEST_UPDATED_AT, completedAt: null,
 };
 const checkpoint: ViewerOperationCheckpoint = {
   version: 1, operationId: queued.id, type: queued.type, datasetId: queued.datasetId,
   uploadId: queued.uploadId, createdAt: queued.createdAt,
 };
 const previewResult = {
-  id: "77777777-7777-4777-8777-777777777777", previewToken: "p".repeat(43), expiresAt: "2026-08-16T12:12:00.000Z",
+  id: "77777777-7777-4777-8777-777777777777", previewToken: "p".repeat(43), expiresAt: TEST_COMPLETED_AT,
   preview: {
     rootKey: "dataset_import" as const, relativePath: "north/flight", fileCount: 1, byteSize: 12,
     treeFingerprint: "c".repeat(64),
@@ -46,7 +51,7 @@ const previewResult = {
 const previewQueued: ViewerDurableOperation = {
   id: "88888888-8888-4888-8888-888888888888", type: "import_preview", subject: "ops:staff-one",
   datasetId: null, uploadId: null, status: "queued", progress: 0, result: null, errorCode: null, errorMessage: null,
-  createdAt: "2026-08-16T12:00:00.000Z", updatedAt: "2026-08-16T12:00:00.000Z", completedAt: null,
+  createdAt: TEST_CREATED_AT, updatedAt: TEST_UPDATED_AT, completedAt: null,
 };
 const previewCheckpoint: ViewerOperationCheckpoint = {
   version: 1, operationId: previewQueued.id, type: previewQueued.type, datasetId: null, uploadId: null,
@@ -61,7 +66,7 @@ const pending: ViewerPendingOperationRequest = {
   type: "upload_finalize",
   datasetId: dataset.id,
   uploadId: queued.uploadId,
-  createdAt: "2026-08-16T12:00:00.000Z",
+  createdAt: TEST_CREATED_AT,
 };
 
 function receipt(operation: ViewerDurableOperation | null = queued) {
@@ -70,7 +75,7 @@ function receipt(operation: ViewerDurableOperation | null = queued) {
       subject: "ops:staff-one", key: pending.key, method: "POST", path: pending.path,
       requestHash: "d".repeat(64), responseStatus: operation ? 202 : null,
       response: null, operationId: operation?.id ?? null,
-      createdAt: "2026-08-16T12:00:00.000Z", updatedAt: "2026-08-16T12:00:01.000Z",
+      createdAt: TEST_CREATED_AT, updatedAt: TEST_UPDATED_AT,
     },
     operation,
   };
@@ -90,16 +95,16 @@ function memoryStorage(): Storage {
 
 describe("Viewer durable operations", () => {
   it("stores only bounded credential-free operation identity and fails closed on storage errors", () => {
-    expect(parseViewerOperationCheckpoints(JSON.stringify([checkpoint]), Date.parse("2026-08-16T12:01:00.000Z"))).toEqual([checkpoint]);
-    expect(parseViewerOperationCheckpoints(JSON.stringify([{ ...checkpoint, uploadToken: "secret" }]), Date.parse("2026-08-16T12:01:00.000Z"))).toEqual([]);
+    expect(parseViewerOperationCheckpoints(JSON.stringify([checkpoint]), TEST_NOW)).toEqual([checkpoint]);
+    expect(parseViewerOperationCheckpoints(JSON.stringify([{ ...checkpoint, uploadToken: "secret" }]), TEST_NOW)).toEqual([]);
     const denied = { getItem() { throw new DOMException("denied", "SecurityError"); }, removeItem() {}, setItem() { throw new DOMException("full", "QuotaExceededError"); } } as unknown as Storage;
     expect(readViewerOperationCheckpoints(denied)).toEqual([]);
     expect(writeViewerOperationCheckpoint(checkpoint, denied)).toBe(false);
-    expect(parseViewerOperationCheckpoints(JSON.stringify([previewCheckpoint]), Date.parse("2026-08-16T12:01:00.000Z"))).toEqual([previewCheckpoint]);
-    expect(parseViewerOperationCheckpoints(JSON.stringify([{ ...previewCheckpoint, previewToken: "secret" }]), Date.parse("2026-08-16T12:01:00.000Z"))).toEqual([]);
-    expect(parseViewerPendingOperationRequests(JSON.stringify([pending]), Date.parse("2026-08-16T12:01:00.000Z"))).toEqual([pending]);
+    expect(parseViewerOperationCheckpoints(JSON.stringify([previewCheckpoint]), TEST_NOW)).toEqual([previewCheckpoint]);
+    expect(parseViewerOperationCheckpoints(JSON.stringify([{ ...previewCheckpoint, previewToken: "secret" }]), TEST_NOW)).toEqual([]);
+    expect(parseViewerPendingOperationRequests(JSON.stringify([pending]), TEST_NOW)).toEqual([pending]);
     for (const forbidden of ["accessToken", "uploadToken", "previewToken", "grant", "body", "requestHash", "headers"])
-      expect(parseViewerPendingOperationRequests(JSON.stringify([{ ...pending, [forbidden]: "secret" }]), Date.parse("2026-08-16T12:01:00.000Z"))).toEqual([]);
+      expect(parseViewerPendingOperationRequests(JSON.stringify([{ ...pending, [forbidden]: "secret" }]), TEST_NOW)).toEqual([]);
   });
 
   it("replays an ambiguous start with the same idempotency key and validates canonical 202 Location", async () => {
@@ -195,7 +200,7 @@ describe("Viewer durable operations", () => {
   it("accepts only the matching subject-bound operation and terminal dataset", async () => {
     const succeeded: ViewerDurableOperationResponse = { operation: {
       ...queued, status: "succeeded", progress: 1, result: { dataset },
-      updatedAt: "2026-08-16T12:02:00.000Z", completedAt: "2026-08-16T12:02:00.000Z",
+      updatedAt: TEST_COMPLETED_AT, completedAt: TEST_COMPLETED_AT,
     } };
     const client = { request: vi.fn().mockResolvedValue(succeeded) } as unknown as ViewerAdminClient;
     const progress = vi.fn();
@@ -218,7 +223,7 @@ describe("Viewer durable operations", () => {
 
     const succeeded: ViewerDurableOperationResponse = { operation: {
       ...previewQueued, status: "succeeded", progress: 1, result: previewResult,
-      updatedAt: "2026-08-16T12:02:00.000Z", completedAt: "2026-08-16T12:02:00.000Z",
+      updatedAt: TEST_COMPLETED_AT, completedAt: TEST_COMPLETED_AT,
     } };
     const pollClient = { request: vi.fn().mockResolvedValue(succeeded) } as unknown as ViewerAdminClient;
     await expect(pollViewerOperation(pollClient, previewCheckpoint, vi.fn())).resolves.toEqual(succeeded.operation);
