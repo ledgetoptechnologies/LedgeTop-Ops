@@ -10,8 +10,8 @@
     "deploy": "vite build && wrangler deploy",
     "test": "vitest run --config vitest.config.ts",
     "test:browser": "npm run build && playwright test --config playwright.config.ts",
-    "cf-typegen": "wrangler types",
-    "cf-typegen:check": "wrangler types --check",
+    "cf-typegen": "node ../../scripts/wrangler-typegen.mjs",
+    "cf-typegen:check": "node ../../scripts/wrangler-typegen.mjs --check",
     "db:migrate:local": "wrangler d1 migrations apply client-data --local",
     "db:migrate:remote": "wrangler d1 migrations apply client-data --remote"
   },
