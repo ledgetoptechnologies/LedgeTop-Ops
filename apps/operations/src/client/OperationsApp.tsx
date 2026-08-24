@@ -11,6 +11,7 @@ import {
   prefixFromDeliveryPath,
 } from "./delivery-route";
 import {
+  canonicalClientPath,
   deliverySectionPath,
   operationsSectionPath,
   pathDeliverySection,
@@ -20,7 +21,8 @@ import {
   type OperationsSection,
 } from "./operations-route";
 import { DropboxImportDialog } from "./DropboxImportDialog";
-import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
+import { ClientHub } from "./ClientHub";
+import { DeliveryLinksPage } from "./DeliveryLinksPage";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
 import { WorkContextSops } from "./WorkContextSops";
@@ -124,7 +126,7 @@ const NAV: Array<{
     label: "Operations",
     permissions: ["operations.view", "projects.view", "tasks.view"],
   },
-  { page: "client-requests", label: "Client Requests", href: "/operations/client-requests", permissions: ["operations.manage"] },
+  { page: "clients", label: "Client Hub", href: "/clients", permissions: ["team.view", "operations.manage"] },
   { page: "sops", label: "SOP Library", href: "/operations/sops", permissions: ["sops.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
   { page: "delivery", label: "Data", permissions: ["delivery.browse", "viewer.view"] },
@@ -194,6 +196,11 @@ export function OperationsApp() {
     const target = authorized || fallback;
     if (!target) return;
     setPage(target.page);
+    if (authorized && requested === "clients") {
+      const canonical = canonicalClientPath(location.pathname);
+      if (canonical !== location.pathname) history.replaceState(null, "", `${canonical}${location.search}`);
+      return;
+    }
     if (!authorized && location.pathname !== target.href)
       history.replaceState(null, "", target.href);
   };
@@ -319,7 +326,9 @@ export function OperationsApp() {
         <PageHeading page={page} />
         {page === "dashboard" && <Dashboard {...props} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
-        {page === "client-requests" && allowed(session.user, "operations.manage") && <ClientRequestWorkflow mapToken={session.mapboxPublicToken} />}{" "}
+        {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage")) && (
+          <ClientHub mapToken={session.mapboxPublicToken} permissions={session.user.permissions} />
+        )}{" "}
         {page === "sops" && allowed(session.user, "sops.view") && (
           <SopLibrary user={session.user} />
         )}{" "}
@@ -355,9 +364,9 @@ function PageHeading({ page }: { page: Page }) {
       "Operations",
       "Detailed operational schedules, projects, and task queues managed in Project Alpha.",
     ],
-    "client-requests": [
-      "Client requests",
-      "Review client-submitted work areas, scope, files, and request status.",
+    clients: [
+      "Client Hub",
+      "Review requests and open each client workspace for contacts, access, projects, and shared work.",
     ],
     sops: [
       "Internal SOP library",
@@ -503,11 +512,8 @@ function Dashboard({ session }: { session: Session }) {
     [],
   );
   if (!data && !error) return <Loading />;
-  const integrations = (data?.integrations || []).filter(
-    (item: any) =>
-      String(item.integration).toLowerCase().replaceAll("_", "-") ===
-      "project-alpha",
-  );
+  const integrations = data?.integrations || [];
+  const connections = data?.connections || [];
   const projectAlpha = integrations.find(
     (item: any) =>
       String(item.integration).toLowerCase().replaceAll("_", "-") ===
@@ -534,7 +540,7 @@ function Dashboard({ session }: { session: Session }) {
         </div>
       )}
       {allowed(session.user, "operations.manage") && (
-        <a className="pending-request-card ltds-card" href="/operations/client-requests?status=submitted">
+        <a className="pending-request-card ltds-card" href="/clients">
           <span>Client service requests</span>
           <strong>{pending.data?.count ?? "—"}</strong>
           <p>Awaiting staff review</p>
@@ -593,20 +599,20 @@ function Dashboard({ session }: { session: Session }) {
           )}
         </Card>
         <Card title="Configurations" action={session.user.isAdministrator ? <a href="/configurations">Open configurations</a> : undefined}>
-          {integrations.length ? (
-            integrations.map((item: any) => (
-              <div className="health-row" key={item.integration}>
+          {connections.length ? (
+            connections.map((item: any) => (
+              <a className="health-row" key={item.id} href={item.href}>
                 <div>
-                  <strong>{item.integration}</strong>
+                  <strong>{item.label}</strong>
                   <small>
-                    {item.last_success_at
-                      ? `Last success ${date(item.last_success_at)}`
-                      : "No successful sync yet"}
+                    {item.lastSuccessAt
+                      ? `Last success ${date(item.lastSuccessAt)}`
+                      : item.configured ? "Configured" : "Not configured"}
                   </small>
                 </div>
                 <StatusPill
                   tone={
-                    item.status === "healthy" && !item.stale
+                    (item.status === "healthy" || item.status === "configured") && !item.stale
                       ? "success"
                       : item.status === "error"
                         ? "danger"
@@ -615,7 +621,7 @@ function Dashboard({ session }: { session: Session }) {
                 >
                   {item.stale ? "stale" : item.status}
                 </StatusPill>
-              </div>
+              </a>
             ))
           ) : (
             <EmptyState
@@ -630,7 +636,7 @@ function Dashboard({ session }: { session: Session }) {
               <SimpleRows
                 rows={data.recentShares.map((item: any) => ({
                   title: `${item.client_name} · ${item.project_name}`,
-                  detail: item.r2_prefix,
+                  detail: item.target_path || item.r2_prefix,
                   status: item.revoked_at ? "revoked" : "active",
                 }))}
               />
@@ -3637,22 +3643,23 @@ function ViewerDataOverview() {
   </div>;
 }
 
-function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; initialTab?: "delivery" | "incoming" | "models" }) {
+function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; initialTab?: "delivery" | "incoming" | "models" | "links" }) {
   const canViewDelivery = allowed(session.user, "delivery.browse");
   const canViewIncoming =
     allowed(session.user, "file_requests.view") &&
     session.capabilities?.incomingUploads?.enabled === true;
   const canViewModels = allowed(session.user, "viewer.view");
+  const canViewLinks = allowed(session.user, "delivery.share.audit");
   const requestedTab = pathDeliverySection(location.pathname);
-  const authorizedTab = (requested: "delivery" | "incoming" | "models") =>
-    requested === "delivery" ? canViewDelivery : requested === "incoming" ? canViewIncoming : canViewModels;
+  const authorizedTab = (requested: "delivery" | "incoming" | "models" | "links") =>
+    requested === "delivery" ? canViewDelivery : requested === "incoming" ? canViewIncoming : requested === "links" ? canViewLinks : canViewModels;
   const fallbackTab = initialTab === "models" && canViewModels ? "models" :
     canViewDelivery ? "delivery" : canViewIncoming ? "incoming" : "models";
-  const normalizedTab = (requested: "delivery" | "incoming" | "models") =>
+  const normalizedTab = (requested: "delivery" | "incoming" | "models" | "links") =>
     authorizedTab(requested) ? requested : fallbackTab;
   const firstTab = normalizedTab(requestedTab);
-  const [tab, setTab] = useState<"delivery" | "incoming" | "models">(firstTab);
-  const selectTab = (next: "delivery" | "incoming" | "models") => {
+  const [tab, setTab] = useState<"delivery" | "incoming" | "models" | "links">(firstTab);
+  const selectTab = (next: "delivery" | "incoming" | "models" | "links") => {
     setTab(next);
     history.pushState(null, "", deliverySectionPath(next));
   };
@@ -3685,6 +3692,7 @@ function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; i
             Incoming uploads
           </button>
         )}
+        {canViewLinks && <button role="tab" aria-selected={tab === "links"} className={tab === "links" ? "active" : ""} onClick={() => selectTab("links")}>Client links</button>}
         {canViewModels && (
           <button role="tab" aria-selected={tab === "models"} className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>3D models</button>
         )}
@@ -3693,6 +3701,8 @@ function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; i
         <DeliveryWorkspaceV2 session={session} />
       ) : tab === "incoming" && canViewIncoming ? (
         <IncomingUploads />
+      ) : tab === "links" && canViewLinks ? (
+        <DeliveryLinksPage canRevoke={allowed(session.user, "delivery.share.revoke")} />
       ) : <EmptyState title="No Data tools available" detail="Your account does not have access to Delivery or the 3D Viewer overview." />}
     </>
   );
@@ -5537,7 +5547,7 @@ function ShareHistory({
   const { data, error, reload } = useLoad(
     () =>
       allowed(session.user, "delivery.share.audit")
-        ? api<{ shares: any[] }>("/api/delivery/shares")
+        ? api<{ shares: any[] }>("/api/delivery/shares?limit=8")
         : Promise.resolve({ shares: [] }),
     [revision],
   );
@@ -5546,14 +5556,10 @@ function ShareHistory({
   return (
     <Card
       title="Recent client links"
-      action={
-        <button
-          className="button-ghost button-small"
-          onClick={() => void reload()}
-        >
-          Refresh
-        </button>
-      }
+      action={<span className="card-actions">
+        <a className="button-ghost button-small" href="/delivery/links">View all</a>
+        <button className="button-ghost button-small" onClick={() => void reload()}>Refresh</button>
+      </span>}
     >
       <ErrorLine error={error} />
       {data?.shares.length ? (
@@ -5576,9 +5582,9 @@ function ShareHistory({
               return (
                 <tr key={share.id}>
                   <td>
-                    <strong>{share.display_name || share.r2_prefix}</strong>
+                    <strong>{share.display_name || share.target_path || share.r2_prefix}</strong>
                     <small>
-                      <code>{share.r2_prefix}</code>
+                      <code>{share.target_path || share.r2_prefix}</code>
                     </small>
                   </td>
                   <td>
@@ -5651,7 +5657,6 @@ const STAFF_CONTROL_LABELS = {
 } as const;
 type StaffControl = keyof typeof STAFF_CONTROL_LABELS;
 function Team({ session }: { session: Session }) {
-  const [tab, setTab] = useState<"staff" | "clients">("staff");
   const { data, error, reload } = useLoad(
     () => api<{ staff: any[] }>("/api/team/staff"),
     [],
@@ -5679,11 +5684,6 @@ function Team({ session }: { session: Session }) {
   };
   return (
     <>
-      <div className="team-tabs" role="tablist" aria-label="Team directory">
-        <button role="tab" aria-selected={tab === "staff"} onClick={() => setTab("staff")}>Staff</button>
-        <button role="tab" aria-selected={tab === "clients"} onClick={() => setTab("clients")}>Clients</button>
-      </div>
-      {tab === "clients" ? <ClientIdentityDirectory administrator={session.user.isAdministrator} /> : <>
       <ManagedNotice
         detail={
           session.user.isAdministrator
@@ -5756,7 +5756,6 @@ function Team({ session }: { session: Session }) {
           </Card>
         ))}
       </div>
-      </>}
     </>
   );
 }

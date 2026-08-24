@@ -56,7 +56,7 @@ import {
 } from "./delivery";
 import { searchShareRecipients, shareDirectoryRecipientsEnabled } from "./share-recipients";
 import { syncProjectAlpha } from "./project-alpha";
-import { projectAlphaHealthIsStale } from "./integration-health";
+import { buildConnectionSummaries, projectAlphaHealthIsStale } from "./integration-health";
 import {
   auditStatement,
   csrfToken,
@@ -128,6 +128,7 @@ import {
 } from "./client-request-service-review";
 import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quote";
 import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
+import { registerClientHubRoutes } from "./client-hub";
 import {
   decorateWorkContextsWithSops,
   registerWorkContextSopRoutes,
@@ -183,6 +184,7 @@ import {
   drainViewerSessionRevocations,
   pruneViewerSessionIssuanceReceipts,
   registerViewerIntegrationRoutes,
+  viewerIntegrationEnabled,
 } from "./viewer-integration";
 import {
   registerViewerProcessingRoutes,
@@ -810,7 +812,7 @@ app.get("/api/dashboard", async (c) => {
       `SELECT integration,status,last_success_at,last_error_code,updated_at FROM integration_health ${administrator ? "" : "WHERE integration='project-alpha'"} ORDER BY integration`,
     ).all(),
     administrator
-      ? listDeliveryShares(c.env, principal).catch(() => [])
+      ? listDeliveryShares(c.env, principal, { limit: 6 }).then(page => page.shares).catch(() => [])
       : Promise.resolve([]),
   ]);
   const now = Date.now();
@@ -818,6 +820,10 @@ app.get("/api/dashboard", async (c) => {
     ...row,
     stale: projectAlphaHealthIsStale(row, now),
   }));
+  const projectAlphaConfigured = Boolean(c.env.PROJECT_ALPHA_BASE_URL && c.env.PROJECT_ALPHA_API_KEY);
+  const viewerConfigured = viewerIntegrationEnabled(c.env) && Boolean(c.env.VIEWER_BASE_URL);
+  const deliveryConfigured = Boolean(c.env.DELIVERY_BASE_URL && c.env.R2_BUCKET_NAME);
+  const connections = buildConnectionSummaries({ integrations, projectAlphaConfigured, viewerConfigured, deliveryConfigured });
   return c.json({
     operations: operations.results,
     tasks: tasks.results,
@@ -832,6 +838,7 @@ app.get("/api/dashboard", async (c) => {
         .length,
     },
     integrations,
+    connections,
     recentShares: shares.slice(0, 6),
   });
 });
@@ -1391,6 +1398,7 @@ registerWorkContextSopRoutes(app);
 registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
+registerClientHubRoutes(app);
 registerViewerIntegrationRoutes(app);
 registerViewerProcessingRoutes(app);
 app.post("/api/internal/project-alpha/delivery-intents/preflight", handleProjectAlphaDeliveryPreflight);
@@ -1424,7 +1432,7 @@ app.get("/api/client-service-requests", async (c) => {
   const principal = c.get("principal");
   await requireGlobal(c.env, principal, "operations.manage");
   const db = c.env.DELIVERY_DB.withSession("first-primary");
-  const baseQuery = `SELECT r.id,r.account_id,r.project_id,r.parent_request_id,r.request_type,r.title,r.details,r.location_text,r.preferred_start_at,r.service_category,r.deliverables_text,r.site_contact_name,r.site_contact_email,r.site_contact_phone,r.desired_completion_at,r.latitude,r.longitude,r.area_geojson,r.poi_points_json,r.status,r.created_at,r.updated_at,a.display_name account_name,p.project_name,p.client_name,quote.project_alpha_artifact_id quote_id,quote.document_number quote_document_number,quote.artifact_status quote_status,quote.total_minor quote_total_minor,quote.currency quote_currency,quote.verified_at quote_verified_at,__CATALOG_MARKER__ uses_catalog_v2 FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id LEFT JOIN projects p ON p.id=r.project_id LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id AND quote.artifact_type='quote' AND quote.superseded_at IS NULL WHERE a.status='active' ORDER BY CASE r.status WHEN 'submitted' THEN 0 WHEN 'under_review' THEN 1 WHEN 'accepted_pending_pa_linkage' THEN 2 WHEN 'accepted_linked' THEN 3 ELSE 4 END,CASE WHEN r.desired_completion_at IS NULL THEN 1 ELSE 0 END,r.desired_completion_at ASC,r.created_at ASC,r.id ASC LIMIT 200`;
+  const baseQuery = `SELECT r.id,r.account_id,r.project_id,r.parent_request_id,r.request_type,r.title,r.details,r.location_text,r.preferred_start_at,r.service_category,r.deliverables_text,r.site_contact_name,r.site_contact_email,r.site_contact_phone,r.desired_completion_at,r.latitude,r.longitude,r.area_geojson,r.poi_points_json,r.status,r.created_at,r.updated_at,a.display_name account_name,p.project_name,p.client_name,quote.project_alpha_artifact_id quote_id,quote.document_number quote_document_number,quote.artifact_status quote_status,quote.total_minor quote_total_minor,quote.currency quote_currency,quote.verified_at quote_verified_at,__CATALOG_MARKER__ uses_catalog_v2 FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id LEFT JOIN projects p ON p.id=r.project_id LEFT JOIN request_pa_artifacts quote ON quote.request_id=r.id AND quote.artifact_type='quote' AND quote.superseded_at IS NULL WHERE a.status='active' ORDER BY CASE r.status WHEN 'submitted' THEN 0 WHEN 'under_review' THEN 1 WHEN 'accepted_pending_pa_linkage' THEN 2 WHEN 'accepted_linked' THEN 3 ELSE 4 END,r.created_at ASC,r.id ASC LIMIT 200`;
   let result: D1Result<Record<string, unknown>>;
   try {
     result = await db.prepare(baseQuery.replace(

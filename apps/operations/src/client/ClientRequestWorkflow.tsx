@@ -163,16 +163,26 @@ function requestQueueError(caught: unknown): string {
 
 export function ClientRequestWorkflow({
   mapToken,
+  basePath = "/operations/client-requests",
+  pendingOnly: forcePendingOnly = false,
 }: {
   mapToken: string | null;
+  basePath?: string;
+  pendingOnly?: boolean;
 }) {
+  const selectedRequestId = () => {
+    const parts = location.pathname.split("/").filter(Boolean);
+    return parts[0] === "clients" && parts[1] === "requests"
+      ? parts[2] || null
+      : parts[0] === "operations" && parts[1] === "client-requests"
+        ? parts[2] || null
+        : null;
+  };
   const [requests, setRequests] = useState<ClientRequestRecord[] | null>(null),
     [error, setError] = useState(""),
-    [selectedId, setSelectedId] = useState(
-      () => location.pathname.split("/").filter(Boolean)[2] || null,
-    );
+    [selectedId, setSelectedId] = useState(selectedRequestId);
   const pendingOnly =
-    new URLSearchParams(location.search).get("status") === "submitted";
+    forcePendingOnly || new URLSearchParams(location.search).get("status") === "submitted";
   const load = () => {
     setError("");
     return api<{ requests: ClientRequestRecord[] }>("/api/client-service-requests")
@@ -181,8 +191,7 @@ export function ClientRequestWorkflow({
   };
   useEffect(() => {
     void load();
-    const pop = () =>
-      setSelectedId(location.pathname.split("/").filter(Boolean)[2] || null);
+    const pop = () => setSelectedId(selectedRequestId());
     addEventListener("popstate", pop);
     return () => removeEventListener("popstate", pop);
   }, []);
@@ -197,13 +206,13 @@ export function ClientRequestWorkflow({
     history.pushState(
       null,
       "",
-      `/operations/client-requests/${encodeURIComponent(id)}`,
+      `${basePath}/${encodeURIComponent(id)}`,
     );
     setSelectedId(id);
     window.scrollTo(0, 0);
   };
   const back = () => {
-    history.pushState(null, "", "/operations/client-requests");
+    history.pushState(null, "", basePath === "/clients/requests" ? "/clients" : basePath);
     setSelectedId(null);
   };
   if (selectedId)
@@ -211,6 +220,7 @@ export function ClientRequestWorkflow({
       <ClientRequestDetail
         requestId={selectedId}
         mapToken={mapToken}
+        basePath={basePath}
         back={back}
         changed={load}
       />
@@ -288,11 +298,13 @@ export function ClientRequestWorkflow({
 function ClientRequestDetail({
   requestId,
   mapToken,
+  basePath,
   back,
   changed,
 }: {
   requestId: string;
   mapToken: string | null;
+  basePath: string;
   back: () => void;
   changed: () => Promise<void> | void;
 }) {
@@ -807,7 +819,7 @@ function ClientRequestDetail({
                       history.pushState(
                         null,
                         "",
-                        `/operations/client-requests/${encodeURIComponent(child.id)}`,
+                        `${basePath}/${encodeURIComponent(child.id)}`,
                       );
                       dispatchEvent(new PopStateEvent("popstate"));
                     }}
