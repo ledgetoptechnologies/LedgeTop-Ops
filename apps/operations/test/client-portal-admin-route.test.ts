@@ -209,6 +209,29 @@ describe("verified Project Alpha quote linkage", () => {
     expect(JSON.stringify(payload)).not.toMatch(/Q-0042|125000|USD|"quote_id":42/);
   });
 
+  it("orders the submitted review queue by creation time for first-come-first-served handling", async () => {
+    let queueSql = "";
+    const state: DbState = {
+      batches: [],
+      all(kind, sql) {
+        if (kind === "delivery" && sql.includes("FROM client_service_requests r JOIN client_accounts")) {
+          queueSql = sql;
+          return [];
+        }
+        return [];
+      },
+    };
+    const response = await worker.fetch(
+      new Request("https://ops.example/api/client-service-requests"),
+      environment(state) as any,
+      executionCtx,
+    );
+    expect(response.status).toBe(200);
+    expect(queueSql).toContain("WHEN 'submitted' THEN 0");
+    expect(queueSql).toContain("END,r.created_at ASC,r.id ASC");
+    expect(queueSql).not.toContain("desired_completion_at ASC");
+  });
+
   it("keeps the request queue available while the additive v2 table migration is pending", async () => {
     const state: DbState = {
       batches: [],
