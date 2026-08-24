@@ -1,5 +1,33 @@
 import { expect, test } from "@playwright/test";
 
+test("audit-only staff can directly open Client links without browse or share mutation access",async({page})=>{
+  const apiRequests:Array<{method:string;path:string}>=[];
+  await page.route("**/api/**",async route=>{
+    const request=route.request(),url=new URL(request.url());
+    apiRequests.push({method:request.method(),path:url.pathname});
+    if(url.pathname==="/api/session")return route.fulfill({json:{
+      user:{id:"staff-link-auditor",email:"auditor@example.test",displayName:"Link Auditor",status:"Active",profileType:"Employee",isAdministrator:false,permissions:["delivery.share.audit"],divisions:[]},
+      csrfToken:"csrf-audit",timezone:"America/Chicago",mapStyleUrl:null,mapboxPublicToken:null,capabilities:{},
+    }});
+    if(url.pathname==="/api/delivery/shares"&&request.method()==="GET")return route.fulfill({json:{shares:[{
+      id:"share-audit",label:"Read-only handoff",client_name:"Acme",project_name:"Survey",target_path:"Jobs/Clients/Acme/final.mov",target_kind:"file",display_name:"final.mov",created_at:"2026-08-21T12:00:00Z",expires_at:null,revoked_at:null,unavailable_since:null,password_protected:0,access_count:1,last_accessed_at:null,
+    }],nextCursor:null}});
+    return route.fulfill({status:404,json:{error:"Not found"}});
+  });
+
+  await page.goto("/delivery/links");
+  await expect(page).toHaveURL(/\/delivery\/links$/);
+  await expect(page.getByRole("heading",{name:"Client links",exact:true})).toBeVisible();
+  await expect(page.getByText("Read-only handoff")).toBeVisible();
+  const dataNavigationLink=page.locator('.ops-desktop-nav a[href="/delivery"]');
+  await expect(dataNavigationLink).toHaveAttribute("aria-current","page");
+  await expect(page.getByRole("tab",{name:"Client delivery"})).toHaveCount(0);
+  await expect(page.getByRole("button",{name:"Revoke"})).toHaveCount(0);
+  expect(apiRequests.filter(({path})=>path.startsWith("/api/delivery"))).toEqual([
+    {method:"GET",path:"/api/delivery/shares"},
+  ]);
+});
+
 test("client-link history is refresh-safe, searchable, paginated, and revocable",async({page})=>{
   const shareQueries:string[]=[];
   const revoked:string[]=[];

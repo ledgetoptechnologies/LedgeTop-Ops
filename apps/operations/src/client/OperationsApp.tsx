@@ -11,6 +11,8 @@ import {
   prefixFromDeliveryPath,
 } from "./delivery-route";
 import {
+  DATA_PAGE_PERMISSIONS,
+  canAccessDataPage,
   canonicalClientPath,
   deliverySectionPath,
   operationsSectionPath,
@@ -129,7 +131,7 @@ const NAV: Array<{
   { page: "clients", label: "Client Hub", href: "/clients", permissions: ["team.view", "operations.manage"] },
   { page: "sops", label: "SOP Library", href: "/operations/sops", permissions: ["sops.view"] },
   { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
-  { page: "delivery", label: "Data", permissions: ["delivery.browse", "viewer.view"] },
+  { page: "delivery", label: "Data", permissions: [...DATA_PAGE_PERMISSIONS] },
 ];
 const MANAGE_NAV: typeof NAV = [
   { page: "team", label: "Team", permissions: ["team.view"] },
@@ -333,7 +335,7 @@ export function OperationsApp() {
           <SopLibrary user={session.user} />
         )}{" "}
         {page === "airspace" && <Airspace />}{" "}
-        {page === "delivery" && (allowed(session.user, "delivery.browse") || allowed(session.user, "viewer.view")) && (
+        {page === "delivery" && canAccessDataPage(session.user.permissions) && (
           <DeliveryHub {...props} />
         )}{" "}
         {page === "viewer" && allowed(session.user, "viewer.view") && (
@@ -3654,7 +3656,7 @@ function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; i
   const authorizedTab = (requested: "delivery" | "incoming" | "models" | "links") =>
     requested === "delivery" ? canViewDelivery : requested === "incoming" ? canViewIncoming : requested === "links" ? canViewLinks : canViewModels;
   const fallbackTab = initialTab === "models" && canViewModels ? "models" :
-    canViewDelivery ? "delivery" : canViewIncoming ? "incoming" : "models";
+    canViewDelivery ? "delivery" : canViewIncoming ? "incoming" : canViewLinks ? "links" : "models";
   const normalizedTab = (requested: "delivery" | "incoming" | "models" | "links") =>
     authorizedTab(requested) ? requested : fallbackTab;
   const firstTab = normalizedTab(requestedTab);
@@ -3673,7 +3675,7 @@ function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; i
     const pop = () => normalize();
     addEventListener("popstate", pop);
     return () => removeEventListener("popstate", pop);
-  }, [canViewDelivery, canViewIncoming, canViewModels, fallbackTab]);
+  }, [canViewDelivery, canViewIncoming, canViewLinks, canViewModels, fallbackTab]);
   return (
     <>
       <div

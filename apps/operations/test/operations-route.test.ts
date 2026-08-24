@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { canonicalClientPath, deliverySectionPath, pathDeliverySection, pathOperationsSection, pathPage } from "../src/client/operations-route";
+import { canAccessDataPage, canonicalClientPath, deliverySectionPath, pathDeliverySection, pathOperationsSection, pathPage } from "../src/client/operations-route";
 
 describe("consolidated Operations routes", () => {
+  it("authorizes the Data page for link auditors without granting access from share mutation permissions", () => {
+    expect(canAccessDataPage(["delivery.share.audit"])).toBe(true);
+    expect(canAccessDataPage(["delivery.browse"])).toBe(true);
+    expect(canAccessDataPage(["viewer.view"])).toBe(true);
+    expect(canAccessDataPage(["delivery.share.create", "delivery.share.revoke"])).toBe(false);
+  });
+
   it("maps the canonical authenticated processing review route to Viewer", () => {
     expect(pathPage("/operations/processing")).toBe("viewer");
     expect(pathPage("/operations/processing/anything")).toBe("viewer");

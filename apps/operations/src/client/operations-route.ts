@@ -2,6 +2,12 @@ export type OperationsPage="dashboard"|"operations"|"clients"|"sops"|"airspace"|
 export type OperationsSection="operations"|"projects"|"tasks"|"client-requests";
 export type DeliverySection="delivery"|"incoming"|"models"|"links";
 
+export const DATA_PAGE_PERMISSIONS = ["delivery.browse", "viewer.view", "delivery.share.audit"] as const;
+
+export function canAccessDataPage(permissions:readonly string[]):boolean{
+  return DATA_PAGE_PERMISSIONS.some(permission=>permissions.includes(permission));
+}
+
 const PAGES:OperationsPage[]=["dashboard","operations","clients","sops","airspace","delivery","viewer","team","configurations","administration"];
 
 export function pathPage(pathname:string):OperationsPage{
