@@ -2553,9 +2553,15 @@ app.get("/api/delivery/folders/location-assets/:assetRef", async (c) =>
     c.req.param("assetRef"),
   )),
 );
-app.get("/api/delivery/shares", async (c) =>
-  c.json({ shares: await listDeliveryShares(c.env, c.get("principal")) }),
-);
+app.get("/api/delivery/shares", async (c) => {
+  const limitValue=c.req.query("limit");
+  const limit=limitValue===undefined?undefined:/^\d+$/.test(limitValue)?Number(limitValue):Number.NaN;
+  return c.json(await listDeliveryShares(c.env,c.get("principal"),{
+    q:c.req.query("q"),
+    cursor:c.req.query("cursor"),
+    limit,
+  }));
+});
 app.get("/api/delivery/trash", async (c) => {
   const principal = c.get("principal");
   await requireGlobal(c.env, principal, "delivery.delete");

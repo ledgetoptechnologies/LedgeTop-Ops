@@ -288,7 +288,9 @@ export async function listDeliveryFolderMedia(env:Env,principal:StaffPrincipal,p
  */
 export async function searchDeliveryItems(env:Env,principal:StaffPrincipal,queryValue:string,cursorValue?:string){
   await requirePermission(env,principal,"delivery.browse");
-  const query=queryValue.normalize("NFC").trim();
+  const submittedQuery=queryValue.normalize("NFC").trim();
+  const pathMode=/^path\s*:/i.test(submittedQuery);
+  const query=(pathMode?submittedQuery.replace(/^path\s*:/i,""):submittedQuery).trim();
   if(!query||query.length>160||/[\0-\x1f\x7f]/.test(query))throw new HTTPException(400,{message:"Search text is invalid"});
   const access=await browseRoots(env,principal);
   if(!access.global&&!access.roots.length)return{query,items:[],nextCursor:null};
@@ -299,42 +301,70 @@ export async function searchDeliveryItems(env:Env,principal:StaffPrincipal,query
   const roots=access.global?["Jobs/"]:access.roots.map(root=>root.prefix);
   const scopeSql=roots.map(()=>"r2_key LIKE ?").join(" OR ");
   const escaped=query.toLowerCase().replace(/[\\%_]/g,"\\$&");
-  const rows=await env.DELIVERY_DB.prepare(`SELECT r2_key,etag,size,uploaded_at,content_type,media_kind
-    FROM file_index
-    WHERE (${scopeSql})
-      AND lower(r2_key) LIKE ? ESCAPE '\\'
-      AND instr(lower('/'||r2_key||'/'),'/_ltds/')=0
-      AND instr(lower('/'||r2_key||'/'),'/.previews/')=0
-      AND instr(lower('/'||r2_key||'/'),'/dump/')=0
-      AND NOT EXISTS (SELECT 1 FROM delivery_tombstones t WHERE t.restored_at IS NULL AND (
-        (t.tombstone_kind='exact' AND t.physical_key=file_index.r2_key) OR
-        (t.tombstone_kind='prefix' AND substr(file_index.r2_key,1,length(t.physical_key))=t.physical_key)
-      ))
-    ORDER BY r2_key COLLATE NOCASE
-    LIMIT 101 OFFSET ?`).bind(...roots.map(root=>`${root}%`),`%${escaped}%`,offset).all<{r2_key:string;etag:string;size:number;uploaded_at:string;content_type:string|null;media_kind:string|null}>();
+  const prefilterSql=pathMode?"lower(r2_key) LIKE ? ESCAPE '\\'":`(
+    lower(r2_key) LIKE ? ESCAPE '\\' OR EXISTS (
+      SELECT 1 FROM file_aliases prefilter_alias
+      WHERE (prefilter_alias.physical_key=file_index.r2_key OR
+        (substr(prefilter_alias.physical_key,-1,1)='/' AND substr(file_index.r2_key,1,length(prefilter_alias.physical_key))=prefilter_alias.physical_key))
+        AND lower(prefilter_alias.display_name) LIKE ? ESCAPE '\\'
+    )
+  )`;
+  const matchSql=pathMode
+    ?"part.is_leaf=1 AND lower(part.item_path) LIKE ? ESCAPE '\\'"
+    :"(lower(part.item_name) LIKE ? ESCAPE '\\' OR lower(COALESCE(alias.display_name,'')) LIKE ? ESCAPE '\\')";
+  // Split each scoped key into addressable path components before pagination.
+  // This lets a folder name produce exactly one folder candidate and prevents
+  // its descendants from consuming the page ahead of genuine leaf matches.
+  const rows=await env.DELIVERY_DB.prepare(`WITH RECURSIVE
+    scoped_files(r2_key,etag,size,uploaded_at,content_type,media_kind) AS (
+      SELECT r2_key,etag,size,uploaded_at,content_type,media_kind FROM file_index
+      WHERE (${scopeSql})
+        AND (${prefilterSql})
+        AND instr(lower('/'||r2_key||'/'),'/_ltds/')=0
+        AND instr(lower('/'||r2_key||'/'),'/.previews/')=0
+        AND instr(lower('/'||r2_key||'/'),'/dump/')=0
+        AND NOT EXISTS (SELECT 1 FROM delivery_tombstones t WHERE t.restored_at IS NULL AND (
+          (t.tombstone_kind='exact' AND t.physical_key=file_index.r2_key) OR
+          (t.tombstone_kind='prefix' AND substr(file_index.r2_key,1,length(t.physical_key))=t.physical_key)
+        ))
+    ),
+    path_parts(r2_key,etag,size,uploaded_at,content_type,media_kind,remaining,item_path,item_name,is_leaf) AS (
+      SELECT r2_key,etag,size,uploaded_at,content_type,media_kind,r2_key,'','',0 FROM scoped_files
+      UNION ALL
+      SELECT r2_key,etag,size,uploaded_at,content_type,media_kind,
+        CASE WHEN instr(remaining,'/')>0 THEN substr(remaining,instr(remaining,'/')+1) ELSE '' END,
+        item_path||CASE WHEN instr(remaining,'/')>0 THEN substr(remaining,1,instr(remaining,'/')) ELSE remaining END,
+        CASE WHEN instr(remaining,'/')>0 THEN substr(remaining,1,instr(remaining,'/')-1) ELSE remaining END,
+        CASE WHEN instr(remaining,'/')=0 THEN 1 ELSE 0 END
+      FROM path_parts WHERE remaining<>''
+    )
+    SELECT part.item_path AS r2_key,part.item_name,part.is_leaf,
+      MAX(part.etag) etag,MAX(part.size) size,MAX(part.uploaded_at) uploaded_at,
+      MAX(part.content_type) content_type,MAX(part.media_kind) media_kind,
+      MAX(alias.display_name) display_name
+    FROM path_parts part
+    LEFT JOIN file_aliases alias ON alias.physical_key=part.item_path
+    WHERE part.item_name<>'' AND part.item_path<>'Jobs/' AND (${matchSql})
+    GROUP BY part.item_path,part.item_name,part.is_leaf
+    ORDER BY part.item_path COLLATE NOCASE
+    LIMIT 101 OFFSET ?`).bind(
+      ...roots.map(root=>`${root}%`),`%${escaped}%`,...(pathMode?[]:[`%${escaped}%`]),
+      `%${escaped}%`,...(pathMode?[]:[`%${escaped}%`]),offset,
+    ).all<{r2_key:string;item_name:string;is_leaf:number;etag:string;size:number;uploaded_at:string;content_type:string|null;media_kind:string|null;display_name:string|null}>();
   const page=rows.results.slice(0,100),hasMore=rows.results.length>100;
-  const aliases=await aliasMap(env,page.map(row=>row.r2_key));
   const folders=new Map<string,any>(),files:any[]=[];
   for(const row of page){
     const key=row.r2_key;
     if(hidden(key))continue;
-    const parts=key.split("/");
-    // Include the matching folder segment so searches like a client name find
-    // the folder rather than every file beneath it.  File-name matches retain
-    // a direct preview/download result.
-    const matchingFolderIndex=parts.slice(0,-1).findIndex(part=>part.toLowerCase().includes(query.toLowerCase()));
-    if(matchingFolderIndex>=0){
-      const folderKey=`${parts.slice(0,matchingFolderIndex+1).join("/")}/`;
-      if(folderKey!=="Jobs/"&&!hidden(folderKey)){
-        const name=folderKey.slice(0,-1).split("/").pop()||"Folder";
-        folders.set(folderKey,{id:encodeRef(folderKey.slice(0,-1)),prefix:folderKey,physicalKey:folderKey,name,displayName:name,kind:"folder",searchPath:folderKey});
-      }
+    const name=row.display_name||row.item_name||key;
+    if(!row.is_leaf){
+      folders.set(key,{id:encodeRef(key.slice(0,-1)),prefix:key,physicalKey:key,name:row.item_name||"Folder",displayName:name,kind:"folder",searchPath:key});
+      continue;
     }
-    const name=aliases.get(key)||parts.at(-1)||key;
     const kind=mediaKind(key),id=encodeRef(key),sourceUrl=deliverySourceUrl(kind,id);
     files.push({id,physicalKey:key,name,displayName:name,kind,size:row.size,uploadedAt:row.uploaded_at,searchPath:key,previewUrl:kind==="image"?(isBrowserPreviewableImage(key)?sourceUrl:undefined):["audio","text"].includes(kind)?`/api/delivery/items/${id}/preview`:undefined,sourceUrl,downloadUrl:`/api/delivery/items/${id}/download`,thumbnailState:"not_applicable",thumbnailFallbackKind:thumbnailFallbackKindForFile(key,kind),previewStatus:kind==="video"?"processing":undefined});
   }
-  return{query,items:[...folders.values(),...files],nextCursor:hasMore?String(offset+page.length):null};
+  return{query,searchMode:pathMode?"path":"name",items:[...folders.values(),...files],nextCursor:hasMore?String(offset+page.length):null};
 }
 
 export async function authorizeItem(env:Env,principal:StaffPrincipal,itemRef:string):Promise<string>{await requirePermission(env,principal,"delivery.browse");const key=decodeRef(itemRef);if(hidden(key))throw new HTTPException(404,{message:"Item not found"});const access=await browseRoots(env,principal);if(!access.global&&!access.roots.some(root=>key.startsWith(root.prefix)))throw new HTTPException(404,{message:"Item not found"});await assertNotTrashed(env,key);return key;}
@@ -621,6 +651,102 @@ export async function revokeProjectAlphaDeliveryGuestShare(env:Env,input:{shareI
   if(!results[0]?.meta.changes)throw new HTTPException(409,{message:"Delivery share is not active"});
 }
 
-export async function listDeliveryShares(env:Env,principal:StaffPrincipal){await requirePermission(env,principal,"delivery.share.audit");const scope=await sqlScope(env,principal,"delivery.share.audit");if(scope.deniedGlobal)return[];let where="1=1",values:unknown[]=[];if(!scope.global){if(!scope.divisions.length)return[];where=`COALESCE(s.division_id,p.division_id) IN (${scope.divisions.map(()=>"?").join(",")})`;values=scope.divisions;}const result=await env.DELIVERY_DB.prepare(`SELECT s.id,s.public_id,s.label,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,s.created_at,s.last_accessed_at,s.access_count,(s.password_hash IS NOT NULL) password_protected,p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) AS r2_prefix,COALESCE(s.division_id,p.division_id) AS division_id FROM shares s JOIN projects p ON p.id=s.project_id WHERE ${where} ORDER BY s.created_at DESC LIMIT 200`).bind(...values).all<any>();const aliases=await aliasMap(env,result.results.map(row=>row.r2_prefix));return result.results.map(row=>({...row,display_name:aliases.get(row.r2_prefix)||row.r2_prefix.replace(/\/$/,"").split("/").pop()}));}
+export interface DeliveryShareHistoryQuery {
+  q?:string;
+  cursor?:string;
+  limit?:number;
+}
+
+export interface DeliveryShareHistoryPage {
+  shares:any[];
+  nextCursor:string|null;
+}
+
+interface DeliveryShareHistoryCursor { createdAt:string; id:string }
+
+function encodeDeliveryShareCursor(value:DeliveryShareHistoryCursor):string{
+  return b64(encoder.encode(JSON.stringify([value.createdAt,value.id])));
+}
+
+function decodeDeliveryShareCursor(value:string|undefined):DeliveryShareHistoryCursor|null{
+  if(!value)return null;
+  if(value.length>512||!/^[A-Za-z0-9_-]+$/.test(value))throw new HTTPException(400,{message:"Share-history cursor is invalid"});
+  try{
+    const raw=atob(value.replace(/-/g,"+").replace(/_/g,"/").padEnd(Math.ceil(value.length/4)*4,"="));
+    const parsed=JSON.parse(decoder.decode(Uint8Array.from(raw,character=>character.charCodeAt(0))));
+    if(!Array.isArray(parsed)||parsed.length!==2||typeof parsed[0]!=="string"||typeof parsed[1]!=="string"||!parsed[0]||!parsed[1]||parsed[0].length>64||parsed[1].length>160)throw new Error("invalid");
+    return{createdAt:parsed[0],id:parsed[1]};
+  }catch(error){
+    if(error instanceof HTTPException)throw error;
+    throw new HTTPException(400,{message:"Share-history cursor is invalid"});
+  }
+}
+
+function shareTargetLeaf(path:string):string{return path.replace(/\/$/,"").split("/").pop()||path;}
+
+export async function listDeliveryShares(env:Env,principal:StaffPrincipal,options:DeliveryShareHistoryQuery={}):Promise<DeliveryShareHistoryPage>{
+  await requirePermission(env,principal,"delivery.share.audit");
+  const scope=await sqlScope(env,principal,"delivery.share.audit");
+  const limit=options.limit??50;
+  if(!Number.isSafeInteger(limit)||limit<1||limit>100)throw new HTTPException(400,{message:"Share-history limit must be between 1 and 100"});
+  const submittedQuery=(options.q||"").normalize("NFC").trim();
+  const pathMode=/^path\s*:/i.test(submittedQuery);
+  const query=(pathMode?submittedQuery.replace(/^path\s*:/i,""):submittedQuery).trim();
+  if((submittedQuery&&!query)||query.length>160||/[\0-\x1f\x7f]/.test(query))throw new HTTPException(400,{message:"Share-history search text is invalid"});
+  if(scope.deniedGlobal)return{shares:[],nextCursor:null};
+  let scopeWhere="1=1",scopeValues:unknown[]=[];
+  if(!scope.global){
+    if(!scope.divisions.length)return{shares:[],nextCursor:null};
+    scopeWhere=`COALESCE(s.division_id,p.division_id) IN (${scope.divisions.map(()=>"?").join(",")})`;
+    scopeValues=scope.divisions;
+  }
+  const escaped=query.toLowerCase().replace(/[\\%_]/g,"\\$&"),like=`%${escaped}%`;
+  const targetExpression="COALESCE(s.r2_object_key,s.r2_prefix,p.r2_prefix)";
+  const searchWhere=query?`AND (
+    lower(COALESCE(s.label,'')) LIKE ? ESCAPE '\\' OR
+    lower(p.client_name) LIKE ? ESCAPE '\\' OR
+    lower(p.project_name) LIKE ? ESCAPE '\\' OR
+    lower(${targetExpression}) LIKE ? ESCAPE '\\' OR
+    lower(COALESCE(target_alias.display_name,'')) LIKE ? ESCAPE '\\'
+  )`:"";
+  const searchValues=query?[like,like,like,like,like]:[];
+  let databaseCursor=decodeDeliveryShareCursor(options.cursor),exhausted=false;
+  const matching:any[]=[];
+  while(matching.length<limit+1&&!exhausted){
+    const cursorWhere=databaseCursor?"AND (s.created_at<? OR (s.created_at=? AND s.id<?))":"";
+    const cursorValues=databaseCursor?[databaseCursor.createdAt,databaseCursor.createdAt,databaseCursor.id]:[];
+    const batchLimit=query?100:limit+1;
+    const result=await env.DELIVERY_DB.prepare(`SELECT
+      s.id,s.public_id,s.label,s.expires_at,s.revoked_at,s.revoked_reason,s.unavailable_since,
+      s.created_at,s.last_accessed_at,s.access_count,(s.password_hash IS NOT NULL) password_protected,
+      p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) AS r2_prefix,
+      COALESCE(s.division_id,p.division_id) AS division_id,${targetExpression} AS target_path,
+      CASE WHEN s.r2_object_key IS NULL THEN 'folder' ELSE 'file' END AS target_kind,
+      target_alias.display_name AS target_alias
+      FROM shares s JOIN projects p ON p.id=s.project_id
+      LEFT JOIN file_aliases target_alias ON target_alias.physical_key=${targetExpression}
+      WHERE ${scopeWhere} ${searchWhere} ${cursorWhere}
+      ORDER BY s.created_at DESC,s.id DESC LIMIT ?`)
+      .bind(...scopeValues,...searchValues,...cursorValues,batchLimit).all<any>();
+    exhausted=result.results.length<batchLimit;
+    for(const row of result.results){
+      databaseCursor={createdAt:row.created_at,id:row.id};
+      const leaf=shareTargetLeaf(row.target_path),displayName=row.target_alias||leaf;
+      const normalized=query.toLowerCase();
+      const directlyRelated=!query||(pathMode
+        ?String(row.target_path).toLowerCase().includes(normalized)
+        :[row.label,row.client_name,row.project_name,displayName,leaf]
+          .some(value=>String(value||"").toLowerCase().includes(normalized)));
+      if(directlyRelated)matching.push({...row,display_name:displayName});
+      if(matching.length>=limit+1)break;
+    }
+    if(!result.results.length)exhausted=true;
+  }
+  const shares=matching.slice(0,limit);
+  return{
+    shares,
+    nextCursor:matching.length>limit?encodeDeliveryShareCursor({createdAt:shares.at(-1).created_at,id:shares.at(-1).id}):null,
+  };
+}
 
 export async function revokeDeliveryShare(env:Env,request:Request,principal:StaffPrincipal,shareId:string){const share=await env.DELIVERY_DB.prepare("SELECT s.id,COALESCE(s.division_id,p.division_id) AS division_id,s.recipient_email,p.client_name,p.project_name,COALESCE(s.r2_prefix,p.r2_prefix) r2_prefix FROM shares s JOIN projects p ON p.id=s.project_id WHERE s.id=?").bind(shareId).first<{id:string;division_id:string|null;recipient_email:string|null;client_name:string;project_name:string;r2_prefix:string}>();if(!share)throw new HTTPException(404,{message:"Share not found"});await requirePermission(env,principal,"delivery.share.revoke",{divisionId:share.division_id},true);const audience=shareDirectoryRecipientsEnabled(env)?await latestShareAudienceSnapshot(env,shareId):null;const notifications=audience?audience.recipients.map(member=>notificationStatement(env,{shareId,kind:"share_revoked",recipientEmail:member.email,dedupeKey:notificationDedupeKey("share_revoked",shareId,member.principalPublicId),payload:{clientName:share.client_name,projectName:share.project_name,r2Prefix:share.r2_prefix}})!):[notificationStatement(env,{shareId,kind:"share_revoked",recipientEmail:share.recipient_email,payload:{clientName:share.client_name,projectName:share.project_name,r2Prefix:share.r2_prefix}})].filter((value):value is D1PreparedStatement=>Boolean(value));const result=await env.DELIVERY_DB.batch([env.DELIVERY_DB.prepare("UPDATE shares SET revoked_at=datetime('now'),revoked_reason='manual',share_version=share_version+1 WHERE id=? AND revoked_at IS NULL").bind(shareId),env.DELIVERY_DB.prepare("INSERT INTO audit_log (actor_type,actor_id,action,entity_type,entity_id) VALUES ('staff',?,'share.revoked','share',?)").bind(principal.id,shareId),...notifications]);if(!result[0]?.meta.changes)throw new HTTPException(404,{message:"Share not found or already revoked"});await env.OPS_DB.batch([await auditStatement(env,request,principal,"delivery.share.revoked","share",shareId,share.division_id)]);}

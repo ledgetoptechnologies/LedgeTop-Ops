@@ -1,6 +1,6 @@
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { DELIVERY_FOLDER_PAGE_SIZE, deliveryBrowseRevision, listDeliveryFolder, listDeliveryFolderMedia, searchDeliveryItems } from "../src/worker/delivery";
+import { DELIVERY_FOLDER_PAGE_SIZE, deliveryBrowseRevision, listDeliveryFolder, listDeliveryFolderMedia, listDeliveryShares, searchDeliveryItems } from "../src/worker/delivery";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const principal:StaffPrincipal={
@@ -44,8 +44,8 @@ describe("Delivery folder-only listing performance",()=>{
       CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT);`);
     await applySql(deliveryDb,`CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,uploaded_at TEXT NOT NULL,content_type TEXT,media_kind TEXT NOT NULL,stream_uid TEXT,stream_status TEXT);
       CREATE TABLE delivery_tombstones(id TEXT PRIMARY KEY,physical_key TEXT NOT NULL,tombstone_kind TEXT NOT NULL,deleted_by TEXT,deleted_at TEXT,purge_after TEXT,restored_by TEXT,restored_at TEXT);
-      CREATE TABLE projects(id TEXT PRIMARY KEY,r2_prefix TEXT NOT NULL,active INTEGER NOT NULL);
-      CREATE TABLE shares(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,r2_prefix TEXT,r2_object_key TEXT,revoked_at TEXT,expires_at TEXT);
+      CREATE TABLE projects(id TEXT PRIMARY KEY,r2_prefix TEXT NOT NULL,active INTEGER NOT NULL,division_id TEXT,client_name TEXT,project_name TEXT);
+      CREATE TABLE shares(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,public_id TEXT,label TEXT,password_hash TEXT,expires_at TEXT,revoked_at TEXT,revoked_reason TEXT,unavailable_since TEXT,created_at TEXT NOT NULL,last_accessed_at TEXT,access_count INTEGER NOT NULL DEFAULT 0,r2_prefix TEXT,r2_object_key TEXT,division_id TEXT);
       CREATE TABLE file_aliases(physical_key TEXT PRIMARY KEY,display_name TEXT NOT NULL);
       CREATE TABLE image_thumbnail_jobs(source_key TEXT PRIMARY KEY,source_etag TEXT NOT NULL,thumbnail_key TEXT NOT NULL,
         thumbnail_etag TEXT,thumbnail_size INTEGER,status TEXT NOT NULL,error_code TEXT);`);
@@ -289,9 +289,65 @@ describe("Delivery folder-only listing performance",()=>{
       deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')").bind("_ltds/Tree-B-Gone/hidden.jpg","etag-hidden",999,"2026-08-07T12:00:00.000Z","image/jpeg"),
     ]);
     const result=await searchDeliveryItems(environment(),principal,"tree-b-gone");
-    expect(result.items.map(item=>item.physicalKey)).toEqual(expect.arrayContaining(["Jobs/Clients/Tree-B-Gone/","Jobs/Clients/Tree-B-Gone/Edited/hero.jpg","Jobs/Demo/Tree-B-Gone-demo.jpg"]));
+    expect(result.items.map(item=>item.physicalKey)).toEqual(expect.arrayContaining(["Jobs/Clients/Tree-B-Gone/","Jobs/Demo/Tree-B-Gone-demo.jpg"]));
+    expect(result.items.map(item=>item.physicalKey)).not.toContain("Jobs/Clients/Tree-B-Gone/Edited/hero.jpg");
+    const pathResult=await searchDeliveryItems(environment(),principal,"path:tree-b-gone");
+    expect(pathResult.items.map(item=>item.physicalKey)).toEqual(expect.arrayContaining(["Jobs/Clients/Tree-B-Gone/Edited/hero.jpg","Jobs/Demo/Tree-B-Gone-demo.jpg"]));
     expect(result.items.some(item=>item.physicalKey?.startsWith("_ltds/"))).toBe(false);
     expect(list).not.toHaveBeenCalled();
+  });
+
+  it("paginates candidates after collapsing an ancestor match instead of starving later leaf matches",async()=>{
+    const inserts=Array.from({length:125},(_,index)=>deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')")
+      .bind(`Jobs/Clients/Gelsman Construction Service/Folder-${index}/photo-${index}.jpg`,`etag-${index}`,1,"2026-08-07T12:00:00.000Z","image/jpeg"));
+    for(let offset=0;offset<inserts.length;offset+=50)await deliveryDb.batch(inserts.slice(offset,offset+50));
+    await deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'pdf')")
+      .bind("Jobs/Zzz/Gelsman Construction Service closeout.pdf","etag-direct",2,"2026-08-07T12:00:00.000Z","application/pdf").run();
+    const result=await searchDeliveryItems(environment(),principal,"Gelsman Construction Service");
+    expect(result.items.map(item=>item.physicalKey)).toEqual([
+      "Jobs/Clients/Gelsman Construction Service/",
+      "Jobs/Zzz/Gelsman Construction Service closeout.pdf",
+    ]);
+    expect(result.nextCursor).toBeNull();
+  },15_000);
+
+  it("matches a direct display alias without expanding an aliased folder's descendants",async()=>{
+    await deliveryDb.batch([
+      deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')").bind("Jobs/Clients/Acme/internal-name.jpg","etag-a",1,"2026-08-07T12:00:00.000Z","image/jpeg"),
+      deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES(?,?,?,?,?,'image')").bind("Jobs/Clients/Other/child.jpg","etag-b",1,"2026-08-07T12:00:00.000Z","image/jpeg"),
+      deliveryDb.prepare("INSERT INTO file_aliases(physical_key,display_name) VALUES(?,?)").bind("Jobs/Clients/Acme/internal-name.jpg","Finished inspection photo"),
+      deliveryDb.prepare("INSERT INTO file_aliases(physical_key,display_name) VALUES(?,?)").bind("Jobs/Clients/Other/","Inspection archive"),
+    ]);
+    const result=await searchDeliveryItems(environment(),principal,"inspection");
+    expect(result.items.map(item=>item.physicalKey)).toEqual(expect.arrayContaining([
+      "Jobs/Clients/Acme/internal-name.jpg",
+      "Jobs/Clients/Other/",
+    ]));
+  });
+
+  it("returns keyset-paginated share history with exact target metadata and scoped search",async()=>{
+    await opsDb.batch([
+      opsDb.prepare("INSERT INTO role_permissions(role_id,permission_key) VALUES('delivery-role','delivery.share.audit')"),
+    ]);
+    await deliveryDb.batch([
+      deliveryDb.prepare("INSERT INTO projects(id,r2_prefix,active,division_id,client_name,project_name) VALUES(?,?,?,?,?,?)").bind("project-a","Jobs/Clients/Acme/",1,"division-a","Acme","Roof survey"),
+      deliveryDb.prepare("INSERT INTO shares(id,project_id,public_id,label,created_at,r2_prefix,r2_object_key,division_id) VALUES(?,?,?,?,?,?,?,?)").bind("share-a","project-a","public-a","First","2026-08-01T12:00:00Z","Jobs/Clients/Acme/","Jobs/Gelsman/archive/video.mov","division-a"),
+      deliveryDb.prepare("INSERT INTO shares(id,project_id,public_id,label,created_at,r2_prefix,r2_object_key,division_id) VALUES(?,?,?,?,?,?,?,?)").bind("share-b","project-a","public-b","Second","2026-08-02T12:00:00Z","Jobs/Clients/Acme/","Jobs/Clients/Acme/final.mov","division-a"),
+      deliveryDb.prepare("INSERT INTO shares(id,project_id,public_id,label,created_at,r2_prefix,r2_object_key,division_id) VALUES(?,?,?,?,?,?,?,?)").bind("share-c","project-a","public-c","Third","2026-08-03T12:00:00Z","Jobs/Clients/Acme/",null,"division-a"),
+      deliveryDb.prepare("INSERT INTO file_aliases(physical_key,display_name) VALUES(?,?)").bind("Jobs/Clients/Acme/final.mov","Client walkthrough"),
+    ]);
+    const first=await listDeliveryShares(environment(),principal,{limit:2});
+    expect(first.shares.map(share=>share.id)).toEqual(["share-c","share-b"]);
+    expect(first.shares[1]).toMatchObject({target_path:"Jobs/Clients/Acme/final.mov",target_kind:"file",display_name:"Client walkthrough"});
+    expect(first.nextCursor).toBeTruthy();
+    const second=await listDeliveryShares(environment(),principal,{limit:2,cursor:first.nextCursor!});
+    expect(second.shares.map(share=>share.id)).toEqual(["share-a"]);
+    expect(second.nextCursor).toBeNull();
+    expect((await listDeliveryShares(environment(),principal,{q:"gelsman"})).shares).toEqual([]);
+    expect((await listDeliveryShares(environment(),principal,{q:"path:gelsman"})).shares.map(share=>share.id)).toEqual(["share-a"]);
+    expect((await listDeliveryShares(environment(),principal,{q:"walkthrough"})).shares.map(share=>share.id)).toEqual(["share-b"]);
+    await expect(listDeliveryShares(environment(),principal,{limit:101})).rejects.toThrow("between 1 and 100");
+    await expect(listDeliveryShares(environment(),principal,{cursor:"not-a-valid-cursor"})).rejects.toThrow("cursor is invalid");
   });
 
   it("search keeps a division-scoped user inside their associated folder root",async()=>{
