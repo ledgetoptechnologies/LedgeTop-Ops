@@ -118,7 +118,7 @@ export function DeliveryLinksPage({canRevoke,onChanged}:{canRevoke:boolean;onCha
           </tr>;})}</tbody>
         </table></div>
         {nextCursor&&<button className="button-ghost" disabled={loadingMore} onClick={()=>void load(nextCursor)}>{loadingMore?"Loading…":"Load more"}</button>}
-      </>:<EmptyState title="No client links found" detail={query?"Try another name or use path: followed by part of the storage path.":"Links created from Data will appear here."}/>} 
+      </>:<EmptyState title="No client links found" detail={query?"Try another name or use path: followed by part of the storage path.":"Links created from Data will appear here."}/>}
     </Card>
   </div>;
 }
