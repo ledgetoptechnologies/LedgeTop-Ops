@@ -26,7 +26,7 @@ const requestRecord = {
   updated_at: "2026-08-01T12:00:00.000Z",
 };
 
-test("staff deep-link review shows all request evidence and sends an idempotent estimate", async ({ page }) => {
+test("legacy request deep links redirect to canonical review and preserve the full workflow", async ({ page }) => {
   let estimateReady = false;
   const policyErrors: string[] = [];
   page.on("console", message => {
@@ -65,7 +65,7 @@ test("staff deep-link review shows all request evidence and sends an idempotent 
   });
 
   await page.goto("/operations/client-requests/request-a");
-  await expect(page).toHaveURL(/\/operations\/client-requests\/request-a$/);
+  await expect(page).toHaveURL(/\/clients\/requests\/request-a$/);
   await expect(page.getByRole("heading", { name: "North site progress flight" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Selected services (1)" })).toBeVisible();
   await expect(page.getByRole("heading", { name: "2D Mapping" })).toBeVisible();
@@ -131,7 +131,7 @@ test("request queue distinguishes a schema update from an empty queue and recove
     }
   });
 
-  await page.goto("/operations/client-requests");
+  await page.goto("/clients");
   await expect(page.getByText("Request queue unavailable", { exact: true })).toBeVisible();
   await expect(page.getByText(/database update has not finished/i)).toBeVisible();
   await expect(page.getByText("No client requests")).toHaveCount(0);

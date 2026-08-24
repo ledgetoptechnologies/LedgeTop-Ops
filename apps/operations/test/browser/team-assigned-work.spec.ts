@@ -12,6 +12,7 @@ const operation = {
 async function mock(page: Page, options: { administrator?: boolean; canManageEligibilityBlocks?: boolean; canManagePortal?: boolean } = {}) {
   let assignedWorkRequests = 0;
   let invitationRetries = 0;
+  let clientDirectoryRequests = 0;
   await page.route("**/api/**", async route => {
     const path = new URL(route.request().url()).pathname;
     if (path === "/api/session") {
@@ -42,6 +43,7 @@ async function mock(page: Page, options: { administrator?: boolean; canManageEli
         sync_protected: 0,
       }] } });
     } else if (path === "/api/team/clients") {
+      clientDirectoryRequests += 1;
       await route.fulfill({ json: { clients: [{
         workspace_id: "workspace-one", public_id: "principal-one", display_name: "Alex Client",
         workspace_name: "Acme Workspace",
@@ -113,7 +115,11 @@ async function mock(page: Page, options: { administrator?: boolean; canManageEli
       await route.fulfill({ status: 404, json: { error: "Not found" } });
     }
   });
-  return { assignedWorkRequests: () => assignedWorkRequests, invitationRetries: () => invitationRetries };
+  return {
+    assignedWorkRequests: () => assignedWorkRequests,
+    invitationRetries: () => invitationRetries,
+    clientDirectoryRequests: () => clientDirectoryRequests,
+  };
 }
 
 test("Team lazily exposes only visible assigned work and opens its pinned-SOP brief", async ({ page }) => {
@@ -145,42 +151,37 @@ test("Team lazily exposes only visible assigned work and opens its pinned-SOP br
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test("Team keeps Staff and Clients as responsive keyboard-accessible directories", async ({ page }) => {
+test("Team keeps its staff-only directory responsive and keyboard-accessible", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await mock(page);
+  const state = await mock(page);
   await page.goto("/team");
-  const staff = page.getByRole("tab", { name: "Staff" });
-  const clients = page.getByRole("tab", { name: "Clients" });
-  await expect(clients).toHaveCSS("color", "rgb(21, 27, 34)");
-  await clients.focus();
+  await expect(page.getByRole("heading", { name: "Colin Pilot" })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "Staff" })).toHaveCount(0);
+  await expect(page.getByRole("tab", { name: "Clients" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Alex Client" })).toHaveCount(0);
+  expect(state.clientDirectoryRequests()).toBe(0);
+  const assignedWork = page.getByText("Assigned work", { exact: true });
+  expect((await assignedWork.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+  await assignedWork.focus();
   await page.keyboard.press("Enter");
-  await expect(clients).toHaveAttribute("aria-selected", "true");
-  await expect(staff).toHaveCSS("color", "rgb(21, 27, 34)");
-  await expect(page.getByRole("heading", { name: "Alex Client" })).toBeVisible();
-  await expect(page.getByText("Awaiting first login")).toBeVisible();
-  await expect(page.getByText("None explicitly granted")).toBeVisible();
-  await expect(page.getByText(/Eligibility and login never grant project files/)).toBeVisible();
-  expect((await clients.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+  await expect(page.getByText("2 SOPs", { exact: true })).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });
 
-test("Team shows invitation failure and retries it through the guarded staff endpoint", async ({ page }) => {
+test("Team keeps client invitation controls out of the administrator staff directory", async ({ page }) => {
   const state = await mock(page, { administrator: true, canManagePortal: true });
-  page.on("dialog", dialog => void dialog.accept());
   await page.goto("/team");
-  await page.getByRole("tab", { name: "Clients" }).click();
-  await expect(page.getByText("Invitation failed")).toBeVisible();
-  await expect(page.getByText("E_TEMP")).toBeVisible();
-  const retry = page.getByRole("button", { name: "Retry invitation delivery" });
-  await retry.click();
-  await expect.poll(state.invitationRetries).toBe(1);
+  await expect(page.getByRole("heading", { name: "Colin Pilot" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Retry invitation delivery" })).toHaveCount(0);
+  expect(state.clientDirectoryRequests()).toBe(0);
+  expect(state.invitationRetries()).toBe(0);
 });
 
-test("Team hides client eligibility mutations when management rollout is off", async ({ page }) => {
-  await mock(page, { administrator: true, canManageEligibilityBlocks: false });
+test("Team keeps client eligibility mutations out of the staff-only directory", async ({ page }) => {
+  const state = await mock(page, { administrator: true, canManageEligibilityBlocks: false });
   await page.goto("/team");
-  await page.getByRole("tab", { name: "Clients" }).click();
-  await expect(page.getByRole("heading", { name: "Alex Client" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Colin Pilot" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Block portal eligibility" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Remove opt-out" })).toHaveCount(0);
+  expect(state.clientDirectoryRequests()).toBe(0);
 });

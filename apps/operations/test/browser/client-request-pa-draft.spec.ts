@@ -82,7 +82,7 @@ test("staff explicitly creates a private Project Alpha draft and opens the PA ed
     }
   });
 
-  await page.goto("/operations/client-requests/request-pa-draft");
+  await page.goto("/clients/requests/request-pa-draft");
   await page.waitForTimeout(250);
   expect(runtimeErrors).toEqual([]);
   const create = page.getByRole("button", { name: "Create Project Alpha draft" });

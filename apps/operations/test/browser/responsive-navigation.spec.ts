@@ -14,6 +14,10 @@ async function mockSession(page: Page, permissions: string[], identity?: { displ
       await route.fulfill({ json: { requests: [] } });
       return;
     }
+    if (path === "/api/client-hub") {
+      await route.fulfill({ json: { clients: [], capabilities: { directory: true, requests: true, delivery: true, viewer: true } } });
+      return;
+    }
     if (path === "/api/viewer/overview") {
       await route.fulfill({ json: { enabled: true, viewerBaseUrl: "https://viewer.ledgetopdroneservices.com", overview: {
         schemaVersion: 1, generatedAt: "2026-08-18T14:00:00.000Z",
@@ -30,21 +34,22 @@ async function mockSession(page: Page, permissions: string[], identity?: { displ
 
 const allNavigationPermissions = ["dashboard.view", "operations.view", "operations.manage", "sops.view", "airspace.view", "delivery.browse", "viewer.view", "team.view", "administration.view"];
 
-test("desktop navigation exposes canonical client requests and independently authorizes Administration items", async ({ page }) => {
+test("desktop navigation exposes the canonical Client Hub and independently authorizes Administration items", async ({ page }) => {
   await mockSession(page, allNavigationPermissions);
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto("/");
 
   const primary = page.getByRole("navigation", { name: "Primary navigation" });
-  await expect(primary.getByRole("link", { name: "Client Requests" })).toHaveAttribute("href", "/operations/client-requests");
-  await primary.getByRole("link", { name: "Client Requests" }).click();
-  await expect(page).toHaveURL(/\/operations\/client-requests$/);
-  await expect(page.getByRole("heading", { name: "Client requests" })).toBeVisible();
-  await expect(primary.getByRole("link", { name: "Client Requests" })).toHaveAttribute("aria-current", "page");
+  await expect(primary.getByRole("link", { name: "Client Hub" })).toHaveAttribute("href", "/clients");
+  await primary.getByRole("link", { name: "Client Hub" }).click();
+  await expect(page).toHaveURL(/\/clients$/);
+  await expect(page.getByRole("heading", { name: "Client Hub" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Clients", exact: true })).toBeVisible();
+  await expect(primary.getByRole("link", { name: "Client Hub" })).toHaveAttribute("aria-current", "page");
   await page.goBack();
   await expect(page).toHaveURL(/\/$/);
   await page.goForward();
-  await expect(page).toHaveURL(/\/operations\/client-requests$/);
+  await expect(page).toHaveURL(/\/clients$/);
 
   const dataLink = primary.getByRole("link", { name: "Data" });
   await expect(dataLink).toHaveAttribute("href", "/delivery");
@@ -186,7 +191,8 @@ for (const width of [320, 390, 768]) {
     await expect(drawer).toBeVisible();
     await expect(drawer.locator(".ops-mobile-nav-label")).toHaveText("Administration");
     await expect(drawer.getByRole("link", { name: "Dashboard" })).toBeFocused();
-    await expect(drawer.getByRole("link", { name: "Client Requests" })).toHaveCSS("min-height", "44px");
+    await expect(drawer.getByRole("link", { name: "Client Hub" })).toHaveAttribute("href", "/clients");
+    await expect(drawer.getByRole("link", { name: "Client Hub" })).toHaveCSS("min-height", "44px");
     await expect(drawer.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/delivery");
     await expect(drawer.getByRole("link", { name: "Data" })).toHaveCSS("min-height", "44px");
     await expect(drawer.getByRole("link", { name: "3D Viewer" })).toHaveCount(0);

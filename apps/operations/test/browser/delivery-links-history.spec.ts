@@ -33,7 +33,10 @@ test("client-link history is refresh-safe, searchable, paginated, and revocable"
   await expect(page.getByText("Roof walkthrough")).toBeVisible();
   expect(shareQueries[0]).toContain("limit=50");
 
-  await page.getByRole("button",{name:"Load more"}).click();
+  const loadMore=page.getByRole("button",{name:"Load more"});
+  if((page.viewportSize()?.width||0)<=960)expect((await loadMore.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1)).toBe(true);
+  await loadMore.click();
   await expect(page.getByText("Jobs/Clients/Acme/Archive/",{exact:true})).toBeVisible();
   expect(shareQueries.some(query=>query.includes("cursor=next-page"))).toBe(true);
 

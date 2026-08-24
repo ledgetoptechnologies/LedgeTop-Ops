@@ -89,7 +89,7 @@ test("staff can review and download accepted supporting files on desktop and mob
     }
   });
 
-  await page.goto("/operations/client-requests/request-a");
+  await page.goto("/clients/requests/request-a");
   await expect(page.getByRole("heading", { name: "North site mapping" })).toBeVisible();
   await expect(page.getByText("Supporting files", { exact: true })).toBeVisible();
   await expect(page.getByText("PDF · 2.0 KB")).toBeVisible();

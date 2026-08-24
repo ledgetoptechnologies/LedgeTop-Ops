@@ -241,6 +241,10 @@ th {
   color: var(--muted);
 }
 tbody tr:last-child td { border: 0; }
+.delivery-links-table { max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+.delivery-links-table table { min-width: 760px; }
+.delivery-links-pagination { display: flex; margin-top: 1rem; }
+.delivery-links-pagination button { min-height: 44px; }
 
 /* ---------------------------------------------------------------------------
    Forms

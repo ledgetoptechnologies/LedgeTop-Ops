@@ -73,7 +73,7 @@ async function fixture(page: Page) {
 
 test("staff review is read-only until Edit and saves an explicit immutable work-area revision", async ({ page }) => {
   const state = await fixture(page);
-  await page.goto("/operations/client-requests/request-area");
+  await page.goto("/clients/requests/request-area");
   await expect(page.getByRole("heading", { name: "North site mapping" })).toBeVisible();
   await expect(page.getByLabel("Reason for change")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Edit work area" })).toBeVisible();
@@ -98,7 +98,7 @@ test("staff review is read-only until Edit and saves an explicit immutable work-
 test("work-area editor remains usable without horizontal overflow on mobile", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await fixture(page);
-  await page.goto("/operations/client-requests/request-area");
+  await page.goto("/clients/requests/request-area");
   await page.getByRole("button", { name: "Edit work area" }).click();
   await expect(page.getByRole("button", { name: "Draw area" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Add point" })).toBeVisible();

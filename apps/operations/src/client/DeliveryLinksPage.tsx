@@ -106,7 +106,7 @@ export function DeliveryLinksPage({canRevoke,onChanged}:{canRevoke:boolean;onCha
     <Card title={query?`Results for “${query}”`:"All client links"} action={<button className="button-ghost button-small" onClick={()=>void load()} disabled={loading}>Refresh</button>}>
       {error&&<div className="notice error-notice" role="alert">{error}</div>}
       {loading?<Loading/>:rows.length?<>
-        <div className="table-wrap"><table>
+        <div className="table-wrap delivery-links-table"><table>
           <thead><tr><th>Target</th><th>Client and project</th><th>Created</th><th>Security</th><th>Status</th>{canRevoke&&<th>Action</th>}</tr></thead>
           <tbody>{rows.map(row=>{const status=lifecycle(row);return <tr key={row.id}>
             <td><strong>{row.label||row.display_name}</strong><small>{row.target_kind} · <code>{row.target_path}</code></small></td>
@@ -117,7 +117,7 @@ export function DeliveryLinksPage({canRevoke,onChanged}:{canRevoke:boolean;onCha
             {canRevoke&&<td>{!row.revoked_at&&<button className="button-danger button-small" disabled={busy===row.id} onClick={()=>void revoke(row)}>{busy===row.id?"Revoking…":"Revoke"}</button>}</td>}
           </tr>;})}</tbody>
         </table></div>
-        {nextCursor&&<button className="button-ghost" disabled={loadingMore} onClick={()=>void load(nextCursor)}>{loadingMore?"Loading…":"Load more"}</button>}
+        {nextCursor&&<div className="delivery-links-pagination"><button className="button-ghost" disabled={loadingMore} onClick={()=>void load(nextCursor)}>{loadingMore?"Loading…":"Load more"}</button></div>}
       </>:<EmptyState title="No client links found" detail={query?"Try another name or use path: followed by part of the storage path.":"Links created from Data will appear here."}/>}
     </Card>
   </div>;
