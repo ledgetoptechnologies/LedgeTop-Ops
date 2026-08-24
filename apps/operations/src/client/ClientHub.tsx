@@ -3,6 +3,7 @@ import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import type { Permission } from "@ltds/shared";
 import { api } from "./api";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
+import { ClientIdentityAccess, type ClientAccessManagementState, type ClientIdentityContact } from "./ClientIdentityAccess";
 
 interface ContactAccess {
   capability: string;
@@ -11,7 +12,7 @@ interface ContactAccess {
   scope_public_id: string;
   scope_label: string;
 }
-interface ClientContact {
+interface ClientContact extends ClientIdentityContact {
   workspace_id: string;
   public_id: string;
   display_name: string;
@@ -21,7 +22,6 @@ interface ClientContact {
   has_workspace_access: number;
   blocked: number;
   access: ContactAccess[];
-  invitation: null | { status: string; email_status: string | null };
 }
 interface ClientSummary {
   workspace_id: string;
@@ -49,6 +49,7 @@ interface ClientDetailResponse {
   deliveryGrants: Array<{ share_id: string; label: string | null; r2_prefix: string; project_name: string; revoked_at: string | null; expires_at: string | null }>;
   authenticatedDeliveryGrants: Array<{ id: string; status: string; r2_prefix: string; audience_type: string; expires_at: string | null }>;
   viewerGrants: Array<{ id: string; status: string; scope_type: string; project_name: string; model_title: string | null; authorization_expires_at: string | null }>;
+  accessManagement: ClientAccessManagementState;
   capabilities: HubResponse["capabilities"];
 }
 
@@ -123,7 +124,8 @@ function ClientDirectory({ clients }: { clients: ClientSummary[] }) {
 }
 
 function ClientWorkspace({ route }: { route: NonNullable<ReturnType<typeof clientRoute>> }) {
-  const state = useClientHub<ClientDetailResponse>(`/api/client-hub/${route.kind}/${encodeURIComponent(route.publicId)}`);
+  const [revision, setRevision] = useState(0);
+  const state = useClientHub<ClientDetailResponse>(`/api/client-hub/${route.kind}/${encodeURIComponent(route.publicId)}?revision=${revision}`);
   if (!state.data && !state.error) return <Loading />;
   if (!state.data) return <Card><EmptyState title="Client workspace unavailable" detail={state.error} /></Card>;
   const data = state.data;
@@ -135,6 +137,8 @@ function ClientWorkspace({ route }: { route: NonNullable<ReturnType<typeof clien
     </div>
     <div className="dashboard-grid client-hub-detail-grid">
       <Card title="Contacts and logins"><ContactList contacts={data.contacts} /></Card>
+      <ClientIdentityAccess contacts={data.contacts} management={data.accessManagement}
+        onChanged={() => setRevision(value => value + 1)} />
       <Card title="Accounts">{data.accounts.length ? <div className="simple-rows">{data.accounts.map(account => <div key={account.id}><div><strong>{account.display_name}</strong><small>Explicit account record</small></div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div> : <EmptyState title="No accounts" detail="No linked portal account is active." />}</Card>
       <Card title="Projects and access">{data.projects.length ? <div className="simple-rows">{data.projects.map(project => <div key={`${project.id}:${project.project_name}`}><div><strong>{project.project_name}</strong><small>{project.client_name} · {project.can_request_service ? "Requests allowed" : "View access only"}</small></div><StatusPill tone={project.active ? "success" : "neutral"}>{project.active ? "active" : "inactive"}</StatusPill></div>)}</div> : <EmptyState title="No project access" detail="Projects remain unavailable until explicitly granted." />}</Card>
       {data.capabilities.delivery && <Card title="Delivery access">{data.deliveryGrants.length || data.authenticatedDeliveryGrants.length ? <div className="simple-rows">

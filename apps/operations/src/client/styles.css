@@ -1506,6 +1506,10 @@ tbody tr:last-child td { border: 0; }
 .client-hub-contact-list article { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: .25rem .75rem; padding: .7rem .8rem; border-radius: 9px; background: #f7f9fa; }
 .client-hub-contact-list article > div { display: grid; min-width: 0; }
 .client-hub-contact-list article > small:last-child { grid-column: 1 / -1; color: var(--muted); }
+.client-access-management-list { display: grid; gap: .65rem; }
+.client-access-management-list > section { display: grid; grid-template-columns: minmax(0,1fr) auto; align-items: center; gap: .5rem .75rem; padding: .75rem; border: 1px solid var(--line); border-radius: 9px; background: #f7f9fa; }
+.client-access-management-list > section > div:first-child { display: grid; min-width: 0; }
+.client-access-management-list > section > .actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: .5rem; }
 .client-hub-back { display: inline-flex; margin-bottom: 1rem; }
 .client-hub-detail-grid { align-items: start; }
 .client-hub-detail-grid .simple-rows > a { color: inherit; text-decoration: none; }
@@ -1538,6 +1542,8 @@ tbody tr:last-child td { border: 0; }
   .team-tabs { display: grid; grid-template-columns: 1fr 1fr; width: 100%; }
   .team-tabs button { min-height: 44px; min-width: 0; }
   .client-hub-section-heading, .client-hub-title, .client-hub-directory summary { align-items: flex-start; }
+  .client-access-management-list > section > .actions { display: grid; }
+  .client-access-management-list button { width: 100%; min-height: 44px; }
   .viewer-processing-toolbar,
   .viewer-processing-list article { align-items: stretch; flex-direction: column; }
   .viewer-processing-form,

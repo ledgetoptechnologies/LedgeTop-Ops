@@ -309,6 +309,11 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
   return {
     client: workspace,
     contacts: contactsForRoot(workspace, sourceClients, identityDirectory.clients as Array<Record<string, unknown>>),
+    accessManagement: {
+      blocks: identityDirectory.blocks,
+      canManageEligibilityBlocks: identityDirectory.canManageEligibilityBlocks,
+      canManagePortal: identityDirectory.canManagePortal,
+    },
     accounts: accounts.results,
     projects: projects.results,
     requests: bounded(requests.results, "Client request"),

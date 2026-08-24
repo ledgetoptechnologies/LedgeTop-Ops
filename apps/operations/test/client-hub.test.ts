@@ -14,6 +14,9 @@ const eligibility = vi.hoisted(() => ({
       email_hint: "login@example.test", status: "active", identity_id: "identity-login",
       has_workspace_access: 1, blocked: 0, access: [], invitation: null,
     }],
+    blocks: [{ id: "block-one", match_type: "email", normalized_email: "login@example.test", status: "active" }],
+    canManageEligibilityBlocks: true,
+    canManagePortal: true,
   })),
 }));
 vi.mock("../src/worker/acl", () => acl);
@@ -103,6 +106,11 @@ describe("Client Hub", () => {
       requests: [expect.objectContaining({ id: "request-one" })],
       deliveryGrants: [expect.objectContaining({ share_id: "share-one" })],
       authenticatedDeliveryGrants: [],
+      accessManagement: {
+        blocks: [expect.objectContaining({ id: "block-one" })],
+        canManageEligibilityBlocks: true,
+        canManagePortal: true,
+      },
     });
   });
 
