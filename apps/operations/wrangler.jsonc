@@ -104,10 +104,10 @@
       { "queue": "ltds-file-events", "max_batch_size": 25, "max_batch_timeout": 10, "max_retries": 5 },
       {
         "queue": "ltds-thumbnail-jobs",
-        "max_batch_size": 10,
-        "max_batch_timeout": 5,
+        "max_batch_size": 1,
+        "max_batch_timeout": 2,
         "max_retries": 5,
-        "max_concurrency": 1,
+        "max_concurrency": 4,
         "dead_letter_queue": "ltds-thumbnail-jobs-dlq"
       },
       {
@@ -130,7 +130,7 @@
     {
       "class_name": "ThumbnailRendererContainer",
       "image": "./containers/thumbnail-renderer/Dockerfile",
-      "max_instances": 1,
+      "max_instances": 4,
       "instance_type": "standard-1",
       "constraints": { "regions": ["WNAM"] },
       "ssh": { "enabled": false }

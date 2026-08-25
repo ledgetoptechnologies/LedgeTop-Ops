@@ -84,6 +84,7 @@ describe("thumbnail metadata backfill", () => {
       VALUES('legacy-completed','dry_run','Jobs/Clients/','completed')`).run();
     await db.exec(migration("0110_thumbnail_backfill_jobs_scope.sql"));
     await db.exec(migration("0111_thumbnail_render_provenance.sql"));
+    await db.exec(migration("0151_thumbnail_render_not_before.sql"));
     expect(await db.prepare("SELECT scope_prefix,status FROM image_thumbnail_backfill_runs WHERE id='legacy-completed'").first())
       .toEqual({ scope_prefix: "Jobs/Clients/", status: "completed" });
     expect(await db.prepare("SELECT thumbnail_provider,thumbnail_profile FROM image_thumbnail_jobs LIMIT 1").first())

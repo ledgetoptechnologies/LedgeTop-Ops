@@ -32,12 +32,12 @@ Create the source task in the TrueNAS Data Protection/Cloud Sync UI:
 
 Begin with COPY and validate one synthetic folder. Confirm key paths, counts,
 byte totals and checksum samples; nested `Dump` exclusions; R2 index events;
-and image/PDF pre-generation jobs. This checked-in pre-generator intentionally
-does not decode video; video jobs remain pending for the separate authenticated
-TrueNAS `/api/internal/thumbnail-renderer/v1` queue worker described in the
-[media thumbnail runbook](../media-thumbnail-pipeline.md). Confirm the video
-worker produces a thumbnail and that unsupported non-video documents remain
-icons. Take
+and optional image/PDF pre-generation jobs. The checked-in unified TrueNAS
+`/api/internal/thumbnail-renderer/v1` queue renderer is primary for supported
+images, PDFs, and videos; the pre-generator remains an optional exact-artifact
+optimization and intentionally does not decode video. Confirm the queue renderer
+produces each supported thumbnail kind and that unsupported documents remain
+icons. See the [media thumbnail runbook](../media-thumbnail-pipeline.md). Take
 a ZFS snapshot and export the task configuration before switching an approved
 server-owned prefix to SYNC.
 
@@ -93,10 +93,13 @@ separate from the hourly source mirror.
 
 The required five-minute non-overlapping schedule lets the two-pass handshake
 fit inside the Worker's 15-minute raw server/rclone grace under healthy
-conditions. If it misses that window, the private Container renders; a later
-valid prebuilt registration safely replaces the managed mapping and queues
-exact-ETag cleanup. Do not predict an R2 ETag or weaken validation. Direct
-browser/staff uploads keep a separate 30-second fallback grace.
+conditions. Missing that prebuilt window does not transfer healthy-primary work
+to Cloudflare: fresh unified-worker polls and signed active-job heartbeats keep
+the backlog on TrueNAS. Only stale presence or a retryable still/PDF failure
+activates the bounded Container fallback; a later valid prebuilt registration
+safely replaces the managed mapping and queues exact-ETag cleanup. Do not
+predict an R2 ETag or weaken validation. Direct browser/staff uploads use a
+30-second initial queue delay.
 
 The decoder removes an older local immutable WebP/manifest only after its
 replacement registers. For missing sources it requires the same stable Jobs
@@ -107,10 +110,11 @@ objects without touching originals or Cloudflare-managed derivatives.
 ## Monitoring and recovery
 
 R2 create/delete notifications feed `ltds-file-events`; Operations indexes the
-source and publishes exact-version image/PDF work to `ltds-thumbnail-jobs`.
-Operations allows 15 minutes for raw server/rclone events to register a valid
-prebuilt, then uses its private no-internet Container fallback. Direct
-browser/staff enqueue waits 30 seconds. A daily reconciliation repairs missed
+source and records exact-version image, PDF, and video work. The unified TrueNAS
+renderer claims that durable backlog directly. Operations records a 15-minute
+prebuilt boundary for raw server/rclone events and 30 seconds for direct
+browser/staff enqueue, then resolves fallback ownership from the unified
+renderer presence signal. A daily reconciliation repairs missed
 file-index/thumbnail lifecycle events. See the
 [thumbnail runbook](../media-thumbnail-pipeline.md).
 

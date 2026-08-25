@@ -323,8 +323,8 @@ rollback does not undo either database.
 Before version upload, verify rather than infer the remaining operator-owned
 media prerequisites: the staging thumbnail queue and DLQ exist, Operations has
 the exact `THUMBNAIL_QUEUE` producer, main consumer and DLQ consumer; the
-private `THUMBNAIL_RENDERER` Container binding resolves with one maximum
-instance, internet disabled and no SSH/public route; and the 15-minute and
+private `THUMBNAIL_RENDERER` Container binding resolves with four maximum
+instances, internet disabled and no SSH/public route; and the 15-minute and
 5-minute crons are both present. Confirm the
 existing R2 object-create notification still feeds only the staging file-event
 queue; do not add an overlapping notification rule. Confirm the path-specific
@@ -339,10 +339,15 @@ Upload synthetic supported media in both `Jobs/Clients/` and another authorized
 `Jobs/` folder and verify the same queue lifecycle. Inject one transient
 processing failure and prove exactly one bounded second lifecycle; permanent
 oversize and invalid/encrypted cases must remain icon-only. Supported PDFs must
-render page one. Office, audio, and archive files remain icon-only. A video
-queue signal must leave its D1 row pending with zero Cloudflare Container
-source reads, then the authenticated TrueNAS `/claim` path must lease, render,
-upload, and complete it. Prove that heartbeat/fail/complete echo the claim's
+render page one. Office, audio, and archive files remain icon-only. The
+digest-pinned TrueNAS `queue-renderer` must use `includeKind=all` to lease,
+render, upload, and complete one synthetic JPEG, PNG, PDF, and video. Prove a
+live TrueNAS image/PDF/video lease causes zero Cloudflare thumbnail-body or
+Container source reads; bounded best-effort image-location/EXIF reads remain an
+independent metadata path. Prove signed heartbeats keep the TrueNAS backlog
+primary while every slot is busy, then stop TrueNAS and prove stale-presence
+reconciliation lets Cloudflare handle only an unleased image/PDF. Prove that
+heartbeat/fail/complete echo the claim's
 `leaseId`, and that an older attempt cannot mutate a reclaimed row. Prove the
 15-minute raw server/rclone prebuilt
 grace, the 30-second direct-upload grace, and private Container fallback
@@ -351,10 +356,11 @@ source sync until browser/team prefixes are disjoint and excluded by path; R2
 metadata tags are not a deletion boundary.
 
 Record that end-to-end proof under the mandatory
-`trueNasVideoThumbnailRenderer` external gate. The evidence must identify the
-deployed TrueNAS renderer version or immutable image digest and show that it
-treats `leaseId` as opaque. Repository tests cannot substitute for this check
-because the TrueNAS client is maintained outside this repository.
+`trueNasThumbnailQueueRenderer` external gate. The evidence must identify the
+deployed `queue-worker` image digest, startup capability record, configured
+`LTDSTHUMB_WORKER_CONCURRENCY`, RAM-backed `/scratch` and `/cache`, and show that
+it treats `leaseId` as opaque. Repository tests cannot substitute for this live
+TrueNAS-to-Cloudflare check.
 
 ## Separately approved version and deployment sequence
 

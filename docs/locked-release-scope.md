@@ -1,5 +1,10 @@
 # Locked LTDS release scope
 
+> Historical release record: this file preserves the scope frozen on August 13,
+> 2026. Its video-only thumbnail split is superseded by the current
+> [media thumbnail runbook](media-thumbnail-pipeline.md) and must not be used as
+> deployment guidance.
+
 This checklist is the release traceability record for the Operations, Client
 Portal, delivery, request, and Project Alpha compatibility work reviewed on
 2026-08-13. A checked implementation still requires the staging and external

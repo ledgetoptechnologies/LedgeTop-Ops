@@ -1,54 +1,66 @@
-# TrueNAS video thumbnail generation
+# TrueNAS unified thumbnail queue renderer
 
-[`thumbnail-queue-worker.sh`](thumbnail-queue-worker.sh) is the canonical,
-version-controlled script to copy into the FFmpeg container at
-`/scripts/thumbnail-queue-worker.sh`.
+The repository-owned `queue-worker` image runs
+[`thumbnail-worker-supervisor.sh`](thumbnail-worker-supervisor.sh), which starts
+a bounded pool of isolated
+[`thumbnail-queue-worker.sh`](thumbnail-queue-worker.sh) processes. Each process
+claims one exact-version image, PDF, or video job from the authenticated
+Operations renderer API, renews its opaque lease, uploads one metadata-free
+`320x240` WebP, and reports completion.
 
-## Production-verified baseline
+This is the primary renderer for direct browser and other R2-only uploads. The
+Cloudflare Container remains a delayed still/PDF fallback. The older
+`includeKind=video` claim remains compatible with already-deployed workers, but
+new images use the explicit `includeKind=all` contract.
 
-The current script was verified in production on **2026-08-15** and is the
-known-good TrueNAS video-thumbnail worker. Its SHA-256 is:
+## Resource and transfer policy
 
-```text
-F056F7F6ED458BE4A3A700B601F430BBAE237FF44F30A8C630BD8642D28BE10D
-```
+- `LTDSTHUMB_WORKER_CONCURRENCY` defaults to four and is bounded from one
+  through eight. Slots share one pool across images, PDFs, and videos.
+- `/scratch` and `/cache` must be Docker `tmpfs` mounts owned by the non-root
+  renderer user. Every slot has a separate directory, lock, lease, heartbeat,
+  and cleanup lifecycle.
+- Images up to 512 MiB and PDFs up to 256 MiB are downloaded through the exact
+  leased Operations source URL into RAM. The downloaded byte count must equal
+  the claimed source size. libvips renders images; Poppler rasterizes PDF page
+  one before libvips renders it.
+- Videos up to 10 GiB are never downloaded as complete files. FFprobe and
+  FFmpeg read a validated short-lived R2 URL through a loopback-only range
+  proxy. Each video attempt has a 512 MiB aggregate upstream-read budget so
+  formats with metadata or keyframes near the end can seek safely without a
+  fixed-prefix assumption.
+- Outputs are static WebP, exactly 320 by 240, no larger than 128 KiB. The
+  Operations API validates the output again before storing and completing it.
 
-Treat that exact file as locked infrastructure. Do not rewrite, simplify, or
-replace it as part of unrelated thumbnail, delivery-page, or Cloudflare Worker
-work. Any future script change must be intentional and must rerun the complete
-`test:video-worker-container` suite for both the eight-second (five-second
-frame) and four-second (midpoint frame) scenarios before deployment. Keep the
-Docker/Compose configuration unchanged unless a separate container change is
-explicitly requested.
+## Deployment
 
-The machine-facing renderer endpoint is on the Incoming hostname and requires
-the dedicated renderer bearer. The Access-protected Operations hostname is
-also accepted only when both Cloudflare Access service-token values are
-configured. `/scratch` must be a Docker `tmpfs` mount.
-
-Videos are not downloaded as complete files. A loopback-only range proxy holds
-the validated, short-lived R2 GET URL and streams only FFprobe/FFmpeg's requested
-byte ranges. FFmpeg selects the frame at five seconds when the clip is at least
-five seconds long; shorter clips use their midpoint. Only small control files
-and the bounded WebP output are written to the RAM-backed scratch directory.
-
-Do not place credentials in this directory, Compose YAML, logs, or screenshots.
-Configure these runtime values using the TrueNAS application environment or
-secret fields:
-
-- `LTDSTHUMB_API_TOKEN` (or `THUMBNAIL_INGEST_SECRET`)
-- `CF_ACCESS_CLIENT_ID` and `CF_ACCESS_CLIENT_SECRET` (optional paired values)
+Use the digest-qualified `ltds-thumbnail-queue-worker` reference published by
+the **Publish TrueNAS thumbnail renderer images** workflow. Configure the
+`queue-renderer` service from `compose.truenas.yaml`; do not mount a Jobs dataset
+or grant R2 credentials. It needs only the dedicated renderer bearer and,
+when using the Access-protected Operations host, the paired Cloudflare Access
+service-token fields.
 
 The normal API base is
 `https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1`.
+The worker emits bounded startup, claim-kind/size, completion, and safe error
+codes. It never logs source paths, object keys, URLs, ETags, thumbnails, or
+credentials.
 
-Run `npm run test:video-worker-container` from `apps/thumbnail-renderer` to
-exercise the worker in the pinned FFmpeg container against local mock HTTPS
-claim, R2-range, upload, heartbeat, and completion endpoints. The smoke test
-uses synthetic eight-second and four-second videos and writes only to a
-disposable container tmpfs.
+## Verification
 
-The final operator copy is also placed at
-`C:\Users\fstor\Downloads\temp\thumbnail-queue-worker.sh`. Before installing
-it, compare its SHA-256 with the known-good value above. A mismatch means the
-copy must not be deployed.
+Run from `apps/thumbnail-renderer`:
+
+```text
+npm run check
+npm test
+npm run test:video-worker-container
+```
+
+The local container smoke builds the exact `queue-worker` target and exercises
+JPEG, PNG, PDF, long-video, short-video, authenticated Operations-proxy video,
+tail-metadata video, and an authoritative `video/mp4` object with a misleading
+`.jpg` name through claim, source transfer, render, heartbeat, upload, and
+completion over local mock HTTPS. The release workflow repeats that canary
+against the exact registry digest before creating its deployment receipt. No
+client media or production service is contacted by the synthetic canary.

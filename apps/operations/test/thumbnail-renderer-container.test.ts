@@ -5,6 +5,7 @@ import {
   CONTAINER_RENDER_MAX_OUTPUT_BYTES,
   CONTAINER_RENDER_MAX_PIXELS,
   ThumbnailRendererError,
+  containerSourceTransferError,
   inspectWebp,
   validWebp,
   validateContainerThumbnailRequest,
@@ -52,5 +53,10 @@ describe("private thumbnail renderer boundary", () => {
     expect(validWebp(badRiffLength)).toBe(false);
     expect(validWebp(Uint8Array.from([0x89, 0x50, 0x4e, 0x47]))).toBe(false);
     expect(validWebp(new Uint8Array(CONTAINER_RENDER_MAX_OUTPUT_BYTES + 1))).toBe(false);
+  });
+
+  it("treats a container source-pipe failure as retryable infrastructure work", () => {
+    const error = containerSourceTransferError();
+    expect(error).toMatchObject({ code: "render_failed", message: "Container source transfer failed" });
   });
 });

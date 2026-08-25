@@ -8,6 +8,7 @@ import {
   enqueueThumbnailJob,
   getThumbnailForAuthorizedSource,
   processThumbnailJob,
+  republishPendingThumbnailFallbacks,
   recoverExpiredThumbnailLeases,
   recoverTransientThumbnailFailures,
   THUMBNAIL_JOB_KIND,
@@ -38,6 +39,7 @@ interface StoredJob extends ThumbnailJobRow {
   error_message: string | null;
   dead_lettered: boolean;
   queue_published_at: string | null;
+  render_not_before: string | null;
 }
 
 class FakeThumbnailDb {
@@ -51,6 +53,8 @@ class FakeThumbnailDb {
   indexedContentType = "image/jpeg";
   indexedMediaKind = "image";
   indexMissing = false;
+  primaryHealthy = false;
+  fallbackLockAvailable = true;
 
   async batch(statements: Array<{ run(): Promise<unknown> }>) {
     return Promise.all(statements.map(statement => statement.run()));
@@ -65,9 +69,33 @@ class FakeThumbnailDb {
         return statement;
       },
       async run() {
+        if (sql.includes("thumbnail.primary-deferred")) {
+          const [sourceKey, sourceEtag] = values as [string, string];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "pending") {
+            db.job.queue_published_at = null;
+            return result(1);
+          }
+          return result(0);
+        }
+        if (sql.includes("thumbnail.fallback-lock-register")) return result(1);
+        if (sql.includes("thumbnail.fallback-lock-acquire")) {
+          if (!db.fallbackLockAvailable) return result(0);
+          db.fallbackLockAvailable = false;
+          return result(1);
+        }
+        if (sql.includes("thumbnail.fallback-lock-complete")) return result(1);
+        if (sql.includes("thumbnail.fallback-published")) {
+          const [sourceKey, sourceEtag, sourceSize] = values as [string, string, number];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.source_size === sourceSize &&
+            db.job.status === "pending" && db.job.queue_published_at === null) {
+            db.job.queue_published_at = "2026-08-24 12:00:00";
+            return result(1);
+          }
+          return result(0);
+        }
         if (sql.includes("image-location.register")) return result(0);
         if (sql.includes("thumbnail.register")) {
-          const [sourceKey, sourceEtag, sourceSize, thumbnailKey] = values as [string, string, number, string];
+          const [sourceKey, sourceEtag, sourceSize, thumbnailKey, , renderNotBefore] = values as [string, string, number, string, string, string];
           if (!db.job || db.job.source_etag !== sourceEtag) {
             db.job = {
               source_key: sourceKey,
@@ -82,6 +110,7 @@ class FakeThumbnailDb {
               error_message: null,
               dead_lettered: false,
               queue_published_at: null,
+              render_not_before: renderNotBefore,
             };
           }
           return result(1);
@@ -182,6 +211,7 @@ class FakeThumbnailDb {
             db.job.error_message = null;
             db.job.dead_lettered = false;
             db.job.queue_published_at = null;
+            db.job.render_not_before = "2026-08-24 12:00:00";
             return result(1);
           }
           return result(0);
@@ -224,6 +254,7 @@ class FakeThumbnailDb {
             db.job.error_message = null;
             db.job.dead_lettered = false;
             db.job.queue_published_at = null;
+            db.job.render_not_before = "2026-08-24 12:00:00";
             return result(1);
           }
           return result(0);
@@ -254,6 +285,7 @@ class FakeThumbnailDb {
         throw new Error(`Unhandled run query: ${sql}`);
       },
       async first<T>() {
+        if (sql.includes("thumbnail.primary-health")) return { fresh: db.primaryHealthy ? 1 : 0 } as T;
         if (sql.includes("thumbnail.claim")) {
           const [, sourceKey, sourceEtag] = values as [string, string, string];
           if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "pending") {
@@ -282,6 +314,16 @@ class FakeThumbnailDb {
         throw new Error(`Unhandled first query: ${sql}`);
       },
       async all<T>() {
+        if (sql.includes("thumbnail.fallback-due")) {
+          const [requireFailure, limit] = values as [number, number];
+          const eligible = db.job?.status === "pending" && db.job.queue_published_at === null &&
+            !db.indexMissing && db.indexedEtag === db.job.source_etag && db.indexedSize === db.job.source_size &&
+            ["image", "pdf", "video"].includes(db.indexedMediaKind) &&
+            (requireFailure === 0 || Boolean(db.job.error_code))
+            ? [{ source_key: db.job.source_key, source_etag: db.job.source_etag, source_size: db.job.source_size }]
+            : [];
+          return { results: eligible.slice(0, limit) as T[] };
+        }
         if (sql.includes("thumbnail.recovery-due")) {
           const [maxAttempts, limit] = values as [number, number];
           const eligible = db.job?.status === "failed" &&
@@ -370,6 +412,8 @@ function fixture(options: {
   indexMissing?: boolean;
   indexEtag?: string;
   leaseExpired?: boolean;
+  primaryHealthy?: boolean;
+  renderNotBefore?: string | null;
   duringRender?: (db: FakeThumbnailDb) => void;
 } = {}) {
   const sourceKey = options.sourceKey || "Jobs/Clients/Synthetic/photo.jpg";
@@ -385,6 +429,7 @@ function fixture(options: {
   db.indexedSize = options.size ?? 4096;
   db.indexedContentType = options.contentType || "image/jpeg";
   db.indexedMediaKind = db.indexedContentType.startsWith("video/") ? "video" : db.indexedContentType === "application/pdf" ? "pdf" : "image";
+  db.primaryHealthy = options.primaryHealthy ?? false;
   db.job = {
     source_key: sourceKey,
     source_etag: sourceEtag,
@@ -398,6 +443,7 @@ function fixture(options: {
     error_message: null,
     dead_lettered: false,
     queue_published_at: null,
+    render_not_before: options.renderNotBefore === undefined ? "2026-08-01 00:00:00" : options.renderNotBefore,
   };
   const putBodies: unknown[] = [];
   const putOptions: unknown[] = [];
@@ -560,6 +606,32 @@ describe("private server thumbnail pipeline", () => {
     expect(value.send).toHaveBeenCalledWith(value.message, { delaySeconds: 30 });
   });
 
+  it("persists distinct direct-upload and prebuilt renderer not-before boundaries", async () => {
+    const direct = fixture();
+    direct.db.job = undefined;
+    const directStarted = Date.now();
+    await enqueueThumbnailJob(direct.env, {
+      sourceKey: direct.message.sourceKey,
+      sourceEtag: direct.message.sourceEtag,
+      sourceSize: 4096,
+    });
+    expect(Date.parse(direct.db.job!.render_not_before!) - directStarted).toBeGreaterThanOrEqual(29_000);
+    expect(Date.parse(direct.db.job!.render_not_before!) - directStarted).toBeLessThan(31_000);
+
+    const prebuilt = fixture();
+    prebuilt.db.job = undefined;
+    const prebuiltStarted = Date.now();
+    await enqueueThumbnailJob(prebuilt.env, {
+      sourceKey: prebuilt.message.sourceKey,
+      sourceEtag: prebuilt.message.sourceEtag,
+      sourceSize: 4096,
+      delaySeconds: 15 * 60,
+    });
+    expect(Date.parse(prebuilt.db.job!.render_not_before!) - prebuiltStarted).toBeGreaterThanOrEqual(899_000);
+    expect(Date.parse(prebuilt.db.job!.render_not_before!) - prebuiltStarted).toBeLessThan(901_000);
+    expect(prebuilt.send).toHaveBeenCalledWith(prebuilt.message, { delaySeconds: 15 * 60 });
+  });
+
   it("fails an oversized PDF before any source-body read", async () => {
     const value = fixture({
       sourceKey: "Jobs/Clients/Synthetic/oversized.pdf",
@@ -582,6 +654,86 @@ describe("private server thumbnail pipeline", () => {
     expect(value.db.claims).toBe(0);
     expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 0, error_code: null });
     expect(value.getKeys).toEqual([]);
+    expect(value.renderThumbnail).not.toHaveBeenCalled();
+  });
+
+  it("acknowledges a live TrueNAS still lease after location work without burning a queue retry", async () => {
+    const value = fixture();
+    Object.assign(value.db.job!, { status: "processing", lease_active: 1 });
+    const queue = queueBatch(value.message, 1);
+
+    await consumeThumbnailJobs(queue.batch, value.env);
+
+    expect(queue.ack).toHaveBeenCalledOnce();
+    expect(queue.retry).not.toHaveBeenCalled();
+    expect(value.db.claims).toBe(0);
+    expect(value.db.job).toMatchObject({ status: "processing", lease_active: 1 });
+    expect(value.renderThumbnail).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unfailed still backlog on a healthy fully-busy TrueNAS pool beyond the initial delay", async () => {
+    const value = fixture({ primaryHealthy: true });
+    value.db.job!.queue_published_at = "2026-08-24 10:00:00";
+    const queue = queueBatch(value.message, 1);
+
+    await consumeThumbnailJobs(queue.batch, value.env);
+
+    expect(queue.ack).toHaveBeenCalledOnce();
+    expect(queue.retry).not.toHaveBeenCalled();
+    expect(value.db.claims).toBe(0);
+    expect(value.db.job).toMatchObject({ status: "pending", attempt_count: 0, queue_published_at: null });
+    expect(value.renderThumbnail).not.toHaveBeenCalled();
+    expect(value.getKeys).toEqual([]);
+  });
+
+  it("lets Cloudflare render a retryable failed still even while TrueNAS presence is healthy", async () => {
+    const value = fixture({ primaryHealthy: true });
+    Object.assign(value.db.job!, { error_code: "decode_failed", error_message: "TrueNAS decoder failed" });
+
+    await expect(processThumbnailJob(value.env, value.message)).resolves.toEqual({
+      outcome: "ready",
+      thumbnailKey: value.db.job?.thumbnail_key,
+    });
+
+    expect(value.db.claims).toBe(1);
+    expect(value.renderThumbnail).toHaveBeenCalledOnce();
+    expect(value.db.job).toMatchObject({ status: "ready", error_code: null });
+  });
+
+  it("republishes exact unpublished work only when primary presence is stale and serializes overlapping cron runs", async () => {
+    const value = fixture();
+
+    await expect(republishPendingThumbnailFallbacks(value.env)).resolves.toBe(1);
+    await expect(republishPendingThumbnailFallbacks(value.env)).resolves.toBe(0);
+
+    expect(value.send).toHaveBeenCalledTimes(1);
+    expect(value.send).toHaveBeenCalledWith(value.message);
+    expect(value.db.job).toMatchObject({ status: "pending", queue_published_at: "2026-08-24 12:00:00" });
+  });
+
+  it("republishes a failed-over still despite healthy primary presence but leaves unfailed primary work alone", async () => {
+    const unfailed = fixture({ primaryHealthy: true });
+    await expect(republishPendingThumbnailFallbacks(unfailed.env)).resolves.toBe(0);
+    expect(unfailed.send).not.toHaveBeenCalled();
+
+    const failedOver = fixture({ primaryHealthy: true });
+    failedOver.db.job!.error_code = "decode_failed";
+    await expect(republishPendingThumbnailFallbacks(failedOver.env)).resolves.toBe(1);
+    expect(failedOver.send).toHaveBeenCalledWith(failedOver.message);
+  });
+
+  it("keeps a retryable video failure durable and pollable while its queue signal is republished", async () => {
+    const value = fixture({ sourceKey: "Jobs/Clients/Synthetic/flight.mp4", contentType: "video/mp4", primaryHealthy: true });
+    value.db.job!.error_code = "decode_failed";
+
+    await expect(republishPendingThumbnailFallbacks(value.env)).resolves.toBe(1);
+    expect(value.send).toHaveBeenCalledWith(value.message);
+    expect(value.db.job).toMatchObject({ status: "pending", error_code: "decode_failed" });
+
+    const queue = queueBatch(value.message);
+    await consumeThumbnailJobs(queue.batch, value.env);
+    expect(queue.ack).toHaveBeenCalledOnce();
+    expect(value.db.job).toMatchObject({ status: "pending", error_code: "decode_failed" });
     expect(value.renderThumbnail).not.toHaveBeenCalled();
   });
 

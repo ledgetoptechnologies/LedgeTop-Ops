@@ -231,7 +231,7 @@ describe("authenticated browser delivery uploads", () => {
         : sql);
     }
     await deliveryDb.exec("CREATE TABLE file_index (r2_key TEXT PRIMARY KEY, etag TEXT NOT NULL, size INTEGER NOT NULL, uploaded_at TEXT NOT NULL, content_type TEXT, media_kind TEXT NOT NULL, stream_uid TEXT, stream_status TEXT, stream_upload_url TEXT, stream_upload_offset INTEGER NOT NULL DEFAULT 0, stream_error TEXT, updated_at TEXT NOT NULL DEFAULT (datetime('now')));");
-    for (const name of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql", "0108_thumbnail_backfill_runs.sql", "0111_thumbnail_render_provenance.sql"]) {
+    for (const name of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql", "0108_thumbnail_backfill_runs.sql", "0111_thumbnail_render_provenance.sql", "0151_thumbnail_render_not_before.sql"]) {
       await deliveryDb.exec(sqlFile(new URL(`../../client/migrations/${name}`, import.meta.url)));
     }
   });

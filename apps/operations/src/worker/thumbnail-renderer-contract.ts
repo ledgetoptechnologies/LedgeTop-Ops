@@ -32,6 +32,11 @@ export class ThumbnailRendererError extends Error {
   }
 }
 
+/** A container pipe failure is infrastructure work, not proof of a bad source. */
+export function containerSourceTransferError(): ThumbnailRendererError {
+  return new ThumbnailRendererError("render_failed", "Container source transfer failed");
+}
+
 export function validateContainerThumbnailRequest(value: ContainerThumbnailRequest): void {
   if (value.kind !== "image" && value.kind !== "pdf") {
     throw new ThumbnailRendererError("invalid_request", "Unsupported container thumbnail kind");

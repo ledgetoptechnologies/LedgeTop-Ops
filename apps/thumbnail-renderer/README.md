@@ -1,7 +1,7 @@
 # LTDS TrueNAS thumbnail app
 
-This package pre-generates private LTDS thumbnails on TrueNAS without sending
-original bytes through a new service. It is a two-container Custom App:
+This package generates private LTDS thumbnails on TrueNAS. It is a
+three-container Custom App:
 
 - `decoder` has the Jobs upload dataset mounted read-only and has **no network**.
   It scans supported still images and PDFs, renders exactly one metadata-free
@@ -15,21 +15,26 @@ original bytes through a new service. It is a two-container Custom App:
   WebP, the broker writes its exact source/derivative identities into the local
   manifest, waits for that manifest to sync, and registers only the two object
   keys/ETags with the authenticated Operations ingest API.
+- `queue-renderer` is the primary path for direct browser and other R2-only
+  uploads. Four bounded RAM-backed slots claim supported images, PDFs, and
+  videos from Operations. Images/PDFs download only the exact leased version
+  into tmpfs; videos use bounded HTTP range reads. Cloudflare remains a delayed
+  still/PDF fallback.
 
 Operations independently reads and validates that exact current R2 source,
 manifest, and WebP, then maps the prebuilt object into durable thumbnail state.
 The broker never PUTs an R2 object or uploads source bytes. The decoder never
 receives an R2 or Operations credential. Neither service publishes a port.
 
-Videos, Office documents, archives, and other unsupported formats are skipped
+Office documents, archives, and other unsupported formats are skipped
 by this **pre-generation app** without transfer. PDFs render page one only.
-Video extraction is intentionally not implemented in this package: the
-separate authenticated TrueNAS queue worker claims pending video jobs from
-`/api/internal/thumbnail-renderer/v1`. Do not point this pre-generator at that
-claim API or treat its video skip as disabling the queue-worker pipeline. The
-version-controlled replacement for the standalone container script is
-[`truenas/thumbnail-generation/thumbnail-queue-worker.sh`](truenas/thumbnail-generation/thumbnail-queue-worker.sh); deploy
-that file verbatim rather than copying the retired out-of-repository script.
+The local pre-generator does not decode videos; the repository-owned
+`queue-renderer` handles video plus R2-only still/PDF jobs through
+`/api/internal/thumbnail-renderer/v1`. The version-controlled queue runtime is
+[`truenas/thumbnail-generation/thumbnail-queue-worker.sh`](truenas/thumbnail-generation/thumbnail-queue-worker.sh),
+but production must deploy only the immutable, digest-qualified `queue-worker`
+image published and canary-tested by this repository. Never copy or layer the
+script onto an unrelated image.
 
 ## TrueNAS SCALE installation (UI only)
 
@@ -37,9 +42,9 @@ Do not use the TrueNAS system shell. Install through **Apps > Discover Apps >
 Custom App > Install via YAML** using `compose.truenas.yaml` (labels vary by
 SCALE version).
 
-The YAML expects two prebuilt immutable images. The repository's **Publish
-TrueNAS thumbnail renderer images** GitHub workflow builds the `decoder` and
-`broker` targets for `linux/amd64` on changes to this package or an authorized
+The YAML expects three prebuilt immutable images. The repository's **Publish
+TrueNAS thumbnail renderer images** GitHub workflow builds the `decoder`,
+`broker`, and `queue-worker` targets for `linux/amd64` on changes to this package or an authorized
 manual dispatch from `main`. It publishes commit tags without overwriting them
 and records each digest-qualified reference in the run summary and receipt
 artifact. Copy those `ghcr.io/ledgetoptechnologies/ltds-thumbnail-...@sha256:...`
@@ -55,6 +60,7 @@ filled YAML or `.env` file.
 | --- | --- |
 | `LTDSTHUMB_DECODER_IMAGE` | Pinned image built from Docker target `decoder` |
 | `LTDSTHUMB_BROKER_IMAGE` | Pinned image built from Docker target `broker` |
+| `LTDSTHUMB_QUEUE_WORKER_IMAGE` | Pinned image built from Docker target `queue-worker` |
 | `LTDSTHUMB_JOBS_HOST_PATH` | Existing local Jobs upload dataset, mounted read-only |
 | `LTDSTHUMB_ARTIFACTS_HOST_PATH` | Persistent private prebuilt cache and receipts |
 | `LTDSTHUMB_WORK_HOST_PATH` | Quota-limited decoder scratch dataset |
@@ -101,7 +107,10 @@ ETag handshake fits inside Operations' 15-minute raw server/rclone grace under
 healthy conditions. If it misses that window, the private Container may render
 first; a later valid prebuilt registration deterministically replaces the
 managed mapping and queues exact-ETag cleanup. Direct browser/staff enqueue
-keeps a separate 30-second grace. Never predict an R2 ETag to avoid the race.
+uses a 30-second initial queue delay. Fresh unified-worker polls and signed
+active-job heartbeats keep unfailed work owned by TrueNAS after that delay;
+stale presence or a retryable still/PDF renderer failure enables the bounded
+Cloudflare fallback. Never predict an R2 ETag to avoid the race.
 
 Keep the original source task one-way **Push** into the existing `client-data`
 bucket; never configure it as bidirectional. Begin that task in COPY mode. Only
@@ -132,6 +141,8 @@ The runtime needs:
 - decoder: no network (`network_mode: none`);
 - broker: DNS and outbound TCP 443 to the R2 S3 hostname and the configured
   Operations hostname;
+- queue-renderer: DNS and outbound TCP 443 to the authenticated Operations
+  renderer endpoint and its attempt-scoped R2 video-read URL;
 - no inbound route, host network, public webhook, Cloudflare Tunnel, or public
   R2 URL.
 
@@ -149,7 +160,7 @@ Datasets**. The Jobs dataset already exists and is not modified by this app.
   scratch for one 512 MiB still or 256 MiB PDF. Start `artifacts` at 1 GiB,
   `cache` at 1 GiB, and `state` at 64 MiB.
 - Do not solve ACL failures with root UID, privileged mode, broad `0777`, or
-  additional Linux capabilities. Both services drop all capabilities, use a
+  additional Linux capabilities. All services drop all capabilities, use a
   read-only container root, set `no-new-privileges`, and have CPU/memory/PID
   limits.
 
@@ -161,11 +172,14 @@ owns writes to the prebuilt subtree.
 
 ## Limits and processing behavior
 
-- Concurrency is fixed at one decoder and one broker item.
+- Local pre-generation remains fixed at one decoder and one broker item. The
+  R2 queue renderer defaults to four isolated slots and is configurable from
+  one through eight.
 - Still input: at most 512 MiB and 110,000,000 decoded pixels.
 - PDF input: at most 256 MiB; Poppler rasterizes page one only.
-- Production includes libvips and Poppler only; FFmpeg is not installed and no
-  video media is opened.
+- The local `decoder` includes libvips and Poppler only; it does not install
+  FFmpeg or open video media. The isolated `queue-renderer` image also includes
+  FFmpeg/FFprobe for range-read video attempts.
 - Output: static WebP, exactly 320x240, at most 128 KiB, with no EXIF, XMP, ICC,
   or animation chunks. The broker performs an independent structural check.
 - Source paths are argument-array inputs, never shell strings. Symlinks, hidden
@@ -207,9 +221,9 @@ Use synthetic non-client media only:
    pending to a thumbnail. Opening the original must still require an authorized
    user click.
 4. Repeat with a synthetic PDF and confirm a first-page thumbnail.
-5. Add a video and unsupported document. Confirm this pre-generator decodes or
-   posts neither. Independently confirm the video becomes ready through the
-   authenticated TrueNAS queue worker while the unsupported document remains a
+5. Add a video and unsupported document. Confirm the local pre-generator
+   decodes or posts neither. Confirm the video becomes ready through the
+   authenticated `queue-renderer` while the unsupported document remains a
    type icon.
 6. Replace a synthetic still at the same path. Confirm the exact R2 ETag changes
    and only the new version becomes ready. Delete it and confirm Operations

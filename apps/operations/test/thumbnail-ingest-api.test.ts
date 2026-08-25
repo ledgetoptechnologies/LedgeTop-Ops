@@ -91,7 +91,7 @@ describe("private prebuilt thumbnail registration", () => {
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await db.exec("CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,content_type TEXT,media_kind TEXT NOT NULL);");
     await db.exec("CREATE TABLE delivery_tombstones(id TEXT PRIMARY KEY,physical_key TEXT NOT NULL,tombstone_kind TEXT NOT NULL,restored_at TEXT);");
-    for (const name of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql", "0108_thumbnail_backfill_runs.sql", "0111_thumbnail_render_provenance.sql"]) {
+    for (const name of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql", "0108_thumbnail_backfill_runs.sql", "0111_thumbnail_render_provenance.sql", "0151_thumbnail_render_not_before.sql"]) {
       await db.exec(migration(name));
     }
   });

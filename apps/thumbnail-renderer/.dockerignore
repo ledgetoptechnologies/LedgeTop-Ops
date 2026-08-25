@@ -4,3 +4,7 @@
 !src/*.mjs
 !bin/
 !bin/*.mjs
+!truenas/
+!truenas/thumbnail-generation/
+!truenas/thumbnail-generation/thumbnail-queue-worker.sh
+!truenas/thumbnail-generation/thumbnail-worker-supervisor.sh

@@ -1,5 +1,5 @@
 import { Container } from "@cloudflare/containers";
-import { CONTAINER_RENDER_MAX_OUTPUT_BYTES, ThumbnailRendererError, validWebp, validateContainerThumbnailRequest, type ContainerThumbnailErrorCode, type ContainerThumbnailRequest, type ContainerThumbnailResult } from "./thumbnail-renderer-contract";
+import { CONTAINER_RENDER_MAX_OUTPUT_BYTES, ThumbnailRendererError, containerSourceTransferError, validWebp, validateContainerThumbnailRequest, type ContainerThumbnailErrorCode, type ContainerThumbnailRequest, type ContainerThumbnailResult } from "./thumbnail-renderer-contract";
 
 export const CONTAINER_RENDER_TIMEOUT_MS = 300_000;
 export const CONTAINER_RENDER_MAX_DIAGNOSTIC_BYTES = 4 * 1024;
@@ -145,7 +145,7 @@ export class ThumbnailRendererContainer extends Container {
       active = process;
       await boundedBytes(process.stderr, CONTAINER_RENDER_MAX_DIAGNOSTIC_BYTES, kill);
       if (await process.exitCode !== 0) {
-        throw new ThumbnailRendererError("invalid_input", "Container source transfer failed");
+        throw containerSourceTransferError();
       }
 
       process = await runtime.exec([

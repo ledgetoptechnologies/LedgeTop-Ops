@@ -30,7 +30,7 @@ import {
   refreshStreamStatuses,
   type R2Notification,
 } from "./file-events";
-import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, reconcileManagedThumbnailOrphans, reconcileThumbnailRegistrations, recoverExpiredThumbnailLeases, recoverTransientThumbnailFailures, thumbnailSourceEligible, type ThumbnailJobMessage } from "./image-thumbnails";
+import { consumeThumbnailDeadLetters, consumeThumbnailJobs, drainThumbnailCleanup, getThumbnailForAuthorizedSource, reconcileManagedThumbnailOrphans, reconcileThumbnailRegistrations, recoverExpiredThumbnailLeases, recoverTransientThumbnailFailures, republishPendingThumbnailFallbacks, thumbnailSourceEligible, type ThumbnailJobMessage } from "./image-thumbnails";
 import { processThumbnailBackfills } from "./thumbnail-backfill";
 import { processLegacyVideoThumbnailRecovery } from "./video-thumbnail-recovery";
 import { enqueueImageLocationBackfill } from "./image-locations";
@@ -3013,6 +3013,7 @@ async function scheduled(
     ctx.waitUntil(drainViewerSessionRevocations(env));
     ctx.waitUntil(processThumbnailBackfills(env));
     ctx.waitUntil(processLegacyVideoThumbnailRecovery(env));
+    ctx.waitUntil(republishPendingThumbnailFallbacks(env));
     try {
       await Promise.all([
         processClientPortalRequestNotifications(env),
@@ -3077,6 +3078,7 @@ async function scheduled(
   ctx.waitUntil(reconcileManagedThumbnailOrphans(env));
   ctx.waitUntil(recoverExpiredThumbnailLeases(env));
   ctx.waitUntil(recoverTransientThumbnailFailures(env));
+  ctx.waitUntil(republishPendingThumbnailFallbacks(env));
   ctx.waitUntil(processThumbnailBackfills(env));
   ctx.waitUntil(processLegacyVideoThumbnailRecovery(env));
   ctx.waitUntil(enqueueImageLocationBackfill(env));

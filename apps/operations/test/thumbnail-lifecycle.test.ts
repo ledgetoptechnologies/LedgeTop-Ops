@@ -43,7 +43,7 @@ describe("thumbnail lifecycle cleanup", () => {
     });
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await db.exec("CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,media_kind TEXT NOT NULL);");
-    for (const migration of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql", "0108_thumbnail_backfill_runs.sql", "0109_image_asset_locations.sql", "0111_thumbnail_render_provenance.sql"]) {
+    for (const migration of ["0106_image_thumbnail_jobs.sql", "0107_thumbnail_cleanup_jobs.sql", "0108_thumbnail_backfill_runs.sql", "0109_image_asset_locations.sql", "0111_thumbnail_render_provenance.sql", "0151_thumbnail_render_not_before.sql"]) {
       const sql = readFileSync(new URL(`../../client/migrations/${migration}`, import.meta.url), "utf8")
         .replace(/\r\n/g, "\n")
         .replace(/^\s*--.*$/gm, "")
@@ -119,6 +119,48 @@ describe("thumbnail lifecycle cleanup", () => {
       .resolves.toEqual({ enqueued: false, state: "pending" });
     expect(sends).toHaveLength(1);
     expect((await db.prepare("SELECT source_etag FROM image_thumbnail_jobs WHERE source_key=?").bind(sourceKey).first<{ source_etag: string }>())?.source_etag).toBe("new");
+  });
+
+  it("preserves a duplicate version's render boundary and resets it for a replacement ETag", async () => {
+    const sourceKey = "Jobs/Clients/Synthetic/render-boundary.jpg";
+    const first = store(sourceKey, "etag-a");
+    await enqueueThumbnailJob(env, {
+      sourceKey,
+      sourceEtag: first.httpEtag,
+      sourceSize: first.size,
+      eventTime: "2026-08-24T00:00:00Z",
+      delaySeconds: 900,
+    });
+    const initial = await db.prepare("SELECT source_etag,render_not_before FROM image_thumbnail_jobs WHERE source_key=?")
+      .bind(sourceKey).first<{ source_etag: string; render_not_before: string }>();
+    expect(initial?.source_etag).toBe("etag-a");
+
+    await enqueueThumbnailJob(env, {
+      sourceKey,
+      sourceEtag: first.httpEtag,
+      sourceSize: first.size,
+      eventTime: "2026-08-24T00:00:00Z",
+      delaySeconds: 0,
+    });
+    const duplicate = await db.prepare("SELECT source_etag,render_not_before FROM image_thumbnail_jobs WHERE source_key=?")
+      .bind(sourceKey).first<{ source_etag: string; render_not_before: string }>();
+    expect(duplicate).toEqual(initial);
+
+    const replacement = store(sourceKey, "etag-b");
+    const replacementStarted = Date.now();
+    await enqueueThumbnailJob(env, {
+      sourceKey,
+      sourceEtag: replacement.httpEtag,
+      sourceSize: replacement.size,
+      eventTime: "2026-08-24T00:00:01Z",
+      delaySeconds: 30,
+    });
+    const replaced = await db.prepare("SELECT source_etag,render_not_before FROM image_thumbnail_jobs WHERE source_key=?")
+      .bind(sourceKey).first<{ source_etag: string; render_not_before: string }>();
+    expect(replaced?.source_etag).toBe("etag-b");
+    expect(replaced?.render_not_before).not.toBe(initial?.render_not_before);
+    expect(Date.parse(replaced!.render_not_before) - replacementStarted).toBeGreaterThanOrEqual(29_000);
+    expect(Date.parse(replaced!.render_not_before) - replacementStarted).toBeLessThan(31_000);
   });
 
   it("clamps untrusted future event times to the consumer clock", () => {

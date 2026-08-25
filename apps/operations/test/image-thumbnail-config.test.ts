@@ -8,6 +8,7 @@ const cleanupMigration = readFileSync(new URL("../../client/migrations/0107_thum
 const backfillMigration = readFileSync(new URL("../../client/migrations/0108_thumbnail_backfill_runs.sql", import.meta.url), "utf8");
 const claimIndexMigration = readFileSync(new URL("../../client/migrations/0139_thumbnail_claim_queue_index.sql", import.meta.url), "utf8");
 const trueNasProvenanceMigration = readFileSync(new URL("../../client/migrations/0140_truenas_thumbnail_provenance.sql", import.meta.url), "utf8");
+const renderNotBeforeMigration = readFileSync(new URL("../../client/migrations/0151_thumbnail_render_not_before.sql", import.meta.url), "utf8");
 const clientConfig = JSON.parse(readFileSync(new URL("../../client/wrangler.jsonc", import.meta.url), "utf8"));
 const crud = readFileSync(new URL("../src/worker/r2-crud.ts", import.meta.url), "utf8");
 const sourceDelete = readFileSync(new URL("../src/worker/source-delete.ts", import.meta.url), "utf8");
@@ -23,11 +24,17 @@ describe("thumbnail deployment contract", () => {
     expect(config.durable_objects.bindings).toContainEqual({ name: "THUMBNAIL_RENDERER", class_name: "ThumbnailRendererContainer" });
     expect(config.exports).toEqual({ ThumbnailRendererContainer: { type: "durable-object", storage: "sqlite" } });
     expect(config.migrations).toBeUndefined();
-    expect(config.containers).toContainEqual(expect.objectContaining({ class_name: "ThumbnailRendererContainer", max_instances: 1 }));
+    expect(config.containers).toContainEqual(expect.objectContaining({ class_name: "ThumbnailRendererContainer", max_instances: 4 }));
     expect(config.r2_buckets).toContainEqual({ binding: "DATA_BUCKET", bucket_name: "client-data" });
     expect(config.d1_databases.some((value: { binding: string }) => value.binding === "DELIVERY_DB")).toBe(true);
     expect(config.queues.producers).toContainEqual({ binding: "THUMBNAIL_QUEUE", queue: "ltds-thumbnail-jobs" });
-    expect(config.queues.consumers).toContainEqual(expect.objectContaining({ queue: "ltds-thumbnail-jobs", max_retries: 5, dead_letter_queue: "ltds-thumbnail-jobs-dlq" }));
+    expect(config.queues.consumers).toContainEqual(expect.objectContaining({
+      queue: "ltds-thumbnail-jobs",
+      max_batch_size: 1,
+      max_concurrency: 4,
+      max_retries: 5,
+      dead_letter_queue: "ltds-thumbnail-jobs-dlq",
+    }));
     expect(config.queues.consumers).toContainEqual(expect.objectContaining({ queue: "ltds-thumbnail-jobs-dlq" }));
     expect(config.vars).toMatchObject({ FILE_EVENTS_QUEUE_NAME: "ltds-file-events", THUMBNAIL_QUEUE_NAME: "ltds-thumbnail-jobs", THUMBNAIL_DLQ_NAME: "ltds-thumbnail-jobs-dlq", THUMBNAIL_INGEST_EXPECTED_HOST: "ops.ledgetopdroneservices.com", THUMBNAIL_RENDERER_EXPECTED_HOST: "incoming.ledgetopdroneservices.com" });
     expect(clientConfig).not.toHaveProperty("images");
@@ -65,6 +72,24 @@ describe("thumbnail deployment contract", () => {
     database.exec(claimIndexMigration);
     const indexes = database.prepare("PRAGMA index_list('image_thumbnail_jobs')").all() as Array<{ name: string; partial: number }>;
     expect(indexes).toContainEqual(expect.objectContaining({ name: "idx_image_thumbnail_jobs_pending_queue", partial: 1 }));
+    database.close();
+  });
+
+  it("adds a nullable render boundary without delaying the existing pending backlog", () => {
+    const database = new DatabaseSync(":memory:");
+    database.exec(migration);
+    database.exec(backfillMigration);
+    database.prepare(`INSERT INTO image_thumbnail_jobs(
+      source_key,source_etag,source_size,thumbnail_key,status,queue_published_at)
+      VALUES('Jobs/Existing/photo.jpg','etag',10,'_ltds/existing.webp','pending',datetime('now'))`).run();
+
+    database.exec(renderNotBeforeMigration);
+
+    expect(database.prepare("SELECT render_not_before FROM image_thumbnail_jobs WHERE source_key='Jobs/Existing/photo.jpg'").get())
+      .toEqual({ render_not_before: null });
+    expect(database.prepare("PRAGMA index_list('image_thumbnail_jobs')").all())
+      .toContainEqual(expect.objectContaining({ name: "idx_image_thumbnail_jobs_pending_render", partial: 1 }));
+    expect(renderNotBeforeMigration).toContain("ALTER TABLE image_thumbnail_jobs ADD COLUMN render_not_before TEXT");
     database.close();
   });
 

@@ -1,15 +1,19 @@
 #!/usr/bin/env bash
-# LTDS TrueNAS video thumbnail queue worker.
+# LTDS TrueNAS unified thumbnail queue worker.
 #
-# This is intentionally a single-job worker. One active video, one opaque
-# lease, and one heartbeat process keep cancellation and cleanup deterministic.
+# Each process owns one job at a time. The repository-owned supervisor starts a
+# bounded number of these isolated slots so images, PDFs, and videos can render
+# concurrently without sharing leases or scratch files.
 set -Eeuo pipefail
 
 readonly EXPECTED_API_BASE="https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1"
 readonly ACCESS_API_BASE="https://ops.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1"
-readonly MAX_SOURCE_BYTES=10737418240 # exactly 10 * 1024 * 1024 * 1024
+readonly MAX_IMAGE_BYTES=536870912    # exactly 512 MiB
+readonly MAX_PDF_BYTES=268435456      # exactly 256 MiB
+readonly MAX_VIDEO_BYTES=10737418240  # exactly 10 GiB
 readonly MAX_OUTPUT_BYTES=131072      # exactly 128 KiB
 readonly MAX_STREAM_BYTES=536870912   # 512 MiB aggregate upstream reads per job
+readonly MAX_UPSTREAM_RANGE_BYTES=8388608 # 8 MiB per upstream R2 request
 readonly HEARTBEAT_SECONDS=60
 
 : "${LTDSTHUMB_API_BASE:=$EXPECTED_API_BASE}"
@@ -19,6 +23,8 @@ readonly HEARTBEAT_SECONDS=60
 : "${LTDSTHUMB_SCRATCH_DIR:=/scratch}"
 : "${LTDSTHUMB_IDLE_SECONDS:=30}"
 : "${LTDSTHUMB_RENDER_TIMEOUT_SECONDS:=600}"
+: "${LTDSTHUMB_WORKER_SLOT:=0}"
+: "${LTDSTHUMB_RENDERER_VERSION:=truenas-0.2.0}"
 
 log() { printf '[%s] %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >&2; }
 die() { log "fatal: $*"; exit 2; }
@@ -46,8 +52,12 @@ fi
 [[ "$LTDSTHUMB_RENDER_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] &&
   (( LTDSTHUMB_RENDER_TIMEOUT_SECONDS >= 30 && LTDSTHUMB_RENDER_TIMEOUT_SECONDS <= 840 )) ||
   die "LTDSTHUMB_RENDER_TIMEOUT_SECONDS must be an integer from 30 through 840"
+[[ "$LTDSTHUMB_WORKER_SLOT" =~ ^[0-9]+$ ]] && (( LTDSTHUMB_WORKER_SLOT <= 8 )) ||
+  die "LTDSTHUMB_WORKER_SLOT must be an integer from 0 through 8"
+[[ "$LTDSTHUMB_RENDERER_VERSION" =~ ^[A-Za-z0-9._-]{1,80}$ ]] ||
+  die "LTDSTHUMB_RENDERER_VERSION is invalid"
 
-for dependency in curl python3 ffmpeg ffprobe timeout flock mktemp stat; do
+for dependency in curl python3 ffmpeg ffprobe node vips vipsheader webpmux pdftocairo timeout flock mktemp stat; do
   require_command "$dependency"
 done
 
@@ -55,8 +65,8 @@ mkdir -p -- "$LTDSTHUMB_SCRATCH_DIR"
 chmod 700 -- "$LTDSTHUMB_SCRATCH_DIR" 2>/dev/null || true
 [[ "$(stat -f -c '%T' -- "$LTDSTHUMB_SCRATCH_DIR" 2>/dev/null || true)" == "tmpfs" ]] ||
   die "LTDSTHUMB_SCRATCH_DIR must be a tmpfs RAM mount"
-exec 9>"$LTDSTHUMB_SCRATCH_DIR/.video-queue-worker.lock"
-flock -n 9 || die "another video queue worker already holds the scratch lock"
+exec 9>"$LTDSTHUMB_SCRATCH_DIR/.thumbnail-queue-worker-${LTDSTHUMB_WORKER_SLOT}.lock"
+flock -n 9 || die "another thumbnail queue worker already holds slot $LTDSTHUMB_WORKER_SLOT"
 
 STOP_REQUESTED=0
 CURRENT_JOB_DIR=""
@@ -182,6 +192,22 @@ print(value)
 ' "$LTDSTHUMB_API_BASE" "$1"
 }
 
+resolve_ops_source_url() {
+  python3 -c '
+import sys
+from urllib.parse import urljoin, urlsplit
+base = urlsplit(sys.argv[1])
+value = urljoin(sys.argv[1] + "/", sys.argv[2])
+parsed = urlsplit(value)
+if (parsed.scheme != "https" or parsed.hostname != base.hostname or parsed.port is not None or
+        parsed.username or parsed.password or parsed.fragment):
+    raise SystemExit(1)
+if not parsed.path.startswith("/api/internal/thumbnail-renderer/v1/source/"):
+    raise SystemExit(1)
+print(value)
+' "$LTDSTHUMB_API_BASE" "$1"
+}
+
 validate_presigned_url() {
   python3 -c '
 import re, sys
@@ -229,6 +255,27 @@ _raw_ops_upload() {
     --header "Content-Length: $input_size"
     --upload-file "$input_file"
     --output "$body_file" --write-out '%{http_code}'
+  )
+  if [[ -n "$CF_ACCESS_CLIENT_ID" ]]; then
+    args+=(--header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
+    args+=(--header "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET")
+  fi
+  status=$(curl "${args[@]}" "$url") || rc=$?
+  printf '%s' "$status" >"$status_file"
+  return "$rc"
+}
+
+_raw_ops_download() {
+  local url="$1" output_file="$2" maximum_bytes="$3" status_file="$4"
+  local status rc=0
+  local args=(
+    --silent --show-error --max-redirs 0 --connect-timeout 10 --max-time 840
+    --request GET
+    --header "Authorization: Bearer $LTDSTHUMB_API_TOKEN"
+    --header "Accept: application/octet-stream"
+    --header "Accept-Encoding: identity"
+    --max-filesize "$maximum_bytes"
+    --output "$output_file" --write-out '%{http_code}'
   )
   if [[ -n "$CF_ACCESS_CLIENT_ID" ]]; then
     args+=(--header "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID")
@@ -292,6 +339,19 @@ ops_upload_call() {
   rm -f -- "$body_file" "$status_file"
 }
 
+download_source() {
+  local url="$1" output_file="$2" expected_size="$3" maximum_bytes="$4"
+  local status_file rc=0 actual_size
+  status_file=$(mktemp "$CURRENT_JOB_DIR/download-status.XXXXXX")
+  run_guarded _raw_ops_download "$url" "$output_file" "$maximum_bytes" "$status_file" || rc=$?
+  (( rc == 0 )) || return "$rc"
+  LAST_HTTP_STATUS=$(<"$status_file")
+  rm -f -- "$status_file"
+  [[ "$LAST_HTTP_STATUS" == "200" ]] || return 1
+  actual_size=$(stat -c '%s' -- "$output_file" 2>/dev/null || printf '0')
+  [[ "$actual_size" == "$expected_size" ]] || return 1
+}
+
 heartbeat_once() {
   local source_key="$1" lease_id="$2" payload body_file status_file status body
   payload=$(json_heartbeat_payload "$source_key" "$lease_id") || return 1
@@ -332,7 +392,7 @@ start_heartbeat() {
 
 fail_job() {
   local source_key="$1" lease_id="$2" code="$3" message="$4" payload result
-  log "video thumbnail failed ($code)"
+  log "thumbnail failed ($code)"
   payload=$(json_fail_payload "$source_key" "$lease_id" "$code" "$message") || return 1
   if ! ops_json_call POST "$LTDSTHUMB_API_BASE/fail" "$payload"; then
     mark_stale
@@ -360,7 +420,7 @@ if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
 }
 
 start_stream_proxy() {
-  local source_url="$1" port_file="$CURRENT_JOB_DIR/stream-proxy-port"
+  local source_url="$1" auth_mode="$2" port_file="$CURRENT_JOB_DIR/stream-proxy-port"
   local source_url_file="$CURRENT_JOB_DIR/stream-source-url"
   rm -f -- "$port_file" "$source_url_file"
   (umask 077; printf '%s' "$source_url" >"$source_url_file")
@@ -370,11 +430,27 @@ import http.server, os, re, sys, threading, urllib.error, urllib.request
 port_file = sys.argv[1]
 source_url_file = sys.argv[2]
 max_stream_bytes = int(sys.argv[3])
+max_upstream_range_bytes = int(sys.argv[4])
+auth_mode = sys.argv[5]
 with open(source_url_file, "r", encoding="utf-8") as handle:
     remote_url = handle.read()
 os.unlink(source_url_file)
 budget_lock = threading.Lock()
 bytes_forwarded = 0
+
+base_headers = {"Accept-Encoding": "identity"}
+if auth_mode == "ops":
+    token = os.environ.get("LTDSTHUMB_API_TOKEN", "")
+    if len(token) < 32:
+        raise SystemExit("missing renderer API token")
+    base_headers["Authorization"] = f"Bearer {token}"
+    access_id = os.environ.get("CF_ACCESS_CLIENT_ID", "")
+    access_secret = os.environ.get("CF_ACCESS_CLIENT_SECRET", "")
+    if access_id and access_secret:
+        base_headers["CF-Access-Client-Id"] = access_id
+        base_headers["CF-Access-Client-Secret"] = access_secret
+elif auth_mode != "presigned":
+    raise SystemExit("invalid stream authentication mode")
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -399,17 +475,35 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if self.path != "/source":
             self.send_error(404)
             return
-        headers = {"Accept-Encoding": "identity"}
+        headers = dict(base_headers)
         range_value = self.headers.get("Range")
         if range_value:
-            if not re.fullmatch(r"bytes=\d+-\d*", range_value):
+            range_match = re.fullmatch(r"bytes=(\d+)-(\d*)", range_value)
+            if not range_match:
                 self.send_error(416)
                 return
-            headers["Range"] = range_value
+            requested_start = int(range_match.group(1))
+            requested_end = int(range_match.group(2)) if range_match.group(2) else None
+            if requested_end is not None and requested_end < requested_start:
+                self.send_error(416)
+                return
         elif not include_body:
             # The R2 URL is signed for GET, so satisfy a local HEAD with a
             # one-byte GET and synthesize the full length from Content-Range.
             headers["Range"] = "bytes=0-0"
+        else:
+            # The renderer must never turn a missing client Range into a full
+            # object transfer. FFmpeg/FFprobe are configured for seekable HTTP
+            # and can retry with an explicit byte range.
+            self.send_error(416)
+            return
+
+        upstream_start = requested_start if include_body else 0
+        upstream_end = min(
+            requested_end if requested_end is not None else upstream_start + max_upstream_range_bytes - 1,
+            upstream_start + max_upstream_range_bytes - 1,
+        ) if include_body else 0
+        headers["Range"] = f"bytes={upstream_start}-{upstream_end}"
         request = urllib.request.Request(remote_url, headers=headers, method="GET")
         try:
             response = opener.open(request, timeout=30)
@@ -422,32 +516,63 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.send_error(502)
             return
         with response:
-            self.send_response(response.status if include_body else 200)
-            for name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges", "ETag"):
-                value = response.headers.get(name)
-                if not include_body and name == "Content-Length":
-                    content_range = response.headers.get("Content-Range", "")
-                    match = re.fullmatch(r"bytes \d+-\d+/(\d+)", content_range)
-                    value = match.group(1) if match else value
-                if not include_body and name == "Content-Range":
-                    continue
-                if value is not None:
-                    self.send_header(name, value)
+            content_range = response.headers.get("Content-Range", "")
+            content_match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", content_range)
+            if not content_match:
+                self.send_error(502)
+                return
+            total_size = int(content_match.group(3))
+            if not include_body:
+                self.send_response(200)
+                for name in ("Content-Type", "Accept-Ranges", "ETag"):
+                    value = response.headers.get(name)
+                    if value is not None:
+                        self.send_header(name, value)
+                self.send_header("Content-Length", str(total_size))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                return
+
+            final_end = min(requested_end if requested_end is not None else total_size - 1, total_size - 1)
+            if requested_start >= total_size or final_end < requested_start:
+                self.send_error(416)
+                return
+            self.send_response(206)
+            self.send_header("Content-Type", response.headers.get("Content-Type", "application/octet-stream"))
+            self.send_header("Content-Length", str(final_end - requested_start + 1))
+            self.send_header("Content-Range", f"bytes {requested_start}-{final_end}/{total_size}")
+            self.send_header("Accept-Ranges", "bytes")
+            etag = response.headers.get("ETag")
+            if etag is not None:
+                self.send_header("ETag", etag)
             self.send_header("Cache-Control", "no-store")
             self.end_headers()
-            if not include_body:
-                return
+
+            current_start = requested_start
+            current_response = response
             try:
-                while True:
-                    chunk = response.read(262144)
-                    if not chunk:
-                        break
-                    with budget_lock:
-                        if bytes_forwarded + len(chunk) > max_stream_bytes:
-                            self.close_connection = True
-                            return
-                        bytes_forwarded += len(chunk)
-                    self.wfile.write(chunk)
+                while current_start <= final_end:
+                    current_end = min(current_start + max_upstream_range_bytes - 1, final_end)
+                    if current_start != requested_start:
+                        next_headers = dict(base_headers)
+                        next_headers["Range"] = f"bytes={current_start}-{current_end}"
+                        next_request = urllib.request.Request(remote_url, headers=next_headers, method="GET")
+                        current_response = opener.open(next_request, timeout=30)
+                    try:
+                        while True:
+                            chunk = current_response.read(262144)
+                            if not chunk:
+                                break
+                            with budget_lock:
+                                if bytes_forwarded + len(chunk) > max_stream_bytes:
+                                    self.close_connection = True
+                                    return
+                                bytes_forwarded += len(chunk)
+                            self.wfile.write(chunk)
+                    finally:
+                        if current_response is not response:
+                            current_response.close()
+                    current_start = current_end + 1
             except (BrokenPipeError, ConnectionResetError):
                 pass
 
@@ -459,7 +584,7 @@ with open(port_file, "x", encoding="ascii") as handle:
     handle.write(str(server.server_port))
 os.chmod(port_file, 0o600)
 server.serve_forever(poll_interval=0.2)
-' "$port_file" "$source_url_file" "$MAX_STREAM_BYTES" &
+' "$port_file" "$source_url_file" "$MAX_STREAM_BYTES" "$MAX_UPSTREAM_RANGE_BYTES" "$auth_mode" &
   STREAM_PROXY_PID=$!
 
   local wait_count=0 port=""
@@ -539,7 +664,7 @@ claim_once() {
   local body_file status_file
   body_file=$(mktemp "$CURRENT_JOB_DIR/claim-body.XXXXXX")
   status_file=$(mktemp "$CURRENT_JOB_DIR/claim-status.XXXXXX")
-  if ! _raw_ops_json POST "$LTDSTHUMB_API_BASE/claim?includeKind=video" "" "$body_file" "$status_file"; then
+  if ! _raw_ops_json POST "$LTDSTHUMB_API_BASE/claim?includeKind=all" "" "$body_file" "$status_file"; then
     log "claim request failed"
     return 20
   fi
@@ -562,7 +687,7 @@ claim_once() {
 
 process_one() {
   cleanup_job
-  CURRENT_JOB_DIR=$(mktemp -d "$LTDSTHUMB_SCRATCH_DIR/video-job.XXXXXX")
+  CURRENT_JOB_DIR=$(mktemp -d "$LTDSTHUMB_SCRATCH_DIR/thumbnail-job.XXXXXX")
   chmod 700 -- "$CURRENT_JOB_DIR"
   STALE_MARKER="$CURRENT_JOB_DIR/lease-stale"
   HEARTBEAT_SLEEP_PID_FILE="$CURRENT_JOB_DIR/heartbeat-sleep-pid"
@@ -574,11 +699,12 @@ process_one() {
     return "$claim_rc"
   fi
 
-  local lease_id source_key source_size media_kind thumbnail_key source_url presigned_url upload_url
+  local lease_id source_key source_size media_kind source_content_type thumbnail_key source_url presigned_url upload_url
   lease_id=$(json_string "$LAST_HTTP_BODY" leaseId 2>/dev/null || true)
   source_key=$(json_string "$LAST_HTTP_BODY" sourceKey 2>/dev/null || true)
   source_size=$(json_integer "$LAST_HTTP_BODY" sourceSize 2>/dev/null || true)
   media_kind=$(json_string "$LAST_HTTP_BODY" mediaKind 2>/dev/null || true)
+  source_content_type=$(json_string "$LAST_HTTP_BODY" sourceContentType 2>/dev/null || true)
   thumbnail_key=$(json_string "$LAST_HTTP_BODY" thumbnailKey 2>/dev/null || true)
   source_url=$(json_string "$LAST_HTTP_BODY" r2SourceUrl 2>/dev/null || true)
   presigned_url=$(json_string "$LAST_HTTP_BODY" r2PresignedUrl 2>/dev/null || true)
@@ -595,14 +721,20 @@ process_one() {
     return 20
   fi
 
-  log "video claim accepted ($source_size bytes)"
-  if [[ "$media_kind" != "video" ]]; then
-    fail_job "$source_key" "$lease_id" unexpected_media_kind "Video-only worker received a non-video claim" || true
-    cleanup_job
-    return 20
-  fi
-  if (( source_size > MAX_SOURCE_BYTES )); then
-    fail_job "$source_key" "$lease_id" input_too_large "Video exceeds the exact 10 GiB source limit" || true
+  log "${media_kind:-unknown} claim accepted ($source_size bytes)"
+  local maximum_source_bytes=0
+  case "$media_kind" in
+    image) maximum_source_bytes=$MAX_IMAGE_BYTES ;;
+    pdf) maximum_source_bytes=$MAX_PDF_BYTES ;;
+    video) maximum_source_bytes=$MAX_VIDEO_BYTES ;;
+    *)
+      fail_job "$source_key" "$lease_id" unexpected_media_kind "Unified worker received an unsupported media kind" || true
+      cleanup_job
+      return 20
+      ;;
+  esac
+  if (( source_size <= 0 || source_size > maximum_source_bytes )); then
+    fail_job "$source_key" "$lease_id" input_too_large "Source exceeds the exact renderer input limit" || true
     cleanup_job
     return 20
   fi
@@ -613,41 +745,88 @@ process_one() {
     return 20
   fi
 
-  local stream_url
-  if [[ -n "$presigned_url" ]] && validate_presigned_url "$presigned_url"; then
-    stream_url="$presigned_url"
-  else
-    fail_job "$source_key" "$lease_id" presigned_url_unavailable "Claim did not provide a valid range-streaming URL" || true
-    cleanup_job
-    return 20
-  fi
-
-  if ! start_stream_proxy "$stream_url"; then
-    fail_job "$source_key" "$lease_id" stream_proxy_failed "The RAM-only range proxy could not start" || true
-    cleanup_job
-    return 20
-  fi
-
-  local demuxer=""
-  case "${source_key,,}" in
-    *.mp4|*.mov) demuxer="mov" ;;
-    *.mkv) demuxer="matroska" ;;
-    *)
-      fail_job "$source_key" "$lease_id" unsupported_video_extension "Video key did not have an approved container extension" || true
+  local thumbnail_file="$CURRENT_JOB_DIR/thumbnail.webp" render_rc=0 thumbnail_size
+  if [[ "$media_kind" == "video" ]]; then
+    local stream_url stream_auth_mode demuxer=""
+    if [[ -n "$presigned_url" ]] && validate_presigned_url "$presigned_url"; then
+      stream_url="$presigned_url"
+      stream_auth_mode="presigned"
+    else
+      source_url=$(resolve_ops_source_url "$source_url" 2>/dev/null || true)
+      if [[ -z "$source_url" ]]; then
+        fail_job "$source_key" "$lease_id" invalid_source_url "Claim did not provide a valid range-streaming source URL" || true
+        cleanup_job
+        return 20
+      fi
+      stream_url="$source_url"
+      stream_auth_mode="ops"
+    fi
+    if ! start_stream_proxy "$stream_url" "$stream_auth_mode"; then
+      fail_job "$source_key" "$lease_id" stream_proxy_failed "The RAM-only range proxy could not start" || true
       cleanup_job
       return 20
-      ;;
-  esac
-
-  local thumbnail_file="$CURRENT_JOB_DIR/thumbnail.webp" render_rc=0 thumbnail_size
-  render_video "$STREAM_PROXY_URL" "$thumbnail_file" "$demuxer" || render_rc=$?
+    fi
+    # The API derives mediaKind from authoritative object metadata. Select the
+    # forced demuxer from that same bounded content type before consulting the
+    # key suffix, so a valid MP4 named `disguised.jpg` is never rejected or sent
+    # through an image decoder. Octet-stream legacy objects retain an explicit
+    # approved-extension fallback.
+    source_content_type=${source_content_type%%;*}
+    source_content_type=${source_content_type,,}
+    source_content_type=${source_content_type//[[:space:]]/}
+    case "$source_content_type" in
+      video/mp4|video/quicktime|video/3gpp) demuxer="mov" ;;
+      video/x-matroska|video/webm) demuxer="matroska" ;;
+      video/x-msvideo) demuxer="avi" ;;
+      video/mpeg) demuxer="mpeg" ;;
+      video/mp2t) demuxer="mpegts" ;;
+      video/x-ms-wmv) demuxer="asf" ;;
+      video/x-flv) demuxer="flv" ;;
+      video/mxf|application/mxf) demuxer="mxf" ;;
+      application/octet-stream|"")
+        case "${source_key,,}" in
+          *.mp4|*.mov) demuxer="mov" ;;
+          *.mkv|*.webm) demuxer="matroska" ;;
+          *.avi) demuxer="avi" ;;
+          *.mts|*.m2ts|*.ts) demuxer="mpegts" ;;
+          *.mpg|*.mpeg) demuxer="mpeg" ;;
+          *.wmv) demuxer="asf" ;;
+          *.flv) demuxer="flv" ;;
+          *.mxf) demuxer="mxf" ;;
+          *.3gp) demuxer="mov" ;;
+        esac
+        ;;
+    esac
+    if [[ -z "$demuxer" ]]; then
+      fail_job "$source_key" "$lease_id" unsupported_video_container "Video metadata did not identify an approved container" || true
+      cleanup_job
+      return 20
+    fi
+    render_video "$STREAM_PROXY_URL" "$thumbnail_file" "$demuxer" || render_rc=$?
+  else
+    source_url=$(resolve_ops_source_url "$source_url" 2>/dev/null || true)
+    if [[ -z "$source_url" ]]; then
+      fail_job "$source_key" "$lease_id" invalid_source_url "Claim provided an invalid source URL" || true
+      cleanup_job
+      return 20
+    fi
+    local source_file="$CURRENT_JOB_DIR/source.bin"
+    if ! download_source "$source_url" "$source_file" "$source_size" "$maximum_source_bytes"; then
+      fail_job "$source_key" "$lease_id" source_transfer_failed "Exact leased source transfer failed" || true
+      cleanup_job
+      return 20
+    fi
+    run_guarded timeout --signal=TERM --kill-after=10s "$LTDSTHUMB_RENDER_TIMEOUT_SECONDS" \
+      node /app/src/queue-render.mjs "$media_kind" "$source_file" "$thumbnail_file" "$CURRENT_JOB_DIR" \
+      "$LTDSTHUMB_RENDER_TIMEOUT_SECONDS" || render_rc=$?
+  fi
   if (( render_rc == 75 )); then
     log "attempt stopped because its lease became stale"
     cleanup_job
     return 20
   fi
   if (( render_rc != 0 )); then
-    fail_job "$source_key" "$lease_id" render_failed "FFmpeg could not create a bounded 320x240 WebP" || true
+    fail_job "$source_key" "$lease_id" render_failed "Renderer could not create a bounded 320x240 WebP" || true
     cleanup_job
     return 20
   fi
@@ -678,7 +857,7 @@ process_one() {
   complete_status=$(json_string "$LAST_HTTP_BODY" status 2>/dev/null || true)
   if [[ "$LAST_HTTP_STATUS" == "200" && ( "$complete_status" == "ready" || "$complete_status" == "already_ready" ) ]]; then
     stop_heartbeat
-    log "video thumbnail completed"
+    log "$media_kind thumbnail completed"
     cleanup_job
     return 0
   fi
@@ -697,7 +876,7 @@ main() {
     *) die "usage: $0 [--once]" ;;
   esac
 
-  log "TrueNAS video thumbnail queue worker started"
+  log "TrueNAS thumbnail queue worker started (version=$LTDSTHUMB_RENDERER_VERSION slot=$LTDSTHUMB_WORKER_SLOT media=image,pdf,video)"
   while (( STOP_REQUESTED == 0 )); do
     local rc=0
     process_one || rc=$?
@@ -715,7 +894,7 @@ main() {
     wait "$ACTIVE_PID" 2>/dev/null || true
     ACTIVE_PID=""
   done
-  log "TrueNAS video thumbnail queue worker stopped"
+  log "TrueNAS thumbnail queue worker stopped (slot=$LTDSTHUMB_WORKER_SLOT)"
 }
 
 main "$@"

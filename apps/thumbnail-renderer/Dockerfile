@@ -32,3 +32,18 @@ ENV LTDSTHUMB_JOBS_ROOT=/data/jobs \
     LTDSTHUMB_STATE_DIR=/state/decoder
 USER 568:568
 CMD ["node", "src/index.mjs"]
+
+FROM common AS queue-worker
+USER root
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends curl ffmpeg libvips-tools openssl poppler-utils python3 webp \
+  && rm -rf /var/lib/apt/lists/* \
+  && mkdir -p /scripts /cache /scratch \
+  && chown -R 568:568 /cache /scratch
+COPY --chmod=0555 truenas/thumbnail-generation/thumbnail-queue-worker.sh /scripts/thumbnail-queue-worker.sh
+COPY --chmod=0555 truenas/thumbnail-generation/thumbnail-worker-supervisor.sh /scripts/thumbnail-worker-supervisor.sh
+RUN sed -i 's/\r$//' /scripts/thumbnail-queue-worker.sh /scripts/thumbnail-worker-supervisor.sh
+ENV LTDSTHUMB_SCRATCH_DIR=/scratch LTDSTHUMB_WORKER_CONCURRENCY=4 LTDSTHUMB_IDLE_SECONDS=5
+USER 568:568
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 CMD ["test", "-f", "/scratch/worker-ready"]
+CMD ["/scripts/thumbnail-worker-supervisor.sh"]

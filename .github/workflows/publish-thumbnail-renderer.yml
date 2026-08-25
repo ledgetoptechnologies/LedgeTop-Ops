@@ -17,13 +17,34 @@ permissions:
   packages: write
 
 jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Check out the exact release commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Use the renderer's supported Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
+
+      - name: Check renderer source and policy tests
+        run: |
+          npm --prefix apps/thumbnail-renderer run check
+          npm --prefix apps/thumbnail-renderer test
+
   publish:
     if: github.ref == 'refs/heads/main'
+    needs: verify
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
-        target: [decoder, broker]
+        target: [decoder, broker, queue-worker]
     outputs:
       digest: ${{ steps.build.outputs.digest }}
       image: ${{ steps.names.outputs.image }}
@@ -32,6 +53,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Use the renderer's supported Node runtime
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24
 
       - name: Resolve the package name
         id: names
@@ -77,6 +103,24 @@ jobs:
             org.opencontainers.image.title=LTDS thumbnail ${{ matrix.target }}
           provenance: mode=max
           sbom: true
+
+      - name: Verify immutable commit tag digest
+        shell: bash
+        env:
+          TAG: ${{ steps.names.outputs.tag }}
+          EXPECTED_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          resolved_digest="$(docker buildx imagetools inspect "${TAG}" | awk '$1 == "Digest:" { print $2; exit }')"
+          if [[ -z "${EXPECTED_DIGEST}" || -z "${resolved_digest}" || "${resolved_digest}" != "${EXPECTED_DIGEST}" ]]; then
+            echo "Published immutable tag did not resolve to the build output digest." >&2
+            exit 1
+          fi
+
+      - name: Prove the exact published all-media queue image
+        if: matrix.target == 'queue-worker'
+        env:
+          LTDSTHUMB_SMOKE_IMAGE: ${{ steps.names.outputs.image }}@${{ steps.build.outputs.digest }}
+        run: npm --prefix apps/thumbnail-renderer run test:video-worker-container
 
       - name: Write the immutable deployment receipt
         id: receipt

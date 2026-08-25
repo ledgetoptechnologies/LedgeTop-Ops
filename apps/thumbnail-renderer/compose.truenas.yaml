@@ -84,6 +84,26 @@ services:
         target: /state
     tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=32m,mode=1777]
 
+  queue-renderer:
+    <<: *hardened
+    image: ${LTDSTHUMB_QUEUE_WORKER_IMAGE:?Set the pinned queue-worker image in the TrueNAS UI}
+    container_name: ltds-thumbnail-queue-renderer
+    cpus: "${LTDSTHUMB_QUEUE_WORKER_CPU_LIMIT:-4.0}"
+    mem_limit: ${LTDSTHUMB_QUEUE_WORKER_MEMORY_LIMIT:-5g}
+    environment:
+      LTDSTHUMB_API_BASE: ${LTDSTHUMB_API_BASE:-https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1}
+      LTDSTHUMB_API_TOKEN: ${THUMBNAIL_INGEST_SECRET:?Set the dedicated Operations ingest secret}
+      CF_ACCESS_CLIENT_ID: ${CF_ACCESS_CLIENT_ID:-}
+      CF_ACCESS_CLIENT_SECRET: ${CF_ACCESS_CLIENT_SECRET:-}
+      LTDSTHUMB_WORKER_CONCURRENCY: ${LTDSTHUMB_WORKER_CONCURRENCY:-4}
+      LTDSTHUMB_IDLE_SECONDS: ${LTDSTHUMB_IDLE_SECONDS:-5}
+      LTDSTHUMB_RENDER_TIMEOUT_SECONDS: ${LTDSTHUMB_RENDER_TIMEOUT_SECONDS:-600}
+      LTDSTHUMB_RENDERER_VERSION: ${LTDSTHUMB_RENDERER_VERSION:-truenas-0.2.0}
+    tmpfs:
+      - /scratch:rw,nosuid,nodev,noexec,size=${LTDSTHUMB_QUEUE_SCRATCH_SIZE:-4g},mode=0700,uid=568,gid=568
+      - /cache:rw,nosuid,nodev,noexec,size=256m,mode=0700,uid=568,gid=568
+      - /tmp:rw,nosuid,nodev,noexec,size=64m,mode=1777
+
 networks:
   default:
     name: ltds-thumbnails-outbound

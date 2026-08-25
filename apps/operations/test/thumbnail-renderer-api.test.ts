@@ -5,18 +5,28 @@ import { dispatchThumbnailRendererApi } from "../src/worker/thumbnail-renderer-a
 const HOST = "incoming.example.test";
 const SECRET = "thumbnail-renderer-secret-that-is-at-least-32-bytes";
 
-function videoClaimFixture() {
+function videoClaimFixture(input: {
+  sourceKey?: string;
+  sourceEtag?: string;
+  sourceSize?: number;
+  contentType?: string;
+  renderNotBefore?: string | null;
+} = {}) {
   const job = {
-    source_key: "Jobs/Clients/Acme/flight.mov",
-    source_etag: "video-etag",
-    source_size: 4096,
+    source_key: input.sourceKey || "Jobs/Clients/Acme/flight.mov",
+    source_etag: input.sourceEtag || "video-etag",
+    source_size: input.sourceSize || 4096,
     thumbnail_key: "_ltds/derivatives/thumbnails/v1/managed/abc.webp",
     attempt_count: 0,
     status: "pending",
     lease_until: null as string | null,
     thumbnail_provider: null as string | null,
+    error_code: null as string | null,
+    queue_published_at: null as string | null,
+    render_not_before: input.renderNotBefore ?? null as string | null,
   };
   const queries: string[] = [];
+  const health = { attempts: 0, writes: 0, throttleOpen: true };
   const prepare = vi.fn((sql: string) => {
     queries.push(sql);
     let values: unknown[] = [];
@@ -24,7 +34,9 @@ function videoClaimFixture() {
       bind(...input: unknown[]) { values = input; return statement; },
       async first() {
         if (sql.includes("image_thumbnail_jobs") && sql.includes("ORDER BY") && sql.includes("queue_published_at")) {
-          return job.status === "pending" ? { ...job } : null;
+          const due = !job.render_not_before ||
+            Date.parse(`${job.render_not_before.replace(" ", "T")}Z`) <= Date.now();
+          return job.status === "pending" && due ? { ...job } : null;
         }
         if (sql.includes("FROM image_thumbnail_jobs") && sql.includes("status='processing'")) {
           return job.status === "processing" ? { ...job } : null;
@@ -35,6 +47,13 @@ function videoClaimFixture() {
         throw new Error(`Unhandled first query: ${sql}`);
       },
       async run() {
+        if (sql.includes("INSERT INTO delivery_sync_health")) {
+          health.attempts += 1;
+          if (!health.throttleOpen) return { meta: { changes: 0 } };
+          health.writes += 1;
+          health.throttleOpen = false;
+          return { meta: { changes: 1 } };
+        }
         if (sql.includes("SET status='processing'")) {
           const [leaseUntil, attempts, sourceKey, sourceEtag] = values as [string, number, string, string];
           if (job.status !== "pending" || sourceKey !== job.source_key || sourceEtag !== job.source_etag) return { meta: { changes: 0 } };
@@ -58,10 +77,26 @@ function videoClaimFixture() {
           return { meta: { changes: current ? 1 : 0 } };
         }
         if (sql.includes("SET status=?")) {
-          const [status, , , sourceKey, sourceEtag, thumbnailKey, attemptCount] = values as [string, string, string, string, string, string, number];
+          const [status, errorCode, , terminal, sourceKey, sourceEtag, thumbnailKey, attemptCount] = values as [string, string, string, boolean, string, string, string, number];
           const current = job.status === "processing" && sourceKey === job.source_key && sourceEtag === job.source_etag &&
             thumbnailKey === job.thumbnail_key && attemptCount === job.attempt_count;
-          if (current) { job.status = status; job.lease_until = null; }
+          if (current) {
+            job.status = status;
+            job.lease_until = null;
+            job.error_code = errorCode;
+            if (status === "pending") {
+              job.queue_published_at = null;
+              job.render_not_before = "2026-08-24 12:00:00";
+            } else if (!terminal) {
+              throw new Error("terminal failure binding mismatch");
+            }
+          }
+          return { meta: { changes: current ? 1 : 0 } };
+        }
+        if (sql.includes("SET queue_published_at=datetime('now')")) {
+          const [sourceKey, sourceEtag] = values as [string, string];
+          const current = job.status === "pending" && sourceKey === job.source_key && sourceEtag === job.source_etag;
+          if (current) job.queue_published_at = "2026-08-24 12:00:00";
           return { meta: { changes: current ? 1 : 0 } };
         }
         throw new Error(`Unhandled run query: ${sql}`);
@@ -71,11 +106,11 @@ function videoClaimFixture() {
   });
   const head = vi.fn(async (key: string) => key === job.source_key ? {
     key,
-    httpEtag: '"video-etag"',
-    size: 4096,
-    httpMetadata: { contentType: "video/quicktime" },
+    httpEtag: `"${job.source_etag}"`,
+    size: job.source_size,
+    httpMetadata: { contentType: input.contentType || "video/quicktime" },
   } : null);
-  return { job, queries, prepare, head };
+  return { job, queries, prepare, head, health };
 }
 
 function validWebpBytes(): Uint8Array {
@@ -91,6 +126,35 @@ function validWebpBytes(): Uint8Array {
 }
 
 describe("private TrueNAS thumbnail renderer API", () => {
+  it("leases supported stills through the unified TrueNAS contract", async () => {
+    const value = videoClaimFixture({
+      sourceKey: "Jobs/Clients/Acme/photo.jpg",
+      sourceEtag: "image-etag",
+      contentType: "image/jpeg",
+    });
+    const response = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/claim?includeKind=all`,
+      { method: "POST", headers: { Authorization: `Bearer ${SECRET}` } },
+    ), {
+      THUMBNAIL_INGEST_EXPECTED_HOST: HOST,
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare: value.prepare },
+      DATA_BUCKET: { head: value.head },
+    } as never);
+
+    expect(response?.status).toBe(200);
+    expect(await response!.json()).toMatchObject({
+      status: "claimed",
+      sourceKey: value.job.source_key,
+      sourceEtag: value.job.source_etag,
+      mediaKind: "image",
+      sourceContentType: "image/jpeg",
+    });
+    expect(value.queries.some(sql => sql.includes("source.media_kind IN ('image','pdf','video')"))).toBe(true);
+    expect(value.job.status).toBe("processing");
+    expect(value.health.writes).toBe(1);
+  });
+
   it("keeps the authenticated claim endpoint and leases video to TrueNAS", async () => {
     const value = videoClaimFixture();
     const claimStartedAt = Date.now();
@@ -113,6 +177,7 @@ describe("private TrueNAS thumbnail renderer API", () => {
       sourceEtag: value.job.source_etag,
       sourceSize: value.job.source_size,
       mediaKind: "video",
+      sourceContentType: "video/quicktime",
       thumbnailKey: value.job.thumbnail_key,
     });
     expect(body.leaseId).toEqual(expect.any(String));
@@ -122,6 +187,176 @@ describe("private TrueNAS thumbnail renderer API", () => {
     expect(initialLeaseMs).toBeGreaterThanOrEqual(15 * 60 * 1000);
     expect(initialLeaseMs).toBeLessThan(15 * 60 * 1000 + 2_000);
     expect(value.queries.some(sql => sql.includes("source.media_kind='video'") && sql.includes("INDEXED BY idx_file_index_kind"))).toBe(true);
+    expect(value.health.writes).toBe(0);
+  });
+
+  it("does not lease a future render boundary and leases the same exact row once due", async () => {
+    const value = videoClaimFixture({
+      contentType: "image/jpeg",
+      sourceKey: "Jobs/Clients/Acme/prebuilt.jpg",
+      renderNotBefore: new Date(Date.now() + 15 * 60 * 1000).toISOString().replace("T", " ").slice(0, 19),
+    });
+    const env = {
+      THUMBNAIL_INGEST_EXPECTED_HOST: HOST,
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare: value.prepare },
+      DATA_BUCKET: { head: value.head },
+    } as never;
+    const request = () => new Request(`https://${HOST}/api/internal/thumbnail-renderer/v1/claim?includeKind=all`, {
+      method: "POST", headers: { Authorization: `Bearer ${SECRET}` },
+    });
+
+    const future = await dispatchThumbnailRendererApi(request(), env);
+    expect(await future!.json()).toEqual({ status: "idle" });
+    expect(value.head).not.toHaveBeenCalled();
+    expect(value.queries.some(sql => sql.includes("job.render_not_before IS NULL") && sql.includes("datetime(job.render_not_before)<=datetime('now')"))).toBe(true);
+
+    value.job.render_not_before = new Date(Date.now() - 1_000).toISOString().replace("T", " ").slice(0, 19);
+    const due = await dispatchThumbnailRendererApi(request(), env);
+    expect(await due!.json()).toMatchObject({ status: "claimed", sourceKey: value.job.source_key });
+    expect(value.head).toHaveBeenCalledTimes(1);
+  });
+
+  it("returns authoritative video content type when the object name has a misleading image suffix", async () => {
+    const value = videoClaimFixture({ sourceKey: "Jobs/Clients/Acme/disguised.jpg", contentType: "video/mp4" });
+    const response = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/claim?includeKind=all`,
+      { method: "POST", headers: { Authorization: `Bearer ${SECRET}` } },
+    ), {
+      THUMBNAIL_INGEST_EXPECTED_HOST: HOST,
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare: value.prepare },
+      DATA_BUCKET: { head: value.head },
+    } as never);
+
+    expect(response?.status).toBe(200);
+    expect(await response!.json()).toMatchObject({
+      sourceKey: "Jobs/Clients/Acme/disguised.jpg",
+      mediaKind: "video",
+      sourceContentType: "video/mp4",
+    });
+  });
+
+  it("uses the signed unified lease to keep primary health fresh while every slot is busy", async () => {
+    const value = videoClaimFixture({
+      sourceKey: "Jobs/Clients/Acme/photo.jpg",
+      sourceEtag: "image-etag",
+      contentType: "image/jpeg",
+    });
+    const queue = { send: vi.fn() };
+    const apiEnv = {
+      THUMBNAIL_INGEST_EXPECTED_HOST: HOST,
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare: value.prepare },
+      DATA_BUCKET: { head: value.head },
+      THUMBNAIL_QUEUE: queue,
+    } as never;
+    const claimed = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/claim?includeKind=all`,
+      { method: "POST", headers: { Authorization: `Bearer ${SECRET}` } },
+    ), apiEnv);
+    const claim = await claimed!.json() as { leaseId: string; sourceKey: string };
+    expect(value.health.writes).toBe(1);
+
+    value.health.throttleOpen = true;
+    const heartbeat = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/heartbeat`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${SECRET}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceKey: claim.sourceKey, leaseId: claim.leaseId }),
+      },
+    ), apiEnv);
+
+    expect(heartbeat?.status).toBe(200);
+    expect(value.health.writes).toBe(2);
+    expect(queue.send).not.toHaveBeenCalled();
+  });
+
+  it("throttles repeated fresh unified polls to one D1 health write per interval", async () => {
+    const value = videoClaimFixture({ contentType: "image/jpeg", sourceKey: "Jobs/Clients/Acme/photo.jpg" });
+    const env = {
+      THUMBNAIL_INGEST_EXPECTED_HOST: HOST,
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare: value.prepare },
+      DATA_BUCKET: { head: value.head },
+    } as never;
+    const request = () => new Request(`https://${HOST}/api/internal/thumbnail-renderer/v1/claim?includeKind=all`, {
+      method: "POST", headers: { Authorization: `Bearer ${SECRET}` },
+    });
+
+    expect((await dispatchThumbnailRendererApi(request(), env))?.status).toBe(200);
+    expect((await dispatchThumbnailRendererApi(request(), env))?.status).toBe(200);
+
+    expect(value.health).toMatchObject({ attempts: 2, writes: 1 });
+    expect(value.queries.some(sql => sql.includes("datetime('now','-30 seconds')"))).toBe(true);
+  });
+
+  it("durably republishes a retryable unified still failure for Cloudflare fallback", async () => {
+    const value = videoClaimFixture({
+      sourceKey: "Jobs/Clients/Acme/photo.jpg",
+      sourceEtag: "image-etag",
+      contentType: "image/jpeg",
+    });
+    const send = vi.fn(async () => undefined);
+    const apiEnv = {
+      THUMBNAIL_INGEST_EXPECTED_HOST: HOST,
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare: value.prepare },
+      DATA_BUCKET: { head: value.head },
+      THUMBNAIL_QUEUE: { send },
+    } as never;
+    const claimed = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/claim?includeKind=all`,
+      { method: "POST", headers: { Authorization: `Bearer ${SECRET}` } },
+    ), apiEnv);
+    const claim = await claimed!.json() as { leaseId: string; sourceKey: string };
+    const failed = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/fail`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${SECRET}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceKey: claim.sourceKey, leaseId: claim.leaseId, errorCode: "decode_failed" }),
+      },
+    ), apiEnv);
+
+    expect(failed?.status).toBe(200);
+    expect(await failed!.json()).toEqual({ status: "retrying" });
+    expect(send).toHaveBeenCalledWith({
+      kind: "image-thumbnail.v1",
+      sourceKey: value.job.source_key,
+      sourceEtag: value.job.source_etag,
+    });
+    expect(value.job).toMatchObject({
+      status: "pending",
+      error_code: "decode_failed",
+      queue_published_at: "2026-08-24 12:00:00",
+    });
+    expect(value.queries.some(sql => sql.includes("job.error_code IS NULL OR source.media_kind='video'"))).toBe(true);
+  });
+
+  it("leaves a durable unpublished marker when retryable failure publication is unavailable", async () => {
+    const value = videoClaimFixture({ contentType: "application/pdf", sourceKey: "Jobs/Clients/Acme/report.pdf" });
+    const apiEnv = {
+      THUMBNAIL_INGEST_EXPECTED_HOST: HOST,
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare: value.prepare },
+      DATA_BUCKET: { head: value.head },
+      THUMBNAIL_QUEUE: { send: vi.fn(async () => { throw new Error("queue unavailable"); }) },
+    } as never;
+    const claimed = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/claim?includeKind=all`,
+      { method: "POST", headers: { Authorization: `Bearer ${SECRET}` } },
+    ), apiEnv);
+    const claim = await claimed!.json() as { leaseId: string; sourceKey: string };
+    const failed = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/fail`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${SECRET}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceKey: claim.sourceKey, leaseId: claim.leaseId, errorCode: "decode_failed" }),
+      },
+    ), apiEnv);
+
+    expect(failed?.status).toBe(200);
+    expect(value.job).toMatchObject({ status: "pending", error_code: "decode_failed", queue_published_at: null });
   });
 
   it("records successful renderer completions as TrueNAS provenance", async () => {
@@ -173,12 +408,12 @@ describe("private TrueNAS thumbnail renderer API", () => {
     database.exec(`CREATE TABLE image_thumbnail_jobs(
       source_key TEXT PRIMARY KEY,source_etag TEXT NOT NULL,source_size INTEGER NOT NULL,
       thumbnail_key TEXT NOT NULL,attempt_count INTEGER NOT NULL,status TEXT NOT NULL,
-      lease_until TEXT,queue_published_at TEXT);
+      lease_until TEXT,queue_published_at TEXT,render_not_before TEXT);
       CREATE TABLE file_index(
         r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,
         media_kind TEXT NOT NULL,stream_status TEXT);
       CREATE INDEX idx_file_index_kind ON file_index(media_kind,stream_status);`);
-    const insertJob = database.prepare("INSERT INTO image_thumbnail_jobs VALUES(?,?,?,?,0,'pending',NULL,?)");
+    const insertJob = database.prepare("INSERT INTO image_thumbnail_jobs VALUES(?,?,?,?,0,'pending',NULL,?,NULL)");
     const insertFile = database.prepare("INSERT INTO file_index VALUES(?,?,?,'image',NULL)");
     database.exec("BEGIN");
     for (let index = 0; index < 25_000; index += 1) {

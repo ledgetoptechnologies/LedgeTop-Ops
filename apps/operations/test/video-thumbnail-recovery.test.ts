@@ -65,6 +65,7 @@ describe("legacy TrueNAS video thumbnail recovery", () => {
       "0108_thumbnail_backfill_runs.sql",
       "0110_thumbnail_backfill_jobs_scope.sql",
       "0111_thumbnail_render_provenance.sql",
+      "0151_thumbnail_render_not_before.sql",
       "0131_video_thumbnail_recovery_backfill.sql",
     ]) await db.exec(migration(name));
   });

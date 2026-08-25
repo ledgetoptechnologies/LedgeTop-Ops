@@ -308,16 +308,16 @@ The queue consumer must:
 - emit structured counters for eligible, ignored, duplicate, queued,
   completed, failed, deleted-race, retry, and dead-letter outcomes.
 
-Supported still images and first-page PDFs use only the bounded, private
-libvips/Poppler renderer after staging proves format support, decoded-pixel and
-output bounds, access controls, cleanup, and acceptable Container usage. Video
-jobs deliberately bypass that Cloudflare renderer and remain pending until the
-separately deployed, authenticated TrueNAS queue worker claims them through
-`/api/internal/thumbnail-renderer/v1`. The TrueNAS worker extracts one bounded
-frame and must echo the claim's opaque `leaseId` on heartbeat, failure, and
-completion. Existing Stream playback remains a separate authorized viewer
-capability and is never the thumbnail source. Other media stays on a file-kind
-icon until a sandboxed processor is independently proven.
+The authenticated TrueNAS queue worker is primary for supported still images,
+first-page PDFs, and videos through `/api/internal/thumbnail-renderer/v1`.
+Images and PDFs use bounded tmpfs reads and libvips/Poppler; videos use bounded
+HTTP range windows and extract one frame without a full source copy. The worker
+must echo the claim's opaque `leaseId` on heartbeat, failure, and completion.
+The private Cloudflare Container is a delayed still/PDF fallback only after
+TrueNAS health becomes stale or a retryable still/PDF failure. Existing Stream
+playback remains a separate authorized viewer capability and is never the
+thumbnail source. Other media stays on a file-kind icon until a sandboxed
+processor is independently proven.
 
 Cost controls include maximum source bytes/pixels/duration, queue batch and
 retry limits, per-tenant concurrency, daily transformation/minute budgets,

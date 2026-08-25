@@ -21,6 +21,8 @@ const RENDERER_VIDEO_INITIAL_LEASE_MS = 15 * 60 * 1000;
 // renderer boundary. Cloudflare Container jobs complete through
 // image-thumbnails.ts; the managed object-key layout is shared by both paths.
 const PROVIDER = "ltds-truenas";
+const UNIFIED_RENDERER_CONTRACT = "all-media-v1" as const;
+const UNIFIED_RENDERER_HEALTH_SOURCE = "thumbnail-renderer-queue";
 
 interface ClaimResponse {
   leaseId?: string;
@@ -28,6 +30,7 @@ interface ClaimResponse {
   sourceEtag?: string;
   sourceSize?: number;
   mediaKind?: string;
+  sourceContentType?: string;
   thumbnailKey?: string;
   r2SourceUrl?: string;
   r2PresignedUrl?: string;
@@ -55,6 +58,18 @@ interface RendererAttemptJob {
   thumbnail_key: string;
   attempt_count: number;
   lease_until: string | null;
+  renderer_contract?: typeof UNIFIED_RENDERER_CONTRACT | null;
+}
+
+async function recordUnifiedRendererHealth(env: Pick<Env, "DELIVERY_DB">): Promise<void> {
+  await env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health(
+    source,last_attempt_at,last_success_at,status,details_json,updated_at)
+    VALUES(?,datetime('now'),datetime('now'),'healthy',?,datetime('now'))
+    ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=datetime('now'),
+      status='healthy',details_json=excluded.details_json,updated_at=datetime('now')
+    WHERE delivery_sync_health.last_success_at IS NULL
+      OR datetime(delivery_sync_health.last_success_at)<=datetime('now','-30 seconds')`)
+    .bind(UNIFIED_RENDERER_HEALTH_SOURCE, JSON.stringify({ contract: UNIFIED_RENDERER_CONTRACT })).run();
 }
 
 function json(value: unknown, status: number): Response {
@@ -157,12 +172,16 @@ async function boundedJson(request: Request, maxBytes = 8 * 1024): Promise<Recor
  * and returns the source details plus presigned URLs for download and upload.
  */
 async function handleClaim(request: Request, env: Env): Promise<Response> {
-  // The external TrueNAS queue worker is video-only. Keep the legacy
-  // excludeKind filter for older callers, but provide an authoritative filter
-  // backed by the indexed media classification so it cannot consume image/PDF
-  // work intended for the Cloudflare queue consumer.
+  // The external TrueNAS renderer is the primary renderer for every supported
+  // media kind. `video` remains available for the previously published worker;
+  // `all` is the explicit unified-worker contract. The Cloudflare queue
+  // consumer remains a still/PDF fallback and loses the atomic D1 claim when
+  // TrueNAS has already leased the exact source version.
   const includeKind = new URL(request.url).searchParams.get("includeKind") || "";
-  if (includeKind && includeKind !== "video") return json({ error: "invalid_request" }, 400);
+  if (includeKind && includeKind !== "video" && includeKind !== "all") return json({ error: "invalid_request" }, 400);
+  if (includeKind === "all") {
+    await recordUnifiedRendererHealth(env);
+  }
   // Allow excluding a media kind (e.g. excludeKind=video to only claim photos)
   const excludeKind = new URL(request.url).searchParams.get("excludeKind") || "";
   const excludeClause = excludeKind === "video"
@@ -186,12 +205,27 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
          AND trim(source.etag,'"')=job.source_etag
          AND source.size=job.source_size
          AND job.status='pending'
+         AND (job.render_not_before IS NULL OR datetime(job.render_not_before)<=datetime('now'))
+         AND (job.lease_until IS NULL OR job.lease_until < datetime('now'))
+       ORDER BY job.queue_published_at ASC
+       LIMIT 1`
+    : includeKind === "all"
+    ? `SELECT job.source_key,job.source_etag,job.source_size,job.thumbnail_key,job.attempt_count
+       FROM image_thumbnail_jobs AS job
+       INNER JOIN file_index AS source ON source.r2_key=job.source_key
+         AND trim(source.etag,'"')=job.source_etag
+         AND source.size=job.source_size
+       WHERE source.media_kind IN ('image','pdf','video')
+         AND job.status='pending'
+         AND (job.render_not_before IS NULL OR datetime(job.render_not_before)<=datetime('now'))
+         AND (job.error_code IS NULL OR source.media_kind='video')
          AND (job.lease_until IS NULL OR job.lease_until < datetime('now'))
        ORDER BY job.queue_published_at ASC
        LIMIT 1`
     : `SELECT source_key,source_etag,source_size,thumbnail_key,attempt_count
        FROM image_thumbnail_jobs
        WHERE status='pending'
+         AND (render_not_before IS NULL OR datetime(render_not_before)<=datetime('now'))
          AND (lease_until IS NULL OR lease_until < datetime('now'))
          ${excludeClause}
        ORDER BY queue_published_at ASC
@@ -254,6 +288,7 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
     sourceSize: job.source_size,
     thumbnailKey,
     attemptCount,
+    ...(includeKind === "all" ? { rendererContract: UNIFIED_RENDERER_CONTRACT } : {}),
     // The database lease is bounded and must be extended by heartbeat. The
     // attempt-bound token lasts longer so a heartbeat does not invalidate the
     // source/upload URLs during a large video render.
@@ -286,6 +321,7 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
     sourceEtag: cleanThumbnailEtag(job.source_etag),
     sourceSize: job.source_size,
     mediaKind: kind,
+    sourceContentType: sourceHead.httpMetadata?.contentType || "application/octet-stream",
     thumbnailKey,
     r2SourceUrl: `${RENDERER_API_PREFIX}/source/${leaseId}?key=${encodeURIComponent(job.source_key)}`,
     r2PresignedUrl,
@@ -507,14 +543,16 @@ async function currentRendererAttempt(
     FROM image_thumbnail_jobs WHERE source_key=? AND status='processing'
       AND lease_until IS NOT NULL AND datetime(lease_until)>datetime('now')`)
     .bind(sourceKey).first<RendererAttemptJob>();
-  if (!job || !(await verifyRendererLease(env, leaseId, {
+  if (!job) return null;
+  const lease = await verifiedRendererLease(env, leaseId, {
     sourceKey,
     sourceEtag: job.source_etag,
     sourceSize: job.source_size,
     thumbnailKey: job.thumbnail_key,
     attemptCount: job.attempt_count,
-  }))) return null;
-  return job;
+  });
+  if (!lease) return null;
+  return { ...job, renderer_contract: lease.rendererContract || null };
 }
 
 /**
@@ -547,6 +585,13 @@ async function handleHeartbeat(request: Request, env: Env): Promise<Response> {
   ).bind(leaseUntil, sourceKey, job.source_etag, job.thumbnail_key, job.attempt_count).run();
   if (heartbeat.meta.changes !== 1) return json({ error: "job_not_found" }, 404);
 
+  // Polling slots cannot report presence while all of them are rendering.
+  // The signed claim contract therefore lets a busy unified slot refresh the
+  // same health record without trusting a client-supplied capability string.
+  if (job.renderer_contract === UNIFIED_RENDERER_CONTRACT) {
+    await recordUnifiedRendererHealth(env);
+  }
+
   return json({ status: "ok" }, 200);
 }
 
@@ -573,15 +618,34 @@ async function handleFail(request: Request, env: Env): Promise<Response> {
   const terminal = job.attempt_count >= 6;
   const failed = await env.DELIVERY_DB.prepare(
     `UPDATE image_thumbnail_jobs SET status=?, error_code=?, error_message=?, lease_until=NULL,
-     ${terminal ? "failed_at=datetime('now')," : "queue_published_at=datetime('now'),"}
+     render_not_before=CASE WHEN ? THEN render_not_before ELSE datetime('now') END,
+     ${terminal ? "failed_at=datetime('now')," : "queue_published_at=NULL,"}
      updated_at=datetime('now')
      WHERE source_key=? AND source_etag=? AND thumbnail_key=? AND status='processing'
        AND attempt_count=? AND lease_until IS NOT NULL AND datetime(lease_until)>datetime('now')`
   ).bind(
-    terminal ? "failed" : "pending", errorCode, errorMessage,
+    terminal ? "failed" : "pending", errorCode, errorMessage, terminal,
     sourceKey, job.source_etag, job.thumbnail_key, job.attempt_count,
   ).run();
   if (failed.meta.changes !== 1) return json({ error: "job_not_found" }, 404);
+
+  if (!terminal) {
+    try {
+      await env.THUMBNAIL_QUEUE.send({
+        kind: "image-thumbnail.v1",
+        sourceKey,
+        sourceEtag: cleanThumbnailEtag(job.source_etag),
+      });
+      await env.DELIVERY_DB.prepare(`UPDATE image_thumbnail_jobs
+        SET queue_published_at=datetime('now'),updated_at=datetime('now')
+        WHERE source_key=? AND source_etag=? AND status='pending'`)
+        .bind(sourceKey, cleanThumbnailEtag(job.source_etag)).run();
+    } catch {
+      // The durable pending row with a null publish marker is intentional.
+      // Scheduled stale-renderer reconciliation republishes it if the server
+      // stops before claiming it again.
+    }
+  }
 
   return json({ status: terminal ? "failed" : "retrying" }, 200);
 }
@@ -618,6 +682,7 @@ interface RendererLease {
   sourceSize: number;
   thumbnailKey: string;
   attemptCount: number;
+  rendererContract?: typeof UNIFIED_RENDERER_CONTRACT;
   expiresAt: number;
 }
 
@@ -637,23 +702,32 @@ async function createRendererLease(env: Env, lease: RendererLease): Promise<stri
 async function verifyRendererLease(
   env: Env,
   leaseId: string | null,
-  expected: Omit<RendererLease, "v" | "expiresAt">,
+  expected: Omit<RendererLease, "v" | "expiresAt" | "rendererContract">,
 ): Promise<boolean> {
-  if (!leaseId || leaseId.length > 4096) return false;
+  return Boolean(await verifiedRendererLease(env, leaseId, expected));
+}
+
+async function verifiedRendererLease(
+  env: Env,
+  leaseId: string | null,
+  expected: Omit<RendererLease, "v" | "expiresAt" | "rendererContract">,
+): Promise<RendererLease | null> {
+  if (!leaseId || leaseId.length > 4096) return null;
   const match = /^v1\.([A-Za-z0-9_-]+)\.([A-Za-z0-9_-]{43})$/.exec(leaseId);
-  if (!match) return false;
+  if (!match) return null;
   const [encoded, signature] = [match[1]!, match[2]!];
   let lease: RendererLease;
   try {
     lease = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(decodeBase64Url(encoded))) as RendererLease;
   } catch {
-    return false;
+    return null;
   }
-  return timingSafeEqual(
+  const valid = timingSafeEqual(
     await hmac(env.THUMBNAIL_INGEST_SECRET || "", `thumbnail-renderer-lease:v1:${encoded}`),
     signature,
   ) && lease.v === 1 && lease.expiresAt > Date.now() &&
     lease.sourceKey === expected.sourceKey && cleanThumbnailEtag(lease.sourceEtag) === cleanThumbnailEtag(expected.sourceEtag) &&
     lease.sourceSize === expected.sourceSize && lease.thumbnailKey === expected.thumbnailKey &&
     lease.attemptCount === expected.attemptCount;
+  return valid ? lease : null;
 }

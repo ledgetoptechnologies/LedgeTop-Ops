@@ -152,20 +152,24 @@ Do not add either binding or run an Images-dependent backfill. The Operations
 Worker owns the existing thumbnail Queue/DLQ and a private RPC-only
 `ThumbnailRendererContainer`; the Client Worker only serves an already-ready
 private R2 derivative after reauthorization. The Container has no public route,
-internet access, or source credentials and is capped at one `standard-1`
-instance. It renders still images with libvips and the first PDF page with
-Poppler. Office/document media remain type-specific icons. Video queue signals
-are acknowledged without a Container claim or source read; their D1 rows stay
-pending for the separate authenticated TrueNAS renderer API.
+internet access, or source credentials. It is a delayed still/PDF fallback,
+sharded across at most four `standard-1` instances with queue concurrency four;
+it renders still images with libvips and the first PDF page with Poppler.
+Office/document media remain type-specific icons. It never renders video.
 
-Operations waits 15 minutes for an optional TrueNAS prebuilt registration on
-raw server/rclone R2 events; direct browser/staff enqueue keeps a 30-second
-grace. It then uses the Container fallback. Prebuilt artifacts live only under
+Operations records a durable 15-minute renderer-eligibility boundary for raw
+server/rclone R2 events; direct browser/staff enqueue records 30 seconds. The
+authenticated TrueNAS queue renderer is primary for image, PDF, and video jobs.
+Fresh worker polls and signed active-job heartbeats keep unfailed still/PDF work
+owned by TrueNAS beyond the initial boundary. Only when that health becomes
+stale, or after a retryable TrueNAS still/PDF failure, does the bounded scheduler
+publish the exact pending version to the Cloudflare Container fallback. Prebuilt
+artifacts live only under
 `_ltds/derivatives/thumbnails/v1/prebuilt/`; Cloudflare fallback objects live
-only under the sibling `managed/` namespace. The repository-owned pre-generation
-app handles still images and PDFs only. A separate TrueNAS queue worker handles
-pending video jobs. Configure the two components and keep their contracts
-separate exactly as documented in the [thumbnail runbook](media-thumbnail-pipeline.md).
+only under the sibling `managed/` namespace. The optional pre-generation broker
+can still register exact still/PDF artifacts, but it is not the queue renderer.
+Configure these roles exactly as documented in the
+[thumbnail runbook](media-thumbnail-pipeline.md).
 Current rclone multipart objects do not expose the full-object SHA-256 proof
 required for prebuilt registration, so they fail closed to the private Container
 fallback. Do not enable an undocumented S3 checksum-mode HEAD header, accept a
@@ -173,23 +177,31 @@ composite checksum, or weaken source ETag checks to make prebuilt registration
 succeed.
 The prebuilt ingest prefix on Operations requires the Cloudflare Access
 service-token headers `CF-Access-Client-Id` and `CF-Access-Client-Secret` plus
-`THUMBNAIL_INGEST_SECRET` at the Worker. The video renderer uses the separate
-Incoming machine endpoint and requires the Worker bearer before any D1 or R2
+`THUMBNAIL_INGEST_SECRET` at the Worker. The unified queue renderer uses the
+separate Incoming machine endpoint and requires that bearer before any D1 or R2
 operation; it must answer directly rather than redirect to an Access login.
 
 The TrueNAS queue worker uses the sibling
 `/api/internal/thumbnail-renderer/v1` API on the exact Incoming hostname to
-claim pending video rows, download one exact ETag-bound source into isolated
-scratch, upload a bounded WebP, and complete the row. Its heartbeat, failure, and completion calls must
+claim pending image, PDF, and video rows with `includeKind=all`, render a bounded
+WebP, upload it, and complete the exact version. Images and PDFs use an exact
+authenticated full read into per-slot tmpfs with 512 MiB and 256 MiB source
+caps. Videos use a loopback range proxy with eight-MiB upstream windows and a
+512 MiB aggregate read budget; they are never copied to a full-size scratch
+file. A short-lived presigned R2 URL is preferred for video, but the returned
+authenticated source URL is the required fallback. Its heartbeat, failure, and
+completion calls must
 echo the opaque `leaseId` returned by `/claim`; stale attempt tokens are
 rejected. It starts the renderer heartbeat immediately after a claim and sends
-it every 60 seconds throughout capacity waits, source reads, FFmpeg work, upload,
-and completion. A video claim starts with a 15-minute D1 lease. An early
+it every 60 seconds throughout source reads, media decoding, upload, and
+completion. A video claim starts with a 15-minute D1 lease; image and PDF claims
+start with five minutes. An early
 heartbeat never shortens that horizon; once fewer than five minutes remain,
 each heartbeat extends it to five minutes from the heartbeat. Those leases are distinct from the longer-lived
 signed lease token. See the [authoritative queue-worker protocol](media-thumbnail-pipeline.md#truenas-queue-worker-protocol)
-for the payloads and large-video behavior. Give the worker at least 12 GiB of
-private scratch so the 10 GiB upper bound plus derivative and safety margin fit.
+for the payloads and large-video behavior. Use the repository compose defaults:
+four isolated worker slots, a five-GiB memory limit, and a four-GiB tmpfs scratch
+mount. The ten-GiB video source limit is safe because video stays range-streamed.
 
 Create path-specific self-hosted Access coverage for the ingest prefix on
 `ops.ledgetopdroneservices.com`. Keep the renderer prefix on Incoming restricted
@@ -202,7 +214,7 @@ Use a Service Auth policy that includes only one dedicated TrueNAS prebuilt
 service token; do not broaden coverage to all Operations routes. Enter that
 token's client ID/secret only in the prebuilt client. Set a separate random
 Operations runtime secret named `THUMBNAIL_INGEST_SECRET` and enter the same
-bearer only in the prebuilt and video-renderer clients. Keep
+bearer only in the prebuilt and unified queue-renderer clients. Keep
 `THUMBNAIL_INGEST_EXPECTED_HOST=ops.ledgetopdroneservices.com` and
 `THUMBNAIL_RENDERER_EXPECTED_HOST=incoming.ledgetopdroneservices.com`.
 
@@ -211,12 +223,12 @@ Access-protect the ingest prefix there, but allow the exact renderer prefix to
 reach its Worker bearer check without an interactive redirect. Do not reuse
 staff Access, Worker/Wrangler, rclone, Project Alpha, or Incoming credentials.
 Give only the prebuilt broker a separate bucket-scoped R2 Object Read credential
-for HEAD requests; rclone alone owns prebuilt writes. The video queue worker
+for HEAD requests; rclone alone owns prebuilt writes. The unified queue worker
 receives no R2 S3 credential.
 
 Stream remains available for private playback of existing Stream assets, but
-the thumbnail path never sends a source to Stream. The TrueNAS renderer
-extracts a local frame for the private R2 thumbnail derivative.
+the thumbnail path never sends a source to Stream. The TrueNAS renderer extracts
+a frame through bounded range reads for the private R2 thumbnail derivative.
 
 Delivery uses the Stream binding to generate one-hour signed tokens for existing
 Stream assets. Original R2 objects remain the authorized download source.
@@ -593,17 +605,16 @@ Set-Location ../operations
 npm.cmd run db:migrate:remote
 ```
 
-Confirm Delivery migrations through `0112_thumbnail_renderer_jobs_root.sql`
-and `0114` through `0135_security_scan_followups.sql`
+Confirm Delivery migrations through `0151_thumbnail_render_not_before.sql`
 (`0113` is the reserved production-ledger gap), and Operations migrations
-through `0023_project_task_sop_links.sql`, appear in the
+through `0031_project_alpha_delivery_intent_rate_limits.sql`, appear in the
 remote migration lists before deploying dependent Workers. Before the
 Operations deployment, separately verify the thumbnail queue and DLQ exist;
 the producer/main-consumer/DLQ consumer bindings resolve to those exact queues;
-the private `THUMBNAIL_RENDERER` Container binding resolves with one maximum
+the private `THUMBNAIL_RENDERER` Container binding resolves with four maximum
 instance, internet disabled and no SSH/public route; the existing R2
 object-create notification still feeds `ltds-file-events`; and both the
-15-minute and 5-minute crons are present. Apply Delivery `0111` before
+15-minute and 5-minute crons are present. Apply Delivery `0151` before
 uploading the dependent Operations version. The existing private `ltds-ops`
 Worker owns the thumbnail consumer; no separate or public `ltds-thumbnails`
 Worker is needed. Repository configuration does not prove remote resources or

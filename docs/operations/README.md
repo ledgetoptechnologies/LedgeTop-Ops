@@ -67,8 +67,8 @@ failures correctly remain on their local file-type icon.
 - Local tests and dry-run configuration checks do not prove Cloudflare Container
   entitlement, decoder behavior, queue/DLQ existence, R2 event subscriptions,
   cron installation, or production bindings. Verify each in isolated staging.
-- Delivery migrations `0105` through `0112` and `0114` through `0135`, plus
-  Operations migrations `0017` through `0023`, are
+- Delivery migrations through `0151` (with reserved ledger gap `0113`), plus
+  Operations migrations through `0031`, are
   additive and remain after a Worker version rollback. Preserve verified D1
   exports and prior Worker version IDs before rollout.
 - Folder-grant mail is at-least-once. Revocation before the final authorization
@@ -80,11 +80,13 @@ failures correctly remain on their local file-type icon.
   be monitored.
 - Invalid, empty, unsupported, over-512-MiB or over-110-MP still images and
   over-256-MiB PDFs use a local file-type icon. Supported PDFs render page one.
-  Video bypasses the Cloudflare image/PDF decoder and is processed only by the
-  authenticated TrueNAS claim worker; Office, audio and archive files remain
+  The authenticated TrueNAS renderer claims supported images, PDFs, and videos;
+  video uses bounded range reads instead of a full scratch copy. Cloudflare is
+  a delayed still/PDF fallback only. Office, audio and archive files remain
   icon-only. Thumbnail DLQ rows and retained unregistered prebuilt objects
   require monitoring and separately reviewed replay/cleanup.
-- The active private Container fallback and optional TrueNAS prebuilt renderer
+- The unified TrueNAS queue renderer, private Container fallback, and optional
+  TrueNAS prebuilt renderer
   require separate entitlement/cost and staging evidence. Neither may expose a
   public route, public R2 URL, source credential, or original fallback.
 - Job-brief attachments are append-only and consume private R2 storage. Brief
