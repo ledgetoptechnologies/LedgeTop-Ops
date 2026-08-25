@@ -71,6 +71,28 @@ async function currentFolderLocationAssets(
   return rows.results;
 }
 
+async function currentFolderImageCount(
+  env: Pick<Env, "DELIVERY_DB">,
+  prefix: string,
+): Promise<number> {
+  const row = await env.DELIVERY_DB.prepare(`/* image-location.operations-total */
+    SELECT COUNT(*) image_count FROM file_index file
+    WHERE file.media_kind='image'
+      AND substr(file.r2_key,1,length(?))=?
+      AND length(file.r2_key)>length(?)
+      AND instr(substr(file.r2_key,length(?)+1),'/')=0
+      AND NOT EXISTS (
+        SELECT 1 FROM delivery_tombstones tombstone
+        WHERE tombstone.restored_at IS NULL AND (
+          tombstone.physical_key=file.r2_key OR
+          (tombstone.tombstone_kind='prefix' AND substr(file.r2_key,1,length(tombstone.physical_key))=tombstone.physical_key)
+        )
+      )`)
+    .bind(prefix, prefix, prefix, prefix)
+    .first<{ image_count: number }>();
+  return Math.max(0, Number(row?.image_count || 0));
+}
+
 async function authorizeResolverFolder(
   env: Env,
   principal: StaffPrincipal,
@@ -92,13 +114,21 @@ export async function listDeliveryFolderLocations(
   prefixValue: string,
 ): Promise<DeliveryLocationCollection> {
   const prefix = await authorizeDeliveryFolderPrefix(env, principal, prefixValue);
-  const rows = await currentFolderLocationAssets(env, prefix);
+  const [rows, totalImageCount] = await Promise.all([
+    currentFolderLocationAssets(env, prefix),
+    currentFolderImageCount(env, prefix),
+  ]);
   const safeRows = await Promise.all(rows.map(async (row) => ({
     latitude: row.latitude,
     longitude: row.longitude,
     assetRef: await locationAssetRef(env.DELIVERY_TOKEN_SECRET, prefix, row.source_key, row.source_etag),
   })));
-  return aggregateDeliveryLocations(safeRows, IMAGE_LOCATION_MAP_LIMIT);
+  const locations = aggregateDeliveryLocations(safeRows, IMAGE_LOCATION_MAP_LIMIT);
+  return {
+    ...locations,
+    totalImageCount,
+    unmappedImageCount: Math.max(0, totalImageCount - locations.imageCount),
+  };
 }
 
 /**

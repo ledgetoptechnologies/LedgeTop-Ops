@@ -134,6 +134,8 @@ export function ImageLocationMap({ token, locations, scopeLabel, loadAsset, open
   const selectedRefState = useRef<string | null>(null);
   selectedRefState.current = selectedRef;
   const points = locations?.points ?? [];
+  const totalImageCount = locations?.totalImageCount ?? locations?.imageCount ?? 0;
+  const unmappedImageCount = locations?.unmappedImageCount ?? Math.max(0, totalImageCount - (locations?.imageCount ?? 0));
 
   const clearSelection = useCallback(() => {
     selectedRefState.current = null;
@@ -211,7 +213,7 @@ export function ImageLocationMap({ token, locations, scopeLabel, loadAsset, open
           ? <div className="image-location-map-state">Map preview is unavailable because the map service is not configured.</div>
           : <><LocationCanvas token={token} points={points} expanded={false} scopeLabel={scopeLabel} onPointSelect={selectPoint} />
             {!enlarged && selectedRef && <LocationSelection asset={selectedAsset} loading={selectionLoading} error={selectionError} close={clearSelection} open={() => selectedAsset && openAsset?.(selectedAsset)} />}
-            <p className="image-location-map-summary">{locations.imageCount} image{locations.imageCount === 1 ? "" : "s"} at {points.length} mapped location{points.length === 1 ? "" : "s"}.{locations.truncated ? " The preview is limited to the first 500 authorized images." : ""}</p></>}
+            <p className="image-location-map-summary">{totalImageCount} total image{totalImageCount === 1 ? "" : "s"} · {locations.imageCount} geotagged · {points.length} mapped location{points.length === 1 ? "" : "s"}{unmappedImageCount > 0 ? ` · ${unmappedImageCount} without mapped GPS` : ""}.{locations.truncated ? " The preview is limited to the first 500 authorized geotagged images." : ""}</p></>}
     {enlarged && token && points.length > 0 && <div className="image-location-map-backdrop" onMouseDown={event => { if (event.currentTarget === event.target) setEnlarged(false); }}>
       <section ref={dialog} className="image-location-map-dialog" role="dialog" aria-modal="true" aria-labelledby={dialogTitleId} tabIndex={-1} onKeyDown={handleDialogKeyDown}>
         <header><div><span>Photo map</span><h2 id={dialogTitleId}>Image locations from available photo metadata</h2><p>{scopeLabel}</p></div><button ref={closeButton} type="button" className="button-ghost" onClick={() => setEnlarged(false)}>Close</button></header>

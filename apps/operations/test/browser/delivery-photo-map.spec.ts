@@ -14,6 +14,8 @@ async function mockMapbox(page: Page) {
 
 async function mockDelivery(page: Page, locationResponse: {
   points: Array<{ latitude: number; longitude: number; imageCount: number; assetRef?: string }>;
+  totalImageCount?: number;
+  unmappedImageCount?: number;
   imageCount: number;
   truncated: boolean;
 } = {
@@ -77,9 +79,16 @@ async function clickMappedPoint(page: Page) {
 
 test("assigned Operations viewer gets a compact and fullscreen photo map without overflow", async ({ page }, testInfo) => {
   await mockMapbox(page);
-  await mockDelivery(page);
+  await mockDelivery(page, {
+    points: [{ latitude: 44.501, longitude: -88.071, imageCount: 35 }],
+    totalImageCount: 40,
+    unmappedImageCount: 5,
+    imageCount: 35,
+    truncated: false,
+  });
   await page.goto("/delivery/Acme/Current");
   await expect(page.getByRole("heading", { name: "Image locations from available photo metadata" })).toBeVisible();
+  await expect(page.getByText("40 total images · 35 geotagged · 1 mapped location · 5 without mapped GPS.")).toBeVisible();
   const compact = page.locator(".image-location-map-canvas").first();
   const compactBox = await compact.boundingBox();
   expect(compactBox).not.toBeNull();

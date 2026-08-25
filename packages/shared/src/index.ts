@@ -359,6 +359,10 @@ export interface DeliveryLocationPoint {
 
 export interface DeliveryLocationCollection {
   points: DeliveryLocationPoint[];
+  /** Current authorized image files in this exact folder, including files without GPS. */
+  totalImageCount?: number;
+  /** Current authorized image files that do not have a mapped GPS coordinate. */
+  unmappedImageCount?: number;
   imageCount: number;
   truncated: boolean;
 }

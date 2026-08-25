@@ -81,7 +81,9 @@ describe("Operations delivery location authorization", () => {
       deliveryDb.prepare("DELETE FROM image_thumbnail_jobs"),
       deliveryDb.prepare("DELETE FROM file_index"),
       deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES('Jobs/Clients/Acme/Delivery/photo.jpg','etag-a',4096,'2026-08-07T12:00:00.000Z','image/jpeg','image')"),
+      deliveryDb.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES('Jobs/Clients/Acme/Delivery/no-gps.jpg','etag-b',4096,'2026-08-07T12:00:00.000Z','image/jpeg','image')"),
       deliveryDb.prepare("INSERT INTO image_asset_locations(source_key,source_etag,folder_prefix,latitude,longitude,status) VALUES('Jobs/Clients/Acme/Delivery/photo.jpg','etag-a','Jobs/Clients/Acme/Delivery/',44.5,-88.1,'ready')"),
+      deliveryDb.prepare("INSERT INTO image_asset_locations(source_key,source_etag,folder_prefix,latitude,longitude,status) VALUES('Jobs/Clients/Acme/Delivery/no-gps.jpg','etag-b','Jobs/Clients/Acme/Delivery/',NULL,NULL,'absent')"),
       deliveryDb.prepare("INSERT INTO image_thumbnail_jobs(source_key,source_etag,thumbnail_key,status,error_code) VALUES('Jobs/Clients/Acme/Delivery/photo.jpg','etag-a','_ltds/thumbnails/ready.webp','ready',NULL)"),
     ]);
 
@@ -118,6 +120,8 @@ describe("Operations delivery location authorization", () => {
         imageCount: 1,
         assetRef: expect.stringMatching(/^loc_[A-Za-z0-9_-]{43}$/),
       }],
+      totalImageCount: 2,
+      unmappedImageCount: 1,
       imageCount: 1,
       truncated: false,
     });
@@ -126,7 +130,7 @@ describe("Operations delivery location authorization", () => {
 
   it("treats an empty root prefix as an authorized empty aggregate", async () => {
     await expect(listDeliveryFolderLocations(env, principal, "")).resolves.toEqual({
-      points: [], imageCount: 0, truncated: false,
+      points: [], totalImageCount: 0, unmappedImageCount: 0, imageCount: 0, truncated: false,
     });
     expect(coordinateQueries).toHaveLength(1);
   });
