@@ -11,6 +11,47 @@ the checked-in default-off release contract. New Viewer public-share, Client
 Viewer, and Project Alpha portal capabilities remain gated until their
 corresponding live evidence below is captured.
 
+## Current pre-production validation checkpoint (2026-08-24)
+
+This checkpoint records the images currently authorized for internal
+pre-production validation. It does **not** finalize the immutable staging
+release contract below, enable a public/client Viewer gate, or replace any of
+the remaining representative TrueNAS and browser evidence required by this
+runbook.
+
+- Viewer source `6fb37c62b49dd76f36fb14a76c7afedcf44879cc` was built,
+  pulled back, runtime-verified, and attested by GitHub Actions run
+  `32805353873`. The immutable image is
+  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:a533354f16e826987aca46adb51c1838bfd053947a58a152cc6d94fc436942c3`.
+  The attestation verifies SQLite schema `24`, Obj2Tiles `1.6.2`, Potree
+  converter `1.8.2`, and the exact OCI source revision. Both the Viewer API and
+  background worker must run this same digest. Startup applies Viewer schema
+  migrations through v24; do not skip from an older persistent volume.
+- Operations source `0c2011dfd0929e8971aa5312640a74778c85115d` is the current
+  internal validation tip. Client/Delivery D1 migrations are current through
+  `0151_thumbnail_render_not_before.sql`; Operations D1 is current through
+  `0031_project_alpha_delivery_intent_rate_limits.sql`. A remote Wrangler
+  migration audit on 2026-08-24 reported no pending migration in either
+  database.
+- The unified TrueNAS image/PDF/video thumbnail worker is pinned to
+  `ghcr.io/ledgetoptechnologies/ltds-thumbnail-queue-worker@sha256:879dd885507ca56a2256a7fe5392809cd3226868761bfe43450d7df5656dec1e`.
+  It is the primary renderer for supported media, uses bounded RAM-backed
+  concurrency, serializes images above 128 megapixels, and accepts sources up
+  to 512 MiB / 512 megapixels. Cloudflare remains delayed fallback with its
+  lower 256-megapixel ceiling; a fallback `pixel_limit_exceeded` result returns
+  the exact job to TrueNAS instead of terminally losing the derivative.
+- Existing Viewer projects do not require re-import. On startup and bounded
+  maintenance, current native EPT and valid 3D Tiles are reused; missing or
+  validator-revision-stale LOD derivatives are reconciled once, with bounded
+  automatic recovery and the existing manual retry limit. Full-resolution
+  GLB/OBJ assets are download-only and are never automatically transferred to
+  or decoded by the browser.
+
+Before retrying any previously terminal large-image thumbnail row, verify a
+fresh `thumbnail-renderer-queue` heartbeat from the pinned TrueNAS image. This
+prevents an older worker with the former decoded-pixel ceiling from claiming
+and failing the same source again.
+
 ## Pinned source candidates (release contract open)
 
 - 3D Viewer source: `32cece808289a942ce902797535ccff6e24763e3`.
@@ -308,7 +349,7 @@ SHA-256 is `f16d540bcfbcf4c77c356fc37e2c046a23a473ebec701d526e3b8d45f38c90e8`.
   managed-delivery contract; `0070`–`0075` add default-off pricing adjustment,
   snapshot lineage, idempotency, and settlement close-out foundations. All are
   replay-safe but must still be recorded once in the ledger.
-- Viewer: startup applies every internal SQLite migration through schema v21;
+- Viewer: startup applies every internal SQLite migration through schema v24;
   verify integrity, foreign keys, and the final schema ledger after restart.
 
 After each database, verify the migration ledger, integrity/foreign-key checks,

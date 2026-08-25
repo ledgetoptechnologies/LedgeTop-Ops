@@ -45,6 +45,7 @@ function environment(rows: Array<{ latitude: number; longitude: number }>) {
         const statement = {
           bind(...binds: unknown[]) { call.binds = binds; return statement; },
           async all<T>() { return { results: assetRows as T[] }; },
+          async first<T>() { return { image_count: assetRows.length } as T; },
         };
         return statement;
       },
@@ -72,6 +73,8 @@ describe("authorized Operations delivery location maps", () => {
         imageCount: 2,
         assetRef: expect.stringMatching(/^loc_[A-Za-z0-9_-]{43}$/),
       }],
+      totalImageCount: 2,
+      unmappedImageCount: 0,
       imageCount: 2,
       truncated: false,
     });
@@ -111,6 +114,8 @@ describe("authorized Operations delivery location maps", () => {
           imageCount: 1,
           assetRef: expect.stringMatching(/^loc_[A-Za-z0-9_-]{43}$/),
         }],
+        totalImageCount: 3,
+        unmappedImageCount: 2,
         imageCount: 1,
         truncated: false,
       });

@@ -200,7 +200,7 @@ describe("R2 move location cleanup", () => {
     expect(await deliveryDb.prepare("SELECT r2_key FROM file_index WHERE r2_key=?").bind(source).first()).toBeNull();
     expect(await deliveryDb.prepare("SELECT source_key FROM image_asset_locations WHERE source_key=?").bind(source).first()).toBeNull();
     await expect(listDeliveryFolderLocations(value.env, principal as any, oldPrefix)).resolves.toEqual({
-      points: [], imageCount: 0, truncated: false,
+      points: [], totalImageCount: 0, unmappedImageCount: 0, imageCount: 0, truncated: false,
     });
   });
 
@@ -216,7 +216,7 @@ describe("R2 move location cleanup", () => {
     expect(await deliveryDb.prepare("SELECT r2_key FROM file_index WHERE r2_key=?").bind(source).first()).toBeNull();
     expect(await deliveryDb.prepare("SELECT source_key FROM image_asset_locations WHERE source_key=?").bind(source).first()).toBeNull();
     await expect(listDeliveryFolderLocations(value.env, principal as any, oldPrefix)).resolves.toEqual({
-      points: [], imageCount: 0, truncated: false,
+      points: [], totalImageCount: 0, unmappedImageCount: 0, imageCount: 0, truncated: false,
     });
     expect(await opsDb.prepare("SELECT status,error_message FROM r2_operation_jobs WHERE id='job-1'").first()).toEqual({status:"completed",error_message:null});
   });
@@ -248,6 +248,8 @@ describe("R2 move location cleanup", () => {
         imageCount: 1,
         assetRef: expect.stringMatching(/^loc_[A-Za-z0-9_-]{43}$/),
       }],
+      totalImageCount: 1,
+      unmappedImageCount: 0,
       imageCount: 1,
       truncated: false,
     });
