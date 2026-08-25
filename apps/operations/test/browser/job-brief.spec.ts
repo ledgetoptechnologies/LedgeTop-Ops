@@ -153,11 +153,8 @@ test("staff edits a multi-item brief and gets mobile-friendly private KML and ma
 test("assigned pilot sees the current brief without edit or delivery-browse controls", async ({ page }) => {
   await mock(page, false);
   await page.goto("/operations");
-  if ((page.viewportSize()?.width || 0) <= 960)
-    await page.getByRole("button", { name: "Open navigation" }).click();
-  await expect(page.getByRole("link", { name: "SOP Library" })).toBeVisible();
-  if ((page.viewportSize()?.width || 0) <= 960)
-    await page.getByRole("link", { name: "Operations" }).click();
+  await expect(page.getByRole("tab", { name: "SOP Library" })).toBeVisible();
+  await expect(page.getByRole("link", { name: "SOP Library" })).toHaveCount(0);
   await page.getByRole("button", { name: "View brief" }).click();
 
   await expect(page.getByText("Fly 300 ft AGL with 80/75 overlap.")).toBeVisible();

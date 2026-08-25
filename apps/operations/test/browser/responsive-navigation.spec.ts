@@ -18,6 +18,10 @@ async function mockSession(page: Page, permissions: string[], identity?: { displ
       await route.fulfill({ json: { clients: [], capabilities: { directory: true, requests: true, delivery: true, viewer: true } } });
       return;
     }
+    if (path === "/api/sops") {
+      await route.fulfill({ json: { sops: [] } });
+      return;
+    }
     if (path === "/api/viewer/overview") {
       await route.fulfill({ json: { enabled: true, viewerBaseUrl: "https://viewer.ledgetopdroneservices.com", overview: {
         schemaVersion: 1, generatedAt: "2026-08-18T14:00:00.000Z",
@@ -40,6 +44,10 @@ test("desktop navigation exposes the canonical Client Hub and independently auth
   await page.goto("/");
 
   const primary = page.getByRole("navigation", { name: "Primary navigation" });
+  await expect(primary.locator(":scope > a, :scope > .ops-manage-menu > button")).toHaveText([
+    "Dashboard", "Airspace", "Operations", "Client Hub", "Models", "Data", "Administration",
+  ]);
+  await expect(primary.getByRole("link", { name: "SOP Library" })).toHaveCount(0);
   await expect(primary.getByRole("link", { name: "Client Hub" })).toHaveAttribute("href", "/clients");
   await primary.getByRole("link", { name: "Client Hub" }).click();
   await expect(page).toHaveURL(/\/clients$/);
@@ -55,7 +63,10 @@ test("desktop navigation exposes the canonical Client Hub and independently auth
   await expect(dataLink).toHaveAttribute("href", "/delivery");
   await dataLink.click();
   await expect(page.getByRole("heading", { name: "Data", exact: true })).toBeVisible();
-  await page.getByRole("tab", { name: "3D models" }).click();
+  await expect(page.getByRole("tab", { name: "3D models" })).toHaveCount(0);
+  const modelsLink = primary.getByRole("link", { name: "Models", exact: true });
+  await expect(modelsLink).toHaveAttribute("href", "/viewer");
+  await modelsLink.click();
   await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
   await expect(page.getByText(/9 total · 12[01](?:\.\d)? KB/)).toBeVisible();
 
@@ -86,7 +97,32 @@ test("desktop navigation exposes the canonical Client Hub and independently auth
   expect(menuLayout.popoverTop).toBeGreaterThanOrEqual(menuLayout.headerBottom - 1);
   expect(menuLayout.popoverRight).toBeLessThanOrEqual(menuLayout.viewportWidth);
 
-  await expect(dataLink).toHaveAttribute("aria-current", "page");
+  await expect(modelsLink).toHaveAttribute("aria-current", "page");
+});
+
+test("SOP and Models navigation keeps the correct page through Back and Forward", async ({ page }, testInfo) => {
+  await mockSession(page, allNavigationPermissions);
+  await page.goto("/operations/sops");
+  await expect(page.getByRole("tab", { name: "SOP Library" })).toHaveAttribute("aria-selected", "true");
+  const selectPrimary = async (name: string) => {
+    if ((page.viewportSize()?.width || 0) <= 960) {
+      await page.getByRole("button", { name: "Open navigation" }).click();
+      await page.getByRole("dialog", { name: "Navigation" }).getByRole("link", { name, exact: true }).click();
+    } else {
+      await page.getByRole("navigation", { name: "Primary navigation" }).getByRole("link", { name, exact: true }).click();
+    }
+  };
+  await selectPrimary("Models");
+  await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/\/operations\/sops$/);
+  await expect(page.getByRole("tab", { name: "SOP Library" })).toHaveAttribute("aria-selected", "true");
+  await page.goForward();
+  await expect(page).toHaveURL(/\/viewer$/);
+  await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("models-top-navigation.png"), fullPage: true });
 });
 
 test("Team remains visible without Administration permission", async ({ page }) => {
@@ -124,7 +160,9 @@ test("direct and history navigation normalize unauthorized global pages before r
 test("Data Back and Forward normalize an unavailable nested tab without exposing it", async ({ page }) => {
   await mockSession(page, ["dashboard.view", "delivery.browse", "viewer.view"]);
   await page.goto("/delivery");
-  await page.getByRole("tab", { name: "3D models" }).click();
+  if ((page.viewportSize()?.width || 0) <= 960)
+    await page.getByRole("button", { name: "Open navigation" }).click();
+  await page.getByRole("link", { name: "Models", exact: true }).filter({ visible: true }).click();
   await expect(page).toHaveURL(/\/viewer$/);
   await page.evaluate(() => { history.pushState(null, "", "/delivery/incoming"); dispatchEvent(new PopStateEvent("popstate")); });
   await expect(page).toHaveURL(/\/delivery$/);
@@ -135,6 +173,54 @@ test("Data Back and Forward normalize an unavailable nested tab without exposing
   await page.goForward();
   await expect(page).toHaveURL(/\/delivery$/);
   await expect(page.getByRole("tab", { name: "Client delivery" })).toHaveAttribute("aria-selected", "true");
+});
+
+test("SOP-only staff land inside Operations and retain legacy routes across refresh and history", async ({ page }) => {
+  const probes: string[] = [];
+  page.on("request", request => probes.push(new URL(request.url()).pathname));
+  await mockSession(page, ["sops.view"]);
+  await page.goto("/");
+  await expect(page).toHaveURL(/\/operations\/sops$/);
+  const tabs = page.getByRole("tablist", { name: "Operations views" });
+  await expect(tabs.getByRole("tab")).toHaveText(["SOP Library"]);
+  await expect(tabs.getByRole("tab", { name: "SOP Library" })).toHaveAttribute("aria-selected", "true");
+  await expect(page.getByLabel("Search SOPs")).toBeVisible();
+  if ((page.viewportSize()?.width || 0) <= 960)
+    await page.getByRole("button", { name: "Open navigation" }).click();
+  const navigation = page.getByRole("navigation", { name: (page.viewportSize()?.width || 0) <= 960 ? "Mobile primary navigation" : "Primary navigation", exact: true });
+  await expect(navigation.getByRole("link")).toHaveText(["Operations"]);
+  await expect(navigation.getByRole("link", { name: "Operations" })).toHaveAttribute("href", "/operations/sops");
+  await navigation.getByRole("link", { name: "Operations" }).click();
+  await page.evaluate(() => { history.pushState(null, "", "/sops"); dispatchEvent(new PopStateEvent("popstate")); });
+  await expect(page).toHaveURL(/\/sops$/);
+  await page.reload();
+  await expect(page.getByLabel("Search SOPs")).toBeVisible();
+  await page.goBack();
+  await expect(page).toHaveURL(/\/operations\/sops$/);
+  await page.goForward();
+  await expect(page).toHaveURL(/\/sops$/);
+  expect(probes).not.toContain("/api/operations");
+  expect(probes).not.toContain("/api/projects");
+  expect(probes).not.toContain("/api/tasks");
+});
+
+test("Models is an independent refresh-safe destination for Viewer-only staff", async ({ page }) => {
+  const probes: string[] = [];
+  page.on("request", request => probes.push(new URL(request.url()).pathname));
+  await mockSession(page, ["viewer.view"]);
+  await page.goto("/delivery");
+  await expect(page).toHaveURL(/\/viewer$/);
+  await expect(page.getByRole("button", { name: "Open Viewer workspace" })).toBeVisible();
+  await expect(page.getByRole("tablist", { name: "Delivery tools" })).toHaveCount(0);
+  await page.reload();
+  await expect(page).toHaveURL(/\/viewer$/);
+  await expect(page.getByRole("heading", { name: "3D models overview" })).toBeVisible();
+  if ((page.viewportSize()?.width || 0) <= 960)
+    await page.getByRole("button", { name: "Open navigation" }).click();
+  const navigation = page.getByRole("navigation", { name: (page.viewportSize()?.width || 0) <= 960 ? "Mobile primary navigation" : "Primary navigation", exact: true });
+  await expect(navigation.getByRole("link")).toHaveText(["Models"]);
+  await expect(navigation.getByRole("link", { name: "Models" })).toHaveAttribute("aria-current", "page");
+  expect(probes.some(path => path.startsWith("/api/delivery/"))).toBe(false);
 });
 
 test("administration.view opens the read-only Administration page without privileged API probes", async ({ page }) => {
@@ -193,6 +279,11 @@ for (const width of [320, 390, 768]) {
     await expect(drawer.getByRole("link", { name: "Dashboard" })).toBeFocused();
     await expect(drawer.getByRole("link", { name: "Client Hub" })).toHaveAttribute("href", "/clients");
     await expect(drawer.getByRole("link", { name: "Client Hub" })).toHaveCSS("min-height", "44px");
+    await expect(drawer.getByRole("link", { name: "Models", exact: true })).toHaveAttribute("href", "/viewer");
+    await expect(drawer.getByRole("link", { name: "SOP Library" })).toHaveCount(0);
+    await expect(drawer.getByRole("link")).toHaveText([
+      "Dashboard", "Airspace", "Operations", "Client Hub", "Models", "Data", "Team", "Configurations", "Administration",
+    ]);
     await expect(drawer.getByRole("link", { name: "Data" })).toHaveAttribute("href", "/delivery");
     await expect(drawer.getByRole("link", { name: "Data" })).toHaveCSS("min-height", "44px");
     await expect(drawer.getByRole("link", { name: "3D Viewer" })).toHaveCount(0);

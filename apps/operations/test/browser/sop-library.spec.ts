@@ -88,11 +88,14 @@ async function session(page: Page, administrator: boolean) {
 test("pilot searches and reads only a published responsive, printable SOP with TOC", async ({ page }) => {
   await session(page, false);
   await page.goto("/sops");
-  await expect(page.getByRole("heading", { name: "Internal SOP library" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Operations", exact: true })).toBeVisible();
+  await expect(page.getByRole("tab", { name: "SOP Library" })).toHaveAttribute("aria-selected", "true");
   await page.getByLabel("Search SOPs").fill("mapping");
   await expect(page.getByRole("heading", { name: "Mapping Flight" })).toBeVisible();
   await expect(page.getByText("Draft flight notes")).toHaveCount(0);
   await page.getByRole("button", { name: "Read SOP" }).click();
+  await expect(page).toHaveURL(/\/operations\/sops\/mapping-flight$/);
+  await page.reload();
   await expect(page.getByRole("navigation", { name: "Table of contents" })).toBeVisible();
   await expect(page.getByRole("link", { name: "Capture" })).toHaveAttribute("href", "#sop-heading-capture");
   await expect(page.getByText("80/75 overlap")).toBeVisible();

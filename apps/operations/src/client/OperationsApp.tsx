@@ -15,16 +15,19 @@ import {
   canAccessDataPage,
   canonicalClientPath,
   deliverySectionPath,
+  operationsLandingPath,
   operationsSectionPath,
   pathDeliverySection,
   pathOperationsSection,
   pathPage,
   type OperationsPage as Page,
   type OperationsSection,
+  type DeliverySection,
 } from "./operations-route";
 import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientHub } from "./ClientHub";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
+import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
 import { WorkContextSops } from "./WorkContextSops";
@@ -123,14 +126,14 @@ const NAV: Array<{
   administrator?: boolean;
 }> = [
   { page: "dashboard", label: "Dashboard", permissions: ["dashboard.view"] },
+  { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
   {
     page: "operations",
     label: "Operations",
-    permissions: ["operations.view", "projects.view", "tasks.view"],
+    permissions: ["operations.view", "projects.view", "tasks.view", "sops.view"],
   },
   { page: "clients", label: "Client Hub", href: "/clients", permissions: ["team.view", "operations.manage"] },
-  { page: "sops", label: "SOP Library", href: "/operations/sops", permissions: ["sops.view"] },
-  { page: "airspace", label: "Airspace", permissions: ["airspace.view"] },
+  { page: "viewer", label: "Models", href: "/viewer", permissions: ["viewer.view"] },
   { page: "delivery", label: "Data", permissions: [...DATA_PAGE_PERMISSIONS] },
 ];
 const MANAGE_NAV: typeof NAV = [
@@ -180,14 +183,9 @@ export function OperationsApp() {
     manageMenu = useRef<HTMLDivElement>(null),
     manageTrigger = useRef<HTMLButtonElement>(null);
   const routeForPage = (requested: Page, user: OperationsUser): { page: Page; href: string } | null => {
-    if (requested === "viewer") {
-      if (allowed(user, "viewer.view")) return { page: "viewer", href: "/viewer" };
-      if (allowed(user, "delivery.browse")) return { page: "delivery", href: "/delivery" };
-      return null;
-    }
     const item = [...NAV, ...MANAGE_NAV].find(candidate => candidate.page === requested);
     return item && navAllowed(user, item)
-      ? { page: item.page, href: item.href || (item.page === "dashboard" ? "/" : `/${item.page}`) }
+      ? { page: item.page, href: item.page === "operations" ? operationsLandingPath(user.permissions) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`) }
       : null;
   };
   const normalizeLocation = (value: Session) => {
@@ -290,7 +288,7 @@ export function OperationsApp() {
   const primaryNavigation = NAV.filter((item) => navAllowed(session.user, item));
   const manageNavigation = MANAGE_NAV.filter((item) => navAllowed(session.user, item));
   const navigationLink = (item: (typeof NAV)[number], mobile = false) => {
-    const href = item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
+    const href = item.page === "operations" ? operationsLandingPath(session.user.permissions) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
     return <a
       key={`${mobile ? "mobile" : "desktop"}-${item.page}`}
       href={href}
@@ -331,15 +329,12 @@ export function OperationsApp() {
         {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage")) && (
           <ClientHub mapToken={session.mapboxPublicToken} permissions={session.user.permissions} />
         )}{" "}
-        {page === "sops" && allowed(session.user, "sops.view") && (
-          <SopLibrary user={session.user} />
-        )}{" "}
         {page === "airspace" && <Airspace />}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (
           <DeliveryHub {...props} />
         )}{" "}
         {page === "viewer" && allowed(session.user, "viewer.view") && (
-          <DeliveryHub session={session} initialTab="models" />
+          <ViewerDataOverview />
         )}{" "}
         {page === "team" && allowed(session.user, "team.view") && (
           <Team {...props} />
@@ -370,17 +365,13 @@ function PageHeading({ page }: { page: Page }) {
       "Client Hub",
       "Review requests and open each client workspace for contacts, access, projects, and shared work.",
     ],
-    sops: [
-      "Internal SOP library",
-      "Published field guidance and Operations-owned procedures for staff and pilots.",
-    ],
     airspace: [
       "Airspace awareness",
       "Official FAA TFR and special-use airspace information for Wisconsin.",
     ],
     delivery: [
       "Data",
-      "Manage client delivery and monitor the dedicated 3D Viewer workspace.",
+      "Manage client delivery, incoming uploads, and shared links.",
     ],
     viewer: [
       "3D models overview",
@@ -693,6 +684,7 @@ function OperationsHub({ session }: { session: Session }) {
     { id: "operations", label: "Operations", permission: "operations.view" },
     { id: "projects", label: "Projects", permission: "projects.view" },
     { id: "tasks", label: "Tasks", permission: "tasks.view" },
+    { id: "sops", label: "SOP Library", permission: "sops.view" },
   ];
   const visible = sections.filter((item) =>
     allowed(session.user, item.permission),
@@ -712,10 +704,10 @@ function OperationsHub({ session }: { session: Session }) {
           : visible[0]?.id || "operations";
       setSection(next);
       const expected = operationsSectionPath(next);
-      const isRequestDetail =
-        next === "client-requests" &&
-        location.pathname.startsWith(`${expected}/`);
-      if (!isRequestDetail && location.pathname !== expected)
+      const isSopRoute = next === "sops" &&
+        (location.pathname === "/sops" || location.pathname.startsWith("/sops/") ||
+          location.pathname === expected || location.pathname.startsWith(`${expected}/`));
+      if (!isSopRoute && location.pathname !== expected)
         history.replaceState(null, "", expected);
     };
     sync();
@@ -753,6 +745,7 @@ function OperationsHub({ session }: { session: Session }) {
         <Projects session={session} />
       )}{" "}
       {section === "tasks" && allowed(session.user, "tasks.view") && <Tasks />}
+      {section === "sops" && allowed(session.user, "sops.view") && <SopLibrary user={session.user} />}
     </>
   );
 }
@@ -2527,6 +2520,7 @@ function DeliveryWorkspace({ session }: { session: Session }) {
   );
 }
 function DeliveryWorkspaceV2({ session }: { session: Session }) {
+  const [shareRevision, setShareRevision] = useState(0);
   const [prefix, setPrefix] = useState(() =>
       prefixFromDeliveryPath(location.pathname),
     ),
@@ -2875,6 +2869,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     const requestedPrefix = prefix;
     if (requestedPrefix !== currentPrefixRef.current) return;
     setSelected([]);
+    setShareRevision(current => current + 1);
     invalidateDeliveryFolderCache(prefix);
     await Promise.all([reload(), reloadLocations()]);
   };
@@ -3087,7 +3082,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
       <div className="delivery-toolbar">
         <div className="delivery-toolbar-actions">
           <label className="delivery-search">
-            <span className="sr-only">Search</span>
+            <span className="visually-hidden">Search</span>
             <input ref={searchInput} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} placeholder="Search" aria-label="Search" />
             {searchQuery && <button type="button" className="delivery-search-clear" aria-label="Clear search" onClick={() => setSearchQuery("")}>×</button>}
           </label>
@@ -3463,6 +3458,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           close={() => setPreview(null)}
           changed={() => {
             invalidateDeliveryFolderCache(prefix);
+            setShareRevision(current => current + 1);
             void reload();
           }}
         />
@@ -3475,8 +3471,10 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
           close={() => setPreview(null)}
         />
       )}
-      {admin && canDelete && <TrashPanel />}
-      <ShareHistory session={session} revision={0} />
+      <div className="delivery-support-panels">
+        <ShareHistory session={session} revision={shareRevision} prefix={prefix} />
+        {admin && canDelete && <TrashPanel />}
+      </div>
       {showDropboxImport && session.capabilities?.dropboxImport?.enabled && (
         <DropboxImportDialog
           destinationPrefix={prefix}
@@ -3645,28 +3643,28 @@ function ViewerDataOverview() {
   </div>;
 }
 
-function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; initialTab?: "delivery" | "incoming" | "models" | "links" }) {
+function DeliveryHub({ session }: { session: Session }) {
   const canViewDelivery = allowed(session.user, "delivery.browse");
   const canViewIncoming =
     allowed(session.user, "file_requests.view") &&
     session.capabilities?.incomingUploads?.enabled === true;
-  const canViewModels = allowed(session.user, "viewer.view");
   const canViewLinks = allowed(session.user, "delivery.share.audit");
   const requestedTab = pathDeliverySection(location.pathname);
-  const authorizedTab = (requested: "delivery" | "incoming" | "models" | "links") =>
-    requested === "delivery" ? canViewDelivery : requested === "incoming" ? canViewIncoming : requested === "links" ? canViewLinks : canViewModels;
-  const fallbackTab = initialTab === "models" && canViewModels ? "models" :
-    canViewDelivery ? "delivery" : canViewIncoming ? "incoming" : canViewLinks ? "links" : "models";
-  const normalizedTab = (requested: "delivery" | "incoming" | "models" | "links") =>
+  const authorizedTab = (requested: DeliverySection) =>
+    requested === "delivery" ? canViewDelivery : requested === "incoming" ? canViewIncoming : canViewLinks;
+  const fallbackTab: DeliverySection = canViewDelivery ? "delivery" : canViewIncoming ? "incoming" : "links";
+  const normalizedTab = (requested: DeliverySection) =>
     authorizedTab(requested) ? requested : fallbackTab;
   const firstTab = normalizedTab(requestedTab);
-  const [tab, setTab] = useState<"delivery" | "incoming" | "models" | "links">(firstTab);
-  const selectTab = (next: "delivery" | "incoming" | "models" | "links") => {
+  const [tab, setTab] = useState<DeliverySection>(firstTab);
+  const selectTab = (next: DeliverySection) => {
+    if (next === tab) return;
     setTab(next);
     history.pushState(null, "", deliverySectionPath(next));
   };
   useEffect(() => {
     const normalize = () => {
+      if (pathPage(location.pathname) !== "delivery") return;
       const requested = pathDeliverySection(location.pathname), next = normalizedTab(requested);
       setTab(next);
       if (next !== requested) history.replaceState(null, "", deliverySectionPath(next));
@@ -3675,7 +3673,7 @@ function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; i
     const pop = () => normalize();
     addEventListener("popstate", pop);
     return () => removeEventListener("popstate", pop);
-  }, [canViewDelivery, canViewIncoming, canViewLinks, canViewModels, fallbackTab]);
+  }, [canViewDelivery, canViewIncoming, canViewLinks, fallbackTab]);
   return (
     <>
       <div
@@ -3695,17 +3693,14 @@ function DeliveryHub({ session, initialTab = "delivery" }: { session: Session; i
           </button>
         )}
         {canViewLinks && <button role="tab" aria-selected={tab === "links"} className={tab === "links" ? "active" : ""} onClick={() => selectTab("links")}>Client links</button>}
-        {canViewModels && (
-          <button role="tab" aria-selected={tab === "models"} className={tab === "models" ? "active" : ""} onClick={() => selectTab("models")}>3D models</button>
-        )}
       </div>
-      {tab === "models" && canViewModels ? <ViewerDataOverview /> : tab === "delivery" && canViewDelivery ? (
+      {tab === "delivery" && canViewDelivery ? (
         <DeliveryWorkspaceV2 session={session} />
       ) : tab === "incoming" && canViewIncoming ? (
         <IncomingUploads />
       ) : tab === "links" && canViewLinks ? (
         <DeliveryLinksPage canRevoke={allowed(session.user, "delivery.share.revoke")} />
-      ) : <EmptyState title="No Data tools available" detail="Your account does not have access to Delivery or the 3D Viewer overview." />}
+      ) : <EmptyState title="No Data tools available" detail="Your account does not have access to client delivery, incoming uploads, or shared links." />}
     </>
   );
 }
@@ -5539,112 +5534,9 @@ function OperationsPreviewPlaceholder({ item }: { item: DeliveryItem }) {
     </div>
   );
 }
-function ShareHistory({
-  session,
-  revision,
-}: {
-  session: Session;
-  revision: number;
-}) {
-  const { data, error, reload } = useLoad(
-    () =>
-      allowed(session.user, "delivery.share.audit")
-        ? api<{ shares: any[] }>("/api/delivery/shares?limit=8")
-        : Promise.resolve({ shares: [] }),
-    [revision],
-  );
+function ShareHistory({ session, revision, prefix }: { session: Session; revision: number; prefix?: string }) {
   if (!allowed(session.user, "delivery.share.audit")) return null;
-  const canRevoke = allowed(session.user, "delivery.share.revoke");
-  return (
-    <Card
-      title="Recent client links"
-      action={<span className="card-actions">
-        <a className="button-ghost button-small" href="/delivery/links">View all</a>
-        <button className="button-ghost button-small" onClick={() => void reload()}>Refresh</button>
-      </span>}
-    >
-      <ErrorLine error={error} />
-      {data?.shares.length ? (
-        <table>
-          <thead>
-            <tr>
-              <th>Folder</th>
-              <th>Security</th>
-              <th>Status</th>
-              {canRevoke && <th>Action</th>}
-            </tr>
-          </thead>
-          <tbody>
-            {data.shares.map((share) => {
-              const status = share.revoked_at
-                ? "revoked"
-                : share.unavailable_since
-                  ? "unavailable"
-                  : "active";
-              return (
-                <tr key={share.id}>
-                  <td>
-                    <strong>{share.display_name || share.target_path || share.r2_prefix}</strong>
-                    <small>
-                      <code>{share.target_path || share.r2_prefix}</code>
-                    </small>
-                  </td>
-                  <td>
-                    {share.password_protected ? "Access code" : "Complete link"}
-                  </td>
-                  <td>
-                    <StatusPill
-                      tone={
-                        status === "revoked"
-                          ? "danger"
-                          : status === "unavailable"
-                            ? "warning"
-                            : "success"
-                      }
-                    >
-                      {status}
-                    </StatusPill>
-                  </td>
-                  {canRevoke && (
-                    <td>
-                      {!share.revoked_at && (
-                        <button
-                          className="button-danger button-small"
-                          onClick={async () => {
-                            if (
-                              !confirm(
-                                "Unshare this folder? Anyone using the current link will lose access.",
-                              )
-                            )
-                              return;
-                            try {
-                              await api(`/api/delivery/shares/${share.id}`, {
-                                method: "DELETE",
-                              });
-                              await reload();
-                            } catch (caught) {
-                              alert((caught as Error).message);
-                            }
-                          }}
-                        >
-                          Unshare
-                        </button>
-                      )}
-                    </td>
-                  )}
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      ) : (
-        <EmptyState
-          title="No delivery links"
-          detail="Links created from the file browser appear here."
-        />
-      )}
-    </Card>
-  );
+  return <RecentDeliveryLinks key={prefix || "all"} prefix={prefix} revision={revision} canRevoke={allowed(session.user, "delivery.share.revoke")} />;
 }
 
 const STAFF_CONTROL_LABELS = {

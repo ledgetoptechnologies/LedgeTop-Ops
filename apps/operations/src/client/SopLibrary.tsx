@@ -203,15 +203,20 @@ function versionHeaders(version: number): HeadersInit {
   return { "If-Match": `"sop-${version}"` };
 }
 
-function pathSlug(): string | null {
+function sopPathParts(): string[] {
   const parts = location.pathname.split("/").filter(Boolean);
+  return parts[0] === "operations" ? parts.slice(1) : parts;
+}
+
+function pathSlug(): string | null {
+  const parts = sopPathParts();
   return parts[0] === "sops" && (parts.length === 2 || (parts.length === 4 && parts[2] === "revisions"))
     ? decodeURIComponent(parts[1]!)
     : null;
 }
 
 function pathRevisionId(): string | null {
-  const parts = location.pathname.split("/").filter(Boolean);
+  const parts = sopPathParts();
   return parts[0] === "sops" && parts.length === 4 && parts[2] === "revisions"
     ? decodeURIComponent(parts[3]!)
     : null;
@@ -242,7 +247,7 @@ export function SopLibrary({ user }: { user: SopUser }) {
   }, []);
 
   const showLibrary = () => {
-    if (location.pathname !== "/sops") history.pushState(null, "", "/sops");
+    if (location.pathname !== "/operations/sops") history.pushState(null, "", "/operations/sops");
     setSlug(null);
     setRevisionId(null);
     setRevisionContext(null);
@@ -280,7 +285,7 @@ export function SopLibrary({ user }: { user: SopUser }) {
           revisionId={revisionId}
           revisionContext={revisionContext}
           open={(nextSlug) => {
-            history.pushState(null, "", `/sops/${encodeURIComponent(nextSlug)}`);
+            history.pushState(null, "", `/operations/sops/${encodeURIComponent(nextSlug)}`);
             setSlug(nextSlug);
             setRevisionId(null);
             setRevisionContext(null);

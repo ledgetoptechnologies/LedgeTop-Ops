@@ -245,6 +245,34 @@ tbody tr:last-child td { border: 0; }
 .delivery-links-table table { min-width: 760px; }
 .delivery-links-pagination { display: flex; margin-top: 1rem; }
 .delivery-links-pagination button { min-height: 44px; }
+.delivery-links-page { display: grid; gap: 1.25rem; min-width: 0; }
+.delivery-links-page > * { min-width: 0; }
+.delivery-links-page .page-heading { display: flex; align-items: flex-start; justify-content: space-between; flex-wrap: wrap; gap: 1rem; margin-bottom: 0; }
+.delivery-links-page .page-heading > a { min-height: 44px; }
+.delivery-links-page > .delivery-links-scope { padding: 1rem; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.delivery-links-page > .delivery-links-scope p { margin: .4rem 0 0; color: var(--muted); }
+.delivery-links-search { display: flex; align-items: end; flex-wrap: wrap; gap: 1rem; }
+.delivery-links-search-field { display: grid; gap: .5rem; flex: 1 1 20rem; min-width: 0; font-weight: 760; }
+.delivery-links-search-field input { width: 100%; min-width: 0; min-height: 44px; padding: .7rem .8rem; border: 1px solid #cbd2d8; border-radius: 8px; }
+.delivery-links-search-actions, .delivery-links-scope-actions { display: flex; flex-wrap: wrap; gap: .75rem; }
+.delivery-links-search-actions button, .delivery-links-scope-actions a { min-height: 44px; }
+.delivery-links-search-help { display: block; margin-top: .85rem; color: var(--muted); }
+.delivery-links-scope { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: .75rem; overflow-wrap: anywhere; }
+.delivery-links-error { display: flex; align-items: center; flex-wrap: wrap; gap: .75rem; }
+.delivery-support-panels { display: grid; gap: 1.25rem; margin-top: 1.25rem; min-width: 0; }
+.delivery-support-panels > * { min-width: 0; }
+.recent-delivery-links > header { flex-wrap: wrap; gap: .75rem; }
+.recent-delivery-links .card-actions { display: flex; flex-wrap: wrap; gap: .65rem; }
+.recent-delivery-links .card-actions :is(a, button) { min-height: 44px; }
+.recent-delivery-links .delivery-links-scope { display: block; color: var(--muted); font-size: .85rem; margin: 0 0 1rem; }
+.recent-delivery-links-table { max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+.recent-delivery-links-table table { min-width: 540px; }
+.recent-delivery-links-table td:first-child { overflow-wrap: anywhere; min-width: 12rem; }
+@media (max-width: 640px) {
+  .delivery-links-search { align-items: stretch; flex-direction: column; }
+  .delivery-links-search-field { flex-basis: auto; width: 100%; }
+  .delivery-links-search-actions button { flex: 1 1 auto; }
+}
 
 /* ---------------------------------------------------------------------------
    Forms

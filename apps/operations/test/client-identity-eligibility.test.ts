@@ -31,10 +31,11 @@ async function fixture() {
   const database = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
   await applySql(database, `
     CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,display_name TEXT,email_hint TEXT,source_version TEXT,status TEXT);
-    CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,display_name TEXT);
-    CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT);
+    CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,display_name TEXT,status TEXT DEFAULT 'active');
+    CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT,status TEXT DEFAULT 'active',revoked_at TEXT);
     CREATE TABLE portal_v2_identity_eligibility_bindings(identity_id TEXT,workspace_id TEXT,principal_public_id TEXT);
-    CREATE TABLE portal_v2_workspace_memberships(identity_id TEXT,status TEXT,revoked_at TEXT,expires_at TEXT);
+    CREATE TABLE portal_v2_workspace_memberships(workspace_id TEXT,identity_id TEXT,status TEXT,revoked_at TEXT,expires_at TEXT,
+      PRIMARY KEY(workspace_id,identity_id));
     CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT,active_generation_id TEXT);
     CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,display_name TEXT);
     CREATE TABLE portal_v2_entitlements(workspace_id TEXT,identity_id TEXT,capability TEXT,effect TEXT,scope_type TEXT,
@@ -56,7 +57,7 @@ async function fixture() {
       PRIMARY KEY(actor_staff_id,idempotency_key));
     CREATE TABLE portal_v2_operations_management_audit(id TEXT,actor_staff_id TEXT,action TEXT,workspace_id TEXT,
       principal_public_id TEXT,invitation_id TEXT,details_json TEXT);
-    INSERT INTO portal_v2_workspaces VALUES('workspace-one','Acme Workspace');
+    INSERT INTO portal_v2_workspaces(id,display_name) VALUES('workspace-one','Acme Workspace');
     INSERT INTO pa_portal_principals VALUES('workspace-one','principal-one','Acme Client','CLIENT@EXAMPLE.TEST','v1','active');
   `);
   return { database, env: { DELIVERY_DB: database, CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
@@ -66,6 +67,72 @@ async function fixture() {
 afterEach(async () => { vi.clearAllMocks(); await Promise.all(active.splice(0).map(item => item.dispose())); });
 
 describe("client identity eligibility administration", () => {
+  it("shows access only for the exact principal workspace when an identity belongs to two workspaces", async () => {
+    const { database, env } = await fixture();
+    await applySql(database, `
+      INSERT INTO portal_v2_workspaces(id,display_name) VALUES('workspace-two','Second Workspace');
+      INSERT INTO pa_portal_principals VALUES('workspace-two','principal-two','Second Client','CLIENT@EXAMPLE.TEST','v1','active');
+      INSERT INTO portal_v2_identities(id,issuer,subject) VALUES('identity-one','https://identity.example.test','person-one');
+      INSERT INTO portal_v2_identity_eligibility_bindings VALUES('identity-one','workspace-one','principal-one');
+      INSERT INTO portal_v2_identity_eligibility_bindings VALUES('identity-one','workspace-two','principal-two');
+      INSERT INTO portal_v2_workspace_memberships VALUES('workspace-one','identity-one','active',NULL,NULL);
+    `);
+    const listed = await listClientIdentityEligibility(env, principal);
+    expect(listed.clients).toEqual(expect.arrayContaining([
+      expect.objectContaining({ workspace_id: "workspace-one", identity_id: "identity-one", has_workspace_access: 1 }),
+      expect.objectContaining({ workspace_id: "workspace-two", identity_id: "identity-one", has_workspace_access: 0 }),
+    ]));
+    // Reading the directory must never create the missing membership or grants.
+    expect(await database.prepare("SELECT COUNT(*) count FROM portal_v2_workspace_memberships").first("count")).toBe(1);
+    expect(await database.prepare("SELECT COUNT(*) count FROM portal_v2_entitlements").first("count")).toBe(0);
+  });
+
+  it("requires live workspace, identity, and membership state for the access indicator", async () => {
+    const { database, env } = await fixture();
+    const past = new Date(Date.now() - 60_000).toISOString();
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const scenarios = [
+      ["workspace-suspended", "suspended", "active", null, "active", null, null],
+      ["workspace-disabled", "disabled", "active", null, "active", null, null],
+      ["workspace-closed", "closed", "active", null, "active", null, null],
+      ["identity-suspended", "active", "suspended", null, "active", null, null],
+      ["identity-revoked", "active", "active", past, "active", null, null],
+      ["membership-suspended", "active", "active", null, "suspended", null, null],
+      ["membership-revoked", "active", "active", null, "active", past, null],
+      ["membership-expired", "active", "active", null, "active", null, past],
+      ["live", "active", "active", null, "active", null, future],
+    ] as const;
+    await database.batch(scenarios.flatMap(([id, workspaceStatus, identityStatus, identityRevoked, memberStatus, memberRevoked, memberExpiry]) => [
+      database.prepare("INSERT INTO portal_v2_workspaces VALUES(?,?,?)").bind(id, id, workspaceStatus),
+      database.prepare("INSERT INTO pa_portal_principals VALUES(?,?,?,'client@example.test','v1','active')").bind(id, id, id),
+      database.prepare("INSERT INTO portal_v2_identities VALUES(?,'https://identity.example.test',?,?,?)").bind(id, id, identityStatus, identityRevoked),
+      database.prepare("INSERT INTO portal_v2_identity_eligibility_bindings VALUES(?,?,?)").bind(id, id, id),
+      database.prepare("INSERT INTO portal_v2_workspace_memberships VALUES(?,?,?,?,?)").bind(id, id, memberStatus, memberRevoked, memberExpiry),
+    ]));
+    const listed = await listClientIdentityEligibility(env, principal);
+    for (const [id] of scenarios)
+      expect(listed.clients, id).toEqual(expect.arrayContaining([
+        expect.objectContaining({ workspace_id: id, has_workspace_access: id === "live" ? 1 : 0 }),
+      ]));
+  });
+
+  it("does not label a blocked identity as having workspace access", async () => {
+    const { database, env } = await fixture();
+    await applySql(database, `
+      INSERT INTO portal_v2_identities(id,issuer,subject) VALUES('identity-one','https://identity.example.test','person-one');
+      INSERT INTO portal_v2_identity_eligibility_bindings VALUES('identity-one','workspace-one','principal-one');
+      INSERT INTO portal_v2_workspace_memberships VALUES('workspace-one','identity-one','active',NULL,NULL);
+    `);
+    const block = await createEligibilityBlock(env, principal,
+      { matchType: "issuer_subject", issuer: "https://identity.example.test", subject: "person-one", reasonCode: "operator_opt_out" },
+      "eligibility-subject-0001");
+    expect((await listClientIdentityEligibility(env, principal)).clients[0])
+      .toMatchObject({ blocked: 1, has_workspace_access: 0 });
+    await revokeEligibilityBlock(env, principal, block.id, "operator_opt_in", "eligibility-subject-0002");
+    expect((await listClientIdentityEligibility(env, principal)).clients[0])
+      .toMatchObject({ blocked: 0, has_workspace_access: 1 });
+  });
+
   it("creates, replays, lists, and revokes a normalized audited block", async () => {
     const { database, env } = await fixture();
     const input = { matchType: "email" as const, email: " Client@Example.Test ", reasonCode: "operator_opt_out", expiresAt: null };

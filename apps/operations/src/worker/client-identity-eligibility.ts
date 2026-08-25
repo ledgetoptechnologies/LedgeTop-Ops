@@ -33,8 +33,10 @@ export async function listClientIdentityEligibility(env: Env, principal: StaffPr
   const [principals, blocks, accessRows, invitationRows] = await Promise.all([
     db(env).prepare(`SELECT pa.workspace_id,workspace.display_name workspace_name,pa.public_id,pa.display_name,pa.email_hint,pa.source_version,
       pa.status,eligibility.identity_id,identity.issuer,identity.subject,
-      CASE WHEN EXISTS (SELECT 1 FROM portal_v2_workspace_memberships membership
-        WHERE membership.identity_id=eligibility.identity_id AND membership.status='active' AND membership.revoked_at IS NULL
+      CASE WHEN workspace.status='active' AND identity.status='active' AND identity.revoked_at IS NULL
+        AND EXISTS (SELECT 1 FROM portal_v2_workspace_memberships membership
+        WHERE membership.workspace_id=pa.workspace_id AND membership.identity_id=eligibility.identity_id
+          AND membership.status='active' AND membership.revoked_at IS NULL
           AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))) THEN 1 ELSE 0 END has_workspace_access,
       CASE WHEN EXISTS (SELECT 1 FROM portal_v2_identity_eligibility_blocks block
         WHERE block.status='active' AND datetime(block.valid_from)<=datetime('now')
@@ -92,6 +94,9 @@ export async function listClientIdentityEligibility(env: Env, principal: StaffPr
     attempts: row.attempts,last_error_code: row.last_error_code,
   }]));
   const clients = principals.results.map(row => ({ ...row,
+    // This is a workspace-shell indicator, never a content grant. Keep a live
+    // eligibility block from being displayed alongside a positive access flag.
+    has_workspace_access: row.blocked === 1 ? 0 : row.has_workspace_access,
     access: accessByPrincipal.get(keyed(row.workspace_id,row.public_id)) ?? [],
     invitation: invitationByPrincipal.get(keyed(row.workspace_id,row.public_id)) ?? null,
   }));

@@ -2558,6 +2558,7 @@ app.get("/api/delivery/shares", async (c) => {
   const limit=limitValue===undefined?undefined:/^\d+$/.test(limitValue)?Number(limitValue):Number.NaN;
   return c.json(await listDeliveryShares(c.env,c.get("principal"),{
     q:c.req.query("q"),
+    prefix:c.req.query("prefix"),
     cursor:c.req.query("cursor"),
     limit,
   }));

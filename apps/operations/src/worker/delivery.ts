@@ -653,6 +653,7 @@ export async function revokeProjectAlphaDeliveryGuestShare(env:Env,input:{shareI
 
 export interface DeliveryShareHistoryQuery {
   q?:string;
+  prefix?:string;
   cursor?:string;
   limit?:number;
 }
@@ -689,6 +690,9 @@ export async function listDeliveryShares(env:Env,principal:StaffPrincipal,option
   const scope=await sqlScope(env,principal,"delivery.share.audit");
   const limit=options.limit??50;
   if(!Number.isSafeInteger(limit)||limit<1||limit>100)throw new HTTPException(400,{message:"Share-history limit must be between 1 and 100"});
+  if(options.prefix!==undefined&&(options.prefix.length>1024||/[\0-\x1f\x7f]/.test(options.prefix)))
+    throw new HTTPException(400,{message:"Folder prefix is invalid"});
+  const prefix=options.prefix===undefined?null:normalizePrefix(options.prefix);
   const submittedQuery=(options.q||"").normalize("NFC").trim();
   const pathMode=/^path\s*:/i.test(submittedQuery);
   const query=(pathMode?submittedQuery.replace(/^path\s*:/i,""):submittedQuery).trim();
@@ -702,6 +706,10 @@ export async function listDeliveryShares(env:Env,principal:StaffPrincipal,option
   }
   const escaped=query.toLowerCase().replace(/[\\%_]/g,"\\$&"),like=`%${escaped}%`;
   const targetExpression="COALESCE(s.r2_object_key,s.r2_prefix,p.r2_prefix)";
+  // Match the share's actual target, not just its project/parent folder. Binary
+  // bounds preserve case and treat SQL wildcard characters as literal names.
+  const prefixWhere=prefix?`AND ${targetExpression} COLLATE BINARY>=? AND ${targetExpression} COLLATE BINARY<?`:"";
+  const prefixValues=prefix?[prefix,prefixUpperBound(prefix)]:[];
   const searchWhere=query?`AND (
     lower(COALESCE(s.label,'')) LIKE ? ESCAPE '\\' OR
     lower(p.client_name) LIKE ? ESCAPE '\\' OR
@@ -725,9 +733,9 @@ export async function listDeliveryShares(env:Env,principal:StaffPrincipal,option
       target_alias.display_name AS target_alias
       FROM shares s JOIN projects p ON p.id=s.project_id
       LEFT JOIN file_aliases target_alias ON target_alias.physical_key=${targetExpression}
-      WHERE ${scopeWhere} ${searchWhere} ${cursorWhere}
+      WHERE ${scopeWhere} ${prefixWhere} ${searchWhere} ${cursorWhere}
       ORDER BY s.created_at DESC,s.id DESC LIMIT ?`)
-      .bind(...scopeValues,...searchValues,...cursorValues,batchLimit).all<any>();
+      .bind(...scopeValues,...prefixValues,...searchValues,...cursorValues,batchLimit).all<any>();
     exhausted=result.results.length<batchLimit;
     for(const row of result.results){
       databaseCursor={createdAt:row.created_at,id:row.id};
