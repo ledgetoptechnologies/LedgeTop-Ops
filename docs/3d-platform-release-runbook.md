@@ -19,10 +19,10 @@ release contract below, enable a public/client Viewer gate, or replace any of
 the remaining representative TrueNAS and browser evidence required by this
 runbook.
 
-- Viewer source `6fb37c62b49dd76f36fb14a76c7afedcf44879cc` was built,
+- Viewer source `b43b2969bc72f1f6cad4d4e502c62b97e294e71d` was built,
   pulled back, runtime-verified, and attested by GitHub Actions run
-  `32805353873`. The immutable image is
-  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:a533354f16e826987aca46adb51c1838bfd053947a58a152cc6d94fc436942c3`.
+  `32806526763`. The immutable image is
+  `ghcr.io/ledgetoptechnologies/3d-viewer@sha256:4a7cd1caccde7ef2d5992c4c3dbbabd70e766a4d8067ec110511b557fae6e774`.
   The attestation verifies SQLite schema `24`, Obj2Tiles `1.6.2`, Potree
   converter `1.8.2`, and the exact OCI source revision. Both the Viewer API and
   background worker must run this same digest. Startup applies Viewer schema
