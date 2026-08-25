@@ -11,7 +11,7 @@ test("queues one local still without credentials or a source copy", async () => 
   const root = await mkdtemp(path.join(os.tmpdir(), "ltds-decoder-test-"));
   const jobsRoot = path.join(root, "Jobs");
   const source = path.join(jobsRoot, "Clients", "Synthetic", "photo.jpg");
-  const config = { jobsRoot, r2RootPrefix: "Jobs", artifactsDir: path.join(root, "artifacts"), workDir: path.join(root, "work"), imageMaxBytes: 1000, pdfMaxBytes: 1000, imageMaxPixels: 110_000_000, renderTimeoutMs: 1000, rendererVersion: "truenas-0.1.0" };
+  const config = { jobsRoot, r2RootPrefix: "Jobs", artifactsDir: path.join(root, "artifacts"), workDir: path.join(root, "work"), imageMaxBytes: 1000, pdfMaxBytes: 1000, imageMaxPixels: 512_000_000, renderTimeoutMs: 1000, rendererVersion: "truenas-0.1.0" };
   await (await import("node:fs/promises")).mkdir(path.dirname(source), { recursive: true });
   await writeFile(source, "synthetic-image");
   try {
@@ -83,7 +83,7 @@ test("bounds render retries by source identity, quarantines failures, and contin
   const config = {
     jobsRoot, r2RootPrefix: "Jobs", artifactsDir: path.join(root, "artifacts"), workDir: path.join(root, "work"),
     stateDir: path.join(root, "state"), pruneGraceMs: 86_400_000, imageMaxBytes: 1000, pdfMaxBytes: 1000,
-    imageMaxPixels: 110_000_000, renderTimeoutMs: 1000, renderMaxAttempts: 3,
+    imageMaxPixels: 512_000_000, renderTimeoutMs: 1000, renderMaxAttempts: 3,
     renderRetryBaseMs: 1000, renderRetryMaxMs: 4000, rendererVersion: "truenas-0.1.0",
   };
   await mkdir(path.dirname(bad), { recursive: true });
@@ -125,7 +125,7 @@ test("quarantines invalid post-render output without blocking a later source", a
   const config = {
     jobsRoot, r2RootPrefix: "Jobs", artifactsDir: path.join(root, "artifacts"), workDir: path.join(root, "work"),
     stateDir: path.join(root, "state"), pruneGraceMs: 86_400_000, imageMaxBytes: 1000, pdfMaxBytes: 1000,
-    imageMaxPixels: 110_000_000, renderTimeoutMs: 1000, renderMaxAttempts: 3,
+    imageMaxPixels: 512_000_000, renderTimeoutMs: 1000, renderMaxAttempts: 3,
     renderRetryBaseMs: 1000, renderRetryMaxMs: 4000, rendererVersion: "truenas-0.1.0",
   };
   await mkdir(path.dirname(invalid), { recursive: true });

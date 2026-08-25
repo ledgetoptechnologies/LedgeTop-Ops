@@ -77,6 +77,19 @@ class FakeThumbnailDb {
           }
           return result(0);
         }
+        if (sql.includes("thumbnail.container-limited-primary")) {
+          const [code, message, sourceKey, sourceEtag, expectedAttemptCount] = values as [string, string, string, string, number];
+          if (db.job?.source_key === sourceKey && db.job.source_etag === sourceEtag && db.job.status === "processing" &&
+            db.job.attempt_count === expectedAttemptCount) {
+            db.job.status = "pending";
+            db.job.error_code = code;
+            db.job.error_message = message;
+            db.job.queue_published_at = null;
+            db.job.render_not_before = "2026-08-24 12:00:00";
+            return result(1);
+          }
+          return result(0);
+        }
         if (sql.includes("thumbnail.fallback-lock-register")) return result(1);
         if (sql.includes("thumbnail.fallback-lock-acquire")) {
           if (!db.fallbackLockAvailable) return result(0);
@@ -319,6 +332,7 @@ class FakeThumbnailDb {
           const eligible = db.job?.status === "pending" && db.job.queue_published_at === null &&
             !db.indexMissing && db.indexedEtag === db.job.source_etag && db.indexedSize === db.job.source_size &&
             ["image", "pdf", "video"].includes(db.indexedMediaKind) &&
+            db.job.error_code !== "pixel_limit_exceeded" &&
             (requireFailure === 0 || Boolean(db.job.error_code))
             ? [{ source_key: db.job.source_key, source_etag: db.job.source_etag, source_size: db.job.source_size }]
             : [];
@@ -968,9 +982,9 @@ describe("private server thumbnail pipeline", () => {
     }
   });
 
-  it("acks a permanent pixel-limit rejection and leaves an explicit icon-fallback failure", async () => {
+  it("acks a Cloudflare pixel-limit rejection and returns the exact job to TrueNAS", async () => {
     const value = fixture({
-      rendererResult: { ok: false, errorCode: "pixel_limit_exceeded", message: "decoded image exceeds 110 MP" },
+      rendererResult: { ok: false, errorCode: "pixel_limit_exceeded", message: "decoded image exceeds 256 MP" },
     });
     const queue = queueBatch(value.message);
 
@@ -978,8 +992,17 @@ describe("private server thumbnail pipeline", () => {
 
     expect(queue.ack).toHaveBeenCalledOnce();
     expect(queue.retry).not.toHaveBeenCalled();
-    expect(value.db.job).toMatchObject({ status: "failed", attempt_count: 1, error_code: "pixel_limit_exceeded" });
+    expect(value.db.job).toMatchObject({
+      status: "pending",
+      attempt_count: 1,
+      error_code: "pixel_limit_exceeded",
+      queue_published_at: null,
+    });
     expect(value.putBodies).toHaveLength(0);
+
+    value.db.fallbackLockAvailable = true;
+    await expect(republishPendingThumbnailFallbacks(value.env)).resolves.toBe(0);
+    expect(value.send).not.toHaveBeenCalled();
   });
 
   it("adopts a valid sidecar winner that lands during the Container render race", async () => {

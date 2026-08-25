@@ -4,7 +4,7 @@ import { HARD_LIMITS, readBrokerConfig, readDecoderConfig } from "../src/config.
 
 test("accepts bounded decoder defaults without credentials", () => {
   const config = readDecoderConfig({});
-  assert.equal(config.imageMaxPixels, 110_000_000);
+  assert.equal(config.imageMaxPixels, 512_000_000);
   assert.equal(config.imageMaxBytes, HARD_LIMITS.imageBytes);
   assert.equal(config.renderMaxAttempts, 3);
   assert.equal(config.renderRetryBaseMs, 60_000);
@@ -27,6 +27,6 @@ test("rejects endpoint drift, weak secrets, and decoder caps above hard limits",
   assert.throws(() => readBrokerConfig({ ...broker, LTDSTHUMB_INGEST_URL: "https://ops.example.test/other" }), /exact HTTPS/);
   assert.throws(() => readBrokerConfig({ ...broker, THUMBNAIL_INGEST_SECRET: "short" }), /INGEST_SECRET/);
   assert.throws(() => readBrokerConfig({ ...broker, CF_ACCESS_CLIENT_SECRET: "short" }), /Access service token/);
-  assert.throws(() => readDecoderConfig({ LTDSTHUMB_IMAGE_MAX_PIXELS: "110000001" }), /safe range/);
+  assert.throws(() => readDecoderConfig({ LTDSTHUMB_IMAGE_MAX_PIXELS: "512000001" }), /safe range/);
   assert.throws(() => readDecoderConfig({ LTDSTHUMB_RENDER_RETRY_BASE_MS: "2000", LTDSTHUMB_RENDER_RETRY_MAX_MS: "1000" }), /must not be less/);
 });

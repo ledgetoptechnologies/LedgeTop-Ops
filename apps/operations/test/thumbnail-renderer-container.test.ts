@@ -37,7 +37,7 @@ describe("private thumbnail renderer boundary", () => {
     expect(() => validateContainerThumbnailRequest({ kind: "pdf", expectedSize: 0 })).toThrow(ThumbnailRendererError);
     expect(() => validateContainerThumbnailRequest({ kind: "image", expectedSize: 1.5 })).toThrow(ThumbnailRendererError);
     expect(() => validateContainerThumbnailRequest({ kind: "video", expectedSize: 1 } as never)).toThrow(ThumbnailRendererError);
-    expect(CONTAINER_RENDER_MAX_PIXELS).toBe(110_000_000);
+    expect(CONTAINER_RENDER_MAX_PIXELS).toBe(256_000_000);
   });
 
   it("accepts only a complete 320x240 metadata-free RIFF WebP", () => {

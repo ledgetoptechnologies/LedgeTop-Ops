@@ -3,7 +3,7 @@ export const CONTAINER_PDF_MAX_INPUT_BYTES = 256 * 1024 * 1024;
 export const CONTAINER_RENDER_MAX_OUTPUT_BYTES = 128 * 1024;
 export const CONTAINER_RENDER_WIDTH = 320;
 export const CONTAINER_RENDER_HEIGHT = 240;
-export const CONTAINER_RENDER_MAX_PIXELS = 110_000_000;
+export const CONTAINER_RENDER_MAX_PIXELS = 256_000_000;
 export const THUMBNAIL_RENDER_PROFILE = "ltds-thumbnail-320x240-webp-v1";
 
 export type ContainerThumbnailKind = "image" | "pdf" | "video";

@@ -960,8 +960,14 @@ const PERMANENT_CONTAINER_FAILURES = new Set<ContainerThumbnailErrorCode>([
   "metadata_not_stripped",
   "output_too_large",
   "pdf_page_limit",
-  "pixel_limit_exceeded",
   "unsupported_format",
+]);
+
+const TRUENAS_ONLY_CONTAINER_FAILURES = new Set<ContainerThumbnailErrorCode>([
+  // The Cloudflare fallback intentionally has a lower decoded-pixel ceiling
+  // than the unified TrueNAS renderer. Keep the exact job pending for the
+  // server instead of converting a fallback capacity limit into data loss.
+  "pixel_limit_exceeded",
 ]);
 
 async function adoptExistingThumbnail(
@@ -1035,6 +1041,22 @@ async function deferPendingThumbnailToPrimary(
     .bind(sourceKey, sourceEtag).run();
 }
 
+async function returnContainerLimitedThumbnailToPrimary(
+  env: Pick<Env, "DELIVERY_DB">,
+  sourceKey: string,
+  sourceEtag: string,
+  errorCode: ContainerThumbnailErrorCode,
+  message: string,
+  expectedAttemptCount: number,
+): Promise<void> {
+  await env.DELIVERY_DB.prepare(`/* thumbnail.container-limited-primary */
+    UPDATE image_thumbnail_jobs SET status='pending',error_code=?,error_message=?,lease_until=NULL,
+      failed_at=NULL,dead_lettered_at=NULL,queue_published_at=NULL,render_not_before=datetime('now'),updated_at=datetime('now')
+    WHERE source_key=? AND source_etag=? AND status='processing' AND attempt_count=?`)
+    .bind(errorCode, safeErrorMessage(message), sourceKey, sourceEtag, expectedAttemptCount)
+    .run();
+}
+
 /**
  * Re-publish work acknowledged while the server was primary only after its
  * independent presence/heartbeat signal becomes stale. The null publication
@@ -1067,6 +1089,7 @@ export async function republishPendingThumbnailFallbacks(
     WHERE job.status='pending' AND job.queue_published_at IS NULL
       AND (job.render_not_before IS NULL OR datetime(job.render_not_before)<=datetime('now'))
       AND source.media_kind IN ('image','pdf','video')
+      AND (job.error_code IS NULL OR job.error_code<>'pixel_limit_exceeded')
       AND (?=0 OR job.error_code IS NOT NULL)
     ORDER BY job.updated_at,job.source_key LIMIT ?`)
     .bind(primaryHealthy ? 1 : 0, boundedLimit).all<PendingThumbnailFallbackRow>();
@@ -1227,6 +1250,17 @@ async function processThumbnailJobAttempt(
 
   const rendered = await renderContainerThumbnail(env, source.body, sourceKind, source.size, message.sourceKey);
   if (!rendered.ok) {
+    if (TRUENAS_ONLY_CONTAINER_FAILURES.has(rendered.errorCode)) {
+      await returnContainerLimitedThumbnailToPrimary(
+        env,
+        message.sourceKey,
+        sourceEtag,
+        rendered.errorCode,
+        rendered.message,
+        claimAttempt,
+      );
+      return { outcome: "pending", thumbnailKey };
+    }
     const terminal = PERMANENT_CONTAINER_FAILURES.has(rendered.errorCode) || Boolean(options.finalAttempt);
     await failJob(env, message.sourceKey, sourceEtag, rendered.errorCode, rendered.message, terminal, claimAttempt);
     return terminal

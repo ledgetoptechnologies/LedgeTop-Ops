@@ -21,10 +21,12 @@ function cleanTool(calls) {
   };
 }
 
-test("enforces the 110 MP image cap before rendering", async () => {
+test("accepts the 112.8 MP DJI/DxO envelope and enforces the 512 MP server cap", async () => {
+  const accepted = async (_command, args) => ({ exitCode: 0, output: args[1] === "width" ? "12281" : "9186", diagnostic: "" });
+  assert.deepEqual(await inspectImage("source", { runTool: accepted, timeoutMs: 1, cwd: ".", maxPixels: 512_000_000 }), { width: 12281, height: 9186 });
   let count = 0;
-  const runTool = async (_command, args) => ({ exitCode: 0, output: args[1] === "width" ? "12281" : String(++count && 9186), diagnostic: "" });
-  await assert.rejects(inspectImage("source", { runTool, timeoutMs: 1, cwd: ".", maxPixels: 110_000_000 }), { code: "image_pixel_limit" });
+  const runTool = async (_command, args) => ({ exitCode: 0, output: args[1] === "width" ? "30000" : String(++count && 20000), diagnostic: "" });
+  await assert.rejects(inspectImage("source", { runTool, timeoutMs: 1, cwd: ".", maxPixels: 512_000_000 }), { code: "image_pixel_limit" });
 });
 
 test("renders a bounded metadata-free WebP with argv-only tools", async () => {
@@ -34,7 +36,7 @@ test("renders a bounded metadata-free WebP with argv-only tools", async () => {
   const calls = [];
   try {
     await writeFile(source, "synthetic");
-    const result = await renderThumbnail({ mediaKind: "image", sourcePath: source, outputPath: output, workspace: directory, maxPixels: 110_000_000, timeoutMs: 1_000, runTool: cleanTool(calls) });
+    const result = await renderThumbnail({ mediaKind: "image", sourcePath: source, outputPath: output, workspace: directory, maxPixels: 512_000_000, timeoutMs: 1_000, runTool: cleanTool(calls) });
     assert.deepEqual(result, { width: 320, height: 240, outputBytes: webp.length });
     assert.deepEqual(await readFile(output), webp);
     assert.equal(calls.some((call) => call[0] === "vips" && call[1] === "thumbnail" && call.includes("--auto-rotate") && call.includes("--crop")), true);

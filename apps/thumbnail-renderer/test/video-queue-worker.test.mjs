@@ -39,6 +39,8 @@ test("unified queue worker claims all supported media and range-streams videos",
   assert.match(script, /\/claim\?includeKind=all/);
   assert.doesNotMatch(script, /excludeKind=video/);
   assert.match(script, /readonly MAX_IMAGE_BYTES=536870912\b/);
+  assert.match(script, /readonly MAX_IMAGE_PIXELS=512000000\b/);
+  assert.match(script, /readonly LARGE_IMAGE_PIXELS=128000000\b/);
   assert.match(script, /readonly MAX_PDF_BYTES=268435456\b/);
   assert.match(script, /readonly MAX_VIDEO_BYTES=10737418240\b/);
   assert.match(script, /readonly MAX_OUTPUT_BYTES=131072\b/);
@@ -71,6 +73,10 @@ test("unified queue worker claims all supported media and range-streams videos",
   assert.match(script, /-ss "\$VIDEO_SEEK" -protocol_whitelist http,tcp "\$\{input_options\[@\]\}" -i "\$stream_url"/);
   assert.match(script, /render_deadline=.*LTDSTHUMB_RENDER_TIMEOUT_SECONDS/);
   assert.match(script, /download_source "\$source_url" "\$source_file" "\$source_size" "\$maximum_source_bytes"/);
+  assert.match(script, /pixel_class=\$\(image_pixel_class "\$source_file"/);
+  assert.match(script, /acquire_large_image_slot/);
+  assert.match(script, /flock -n 8/);
+  assert.match(script, /release_large_image_slot/);
   assert.match(script, /--max-filesize "\$maximum_bytes"/);
   assert.match(script, /node \/app\/src\/queue-render\.mjs "\$media_kind"/);
   assert.doesNotMatch(script, /source\.video/);

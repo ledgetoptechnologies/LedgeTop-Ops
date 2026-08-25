@@ -30,12 +30,12 @@ try {
   const image = path.join(root, "source.png");
   const imageOutput = path.join(root, "image.webp");
   await runTool("vips", ["black", image, "1000", "800"], { cwd: root, timeoutMs: 30_000 });
-  const imageResult = await renderThumbnail({ mediaKind: "image", sourcePath: image, outputPath: imageOutput, workspace: root, maxPixels: 110_000_000, timeoutMs: 30_000 });
+  const imageResult = await renderThumbnail({ mediaKind: "image", sourcePath: image, outputPath: imageOutput, workspace: root, maxPixels: 512_000_000, timeoutMs: 30_000 });
 
   const pdf = path.join(root, "source.pdf");
   const pdfOutput = path.join(root, "pdf.webp");
   await writeFile(pdf, minimalPdf(), { mode: 0o600 });
-  const pdfResult = await renderThumbnail({ mediaKind: "pdf", sourcePath: pdf, outputPath: pdfOutput, workspace: root, maxPixels: 110_000_000, timeoutMs: 30_000 });
+  const pdfResult = await renderThumbnail({ mediaKind: "pdf", sourcePath: pdf, outputPath: pdfOutput, workspace: root, maxPixels: 512_000_000, timeoutMs: 30_000 });
   process.stdout.write(`${JSON.stringify({ image: imageResult, pdf: pdfResult })}\n`);
 } finally {
   await rm(root, { recursive: true, force: true });

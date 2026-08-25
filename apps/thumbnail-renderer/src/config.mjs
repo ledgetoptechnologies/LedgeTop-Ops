@@ -4,7 +4,7 @@ import { RendererError } from "./errors.mjs";
 export const HARD_LIMITS = Object.freeze({
   imageBytes: 512 * 1024 * 1024,
   pdfBytes: 256 * 1024 * 1024,
-  imagePixels: 110_000_000,
+  imagePixels: 512_000_000,
   outputBytes: 128 * 1024,
   outputWidth: 320,
   outputHeight: 240,

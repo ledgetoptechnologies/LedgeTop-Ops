@@ -9,6 +9,8 @@ set -Eeuo pipefail
 readonly EXPECTED_API_BASE="https://incoming.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1"
 readonly ACCESS_API_BASE="https://ops.ledgetopdroneservices.com/api/internal/thumbnail-renderer/v1"
 readonly MAX_IMAGE_BYTES=536870912    # exactly 512 MiB
+readonly MAX_IMAGE_PIXELS=512000000   # server ceiling; still finite for untrusted input
+readonly LARGE_IMAGE_PIXELS=128000000 # serialize large decodes across worker slots
 readonly MAX_PDF_BYTES=268435456      # exactly 256 MiB
 readonly MAX_VIDEO_BYTES=10737418240  # exactly 10 GiB
 readonly MAX_OUTPUT_BYTES=131072      # exactly 128 KiB
@@ -76,6 +78,7 @@ HEARTBEAT_SLEEP_PID_FILE=""
 ACTIVE_PID=""
 STREAM_PROXY_PID=""
 STREAM_PROXY_URL=""
+LARGE_IMAGE_LOCKED=0
 LAST_HTTP_STATUS=""
 LAST_HTTP_BODY=""
 
@@ -117,6 +120,11 @@ cleanup_job() {
   stop_active_command
   stop_stream_proxy
   stop_heartbeat
+  if (( LARGE_IMAGE_LOCKED != 0 )); then
+    flock -u 8 2>/dev/null || true
+    exec 8>&-
+    LARGE_IMAGE_LOCKED=0
+  fi
   if [[ -n "$CURRENT_JOB_DIR" && -d "$CURRENT_JOB_DIR" ]]; then
     rm -rf -- "$CURRENT_JOB_DIR"
   fi
@@ -417,6 +425,40 @@ data = pathlib.Path(sys.argv[1]).read_bytes()
 if len(data) < 12 or data[:4] != b"RIFF" or data[8:12] != b"WEBP":
     raise SystemExit(1)
 ' "$input_file"
+}
+
+image_pixel_class() {
+  local input_file="$1" width height
+  width=$(vipsheader -f width "$input_file" 2>/dev/null) || return 1
+  height=$(vipsheader -f height "$input_file" 2>/dev/null) || return 1
+  python3 -c '
+import sys
+try:
+    width, height, large, maximum = map(int, sys.argv[1:])
+except ValueError:
+    raise SystemExit(1)
+if width <= 0 or height <= 0:
+    raise SystemExit(1)
+pixels = width * height
+print("too_large" if pixels > maximum else "large" if pixels > large else "normal")
+' "$width" "$height" "$LARGE_IMAGE_PIXELS" "$MAX_IMAGE_PIXELS"
+}
+
+acquire_large_image_slot() {
+  exec 8>"$LTDSTHUMB_SCRATCH_DIR/.thumbnail-large-image.lock"
+  while ! flock -n 8; do
+    lease_is_live || { exec 8>&-; return 1; }
+    (( STOP_REQUESTED == 0 )) || { exec 8>&-; return 1; }
+    sleep 1
+  done
+  LARGE_IMAGE_LOCKED=1
+}
+
+release_large_image_slot() {
+  (( LARGE_IMAGE_LOCKED != 0 )) || return 0
+  flock -u 8 2>/dev/null || true
+  exec 8>&-
+  LARGE_IMAGE_LOCKED=0
 }
 
 start_stream_proxy() {
@@ -816,9 +858,35 @@ process_one() {
       cleanup_job
       return 20
     fi
+    if [[ "$media_kind" == "image" ]]; then
+      local pixel_class
+      pixel_class=$(image_pixel_class "$source_file" 2>/dev/null || true)
+      case "$pixel_class" in
+        too_large)
+          fail_job "$source_key" "$lease_id" pixel_limit_exceeded "Decoded image exceeds the bounded 512 MP server limit" || true
+          cleanup_job
+          return 20
+          ;;
+        large)
+          if ! acquire_large_image_slot; then
+            log "large image attempt stopped before its serialized render slot became available"
+            cleanup_job
+            return 20
+          fi
+          log "large image render entered the serialized server slot"
+          ;;
+        normal) ;;
+        *)
+          fail_job "$source_key" "$lease_id" invalid_media "Image dimensions could not be validated" || true
+          cleanup_job
+          return 20
+          ;;
+      esac
+    fi
     run_guarded timeout --signal=TERM --kill-after=10s "$LTDSTHUMB_RENDER_TIMEOUT_SECONDS" \
       node /app/src/queue-render.mjs "$media_kind" "$source_file" "$thumbnail_file" "$CURRENT_JOB_DIR" \
       "$LTDSTHUMB_RENDER_TIMEOUT_SECONDS" || render_rc=$?
+    release_large_image_slot
   fi
   if (( render_rc == 75 )); then
     log "attempt stopped because its lease became stale"

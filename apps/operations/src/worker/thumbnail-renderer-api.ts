@@ -218,7 +218,7 @@ async function handleClaim(request: Request, env: Env): Promise<Response> {
        WHERE source.media_kind IN ('image','pdf','video')
          AND job.status='pending'
          AND (job.render_not_before IS NULL OR datetime(job.render_not_before)<=datetime('now'))
-         AND (job.error_code IS NULL OR source.media_kind='video')
+         AND (job.error_code IS NULL OR job.error_code='pixel_limit_exceeded' OR source.media_kind='video')
          AND (job.lease_until IS NULL OR job.lease_until < datetime('now'))
        ORDER BY job.queue_published_at ASC
        LIMIT 1`

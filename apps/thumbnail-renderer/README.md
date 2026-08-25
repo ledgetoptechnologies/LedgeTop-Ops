@@ -175,7 +175,13 @@ owns writes to the prebuilt subtree.
 - Local pre-generation remains fixed at one decoder and one broker item. The
   R2 queue renderer defaults to four isolated slots and is configurable from
   one through eight.
-- Still input: at most 512 MiB and 110,000,000 decoded pixels.
+- TrueNAS still input: at most 512 MiB and 512,000,000 decoded pixels. This bounded
+  ceiling includes the 112.8 MP DJI/DxO exports used by Operations and leaves
+  room for larger 200 MB deliverables while still rejecting decompression-bomb
+  dimensions before rendering. Queue workers serialize images above 128 MP so
+  one large decode cannot multiply across every parallel slot.
+  The smaller Cloudflare fallback remains capped at 256 MP; that fallback must
+  not make a larger TrueNAS-eligible job terminal.
 - PDF input: at most 256 MiB; Poppler rasterizes page one only.
 - The local `decoder` includes libvips and Poppler only; it does not install
   FFmpeg or open video media. The isolated `queue-renderer` image also includes

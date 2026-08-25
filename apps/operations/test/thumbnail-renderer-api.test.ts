@@ -11,6 +11,7 @@ function videoClaimFixture(input: {
   sourceSize?: number;
   contentType?: string;
   renderNotBefore?: string | null;
+  errorCode?: string | null;
 } = {}) {
   const job = {
     source_key: input.sourceKey || "Jobs/Clients/Acme/flight.mov",
@@ -21,7 +22,7 @@ function videoClaimFixture(input: {
     status: "pending",
     lease_until: null as string | null,
     thumbnail_provider: null as string | null,
-    error_code: null as string | null,
+    error_code: input.errorCode ?? null as string | null,
     queue_published_at: null as string | null,
     render_not_before: input.renderNotBefore ?? null as string | null,
   };
@@ -60,6 +61,7 @@ function videoClaimFixture(input: {
           job.status = "processing";
           job.attempt_count = attempts;
           job.lease_until = leaseUntil;
+          job.error_code = null;
           return { meta: { changes: 1 } };
         }
         if (sql.includes("SET lease_until=?")) {
@@ -153,6 +155,34 @@ describe("private TrueNAS thumbnail renderer API", () => {
     expect(value.queries.some(sql => sql.includes("source.media_kind IN ('image','pdf','video')"))).toBe(true);
     expect(value.job.status).toBe("processing");
     expect(value.health.writes).toBe(1);
+  });
+
+  it("leases a still returned by the lower-capacity Cloudflare fallback", async () => {
+    const value = videoClaimFixture({
+      sourceKey: "Jobs/Clients/Acme/large-photo.jpg",
+      sourceEtag: "large-image-etag",
+      sourceSize: 200 * 1024 * 1024,
+      contentType: "image/jpeg",
+      errorCode: "pixel_limit_exceeded",
+    });
+    const response = await dispatchThumbnailRendererApi(new Request(
+      `https://${HOST}/api/internal/thumbnail-renderer/v1/claim?includeKind=all`,
+      { method: "POST", headers: { Authorization: `Bearer ${SECRET}` } },
+    ), {
+      THUMBNAIL_INGEST_EXPECTED_HOST: HOST,
+      THUMBNAIL_INGEST_SECRET: SECRET,
+      DELIVERY_DB: { prepare: value.prepare },
+      DATA_BUCKET: { head: value.head },
+    } as never);
+
+    expect(response?.status).toBe(200);
+    expect(await response!.json()).toMatchObject({
+      status: "claimed",
+      sourceKey: value.job.source_key,
+      mediaKind: "image",
+    });
+    expect(value.job).toMatchObject({ status: "processing", attempt_count: 1, error_code: null });
+    expect(value.queries.some(sql => sql.includes("job.error_code='pixel_limit_exceeded'"))).toBe(true);
   });
 
   it("keeps the authenticated claim endpoint and leases video to TrueNAS", async () => {
@@ -330,7 +360,7 @@ describe("private TrueNAS thumbnail renderer API", () => {
       error_code: "decode_failed",
       queue_published_at: "2026-08-24 12:00:00",
     });
-    expect(value.queries.some(sql => sql.includes("job.error_code IS NULL OR source.media_kind='video'"))).toBe(true);
+    expect(value.queries.some(sql => sql.includes("job.error_code IS NULL OR job.error_code='pixel_limit_exceeded' OR source.media_kind='video'"))).toBe(true);
   });
 
   it("leaves a durable unpublished marker when retryable failure publication is unavailable", async () => {

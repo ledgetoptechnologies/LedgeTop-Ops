@@ -68,7 +68,8 @@ through the TrueNAS Apps UI; do not run Docker Compose in the system shell.
   Access service-token headers plus `THUMBNAIL_INGEST_SECRET` register exact
   synced artifact identities with Operations.
 - output: one metadata-stripped static WebP, exactly 320x240 and <=128 KiB;
-  image sources <=512 MiB and <=110 MP; PDFs <=256 MiB; video/Office/audio/
+  image sources <=512 MiB and <=512 MP (renders above 128 MP are serialized);
+  PDFs <=256 MiB; video/Office/audio/
   archives are not opened and remain icons.
 
 The persistent local cache maps through a second, independent TrueNAS UI Cloud

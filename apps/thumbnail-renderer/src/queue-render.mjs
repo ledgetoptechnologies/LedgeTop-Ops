@@ -20,7 +20,7 @@ if (!["image", "pdf"].includes(kind) || !sourcePath || !outputPath || !workspace
       sourcePath,
       outputPath,
       workspace,
-      maxPixels: 110_000_000,
+      maxPixels: 512_000_000,
       timeoutMs: Number(timeoutText) * 1000,
     });
   } catch (error) {
