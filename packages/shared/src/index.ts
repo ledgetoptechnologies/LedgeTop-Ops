@@ -1,3 +1,6 @@
+export { PRIMARY_ALPHA_SOURCE_ID, PRIMARY_CATALOG_SOURCE, createCatalogSourceContext } from "./source-identity";
+export type { CatalogSourceContext } from "./source-identity";
+
 import type {
   ViewerDisplayUnits,
   ViewerPublicShareCreation,

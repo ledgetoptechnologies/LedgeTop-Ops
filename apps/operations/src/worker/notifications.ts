@@ -1,6 +1,7 @@
 import {
   buildServiceRequestNotificationSnapshot,
   parseServiceRequestNotificationSnapshot,
+  PRIMARY_ALPHA_SOURCE_ID,
   type ServiceRequestNotificationLifecycle,
   type ServiceRequestNotificationSnapshot,
 } from "@ltds/shared";
@@ -21,6 +22,7 @@ type ClientPortalRequestRecipient = "staff_triage" | "client_requester";
 interface ClientPortalRequestNotificationRow {
   id: string;
   request_id: string;
+  catalog_source_id: string;
   event_type: ClientPortalRequestEvent;
   status_value: string | null;
   recipient_kind: ClientPortalRequestRecipient;
@@ -346,7 +348,7 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
   let processed = 0;
   for (; processed < 25; processed += 1) {
     const row = await env.DELIVERY_DB.prepare(`SELECT n.id,n.request_id,n.event_type,n.status_value,n.recipient_kind,n.payload_json,n.attempt_count,
-      r.title,r.project_id,r.service_category,r.location_text,r.latitude,r.longitude,p.project_name,r.account_id,r.created_by_identity_id requester_identity_id,
+      r.catalog_source_id,r.title,r.project_id,r.service_category,r.location_text,r.latitude,r.longitude,p.project_name,r.account_id,r.created_by_identity_id requester_identity_id,
       CASE WHEN n.recipient_kind='client_requester' THEN i.email ELSE NULL END requester_email
       FROM client_portal_notification_outbox n
       JOIN client_service_requests r ON r.id=n.request_id
@@ -373,6 +375,16 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
       .bind(row.id, MAX_ATTEMPTS).run();
     if (!claimed.meta.changes) { processed -= 1; continue; }
     const attempt = row.attempt_count + 1;
+    // Client request routes currently support only the primary catalog. Keep
+    // other sources in staff triage, but never send an unusable client action.
+    // Suppress after claiming so unsupported intent cannot remain queued forever.
+    if (row.recipient_kind === "client_requester" && row.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID) {
+      const reason = "unsupported-catalog-source";
+      await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing'")
+        .bind(reason, row.id).run();
+      await auditClientRequestNotification(env, "client_request_notification.suppressed", row, { attempt, reason });
+      continue;
+    }
     const recipient = row.recipient_kind === "staff_triage" ? normalizeRecipientEmail(env.CLIENT_REQUEST_TRIAGE_TO) : normalizeRecipientEmail(row.requester_email);
     if (!recipient) {
       const staffRecipientMissing = row.recipient_kind === "staff_triage";

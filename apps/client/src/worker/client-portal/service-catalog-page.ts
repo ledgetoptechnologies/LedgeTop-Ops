@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE, type CatalogSourceContext } from "@ltds/shared";
 import { base64Url, sha256 } from "../security";
 import type { Env } from "../types";
 import { mapServiceCatalogItem } from "./request-v2";
@@ -32,16 +33,18 @@ function parseCursor(encoded: string | undefined): z.infer<typeof cursorSchema> 
   } catch { throw new ServiceCatalogPageError(400, "catalog_cursor_invalid"); }
 }
 
-async function checkpoint(database: D1DatabaseSession): Promise<Checkpoint> {
+async function checkpoint(database: D1DatabaseSession, source: CatalogSourceContext): Promise<Checkpoint> {
   let row: Checkpoint | null;
   try {
     row = await database.prepare(`SELECT checkpoint.active_generation_id,checkpoint.source_generation,checkpoint.source_sequence
       FROM pa_service_catalog_checkpoint checkpoint
       JOIN pa_service_catalog_generations generation ON generation.id=checkpoint.active_generation_id
+        AND generation.source_id=checkpoint.source_id
         AND generation.status='active' AND generation.complete=1 AND generation.source_generation=checkpoint.source_generation
-      WHERE checkpoint.singleton=1 AND checkpoint.source_sequence>=generation.source_sequence`).first<Checkpoint>();
+      WHERE checkpoint.source_id=? AND checkpoint.source_sequence>=generation.source_sequence`)
+      .bind(source.sourceId).first<Checkpoint>();
   } catch (error) {
-    if (/no such table:\s*(?:main\.)?pa_service_catalog_(?:checkpoint|generations)\b/i.test(error instanceof Error ? error.message : String(error))) {
+    if (/no such table:\s*(?:main\.)?pa_service_catalog_(?:checkpoint|generations)\b|no such column:\s*(?:(?:checkpoint|generation)\.)?source_id\b/i.test(error instanceof Error ? error.message : String(error))) {
       throw new ServiceCatalogPageError(503, "catalog_not_ready");
     }
     throw error;
@@ -56,25 +59,35 @@ async function checkpoint(database: D1DatabaseSession): Promise<Checkpoint> {
 
 /** Global client-safe catalog, not a per-client service entitlement or price list. */
 export async function listServiceCatalogPage(env: Env, input: ClientServiceCatalogPageInput = {}): Promise<ClientServiceCatalogPage> {
+  return listServiceCatalogPageForSource(env, PRIMARY_CATALOG_SOURCE, input);
+}
+
+/** Internal reader: callers must resolve authorized source ownership server-side.
+ * The public compatibility endpoint deliberately exposes only the primary source.
+ */
+export async function listServiceCatalogPageForSource(
+  env: Env, sourceContext: CatalogSourceContext, input: ClientServiceCatalogPageInput = {},
+): Promise<ClientServiceCatalogPage> {
+  const source = createCatalogSourceContext(sourceContext.sourceId);
   const limit = input.limit ?? 100;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ServiceCatalogPageError(400, "catalog_cursor_invalid");
   const cursor = parseCursor(input.cursor);
   const database = env.DELIVERY_DB.withSession("first-primary");
-  const before = await checkpoint(database).catch(error => {
+  const before = await checkpoint(database, source).catch(error => {
     if (cursor && error instanceof ServiceCatalogPageError && error.code === "catalog_not_ready") {
       throw new ServiceCatalogPageError(409, "catalog_changed");
     }
     throw error;
   });
-  const proof = await sha256(JSON.stringify([env.PROJECT_ALPHA_CATALOG_APPLICATION_KEY ?? null, before]));
+  const proof = await sha256(JSON.stringify([source.sourceId, env.PROJECT_ALPHA_CATALOG_APPLICATION_KEY ?? null, before]));
   if (cursor && cursor.proof !== proof) throw new ServiceCatalogPageError(409, "catalog_changed");
   const bindings: (string | number)[] = cursor ? [cursor.category, cursor.displayOrder, cursor.name, cursor.publicId] : [];
   const rows = await database.prepare(`SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json
-    FROM pa_service_catalog_items WHERE active=1${cursor ? ` AND
+    FROM pa_service_catalog_items WHERE source_id=? AND active=1${cursor ? ` AND
       (category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id) > (? COLLATE NOCASE,?,? COLLATE NOCASE,?)` : ""}
     ORDER BY category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id LIMIT ?`)
-    .bind(...bindings, limit + 1).all<CatalogRow>();
-  const after = await checkpoint(database).catch(error => {
+    .bind(source.sourceId, ...bindings, limit + 1).all<CatalogRow>();
+  const after = await checkpoint(database, source).catch(error => {
     if (error instanceof ServiceCatalogPageError && error.code === "catalog_not_ready") {
       throw new ServiceCatalogPageError(409, "catalog_changed");
     }

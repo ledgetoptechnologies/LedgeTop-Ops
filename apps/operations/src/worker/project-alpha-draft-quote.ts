@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import { sqlScope } from "./acl";
 import { auditStatement } from "./request-security";
 import { parseStoredWorkArea, type StaffRequestArea } from "./request-area-revision";
@@ -24,6 +25,7 @@ const SHA256_HEX = /^[a-f0-9]{64}$/;
 
 interface RequestRow {
   id: string;
+  catalog_source_id: string;
   status: string;
   title: string;
   details: string;
@@ -43,6 +45,7 @@ interface RequestRow {
 }
 
 interface ServiceRow {
+  service_source_id: string;
   service_public_id: string;
   service_source_version: string;
   answers_json: string;
@@ -435,7 +438,7 @@ export async function sendProjectAlphaDraftQuoteCommand(
 
 async function requestForDraft(env: Env, requestId: string): Promise<RequestRow | null> {
   return database(env).prepare(
-    `SELECT r.id,r.status,r.title,r.details,r.deliverables_text,
+    `SELECT r.id,r.catalog_source_id,r.status,r.title,r.details,r.deliverables_text,
       account.project_alpha_client_id,account.project_alpha_organization_id,
       project.project_alpha_project_id,r.project_id portal_project_id,
       CASE WHEN r.project_id IS NULL THEN 1 WHEN project.active=1 AND EXISTS (
@@ -471,6 +474,10 @@ async function latestReceipt(env: Env, requestId: string): Promise<ReceiptRow | 
 }
 
 async function buildPayload(env: Env, row: RequestRow): Promise<ProjectAlphaDraftQuotePayload> {
+  // Only the primary connector is configured. Never send another source's raw
+  // client/project/service IDs to it, including for an empty service selection.
+  if (row.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID)
+    throw new HTTPException(409, { message: "This request's catalog source has no configured quote connection" });
   if (!OPAQUE_PUBLIC_ID.test(row.id))
     throw new HTTPException(409, { message: "This request has an invalid public identifier" });
   if (!row.project_alpha_client_id || !OPAQUE_PUBLIC_ID.test(row.project_alpha_client_id))
@@ -490,7 +497,7 @@ async function buildPayload(env: Env, row: RequestRow): Promise<ProjectAlphaDraf
 
   const [serviceResult, attachmentResult] = await Promise.all([
     database(env).prepare(
-      `SELECT service_public_id,service_source_version,answers_json
+      `SELECT service_source_id,service_public_id,service_source_version,answers_json
        FROM client_service_request_services WHERE request_id=? ORDER BY ordinal`,
     ).bind(row.id).all<ServiceRow>(),
     database(env).prepare(
@@ -506,6 +513,8 @@ async function buildPayload(env: Env, row: RequestRow): Promise<ProjectAlphaDraf
     });
   if (serviceResult.results.length > 10 || attachmentResult.results.length > 10)
     throw new HTTPException(409, { message: "This request exceeds the Project Alpha draft command bounds" });
+  if (serviceResult.results.some(service => service.service_source_id !== row.catalog_source_id))
+    throw new HTTPException(409, { message: "This request contains services from an inconsistent catalog source" });
 
   let workArea;
   try {
@@ -573,6 +582,8 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
     const requestId = c.req.param("id");
     const request = await requestForDraft(c.env, requestId);
     if (!request) throw new HTTPException(404, { message: "Client request not found" });
+    if (request.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID)
+      return c.json({ capability: { enabled: false, reason: "This request's catalog source has no configured quote connection" }, receipt: null });
     const receipt = await latestReceipt(c.env, requestId);
     return c.json({
       capability: projectAlphaDraftQuoteCapability(c.env),
@@ -635,7 +646,7 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
              artifact_status,artifact_version,editor_path,created_by)
            SELECT ?,?,?,?,?,?,?,?,?,'draft',?,?,? WHERE EXISTS (
              SELECT 1 FROM client_service_requests current_request
-             WHERE current_request.id=? AND current_request.status IN ('under_review','accepted_pending_pa_linkage')
+             WHERE current_request.id=? AND current_request.catalog_source_id=? AND current_request.status IN ('under_review','accepted_pending_pa_linkage')
                AND COALESCE((SELECT MAX(revision_number) FROM request_revisions WHERE request_id=current_request.id),0)=?
                AND COALESCE((SELECT MAX(revision_number) FROM client_service_request_area_revisions WHERE request_id=current_request.id),0)=?
            )`,
@@ -643,7 +654,7 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
           receiptId, requestId, request.request_revision, areaRevision, idempotencyKey, payloadHash,
           result.receiptId, result.draftQuote.publicId, result.draftQuote.documentNumber,
           result.draftQuote.version, result.draftQuote.editorPath, principal.id,
-          requestId,request.request_revision,areaRevision,
+          requestId,PRIMARY_ALPHA_SOURCE_ID,request.request_revision,areaRevision,
         ).run();
       if (receiptInsert.meta.changes !== 1) {
         await database(c.env).batch([

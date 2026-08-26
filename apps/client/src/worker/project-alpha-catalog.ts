@@ -1,4 +1,5 @@
 import { createRemoteJWKSet, jwtVerify } from "jose";
+import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE, type CatalogSourceContext } from "@ltds/shared";
 import type { Env } from "./types";
 
 const MAX_BODY_BYTES = 128 * 1024;
@@ -116,10 +117,7 @@ async function readBoundedRequestBody(request: Request, maximumBytes: number): P
   return body;
 }
 
-function database(env: Env): D1Database {
-  const candidate = env.DELIVERY_DB as D1Database & { withSession?: (consistency: "first-primary") => D1Database };
-  return typeof candidate.withSession === "function" ? candidate.withSession("first-primary") : env.DELIVERY_DB;
-}
+type CatalogDatabase = Pick<D1Database, "prepare" | "batch">;
 
 function record(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
@@ -210,7 +208,11 @@ function parseItem(value: unknown): CatalogProjectionItem {
 function parseCommon(value: Record<string, unknown>): CommonDelivery {
   if (value.schemaVersion !== 2 || typeof value.applicationKey !== "string" || typeof value.deliveryId !== "string" || typeof value.occurredAt !== "string" || typeof value.sourceGeneration !== "string") throw new Error("catalog-envelope-invalid");
   if (!SAFE_ID.test(value.deliveryId) || !SAFE_ID.test(value.sourceGeneration) || !Number.isSafeInteger(value.sourceSequence) || (value.sourceSequence as number) < 1 || !Number.isFinite(Date.parse(value.occurredAt))) throw new Error("catalog-envelope-invalid");
-  return value as unknown as CommonDelivery;
+  return {
+    schemaVersion: 2, applicationKey: value.applicationKey, deliveryId: value.deliveryId,
+    occurredAt: value.occurredAt, sourceGeneration: value.sourceGeneration,
+    sourceSequence: integer(value.sourceSequence, 1, Number.MAX_SAFE_INTEGER),
+  };
 }
 
 export function parseCatalogProjectionDelivery(value: unknown, expectedApplicationKey: string): CatalogProjectionDelivery {
@@ -283,153 +285,222 @@ export async function verifyCatalogAccessAssertion(request: Request, env: Env): 
   }
 }
 
-async function existingReceipt(env: Env, deliveryId: string, payloadHash: string): Promise<"duplicate" | null> {
-  const receipt = await database(env).prepare("SELECT payload_hash,status FROM pa_service_catalog_projection_receipts WHERE delivery_id=?").bind(deliveryId).first<ReceiptRow>();
+async function existingReceipt(db: CatalogDatabase, sourceId: string, deliveryId: string, payloadHash: string): Promise<"duplicate" | null> {
+  const receipt = await db.prepare("SELECT payload_hash,status FROM pa_service_catalog_projection_receipts WHERE source_id=? AND delivery_id=?").bind(sourceId, deliveryId).first<ReceiptRow>();
   if (!receipt) return null;
   if (receipt.payload_hash !== payloadHash) throw new Error("catalog-delivery-id-conflict");
   return "duplicate";
 }
 
-function receiptStatement(db: D1Database, delivery: CatalogProjectionDelivery, payloadHash: string, kind: "snapshot_page" | "snapshot_activate" | "event", status: "completed" | "ignored" = "completed"): D1PreparedStatement {
-  return db.prepare(`INSERT INTO pa_service_catalog_projection_receipts(delivery_id,delivery_kind,payload_hash,source_sequence,status) VALUES(?,?,?,?,?)`)
-    .bind(delivery.deliveryId, kind, payloadHash, delivery.sourceSequence, status);
+interface SqlGuard { sql: string; bindings: (string | number | null)[] }
+
+function checkpointGuard(sourceId: string, checkpoint: CheckpointRow): SqlGuard {
+  return {
+    sql: `EXISTS(SELECT 1 FROM pa_service_catalog_checkpoint WHERE source_id=?
+      AND active_generation_id IS ? AND source_generation=? AND source_sequence=?)`,
+    bindings: [sourceId, checkpoint.active_generation_id, checkpoint.source_generation, checkpoint.source_sequence],
+  };
 }
 
-function auditStatement(db: D1Database, delivery: CatalogProjectionDelivery, action: string, details: Record<string, unknown>): D1PreparedStatement {
-  return db.prepare(`INSERT INTO pa_service_catalog_projection_audit(id,action,delivery_id,source_generation,source_sequence,details_json) VALUES(?,?,?,?,?,?)`)
-    .bind(crypto.randomUUID(), action, delivery.deliveryId, delivery.sourceGeneration, delivery.sourceSequence, JSON.stringify(details));
+function generationGuard(sourceId: string, generation: GenerationRow): SqlGuard {
+  return {
+    sql: `EXISTS(SELECT 1 FROM pa_service_catalog_generations WHERE source_id=? AND id=?
+      AND source_generation=? AND source_sequence=? AND snapshot_hash=? AND page_count=? AND item_count=? AND status=? AND complete=?)`,
+    bindings: [sourceId, generation.id, generation.source_generation, generation.source_sequence,
+      generation.snapshot_hash, generation.page_count, generation.item_count, generation.status, generation.complete],
+  };
 }
 
-async function stageSnapshotPage(env: Env, delivery: SnapshotPageDelivery, payloadHash: string): Promise<"completed" | "ignored"> {
-  const db = database(env);
-  const checkpoint = await db.prepare("SELECT source_sequence FROM pa_service_catalog_checkpoint WHERE singleton=1").first<{ source_sequence: number }>();
-  if (!checkpoint || delivery.sourceSequence <= checkpoint.source_sequence) throw new Error("catalog-snapshot-stale");
-  let generation = await db.prepare("SELECT * FROM pa_service_catalog_generations WHERE source_generation=?").bind(delivery.sourceGeneration).first<GenerationRow>();
-  if (!generation) {
-    const generationId = crypto.randomUUID();
-    await db.prepare(`INSERT INTO pa_service_catalog_generations(id,source_generation,source_sequence,snapshot_hash,page_count,item_count,status) VALUES(?,?,?,?,?,?,'staging')`)
-      .bind(generationId, delivery.sourceGeneration, delivery.sourceSequence, delivery.snapshotHash, delivery.pageCount, delivery.itemCount).run();
-    generation = await db.prepare("SELECT * FROM pa_service_catalog_generations WHERE source_generation=?").bind(delivery.sourceGeneration).first<GenerationRow>();
+function allGuards(...guards: SqlGuard[]): SqlGuard {
+  return { sql: guards.map(guard => `(${guard.sql})`).join(" AND "), bindings: guards.flatMap(guard => guard.bindings) };
+}
+
+/** First statement in the write transaction: a stale proof violates a named
+ * CHECK, rolling back every item/checkpoint/audit write, rather than a CAS=0
+ * silently allowing the rest of the batch to commit. No user SQL is accepted. */
+function receiptStatement(db: CatalogDatabase, sourceId: string, delivery: CatalogProjectionDelivery, payloadHash: string,
+  kind: "snapshot_page" | "snapshot_activate" | "event", guard: SqlGuard, status: "completed" | "ignored" = "completed"): D1PreparedStatement {
+  return db.prepare(`INSERT INTO pa_service_catalog_projection_receipts
+    (source_id,delivery_id,delivery_kind,payload_hash,status,source_sequence)
+    VALUES(?,?,?,?,?,CASE WHEN ${guard.sql} THEN ? ELSE 0 END)`)
+    .bind(sourceId, delivery.deliveryId, kind, payloadHash, status, ...guard.bindings, delivery.sourceSequence);
+}
+
+function auditStatement(db: CatalogDatabase, sourceId: string, delivery: CatalogProjectionDelivery, action: string, details: Record<string, unknown>): D1PreparedStatement {
+  return db.prepare(`INSERT INTO pa_service_catalog_projection_audit(id,source_id,action,delivery_id,source_generation,source_sequence,details_json) VALUES(?,?,?,?,?,?,?)`)
+    .bind(crypto.randomUUID(), sourceId, action, delivery.deliveryId, delivery.sourceGeneration, delivery.sourceSequence, JSON.stringify(details));
+}
+
+async function stageSnapshotPage(db: CatalogDatabase, sourceId: string, delivery: SnapshotPageDelivery, payloadHash: string): Promise<"completed" | "ignored"> {
+  const checkpoint = await db.prepare("SELECT active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE source_id=?")
+    .bind(sourceId).first<CheckpointRow>() ?? { active_generation_id: null, source_generation: "legacy", source_sequence: 0 };
+  if (delivery.sourceSequence <= checkpoint.source_sequence) throw new Error("catalog-snapshot-stale");
+  const generation = await db.prepare("SELECT * FROM pa_service_catalog_generations WHERE source_id=? AND source_generation=?")
+    .bind(sourceId, delivery.sourceGeneration).first<GenerationRow>();
+  if (generation && (generation.source_sequence !== delivery.sourceSequence || generation.snapshot_hash !== delivery.snapshotHash || generation.page_count !== delivery.pageCount || generation.item_count !== delivery.itemCount || generation.status !== "staging")) throw new Error("catalog-generation-conflict");
+  const generationId = generation?.id ?? crypto.randomUUID();
+  const existingPage = generation ? await db.prepare("SELECT payload_hash FROM pa_service_catalog_generation_pages WHERE source_id=? AND generation_id=? AND page_number=?")
+    .bind(sourceId, generationId, delivery.pageNumber).first<{ payload_hash: string }>() : null;
+  if (existingPage && existingPage.payload_hash !== payloadHash) throw new Error("catalog-page-conflict");
+  const guard = allGuards(checkpointGuard(sourceId, checkpoint), generation ? generationGuard(sourceId, generation) : {
+    sql: "NOT EXISTS(SELECT 1 FROM pa_service_catalog_generations WHERE source_id=? AND (source_generation=? OR source_sequence=?))",
+    bindings: [sourceId, delivery.sourceGeneration, delivery.sourceSequence],
+  }, existingPage ? {
+    sql: "EXISTS(SELECT 1 FROM pa_service_catalog_generation_pages WHERE source_id=? AND generation_id=? AND page_number=? AND payload_hash=?)",
+    bindings: [sourceId, generationId, delivery.pageNumber, payloadHash],
+  } : {
+    sql: "NOT EXISTS(SELECT 1 FROM pa_service_catalog_generation_pages WHERE source_id=? AND generation_id=? AND page_number=?)",
+    bindings: [sourceId, generationId, delivery.pageNumber],
+  });
+  const statements: D1PreparedStatement[] = [
+    db.prepare("INSERT OR IGNORE INTO pa_service_catalog_checkpoint(source_id,active_generation_id,source_generation,source_sequence) VALUES(?,NULL,'legacy',0)").bind(sourceId),
+    receiptStatement(db, sourceId, delivery, payloadHash, "snapshot_page", guard, existingPage ? "ignored" : "completed"),
+  ];
+  if (!existingPage) {
+    if (!generation) statements.push(db.prepare(`INSERT INTO pa_service_catalog_generations
+      (id,source_id,source_generation,source_sequence,snapshot_hash,page_count,item_count,status) VALUES(?,?,?,?,?,?,?,'staging')`)
+      .bind(generationId, sourceId, delivery.sourceGeneration, delivery.sourceSequence, delivery.snapshotHash, delivery.pageCount, delivery.itemCount));
+    statements.push(
+      db.prepare("INSERT INTO pa_service_catalog_generation_pages(generation_id,source_id,page_number,item_count,payload_hash) VALUES(?,?,?,?,?)")
+        .bind(generationId, sourceId, delivery.pageNumber, delivery.items.length, payloadHash),
+      ...delivery.items.map(item => db.prepare(`INSERT INTO pa_service_catalog_generation_items
+        (generation_id,source_id,page_number,public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`)
+        .bind(generationId, sourceId, delivery.pageNumber, item.publicId, item.sourceVersion, item.name, item.summary, item.category, item.displayOrder, item.geometryRequirement, JSON.stringify(item.questions))),
+    );
   }
-  if (!generation || generation.source_sequence !== delivery.sourceSequence || generation.snapshot_hash !== delivery.snapshotHash || generation.page_count !== delivery.pageCount || generation.item_count !== delivery.itemCount || generation.status !== "staging") throw new Error("catalog-generation-conflict");
-  const existingPage = await db.prepare("SELECT payload_hash FROM pa_service_catalog_generation_pages WHERE generation_id=? AND page_number=?").bind(generation.id, delivery.pageNumber).first<{ payload_hash: string }>();
-  if (existingPage) {
-    if (existingPage.payload_hash !== payloadHash) throw new Error("catalog-page-conflict");
-    await db.batch([
-      receiptStatement(db, delivery, payloadHash, "snapshot_page", "ignored"),
-      auditStatement(db, delivery, "delivery_replayed", { kind: delivery.kind, pageNumber: delivery.pageNumber }),
-    ]);
-    return "ignored";
-  }
-  await db.batch([
-    db.prepare("INSERT INTO pa_service_catalog_generation_pages(generation_id,page_number,item_count,payload_hash) VALUES(?,?,?,?)").bind(generation.id, delivery.pageNumber, delivery.items.length, payloadHash),
-    ...delivery.items.map(item => db.prepare(`INSERT INTO pa_service_catalog_generation_items
-      (generation_id,page_number,public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json)
-      VALUES(?,?,?,?,?,?,?,?,?,?)`)
-      .bind(generation!.id, delivery.pageNumber, item.publicId, item.sourceVersion, item.name, item.summary, item.category, item.displayOrder, item.geometryRequirement, JSON.stringify(item.questions))),
-    receiptStatement(db, delivery, payloadHash, "snapshot_page"),
-    auditStatement(db, delivery, "snapshot_page_staged", { pageNumber: delivery.pageNumber, pageCount: delivery.pageCount, itemCount: delivery.items.length }),
-  ]);
-  return "completed";
+  statements.push(auditStatement(db, sourceId, delivery, existingPage ? "delivery_replayed" : "snapshot_page_staged",
+    { pageNumber: delivery.pageNumber, pageCount: delivery.pageCount, itemCount: delivery.items.length }));
+  await db.batch(statements);
+  return existingPage ? "ignored" : "completed";
 }
 
-async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, payloadHash: string): Promise<"completed" | "ignored"> {
-  const db = database(env);
-  const generation = await db.prepare("SELECT * FROM pa_service_catalog_generations WHERE source_generation=?").bind(delivery.sourceGeneration).first<GenerationRow>();
+const SNAPSHOT_VERSION_CONFLICT = `SELECT 1 FROM pa_service_catalog_generation_items staged
+  JOIN pa_service_catalog_items current ON current.source_id=staged.source_id
+    AND current.public_id=staged.public_id AND current.source_version=staged.source_version
+  WHERE staged.source_id=? AND staged.generation_id=? AND (
+    current.name<>staged.name OR COALESCE(current.summary,'')<>COALESCE(staged.summary,'')
+    OR current.category<>staged.category OR current.display_order<>staged.display_order
+    OR current.geometry_requirement<>staged.geometry_requirement
+    OR current.question_schema_json<>staged.question_schema_json)`;
+
+async function activateSnapshot(db: CatalogDatabase, sourceId: string, delivery: SnapshotActivateDelivery, payloadHash: string): Promise<"completed" | "ignored"> {
+  const generation = await db.prepare("SELECT * FROM pa_service_catalog_generations WHERE source_id=? AND source_generation=?").bind(sourceId, delivery.sourceGeneration).first<GenerationRow>();
   if (!generation || generation.source_sequence !== delivery.sourceSequence || generation.snapshot_hash !== delivery.snapshotHash || generation.page_count !== delivery.pageCount || generation.item_count !== delivery.itemCount) throw new Error("catalog-generation-incomplete");
-  const checkpoint = await db.prepare("SELECT active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE singleton=1").first<CheckpointRow>();
+  const checkpoint = await db.prepare("SELECT active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE source_id=?").bind(sourceId).first<CheckpointRow>();
   if (!checkpoint) throw new Error("catalog-checkpoint-missing");
   if (checkpoint.source_sequence === delivery.sourceSequence && checkpoint.active_generation_id === generation.id && generation.status === "active") {
     await db.batch([
-      receiptStatement(db, delivery, payloadHash, "snapshot_activate", "ignored"),
-      auditStatement(db, delivery, "delivery_replayed", { kind: delivery.kind }),
+      receiptStatement(db, sourceId, delivery, payloadHash, "snapshot_activate", allGuards(checkpointGuard(sourceId, checkpoint), generationGuard(sourceId, generation)), "ignored"),
+      auditStatement(db, sourceId, delivery, "delivery_replayed", { kind: delivery.kind }),
     ]);
     return "ignored";
   }
   if (delivery.sourceSequence <= checkpoint.source_sequence || generation.status !== "staging") throw new Error("catalog-snapshot-stale");
-  const staged = await db.prepare(`SELECT COUNT(DISTINCT page_number) page_count,COUNT(*) item_count,MIN(page_number) min_page,MAX(page_number) max_page FROM pa_service_catalog_generation_items WHERE generation_id=?`).bind(generation.id).first<{ page_count: number; item_count: number; min_page: number | null; max_page: number | null }>();
-  const receivedPages = await db.prepare("SELECT COUNT(*) count,SUM(item_count) item_count,MIN(page_number) min_page,MAX(page_number) max_page FROM pa_service_catalog_generation_pages WHERE generation_id=?").bind(generation.id).first<{ count: number; item_count: number | null; min_page: number | null; max_page: number | null }>();
+  const staged = await db.prepare("SELECT COUNT(*) item_count FROM pa_service_catalog_generation_items WHERE source_id=? AND generation_id=?").bind(sourceId, generation.id).first<{ item_count: number }>();
+  const receivedPages = await db.prepare("SELECT COUNT(*) count,SUM(item_count) item_count,MIN(page_number) min_page,MAX(page_number) max_page FROM pa_service_catalog_generation_pages WHERE source_id=? AND generation_id=?").bind(sourceId, generation.id).first<{ count: number; item_count: number | null; min_page: number | null; max_page: number | null }>();
   if (!staged || !receivedPages || receivedPages.count !== delivery.pageCount || (receivedPages.item_count ?? 0) !== delivery.itemCount || receivedPages.min_page !== 1 || receivedPages.max_page !== delivery.pageCount || staged.item_count !== delivery.itemCount) throw new Error("catalog-generation-incomplete");
-  const reusedVersion = await db.prepare(`SELECT 1 conflict FROM pa_service_catalog_generation_items staged
-    JOIN pa_service_catalog_items current ON current.public_id=staged.public_id AND current.source_version=staged.source_version
-    WHERE staged.generation_id=? AND (
-      current.name<>staged.name OR COALESCE(current.summary,'')<>COALESCE(staged.summary,'')
-      OR current.category<>staged.category OR current.display_order<>staged.display_order
-      OR current.geometry_requirement<>staged.geometry_requirement
-      OR current.question_schema_json<>staged.question_schema_json
-    ) LIMIT 1`).bind(generation.id).first("conflict");
+  const reusedVersion = await db.prepare(`${SNAPSHOT_VERSION_CONFLICT} LIMIT 1`).bind(sourceId, generation.id).first();
   if (reusedVersion) throw new Error("catalog-source-version-conflict");
+  const guard = allGuards(checkpointGuard(sourceId, checkpoint), generationGuard(sourceId, generation), {
+    sql: `(SELECT COUNT(*) FROM pa_service_catalog_generation_items WHERE source_id=? AND generation_id=?)=?
+      AND EXISTS(SELECT COUNT(*) FROM pa_service_catalog_generation_pages WHERE source_id=? AND generation_id=?
+        HAVING COUNT(*)=? AND COALESCE(SUM(item_count),0)=? AND MIN(page_number)=1 AND MAX(page_number)=?)
+      AND NOT EXISTS(${SNAPSHOT_VERSION_CONFLICT})`,
+    bindings: [sourceId, generation.id, delivery.itemCount, sourceId, generation.id, delivery.pageCount, delivery.itemCount,
+      delivery.pageCount, sourceId, generation.id],
+  });
   await db.batch([
-    db.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE active=1"),
+    receiptStatement(db, sourceId, delivery, payloadHash, "snapshot_activate", guard),
+    db.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE source_id=? AND active=1").bind(sourceId),
     db.prepare(`INSERT INTO pa_service_catalog_items
-      (public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at,mirrored_at,source_generation,source_sequence)
-      SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,1,?,datetime('now'),?,?
-      FROM pa_service_catalog_generation_items WHERE generation_id=?
-      ON CONFLICT(public_id,source_version) DO UPDATE SET name=excluded.name,summary=excluded.summary,category=excluded.category,display_order=excluded.display_order,geometry_requirement=excluded.geometry_requirement,question_schema_json=excluded.question_schema_json,active=1,source_updated_at=excluded.source_updated_at,mirrored_at=datetime('now'),source_generation=excluded.source_generation,source_sequence=excluded.source_sequence`)
-      .bind(delivery.occurredAt, delivery.sourceGeneration, delivery.sourceSequence, generation.id),
-    db.prepare("UPDATE pa_service_catalog_entity_state SET active=0,source_sequence=?,updated_at=datetime('now')").bind(delivery.sourceSequence),
-    db.prepare(`INSERT INTO pa_service_catalog_entity_state(public_id,source_version,source_sequence,active)
-      SELECT public_id,source_version,?,1 FROM pa_service_catalog_generation_items WHERE generation_id=?
-      ON CONFLICT(public_id) DO UPDATE SET source_version=excluded.source_version,source_sequence=excluded.source_sequence,active=1,updated_at=datetime('now')`)
-      .bind(delivery.sourceSequence, generation.id),
-    db.prepare("UPDATE pa_service_catalog_generations SET status='superseded' WHERE status='active' AND id<>?").bind(generation.id),
-    db.prepare("UPDATE pa_service_catalog_generations SET status='active',complete=1,activated_at=datetime('now') WHERE id=? AND status='staging'").bind(generation.id),
-    db.prepare("UPDATE pa_service_catalog_checkpoint SET active_generation_id=?,source_generation=?,source_sequence=?,updated_at=datetime('now') WHERE singleton=1 AND source_sequence<?")
-      .bind(generation.id, delivery.sourceGeneration, delivery.sourceSequence, delivery.sourceSequence),
-    receiptStatement(db, delivery, payloadHash, "snapshot_activate"),
-    auditStatement(db, delivery, "snapshot_activated", { pageCount: delivery.pageCount, itemCount: delivery.itemCount }),
+      (source_id,public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at,mirrored_at,source_generation,source_sequence)
+      SELECT source_id,public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,1,?,datetime('now'),?,?
+      FROM pa_service_catalog_generation_items WHERE source_id=? AND generation_id=?
+      ON CONFLICT(source_id,public_id,source_version) DO UPDATE SET active=1,source_updated_at=excluded.source_updated_at,mirrored_at=datetime('now'),source_generation=excluded.source_generation,source_sequence=excluded.source_sequence`)
+      .bind(delivery.occurredAt, delivery.sourceGeneration, delivery.sourceSequence, sourceId, generation.id),
+    db.prepare("UPDATE pa_service_catalog_entity_state SET active=0,source_sequence=?,updated_at=datetime('now') WHERE source_id=?").bind(delivery.sourceSequence, sourceId),
+    db.prepare(`INSERT INTO pa_service_catalog_entity_state(source_id,public_id,source_version,source_sequence,active)
+      SELECT source_id,public_id,source_version,?,1 FROM pa_service_catalog_generation_items WHERE source_id=? AND generation_id=?
+      ON CONFLICT(source_id,public_id) DO UPDATE SET source_version=excluded.source_version,source_sequence=excluded.source_sequence,active=1,updated_at=datetime('now')`)
+      .bind(delivery.sourceSequence, sourceId, generation.id),
+    db.prepare("UPDATE pa_service_catalog_generations SET status='superseded' WHERE source_id=? AND status='active' AND id<>?").bind(sourceId, generation.id),
+    db.prepare("UPDATE pa_service_catalog_generations SET status='active',complete=1,activated_at=datetime('now') WHERE source_id=? AND id=? AND status='staging'").bind(sourceId, generation.id),
+    db.prepare("UPDATE pa_service_catalog_checkpoint SET active_generation_id=?,source_generation=?,source_sequence=?,updated_at=datetime('now') WHERE source_id=?")
+      .bind(generation.id, delivery.sourceGeneration, delivery.sourceSequence, sourceId),
+    auditStatement(db, sourceId, delivery, "snapshot_activated", { pageCount: delivery.pageCount, itemCount: delivery.itemCount }),
   ]);
   return "completed";
 }
 
-async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string): Promise<"completed"> {
-  const db = database(env);
-  const checkpoint = await db.prepare("SELECT active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE singleton=1").first<CheckpointRow>();
+function eventVersionGuard(sourceId: string, item: CatalogProjectionItem): SqlGuard {
+  return {
+    sql: `NOT EXISTS(SELECT 1 FROM pa_service_catalog_items WHERE source_id=? AND public_id=? AND source_version=?
+      AND (name<>? OR COALESCE(summary,'')<>COALESCE(?,'') OR category<>? OR display_order<>?
+        OR geometry_requirement<>? OR question_schema_json<>?))`,
+    bindings: [sourceId, item.publicId, item.sourceVersion, item.name, item.summary, item.category,
+      item.displayOrder, item.geometryRequirement, JSON.stringify(item.questions)],
+  };
+}
+
+async function applyEvent(db: CatalogDatabase, sourceId: string, delivery: EventDelivery, payloadHash: string): Promise<"completed"> {
+  const checkpoint = await db.prepare("SELECT active_generation_id,source_generation,source_sequence FROM pa_service_catalog_checkpoint WHERE source_id=?").bind(sourceId).first<CheckpointRow>();
   if (!checkpoint?.active_generation_id || delivery.sourceGeneration !== checkpoint.source_generation) throw new Error("catalog-event-generation-mismatch");
   if (delivery.sourceSequence !== checkpoint.source_sequence + 1) throw new Error("catalog-event-sequence-gap");
   const publicId = delivery.event.action === "upsert" ? delivery.event.item.publicId : delivery.event.publicId;
   const sourceVersion = delivery.event.action === "upsert" ? delivery.event.item.sourceVersion : delivery.event.sourceVersion;
   if (delivery.event.action === "upsert") {
-    const item = delivery.event.item;
-    const reusedVersion = await db.prepare(`SELECT 1 conflict FROM pa_service_catalog_items
-      WHERE public_id=? AND source_version=? AND (
-        name<>? OR COALESCE(summary,'')<>COALESCE(?, '') OR category<>? OR display_order<>?
-        OR geometry_requirement<>? OR question_schema_json<>?
-      ) LIMIT 1`).bind(item.publicId,item.sourceVersion,item.name,item.summary,item.category,item.displayOrder,item.geometryRequirement,JSON.stringify(item.questions)).first("conflict");
-    if (reusedVersion) throw new Error("catalog-source-version-conflict");
+    const versionGuard = eventVersionGuard(sourceId, delivery.event.item);
+    const valid = await db.prepare(`SELECT (${versionGuard.sql}) valid`).bind(...versionGuard.bindings).first<number>("valid");
+    if (!valid) throw new Error("catalog-source-version-conflict");
   }
-  const statements: D1PreparedStatement[] = [db.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE public_id=? AND active=1").bind(publicId)];
+  const guard = allGuards(checkpointGuard(sourceId, checkpoint), {
+    sql: "EXISTS(SELECT 1 FROM pa_service_catalog_generations WHERE source_id=? AND id=? AND source_generation=? AND status='active' AND complete=1)",
+    bindings: [sourceId, checkpoint.active_generation_id, checkpoint.source_generation],
+  }, ...(delivery.event.action === "upsert" ? [eventVersionGuard(sourceId, delivery.event.item)] : []));
+  const statements: D1PreparedStatement[] = [
+    receiptStatement(db, sourceId, delivery, payloadHash, "event", guard),
+    db.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE source_id=? AND public_id=? AND active=1").bind(sourceId, publicId),
+  ];
   if (delivery.event.action === "upsert") {
     const item = delivery.event.item;
     statements.push(db.prepare(`INSERT INTO pa_service_catalog_items
-      (public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at,mirrored_at,source_generation,source_sequence)
-      VALUES(?,?,?,?,?,?,?,?,1,?,datetime('now'),?,?)
-      ON CONFLICT(public_id,source_version) DO UPDATE SET name=excluded.name,summary=excluded.summary,category=excluded.category,display_order=excluded.display_order,geometry_requirement=excluded.geometry_requirement,question_schema_json=excluded.question_schema_json,active=1,source_updated_at=excluded.source_updated_at,mirrored_at=datetime('now'),source_generation=excluded.source_generation,source_sequence=excluded.source_sequence`)
-      .bind(item.publicId, item.sourceVersion, item.name, item.summary, item.category, item.displayOrder, item.geometryRequirement, JSON.stringify(item.questions), delivery.occurredAt, delivery.sourceGeneration, delivery.sourceSequence));
+      (source_id,public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at,mirrored_at,source_generation,source_sequence)
+      VALUES(?,?,?,?,?,?,?,?,?,1,?,datetime('now'),?,?)
+      ON CONFLICT(source_id,public_id,source_version) DO UPDATE SET active=1,source_updated_at=excluded.source_updated_at,mirrored_at=datetime('now'),source_generation=excluded.source_generation,source_sequence=excluded.source_sequence`)
+      .bind(sourceId, item.publicId, item.sourceVersion, item.name, item.summary, item.category, item.displayOrder, item.geometryRequirement, JSON.stringify(item.questions), delivery.occurredAt, delivery.sourceGeneration, delivery.sourceSequence));
   }
   statements.push(
-    db.prepare(`INSERT INTO pa_service_catalog_entity_state(public_id,source_version,source_sequence,active) VALUES(?,?,?,?)
-      ON CONFLICT(public_id) DO UPDATE SET source_version=excluded.source_version,source_sequence=excluded.source_sequence,active=excluded.active,updated_at=datetime('now')`)
-      .bind(publicId, sourceVersion, delivery.sourceSequence, delivery.event.action === "upsert" ? 1 : 0),
-    db.prepare("UPDATE pa_service_catalog_checkpoint SET source_sequence=?,updated_at=datetime('now') WHERE singleton=1 AND source_generation=? AND source_sequence=?")
-      .bind(delivery.sourceSequence, delivery.sourceGeneration, checkpoint.source_sequence),
-    receiptStatement(db, delivery, payloadHash, "event"),
-    auditStatement(db, delivery, delivery.event.action === "upsert" ? "event_upserted" : "event_tombstoned", { publicId }),
+    db.prepare(`INSERT INTO pa_service_catalog_entity_state(source_id,public_id,source_version,source_sequence,active) VALUES(?,?,?,?,?)
+      ON CONFLICT(source_id,public_id) DO UPDATE SET source_version=excluded.source_version,source_sequence=excluded.source_sequence,active=excluded.active,updated_at=datetime('now')`)
+      .bind(sourceId, publicId, sourceVersion, delivery.sourceSequence, delivery.event.action === "upsert" ? 1 : 0),
+    db.prepare("UPDATE pa_service_catalog_checkpoint SET source_sequence=?,updated_at=datetime('now') WHERE source_id=?")
+      .bind(delivery.sourceSequence, sourceId),
+    auditStatement(db, sourceId, delivery, delivery.event.action === "upsert" ? "event_upserted" : "event_tombstoned", { publicId }),
   );
   await db.batch(statements);
   return "completed";
 }
 
-async function processDelivery(env: Env, delivery: CatalogProjectionDelivery, payloadHash: string): Promise<"completed" | "ignored" | "duplicate"> {
-  const duplicate = await existingReceipt(env, delivery.deliveryId, payloadHash);
+/** Internal application of an already parsed/authenticated delivery. The HTTP
+ * receiver below selects PRIMARY_CATALOG_SOURCE itself, never a request field.
+ * Explicit contexts support isolated local tests, not another enabled connector. */
+export async function applyCatalogProjectionDelivery(env: Env, source: CatalogSourceContext, delivery: CatalogProjectionDelivery, payloadHash: string): Promise<"completed" | "ignored" | "duplicate"> {
+  const { sourceId } = createCatalogSourceContext(source.sourceId);
+  if (!SHA256_HEX.test(payloadHash)) throw new Error("catalog-body-digest-invalid");
+  const db = env.DELIVERY_DB.withSession("first-primary");
+  const duplicate = await existingReceipt(db, sourceId, delivery.deliveryId, payloadHash);
   if (duplicate) return duplicate;
   try {
-    if (delivery.kind === "snapshot.page") return await stageSnapshotPage(env, delivery, payloadHash);
-    if (delivery.kind === "snapshot.activate") return await activateSnapshot(env, delivery, payloadHash);
-    return await applyEvent(env, delivery, payloadHash);
+    if (delivery.kind === "snapshot.page") return await stageSnapshotPage(db, sourceId, delivery, payloadHash);
+    if (delivery.kind === "snapshot.activate") return await activateSnapshot(db, sourceId, delivery, payloadHash);
+    return await applyEvent(db, sourceId, delivery, payloadHash);
   } catch (error) {
-    const raced = await existingReceipt(env, delivery.deliveryId, payloadHash);
+    // A competing transaction may have committed after this session's first
+    // read. Anchor receipt reconciliation on the primary, not an older replica.
+    const raced = await existingReceipt(env.DELIVERY_DB.withSession("first-primary"), sourceId, delivery.deliveryId, payloadHash);
     if (raced) return raced;
+    if (/catalog_delivery_write_guard/.test(error instanceof Error ? error.message : String(error))) throw new Error("catalog-projection-conflict");
     throw error;
   }
 }
@@ -478,7 +549,7 @@ export async function handleProjectAlphaCatalogRequest(request: Request, env: En
     await verifyHmac(rawBody, timestamp, keyId, deliveryId, request.headers.get("X-Portal-Integration-Signature"), signingSecret);
     const parsed = parseCatalogProjectionDelivery(JSON.parse(new TextDecoder().decode(rawBody)) as unknown, env.PROJECT_ALPHA_CATALOG_APPLICATION_KEY ?? "");
     if (deliveryId !== parsed.deliveryId) throw new Error("catalog-delivery-id-mismatch");
-    const status = await processDelivery(env, parsed, await sha256Hex(rawBody));
+    const status = await applyCatalogProjectionDelivery(env, PRIMARY_CATALOG_SOURCE, parsed, await sha256Hex(rawBody));
     return json(200, { ok: true, deliveryId: parsed.deliveryId, status });
   } catch (error) {
     const message = error instanceof SyntaxError ? "catalog-json-invalid" : error instanceof Error ? error.message : "catalog-internal-error";

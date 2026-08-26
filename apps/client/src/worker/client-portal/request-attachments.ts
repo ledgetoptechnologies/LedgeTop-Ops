@@ -1,4 +1,5 @@
 import { HTTPException } from "hono/http-exception";
+import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import type { Env } from "../types";
 import { constantTimeEqual } from "../security";
 import type { ClientPortalSession } from "./types";
@@ -161,7 +162,7 @@ const draftAccessSql = `
   JOIN client_accounts a ON a.id=? AND a.status='active'
   JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
   JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
-  WHERE d.id=? AND d.account_id=a.id AND d.state='draft' AND (
+  WHERE d.id=? AND d.account_id=a.id AND d.state='draft' AND d.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND (
     (d.project_id IS NULL AND (m.role='manager' OR d.created_by_identity_id=i.id)) OR
     (d.project_id IS NOT NULL AND EXISTS (
       SELECT 1 FROM client_project_grants g JOIN projects p ON p.id=g.project_id AND p.active=1
@@ -193,7 +194,7 @@ const submittedRequestAccessSql = `
   JOIN client_accounts a ON a.id=? AND a.status='active'
   JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
   JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
-  WHERE request.id=? AND request.account_id=a.id AND (
+  WHERE request.id=? AND request.account_id=a.id AND request.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND (
     (request.project_id IS NULL AND (m.role='manager' OR request.created_by_identity_id=i.id)) OR
     (request.project_id IS NOT NULL AND EXISTS (
       SELECT 1 FROM client_project_grants g JOIN projects p ON p.id=g.project_id AND p.active=1

@@ -1,7 +1,10 @@
 # Multiple Alpha sources: isolation before activation
 
-Status: proposed implementation sequence, not implemented or enabled. Audited
-against local Operations checkpoint `f055b2c` on August 26, 2026. This document
+Status: staged implementation sequence; no second connection is enabled. The
+first local catalog-provenance increment is described in
+[catalog source isolation](catalog-source-isolation.md); the other boundaries
+below remain outstanding. Audited against local Operations checkpoint
+`f055b2c` on August 26, 2026. This document
 does not authorize a second connection, change staff roles, or replace the
 [client workspace roadmap](client-workspace-roadmap.md).
 
@@ -18,7 +21,7 @@ incident or an assertion that a second producer is currently connected.
 | Operations snapshot | `apps/operations/src/worker/project-alpha.ts` uses one configured base URL, collection-only fingerprints, and the `integration_projection/project-alpha` lease. Projection rows use source IDs without a connector key. | Qualify records, relationships, fingerprints, versions, leases, sync runs and missing-record cleanup by the authenticated source. |
 | Staff authority | The same snapshot rebuilds Project Alpha-managed staff roles/divisions. `apps/ops-sync/src/projection.ts` processes entitlements against the same staff projection. | Preserve the existing authority explicitly. A business-data connection must not gain staff-role, Access-group or identity-management authority. |
 | Delivery legacy mapping | Client migration `0103_client_portal_workspace.sql` has globally unique Alpha client, organization and project references. | Associate each reference with a source; preserve existing account/project/grant IDs and old URLs during migration. |
-| Service catalog | Client migration `0122_project_alpha_service_catalog_projection.sql` has one catalog checkpoint and globally unique generation/sequence state. `project-alpha-catalog.ts` deactivates all active catalog items during activation. | Independent source checkpoints, receipts, generations, versions and activation; a source may only supersede its own items. |
+| Service catalog | The released schema has one checkpoint and global catalog state. Local migration `0156` now source-qualifies the catalog, saved request parents and selections; public ingress remains primary-only. | Verify and deploy the compatible migration/code together before any registry or second-source activation. |
 | Portal projection | Client migration `0121_client_workspace_hierarchy_v2.sql` has globally unique Alpha root IDs. Migration `0125_project_alpha_portal_projection.sql` scopes much state to workspace, but receipts are global and workspace ownership is not a multi-connector authority contract. | Bind each workspace/root and projection operation to an authenticated source; scope replay, mapping and lifecycle state consistently. |
 | Client Hub | Operations migration `0032_client_hub_directory.sql` and `client-hub-directory.ts` accept only `project-alpha:primary` and `delivery:local`. Business lookup still reads the single-source `pa_*` tables. | Extend the underlying reader/index and continuation contracts together; do not merely add an accepted source string. |
 

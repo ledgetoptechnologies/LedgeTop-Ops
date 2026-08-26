@@ -1,3 +1,4 @@
+import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import { sha256 } from "../security";
 import type { Env } from "../types";
 import type {
@@ -229,7 +230,7 @@ async function resolveSelections(env: Env, input: ClientServiceRequestDraftInput
   for (const inputService of input.services) {
     if (!PUBLIC_ID.test(inputService.publicId) || !SOURCE_VERSION.test(inputService.sourceVersion))
       return { kind: "invalid" };
-    const row = await db(env).prepare(`SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json FROM pa_service_catalog_items WHERE public_id=? AND active=1`).bind(inputService.publicId).first<CatalogRow>();
+    const row = await db(env).prepare(`SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json FROM pa_service_catalog_items WHERE source_id=? AND public_id=? AND active=1`).bind(PRIMARY_ALPHA_SOURCE_ID, inputService.publicId).first<CatalogRow>();
     const catalog = row ? mapServiceCatalogItem(row) : null;
     if (!catalog || catalog.sourceVersion !== inputService.sourceVersion) {
       changed.push(inputService.publicId);
@@ -257,7 +258,7 @@ function serializeDraft(input: ClientServiceRequestDraftInput, services: ClientS
 async function loadDraft(env: Env, session: ClientPortalSession, draftId: string): Promise<ClientServiceRequestDraft | null> {
   const row = await db(env).prepare(`SELECT d.id,d.project_id,d.state,d.version,d.draft_json,d.area_geojson,d.area_square_meters,d.area_acres,d.submitted_request_id,d.created_at,d.updated_at
     FROM client_service_request_drafts d ${sessionJoin}
-    WHERE d.id=? AND d.account_id=a.id ${draftAccess}`)
+    WHERE d.id=? AND d.account_id=a.id AND d.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' ${draftAccess}`)
     .bind(session.accountId, session.identityId, draftId).first<DraftRow>();
   if (!row) return null;
   let fields: Omit<ClientServiceRequestDraftInput, "areaGeoJson" | "services">;
@@ -266,7 +267,7 @@ async function loadDraft(env: Env, session: ClientPortalSession, draftId: string
     fields = JSON.parse(row.draft_json) as typeof fields;
     areaGeoJson = row.area_geojson ? JSON.parse(row.area_geojson) as typeof areaGeoJson : null;
   } catch { return null; }
-  const serviceRows = await db(env).prepare(`SELECT service_public_id,service_source_version,service_snapshot_json,answers_json FROM client_service_request_draft_services WHERE draft_id=? ORDER BY ordinal`).bind(draftId).all<DraftServiceRow>();
+  const serviceRows = await db(env).prepare(`SELECT service_public_id,service_source_version,service_snapshot_json,answers_json FROM client_service_request_draft_services WHERE draft_id=? AND service_source_id=? ORDER BY ordinal`).bind(draftId, PRIMARY_ALPHA_SOURCE_ID).all<DraftServiceRow>();
   const services: ClientServiceDraftSelection[] = [];
   try {
     for (const serviceRow of serviceRows.results) {
@@ -291,9 +292,9 @@ export async function listServiceRequestDrafts(
 ): Promise<ClientServiceRequestDraftSummary[]> {
   const rows = await db(env).prepare(`SELECT d.id,d.project_id,d.draft_json,d.area_acres,d.updated_at,
       COALESCE((SELECT json_group_array(json_extract(service.service_snapshot_json,'$.name'))
-        FROM client_service_request_draft_services service WHERE service.draft_id=d.id),'[]') service_names_json
+        FROM client_service_request_draft_services service WHERE service.draft_id=d.id AND service.service_source_id=d.catalog_source_id),'[]') service_names_json
     FROM client_service_request_drafts d ${sessionJoin}
-    WHERE d.account_id=a.id AND d.state='draft' ${draftAccess}
+    WHERE d.account_id=a.id AND d.state='draft' AND d.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' ${draftAccess}
     ORDER BY d.updated_at DESC,d.id DESC LIMIT 20`)
     .bind(session.accountId, session.identityId)
     .all<DraftSummaryRow>();
@@ -337,7 +338,8 @@ const reviewedCatalogGuard = `NOT EXISTS (
   SELECT 1 FROM json_each(?) reviewed
   WHERE NOT EXISTS (
     SELECT 1 FROM pa_service_catalog_items current
-    WHERE current.public_id=json_extract(reviewed.value,'$.publicId')
+    WHERE current.source_id='${PRIMARY_ALPHA_SOURCE_ID}'
+      AND current.public_id=json_extract(reviewed.value,'$.publicId')
       AND current.source_version=json_extract(reviewed.value,'$.sourceVersion')
       AND current.active=1
   )
@@ -349,8 +351,8 @@ function reviewedCatalogVersions(services: ClientServiceDraftSelection[]): strin
 
 export async function listServiceCatalog(env: Env): Promise<ClientServiceCatalogItem[]> {
   const result = await db(env).prepare(`SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json
-    FROM pa_service_catalog_items WHERE active=1
-    ORDER BY category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id LIMIT 500`).all<CatalogRow>();
+    FROM pa_service_catalog_items WHERE source_id=? AND active=1
+    ORDER BY category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id LIMIT 500`).bind(PRIMARY_ALPHA_SOURCE_ID).all<CatalogRow>();
   return result.results.map(mapServiceCatalogItem).filter((item): item is ClientServiceCatalogItem => item !== null);
 }
 
@@ -360,7 +362,7 @@ export async function getServiceRequestDraft(env: Env, session: ClientPortalSess
 
 export async function createServiceRequestDraft(env: Env, session: ClientPortalSession, input: ClientServiceRequestDraftInput, mutationKey: string): Promise<ClientServiceDraftMutationResult | null> {
   const fingerprint = await sha256(JSON.stringify(input));
-  const existing = await db(env).prepare(`SELECT id,create_fingerprint FROM client_service_request_drafts WHERE account_id=? AND create_idempotency_key=?`).bind(session.accountId, mutationKey).first<{ id: string; create_fingerprint: string }>();
+  const existing = await db(env).prepare(`SELECT id,create_fingerprint FROM client_service_request_drafts WHERE account_id=? AND create_idempotency_key=? AND catalog_source_id=?`).bind(session.accountId, mutationKey, PRIMARY_ALPHA_SOURCE_ID).first<{ id: string; create_fingerprint: string }>();
   if (existing) {
     if (existing.create_fingerprint !== fingerprint) return { kind: "conflict" };
     const draft = await loadDraft(env, session, existing.id);
@@ -374,8 +376,8 @@ export async function createServiceRequestDraft(env: Env, session: ClientPortalS
   const areaSquareMeters = calculateRequestAreaSquareMeters(input.areaGeoJson);
   const database = db(env);
   const insert = database.prepare(`INSERT INTO client_service_request_drafts
-    (id,account_id,project_id,created_by_identity_id,draft_json,area_geojson,area_square_meters,area_acres,create_idempotency_key,create_fingerprint,last_mutation_key)
-    SELECT ?,a.id,?,i.id,?,?,?,?,?,?,?
+    (id,account_id,project_id,created_by_identity_id,draft_json,area_geojson,area_square_meters,area_acres,create_idempotency_key,create_fingerprint,last_mutation_key,catalog_source_id)
+    SELECT ?,a.id,?,i.id,?,?,?,?,?,?,?,'${PRIMARY_ALPHA_SOURCE_ID}'
     FROM client_accounts a
     JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
     JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
@@ -384,8 +386,8 @@ export async function createServiceRequestDraft(env: Env, session: ClientPortalS
       WHERE g.account_id=a.id AND g.project_id=? AND g.revoked_at IS NULL AND g.can_request_service=1
         AND (m.role='manager' OR EXISTS (SELECT 1 FROM client_member_project_grants mg WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=g.project_id AND mg.revoked_at IS NULL))
     )) AND ${reviewedCatalogGuard}`).bind(id, input.projectId, JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, areaSquareMeters, areaSquareMeters === null ? null : areaSquareMeters / SQUARE_METERS_PER_ACRE, mutationKey, fingerprint, mutationKey, session.identityId, session.accountId, input.projectId, input.projectId, reviewedCatalogVersions(services));
-  const statements = [insert, ...services.map((service, ordinal) => database.prepare(`INSERT INTO client_service_request_draft_services(draft_id,ordinal,service_public_id,service_source_version,service_snapshot_json,answers_json)
-    SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM client_service_request_drafts WHERE id=? AND last_mutation_key=?)`).bind(id, ordinal, service.publicId, service.sourceVersion, serviceSnapshot(service), JSON.stringify(service.answers), id, mutationKey))];
+  const statements = [insert, ...services.map((service, ordinal) => database.prepare(`INSERT INTO client_service_request_draft_services(draft_id,ordinal,service_public_id,service_source_version,service_snapshot_json,answers_json,service_source_id)
+    SELECT ?,?,?,?,?,?,'${PRIMARY_ALPHA_SOURCE_ID}' WHERE EXISTS (SELECT 1 FROM client_service_request_drafts WHERE id=? AND last_mutation_key=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}')`).bind(id, ordinal, service.publicId, service.sourceVersion, serviceSnapshot(service), JSON.stringify(service.answers), id, mutationKey))];
   try {
     const results = await database.batch(statements);
     if (!results[0]?.meta.changes) {
@@ -393,7 +395,7 @@ export async function createServiceRequestDraft(env: Env, session: ClientPortalS
       return changed.length ? { kind: "catalog_changed", servicePublicIds: changed } : null;
     }
   } catch {
-    const raced = await db(env).prepare(`SELECT id,create_fingerprint FROM client_service_request_drafts WHERE account_id=? AND create_idempotency_key=?`).bind(session.accountId, mutationKey).first<{ id: string; create_fingerprint: string }>();
+    const raced = await db(env).prepare(`SELECT id,create_fingerprint FROM client_service_request_drafts WHERE account_id=? AND create_idempotency_key=? AND catalog_source_id=?`).bind(session.accountId, mutationKey, PRIMARY_ALPHA_SOURCE_ID).first<{ id: string; create_fingerprint: string }>();
     if (!raced || raced.create_fingerprint !== fingerprint) return raced ? { kind: "conflict" } : null;
     const replay = await loadDraft(env, session, raced.id);
     return replay ? { kind: "replayed", draft: replay } : null;
@@ -403,8 +405,11 @@ export async function createServiceRequestDraft(env: Env, session: ClientPortalS
 }
 
 export async function saveServiceRequestDraft(env: Env, session: ClientPortalSession, draftId: string, expectedVersion: number, input: ClientServiceRequestDraftInput, mutationKey: string): Promise<ClientServiceDraftMutationResult | null> {
+  // Parent provenance fences even empty drafts and replay lookups. It is not
+  // inferred from selected services, and never comes from browser input.
+  if (!await loadDraft(env, session, draftId)) return null;
   const fingerprint = await sha256(JSON.stringify(input));
-  const replay = await db(env).prepare(`SELECT mutation_fingerprint FROM client_service_request_draft_mutations WHERE draft_id=? AND mutation_key=?`).bind(draftId, mutationKey).first<{ mutation_fingerprint: string }>();
+  const replay = await db(env).prepare(`SELECT mutation_fingerprint FROM client_service_request_draft_mutations mutation JOIN client_service_request_drafts d ON d.id=mutation.draft_id WHERE draft_id=? AND mutation_key=? AND d.account_id=? AND d.catalog_source_id=?`).bind(draftId, mutationKey, session.accountId, PRIMARY_ALPHA_SOURCE_ID).first<{ mutation_fingerprint: string }>();
   if (replay) {
     if (replay.mutation_fingerprint !== fingerprint) return { kind: "conflict" };
     const draft = await loadDraft(env, session, draftId);
@@ -417,7 +422,7 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
   const areaSquareMeters = calculateRequestAreaSquareMeters(input.areaGeoJson);
   const database = db(env);
   const update = database.prepare(`UPDATE client_service_request_drafts AS d SET project_id=?,draft_json=?,area_geojson=?,area_square_meters=?,area_acres=?,version=version+1,last_mutation_key=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
-    WHERE d.id=? AND d.account_id=? AND d.state='draft' AND d.version=?
+    WHERE d.id=? AND d.account_id=? AND d.state='draft' AND d.version=? AND d.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
       AND EXISTS (SELECT 1 FROM client_accounts a
         JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
         JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
@@ -429,11 +434,11 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
     .bind(input.projectId, JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, areaSquareMeters, areaSquareMeters === null ? null : areaSquareMeters / SQUARE_METERS_PER_ACRE, mutationKey, draftId, session.accountId, expectedVersion, session.identityId, input.projectId, input.projectId, reviewedCatalogVersions(services));
   const statements = [
     update,
-    database.prepare(`DELETE FROM client_service_request_draft_services WHERE draft_id=? AND EXISTS (SELECT 1 FROM client_service_request_drafts WHERE id=? AND last_mutation_key=?)`).bind(draftId, draftId, mutationKey),
-    ...services.map((service, ordinal) => database.prepare(`INSERT INTO client_service_request_draft_services(draft_id,ordinal,service_public_id,service_source_version,service_snapshot_json,answers_json)
-      SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM client_service_request_drafts WHERE id=? AND last_mutation_key=?)`).bind(draftId, ordinal, service.publicId, service.sourceVersion, serviceSnapshot(service), JSON.stringify(service.answers), draftId, mutationKey)),
+    database.prepare(`DELETE FROM client_service_request_draft_services WHERE draft_id=? AND service_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND EXISTS (SELECT 1 FROM client_service_request_drafts WHERE id=? AND last_mutation_key=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}')`).bind(draftId, draftId, mutationKey),
+    ...services.map((service, ordinal) => database.prepare(`INSERT INTO client_service_request_draft_services(draft_id,ordinal,service_public_id,service_source_version,service_snapshot_json,answers_json,service_source_id)
+      SELECT ?,?,?,?,?,?,'${PRIMARY_ALPHA_SOURCE_ID}' WHERE EXISTS (SELECT 1 FROM client_service_request_drafts WHERE id=? AND last_mutation_key=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}')`).bind(draftId, ordinal, service.publicId, service.sourceVersion, serviceSnapshot(service), JSON.stringify(service.answers), draftId, mutationKey)),
     database.prepare(`INSERT INTO client_service_request_draft_mutations(draft_id,mutation_key,mutation_fingerprint,resulting_version,result_snapshot_json)
-      SELECT ?,?,?,version,json_object('version',version) FROM client_service_request_drafts WHERE id=? AND last_mutation_key=?`).bind(draftId, mutationKey, fingerprint, draftId, mutationKey),
+      SELECT ?,?,?,version,json_object('version',version) FROM client_service_request_drafts WHERE id=? AND last_mutation_key=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'`).bind(draftId, mutationKey, fingerprint, draftId, mutationKey),
   ];
   try {
     const results = await database.batch(statements);
@@ -456,7 +461,7 @@ function incompleteAnswerServices(draft: ClientServiceRequestDraft): string[] {
 async function changedCatalogServices(env: Env, services: ClientServiceDraftSelection[]): Promise<string[]> {
   const changed: string[] = [];
   for (const service of services) {
-    const current = await db(env).prepare(`SELECT source_version FROM pa_service_catalog_items WHERE public_id=? AND active=1`).bind(service.publicId).first<{ source_version: string }>();
+    const current = await db(env).prepare(`SELECT source_version FROM pa_service_catalog_items WHERE source_id=? AND public_id=? AND active=1`).bind(PRIMARY_ALPHA_SOURCE_ID, service.publicId).first<{ source_version: string }>();
     if (!current || current.source_version !== service.sourceVersion) changed.push(service.publicId);
   }
   return changed;
@@ -467,7 +472,8 @@ async function attachmentSubmissionBlock(
   draftId: string,
 ): Promise<{ reason: "attachments_pending" | "attachments_rejected" | "attachments_expired"; attachmentCount: number } | null> {
   const rows = await db(env).prepare(`SELECT status,COUNT(*) count FROM client_service_request_attachments
-    WHERE draft_id=? AND status NOT IN ('accepted','aborted') GROUP BY status`)
+    WHERE draft_id=? AND status NOT IN ('accepted','aborted')
+      AND EXISTS (SELECT 1 FROM client_service_request_drafts draft WHERE draft.id=draft_id AND draft.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}') GROUP BY status`)
     .bind(draftId).all<{ status: string; count: number }>();
   const counts = new Map(rows.results.map(row => [row.status, Number(row.count)]));
   const rejected = counts.get("rejected") ?? 0;
@@ -494,7 +500,7 @@ function legacyRequestFromRow(row: Record<string, unknown>): ClientServiceReques
 }
 
 async function loadSubmittedRequest(env: Env, session: ClientPortalSession, requestId: string): Promise<ClientServiceRequest | null> {
-  const row = await db(env).prepare(`SELECT r.* FROM client_service_requests r ${sessionJoin} WHERE r.id=? AND r.account_id=a.id`).bind(session.accountId, session.identityId, requestId).first<Record<string, unknown>>();
+  const row = await db(env).prepare(`SELECT r.* FROM client_service_requests r ${sessionJoin} WHERE r.id=? AND r.account_id=a.id AND r.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'`).bind(session.accountId, session.identityId, requestId).first<Record<string, unknown>>();
   return row ? legacyRequestFromRow(row) : null;
 }
 
@@ -503,7 +509,7 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
   if (!draft) return null;
   const fingerprint = await sha256(JSON.stringify({ draftId, version: expectedVersion }));
   if (draft.state === "submitted") {
-    const metadata = await db(env).prepare(`SELECT submit_idempotency_key,submit_fingerprint,submitted_request_id FROM client_service_request_drafts WHERE id=?`).bind(draftId).first<{ submit_idempotency_key: string; submit_fingerprint: string; submitted_request_id: string }>();
+    const metadata = await db(env).prepare(`SELECT submit_idempotency_key,submit_fingerprint,submitted_request_id FROM client_service_request_drafts WHERE id=? AND catalog_source_id=?`).bind(draftId, PRIMARY_ALPHA_SOURCE_ID).first<{ submit_idempotency_key: string; submit_fingerprint: string; submitted_request_id: string }>();
     if (!metadata || metadata.submit_idempotency_key !== mutationKey || metadata.submit_fingerprint !== fingerprint) return { kind: "conflict" };
     const request = await loadSubmittedRequest(env, session, metadata.submitted_request_id);
     return request ? { kind: "replayed", request } : null;
@@ -531,13 +537,13 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
   const requestFingerprint = await sha256(JSON.stringify(draft));
   const database = db(env);
   const insert = database.prepare(`INSERT INTO client_service_requests
-    (id,account_id,project_id,parent_request_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,desired_completion_at,latitude,longitude,area_geojson,poi_points_json,idempotency_key,request_fingerprint)
-    SELECT ?,d.account_id,d.project_id,NULL,d.created_by_identity_id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+    (id,account_id,project_id,parent_request_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,desired_completion_at,latitude,longitude,area_geojson,poi_points_json,idempotency_key,request_fingerprint,catalog_source_id)
+    SELECT ?,d.account_id,d.project_id,NULL,d.created_by_identity_id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,d.catalog_source_id
     FROM client_service_request_drafts d
     JOIN client_accounts a ON a.id=d.account_id AND a.status='active'
     JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
     JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
-    WHERE d.id=? AND d.account_id=? AND d.state='draft' AND d.version=?
+    WHERE d.id=? AND d.account_id=? AND d.state='draft' AND d.version=? AND d.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
       AND ((d.project_id IS NULL AND (m.role='manager' OR d.created_by_identity_id=i.id)) OR EXISTS (
         SELECT 1 FROM client_project_grants g JOIN projects p ON p.id=g.project_id AND p.active=1
         WHERE g.account_id=a.id AND g.project_id=d.project_id AND g.revoked_at IS NULL AND g.can_request_service=1
@@ -547,15 +553,15 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
   const snapshot = JSON.stringify({ ...draft, status: "submitted" });
   const statements = [
     insert,
-    ...draft.services.map((service, ordinal) => database.prepare(`INSERT INTO client_service_request_services(request_id,ordinal,service_public_id,service_source_version,service_snapshot_json,answers_json)
-      SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM client_service_requests WHERE id=?)`).bind(requestId, ordinal, service.publicId, service.sourceVersion, serviceSnapshot(service), JSON.stringify(service.answers), requestId)),
+    ...draft.services.map((service, ordinal) => database.prepare(`INSERT INTO client_service_request_services(request_id,ordinal,service_public_id,service_source_version,service_snapshot_json,answers_json,service_source_id)
+      SELECT ?,?,?,?,?,?,'${PRIMARY_ALPHA_SOURCE_ID}' WHERE EXISTS (SELECT 1 FROM client_service_requests WHERE id=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}')`).bind(requestId, ordinal, service.publicId, service.sourceVersion, serviceSnapshot(service), JSON.stringify(service.answers), requestId)),
     database.prepare(`INSERT INTO request_revisions(id,request_id,revision_number,author_type,author_id,action,snapshot_json)
       SELECT ?,?,1,'client',?,'submitted',? WHERE EXISTS (SELECT 1 FROM client_service_requests WHERE id=?)`).bind(crypto.randomUUID(), requestId, session.identityId, snapshot, requestId),
     database.prepare(`INSERT INTO client_portal_notification_outbox(id,request_id,event_type,status_value,recipient_kind,dedupe_key,payload_json)
       SELECT ?,?,'request_submitted','submitted','staff_triage','request_submitted:submitted:staff_triage',json_object('title',?,'projectId',?,'serviceCount',?,'areaSquareMeters',?) WHERE EXISTS (SELECT 1 FROM client_service_requests WHERE id=?)`).bind(crypto.randomUUID(), requestId, draft.title, draft.projectId, draft.services.length, draft.areaSquareMeters, requestId),
     database.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
       SELECT 'client',?,'client.service_request.submitted','client_service_request',?,json_object('accountId',?,'draftId',?,'serviceCount',?) WHERE EXISTS (SELECT 1 FROM client_service_requests WHERE id=?)`).bind(session.identityId, requestId, session.accountId, draftId, draft.services.length, requestId),
-    database.prepare(`UPDATE client_service_request_drafts SET state='submitted',submitted_request_id=?,submit_idempotency_key=?,submit_fingerprint=?,submitted_at=datetime('now'),updated_at=datetime('now'),last_mutation_key=? WHERE id=? AND state='draft' AND version=? AND EXISTS (SELECT 1 FROM client_service_requests WHERE id=?)`).bind(requestId, mutationKey, fingerprint, mutationKey, draftId, expectedVersion, requestId),
+    database.prepare(`UPDATE client_service_request_drafts SET state='submitted',submitted_request_id=?,submit_idempotency_key=?,submit_fingerprint=?,submitted_at=datetime('now'),updated_at=datetime('now'),last_mutation_key=? WHERE id=? AND state='draft' AND version=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND EXISTS (SELECT 1 FROM client_service_requests WHERE id=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}')`).bind(requestId, mutationKey, fingerprint, mutationKey, draftId, expectedVersion, requestId),
   ];
   try {
     const results = await database.batch(statements);

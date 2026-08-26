@@ -548,8 +548,9 @@ not a claim that the full monorepo or production workflow is accepted. See
 [the service request runbook](client-service-request-readiness.md).
 
 A native workspace may still require an active legacy account/identity bridge
-for requests. Per-client service visibility is not projected yet, and the
-singleton catalog checkpoint is not a multi-producer contract. Existing
+for requests. Per-client service visibility is not projected yet. The local
+0156 catalog increment isolates source provenance, but is not an enabled
+multi-producer contract. Existing
 authorized draft pricing hints are supported and retained; catalog browsing
 does not expose internal pricing. Generic asset/folder/project feedback is a
 separate feature, not a relabelled request or inspection note.
@@ -629,6 +630,10 @@ Test the complete workflow, not only whether a component renders:
       scoped staff transitions and private completion notifications.
 - [x] Document the next multi-source isolation sequence and outstanding authority
       decision; do not equate this audit with implementing a second connector.
+- [x] Implement the local primary-compatible catalog provenance migration,
+      source-scoped ingestion/readers and saved-request/provider boundaries.
+      See [catalog source isolation](catalog-source-isolation.md); second-source
+      authentication, business projection and portal ownership remain disabled.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

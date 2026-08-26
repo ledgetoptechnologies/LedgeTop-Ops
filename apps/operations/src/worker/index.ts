@@ -5,6 +5,7 @@ import { z } from "zod";
 import {
   buildServiceRequestNotificationSnapshot,
   isMovedSourceMarker,
+  PRIMARY_ALPHA_SOURCE_ID,
   type Permission,
   type ServiceRequestNotificationLifecycle,
   type ServiceRequestNotificationSnapshot,
@@ -1537,7 +1538,9 @@ app.get("/api/client-service-requests/:id", async (c) => {
       db,
       "client_service_request_services",
       `SELECT service_public_id,service_source_version,service_snapshot_json,answers_json
-       FROM client_service_request_services WHERE request_id=? ORDER BY ordinal`,
+       FROM client_service_request_services service WHERE request_id=? AND service_source_id=(
+         SELECT catalog_source_id FROM client_service_requests WHERE id=service.request_id
+       ) ORDER BY ordinal`,
       id,
     ),
   ]);
@@ -2323,12 +2326,13 @@ app.post("/api/client-service-requests/:id/pa-quote", async (c) => {
   const value = await body(c, paQuoteLinkSchema),
     id = c.req.param("id"),
     db = c.env.DELIVERY_DB.withSession("first-primary");
-  const linkageQuery = `SELECT r.id,r.status,r.project_id,a.project_alpha_client_id,p.project_alpha_project_id,
+  const linkageQuery = `SELECT r.id,r.catalog_source_id,r.status,r.project_id,a.project_alpha_client_id,p.project_alpha_project_id,
           __CATALOG_MARKER__ uses_catalog_v2
          FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id
          LEFT JOIN projects p ON p.id=r.project_id WHERE r.id=?`;
   type LinkageRequest = {
     id: string;
+    catalog_source_id: string;
     status: string;
     project_id: string | null;
     project_alpha_client_id: string | null;
@@ -2348,6 +2352,8 @@ app.post("/api/client-service-requests/:id/pa-quote", async (c) => {
   }
   if (!request)
     throw new HTTPException(404, { message: "Client request not found" });
+  if (request.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID)
+    throw new HTTPException(409, { message: "This request's catalog source has no configured quote connection" });
   if (Number(request.uses_catalog_v2 || 0) === 1)
     throw new HTTPException(409, {
       message:

@@ -1,6 +1,7 @@
 import {
   aggregateDeliveryLocations,
   buildServiceRequestNotificationSnapshot,
+  PRIMARY_ALPHA_SOURCE_ID,
   type DeliveryLocationCollection,
 } from "@ltds/shared";
 import { sha256 } from "../security";
@@ -640,7 +641,7 @@ async function serviceRequestRead<T>(
   }
 }
 
-const requestAccessConstraint = `AND (
+const requestAccessConstraint = `AND r.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND (
   (r.project_id IS NULL AND (m.role='manager' OR r.created_by_identity_id=i.id)) OR
   (r.project_id IS NOT NULL AND EXISTS (
     SELECT 1 FROM client_project_grants request_grant
@@ -1211,6 +1212,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
         AND (n.source_type<>'service_request' OR EXISTS (
           SELECT 1 FROM client_service_requests authorized_notification
           WHERE authorized_notification.id=n.source_id AND authorized_notification.account_id=a.id
+            AND authorized_notification.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
             AND ((authorized_notification.project_id IS NULL AND (m.role='manager' OR authorized_notification.created_by_identity_id=i.id)) OR
               (authorized_notification.project_id IS NOT NULL AND EXISTS (
                 SELECT 1 FROM client_project_grants notification_grant
@@ -1234,6 +1236,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
         AND (n.source_type<>'service_request' OR EXISTS (
           SELECT 1 FROM client_service_requests authorized_notification
           WHERE authorized_notification.id=n.source_id AND authorized_notification.account_id=a.id
+            AND authorized_notification.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
             AND ((authorized_notification.project_id IS NULL AND (m.role='manager' OR authorized_notification.created_by_identity_id=i.id)) OR
               (authorized_notification.project_id IS NOT NULL AND EXISTS (
                 SELECT 1 FROM client_project_grants notification_grant
@@ -1375,8 +1378,8 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
           .prepare(
             `
       INSERT INTO client_service_requests
-        (id,account_id,project_id,parent_request_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,desired_completion_at,latitude,longitude,area_geojson,poi_points_json,idempotency_key,request_fingerprint)
-      SELECT ?,a.id,g.project_id,?,i.id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+        (id,account_id,project_id,parent_request_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,desired_completion_at,latitude,longitude,area_geojson,poi_points_json,idempotency_key,request_fingerprint,catalog_source_id)
+      SELECT ?,a.id,g.project_id,?,i.id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'${PRIMARY_ALPHA_SOURCE_ID}'
       FROM client_accounts a
       JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
       JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
@@ -1386,6 +1389,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
         AND (? IS NULL OR EXISTS (
           SELECT 1 FROM client_service_requests parent
           WHERE parent.id=? AND parent.account_id=a.id AND parent.project_id=g.project_id
+            AND parent.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
             AND parent.status IN ('under_review','accepted_pending_pa_linkage','accepted_linked')
         ))`,
           )
@@ -1401,8 +1405,8 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
           .prepare(
             `
       INSERT INTO client_service_requests
-        (id,account_id,project_id,parent_request_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,desired_completion_at,latitude,longitude,area_geojson,poi_points_json,idempotency_key,request_fingerprint)
-      SELECT ?,a.id,NULL,?,i.id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?
+        (id,account_id,project_id,parent_request_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,desired_completion_at,latitude,longitude,area_geojson,poi_points_json,idempotency_key,request_fingerprint,catalog_source_id)
+      SELECT ?,a.id,NULL,?,i.id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'${PRIMARY_ALPHA_SOURCE_ID}'
       FROM client_accounts a
       JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
       JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
@@ -1410,6 +1414,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
         AND (? IS NULL OR EXISTS (
           SELECT 1 FROM client_service_requests parent
           WHERE parent.id=? AND parent.account_id=a.id AND parent.project_id IS NULL
+            AND parent.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
             AND parent.status IN ('under_review','accepted_pending_pa_linkage','accepted_linked')
         ))`,
           )
@@ -1517,7 +1522,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
           `UPDATE client_service_requests SET request_type=?,title=?,details=?,location_text=?,preferred_start_at=?,
         service_category=?,deliverables_text=?,site_contact_name=?,site_contact_email=?,site_contact_phone=?,
         desired_completion_at=?,latitude=?,longitude=?,area_geojson=?,poi_points_json=?,request_fingerprint=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
-        WHERE id=? AND account_id=? AND status='submitted' AND updated_at=?
+        WHERE id=? AND account_id=? AND status='submitted' AND updated_at=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
           AND EXISTS (
             SELECT 1 FROM client_service_requests authorized
             ${sessionJoin}
@@ -1677,6 +1682,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
             SELECT 1 FROM client_service_requests authorized
             ${sessionJoin}
             WHERE authorized.id=request_operational_estimates.request_id AND authorized.account_id=a.id
+              AND authorized.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
               AND (
                 (authorized.project_id IS NULL AND (m.role='manager' OR authorized.created_by_identity_id=i.id)) OR
                 (authorized.project_id IS NOT NULL AND EXISTS (

@@ -1,4 +1,5 @@
 import { HTTPException } from "hono/http-exception";
+import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import type { Env } from "../types";
 import type { ClientPortalSession, VerifiedClientPrincipal } from "./types";
 import {
@@ -111,10 +112,10 @@ export async function readClientRequestReadiness(
     if (localAllowed && backendConfigured && mode === "catalog") {
       try {
         catalogAvailable = await env.DELIVERY_DB.withSession("first-primary").prepare(
-          "SELECT 1 available FROM pa_service_catalog_items WHERE active=1 LIMIT 1",
-        ).first<number>("available") === 1;
+          "SELECT 1 available FROM pa_service_catalog_items WHERE source_id=? AND active=1 LIMIT 1",
+        ).bind(PRIMARY_ALPHA_SOURCE_ID).first<number>("available") === 1;
       } catch (error) {
-        if (!/no such table:\s*(?:main\.)?pa_service_catalog_items\b/i.test(
+        if (!/no such table:\s*(?:main\.)?pa_service_catalog_items\b|no such column:\s*source_id\b/i.test(
           error instanceof Error ? error.message : String(error),
         )) throw error;
       }

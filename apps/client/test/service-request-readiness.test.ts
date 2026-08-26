@@ -1,6 +1,8 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { Miniflare } from "miniflare";
+import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
+import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
@@ -23,15 +25,8 @@ describe("request readiness against migrated D1 and real authorization", { timeo
   let env: Env;
 
   async function migration(name: string) {
-    const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8")
-      .replace(/\r\n/g, "\n").replace(/^\s*--.*$/gm, "");
-    if (/CREATE\s+TRIGGER/i.test(sql)) {
-      await db.exec(sql.replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
-      return;
-    }
-    const statements = sql.split(/;\s*(?:\n|$)/).map(value => value.trim())
-      .filter(value => value && !/^PRAGMA\s+foreign_keys\s*=\s*ON$/i.test(value))
-      .map(value => db.prepare(value));
+    const sql = readFileSync(new URL(`../migrations/${name}`, import.meta.url), "utf8");
+    const statements = splitD1MigrationStatements(sql).map(value => db.prepare(value));
     // Rebuild migrations must retain their transaction boundaries.
     if (statements.length) await db.batch(statements);
   }
@@ -127,6 +122,17 @@ describe("request readiness against migrated D1 and real authorization", { timeo
   it("does not promise a catalog request when no published services are available", async () => {
     await db.prepare("UPDATE pa_service_catalog_items SET active=0").run();
     expect(await readiness("project-a")).toMatchObject({ canStartRequest: false, reason: "catalog_unavailable", projectRequestsSupported: false });
+  });
+
+  it("does not borrow a secondary catalog when the primary catalog has no available services", async () => {
+    await db.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE source_id=?").bind(PRIMARY_ALPHA_SOURCE_ID).run();
+    await db.prepare(`INSERT INTO pa_service_catalog_items(source_id,public_id,source_version,name,category,source_updated_at)
+      VALUES ('project-alpha:secondary','service-a','version-1','Other source service','Mapping',datetime('now'))`).run();
+    try {
+      expect(await readiness("project-a")).toMatchObject({ canStartRequest: false, reason: "catalog_unavailable", projectRequestsSupported: false });
+    } finally {
+      await db.prepare("DELETE FROM pa_service_catalog_items WHERE source_id='project-alpha:secondary'").run();
+    }
   });
 
   it("does not promise a legacy request when its required rate limiter is absent", async () => {

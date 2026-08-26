@@ -1,10 +1,10 @@
 import { Miniflare } from "miniflare";
+import { readFileSync, readdirSync } from "node:fs";
+import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
+import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import requestMigration from "../migrations/0117_service_request_v2.sql?raw";
-import projectionMigration from "../migrations/0122_project_alpha_service_catalog_projection.sql?raw";
-import compatibilityMigration from "../migrations/0128_project_alpha_catalog_compatibility.sql?raw";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
-import { listServiceCatalogPage, ServiceCatalogPageError } from "../src/worker/client-portal/service-catalog-page";
+import { listServiceCatalogPage, listServiceCatalogPageForSource, ServiceCatalogPageError } from "../src/worker/client-portal/service-catalog-page";
 import { listServiceCatalog } from "../src/worker/client-portal/request-v2";
 import type { ClientPortalRepository, ClientPortalSession, ClientServiceCatalogPage } from "../src/worker/client-portal/types";
 import type { Env } from "../src/worker/types";
@@ -18,36 +18,36 @@ describe("bounded versioned service catalog pages", () => {
     miniflare = new Miniflare({ compatibilityDate: "2026-07-22", modules: true,
       script: "export default { fetch() { return new Response('ok'); } };", d1Databases: { DELIVERY_DB: "catalog-pages" } });
     database = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
-    for (const migration of [requestMigration, projectionMigration, compatibilityMigration]) {
-      const statements = migration.replace(/^\s*--.*$/gm, "").split(/;\s*(?:\n|$)/).map(statement => statement.trim())
-        .filter(statement => statement && !/^PRAGMA/i.test(statement));
-      await database.batch(statements.map(statement => database.prepare(statement)));
+    const directory = new URL("../migrations/", import.meta.url);
+    for (const name of readdirSync(directory).filter(name => name.endsWith(".sql")).sort()) {
+      const statements = splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"));
+      if (statements.length) await database.batch(statements.map(statement => database.prepare(statement)));
     }
     env = { DELIVERY_DB: database, PROJECT_ALPHA_CATALOG_APPLICATION_KEY: "generic-service-catalog" } as Env;
-  }, 30_000);
+  }, 60_000);
   afterAll(async () => miniflare.dispose());
 
   beforeEach(async () => {
     await database.batch([
       database.prepare("DELETE FROM pa_service_catalog_items"),
-      database.prepare("UPDATE pa_service_catalog_checkpoint SET active_generation_id=NULL,source_generation='legacy',source_sequence=0"),
+      database.prepare("DELETE FROM pa_service_catalog_checkpoint"),
       database.prepare("DELETE FROM pa_service_catalog_generations"),
       database.prepare(`INSERT INTO pa_service_catalog_generations(id,source_generation,source_sequence,snapshot_hash,page_count,item_count,status,complete)
         VALUES('generation-a','catalog-a',1,?,1,0,'active',1)`).bind("a".repeat(64)),
-      database.prepare("UPDATE pa_service_catalog_checkpoint SET active_generation_id='generation-a',source_generation='catalog-a',source_sequence=2"),
+      database.prepare("INSERT INTO pa_service_catalog_checkpoint(active_generation_id,source_generation,source_sequence) VALUES ('generation-a','catalog-a',2)"),
     ]);
   });
 
-  async function seed(count: number) {
+  async function seed(count: number, sourceId: string = PRIMARY_ALPHA_SOURCE_ID) {
     const items = Array.from({ length: count }, (_, index) => ({
       id: `svc-${String(index).padStart(4, "0")}`, category: index % 3 === 0 ? "Mapping" : index % 3 === 1 ? "mapping" : "Élevation",
       name: index % 2 ? "Inspection" : "inspection", order: index % 4,
     }));
     await database.prepare(`INSERT INTO pa_service_catalog_items
-      (public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at)
-      SELECT json_extract(value,'$.id'),'version-1',json_extract(value,'$.name'),NULL,json_extract(value,'$.category'),
+      (source_id,public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at)
+      SELECT ?,json_extract(value,'$.id'),'version-1',json_extract(value,'$.name'),NULL,json_extract(value,'$.category'),
         json_extract(value,'$.order'),'optional','[]',1,'2026-08-25T12:00:00Z' FROM json_each(?)`)
-      .bind(JSON.stringify(items)).run();
+      .bind(sourceId, JSON.stringify(items)).run();
   }
 
   it("pages every active service beyond the compatibility limit without duplicates or collation gaps", async () => {
@@ -135,12 +135,45 @@ describe("bounded versioned service catalog pages", () => {
     expect(await listServiceCatalogPage(env)).toEqual({ services: [], nextCursor: null, complete: true, source: { generation: "catalog-a", sequence: 2 } });
   });
 
+  it("separates colliding source IDs and source-bound cursors without invalidating the other source", async () => {
+    const second = createCatalogSourceContext("project-alpha:secondary");
+    await database.batch([
+      database.prepare(`INSERT INTO pa_service_catalog_generations(id,source_id,source_generation,source_sequence,snapshot_hash,page_count,item_count,status,complete)
+        VALUES ('secondary-generation',?,'catalog-a',1,?,1,0,'active',1)`).bind(second.sourceId, "a".repeat(64)),
+      database.prepare(`INSERT INTO pa_service_catalog_checkpoint(source_id,active_generation_id,source_generation,source_sequence)
+        VALUES (?,'secondary-generation','catalog-a',2)`).bind(second.sourceId),
+    ]);
+    await seed(3);
+    await seed(3, second.sourceId);
+    await database.prepare("UPDATE pa_service_catalog_items SET summary='Secondary only' WHERE source_id=?").bind(second.sourceId).run();
+    const primary = await listServiceCatalogPage(env, { limit: 1 });
+    const secondary = await listServiceCatalogPageForSource(env, second, { limit: 1 });
+    expect(primary.services[0]?.publicId).toBe(secondary.services[0]?.publicId);
+    expect(primary.services[0]?.summary).toBeNull();
+    expect(secondary.services[0]?.summary).toBe("Secondary only");
+    expect(await listServiceCatalog(env)).toHaveLength(3);
+    await expect(listServiceCatalogPageForSource(env, second, { cursor: primary.nextCursor! }))
+      .rejects.toMatchObject({ status: 409, code: "catalog_changed" });
+    await expect(listServiceCatalogPage(env, { cursor: secondary.nextCursor! }))
+      .rejects.toMatchObject({ status: 409, code: "catalog_changed" });
+    await database.prepare("UPDATE pa_service_catalog_checkpoint SET source_sequence=3 WHERE source_id=?").bind(second.sourceId).run();
+    expect((await listServiceCatalogPage(env, { cursor: primary.nextCursor! })).services).toHaveLength(2);
+    await expect(listServiceCatalogPageForSource(env, second, { cursor: secondary.nextCursor! }))
+      .rejects.toMatchObject({ status: 409, code: "catalog_changed" });
+    const refreshedSecondary = await listServiceCatalogPageForSource(env, second, { limit: 1 });
+    await database.prepare("UPDATE pa_service_catalog_checkpoint SET source_sequence=3 WHERE source_id=?").bind(PRIMARY_ALPHA_SOURCE_ID).run();
+    expect((await listServiceCatalogPageForSource(env, second, { cursor: refreshedSecondary.nextCursor! })).services).toHaveLength(2);
+    await database.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE source_id=?").bind(PRIMARY_ALPHA_SOURCE_ID).run();
+    expect((await listServiceCatalogPage(env)).services).toEqual([]);
+    expect(await listServiceCatalog(env)).toEqual([]);
+  });
+
   it("uses the production catalog ordering index for bounded continuation", async () => {
     const plan = await database.prepare(`EXPLAIN QUERY PLAN SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json
-      FROM pa_service_catalog_items WHERE active=1 AND
+      FROM pa_service_catalog_items WHERE source_id=? AND active=1 AND
         (category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id) > (? COLLATE NOCASE,?,? COLLATE NOCASE,?)
       ORDER BY category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id LIMIT ?`)
-      .bind("Mapping", 1, "Inspection", "svc-0001", 101).all<{ detail: string }>();
+      .bind(PRIMARY_ALPHA_SOURCE_ID, "Mapping", 1, "Inspection", "svc-0001", 101).all<{ detail: string }>();
     expect(plan.results.some(row => row.detail.includes("idx_pa_service_catalog_client_order"))).toBe(true);
     expect(plan.results.some(row => row.detail.includes("TEMP B-TREE"))).toBe(false);
   });
@@ -177,7 +210,7 @@ describe("service catalog page route", () => {
     expect(page).toHaveBeenCalledWith(expect.anything(), session, { limit: 25, cursor: "opaque" });
   });
 
-  it.each(["limit=101", "limit=01", "limit=1.5", "limit=1&limit=2", "cursor=a&cursor=b", "price=true"])("rejects invalid page query %s before repository access", async query => {
+  it.each(["limit=101", "limit=01", "limit=1.5", "limit=1&limit=2", "cursor=a&cursor=b", "price=true", "sourceId=project-alpha:secondary"])("rejects invalid page query %s before repository access", async query => {
     const { app, page } = router();
     const response = await app.request(`https://client.example/service-catalog/page?${query}`, {}, env);
     expect(response.status).toBe(400);

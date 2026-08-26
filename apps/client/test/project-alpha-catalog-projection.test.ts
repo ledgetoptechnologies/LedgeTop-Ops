@@ -1,10 +1,11 @@
 import { Miniflare } from "miniflare";
+import { readFileSync, readdirSync } from "node:fs";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import projectionMigration from "../migrations/0122_project_alpha_service_catalog_projection.sql?raw";
-import compatibilityMigration from "../migrations/0128_project_alpha_catalog_compatibility.sql?raw";
+import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID, type CatalogSourceContext } from "@ltds/shared";
+import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import compatibilityFixture from "../../../packages/shared/fixtures/project-alpha-catalog-v2.json";
 import { listServiceCatalog } from "../src/worker/client-portal/request-v2";
-import { handleProjectAlphaCatalogRequest, parseCatalogProjectionDelivery } from "../src/worker/project-alpha-catalog";
+import { applyCatalogProjectionDelivery, handleProjectAlphaCatalogRequest, parseCatalogProjectionDelivery } from "../src/worker/project-alpha-catalog";
 import type { Env } from "../src/worker/types";
 
 const applicationKey = "field_operations_catalog";
@@ -65,21 +66,10 @@ describe("Project Alpha sanitized service catalog projection", () => {
       d1Databases: { DELIVERY_DB: "catalog-projection-test" },
     });
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
-    await db.prepare(`CREATE TABLE pa_service_catalog_items (
-      public_id TEXT NOT NULL, source_version TEXT NOT NULL, name TEXT NOT NULL, summary TEXT,
-      question_schema_json TEXT NOT NULL DEFAULT '[]', active INTEGER NOT NULL DEFAULT 1,
-      source_updated_at TEXT NOT NULL, mirrored_at TEXT NOT NULL DEFAULT (datetime('now')),
-      PRIMARY KEY(public_id,source_version))`).run();
-    await db.prepare("CREATE UNIQUE INDEX idx_pa_service_catalog_current ON pa_service_catalog_items(public_id) WHERE active=1").run();
-    for (const statement of projectionMigration.split(/;\s*(?:\n|$)/)) {
-      const executable = statement.replace(/^\s*--.*$/gm, "").trim();
-      if (!executable || /^PRAGMA\s+foreign_keys/i.test(executable)) continue;
-      await db.prepare(executable).run();
-    }
-    for (const statement of compatibilityMigration.split(/;\s*(?:\n|$)/)) {
-      const executable = statement.replace(/^\s*--.*$/gm, "").trim();
-      if (!executable || /^PRAGMA\s+foreign_keys/i.test(executable)) continue;
-      await db.prepare(executable).run();
+    const directory = new URL("../migrations/", import.meta.url);
+    for (const filename of readdirSync(directory).filter(name => /^\d+.*\.sql$/.test(name) && name <= "0156_catalog_source_isolation.sql").sort()) {
+      const statements = splitD1MigrationStatements(readFileSync(new URL(filename, directory), "utf8"));
+      if (statements.length) await db.batch(statements.map(statement => db.prepare(statement)));
     }
     env = {
       DELIVERY_DB: db,
@@ -88,11 +78,11 @@ describe("Project Alpha sanitized service catalog projection", () => {
       PROJECT_ALPHA_CATALOG_HMAC_KEY_ID: keyId,
       PROJECT_ALPHA_CATALOG_HMAC_SECRET: secret,
     } as Env;
-  });
+  }, 60_000);
 
   afterAll(async () => miniflare.dispose());
 
-  async function deliver(payload: Record<string, unknown>, options: { timestamp?: string; signature?: string; keyId?: string; secret?: string; accessVerifier?: typeof access } = {}) {
+  async function deliver(payload: Record<string, unknown>, options: { timestamp?: string; signature?: string; keyId?: string; secret?: string; accessVerifier?: typeof access; sourceHeader?: string } = {}) {
     const body = JSON.stringify(payload);
     const timestamp = options.timestamp ?? new Date().toISOString();
     const signingKeyId = options.keyId ?? keyId;
@@ -106,9 +96,49 @@ describe("Project Alpha sanitized service catalog projection", () => {
         "X-Portal-Integration-Key-Id": signingKeyId,
         "X-Portal-Integration-Delivery-Id": String(payload.deliveryId),
         "X-Portal-Integration-Signature": options.signature ?? await signature(body, timestamp,String(payload.deliveryId), signingKeyId, options.secret ?? secret),
+        ...(options.sourceHeader ? { "X-Portal-Integration-Source-Id": options.sourceHeader } : {}),
       },
       body,
     }), env, options.accessVerifier ?? access);
+  }
+
+  async function apply(source: CatalogSourceContext, payload: Record<string, unknown>, targetEnv = env) {
+    return applyCatalogProjectionDelivery(targetEnv, source, parseCatalogProjectionDelivery(payload, applicationKey), await bodyHash(JSON.stringify(payload)));
+  }
+
+  async function seed(source: CatalogSourceContext, generation = "shared-generation", sequence = 1, name = "Original service") {
+    await apply(source, envelope("snapshot.page", `seed-page-${sequence}`, sequence, {
+      sourceGeneration: generation, snapshotHash, pageCount: 1, pageNumber: 1, itemCount: 1,
+      items: [{ ...item("svc-shared"), name }],
+    }));
+    await apply(source, envelope("snapshot.activate", `seed-activate-${sequence}`, sequence, {
+      sourceGeneration: generation, snapshotHash, pageCount: 1, itemCount: 1,
+    }));
+  }
+
+  /** Inject a competing write after all optimistic reads but before the batch. */
+  function beforeWriteBatch(hook: () => Promise<void>): Env {
+    let pending = true;
+    const wrapped = new Proxy(db, {
+      get(target, property) {
+        if (property === "withSession") return (...args: Parameters<D1Database["withSession"]>) => {
+          const session = target.withSession(...args);
+          return new Proxy(session, {
+            get(current, key) {
+              if (key === "batch") return async (statements: D1PreparedStatement[]) => {
+                if (pending) { pending = false; await hook(); }
+                return current.batch(statements);
+              };
+              const value = Reflect.get(current, key);
+              return typeof value === "function" ? value.bind(current) : value;
+            },
+          });
+        };
+        const value = Reflect.get(target, property);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    return { ...env, DELIVERY_DB: wrapped };
   }
 
   it("stages pages without changing reads, then atomically activates a complete generation", async () => {
@@ -215,9 +245,170 @@ describe("Project Alpha sanitized service catalog projection", () => {
     ), env, access);
     expect(response.status).toBe(413);
   });
+
+  it("isolates identical source IDs, generations, sequences and receipts across two internal sources", async () => {
+    const a = createCatalogSourceContext("project-alpha:catalog-a");
+    const b = createCatalogSourceContext("project-alpha:catalog-b");
+    await seed(a, "same-generation", 1, "A service");
+    await seed(b, "same-generation", 1, "B service");
+    expect((await db.prepare("SELECT source_id,name FROM pa_service_catalog_items WHERE source_id IN (?,?) AND active=1 ORDER BY source_id")
+      .bind(a.sourceId, b.sourceId).all()).results).toEqual([{ source_id: a.sourceId, name: "A service" }, { source_id: b.sourceId, name: "B service" }]);
+    const event = envelope("event", "same-event", 2, { sourceGeneration: "same-generation", event: { action: "tombstone", publicId: "svc-shared", sourceVersion: "v2" } });
+    expect(await apply(a, event)).toBe("completed");
+    expect(await apply(a, event)).toBe("duplicate");
+    expect(await db.prepare("SELECT active FROM pa_service_catalog_items WHERE source_id=? AND public_id='svc-shared'").bind(b.sourceId).first("active")).toBe(1);
+    expect(await apply(b, event)).toBe("completed");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_service_catalog_projection_receipts WHERE delivery_id='same-event'").first("count")).toBe(2);
+    await expect(apply(a, { ...event, sourceSequence: 3 })).rejects.toThrow("catalog-delivery-id-conflict");
+  }, 15_000);
+
+  it("a source snapshot only supersedes its own catalog and checkpoint", async () => {
+    const a = createCatalogSourceContext("project-alpha:snapshot-a");
+    const b = createCatalogSourceContext("project-alpha:snapshot-b");
+    await seed(a); await seed(b);
+    const bBefore = (await db.prepare("SELECT * FROM pa_service_catalog_checkpoint WHERE source_id=?").bind(b.sourceId).first());
+    await apply(a, envelope("snapshot.page", "empty-page", 2, { sourceGeneration: "new-empty", snapshotHash, pageCount: 1, pageNumber: 1, itemCount: 0, items: [] }));
+    await apply(a, envelope("snapshot.activate", "empty-activate", 2, { sourceGeneration: "new-empty", snapshotHash, pageCount: 1, itemCount: 0 }));
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_service_catalog_items WHERE source_id=? AND active=1").bind(a.sourceId).first("count")).toBe(0);
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_service_catalog_items WHERE source_id=? AND active=1").bind(b.sourceId).first("count")).toBe(1);
+    expect(await db.prepare("SELECT * FROM pa_service_catalog_checkpoint WHERE source_id=?").bind(b.sourceId).first()).toEqual(bBefore);
+    expect(await db.prepare("SELECT status FROM pa_service_catalog_generations WHERE source_id=? AND source_generation='shared-generation'").bind(b.sourceId).first("status")).toBe("active");
+  }, 15_000);
+
+  it("the authenticated HTTP endpoint stays primary despite a source header and rejects a body source selector", async () => {
+    const other = createCatalogSourceContext("project-alpha:http-other");
+    await seed(other, "catalog-2026-08-13", 14);
+    const otherBefore = await db.prepare("SELECT * FROM pa_service_catalog_checkpoint WHERE source_id=?").bind(other.sourceId).first();
+    const payload = envelope("event", "source-header-test", 15, { event: { action: "upsert", item: item("svc-http-primary") } });
+    expect((await deliver(payload, { sourceHeader: other.sourceId })).status).toBe(200);
+    expect(await db.prepare("SELECT source_id FROM pa_service_catalog_items WHERE public_id='svc-http-primary'").first("source_id")).toBe(PRIMARY_ALPHA_SOURCE_ID);
+    expect(await db.prepare("SELECT * FROM pa_service_catalog_checkpoint WHERE source_id=?").bind(other.sourceId).first()).toEqual(otherBefore);
+    expect((await deliver({ ...payload, deliveryId: "body-source", sourceId: other.sourceId })).status).toBe(422);
+    expect((await listServiceCatalog(env)).some(service => service.publicId === "svc-shared")).toBe(false);
+  }, 15_000);
+
+  it("rolls back stale activation after an intervening event, including its receipt and audit", async () => {
+    const source = createCatalogSourceContext("project-alpha:activation-race");
+    await seed(source);
+    await apply(source, envelope("snapshot.page", "race-page", 2, { sourceGeneration: "new-generation", snapshotHash, pageCount: 1, pageNumber: 1, itemCount: 0, items: [] }));
+    const activation = envelope("snapshot.activate", "stale-activation", 2, { sourceGeneration: "new-generation", snapshotHash, pageCount: 1, itemCount: 0 });
+    const raced = beforeWriteBatch(async () => {
+      await apply(source, envelope("event", "winner-event", 2, { sourceGeneration: "shared-generation", event: { action: "upsert", item: item("svc-event-winner") } }));
+    });
+    await expect(apply(source, activation, raced)).rejects.toThrow("catalog-projection-conflict");
+    expect(await db.prepare("SELECT name FROM pa_service_catalog_items WHERE source_id=? AND public_id='svc-event-winner' AND active=1").bind(source.sourceId).first("name")).not.toBeNull();
+    expect(await db.prepare("SELECT status FROM pa_service_catalog_generations WHERE source_id=? AND source_generation='new-generation'").bind(source.sourceId).first("status")).toBe("staging");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_service_catalog_projection_receipts WHERE source_id=? AND delivery_id='stale-activation'").bind(source.sourceId).first("count")).toBe(0);
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_service_catalog_projection_audit WHERE source_id=? AND delivery_id='stale-activation'").bind(source.sourceId).first("count")).toBe(0);
+  }, 15_000);
+
+  it("rejects a competing same-sequence event without deactivating the winner", async () => {
+    const source = createCatalogSourceContext("project-alpha:event-race");
+    await seed(source);
+    const raced = beforeWriteBatch(async () => {
+      await apply(source, envelope("event", "event-race-winner", 2, { sourceGeneration: "shared-generation", event: { action: "upsert", item: { ...item("svc-shared", "v2"), name: "Winning service" } } }));
+    });
+    await expect(apply(source, envelope("event", "event-race-loser", 2, { sourceGeneration: "shared-generation", event: { action: "tombstone", publicId: "svc-shared", sourceVersion: "v3" } }), raced)).rejects.toThrow("catalog-projection-conflict");
+    expect(await db.prepare("SELECT name FROM pa_service_catalog_items WHERE source_id=? AND public_id='svc-shared' AND active=1").bind(source.sourceId).first("name")).toBe("Winning service");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_service_catalog_projection_receipts WHERE source_id=? AND delivery_id='event-race-loser'").bind(source.sourceId).first("count")).toBe(0);
+  }, 15_000);
+
+  it("returns duplicate for a same-delivery write race without recording a second audit", async () => {
+    const source = createCatalogSourceContext("project-alpha:receipt-race");
+    await seed(source);
+    const event = envelope("event", "same-receipt-race", 2, { sourceGeneration: "shared-generation", event: { action: "tombstone", publicId: "svc-shared", sourceVersion: "v2" } });
+    const raced = beforeWriteBatch(async () => { await apply(source, event); });
+    expect(await apply(source, event, raced)).toBe("duplicate");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_service_catalog_projection_audit WHERE source_id=? AND delivery_id=?").bind(source.sourceId, event.deliveryId).first("count")).toBe(1);
+  }, 15_000);
+
+  it("rejects invalid internal source contexts without creating checkpoints or receipts", async () => {
+    const before = await db.prepare(`SELECT
+      (SELECT COUNT(*) FROM pa_service_catalog_checkpoint) checkpoints,
+      (SELECT COUNT(*) FROM pa_service_catalog_projection_receipts) receipts`).first();
+    const event = envelope("event", "invalid-source-event", 1, {
+      event: { action: "tombstone", publicId: "svc-shared", sourceVersion: "v2" },
+    });
+    for (const sourceId of ["", "delivery:local", "project-alpha:", "Project-Alpha:primary",
+      "project-alpha:Primary", " project-alpha:primary", "project-alpha:primary ",
+      "project-alpha:-invalid", "project-alpha:invalid/child", `project-alpha:${"a".repeat(65)}`]) {
+      expect(() => createCatalogSourceContext(sourceId), sourceId).toThrow("catalog-source-invalid");
+      // A structurally typed caller cannot bypass the application boundary's
+      // second validation simply by constructing the context object itself.
+      await expect(apply({ sourceId }, event)).rejects.toThrow("catalog-source-invalid");
+    }
+    expect(await db.prepare(`SELECT
+      (SELECT COUNT(*) FROM pa_service_catalog_checkpoint) checkpoints,
+      (SELECT COUNT(*) FROM pa_service_catalog_projection_receipts) receipts`).first()).toEqual(before);
+  });
+
+  it("rejects a stale staged page after another writer completes and activates its generation", async () => {
+    const source = createCatalogSourceContext("project-alpha:staging-race");
+    const page = { sourceGeneration: "staging-race-generation", snapshotHash, pageCount: 2, itemCount: 2 };
+    await apply(source, envelope("snapshot.page", "staging-race-first", 1, {
+      ...page, pageNumber: 1, items: [item("svc-first")],
+    }));
+    const raced = beforeWriteBatch(async () => {
+      await apply(source, envelope("snapshot.page", "staging-race-winner", 1, {
+        ...page, pageNumber: 2, items: [{ ...item("svc-second"), name: "Winning staged service" }],
+      }));
+      await apply(source, envelope("snapshot.activate", "staging-race-activate", 1, page));
+    });
+    await expect(apply(source, envelope("snapshot.page", "staging-race-loser", 1, {
+      ...page, pageNumber: 2, items: [{ ...item("svc-second"), name: "Late staged service" }],
+    }), raced)).rejects.toThrow("catalog-projection-conflict");
+    expect(await db.prepare("SELECT name FROM pa_service_catalog_items WHERE source_id=? AND public_id='svc-second' AND active=1")
+      .bind(source.sourceId).first("name")).toBe("Winning staged service");
+    expect(await db.prepare("SELECT status FROM pa_service_catalog_generations WHERE source_id=? AND source_generation=?")
+      .bind(source.sourceId, page.sourceGeneration).first("status")).toBe("active");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_service_catalog_projection_receipts WHERE source_id=? AND delivery_id='staging-race-loser'")
+      .bind(source.sourceId).first("count")).toBe(0);
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_service_catalog_projection_audit WHERE source_id=? AND delivery_id='staging-race-loser'")
+      .bind(source.sourceId).first("count")).toBe(0);
+  }, 15_000);
+
+  it.each(["event", "snapshot"] as const)("rolls back %s when version content conflicts after validation without checkpoint drift", async kind => {
+    const source = createCatalogSourceContext(`project-alpha:version-race-${kind}`);
+    await seed(source);
+    const changed = { ...item("svc-shared", "v2"), name: "Requested version content" };
+    if (kind === "snapshot") {
+      await apply(source, envelope("snapshot.page", "version-race-page", 2, {
+        sourceGeneration: "version-race-generation", snapshotHash, pageCount: 1, pageNumber: 1, itemCount: 1, items: [changed],
+      }));
+    }
+    const before = await db.prepare("SELECT * FROM pa_service_catalog_checkpoint WHERE source_id=?").bind(source.sourceId).first();
+    const raced = beforeWriteBatch(async () => {
+      await db.prepare(`INSERT INTO pa_service_catalog_items
+        (source_id,public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at)
+        VALUES(?,'svc-shared','v2','Previously stored different content',NULL,'Aerial services',10,'none','[]',0,'2026-08-13T18:00:00.000Z')`)
+        .bind(source.sourceId).run();
+    });
+    const payload = kind === "event"
+      ? envelope("event", "version-race-loser", 2, { sourceGeneration: "shared-generation", event: { action: "upsert", item: changed } })
+      : envelope("snapshot.activate", "version-race-loser", 2, { sourceGeneration: "version-race-generation", snapshotHash, pageCount: 1, itemCount: 1 });
+    await expect(apply(source, payload, raced)).rejects.toThrow("catalog-projection-conflict");
+    expect(await db.prepare("SELECT * FROM pa_service_catalog_checkpoint WHERE source_id=?").bind(source.sourceId).first()).toEqual(before);
+    expect(await db.prepare("SELECT name FROM pa_service_catalog_items WHERE source_id=? AND public_id='svc-shared' AND active=1")
+      .bind(source.sourceId).first("name")).toBe("Original service");
+    expect(await db.prepare("SELECT name FROM pa_service_catalog_items WHERE source_id=? AND public_id='svc-shared' AND source_version='v2'")
+      .bind(source.sourceId).first("name")).toBe("Previously stored different content");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_service_catalog_projection_receipts WHERE source_id=? AND delivery_id='version-race-loser'")
+      .bind(source.sourceId).first("count")).toBe(0);
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_service_catalog_projection_audit WHERE source_id=? AND delivery_id='version-race-loser'")
+      .bind(source.sourceId).first("count")).toBe(0);
+  }, 15_000);
 });
 
 describe("catalog producer contract parser", () => {
+  it("does not coerce non-string values into a trusted source context", () => {
+    const values: unknown[] = [undefined, null, 1, true, [PRIMARY_ALPHA_SOURCE_ID],
+      new String(PRIMARY_ALPHA_SOURCE_ID), { toString: () => PRIMARY_ALPHA_SOURCE_ID }];
+    for (const value of values) {
+      expect(() => createCatalogSourceContext(value)).toThrow("catalog-source-invalid");
+    }
+    expect(createCatalogSourceContext(PRIMARY_ALPHA_SOURCE_ID)).toEqual({ sourceId: PRIMARY_ALPHA_SOURCE_ID });
+  });
+
   it("requires immutable public ids and exact allowlisted wire fields", () => {
     expect(() => parseCatalogProjectionDelivery(envelope("event", "parser-ok", 1, { event: { action: "upsert", item: item("svc-map") } }), applicationKey)).not.toThrow();
     expect(() => parseCatalogProjectionDelivery(envelope("event", "parser-numeric-id", 1, { event: { action: "upsert", item: { ...item("svc-map"), publicId: 42 } } }), applicationKey)).toThrow();

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildServiceRequestNotificationSnapshot,
   parseServiceRequestNotificationSnapshot,
+  PRIMARY_ALPHA_SOURCE_ID,
 } from "@ltds/shared";
 import {
   enqueueExpiringNotifications,
@@ -42,6 +43,30 @@ function recordingDatabase(callbacks: {
     },
   };
   return { database: database as unknown as D1Database, calls };
+}
+
+function requestNotificationRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: "notice-source",
+    request_id: "request-source",
+    catalog_source_id: PRIMARY_ALPHA_SOURCE_ID,
+    event_type: "request_status_changed",
+    status_value: "under_review",
+    recipient_kind: "client_requester",
+    payload_json: "{}",
+    attempt_count: 0,
+    title: "North site imagery",
+    project_id: null,
+    service_category: "Progress mapping",
+    location_text: "North site",
+    latitude: null,
+    longitude: null,
+    project_name: null,
+    requester_email: "client@example.test",
+    account_id: "account-source",
+    requester_identity_id: "identity-source",
+    ...overrides,
+  };
 }
 
 describe("client notifications", () => {
@@ -86,6 +111,7 @@ describe("client notifications", () => {
           return outboxReads === 1 ? {
             id: "notice-legacy",
             request_id: "request-legacy",
+            catalog_source_id: PRIMARY_ALPHA_SOURCE_ID,
             event_type: "request_status_changed",
             status_value: "under_review",
             recipient_kind: "client_requester",
@@ -118,6 +144,75 @@ describe("client notifications", () => {
     expect(emailSend).toHaveBeenCalledTimes(1);
     expect(value.calls.some(call => call.sql.includes("INSERT OR IGNORE INTO client_portal_notifications"))).toBe(false);
     expect(value.calls.some(call => call.sql.includes("SET status='sent'"))).toBe(true);
+  });
+
+  it.each(["project-alpha:secondary", null, undefined])("terminally suppresses client notices without a supported explicit source (%s), before rendering or delivery", async source => {
+    let outboxReads = 0;
+    const row = requestNotificationRow({
+      catalog_source_id: source,
+      // These fail if recipient resolution or rendering runs before suppression.
+      requester_email: "not-an-email",
+      payload_json: "not-json",
+    });
+    const value = recordingDatabase({
+      first: call => {
+        if (call.sql.includes("sqlite_master")) return { count: 1 };
+        if (call.sql.includes("FROM client_portal_notification_outbox")) return ++outboxReads === 1 ? row : null;
+        return null;
+      },
+    });
+    const emailSend = vi.fn(async () => undefined);
+    await expect(processClientPortalRequestNotifications({
+      DELIVERY_DB: value.database,
+      DELIVERY_BASE_URL: "not-a-url",
+      NOTIFICATION_EMAIL: { send: emailSend },
+    } as unknown as Env)).resolves.toBe(1);
+    expect(emailSend).not.toHaveBeenCalled();
+    expect(value.calls.some(call => call.sql.includes("INSERT OR IGNORE INTO client_portal_notifications"))).toBe(false);
+    expect(value.calls.some(call => call.sql.includes("SET status='sent'"))).toBe(false);
+    expect(value.calls.some(call => call.sql.includes("next_attempt_at=datetime('now',?)"))).toBe(false);
+    const claimIndex = value.calls.findIndex(call => call.sql.includes("SET status='processing'"));
+    const suppressIndex = value.calls.findIndex(call => call.sql.includes("SET status='suppressed'"));
+    expect(claimIndex).toBeGreaterThan(-1);
+    expect(suppressIndex).toBeGreaterThan(claimIndex);
+    expect(value.calls[suppressIndex]?.binds).toEqual(["unsupported-catalog-source", row.id]);
+    expect(value.calls[suppressIndex]?.sql).toContain("lease_expires_at=NULL");
+    expect(value.calls[suppressIndex]?.sql).toContain("AND status='processing'");
+    const audit = value.calls.find(call => call.sql.includes("INSERT INTO audit_log"));
+    expect(audit?.binds[0]).toBe("client_request_notification.suppressed");
+    expect(JSON.parse(String(audit?.binds[2]))).toMatchObject({ attempt: 1, reason: "unsupported-catalog-source" });
+    expect(value.calls.find(call => call.sql.includes("FROM client_portal_notification_outbox"))?.sql).toContain("r.catalog_source_id");
+  });
+
+  it.each([
+    { source: PRIMARY_ALPHA_SOURCE_ID, recipientKind: "client_requester", to: "client@example.test", inbox: true },
+    { source: "project-alpha:secondary", recipientKind: "staff_triage", to: "triage@example.test", inbox: false },
+  ])("preserves $recipientKind delivery for $source", async ({ source, recipientKind, to, inbox }) => {
+    let outboxReads = 0;
+    const row = requestNotificationRow({ catalog_source_id: source, recipient_kind: recipientKind });
+    const value = recordingDatabase({
+      first: call => {
+        if (call.sql.includes("sqlite_master")) return { count: 1 };
+        if (call.sql.includes("FROM client_portal_notification_outbox")) return ++outboxReads === 1 ? row : null;
+        return null;
+      },
+    });
+    const emailSend = vi.fn(async () => undefined);
+    await expect(processClientPortalRequestNotifications({
+      DELIVERY_DB: value.database,
+      DELIVERY_BASE_URL: "https://client.example",
+      PUBLIC_BASE_URL: "https://ops.example",
+      CLIENT_REQUEST_TRIAGE_TO: "triage@example.test",
+      NOTIFICATION_FROM: "notifications@example.test",
+      NOTIFICATION_EMAIL: { send: emailSend },
+    } as unknown as Env)).resolves.toBe(1);
+    expect(emailSend).toHaveBeenCalledTimes(1);
+    expect(emailSend).toHaveBeenCalledWith(expect.objectContaining({ to }));
+    expect(value.calls.some(call => call.sql.includes("INSERT OR IGNORE INTO client_portal_notifications"))).toBe(inbox);
+    expect(value.calls.some(call => call.sql.includes("SET status='sent'"))).toBe(true);
+    expect(value.calls.some(call => call.sql.includes("SET status='suppressed'"))).toBe(false);
+    const audit = value.calls.find(call => call.sql.includes("INSERT INTO audit_log"));
+    expect(audit?.binds[0]).toBe("client_request_notification.sent");
   });
 
   it("normalizes optional recipient email and rejects malformed values", () => {

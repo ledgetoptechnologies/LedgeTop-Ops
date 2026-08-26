@@ -1,12 +1,19 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
+import { splitD1MigrationStatements } from "./helpers/d1-migrations";
+import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
+import { sha256 } from "../src/worker/security";
+import { getAuthorizedRequestAttachment, getSubmittedRequestAttachment, listRequestAttachments, listSubmittedRequestAttachments } from "../src/worker/client-portal/request-attachments";
 import { validateRequestArea } from "../src/worker/client-portal/request-area";
 import {
   calculateRequestAreaSquareMeters,
   createServiceRequestDraft,
   getServiceRequestDraft,
+  listServiceCatalog,
+  listServiceRequestDrafts,
   saveServiceRequestDraft,
   sanitizeServiceQuestions,
   submitServiceRequestDraft,
@@ -120,14 +127,8 @@ describe("service request v2 transaction-time catalog contract", () => {
     // permissive mock schema that could hide partial submission side effects.
     const directory = new URL("../migrations/", import.meta.url);
     for (const name of readdirSync(directory).filter(name => name.endsWith(".sql")).sort()) {
-      const sql = readFileSync(new URL(name, directory), "utf8").replace(/\r\n/g, "\n").replace(/^\s*--.*$/gm, "");
-      if (/\bCREATE\s+TRIGGER\b/i.test(sql)) {
-        await database.exec(sql.replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
-      } else {
-        const statements = sql.split(/;\s*(?:\n|$)/).map(value => value.trim()).filter(value => value && !/^PRAGMA/i.test(value));
-        if (name === "0103_client_portal_workspace.sql") await database.batch(statements.map(statement => database.prepare(statement)));
-        else for (const statement of statements) await database.prepare(statement).run();
-      }
+      const statements = splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8"));
+      if (statements.length) await database.batch(statements.map(statement => database.prepare(statement)));
     }
     await database.batch([
       database.prepare("INSERT INTO client_accounts(id,display_name,status) VALUES('account-a','Acme','active')"),
@@ -185,18 +186,147 @@ describe("service request v2 transaction-time catalog contract", () => {
   }
 
   async function changeCatalog(kind: "deactivated" | "version_changed", publicId = service.publicId) {
-    await database.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE public_id=?").bind(publicId).run();
+    await database.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE source_id=? AND public_id=?").bind(PRIMARY_ALPHA_SOURCE_ID, publicId).run();
     if (kind === "version_changed") {
       await database.prepare(`INSERT INTO pa_service_catalog_items
         (public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at)
         SELECT public_id,'v8',name,summary,category,display_order,geometry_requirement,question_schema_json,1,'2026-08-25T13:00:00Z'
-        FROM pa_service_catalog_items WHERE public_id=? AND source_version='v7'`).bind(publicId).run();
+        FROM pa_service_catalog_items WHERE source_id=? AND public_id=? AND source_version='v7'`).bind(PRIMARY_ALPHA_SOURCE_ID, publicId).run();
     }
   }
+
+  const otherSource = "project-alpha:other";
+  async function seedOtherCatalog(publicId = service.publicId) {
+    await database.prepare(`INSERT INTO pa_service_catalog_items
+      (source_id,public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at)
+      VALUES(?,?,'v7','Other-source confidential service','Other-source summary','Mapping',10,'required',?,1,'2026-08-25T12:00:00Z')`)
+      .bind(otherSource, publicId, JSON.stringify(service.questions)).run();
+  }
+
+  async function seedOtherDraft(empty = false) {
+    const original = await createdDraft();
+    await database.prepare(`INSERT INTO client_service_request_drafts
+      (id,account_id,project_id,created_by_identity_id,draft_json,area_geojson,area_square_meters,area_acres,create_idempotency_key,create_fingerprint,last_mutation_key,catalog_source_id)
+      SELECT 'draft-other',account_id,project_id,created_by_identity_id,draft_json,area_geojson,area_square_meters,area_acres,
+        'other-draft-create-key',create_fingerprint,'other-draft-save-key',? FROM client_service_request_drafts WHERE id=?`)
+      .bind(otherSource, original.id).run();
+    if (!empty) await database.prepare(`INSERT INTO client_service_request_draft_services
+      (draft_id,ordinal,service_public_id,service_source_version,service_snapshot_json,answers_json,service_source_id)
+      SELECT 'draft-other',ordinal,service_public_id,service_source_version,service_snapshot_json,answers_json,?
+      FROM client_service_request_draft_services WHERE draft_id=?`).bind(otherSource, original.id).run();
+    await database.prepare(`INSERT INTO client_service_request_draft_mutations
+      (draft_id,mutation_key,mutation_fingerprint,resulting_version,result_snapshot_json)
+      VALUES('draft-other','other-draft-save-key',?,1,'{"version":1}')`).bind(await sha256(JSON.stringify(input))).run();
+    return original;
+  }
+
+  async function seedOtherRequest(status = "submitted") {
+    await database.prepare(`INSERT INTO client_service_requests
+      (id,account_id,project_id,created_by_identity_id,request_type,title,details,status,idempotency_key,request_fingerprint,catalog_source_id)
+      VALUES('request-other','account-a','project-a','identity-a','service','Private other-source request','Other-source details',?,
+        'other-request-create-key',?,?)`).bind(status, "f".repeat(43), otherSource).run();
+  }
+
+  it("keeps primary selections and saved JSON stable when another source uses identical service IDs and versions", async () => {
+    await seedOtherCatalog();
+    await seedOtherCatalog("only-other-service");
+    const { answers: _answers, ...catalogItem } = service;
+    expect(await listServiceCatalog(repositoryEnv)).toEqual([catalogItem]);
+    const original = await createdDraft();
+    expect(original.services).toEqual([service]);
+    const parent = await database.prepare("SELECT catalog_source_id,create_fingerprint FROM client_service_request_drafts WHERE id=?").bind(original.id).first<{ catalog_source_id: string; create_fingerprint: string }>();
+    expect(parent).toEqual({ catalog_source_id: PRIMARY_ALPHA_SOURCE_ID, create_fingerprint: await sha256(JSON.stringify(input)) });
+    const child = await database.prepare("SELECT service_source_id,service_snapshot_json,answers_json FROM client_service_request_draft_services WHERE draft_id=?").bind(original.id).first<{ service_source_id: string; service_snapshot_json: string; answers_json: string }>();
+    expect(child?.service_source_id).toBe(PRIMARY_ALPHA_SOURCE_ID);
+    expect(JSON.parse(child!.service_snapshot_json)).toEqual(catalogItem);
+    const submitted = await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, "primary-provenance-submit");
+    expect(submitted?.kind).toBe("submitted");
+    if (!submitted || !("request" in submitted)) throw new Error("Expected submitted request");
+    expect(await database.prepare("SELECT catalog_source_id FROM client_service_requests WHERE id=?").bind(submitted.request.id).first("catalog_source_id")).toBe(PRIMARY_ALPHA_SOURCE_ID);
+    expect(await database.prepare("SELECT service_source_id,service_snapshot_json,answers_json FROM client_service_request_services WHERE request_id=?").bind(submitted.request.id).first()).toEqual(child);
+    const before = await requestState();
+    await changeCatalog("deactivated");
+    expect((await createServiceRequestDraft(repositoryEnv, session, input, "initial-draft-key-0001"))?.kind).toBe("replayed");
+    expect((await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, "primary-provenance-submit"))?.kind).toBe("replayed");
+    expect(await requestState()).toEqual(before);
+  });
+
+  it.each([false, true])("denies direct other-source draft reads, saves and replay even when selections are empty=%s", async empty => {
+    const primary = await seedOtherDraft(empty);
+    const before = await requestState();
+    expect((await listServiceRequestDrafts(repositoryEnv, session)).map(row => row.id)).toEqual([primary.id]);
+    expect(await getServiceRequestDraft(repositoryEnv, session, "draft-other")).toBeNull();
+    expect(await createServiceRequestDraft(repositoryEnv, session, input, "other-draft-create-key")).toBeNull();
+    expect(await saveServiceRequestDraft(repositoryEnv, session, "draft-other", 1, input, "other-draft-save-key")).toBeNull();
+    expect(await saveServiceRequestDraft(repositoryEnv, session, "draft-other", 1, { ...input, services: [] }, "new-other-save-key")).toBeNull();
+    expect(await submitServiceRequestDraft(repositoryEnv, session, "draft-other", 1, "other-submit-key")).toBeNull();
+    expect(await requestState()).toEqual(before);
+  });
+
+  it("does not resolve a service that exists only in another source", async () => {
+    await seedOtherCatalog("only-other-service");
+    const before = await requestState();
+    expect(await createServiceRequestDraft(repositoryEnv, session, { ...input, services: [{ ...input.services[0]!, publicId: "only-other-service" }] }, "other-only-selection-key"))
+      .toEqual({ kind: "catalog_changed", servicePublicIds: ["only-other-service"] });
+    expect(await requestState()).toEqual(before);
+  });
+
+  it("hides other-source submitted history, mutations and legacy parent change requests", async () => {
+    const original = await createdDraft();
+    const submitted = await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, "history-primary-submit");
+    if (!submitted || !("request" in submitted)) throw new Error("Expected submitted request");
+    await seedOtherRequest();
+    expect((await d1ClientPortalRepository.listServiceRequests(repositoryEnv, session)).map(row => row.id)).toEqual([submitted.request.id]);
+    expect(await d1ClientPortalRepository.getServiceRequest(repositoryEnv, session, "request-other")).toBeNull();
+    const legacyInput = { ...input, idempotencyKey: "legacy-other-change-key", expectedUpdatedAt: "2026-08-25 12:00:00" };
+    const before = await requestState();
+    expect(await d1ClientPortalRepository.updateServiceRequest(repositoryEnv, session, "request-other", legacyInput)).toBeNull();
+    expect(await requestState()).toEqual(before);
+    await database.prepare("UPDATE client_service_requests SET status='under_review' WHERE id='request-other'").run();
+    const beforeChange = await requestState();
+    expect(await d1ClientPortalRepository.createChangeRequest(repositoryEnv, session, "request-other", legacyInput)).toBeNull();
+    expect(await d1ClientPortalRepository.createServiceRequest(repositoryEnv, session, { ...legacyInput, parentRequestId: "request-other" })).toBeNull();
+    expect(await requestState()).toEqual(beforeChange);
+  });
+
+  it("does not replay a primary draft through an other-source submitted request pointer", async () => {
+    const original = await createdDraft();
+    const key = "primary-pointer-submit";
+    expect((await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, key))?.kind).toBe("submitted");
+    await seedOtherRequest();
+    await database.prepare("UPDATE client_service_request_drafts SET submitted_request_id='request-other' WHERE id=?").bind(original.id).run();
+    expect(await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, key)).toBeNull();
+  });
+
+  it("does not expose attachment metadata from another source's draft or submitted request", async () => {
+    await seedOtherDraft(true);
+    await seedOtherRequest();
+    await database.prepare(`INSERT INTO client_service_request_attachments
+      (id,draft_id,account_id,created_by_identity_id,client_upload_id,object_key,multipart_upload_id,original_name,declared_size,content_type,status,expires_at)
+      VALUES('attachment-other','draft-other','account-a','identity-a','other-attachment-upload','_ltds/quarantine/request-attachments/other/object',
+        'upload-other','Private other-source attachment.pdf',10,'application/pdf','uploading',datetime('now','+1 day'))`).run();
+    expect(await listRequestAttachments(repositoryEnv, session, "draft-other")).toBeNull();
+    expect(await getAuthorizedRequestAttachment(repositoryEnv, session, "draft-other", "attachment-other")).toBeNull();
+    expect(await listSubmittedRequestAttachments(repositoryEnv, session, "request-other")).toBeNull();
+    expect(await getSubmittedRequestAttachment(repositoryEnv, session, "request-other", "attachment-other")).toBeNull();
+  });
+
+  it("does not invoke the primary pricing connector for an other-source draft", async () => {
+    await seedOtherDraft(true);
+    const pricingHintProvider = vi.fn();
+    const app = createClientPortalRouter({ resolvePrincipal: principal, pricingHintProvider,
+      repository: { ...d1ClientPortalRepository, resolveSession: vi.fn(async () => session) } });
+    const response = await app.request("https://client.example/service-request-drafts/draft-other/pricing-hint", {}, { ...env, ...repositoryEnv });
+    expect(response.status).toBe(404);
+    expect(pricingHintProvider).not.toHaveBeenCalled();
+  });
 
   for (const operation of ["create", "save", "submit"] as const) {
     it.each(["deactivated", "version_changed"] as const)(`rejects a %s service changed between ${operation} review and transaction without partial writes`, async change => {
       const original = operation === "create" ? null : await createdDraft();
+      // An identical active item in another source must never satisfy the
+      // primary transaction guard after the reviewed primary item changes.
+      await seedOtherCatalog();
       const before = await requestState();
       const mutationKey = `catalog-${operation}-race-0001`;
       const changedInput = { ...input, title: "Updated mapping request" };

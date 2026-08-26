@@ -49,7 +49,7 @@ function database(kind: "ops" | "delivery", state: DbState) {
           const configured = state.first?.(kind, sql, this.values);
           if (configured !== undefined) return configured;
           if (kind === "delivery" && sql.includes("project_alpha_client_id")) {
-            return { id: "request-a", status: "accepted_pending_pa_linkage", project_id: "portal-pa-9", project_alpha_client_id: "21", project_alpha_project_id: "9" };
+            return { id: "request-a", catalog_source_id: "project-alpha:primary", status: "accepted_pending_pa_linkage", project_id: "portal-pa-9", project_alpha_client_id: "21", project_alpha_project_id: "9" };
           }
           if (kind === "delivery" && sql.includes("SELECT r.title,r.project_id,r.service_category")) {
             return { title: "North site progress imagery", project_id: "portal-pa-9", service_category: "Progress mapping", location_text: "Broadway, Green Bay, Wisconsin", latitude: 44.5132, longitude: -88.0831, project_name: "North Distribution Center" };
@@ -513,7 +513,7 @@ describe("verified Project Alpha quote linkage", () => {
       first(kind, sql) {
         if (kind === "delivery" && sql.includes("uses_catalog_v2"))
           return {
-            id: "request-a", status: "accepted_pending_pa_linkage",
+            id: "request-a", catalog_source_id: "project-alpha:primary", status: "accepted_pending_pa_linkage",
             project_id: "portal-pa-9", project_alpha_client_id: "21",
             project_alpha_project_id: "9", uses_catalog_v2: 1,
           };
@@ -546,6 +546,7 @@ describe("verified Project Alpha quote linkage", () => {
         if (sql.includes("request_revision") && sql.includes("FROM client_service_requests"))
           return {
             id: "request-a",
+            catalog_source_id: "project-alpha:primary",
             status: "under_review",
             title: "North site mapping",
             details: "Capture the reviewed site.",
@@ -568,7 +569,7 @@ describe("verified Project Alpha quote linkage", () => {
       all(kind, sql) {
         if (kind !== "delivery") return undefined;
         if (sql.includes("FROM client_service_request_services"))
-          return [{ service_public_id: "svc-ortho", service_source_version: "catalog-7", answers_json: '{"resolution":"standard"}' }];
+          return [{ service_source_id: "project-alpha:primary", service_public_id: "svc-ortho", service_source_version: "catalog-7", answers_json: '{"resolution":"standard"}' }];
         if (sql.includes("FROM client_service_request_attachments"))
           return [{ original_name: "authorization.pdf", content_type: "application/pdf", actual_size: 2048, verified_sha256: "b".repeat(64), object_key: "must-not-leave-ltds" }];
         return undefined;
@@ -644,7 +645,7 @@ describe("verified Project Alpha quote linkage", () => {
       first(kind, sql) {
         if (kind === "delivery" && sql.includes("request_revision") && sql.includes("FROM client_service_requests"))
           return {
-            id: "request-a", status: "under_review", title: "North site", details: "Capture site.",
+            id: "request-a", catalog_source_id: "project-alpha:primary", status: "under_review", title: "North site", details: "Capture site.",
             deliverables_text: null, project_alpha_client_id: "client-public-a",
             project_alpha_organization_id: null, project_alpha_project_id: "project-public-a",
             portal_project_id: "portal-pa-9", project_authorized: 0,
@@ -655,7 +656,7 @@ describe("verified Project Alpha quote linkage", () => {
       },
       all(kind, sql) {
         return kind === "delivery" && sql.includes("FROM client_service_request_services")
-          ? [{ service_public_id: "svc-ortho", service_source_version: "catalog-7", answers_json: "{}" }]
+          ? [{ service_source_id: "project-alpha:primary", service_public_id: "svc-ortho", service_source_version: "catalog-7", answers_json: "{}" }]
           : [];
       },
     };
@@ -676,7 +677,7 @@ describe("verified Project Alpha quote linkage", () => {
 
   it("replays the immutable local PA receipt without a second upstream command", async () => {
     const requestRow = {
-      id: "request-a", status: "under_review", title: "North site mapping",
+      id: "request-a", catalog_source_id: "project-alpha:primary", status: "under_review", title: "North site mapping",
       details: "Capture site.", deliverables_text: null,
       project_alpha_client_id: "client-public-a", project_alpha_organization_id: null,
       project_alpha_project_id: "project-public-a", area_geojson: null,
@@ -704,7 +705,7 @@ describe("verified Project Alpha quote linkage", () => {
       all(kind, sql) {
         if (kind !== "delivery") return undefined;
         if (sql.includes("FROM client_service_request_services"))
-          return [{ service_public_id: "svc-ortho", service_source_version: "catalog-7", answers_json: "{}" }];
+          return [{ service_source_id: "project-alpha:primary", service_public_id: "svc-ortho", service_source_version: "catalog-7", answers_json: "{}" }];
         if (sql.includes("FROM client_service_request_attachments")) return [];
         return undefined;
       },
@@ -735,6 +736,82 @@ describe("verified Project Alpha quote linkage", () => {
     expect(await response.json()).toMatchObject({ receiptId: "receipt-public-a", idempotentReplay: true });
     expect(upstream).not.toHaveBeenCalled();
     expect(state.batches).toEqual([]);
+  });
+
+  it.each(["pa-draft", "pa-quote"])("never forwards a secondary or empty source-owned request through the primary %s connection", async endpoint => {
+    const state: DbState = {
+      batches: [],
+      first(kind, sql) {
+        if (kind === "delivery" && sql.includes("FROM client_service_requests")) return {
+          id: "request-a", catalog_source_id: "project-alpha:secondary", status: "under_review",
+          title: "Secondary private request", details: "Do not send", project_id: null,
+          project_alpha_client_id: "client-public-a", uses_catalog_v2: 0,
+        };
+        return null;
+      },
+      all: () => [],
+    };
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+    const response = await worker.fetch(new Request(`https://ops.example/api/client-service-requests/request-a/${endpoint}`, {
+      method: "POST", headers: { Origin: "https://ops.example", "Content-Type": "application/json" },
+      body: JSON.stringify({ artifactId: 42 }),
+    }), environment(state, {
+      APPLICATION_KEY: "ltds_ops", PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "true",
+      PROJECT_ALPHA_DRAFT_QUOTE_API_KEY: "draft-only-key", PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET: "0123456789abcdef0123456789abcdef",
+      LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED: "true",
+    }) as any, executionCtx);
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain("catalog source has no configured quote connection");
+    expect(upstream).not.toHaveBeenCalled();
+    expect(state.batches).toEqual([]);
+  });
+
+  it("does not show a primary provider receipt or enabled quote action for another source", async () => {
+    const state: DbState = {
+      batches: [],
+      first(kind, sql) {
+        if (kind === "delivery" && sql.includes("FROM client_service_requests")) return {
+          id: "request-a", catalog_source_id: "project-alpha:secondary",
+        };
+        if (sql.includes("request_pa_draft_quote_receipts")) throw new Error("must not read foreign receipt");
+        return null;
+      },
+    };
+    const response = await worker.fetch(new Request("https://ops.example/api/client-service-requests/request-a/pa-draft"),
+      environment(state) as any, executionCtx);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ capability: { enabled: false }, receipt: null });
+  });
+
+  it("rejects inconsistent child source provenance instead of silently dropping selected services", async () => {
+    const state: DbState = {
+      batches: [],
+      first(kind, sql) {
+        if (kind === "delivery" && sql.includes("FROM client_service_requests")) return {
+          id: "request-a", catalog_source_id: "project-alpha:primary", status: "under_review",
+          title: "Request", details: "Details", project_alpha_client_id: "client-public-a",
+          project_alpha_organization_id: null, project_alpha_project_id: null, portal_project_id: null,
+          request_revision: 1,
+        };
+        return null;
+      },
+      all(kind, sql) {
+        return kind === "delivery" && sql.includes("FROM client_service_request_services")
+          ? [{ service_source_id: "project-alpha:secondary", service_public_id: "svc-ortho", service_source_version: "catalog-7", answers_json: "{}" }] : [];
+      },
+    };
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+    const response = await worker.fetch(new Request("https://ops.example/api/client-service-requests/request-a/pa-draft", {
+      method: "POST", headers: { Origin: "https://ops.example" },
+    }), environment(state, {
+      APPLICATION_KEY: "ltds_ops", PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "true",
+      PROJECT_ALPHA_DRAFT_QUOTE_API_KEY: "draft-only-key", PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET: "0123456789abcdef0123456789abcdef",
+    }) as any, executionCtx);
+    expect(response.status).toBe(409);
+    expect(await response.text()).toContain("inconsistent catalog source");
+    expect(upstream).not.toHaveBeenCalled();
   });
 
   it("exports only the authorized stored request geometry as KML", async () => {
