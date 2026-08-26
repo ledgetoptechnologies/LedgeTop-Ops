@@ -361,6 +361,12 @@ or detail checkpoint has been deployed.
 
 ### 1. Client foundation and find/open workflow
 
+The August 26 source-isolation audit and staged implementation sequence are in
+[multi-source-client-design.md](multi-source-client-design.md). The current
+directory's source-qualified URLs do not make snapshot, catalog, staff or portal
+stores multi-producer. A second source remains disabled pending full isolation
+and an explicit staff-authority policy; no roles are unioned implicitly.
+
 - Introduce immutable connector provenance and an Operations business-party
   mapping without changing existing authorization identities or source URLs.
 - Preserve the current connector as the compatible default. Do not activate a
@@ -619,6 +625,10 @@ Test the complete workflow, not only whether a component renders:
       paged service selection, saved-draft protection and atomic catalog guards.
 - [x] Locally implement and verify current-view folder/file counts without
       descendant totals, including filtered and partially loaded listings.
+- [x] Locally implement and verify authenticated project/folder/file feedback,
+      scoped staff transitions and private completion notifications.
+- [x] Document the next multi-source isolation sequence and outstanding authority
+      decision; do not equate this audit with implementing a second connector.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with
