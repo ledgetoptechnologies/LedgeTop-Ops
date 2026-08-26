@@ -8,6 +8,7 @@ import type {
   ClientViewerShareCreateRequestV1,
 } from "@ltds/shared";
 import { z } from "zod";
+import { projectAccessTermsInputSchema } from './project-access-terms';
 import type { Env } from "../types";
 import { serveAuthorizedThumbnail } from "../thumbnails";
 import { d1ClientPortalRepository } from "./repository";
@@ -277,6 +278,7 @@ const workspaceInvitationBody = z.object({
   }).strict().optional(),
   organizationWide: z.boolean().optional(),
   confirmOrganizationWide: z.boolean().optional(),
+  accessTerms: projectAccessTermsInputSchema.optional(),
   capabilities: z.array(z.enum(["workspace.view", "delivery.view", "request.create"])).min(1).max(3),
 }).strict().superRefine((input, context) => {
   if (input.targetScope?.type === "organization" && input.confirmOrganizationWide !== true) {
@@ -720,6 +722,8 @@ export function createClientPortalRouter(
     if (result.outcome === "invalid") throw new HTTPException(400, { message: "Invitation is invalid" });
     if (result.outcome === "conflict") throw new HTTPException(409, { message: "Idempotency key was already used" });
     if (result.outcome === "rate_limited") throw new HTTPException(429, { message: "Too many invitations. Try again later." });
+    if (result.outcome === "policy_disabled") throw new HTTPException(403, { message: "invitation_policy_disabled" });
+    if (result.outcome === "approval_required") throw new HTTPException(409, { message: "invitation_approval_required" });
     return c.json(result, result.outcome === "created" ? 201 : 200);
   });
 

@@ -415,7 +415,11 @@ export interface PortalWorkspace { id: string; rootType: "organization" | "stand
 export type PortalHierarchyScopeType = "organization" | "department" | "client" | "project";
 export interface PortalWorkspaceEntry { type: PortalHierarchyScopeType | "standalone_client" | "contact"; publicId: string; parentPublicId: string | null; displayName: string; sourceVersion: string }
 export interface PortalWorkspaceMember { identityId: string; email: string | null; status: "active" | "suspended" | "revoked"; manager: boolean; source: string }
-export interface PortalWorkspaceInvitation { id: string; email: string; status: "pending" | "accepted" | "revoked" | "expired"; scope: { type: PortalHierarchyScopeType | "workspace"; publicId: string | null }; capabilities: string[]; expiresAt: string }
+export interface PortalProjectAccessTermsInput { kind: "customer" | "collaborator"; mode: "specific_date" | "project_end" | "until_revoked"; expiresAt: string | null }
+export interface PortalProjectAccessTerms extends PortalProjectAccessTermsInput { id: string; effectiveExpiresAt: string | null; completionPending: boolean; expired: boolean }
+export interface PortalWorkspaceInvitation { id: string; email: string; status: "pending" | "accepted" | "revoked" | "expired"; scope: { type: PortalHierarchyScopeType | "workspace"; publicId: string | null }; capabilities: string[]; expiresAt: string; accessTerms: PortalProjectAccessTerms | null }
+export interface PortalWorkspaceAccess { members: PortalWorkspaceMember[]; invitations: PortalWorkspaceInvitation[]; invitationPolicy: { mode: "allowed" | "disabled" | "require_approval"; version: number }; projectAccessTermsSupported: boolean; projectAccessOptions: Array<{ projectPublicId: string; projectEndSupported: boolean }> }
+export interface PortalWorkspaceInvitationInput { email: string; projectPublicId?: string; targetScope?: { type: PortalHierarchyScopeType; publicId: string }; organizationWide?: boolean; confirmOrganizationWide?: boolean; capabilities: Array<"delivery.view" | "request.create">; accessTerms?: PortalProjectAccessTermsInput }
 export interface PortalDelegatedShareTarget {
   delegationId: string;
   folderTargetId: string;
@@ -446,30 +450,34 @@ export interface PortalDelegatedShareCreated {
   createdAt: string;
 }
 
-export async function loadPortalWorkspaces(request: PortalRequest = requestJson): Promise<PortalWorkspace[]> {
-  return (await request<{ workspaces: PortalWorkspace[] }>("/api/client/v2/workspaces")).workspaces;
+export async function loadPortalWorkspaces(request: PortalRequest = requestJson, signal?: AbortSignal): Promise<PortalWorkspace[]> {
+  const result = signal ? await request<{workspaces: PortalWorkspace[]}>("/api/client/v2/workspaces", {signal}) : await request<{workspaces: PortalWorkspace[]}>("/api/client/v2/workspaces");
+  return result.workspaces;
 }
 
-export async function loadPortalWorkspaceHierarchy(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalWorkspaceEntry[]> {
-  return (await request<{ entries: PortalWorkspaceEntry[] }>(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/hierarchy`)).entries;
+export async function loadPortalWorkspaceHierarchy(workspaceId: string, request: PortalRequest = requestJson, signal?: AbortSignal): Promise<PortalWorkspaceEntry[]> {
+  const url = `/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/hierarchy`;
+  const result = signal ? await request<{entries: PortalWorkspaceEntry[]}>(url, {signal}) : await request<{entries: PortalWorkspaceEntry[]}>(url);
+  return result.entries;
 }
 
-export async function loadPortalWorkspaceAccess(workspaceId: string, request: PortalRequest = requestJson): Promise<{ members: PortalWorkspaceMember[]; invitations: PortalWorkspaceInvitation[] }> {
-  return request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/access`);
+export async function loadPortalWorkspaceAccess(workspaceId: string, request: PortalRequest = requestJson, signal?: AbortSignal): Promise<PortalWorkspaceAccess> {
+  const url = `/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/access`;
+  return signal ? request(url, {signal}) : request(url);
 }
 
-export async function invitePortalWorkspaceMember(workspaceId: string, input: { email: string; projectPublicId?: string; targetScope?: { type: PortalHierarchyScopeType; publicId: string }; organizationWide?: boolean; confirmOrganizationWide?: boolean; capabilities: Array<"delivery.view" | "request.create"> }, request: PortalRequest = requestJson): Promise<void> {
+export async function invitePortalWorkspaceMember(workspaceId: string, input: PortalWorkspaceInvitationInput, request: PortalRequest = requestJson, options?: { idempotencyKey: string; signal?: AbortSignal }): Promise<void> {
   await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/invitations`, {
-    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() }, body: JSON.stringify(input),
+    method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": options?.idempotencyKey ?? crypto.randomUUID() }, body: JSON.stringify(input), ...(options?.signal ? {signal: options.signal} : {}),
   });
 }
 
-export async function revokePortalWorkspaceInvitation(workspaceId: string, invitationId: string, request: PortalRequest = requestJson): Promise<void> {
-  await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}`, { method: "DELETE" });
+export async function revokePortalWorkspaceInvitation(workspaceId: string, invitationId: string, request: PortalRequest = requestJson, signal?: AbortSignal): Promise<void> {
+  await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/invitations/${encodeURIComponent(invitationId)}`, { method: "DELETE", ...(signal ? {signal} : {}) });
 }
 
-export async function suspendPortalWorkspaceMember(workspaceId: string, identityId: string, request: PortalRequest = requestJson): Promise<void> {
-  await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(identityId)}`, { method: "DELETE" });
+export async function suspendPortalWorkspaceMember(workspaceId: string, identityId: string, request: PortalRequest = requestJson, signal?: AbortSignal): Promise<void> {
+  await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(identityId)}`, { method: "DELETE", ...(signal ? {signal} : {}) });
 }
 
 export async function loadPortalDelegatedShareTargets(workspaceId: string, request: PortalRequest = requestJson): Promise<PortalDelegatedShareTarget[]> {

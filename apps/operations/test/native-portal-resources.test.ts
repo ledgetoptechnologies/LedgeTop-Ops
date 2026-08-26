@@ -101,7 +101,7 @@ describe('source-owned native portal resources with real signed projection and l
   beforeAll(async()=>{
     runtime=new Miniflare({compatibilityDate:'2026-07-22',modules:true,script:"export default {fetch(){return new Response('native')}}",d1Databases:{DELIVERY_DB:'native-resources',OPS_DB:'native-operations'}});
     db=await runtime.getD1Database('DELIVERY_DB') as D1Database;
-    for(const name of readdirSync(new URL('../../client/migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0164_').sort())
+    for(const name of readdirSync(new URL('../../client/migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0165_').sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../../client/migrations/${name}`,import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     opsDb=await runtime.getD1Database('OPS_DB') as D1Database;
     for(const name of readdirSync(new URL('../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0041_').sort())
@@ -413,4 +413,59 @@ describe('source-owned native portal resources with real signed projection and l
       expect(await db.prepare('SELECT count(*) n FROM portal_v2_entitlements WHERE workspace_id=?').bind(f.workspace).first('n')).toBe(0);
     }finally{if(fault==='suspension')await state(b,'active');}
   });
+  it('a real customer grant retains signed completed history only while that exact grant and directory capability remain authorized',async()=>{
+    const localProject=(await opsDb.prepare(`SELECT id FROM pa_projects WHERE projection_source_id=? AND json_extract(payload_json,'$.public_id')=?`)
+      .bind(a.source,projectId).first<string>('id'))!;
+    const input={folderRef:encodeRef('native/a'),sourceId:a.source,workspaceId:a.workspace,projectId:localProject,
+      principalPublicId:'same-person',reasonCode:'client_delivery',expiresAt:null,
+      accessTerms:{kind:'customer' as const,mode:'until_revoked' as const,expiresAt:null}};
+    const preview=await previewNativeDeliveryGrant(opsEnv,staff,input);
+    const created=await createNativeDeliveryGrant(opsEnv,staff,{...input,expectedContextVersion:preview.contextVersion},'native-customer-history');
+    const completedAt=new Date(Date.now()-40*86400_000).toISOString();
+    const snapshot={...page(a),schemaVersion:3,deliveryId:'customer-history-page',sourceGeneration:'customer-history-generation',sourceSequence:100,
+      snapshotHash:'c'.repeat(64),recordCount:8,
+      relations:[{publicId:'history-owner',relationType:'contains',from:{type:'organization',publicId:rootId},to:{type:'project',publicId:projectId},sourceVersion:'relation-v1',active:true}],
+      projectLifecycles:[{projectPublicId:projectId,status:'completed',completedAt,sourceVersion:'lifecycle-completed'}]};
+    const relationEnv={...env,CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true'};
+    expect((await signed(a,snapshot,relationEnv)).status).toBe(200);
+    expect((await signed(a,{schemaVersion:3,applicationKey:app,deliveryId:'customer-history-activate',occurredAt:snapshot.occurredAt,
+      sourceGeneration:snapshot.sourceGeneration,sourceSequence:100,workspaceId:'same-workspace',kind:'snapshot.activate',snapshotHash:snapshot.snapshotHash,
+      pageCount:1,recordCount:8},relationEnv)).status).toBe(200);
+    const hierarchy=await request(`${base(a)}/hierarchy`,{},relationEnv);expect(hierarchy.status).toBe(200);
+    expect(await hierarchy.json()).toMatchObject({entries:expect.arrayContaining([expect.objectContaining({type:'project',publicId:projectId})])});
+    const deliveries=await request(`${base(a)}/deliveries`,{},relationEnv);expect(deliveries.status).toBe(200);
+    const selected=await deliveries.json() as {items:Array<{id:string}>};expect(selected.items).toHaveLength(1);
+    const contents=await request(`${base(a)}/folders/${selected.items[0]!.id}`,{},relationEnv);expect(contents.status).toBe(200);
+    const file=(await contents.json() as ClientFilePage).files[0]!;
+    const identity=(await db.prepare('SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?').bind(issuer,principal.subject).first<string>('id'))!;
+    const denyId='customer-history-directory-deny';
+    await db.prepare(`INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status)
+      VALUES(?,?,?,'directory.read','deny','project',?,'operations','active')`).bind(denyId,a.workspace,identity,projectId).run();
+    try{const denied=await (await request(`${base(a)}/hierarchy`,{},relationEnv)).json() as {entries:Array<{publicId:string}>};
+      expect(denied.entries.some(entry=>entry.publicId===projectId)).toBe(false);}
+    finally{await db.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id=?`).bind(denyId).run();}
+    await db.prepare(`UPDATE portal_v2_authenticated_delivery_grants SET status='revoked',revoked_at=datetime('now'),revoked_by_staff_id='staff-test',revoke_reason_code='client_access_removed' WHERE id=?`)
+      .bind(created.grant.grantId).run();
+    const after=await (await request(`${base(a)}/hierarchy`,{},relationEnv)).json() as {entries:Array<{publicId:string}>};
+    expect(after.entries.some(entry=>entry.publicId===projectId)).toBe(false);
+    expect(await (await request(`${base(a)}/deliveries`,{},relationEnv)).json()).toMatchObject({items:[]});
+    reads=[];expect((await request(file.downloadPath,{},relationEnv)).status).toBe(404);expect(reads).toEqual([]);
+    expect((await request(`${base(b)}/context`)).status).toBe(200);
+  },120_000);
+  it('a still-live collaborator until-revoked grant also keeps completed history discoverable without adding directory permission',async()=>{
+    const localProject=(await opsDb.prepare(`SELECT id FROM pa_projects WHERE projection_source_id=? AND json_extract(payload_json,'$.public_id')=?`)
+      .bind(a.source,projectId).first<string>('id'))!;
+    const input={folderRef:encodeRef('native/a'),sourceId:a.source,workspaceId:a.workspace,projectId:localProject,
+      principalPublicId:'same-person',reasonCode:'collaborator_delivery',expiresAt:null,
+      accessTerms:{kind:'collaborator' as const,mode:'until_revoked' as const,expiresAt:null}};
+    const producerEnv={...opsEnv,CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true'},relationEnv={...env,CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true'};
+    const preview=await previewNativeDeliveryGrant(producerEnv,staff,input);
+    const created=await createNativeDeliveryGrant(producerEnv,staff,{...input,expectedContextVersion:preview.contextVersion},'native-collaborator-history');
+    const hierarchy=await request(`${base(a)}/hierarchy`,{},relationEnv);expect(hierarchy.status).toBe(200);
+    expect(await hierarchy.json()).toMatchObject({entries:expect.arrayContaining([expect.objectContaining({type:'project',publicId:projectId})])});
+    expect(await (await request(`${base(a)}/deliveries`,{},relationEnv)).json()).toMatchObject({items:[expect.objectContaining({owner:expect.objectContaining({publicId:projectId})})]});
+    await db.prepare(`UPDATE portal_v2_authenticated_delivery_grants SET status='revoked',revoked_at=datetime('now'),revoked_by_staff_id='staff-test',revoke_reason_code='client_access_removed' WHERE id=?`)
+      .bind(created.grant.grantId).run();
+    expect((await (await request(`${base(a)}/hierarchy`,{},relationEnv)).json() as {entries:Array<{publicId:string}>}).entries.some(entry=>entry.publicId===projectId)).toBe(false);
+  },120_000);
 });

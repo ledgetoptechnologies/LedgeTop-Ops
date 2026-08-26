@@ -7,7 +7,10 @@ import {
   type PortalWorkspaceCapability,
   type PortalWorkspaceTarget,
 } from "./workspace-v2";
-import { portalHierarchyRelationsEnabled } from "./hierarchy-relations";
+import { portalHierarchyRelationsEnabled,resolvePortalRelationAuthorizedTargets } from "./hierarchy-relations";
+import { parseProjectAccessTerms,prepareProjectAccessTerms,projectAccessTermsReady,readProjectAccessTerms,readWorkspaceInvitationPolicy,
+  type ProjectAccessTermsInput,type ProjectAccessTermsView } from './project-access-terms';
+import { captureProjectInvitationDelegation } from './project-invitation-delegation';
 
 const INVITABLE_CAPABILITIES = new Set<PortalWorkspaceCapability>([
   "workspace.view", "delivery.view", "request.create",
@@ -21,6 +24,7 @@ export interface WorkspaceInvitationInput {
   organizationWide?: boolean;
   confirmOrganizationWide?: boolean;
   capabilities: PortalWorkspaceCapability[];
+  accessTerms?: ProjectAccessTermsInput;
 }
 
 export interface WorkspaceInvitationView {
@@ -30,6 +34,7 @@ export interface WorkspaceInvitationView {
   scope: { type: "organization" | "department" | "client" | "project" | "workspace"; publicId: string | null };
   capabilities: PortalWorkspaceCapability[];
   expiresAt: string;
+  accessTerms: ProjectAccessTermsView|null;
 }
 
 export interface WorkspaceMemberView {
@@ -101,16 +106,22 @@ async function getInvitation(env: Env, workspaceId: string, invitationId: string
   const grants = await db(env).prepare(`SELECT capability,scope_type,scope_public_id FROM portal_v2_invitation_entitlements
     WHERE invitation_id=? ORDER BY capability`).bind(invitationId).all<{ capability: PortalWorkspaceCapability; scope_type: WorkspaceInvitationView["scope"]["type"]; scope_public_id: string }>();
   const scoped = grants.results.find(grant => grant.scope_type !== "workspace") ?? grants.results[0];
+  let accessTerms:ProjectAccessTermsView|null=null;
+  if(await projectAccessTermsReady(db(env))){
+    const termsId=await db(env).prepare('SELECT access_terms_id FROM portal_v2_invitation_entitlements WHERE invitation_id=? AND access_terms_id IS NOT NULL LIMIT 1')
+      .bind(invitationId).first<string>('access_terms_id');
+    if(termsId)accessTerms=await readProjectAccessTerms(db(env),termsId);
+  }
   return {
     id: row.id, email: row.invited_email, status: row.status, expiresAt: row.expires_at,
     scope: { type: scoped?.scope_type ?? "workspace", publicId: !scoped || scoped.scope_type === "workspace" ? null : scoped.scope_public_id },
-    capabilities: [...new Set(grants.results.map(grant => grant.capability))],
+    capabilities: [...new Set(grants.results.map(grant => grant.capability))],accessTerms,
   };
 }
 
 export type CreateWorkspaceInvitationResult =
   | { outcome: "created" | "replayed"; invitation: WorkspaceInvitationView; deliveryQueued: true }
-  | { outcome: "denied" | "invalid" | "conflict" | "rate_limited" };
+  | { outcome: "denied" | "invalid" | "conflict" | "rate_limited" | "approval_required" | "policy_disabled" };
 
 export async function createWorkspaceInvitation(
   env: Env,
@@ -141,7 +152,13 @@ export async function createWorkspaceInvitation(
   // authority. member.manage itself is never invit-able or client-created.
   if (!(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "member.manage", selectedTarget))) return { outcome: "denied" };
 
-  const canonical = JSON.stringify({ email, capabilities, scopeType: selectedTarget.scopeType, scopePublicId: selectedTarget.publicId });
+  const termsReady=await projectAccessTermsReady(db(env));
+  const policy=termsReady?await readWorkspaceInvitationPolicy(db(env),workspaceId):{mode:'allowed',version:0};
+  if(policy.mode!=='allowed')return {outcome:policy.mode==='disabled'?'policy_disabled':'approval_required'};
+  const accessTerms=input.accessTerms===undefined?undefined:parseProjectAccessTerms(input.accessTerms);
+  if(accessTerms&&(accessTerms.kind!=='collaborator'||selectedTarget.scopeType!=='project'))return {outcome:'invalid'};
+  const canonical = JSON.stringify({ email, capabilities, scopeType: selectedTarget.scopeType, scopePublicId: selectedTarget.publicId,
+    ...(accessTerms?{accessTerms}:{}) });
   const requestHash = await digest(canonical);
   const replay = await replayedInvitation(env, workspaceId, actor.id, idempotencyKey, requestHash);
   if (replay === "conflict") return { outcome: "conflict" };
@@ -154,6 +171,17 @@ export async function createWorkspaceInvitation(
   if (rate?.current_window === 1 && rate.count >= 10) return { outcome: "rate_limited" };
 
   const invitationId = crypto.randomUUID();
+  const sourceId=accessTerms?await db(env).prepare('SELECT project_alpha_source_id FROM portal_v2_workspaces WHERE id=?').bind(workspaceId).first<string>('project_alpha_source_id'):null;
+  const preparedTerms=accessTerms?await prepareProjectAccessTerms(db(env),{workspaceId,sourceId:sourceId??'',projectPublicId:selectedTarget.publicId},accessTerms,
+    {type:'identity',id:actor.id},`invitation-${invitationId}`):null;
+  const delegation=preparedTerms?await captureProjectInvitationDelegation(env,{workspaceId,projectId:selectedTarget.publicId,identityId:actor.id,
+    issuer:principal.issuer,subject:principal.subject,email:principal.email.trim().toLowerCase()},capabilities,preparedTerms.view):null;
+  if(delegation){
+    for(const capability of new Set<PortalWorkspaceCapability>(['member.manage','workspace.view',...capabilities])){
+      const target=capability==='workspace.view'?{scopeType:'workspace' as const,publicId:workspaceId}:selectedTarget;
+      if(!await authorizePortalWorkspaceCapability(env,principal,workspaceId,capability,target))return {outcome:'denied'};
+    }
+  }
   const token = randomToken();
   const tokenHash = await digest(token);
   const recipientEmailHash = await invitationRecipientEmailHash(email);
@@ -165,12 +193,15 @@ export async function createWorkspaceInvitation(
   const database = db(env);
   try {
     await database.batch([
+      ...(delegation?[delegation.fence(invitationId)]:[]),
+      ...(preparedTerms?[preparedTerms.statement]:[]),
       database.prepare(`INSERT INTO portal_v2_invitations
         (id,workspace_id,token_hash,invited_email,invited_by_identity_id,expires_at)
         VALUES (?,?,?,?,?,?)`).bind(invitationId, workspaceId, tokenHash, email, actor.id, expiresAt),
       ...grants.map(capability => database.prepare(`INSERT INTO portal_v2_invitation_entitlements
-        (invitation_id,capability,scope_type,scope_public_id) VALUES (?,?,?,?)`)
-        .bind(invitationId, capability, capability === "workspace.view" ? "workspace" : scopeType, capability === "workspace.view" ? workspaceId : scopePublicId)),
+        (invitation_id,capability,scope_type,scope_public_id${termsReady?',access_terms_id':''}) VALUES (?,?,?,?${termsReady?',?':''})`)
+        .bind(invitationId, capability, capability === "workspace.view" ? "workspace" : scopeType, capability === "workspace.view" ? workspaceId : scopePublicId,
+          ...(termsReady?[preparedTerms?.id??null]:[]))),
       database.prepare(`INSERT INTO portal_v2_invitation_commands
         (workspace_id,actor_identity_id,idempotency_key,request_hash,invitation_id) VALUES (?,?,?,?,?)`)
         .bind(workspaceId, actor.id, idempotencyKey, requestHash, invitationId),
@@ -183,9 +214,12 @@ export async function createWorkspaceInvitation(
         VALUES (?,?,?,?,?)`).bind(crypto.randomUUID(), invitationId, email, JSON.stringify({ invitationId, token, expiresAt }), recipientEmailHash),
       database.prepare(`INSERT INTO portal_v2_membership_audit
         (id,workspace_id,actor_identity_id,action,invitation_id,details_json) VALUES (?,?,?,'invitation.created',?,?)`)
-        .bind(crypto.randomUUID(), workspaceId, actor.id, invitationId, JSON.stringify({ scopeType, scopePublicId, capabilities: grants })),
+        .bind(crypto.randomUUID(), workspaceId, actor.id, invitationId, JSON.stringify({ scopeType, scopePublicId, capabilities: grants,
+          ...(preparedTerms?{accessTerms:preparedTerms.view}:{}),invitationPolicyVersion:policy.version })),
     ]);
   } catch {
+    if(termsReady){const current=await readWorkspaceInvitationPolicy(database,workspaceId);
+      if(current.mode!=='allowed')return {outcome:current.mode==='disabled'?'policy_disabled':'approval_required'};}
     const raced = await replayedInvitation(env, workspaceId, actor.id, idempotencyKey, requestHash);
     if (raced && raced !== "conflict") return { outcome: "replayed", invitation: raced, deliveryQueued: true };
     return { outcome: raced === "conflict" ? "conflict" : "invalid" };
@@ -193,7 +227,8 @@ export async function createWorkspaceInvitation(
   return { outcome: "created", invitation: (await getInvitation(env, workspaceId, invitationId))!, deliveryQueued: true };
 }
 
-export async function listWorkspaceAccess(env: Env, principal: VerifiedClientPrincipal, workspaceId: string): Promise<{ members: WorkspaceMemberView[]; invitations: WorkspaceInvitationView[] } | null> {
+export async function listWorkspaceAccess(env: Env, principal: VerifiedClientPrincipal, workspaceId: string): Promise<{ members: WorkspaceMemberView[]; invitations: WorkspaceInvitationView[];
+  projectAccessTermsSupported:boolean;invitationPolicy:{mode:'allowed'|'disabled'|'require_approval';version:number};projectAccessOptions:Array<{projectPublicId:string;projectEndSupported:boolean}> } | null> {
   if (!(await authorizePortalWorkspaceCapability(env, principal, workspaceId, "member.manage", { scopeType: "workspace", publicId: workspaceId }))) return null;
   const members = await db(env).prepare(`SELECT m.identity_id,i.verified_email,m.status,m.source_type,
     EXISTS(SELECT 1 FROM portal_v2_entitlements e WHERE e.workspace_id=m.workspace_id AND e.identity_id=m.identity_id
@@ -211,7 +246,20 @@ export async function listWorkspaceAccess(env: Env, principal: VerifiedClientPri
   if (members.results.length > 200) return null;
   const invitationRows = await db(env).prepare(`SELECT id FROM portal_v2_invitations WHERE workspace_id=? ORDER BY created_at DESC,id DESC LIMIT 101`).bind(workspaceId).all<{ id: string }>();
   if (invitationRows.results.length > 100) return null;
-  return {
+  const termsReady=await projectAccessTermsReady(db(env));
+  const invitationPolicy=termsReady?await readWorkspaceInvitationPolicy(db(env),workspaceId):{mode:'allowed' as const,version:0};
+  const options=termsReady&&portalHierarchyRelationsEnabled(env)?(await db(env).prepare(`SELECT e.public_id,EXISTS(SELECT 1 FROM portal_project_access_current_lifecycle l
+    WHERE l.workspace_id=e.workspace_id AND l.project_public_id=e.public_id) supported
+    FROM portal_v2_directory_checkpoints cp JOIN portal_v2_directory_entities e ON e.workspace_id=cp.workspace_id
+    AND e.generation_id=cp.active_generation_id AND e.entity_type='project' AND e.active=1 WHERE cp.workspace_id=? ORDER BY e.public_id LIMIT 201`)
+    .bind(workspaceId).all<{public_id:string;supported:number}>()).results:[];
+  if(options.length>200)return null;
+  const actor=options.length?await actorIdentity(env,principal):null;
+  const root=options.length?await db(env).prepare('SELECT id,root_type rootType,COALESCE(pa_organization_public_id,pa_client_public_id) rootPublicId FROM portal_v2_workspaces WHERE id=?')
+    .bind(workspaceId).first<{id:string;rootType:'organization'|'standalone_client';rootPublicId:string}>():null;
+  const allowed=actor&&root?await resolvePortalRelationAuthorizedTargets(env,root,actor.id,'member.manage',options.map(option=>({scopeType:'project',publicId:option.public_id}))):null;
+  return {projectAccessTermsSupported:termsReady,invitationPolicy,projectAccessOptions:options.filter(option=>allowed?.has(`project:${option.public_id}`))
+    .map(option=>({projectPublicId:option.public_id,projectEndSupported:option.supported===1})),
     members: members.results.map(row => ({ identityId: row.identity_id, email: row.verified_email, status: row.status, manager: row.manager === 1, source: row.source_type })),
     invitations: (await Promise.all(invitationRows.results.map(row => getInvitation(env, workspaceId, row.id)))).filter((value): value is WorkspaceInvitationView => value !== null),
   };

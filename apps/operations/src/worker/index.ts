@@ -183,11 +183,13 @@ import { isPortalIdentityCollection, listPortalIdentityCollection, listPortalIde
 import {
   authenticatedDeliveryGrantsEnabled,
   createAuthenticatedDeliveryGrant,
+  previewAuthenticatedDeliveryGrant,
   listAuthenticatedDeliveryGrants,
   restoreAuthenticatedDeliveryGrant,
   revokeAuthenticatedDeliveryGrant,
   searchAuthenticatedDeliveryGrantAudiences,
 } from "./authenticated-delivery-grants";
+import { projectAccessTermsInputSchema } from '../../../client/src/worker/client-portal/project-access-terms';
 import {
   parseStoredWorkArea,
   summarizeWorkAreaChange,
@@ -534,6 +536,8 @@ const authenticatedGrantSchema = z.object({
   audiencePublicId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
   reasonCode: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$/),
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  accessTerms: projectAccessTermsInputSchema.optional(),
+  expectedContextVersion: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict();
 const authenticatedGrantRevokeSchema = z.object({
   expectedVersion: z.number().int().positive(),
@@ -541,6 +545,8 @@ const authenticatedGrantRevokeSchema = z.object({
 }).strict();
 const authenticatedGrantRestoreSchema = authenticatedGrantRevokeSchema.extend({
   expiresAt: z.iso.datetime({ offset: true }).nullable().optional(),
+  accessTerms: projectAccessTermsInputSchema.optional(),
+  expectedContextVersion: z.string().regex(/^[a-f0-9]{64}$/).optional(),
 }).strict();
 const paQuoteLinkSchema = z
   .object({ artifactId: z.coerce.number().int().positive() })
@@ -1137,6 +1143,7 @@ app.get("/api/delivery/authenticated-grants", async (c) => {
   const folderKey = await authorizeItem(c.env, c.get("principal"), folderRef);
   return c.json(await listAuthenticatedDeliveryGrants(c.env, c.get("principal"), folderKey));
 });
+app.post('/api/delivery/authenticated-grants/preview',async c=>c.json(await previewAuthenticatedDeliveryGrant(c.env,c.get('principal'),await body(c,authenticatedGrantSchema))));
 app.post("/api/delivery/authenticated-grants", async (c) => {
   const result = await createAuthenticatedDeliveryGrant(
     c.env, c.get("principal"), await body(c, authenticatedGrantSchema), c.req.header("Idempotency-Key") || "",
@@ -1154,7 +1161,7 @@ app.post("/api/delivery/authenticated-grants/:grantId/restore", async (c) => {
   const input = await body(c, authenticatedGrantRestoreSchema);
   const result = await restoreAuthenticatedDeliveryGrant(
     c.env, c.get("principal"), c.req.param("grantId"), input.expectedVersion,
-    input.reasonCode, input.expiresAt, c.req.header("Idempotency-Key") || "",
+    input.reasonCode, input.expiresAt, c.req.header("Idempotency-Key") || "",{accessTerms:input.accessTerms,expectedContextVersion:input.expectedContextVersion},
   );
   return c.json(result, result.replayed ? 200 : 201);
 });

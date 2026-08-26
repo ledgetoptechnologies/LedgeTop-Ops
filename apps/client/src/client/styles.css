@@ -1418,6 +1418,10 @@
 .portal-team-panel input, .portal-team-panel select { min-width: 0; padding: .7rem .8rem; border: 1px solid var(--line); border-radius: .65rem; background: #fff; color: var(--ink); font: inherit; }
 .portal-team-panel .portal-check { display: flex; align-items: flex-start; gap: .55rem; font-weight: 500; }
 .portal-team-panel .portal-check input { margin-top: .15rem; }
+.portal-team-panel .portal-info-notice { display: grid; gap: .65rem; min-width: 0; padding: .85rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-soft); overflow-wrap: anywhere; }
+.portal-team-panel .portal-info-notice h4, .portal-team-panel .portal-info-notice p { margin: 0; }
+.portal-team-panel .portal-info-notice .actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.portal-team-panel .portal-info-notice button { min-height: 44px; }
 .portal-hierarchy-picker {
   min-width: 0;
   margin: 0;

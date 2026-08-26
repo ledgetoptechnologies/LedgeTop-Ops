@@ -2239,6 +2239,19 @@ tbody tr:last-child td { border: 0; }
 .share-recipient-field .client-workspace-typeahead button { display: grid; gap: .15rem; }
 .share-recipient-field .client-workspace-typeahead small { color: var(--muted); }
 .authenticated-grant-fields, .portal-denial-fields { margin: 0; }
+.primary-authenticated-grant-panel p { margin: 0; overflow-wrap: anywhere; }
+.primary-authenticated-grant-panel button, .primary-authenticated-grant-panel input, .primary-authenticated-grant-panel select { min-height: 44px; }
+.primary-authenticated-grant-panel > label { margin: 0; font-size: .78rem; font-weight: 760; }
+.primary-authenticated-grant-panel > input { display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: .68rem .75rem; border: 1px solid var(--line); border-radius: 8px; background: var(--paper); }
+.primary-authenticated-grant-panel > .client-workspace-typeahead { position: static; min-width: 0; }
+.primary-authenticated-grant-panel > .client-workspace-typeahead button { color: var(--ink); }
+.primary-authenticated-grant-review { display: grid; gap: .85rem; min-width: 0; padding: .85rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); }
+.primary-authenticated-grant-review h4, .primary-authenticated-grant-review dl { margin: 0; }
+.primary-authenticated-grant-review dl { display: grid; gap: .6rem; }
+.primary-authenticated-grant-review dt { color: var(--muted); }
+.primary-authenticated-grant-review dd { margin: .15rem 0 0; overflow-wrap: anywhere; }
+.primary-authenticated-grant-review .actions { display: flex; flex-wrap: wrap; gap: .6rem; }
+.primary-authenticated-grant-review button { min-height: 44px; }
 .authenticated-grant-list, .portal-denial-list { display: grid; gap: .6rem; margin-top: .35rem; }
 .authenticated-grant-row, .portal-denial-row {
   display: flex;

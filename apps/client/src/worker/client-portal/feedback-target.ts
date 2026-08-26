@@ -15,6 +15,8 @@ import {
 } from "./workspace-v2";
 import { authorizeAuthenticatedDeliveryGrant, listAuthorizedAuthenticatedDeliveryPrefixes } from "./authenticated-delivery-grants";
 import type { FeedbackRecord, FeedbackSourceOwner } from "./feedback-store";
+import { projectAccessTermsReady } from './project-access-terms';
+import { projectAccessReadColumns } from './project-access-read';
 export type { FeedbackSourceOwner } from "./feedback-store";
 
 const opaqueId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
@@ -107,7 +109,7 @@ function changed(): never { throw new HTTPException(409, { message: "Feedback ta
 // authorization engine. Existing resource resolvers decide access. Re-running
 // these expressions in the INSERT detects additions (including new denies),
 // removals, source changes and time-based validity changes in the transaction.
-function proofParts(native: boolean): ProofPart[] {
+function proofParts(native: boolean,termsReady=false): ProofPart[] {
   const parts: ProofPart[] = [rowsProof(`${localSelect} ORDER BY association.id`, [
     "pa_client_id", "pa_org_id", "account_source_id", "project_source_id", "project_id", "project_name", "pa_project_id", "source_updated_at", "association_id", "prefix", "storage_key", "etag", "size", "uploaded_at", "target_live",
   ], 1), rowsProof(`SELECT member.role,member.can_view_billing,identity.issuer,identity.subject,identity.email FROM client_account_members member
@@ -137,11 +139,11 @@ function proofParts(native: boolean): ProofPart[] {
       AND ((match_type='issuer_subject' AND issuer=${field("issuer")} AND subject=${field("subject")})
         OR (match_type='email' AND lower(trim(normalized_email))=lower(trim(${field("email")})))) ORDER BY id`, ["id", "match_type", "issuer", "subject", "normalized_email"]));
   for (const capability of ["workspace.view", "delivery.view", "request.create"]) {
-    parts.push(rowsProof(`SELECT id,effect,scope_type,scope_public_id,entitlement_version,source_version FROM portal_v2_entitlements
+    parts.push(rowsProof(`SELECT id,effect,scope_type,scope_public_id,entitlement_version,source_version,${projectAccessReadColumns('entitlement',termsReady)} FROM portal_v2_entitlements entitlement
       WHERE workspace_id=${workspace} AND identity_id=${globalIdentity} AND capability='${capability}'
         AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
         AND (expires_at IS NULL OR datetime(expires_at)>datetime('now')) ORDER BY id`,
-      ["id", "effect", "scope_type", "scope_public_id", "entitlement_version", "source_version"]));
+      ["id", "effect", "scope_type", "scope_public_id", "entitlement_version", "source_version","access_terms_id","terms_project_id","terms_live"]));
   }
   parts.push(rowsProof(`SELECT id,workspace_id,scope_type,scope_public_id FROM portal_v2_identity_denials
     WHERE identity_id=${globalIdentity} AND (workspace_id=${workspace} OR scope_type='global')
@@ -151,10 +153,11 @@ function proofParts(native: boolean): ProofPart[] {
     FROM portal_v2_folder_bindings WHERE workspace_id=${workspace} AND id=${binding}`,
     ["id", "owner_scope_type", "owner_public_id", "r2_prefix", "source_type", "source_version", "status", "revoked_at"], 1));
   for (const table of ["portal_v2_authenticated_delivery_grants", "project_alpha_delivery_portal_grants"]) {
-    parts.push(rowsProof(`SELECT id,binding_source_version,audience_type,audience_public_id,audience_source_version,grant_version
-      FROM ${table} WHERE workspace_id=${workspace} AND folder_binding_id=${binding} AND status='active'
+    parts.push(rowsProof(`SELECT id,binding_source_version,audience_type,audience_public_id,audience_source_version,grant_version,
+      ${projectAccessReadColumns('grant_record',termsReady&&table==='portal_v2_authenticated_delivery_grants')}
+      FROM ${table} grant_record WHERE workspace_id=${workspace} AND folder_binding_id=${binding} AND status='active'
         AND revoked_at IS NULL AND (expires_at IS NULL OR datetime(expires_at)>datetime('now')) ORDER BY id`,
-      ["id", "binding_source_version", "audience_type", "audience_public_id", "audience_source_version", "grant_version"], 100));
+      ["id", "binding_source_version", "audience_type", "audience_public_id", "audience_source_version", "grant_version","access_terms_id","terms_project_id","terms_live"], 100));
   }
   parts.push(rowsProof(`SELECT r.grant_id,r.principal_public_id,r.identity_id,r.principal_source_version
     FROM portal_v2_authenticated_delivery_grant_recipients r JOIN portal_v2_authenticated_delivery_grants g ON g.id=r.grant_id
@@ -285,7 +288,7 @@ async function resolveCanonicalTarget(
   if (selected && targetInput.kind !== "project" && !bindingRow) deny();
   if (bindingRow) { values.bindingId = bindingRow.id; values.bindingOwnerType = bindingRow.owner_scope_type; values.bindingOwnerId = bindingRow.owner_public_id; }
   const serialized = JSON.stringify(values);
-  const parts = proofParts(Boolean(selected));
+  const parts = proofParts(Boolean(selected),Boolean(selected)&&await projectAccessTermsReady(database));
   parts[0]!.minRows = 1;
   parts[1]!.minRows = 1;
   if (selected) parts[2]!.minRows = 1;

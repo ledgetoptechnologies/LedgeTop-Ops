@@ -10,6 +10,9 @@ tested increments, not every workflow in the original handoff.
 ## Acceptance map
 
 Numbers refer to sections of the August 24 development handoff.
+The table and code-boundary findings describe audit base `ccba9c0`; subsequent
+local implementation and verification are recorded below. They are not claims
+that newer local fixes are missing, or that those fixes are deployed.
 
 | Handoff | Available foundation | Work still required for the requested outcome |
 | --- | --- | --- |
@@ -100,7 +103,20 @@ changing writes or access:
 
 ### Next access-lifecycle slice: audit findings
 
-The August 26 read-only trace confirms that changing the global 30-day cutoff
+Implementation is now locally verified after checkpoint `4a77f6d`.
+[Project access terms](project-access-terms.md) records the exact new-grant
+contract, additive migration, existing-grant behavior, coordinated rollout
+boundary and still-missing approval/notification workflows. The final Client
+backend gate passed 122/122 and Operations producer/resource gate passed 84/84.
+Both app typechecks and builds passed. Operations browser coverage passed 88/88
+before a primary-only contrast correction, then the final primary suite passed
+34/34 after that correction; the unchanged 54 native cases retain their earlier
+coverage. Client browser coverage passed 170/170. Final mobile/desktop screenshots
+were inspected, including recipient suggestions and invitation review. This is
+focused local evidence, not release evidence, and does not mark sections 7, 11
+or 14 complete. The broader workflows and coordinated rollout remain open.
+
+The initial August 26 read-only trace confirmed that changing the global 30-day cutoff
 to seven days would be incorrect. Relation-mode hierarchy, native scope queries
 and feedback target proofs currently apply identity-independent retention;
 legacy ancestry does not consistently apply that same cutoff. Invitation tokens
@@ -123,8 +139,10 @@ and clear it on reopening. Do not fabricate a completion date for an older
 source without that contract. The remaining decisions concern classification
 of existing unclassified grants and reopening behavior; safe proposals are to
 preserve existing grants until reviewed and require explicit renewal after
-expiry. These are proposals, not implemented policy or approval to rewrite
-existing access. Test exact time boundaries, separate invitation/access expiry,
+expiry. The local implementation now preserves unclassified historical grants
+and latches the first authoritative completion for new explicit terms;
+reopening does not renew those terms. This is not approval to rewrite existing
+access. Test exact time boundaries, separate invitation/access expiry,
 independent projects/sources, missing lifecycle support and concurrent changes.
 
 ## Release and latest UI state

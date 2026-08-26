@@ -116,16 +116,28 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
       ORDER BY e.entity_type,e.public_id LIMIT 51`).bind(context.workspaceId,context.generationId,query,query,after?.entryKind??'',after?.after??'')
       .all<{entity_type:PortalDirectoryEntry['type'];public_id:string;parent_public_id:string|null;parent_type:string|null;display_name:string;source_version:string}>();
     const scanned=rows.results.slice(0,50);
-    const scopes=await readNativeTargetScopes(c.env,context,scanned.map(e=>({scopeType:e.entity_type,publicId:e.public_id})));
+    const scopes=await readNativeTargetScopes(c.env,context,scanned.map(e=>({scopeType:e.entity_type,publicId:e.public_id})),{retention:'structural'});
+    const expiredProjects=[...new Set([...scopes.values()].flatMap(target=>target.proofRows
+      .filter(row=>row.entity_type==='project'&&row.retained===0).map(row=>row.public_id)))];
+    // A live explicit delivery term changes only that project's history cutoff.
+    // Directory capability and all current denies remain independently required.
+    const termGrants=expiredProjects.length&&await nativeDeliveryResourcesReady(c.env)
+      ?(await readNativeAuthenticatedDeliveryGrants(c.env,c.get('clientPrincipal'),context,undefined,{projectIds:expiredProjects}))
+        .filter(grant=>grant.source==='staff'&&grant.access_terms_id&&grant.terms_live===1):[];
     const entries=[];
     for(const row of scanned){
       const target=scopes.get(`${row.entity_type}:${row.public_id}`);
-      const allowed=target&&nativePortalScopesAllowed(context,'directory.read',target.scopes);
+      const retainedProject=target&&termGrants.find(grant=>target.scopes.has(`project:${grant.owner_public_id}`))?.owner_public_id;
+      const allowed=target&&nativePortalScopesAllowed(context,'directory.read',target.scopes,true,target,retainedProject);
       if(allowed)entries.push({type:row.entity_type,publicId:row.public_id,parentPublicId:row.parent_public_id,parentType:row.parent_type,
         displayName:clean(row.display_name),sourceVersion:row.source_version});
     }
     const last=scanned.at(-1);
     const nextCursor=rows.results.length>50&&last?await encodeNativePortalHandle(c.env,{...proof(context,undefined,'cursor',`hierarchy:${query}`),after:last.public_id,entryKind:last.entity_type}):null;
+    if(termGrants.length){
+      const current=await readNativeAuthenticatedDeliveryGrants(c.env,c.get('clientPrincipal'),context,undefined,{projectIds:expiredProjects});
+      if(termGrants.some(grant=>!current.some(now=>now.binding_fingerprint===grant.binding_fingerprint)))return changed();
+    }
     await recheck(c,context);return c.json({...envelope(context),entries,page:{nextCursor}});
   });
   router.get('/:workspaceId/deliveries',async c=>{

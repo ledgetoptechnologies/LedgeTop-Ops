@@ -745,11 +745,11 @@ for (const width of [1280, 390, 320]) {
         { type: "project", publicId: "pa-project-a", parentPublicId: "department-a", displayName: "North Site", sourceVersion: "1" },
         { type: "project", publicId: "pa-project-b", parentPublicId: "department-a", displayName: "South Site", sourceVersion: "1" },
       ] } });
-      if (path === "/api/client/v2/workspaces/workspace-a/access") return route.fulfill({ json: { members: [{ identityId: "member-a", email: "manager@example.test", status: "active", manager: true, source: "project_alpha" }], invitations } });
+      if (path === "/api/client/v2/workspaces/workspace-a/access") return route.fulfill({ json: { members: [{ identityId: "member-a", email: "manager@example.test", status: "active", manager: true, source: "project_alpha" }], invitations, invitationPolicy: {mode: "allowed", version: 1}, projectAccessTermsSupported: true, projectAccessOptions: [{projectPublicId: "pa-project-a", projectEndSupported: true}, {projectPublicId: "pa-project-b", projectEndSupported: true}] } });
       if (path === "/api/client/v2/workspaces/workspace-a/invitations" && request.method() === "POST") {
         const body = request.postDataJSON() as Record<string, any>;
         invitationBodies.push(body);
-        invitations.push({ id: `invite-${invitations.length}`, email: body.email, status: "pending", scope: body.organizationWide ? { type: "workspace", publicId: null } : body.targetScope, capabilities: body.capabilities, expiresAt: "2099-01-01T00:00:00Z" });
+        invitations.push({ id: `invite-${invitations.length}`, email: body.email, status: "pending", scope: body.organizationWide ? { type: "workspace", publicId: null } : body.targetScope, capabilities: body.capabilities, expiresAt: "2099-01-01T00:00:00Z", accessTerms: null });
         return route.fulfill({ status: 201, json: { outcome: "created" } });
       }
       return route.fallback();
@@ -771,6 +771,7 @@ for (const width of [1280, 390, 320]) {
     await page.keyboard.press("Space");
     await expect(department).toBeChecked();
     await page.getByLabel("Email address").fill("contractor@example.test");
+    await page.getByRole("button", { name: "Review invitation" }).click();
     await page.getByRole("button", { name: "Send invitation" }).click();
     await expect.poll(() => invitationBodies.length).toBe(1);
     expect(invitationBodies[0]).toMatchObject({ email: "contractor@example.test", targetScope: { type: "department", publicId: "department-a" }, capabilities: ["delivery.view"] });
@@ -778,15 +779,15 @@ for (const width of [1280, 390, 320]) {
 
     const organization = hierarchy.getByRole("radio", { name: /^Acme/ });
     await organization.check();
-    await expect(page.getByRole("button", { name: "Send invitation" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Review invitation" })).toBeDisabled();
     await expect(page.getByRole("alert")).toContainText("current and future projects across this organization");
     await page.getByLabel("I understand and want to grant organization-wide access.").check();
-    await expect(page.getByRole("button", { name: "Send invitation" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Review invitation" })).toBeEnabled();
 
     await page.getByLabel("Give access across this entire organization workspace").check();
-    await expect(page.getByRole("button", { name: "Send invitation" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Review invitation" })).toBeDisabled();
     await page.getByLabel("I understand and want to grant workspace-wide access.").check();
-    await expect(page.getByRole("button", { name: "Send invitation" })).toBeEnabled();
+    await expect(page.getByRole("button", { name: "Review invitation" })).toBeEnabled();
 
     if (width <= 390) {
       const overflow = await page.evaluate(() => [...document.querySelectorAll<HTMLElement>("body *")]

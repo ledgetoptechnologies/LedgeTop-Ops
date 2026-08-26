@@ -1,4 +1,6 @@
 import type { Env as ClientEnv } from "../types";
+import { projectAccessTermsReady, projectAccessTermsSql } from './project-access-terms';
+import { projectAccessCapacitySql } from './project-access-capacity';
 type Env = Pick<ClientEnv, "DELIVERY_DB" | "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED">;
 
 export const PORTAL_HIERARCHY_RELATIONS_FLAG = "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED";
@@ -25,6 +27,7 @@ export async function resolvePortalRelationTargetScopes(
   env: { DELIVERY_DB: Pick<D1Database, "prepare"> },
   workspace: RelationWorkspace,
   target: RelationTarget,
+  options?: {retention:'structural'},
 ): Promise<Set<string> | null> {
   const scopes = new Set<string>([`workspace:${workspace.id}`]);
   if (target.scopeType === "workspace") return target.publicId === workspace.id ? scopes : null;
@@ -78,7 +81,8 @@ export async function resolvePortalRelationTargetScopes(
         AND lifecycle.generation_id=checkpoint.active_generation_id
       JOIN json_each(?) requested ON requested.value=lifecycle.project_public_id
       WHERE checkpoint.workspace_id=?
-        AND (lifecycle.lifecycle_status='active' OR datetime(lifecycle.completed_at,'+30 days')>datetime('now'))`)
+        AND (lifecycle.lifecycle_status='active' OR (lifecycle.lifecycle_status='completed'
+          AND ${options?.retention==='structural'?"datetime(lifecycle.completed_at) IS NOT NULL":"datetime(lifecycle.completed_at,'+30 days')>datetime('now')"}))`)
       .bind(JSON.stringify(projectIds), workspace.id)
       .first<number>("retained");
     if (retained !== projectIds.length) return null;
@@ -99,9 +103,11 @@ export async function resolvePortalRelationAuthorizedTargets(
   identityId: string,
   capability: string,
   targets: RelationTarget[],
+  retainedTermProjects:ReadonlySet<string>=new Set(),
 ): Promise<Set<string> | null> {
   if (targets.length > MAX_AUTHORIZATION_TARGETS) return null;
   if (targets.length === 0) return new Set();
+  const termsReady=await projectAccessTermsReady(env.DELIVERY_DB);
   const requested = JSON.stringify(targets.map(target => ({
     scopeType: target.scopeType,
     publicId: target.publicId,
@@ -150,18 +156,20 @@ export async function resolvePortalRelationAuthorizedTargets(
           LEFT JOIN portal_v2_project_lifecycle lifecycle ON lifecycle.workspace_id=active_generation.workspace_id
             AND lifecycle.generation_id=active_generation.generation_id
             AND lifecycle.project_public_id=project_lineage.public_id
-            AND (lifecycle.lifecycle_status='active' OR datetime(lifecycle.completed_at,'+30 days')>datetime('now'))
+            AND (lifecycle.lifecycle_status='active' OR (lifecycle.lifecycle_status='completed'
+              AND ${termsReady?"datetime(lifecycle.completed_at) IS NOT NULL":"datetime(lifecycle.completed_at,'+30 days')>datetime('now')"}))
           WHERE project_lineage.target_type=stats.target_type
             AND project_lineage.target_public_id=stats.target_public_id
             AND project_lineage.entity_type='project' AND lifecycle.project_public_id IS NULL
         )
     ),
     entitlement_count(row_count) AS (
-      SELECT COUNT(*) FROM portal_v2_entitlements
+      SELECT COUNT(*) FROM portal_v2_entitlements counted_entitlement
       WHERE workspace_id=? AND identity_id=? AND capability=?
         AND status='active' AND revoked_at IS NULL
         AND datetime(valid_from)<=datetime('now')
         AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+        AND ${projectAccessCapacitySql('counted_entitlement',termsReady)}
     ),
     matching(target_type,target_public_id,effect) AS (
       SELECT target.target_type,target.target_public_id,entitlement.effect
@@ -172,13 +180,25 @@ export async function resolvePortalRelationAuthorizedTargets(
         AND entitlement.status='active' AND entitlement.revoked_at IS NULL
         AND datetime(entitlement.valid_from)<=datetime('now')
         AND (entitlement.expires_at IS NULL OR datetime(entitlement.expires_at)>datetime('now'))
+        AND ${projectAccessCapacitySql('entitlement',termsReady)}
       WHERE entitlement_count.row_count<=200 AND (
         (entitlement.scope_type='workspace' AND entitlement.scope_public_id=?) OR EXISTS (
           SELECT 1 FROM lineage scope WHERE scope.target_type=target.target_type
             AND scope.target_public_id=target.target_public_id
             AND scope.entity_type=entitlement.scope_type AND scope.public_id=entitlement.scope_public_id
         )
-      )
+      ) ${termsReady?`AND (entitlement.effect='deny' OR (
+        (entitlement.access_terms_id IS NULL OR EXISTS(SELECT 1 FROM lineage term_target
+          JOIN portal_project_access_terms term ON term.id=entitlement.access_terms_id
+          WHERE term_target.target_type=target.target_type AND term_target.target_public_id=target.target_public_id
+            AND term_target.entity_type='project' AND term_target.public_id=term.project_public_id
+            AND ${projectAccessTermsSql({termsId:'entitlement.access_terms_id',workspaceId:'entitlement.workspace_id',projectId:'term_target.public_id',legacyRetained:'1'})}))
+        AND NOT EXISTS(SELECT 1 FROM lineage project_scope JOIN active_generation
+          LEFT JOIN portal_v2_project_lifecycle current_lifecycle ON current_lifecycle.workspace_id=active_generation.workspace_id
+            AND current_lifecycle.generation_id=active_generation.generation_id AND current_lifecycle.project_public_id=project_scope.public_id
+          WHERE project_scope.target_type=target.target_type AND project_scope.target_public_id=target.target_public_id
+            AND project_scope.entity_type='project' AND NOT ${projectAccessTermsSql({termsId:'entitlement.access_terms_id',workspaceId:'entitlement.workspace_id',projectId:'project_scope.public_id',legacyRetained:"(current_lifecycle.lifecycle_status='active' OR datetime(current_lifecycle.completed_at,'+30 days')>datetime('now') OR (target.target_type='project' AND target.target_public_id=project_scope.public_id AND project_scope.public_id IN(SELECT value FROM json_each(?))))"})})
+      ))`:''}
     )
     SELECT target_type,target_public_id FROM matching
     GROUP BY target_type,target_public_id
@@ -188,6 +208,7 @@ export async function resolvePortalRelationAuthorizedTargets(
       requested, workspace.id, workspace.rootType, workspace.rootPublicId, MAX_SCOPES,
       workspace.id, identityId, capability,
       workspace.id, identityId, capability, workspace.id,
+      ...(termsReady?[JSON.stringify([...retainedTermProjects])]:[]),
     )
     .all<{ target_type: string; target_public_id: string }>();
   return new Set(result.results.map(row => `${row.target_type}:${row.target_public_id}`));

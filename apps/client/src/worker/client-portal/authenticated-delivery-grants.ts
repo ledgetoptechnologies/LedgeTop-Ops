@@ -3,15 +3,17 @@ import { primaryWorkspaceAccount } from "./project-alpha-source";
 import type { PortalAuthorizationEnv } from "./workspace-v2";
 type Env = PortalAuthorizationEnv & Pick<ClientEnv, "AUTHENTICATED_DELIVERY_GRANTS_ENABLED">;
 import type { VerifiedClientPrincipal } from "./types";
-import { authorizePortalWorkspaceCapability, portalHierarchyV2Enabled, nativePortalScopesAllowed, type NativePortalReadContext } from "./workspace-v2";
+import { authorizePortalWorkspaceCapability,authorizePrimaryPortalTargetBatch, portalHierarchyV2Enabled, nativePortalScopesAllowed, type NativePortalReadContext } from "./workspace-v2";
 import { readNativeTargetScopes } from './native-portal-scopes';
 import { d1TablesPresent } from '../schema-readiness';
 import { HTTPException } from 'hono/http-exception';
+import { projectAccessTermsReady, projectAccessTermsSql } from './project-access-terms';
+import { projectAccessReadColumns, projectAccessRowAllows, type ProjectAccessReadRow } from './project-access-read';
 
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const AUTHORIZED_BINDING_LIMIT = 100;
 
-interface GrantCandidate {
+interface GrantCandidate extends ProjectAccessReadRow {
   grant_id: string;
   grant_version: number;
   binding_source_version: string;
@@ -40,16 +42,17 @@ async function candidates(
   workspaceId: string,
   folderBindingId?: string,
   native?: NativePortalReadContext,
-  selection?: {bindingIds?:string[];grantId?:string},
+  selection?: {bindingIds?:string[];grantId?:string;projectIds?:string[]},
 ): Promise<GrantCandidate[] | null> {
   const workspaceSource = native ? `workspace.project_alpha_source_id=? AND workspace.legacy_account_id IS NULL
     AND EXISTS(SELECT 1 FROM pa_portal_workspace_sources map WHERE map.workspace_id=workspace.id
       AND map.projection_source_id=workspace.project_alpha_source_id)` : primaryWorkspaceAccount('workspace');
   const sourceBindings = native ? [native.sourceId] : [];
+  const termsReady=native?.projectAccessTermsAvailable??await projectAccessTermsReady(env.DELIVERY_DB);
   const rows = await portalDb(env).prepare(`SELECT DISTINCT 'staff' source,binding.id folder_binding_id,binding.r2_prefix,
       grant_record.id grant_id,grant_record.grant_version,binding.source_version binding_source_version,
       binding.owner_scope_type,binding.owner_public_id,grant_record.audience_type,
-      grant_record.audience_public_id,grant_record.audience_source_version
+      grant_record.audience_public_id,grant_record.audience_source_version,${projectAccessReadColumns('grant_record',termsReady)}
     FROM portal_v2_identities identity
     JOIN portal_v2_workspace_memberships membership
       ON membership.identity_id=identity.id AND membership.workspace_id=?
@@ -75,6 +78,7 @@ async function candidates(
       AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
         AND workspace.status='active' AND ${workspaceSource})
       AND (grant_record.audience_type<>'principal' OR principal_record.public_id IS NOT NULL)
+      ${termsReady?`AND ${projectAccessTermsSql({termsId:'grant_record.access_terms_id',workspaceId:'grant_record.workspace_id',projectId:'binding.owner_public_id',legacyRetained:'1'})}`:''}
       ${native ? `AND (grant_record.audience_type<>'principal' OR (recipient.principal_public_id=grant_record.audience_public_id
         AND recipient.principal_source_version=grant_record.audience_source_version))
         AND EXISTS(SELECT 1 FROM portal_native_staff_grants publication JOIN portal_native_staff_bindings ownership
@@ -82,18 +86,21 @@ async function candidates(
           WHERE publication.grant_id=grant_record.id AND publication.binding_id=binding.id AND publication.state='active'
             AND publication.source_id=? AND ownership.workspace_id=grant_record.workspace_id
             AND ownership.r2_prefix=binding.r2_prefix AND ownership.project_public_id=binding.owner_public_id AND binding.owner_scope_type='project')
-        AND (? IS NULL OR binding.id IN (SELECT value FROM json_each(?))) AND (? IS NULL OR grant_record.id=?)` : ''}
+        AND (? IS NULL OR binding.id IN (SELECT value FROM json_each(?))) AND (? IS NULL OR grant_record.id=?)
+        AND (? IS NULL OR (binding.owner_scope_type='project' AND binding.owner_public_id IN (SELECT value FROM json_each(?))))` : ''}
+      ${!native&&selection?.projectIds?`AND binding.owner_scope_type='project' AND binding.owner_public_id IN(SELECT value FROM json_each(?))`:''}
       AND (? IS NULL OR binding.id=?)
     ORDER BY binding.id LIMIT ?`)
     .bind(workspaceId, principal.issuer, principal.subject,
       ...sourceBindings,
-      ...(native?[native.sourceId,selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.grantId??null,selection?.grantId??null]:[]),
-      folderBindingId ?? null, folderBindingId ?? null, native?201:AUTHORIZED_BINDING_LIMIT + 1)
+      ...(native?[native.sourceId,selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.grantId??null,selection?.grantId??null,
+        selection?.projectIds?JSON.stringify(selection.projectIds):null,selection?.projectIds?JSON.stringify(selection.projectIds):null]:[]),
+      ...(!native&&selection?.projectIds?[JSON.stringify(selection.projectIds)]:[]),folderBindingId ?? null, folderBindingId ?? null, native?201:AUTHORIZED_BINDING_LIMIT + 1)
     .all<GrantCandidate>();
   const integration = await portalDb(env).prepare(`SELECT DISTINCT 'project_alpha_delivery' source,binding.id folder_binding_id,binding.r2_prefix,
       grant_record.id grant_id,grant_record.grant_version,binding.source_version binding_source_version,
       binding.owner_scope_type,binding.owner_public_id,grant_record.audience_type,
-      grant_record.audience_public_id,grant_record.audience_source_version
+      grant_record.audience_public_id,grant_record.audience_source_version,NULL access_terms_id,NULL terms_project_id,NULL terms_kind,1 terms_live
     FROM portal_v2_identities identity
     JOIN portal_v2_workspace_memberships membership ON membership.identity_id=identity.id AND membership.workspace_id=?
       AND membership.status='active' AND membership.revoked_at IS NULL
@@ -125,13 +132,45 @@ async function candidates(
             AND receipt.access_mode='portal' AND receipt.resource_id=grant_record.id AND receipt.status='accepted')` : ''})
       AND principal_record.public_id IS NOT NULL
       AND (principal_record.identity_id=identity.id OR eligibility.identity_id=identity.id)
-      ${native?`AND (? IS NULL OR binding.id IN (SELECT value FROM json_each(?))) AND (? IS NULL OR grant_record.id=?)`:''}
+      ${native?`AND (? IS NULL OR binding.id IN (SELECT value FROM json_each(?))) AND (? IS NULL OR grant_record.id=?)
+        AND (? IS NULL OR (binding.owner_scope_type='project' AND binding.owner_public_id IN (SELECT value FROM json_each(?))))`:''}
+      ${!native&&selection?.projectIds?`AND binding.owner_scope_type='project' AND binding.owner_public_id IN(SELECT value FROM json_each(?))`:''}
       AND (? IS NULL OR binding.id=?) ORDER BY binding.id LIMIT ?`)
     .bind(workspaceId,principal.issuer,principal.subject,...sourceBindings,
-      ...(native?[selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.grantId??null,selection?.grantId??null]:[]),
-      folderBindingId??null,folderBindingId??null,native?201:AUTHORIZED_BINDING_LIMIT+1).all<GrantCandidate>();
+      ...(native?[selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.grantId??null,selection?.grantId??null,
+        selection?.projectIds?JSON.stringify(selection.projectIds):null,selection?.projectIds?JSON.stringify(selection.projectIds):null]:[]),
+      ...(!native&&selection?.projectIds?[JSON.stringify(selection.projectIds)]:[]),folderBindingId??null,folderBindingId??null,native?201:AUTHORIZED_BINDING_LIMIT+1).all<GrantCandidate>();
   const combined=[...rows.results,...integration.results];
   return combined.length > (native?200:AUTHORIZED_BINDING_LIMIT) ? null : combined;
+}
+
+async function authorizedPrimaryStaffGrants(env:Env,principal:VerifiedClientPrincipal,workspaceId:string,rows:GrantCandidate[]){
+  const staff=rows.filter(row=>row.source==='staff');
+  const scopes=await authorizePrimaryPortalTargetBatch(env,principal,workspaceId,staff.map(row=>({
+    target:{scopeType:'folder' as const,publicId:row.folder_binding_id},
+    ...(row.access_terms_id&&row.terms_project_id?{retainedProjectId:row.terms_project_id}:{})})));
+  return staff.flatMap(row=>{const scope=scopes.get(`folder:${row.folder_binding_id}`);
+    if(!scope||scope.bindingVersion!==row.binding_source_version||row.audience_type!=='principal'
+      &&scope.versions.get(`${row.audience_type}:${row.audience_public_id}`)!==row.audience_source_version)return [];
+    const expired=scope.proofRows.filter(item=>item.entity_type==='project'&&item.retained===0).map(item=>item.public_id);
+    if(!projectAccessRowAllows(row,scope.scopes,expired))return [];
+    return [{row,scope}];
+  });
+}
+
+/** Current primary explicit grants supply retention only, not directory access.
+ * Selection and authorization are bounded/batched, with the same allow/deny
+ * rules used by the primary file authorizer. Never expose these proof bytes. */
+export async function readPrimaryTermRetentionGrants(env:Env,principal:VerifiedClientPrincipal,workspaceId:string,projectIds:string[]){
+  if(!authenticatedDeliveryGrantsEnabled(env)||!projectIds.length||!await projectAccessTermsReady(env.DELIVERY_DB))return [];
+  if(projectIds.length>200)throw new HTTPException(503,{message:'Project history exceeds safe capacity. Contact support.'});
+  const rows=await candidates(env,principal,workspaceId,undefined,undefined,{projectIds});
+  if(!rows)throw new HTTPException(503,{message:'Project delivery access exceeds safe capacity. Contact support.'});
+  const explicit=rows.filter(row=>row.source==='staff'&&row.access_terms_id&&row.owner_scope_type==='project'
+    &&projectAccessRowAllows(row,new Set([`project:${row.owner_public_id}`])));
+  return (await authorizedPrimaryStaffGrants(env,principal,workspaceId,explicit))
+    .map(({row,scope})=>({projectId:row.owner_public_id,proof:JSON.stringify([row,scope.proofRows])}))
+    .sort((a,b)=>a.projectId.localeCompare(b.projectId)||a.proof.localeCompare(b.proof));
 }
 
 export async function nativeDeliveryResourcesReady(env:Env):Promise<boolean>{
@@ -143,22 +182,26 @@ export async function nativeDeliveryResourcesReady(env:Env):Promise<boolean>{
  * reused; callers must fence the supplied context again before returning data. */
 export async function readNativeAuthenticatedDeliveryGrants(
   env: Env, principal: VerifiedClientPrincipal, context: NativePortalReadContext, bindingId?: string,
-  selection?:{bindingIds?:string[];grantId?:string},
+  selection?:{bindingIds?:string[];grantId?:string;projectIds?:string[]},
 ): Promise<Array<GrantCandidate & {owner_name:string;binding_fingerprint:string}>> {
   if (!await nativeDeliveryResourcesReady(env))throw new HTTPException(503,{message:'Native deliveries are not ready. Contact support.'});
   const rows = await candidates(env,principal,context.workspaceId,bindingId,context,selection);
   if (!rows) throw new HTTPException(503,{message:'This delivery selection has too many active grants. Contact support.'});
-  const scopes=await readNativeTargetScopes(env,context,[...new Set(rows.map(r=>r.folder_binding_id))].map(publicId=>({scopeType:'folder',publicId})));
+  const scopes=await readNativeTargetScopes(env,context,[...new Set(rows.map(r=>r.folder_binding_id))].map(publicId=>({scopeType:'folder',publicId})),{retention:'structural'});
   const result:Array<GrantCandidate & {owner_name:string;binding_fingerprint:string}> = [];
   for (const row of rows) {
     const owner=scopes.get(`folder:${row.folder_binding_id}`);
-    if(!owner||owner.bindingVersion!==row.binding_source_version||!nativePortalScopesAllowed(context,'delivery.view',owner.scopes,row.source==='staff'))continue;
+    if(!owner||owner.bindingVersion!==row.binding_source_version)continue;
+    const expired=owner.proofRows.filter(p=>p.entity_type==='project'&&p.retained===0).map(p=>p.public_id);
+    if(!projectAccessRowAllows(row,owner.scopes,expired)
+      ||!nativePortalScopesAllowed(context,'delivery.view',owner.scopes,row.source==='staff',owner,row.access_terms_id?row.terms_project_id??undefined:undefined))continue;
     if(row.audience_type!=='principal'&&owner.versions.get(`${row.audience_type}:${row.audience_public_id}`)!==row.audience_source_version)continue;
     {
       const fingerprint = new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([
         context.sourceId,context.workspaceId,row.folder_binding_id,row.binding_source_version,row.r2_prefix,
         row.owner_scope_type,row.owner_public_id,row.source,row.grant_id,row.grant_version,
         row.audience_type,row.audience_public_id,row.audience_source_version,
+        row.access_terms_id??null,
       ]))));
       result.push({...row,owner_name:owner.name,binding_fingerprint:[...fingerprint].map(n=>n.toString(16).padStart(2,'0')).join('')});
     }
@@ -262,13 +305,24 @@ export async function authorizeAuthenticatedDeliveryGrant(
   if (!authenticatedDeliveryGrantsEnabled(env) || !OPAQUE.test(workspaceId) || !OPAQUE.test(folderBindingId)) return false;
   const rows = await candidates(env, principal, workspaceId, folderBindingId);
   if (!rows) return false;
+  const termsReady=await projectAccessTermsReady(env.DELIVERY_DB);
+  if(termsReady&&(await authorizedPrimaryStaffGrants(env,principal,workspaceId,rows)).length)return true;
   for (const row of rows) {
+    if(termsReady&&row.source==='staff')continue;
+    if(row.access_terms_id&&!projectAccessRowAllows(row,new Set([`project:${row.owner_public_id}`])))continue;
+    if(row.access_terms_id){
+      const scope=(await authorizePrimaryPortalTargetBatch(env,principal,workspaceId,[{target:{scopeType:'folder',publicId:folderBindingId},retainedProjectId:row.owner_public_id}]))
+        .get(`folder:${folderBindingId}`);
+      if(scope?.bindingVersion===row.binding_source_version&&(row.audience_type==='principal'||scope.versions.get(`${row.audience_type}:${row.audience_public_id}`)===row.audience_source_version))return true;
+      continue;
+    }
     if(!await audienceLiveAndContained(env,workspaceId,row))continue;
     if(row.source==="project_alpha_delivery"){
       if(!await integrationDenied(env,principal,workspaceId,row))return true;
       continue;
     }
-    if(await authorizePortalWorkspaceCapability(env,principal,workspaceId,"delivery.view",{scopeType:"folder",publicId:folderBindingId}))return true;
+    if(await authorizePortalWorkspaceCapability(env,principal,workspaceId,"delivery.view",{scopeType:"folder",publicId:folderBindingId},
+      row.access_terms_id&&row.terms_project_id?{retainedProjectId:row.terms_project_id}:undefined))return true;
   }
   return false;
 }
@@ -281,13 +335,23 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
   workspaceId: string,
 ): Promise<Set<string>> {
   if (!authenticatedDeliveryGrantsEnabled(env) || !OPAQUE.test(workspaceId)) return new Set();
+  const termsReady=await projectAccessTermsReady(env.DELIVERY_DB);
+  if(termsReady){
+    const rows=await candidates(env,principal,workspaceId);
+    if(!rows)throw new HTTPException(503,{message:'Project delivery access exceeds safe capacity. Contact support.'});
+    const prefixes=new Set((await authorizedPrimaryStaffGrants(env,principal,workspaceId,rows)).map(({row})=>row.r2_prefix));
+    // Integration-owned legacy grants retain their separate existing policy.
+    for(const row of rows.filter(item=>item.source==='project_alpha_delivery'))
+      if(await audienceLiveAndContained(env,workspaceId,row)&&!await integrationDenied(env,principal,workspaceId,row))prefixes.add(row.r2_prefix);
+    return prefixes;
+  }
   // Resolve every folder binding in one bounded authorization query. Calling
   // the single-binding resolver in a loop repeated identity, membership,
   // hierarchy, entitlement and denial reads up to 100 times on each listing.
   const rows = await portalDb(env).prepare(`WITH RECURSIVE base AS (
       SELECT DISTINCT identity.id identity_id,workspace.id workspace_id,workspace.root_type,
         COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) root_public_id,
-        grant_record.id grant_id,grant_record.audience_type,grant_record.audience_public_id,
+        grant_record.id grant_id,${termsReady?'grant_record.access_terms_id':'NULL'} access_terms_id,grant_record.audience_type,grant_record.audience_public_id,
         grant_record.audience_source_version,binding.id folder_binding_id,binding.r2_prefix,
         owner.entity_type,owner.public_id,owner.parent_public_id,owner.source_version
       FROM portal_v2_identities identity
@@ -351,7 +415,8 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
     )
     SELECT DISTINCT base.r2_prefix
     FROM base
-    WHERE EXISTS (SELECT 1 FROM lineage root
+    WHERE ${termsReady?projectAccessTermsSql({termsId:'base.access_terms_id',workspaceId:'base.workspace_id',projectId:'base.public_id',legacyRetained:'1'}):'1'}
+      AND EXISTS (SELECT 1 FROM lineage root
         WHERE root.grant_id=base.grant_id AND root.entity_type=base.root_type
           AND root.public_id=base.root_public_id)
       AND (base.audience_type='principal' OR EXISTS (SELECT 1 FROM lineage audience
@@ -364,6 +429,9 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
           AND allow_record.status='active' AND allow_record.revoked_at IS NULL
           AND datetime(allow_record.valid_from)<=datetime('now')
           AND (allow_record.expires_at IS NULL OR datetime(allow_record.expires_at)>datetime('now'))
+          ${termsReady?`AND (allow_record.access_terms_id IS NULL OR EXISTS(SELECT 1 FROM lineage term_project
+            WHERE term_project.grant_id=base.grant_id AND term_project.entity_type='project'
+              AND ${projectAccessTermsSql({termsId:'allow_record.access_terms_id',workspaceId:'base.workspace_id',projectId:'term_project.public_id',legacyRetained:'1'})}))`:''}
           AND ((allow_record.scope_type='workspace' AND allow_record.scope_public_id=?)
             OR (allow_record.scope_type='folder' AND allow_record.scope_public_id=base.folder_binding_id)
             OR EXISTS (SELECT 1 FROM lineage allowed_scope WHERE allowed_scope.grant_id=base.grant_id
@@ -403,10 +471,12 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
   if(!integration)return new Set();
   for(const row of integration){
     if(!row.r2_prefix || prefixes.has(row.r2_prefix))continue;
+    if(row.access_terms_id&&!projectAccessRowAllows(row,new Set([`project:${row.owner_public_id}`])))continue;
     if(!await audienceLiveAndContained(env,workspaceId,row))continue;
     if(row.source==="project_alpha_delivery"){
       if(!await integrationDenied(env,principal,workspaceId,row))prefixes.add(row.r2_prefix);
-    }else if(await authorizePortalWorkspaceCapability(env,principal,workspaceId,"delivery.view",{scopeType:"folder",publicId:row.folder_binding_id}))prefixes.add(row.r2_prefix);
+    }else if(await authorizePortalWorkspaceCapability(env,principal,workspaceId,"delivery.view",{scopeType:"folder",publicId:row.folder_binding_id},
+      row.access_terms_id&&row.terms_project_id?{retainedProjectId:row.terms_project_id}:undefined))prefixes.add(row.r2_prefix);
   }
   return prefixes;
 }

@@ -1,13 +1,18 @@
 import type { Env as ClientEnv } from "../types";
+import { HTTPException } from 'hono/http-exception';
 import { readPortalSourceAuthorityProof, portalSourceAuthoritiesReady, type PortalSourceAuthorityProof } from "../project-alpha-portal-authority";
-import { readNativeTargetScopes } from "./native-portal-scopes";
+import { readNativeTargetScopes, type NativeTargetScopes } from "./native-portal-scopes";
+import { projectAccessReadColumns, projectAccessRowAllows, readExpiredScopeProjects, type ProjectAccessReadRow } from './project-access-read';
+import { projectAccessTermsReady,readWorkspaceInvitationPolicy } from './project-access-terms';
+import { projectAccessCapacitySql } from './project-access-capacity';
 import { d1TablesPresent } from "../schema-readiness";
 import { bindNativePortalEligibility } from "./native-portal-eligibility";
+import { readPrimaryTermRetentionGrants } from './authenticated-delivery-grants';
 import { localOrPrimaryAlphaReference, primaryAlphaReference, primaryWorkspaceAccount } from "./project-alpha-source";
 export type PortalAuthorizationEnv = Pick<ClientEnv, "DELIVERY_DB" | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED" |
   "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED" | "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED" |
   "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED" | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED" |
-  "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY">;
+  "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY" | "AUTHENTICATED_DELIVERY_GRANTS_ENABLED">;
 type Env = PortalAuthorizationEnv;
 import type { VerifiedClientPrincipal } from "./types";
 import {
@@ -72,7 +77,7 @@ interface WorkspaceRow {
   legacy_account_id?: string | null;
   project_alpha_source_id?: string;
 }
-interface EntitlementRow {
+interface EntitlementRow extends ProjectAccessReadRow {
   effect: "allow" | "deny";
   scope_type: PortalWorkspaceScopeType;
   scope_public_id: string;
@@ -91,13 +96,13 @@ function deniedByIdentityRows(rows: IdentityDenialRow[], workspaceId: string, sc
   ));
 }
 
-function allowedByEntitlementRows(rows: EntitlementRow[], scopes: ReadonlySet<string>): boolean {
+function allowedByEntitlementRows(rows: EntitlementRow[], scopes: ReadonlySet<string>, expiredProjects:readonly string[]=[], shell=false): boolean {
   if (rows.length > 200) return false;
   let allowed = false;
   for (const entitlement of rows) {
     if (!scopes.has(`${entitlement.scope_type}:${entitlement.scope_public_id}`)) continue;
     if (entitlement.effect === "deny") return false;
-    allowed = true;
+    if(projectAccessRowAllows(entitlement,scopes,expiredProjects,shell))allowed = true;
   }
   return allowed;
 }
@@ -520,10 +525,11 @@ export async function authorizeEffectiveWorkspaceProject(
     .bind(context.legacyAccountId, localProjectId)
     .first<{ public_id: string }>();
   if (!project) return false;
-  return authorizePortalWorkspaceCapability(env, principal, context.workspaceId, capability, {
-    scopeType: "project",
-    publicId: project.public_id,
-  });
+  const target={scopeType:'project' as const,publicId:project.public_id};
+  if(await authorizePortalWorkspaceCapability(env, principal, context.workspaceId, capability,target))return true;
+  if(capability==='delivery.view'&&(await readPrimaryTermRetentionGrants(env,principal,context.workspaceId,[project.public_id])).length)
+    return authorizePortalWorkspaceCapability(env,principal,context.workspaceId,capability,target,{retainedProjectId:project.public_id});
+  return false;
 }
 
 export async function authorizeEffectiveWorkspaceRequest(
@@ -641,13 +647,14 @@ async function targetScopes(
   target: PortalWorkspaceTarget,
   database: Pick<D1Database, "prepare"> = portalDb(env),
   legacyContractVerified = false,
+  options?:{retention:'structural'},
 ): Promise<Set<string> | null> {
   if (portalHierarchyRelationsEnabled(env)) {
     return resolvePortalRelationTargetScopes({ DELIVERY_DB: database }, {
       id: workspace.id,
       rootType: workspace.root_type,
       rootPublicId: workspace.pa_organization_public_id ?? workspace.pa_client_public_id!,
-    }, target);
+    }, target, options);
   }
   if (!legacyContractVerified && !(await legacyTargetContractAvailable(database, workspace.id))) return null;
   const scopes = new Set<string>([["workspace", workspace.id].join(":")]);
@@ -710,30 +717,66 @@ export async function authorizePortalWorkspaceCapability(
   workspaceId: string,
   capability: PortalWorkspaceCapability,
   target: PortalWorkspaceTarget,
+  options?:{retainedProjectId:string},
 ): Promise<boolean> {
   if (!portalHierarchyV2Enabled(env)) return false;
   const identity = await resolveGlobalIdentity(env, principal);
   if (!identity) return false;
   const workspace = await activeWorkspace(env, identity.id, workspaceId);
   if (!workspace || !(await activeRootExists(env, workspace))) return false;
-  const scopes = await targetScopes(env, workspace, target);
+  const termsReady=await projectAccessTermsReady(portalDb(env));
+  const scopes = await targetScopes(env, workspace, target,portalDb(env),false,termsReady?{retention:'structural'}:undefined);
   if (!scopes) return false;
   if (await identityDeniedForScopes(env, identity.id, workspaceId, scopes)) return false;
 
   const result = await portalDb(env).prepare(`
-    SELECT effect,scope_type,scope_public_id
-    FROM portal_v2_entitlements
+    SELECT effect,scope_type,scope_public_id,${projectAccessReadColumns('entitlement',termsReady)}
+    FROM portal_v2_entitlements entitlement
     WHERE workspace_id=? AND identity_id=? AND capability=?
       AND status='active' AND revoked_at IS NULL
       AND datetime(valid_from)<=datetime('now')
       AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+      AND ${projectAccessCapacitySql('entitlement',termsReady)}
     ORDER BY entitlement_version DESC,id
     LIMIT 201`)
     .bind(workspaceId, identity.id, capability)
     .all<EntitlementRow>();
   // An unexpectedly unbounded grant set is a configuration error, not a reason
   // to guess which row should win.
-  return allowedByEntitlementRows(result.results, scopes);
+  const expired=termsReady?await readExpiredScopeProjects(portalDb(env),workspaceId,scopes,portalHierarchyRelationsEnabled(env)):[];
+  return allowedByEntitlementRows(result.results, scopes,expired.filter(id=>id!==options?.retainedProjectId),
+    capability==='workspace.view'&&target.scopeType==='workspace');
+}
+
+/** Internal batching of the same primary capability policy, for independently
+ * selected versioned grants. A retention override is not an entitlement. */
+export async function authorizePrimaryPortalTargetBatch(env:Env,principal:VerifiedClientPrincipal,workspaceId:string,
+  targets:Array<{target:PortalWorkspaceTarget;retainedProjectId?:string}>):Promise<Map<string,NativeTargetScopes>>{
+  const result=new Map<string,NativeTargetScopes>();
+  if(!portalHierarchyV2Enabled(env)||!targets.length)return result;
+  if(targets.length>100)throw new HTTPException(503,{message:'Project delivery access exceeds safe capacity. Contact support.'});
+  const identity=await resolveGlobalIdentity(env,principal);if(!identity)return result;
+  const workspace=await activeWorkspace(env,identity.id,workspaceId);if(!workspace||!await activeRootExists(env,workspace))return result;
+  const db=portalDb(env),generation=await db.prepare('SELECT active_generation_id FROM portal_v2_directory_checkpoints WHERE workspace_id=?')
+    .bind(workspaceId).first<string>('active_generation_id');if(!generation)return result;
+  const scopes=await readNativeTargetScopes(env,{workspaceId,generationId:generation,rootType:workspace.root_type,
+    rootPublicId:workspace.pa_organization_public_id??workspace.pa_client_public_id!},targets.map(t=>t.target),{retention:'structural'});
+  const ready=await projectAccessTermsReady(db);
+  const rules=(await db.prepare(`SELECT effect,scope_type,scope_public_id,${projectAccessReadColumns('entitlement',ready)}
+    FROM portal_v2_entitlements entitlement WHERE workspace_id=? AND identity_id=? AND capability='delivery.view'
+      AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
+      AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+      AND ${projectAccessCapacitySql('entitlement',ready)} ORDER BY entitlement_version DESC,id LIMIT 201`)
+    .bind(workspaceId,identity.id).all<EntitlementRow>()).results;
+  const denials=portalIdentityDenylistEnabled(env)?(await db.prepare(`SELECT workspace_id,scope_type,scope_public_id FROM portal_v2_identity_denials
+    WHERE identity_id=? AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
+      AND (expires_at IS NULL OR datetime(expires_at)>datetime('now')) AND (scope_type='global' OR workspace_id=?) ORDER BY id LIMIT 201`)
+    .bind(identity.id,workspaceId).all<IdentityDenialRow>()).results:[];
+  for(const item of targets){const key=`${item.target.scopeType}:${item.target.publicId}`,scope=scopes.get(key);if(!scope)continue;
+    const expired=scope.proofRows.filter(r=>r.entity_type==='project'&&r.retained===0&&r.public_id!==item.retainedProjectId).map(r=>r.public_id);
+    if(!deniedByIdentityRows(denials,workspaceId,scope.scopes)&&allowedByEntitlementRows(rules,scope.scopes,expired))result.set(key,scope);
+  }
+  return result;
 }
 
 export type NativePortalReadCapability = "workspace.view" | "directory.read" | "delivery.view";
@@ -751,6 +794,7 @@ export interface NativePortalReadContext {
   workspace: WorkspaceRow;
   grants: Array<EntitlementRow & { capability: NativePortalReadCapability }>;
   denials: IdentityDenialRow[];
+  projectAccessTermsAvailable?:boolean;
 }
 
 export async function nativePortalSourceSchemaAvailable(env: Env): Promise<boolean> {
@@ -795,11 +839,13 @@ export async function resolveNativePortalWorkspaceReadContext(
   if (!workspace) return null;
   const authority = await readPortalSourceAuthorityProof(database, workspace.project_alpha_source_id);
   if (!authority) return null;
+  const termsReady=await projectAccessTermsReady(env.DELIVERY_DB);
   const grants = await database.prepare(`SELECT id,capability,effect,scope_type,scope_public_id,entitlement_version,
-      source_type,source_version,valid_from,expires_at FROM portal_v2_entitlements
+      source_type,source_version,valid_from,expires_at,${projectAccessReadColumns('entitlement',termsReady)} FROM portal_v2_entitlements entitlement
     WHERE workspace_id=? AND identity_id=? AND capability IN ('workspace.view','directory.read','delivery.view')
       AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
-      AND (expires_at IS NULL OR datetime(expires_at)>datetime('now')) ORDER BY id LIMIT 201`)
+      AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+      AND ${projectAccessCapacitySql('entitlement',termsReady)} ORDER BY id LIMIT 201`)
     .bind(workspaceId, identity.id).all<NativePortalReadContext["grants"][number]>();
   const denials = portalIdentityDenylistEnabled(env) ? (await database.prepare(`SELECT id,workspace_id,scope_type,scope_public_id,valid_from,expires_at
     FROM portal_v2_identity_denials WHERE identity_id=? AND status='active' AND revoked_at IS NULL
@@ -813,7 +859,7 @@ export async function resolveNativePortalWorkspaceReadContext(
     WHERE p.workspace_id=? AND p.status='active' AND (p.identity_id=? OR eligibility.identity_id=?) ORDER BY p.public_id LIMIT 201`)
     .bind(identity.id, workspaceId, identity.id, identity.id).all()).results;
   if (principals.length > 200) return null;
-  const shellAllowed = allowedByEntitlementRows(grants.results.filter(g => g.capability === "workspace.view"), new Set([`workspace:${workspaceId}`]));
+  const shellAllowed = allowedByEntitlementRows(grants.results.filter(g => g.capability === "workspace.view"), new Set([`workspace:${workspaceId}`]),[],true);
   if (!shellAllowed && !await eligiblePortalShell(env, identity.id, workspaceId)) return null;
   // Eligibility cannot override an explicit workspace.view deny.
   if (grants.results.some(g => g.capability === "workspace.view" && g.effect === "deny" && g.scope_type === "workspace" && g.scope_public_id === workspaceId)) return null;
@@ -824,7 +870,7 @@ export async function resolveNativePortalWorkspaceReadContext(
   return { workspaceId, sourceId: authority.sourceId, identityId: identity.id,
     displayName: workspace.display_name, rootType: workspace.root_type,
     rootPublicId: workspace.pa_organization_public_id ?? workspace.pa_client_public_id!,
-    generationId: workspace.generation_id, authority, workspace, grants: grants.results, denials,
+    generationId: workspace.generation_id, authority, workspace, grants: grants.results, denials,projectAccessTermsAvailable:termsReady,
     contextVersion: Array.from(digest, value => value.toString(16).padStart(2, "0")).join("") };
 }
 
@@ -833,16 +879,18 @@ export async function authorizeNativePortalReadTarget(
   env: Env, context: NativePortalReadContext, capability: NativePortalReadCapability, target: PortalWorkspaceTarget,
 ): Promise<boolean> {
   if (!["workspace.view", "directory.read", "delivery.view"].includes(capability)) return false;
-  const scopes = (await readNativeTargetScopes(env,context,[target])).get(`${target.scopeType}:${target.publicId}`)?.scopes;
-  return Boolean(scopes && nativePortalScopesAllowed(context,capability,scopes));
+  const proof = (await readNativeTargetScopes(env,context,[target],{retention:'structural'})).get(`${target.scopeType}:${target.publicId}`);
+  return Boolean(proof && nativePortalScopesAllowed(context,capability,proof.scopes,true,proof));
 }
 
 /** Same deny precedence as the primary adapter, evaluated once per bounded
  * native target batch. The context and target generation are rechecked by the caller. */
-export function nativePortalScopesAllowed(context:NativePortalReadContext,capability:NativePortalReadCapability,scopes:ReadonlySet<string>,requireAllow=true):boolean {
+export function nativePortalScopesAllowed(context:NativePortalReadContext,capability:NativePortalReadCapability,scopes:ReadonlySet<string>,requireAllow=true,
+  target?:NativeTargetScopes,retainedProjectId?:string):boolean {
   if(deniedByIdentityRows(context.denials,context.workspaceId,scopes))return false;
   const rules=context.grants.filter(g=>g.capability===capability);
-  return requireAllow?allowedByEntitlementRows(rules,scopes)
+  const expired=target?.proofRows.filter(row=>row.entity_type==='project'&&row.retained===0&&row.public_id!==retainedProjectId).map(row=>row.public_id)??[];
+  return requireAllow?allowedByEntitlementRows(rules,scopes,expired,capability==='workspace.view')
     :!rules.some(g=>g.effect==='deny'&&scopes.has(`${g.scope_type}:${g.scope_public_id}`));
 }
 
@@ -986,17 +1034,20 @@ export async function readEffectiveWorkspaceRequestProof(
   }
   if (!local) return null;
 
+  const requestTermsReady=await projectAccessTermsReady(database);
   const rules = await database.prepare(`SELECT * FROM (
-      SELECT capability,effect,scope_type,scope_public_id FROM portal_v2_entitlements
+      SELECT capability,effect,scope_type,scope_public_id,${projectAccessReadColumns('entitlement',requestTermsReady)} FROM portal_v2_entitlements entitlement
       WHERE workspace_id=?1 AND identity_id=?2 AND capability='workspace.view'
         AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
         AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+        AND ${projectAccessCapacitySql('entitlement',requestTermsReady)}
       ORDER BY entitlement_version DESC,id LIMIT 201
     ) UNION ALL SELECT * FROM (
-      SELECT capability,effect,scope_type,scope_public_id FROM portal_v2_entitlements
+      SELECT capability,effect,scope_type,scope_public_id,${projectAccessReadColumns('entitlement',requestTermsReady)} FROM portal_v2_entitlements entitlement
       WHERE workspace_id=?1 AND identity_id=?2 AND capability='request.create'
         AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
         AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+        AND ${projectAccessCapacitySql('entitlement',requestTermsReady)}
       ORDER BY entitlement_version DESC,id LIMIT 201
     )`).bind(workspaceId, state.identity_id)
     .all<EntitlementRow & { capability: "workspace.view" | "request.create" }>();
@@ -1013,13 +1064,16 @@ export async function readEffectiveWorkspaceRequestProof(
   const rootScopes = contractAvailable ? await targetScopes(
     env, state, { scopeType: "workspace", publicId: workspaceId }, database, true,
   ) : null;
+  let expiredRequestProjects:string[]=[];
   const allows = (capability: "workspace.view" | "request.create", scopes: Set<string> | null): boolean =>
     scopes !== null && !deniedByIdentityRows(denials, workspaceId, scopes) &&
-      allowedByEntitlementRows(rules.results.filter(rule => rule.capability === capability), scopes);
+      allowedByEntitlementRows(rules.results.filter(rule => rule.capability === capability), scopes,
+        [...scopes].some(scope=>scope.startsWith('project:'))?expiredRequestProjects:[],capability==='workspace.view');
   if (state.shell_eligible !== 1 && !allows("workspace.view", rootScopes)) return null;
   const projectScopes = contractAvailable && localProjectId && local.project_allowed === 1 && local.project_public_id
-    ? await targetScopes(env, state, { scopeType: "project", publicId: local.project_public_id }, database, true)
+    ? await targetScopes(env, state, { scopeType: "project", publicId: local.project_public_id }, database, true,requestTermsReady?{retention:'structural'}:undefined)
     : null;
+  if(projectScopes&&requestTermsReady)expiredRequestProjects=await readExpiredScopeProjects(database,workspaceId,projectScopes,portalHierarchyRelationsEnabled(env));
   return {
     workspace: {
       workspaceId, identityId: state.identity_id, rootType: state.root_type,
@@ -1133,6 +1187,8 @@ export async function listPortalWorkspaceHierarchy(
   let visible = result.results;
   if (relationScoped) {
     const workspace = relationAuthorization!.workspace;
+    const projectIds=result.results.filter(row=>row.entity_type==='project').map(row=>row.public_id);
+    const termGrants=await readPrimaryTermRetentionGrants(env,principal,workspaceId,projectIds);
     const authorized = await resolvePortalRelationAuthorizedTargets(
       env,
       {
@@ -1143,9 +1199,11 @@ export async function listPortalWorkspaceHierarchy(
       relationAuthorization!.identityId,
       "directory.read",
       result.results.map(row => ({ scopeType: row.entity_type, publicId: row.public_id })),
+      new Set(termGrants.map(row=>row.projectId)),
     );
     if (!authorized) return null;
     visible = result.results.filter(row => authorized.has(`${row.entity_type}:${row.public_id}`));
+    if(termGrants.length&&JSON.stringify(await readPrimaryTermRetentionGrants(env,principal,workspaceId,projectIds))!==JSON.stringify(termGrants))return null;
   }
   if (visible.length > 100) return null;
   return visible.map(row => ({
@@ -1188,6 +1246,8 @@ export async function acceptPortalWorkspaceInvitation(
     .bind(tokenHash, normalizedEmail)
     .first<{ id: string; workspace_id: string; status: string; accepted_by_identity_id: string | null }>();
   if (!invitation) return "denied";
+  const accessTermsReady=await projectAccessTermsReady(portalDb(env));
+  if(accessTermsReady&&(await readWorkspaceInvitationPolicy(portalDb(env),invitation.workspace_id)).mode!=='allowed')return 'denied';
   let identity = await portalDb(env).prepare(`SELECT id FROM portal_v2_identities
     WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?`)
     .bind(principal.issuer, principal.subject, normalizedEmail).first<IdentityRow>();
@@ -1243,7 +1303,7 @@ export async function acceptPortalWorkspaceInvitation(
   if (!acceptanceScopes || await identityDeniedForScopes(
     env, identity.id, invitation.workspace_id, acceptanceScopes,
   )) return "denied";
-  await portalDb(env).batch([
+  try{await portalDb(env).batch([
     portalDb(env).prepare(`UPDATE portal_v2_invitations AS invitation
       SET status='accepted',accepted_at=datetime('now'),accepted_by_identity_id=?
       WHERE id=? AND status='pending' AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
@@ -1275,9 +1335,13 @@ export async function acceptPortalWorkspaceInvitation(
       ON CONFLICT(workspace_id,identity_id) DO NOTHING`)
       .bind(identity.id, invitation.id, identity.id),
     portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_entitlements
-      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status)
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status,entitlement_version${accessTermsReady?',access_terms_id':''})
       SELECT 'invitation-entitlement-' || invitation.id || '-' || grants.capability || '-' || grants.scope_type || '-' || grants.scope_public_id,
-        invitation.workspace_id,?,grants.capability,'allow',grants.scope_type,grants.scope_public_id,'client_invitation','active'
+        invitation.workspace_id,?,grants.capability,'allow',grants.scope_type,grants.scope_public_id,'client_invitation','active',
+        ${accessTermsReady?`CASE WHEN grants.access_terms_id IS NULL THEN 1 ELSE (SELECT COALESCE(MAX(prior.entitlement_version),0)+1
+          FROM portal_v2_entitlements prior WHERE prior.workspace_id=invitation.workspace_id AND prior.identity_id=membership.identity_id
+            AND prior.capability=grants.capability AND prior.effect='allow' AND prior.scope_type=grants.scope_type
+            AND prior.scope_public_id=grants.scope_public_id) END,grants.access_terms_id`:'1'}
       FROM portal_v2_invitations invitation
       JOIN portal_v2_invitation_entitlements grants ON grants.invitation_id=invitation.id
       JOIN portal_v2_workspace_memberships membership
@@ -1335,7 +1399,10 @@ export async function acceptPortalWorkspaceInvitation(
       WHERE id=? AND status='accepted' AND accepted_by_identity_id=?
         AND NOT EXISTS (SELECT 1 FROM portal_v2_membership_audit audit WHERE audit.invitation_id=? AND audit.action='invitation.accepted')`)
       .bind(crypto.randomUUID(), identity.id, identity.id, invitation.id, identity.id, invitation.id),
-  ]);
+  ]);}catch(error){
+    if(error instanceof Error&&/portal invitation policy|portal access terms|portal project access terms/.test(error.message))return 'denied';
+    throw error;
+  }
   const acceptedBy = await portalDb(env).prepare("SELECT accepted_by_identity_id FROM portal_v2_invitations WHERE id=?")
     .bind(invitation.id).first("accepted_by_identity_id");
   // Migration 0127 performs this atomically with the invitation update. Keep

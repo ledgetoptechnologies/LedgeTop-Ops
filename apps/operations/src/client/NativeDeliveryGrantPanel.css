@@ -2,7 +2,7 @@
 .native-grant-panel h3, .native-grant-panel h4, .native-grant-panel p { margin: 0; overflow-wrap: anywhere; }
 .native-grant-panel form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .65rem; align-items: end; }
 .native-grant-panel input { min-width: 0; }
-.native-grant-panel input:not([type="radio"]), .native-grant-connection select { min-height: 44px; }
+.native-grant-panel input:not([type="radio"]), .native-grant-panel select, .native-grant-connection select { min-height: 44px; }
 .native-grant-panel > button { justify-self: start; }
 .native-grant-panel .native-grant-choice { display: flex; align-items: center; gap: .6rem; min-height: 44px; padding: .35rem; }
 .native-grant-choice > span { display: grid; gap: .25rem; min-width: 0; overflow-wrap: anywhere; }

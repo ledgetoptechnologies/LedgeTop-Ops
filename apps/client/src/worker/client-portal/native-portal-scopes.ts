@@ -55,7 +55,11 @@ export const NATIVE_PORTAL_TARGET_SCOPES_SQL=`WITH RECURSIVE
         AND p.entity_type=edge.from_type AND p.public_id=edge.from_public_id WHERE ?4=1 AND l.depth<12
       LIMIT ?5
     ) SELECT l.*,r.display_name,r.binding_version,
-      CASE WHEN l.entity_type<>'project' OR ?4=0 OR EXISTS(SELECT 1 FROM portal_v2_project_lifecycle lifecycle
+      CASE WHEN l.entity_type<>'project' OR ?4=0 THEN 1
+        WHEN NOT EXISTS(SELECT 1 FROM portal_v2_project_lifecycle lifecycle
+          WHERE lifecycle.workspace_id=?2 AND lifecycle.generation_id=?3 AND lifecycle.project_public_id=l.public_id
+            AND (lifecycle.lifecycle_status='active' OR (lifecycle.lifecycle_status='completed' AND datetime(lifecycle.completed_at) IS NOT NULL))) THEN -1
+        WHEN EXISTS(SELECT 1 FROM portal_v2_project_lifecycle lifecycle
         WHERE lifecycle.workspace_id=?2 AND lifecycle.generation_id=?3 AND lifecycle.project_public_id=l.public_id
           AND (lifecycle.lifecycle_status='active' OR datetime(lifecycle.completed_at,'+30 days')>datetime('now'))) THEN 1 ELSE 0 END retained
       FROM lineage l JOIN roots r ON r.target_type=l.target_type AND r.target_id=l.target_id
@@ -66,7 +70,8 @@ export const NATIVE_PORTAL_TARGET_SCOPES_SQL=`WITH RECURSIVE
  * Bound the recursive working set as well as the response; exhaustion is an
  * explicit capacity error, never an apparently empty authorized directory. */
 export async function readNativeTargetScopes(env:Pick<PortalAuthorizationEnv,'DELIVERY_DB'|'CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED'>,
-  context:Pick<NativePortalReadContext,'workspaceId'|'generationId'|'rootType'|'rootPublicId'>,targets:PortalWorkspaceTarget[]):Promise<Map<string,NativeTargetScopes>> {
+  context:Pick<NativePortalReadContext,'workspaceId'|'generationId'|'rootType'|'rootPublicId'>,targets:PortalWorkspaceTarget[],
+  options?:{retention:'structural'}):Promise<Map<string,NativeTargetScopes>> {
   if(targets.length>200)throw new HTTPException(503,{message:'Workspace scope capacity exceeded. Contact support.'});
   const result=new Map<string,NativeTargetScopes>();
   if(!targets.length)return result;
@@ -78,7 +83,9 @@ export async function readNativeTargetScopes(env:Pick<PortalAuthorizationEnv,'DE
   const groups=new Map<string,typeof rows.results>();
   for(const row of rows.results){const key=`${row.target_type}:${row.target_id}`;const group=groups.get(key)??[];group.push(row);groups.set(key,group);}
   for(const [key,group] of groups){
-    if(group.length>(relations?64:10)||group.some(r=>!r.retained||(relations&&r.depth>=12)))continue;
+    // Structural mode never grants access: it preserves expired completed
+    // projects for a later exact-grant terms check, not missing lifecycle proof.
+    if(group.length>(relations?64:10)||group.some(r=>(options?.retention==='structural'?r.retained<0:r.retained<=0)||(relations&&r.depth>=12)))continue;
     const scopes=new Set(group.map(r=>`${r.entity_type}:${r.public_id}`));
     if(!relations&&scopes.size!==group.length)continue; // Revisited ancestor: cycle, not a second valid scope.
     if(!scopes.has(`${context.rootType}:${context.rootPublicId}`))continue;
