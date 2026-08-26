@@ -5,6 +5,7 @@ import { sha256 } from "./crypto";
 import { isBusinessProjectionSource, validatedUniquePublicIdExpression, type ClientHubMappingStatus } from "./client-hub-source";
 import type { Env, StaffPrincipal } from "./types";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
+import { readableBusinessPartySql } from "./business-parties";
 
 export const CLIENT_HUB_SOURCES = ["project-alpha:primary", "delivery:local"] as const;
 export type ClientHubSource = `project-alpha:${string}` | "delivery:local";
@@ -46,9 +47,9 @@ export interface ClientHubDirectoryState {
   lease_until: string | null;
   next_run_at: string | null;
 }
-export interface ClientHubDirectoryQuery { q?: string; kind?: string; source?: string; cursor?: string; limit?: number }
+export interface ClientHubDirectoryQuery { q?: string; kind?: string; source?: string; cursor?: string; limit?: number; grouping?: string }
 type Position = [string, ClientHubSource, ClientHubRootNamespace, ClientHubKind, string];
-interface Cursor { v: 3; revision: number; visibility: number; source: ClientHubSource | null; q: string; kind: ClientHubKind | null; policy: string; after: Position }
+interface Cursor { v: 4; revision: number; visibility: number; source: ClientHubSource | null; q: string; kind: ClientHubKind | null; grouping: "customers" | "records"; policy: string; after: Position }
 
 export function normalizeClientHubText(value: string): string {
   return value.normalize("NFC").trim().toLocaleLowerCase("en-US");
@@ -114,7 +115,7 @@ function decodeCursor(value: string): Cursor {
     const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     if (!parsed || typeof parsed !== "object") throw new Error();
     const cursor = parsed as Partial<Cursor>;
-    if (cursor.v !== 3 || !Number.isSafeInteger(cursor.revision) || cursor.revision! < 0 ||
+    if (cursor.v !== 4 || !["customers", "records"].includes(cursor.grouping ?? "") || !Number.isSafeInteger(cursor.revision) || cursor.revision! < 0 ||
       !Number.isSafeInteger(cursor.visibility) || cursor.visibility! < 1 ||
       (cursor.source !== null && (typeof cursor.source !== "string" || !isClientHubSource(cursor.source))) ||
       typeof cursor.q !== "string" || typeof cursor.policy !== "string" ||
@@ -155,9 +156,12 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   if ((options.q?.length ?? 0) > 200 || /[\0-\x1f\x7f]/.test(options.q ?? ""))
     throw new HTTPException(400, { message: "Client directory search is invalid" });
   const q = normalizeClientHubText(options.q ?? "");
+  const grouping = options.grouping ?? "customers";
+  if (grouping !== "customers" && grouping !== "records")
+    throw new HTTPException(400, { message: "Client directory grouping is invalid" });
   const cursor = options.cursor === undefined ? null : decodeCursor(options.cursor);
   const { filter, policy } = await projectSearchAccess(env, principal);
-  if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.policy !== policy))
+  if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.grouping !== grouping || cursor.policy !== policy))
     throw new HTTPException(400, { message: "Client directory cursor does not match this search" });
   const clauses = [visibleRoot, visibleSource, liveBusinessRoot], values: unknown[] = [];
   if (kind) { clauses.push("root.kind=?"); values.push(kind); }
@@ -166,7 +170,7 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
     const phone = /^[\d\s()+.\-]+$/.test(q) ? normalizeClientHubPhone(q) : "";
     // D1 limits LIKE/GLOB patterns to 50 bytes. Literal instr supports the full
     // 200-character search contract without wildcard interpretation.
-    clauses.push(`(instr(root.sort_name,?)>0 OR EXISTS (
+    clauses.push(`(instr(root.sort_name,?)>0 OR instr(party.sort_name,?)>0 OR EXISTS (
       SELECT 1 FROM client_hub_search_values search WHERE search.source_id=root.source_id
         AND search.root_namespace=root.root_namespace AND search.kind=root.kind AND search.root_public_id=root.public_id
         AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
@@ -184,26 +188,48 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
     // Portal-principal search additionally needs a live cross-database ownership
     // proof before pagination. Until that contract exists the API explicitly
     // reports portalContacts=false rather than searching stale principal rows.
-    values.push(q, q);
+    values.push(q, q, q);
     if (phone.length >= 3) values.push(phone);
     values.push(...filter.values);
   }
-  if (cursor) {
-    clauses.push("(root.sort_name,root.source_id,root.root_namespace,root.kind,root.public_id)>(?,?,?,?,?)");
-    values.push(...cursor.after);
-  }
+  // Match and authorize individual records first, then collapse the matching
+  // records into customers before LIMIT/cursor application. Browser-only
+  // deduplication would skip customers or repeat a party across pages.
+  const pageAfter = cursor ? "AND (root.display_sort_name,root.source_id,root.root_namespace,root.kind,root.public_id)>(?,?,?,?,?)" : "";
+  const pageValues = [...values, ...(cursor?.after ?? []), limit + 1];
   const db = env.OPS_DB.withSession("first-primary");
   // State and page share one transaction. The writer advances revision only
   // alongside effective root/search changes, so mutable names cannot skip rows.
   type Snapshot = Pick<ClientHubDirectoryState, "revision" | "ready" | "last_success_at"> & { source_read_revision: number | null };
-  type LiveRoot = ClientHubRoot & { live_pa_public_id: string | null };
+  type LiveRoot = ClientHubRoot & { live_pa_public_id: string | null; business_party_id: string | null;
+    business_party_name: string | null; business_party_member_count: number | null; display_sort_name: string; party_rank: number };
   type SourceSummary = { source_id: ClientHubSource; display_name: string };
   const results = await db.batch<LiveRoot | Snapshot | SourceSummary>([
     db.prepare(`SELECT revision,ready,last_success_at,
       (SELECT read_revision FROM pa_connector_directory_state WHERE id='directory') source_read_revision
       FROM client_hub_directory_state WHERE id='directory'`),
-    db.prepare(`SELECT root.*,${currentMapping} live_pa_public_id FROM client_hub_roots root WHERE ${clauses.join(" AND ")}
-      ORDER BY root.sort_name,root.source_id,root.root_namespace,root.kind,root.public_id LIMIT ?`).bind(...values, limit + 1),
+    db.prepare(`WITH matching AS (
+      SELECT root.*,${currentMapping} live_pa_public_id,
+        party.id business_party_id,party.display_name business_party_name,
+        ${grouping === "customers" ? "COALESCE(party.sort_name,root.sort_name)" : "root.sort_name"} display_sort_name,
+        CASE WHEN party.id IS NOT NULL THEN (SELECT count(*) FROM business_party_links members
+          WHERE members.party_id=party.id AND members.unlinked_at IS NULL) END business_party_member_count
+      FROM client_hub_roots root
+      LEFT JOIN business_party_links membership ON root.root_namespace='business'
+        AND membership.source_id=root.source_id AND membership.record_id=root.public_id
+        AND membership.record_kind=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
+        AND membership.unlinked_at IS NULL
+      LEFT JOIN business_parties party ON party.id=membership.party_id AND party.status='active'
+        AND ${readableBusinessPartySql("party.id")}
+      WHERE ${clauses.join(" AND ")}
+    ), ranked AS (
+      SELECT matching.*,row_number() OVER (
+        PARTITION BY CASE WHEN ${grouping === "customers" ? "business_party_id IS NOT NULL" : "0=1"} THEN json_array('party',business_party_id)
+          ELSE json_array('record',source_id,root_namespace,kind,public_id) END
+        ORDER BY sort_name,source_id,root_namespace,kind,public_id
+      ) party_rank FROM matching
+    ) SELECT root.* FROM ranked root WHERE party_rank=1 ${pageAfter}
+      ORDER BY root.display_sort_name,root.source_id,root.root_namespace,root.kind,root.public_id LIMIT ?`).bind(...pageValues),
     db.prepare(`SELECT source_id,display_name FROM pa_connectors WHERE read_visible=1
       UNION ALL SELECT 'project-alpha:primary','Project Alpha' WHERE NOT EXISTS (
         SELECT 1 FROM pa_connectors WHERE source_id='project-alpha:primary')
@@ -223,19 +249,21 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   const page = roots.slice(0, limit);
   const last = page.at(-1);
   return {
-    clients: page.map(({ live_pa_public_id, ...root }) => ({ ...root,
+    clients: page.map(({ live_pa_public_id, party_rank: _rank, display_sort_name: _displaySort, business_party_id, business_party_name, business_party_member_count, ...root }) => ({ ...root,
       ...(root.root_namespace === "business" && root.pa_public_id !== live_pa_public_id ? {
         pa_public_id: live_pa_public_id, mapping_status: live_pa_public_id ? "mapped" : "missing",
         workspace_id: null, portal_status: "mapping_unavailable",
       } : {}),
       source_name: sources.find(item => item.source_id === root.source_id)!.display_name,
-      route_kind: clientHubRouteKind(root.kind), detail_path: clientHubDetailPath(root) })),
+      ...(business_party_id ? { business_party_id, business_party_name, business_party_member_count } : {}),
+      route_kind: clientHubRouteKind(root.kind), detail_path: business_party_id && grouping === "customers"
+        ? `/clients/parties/${encodeURIComponent(business_party_id)}` : clientHubDetailPath(root) })),
     indexUpdatedAt: state.last_success_at,
     sources,
     searchCapabilities: { businessContacts: true, portalContacts: false },
-    nextCursor: roots.length > limit && last ? encodeCursor({ v: 3, revision: state.revision, visibility: state.source_read_revision!,
-      source: source ?? null, q, kind: kind ?? null, policy,
-      after: [last.sort_name, last.source_id, last.root_namespace, last.kind, last.public_id] }) : null,
+    nextCursor: roots.length > limit && last ? encodeCursor({ v: 4, revision: state.revision, visibility: state.source_read_revision!,
+      source: source ?? null, q, kind: kind ?? null, grouping, policy,
+      after: [last.display_sort_name, last.source_id, last.root_namespace, last.kind, last.public_id] }) : null,
   };
 }
 

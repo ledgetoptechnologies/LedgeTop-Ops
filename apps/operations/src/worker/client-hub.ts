@@ -12,6 +12,7 @@ import { readClientHubBusinessProjectDetail } from "./client-hub-business-projec
 import { isPortalIdentityCollection, listPortalIdentityCollection, listPortalIdentityPage, portalIdentityQuery } from "./client-portal-identity-read";
 import type { Env, StaffPrincipal } from "./types";
 import { requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
+import { readBusinessPartyForRoot } from "./business-parties";
 
 type AppEnv = {
   Bindings: Env;
@@ -219,7 +220,16 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
   ]);
   const items = (collection: typeof DETAIL_COLLECTIONS[number]) => collections.find(page => page.collection === collection)!.result.items;
   await verifyContext(env, principal, context);
+  // Party membership is live presentation state, not part of the paged source
+  // context. Read it after slow hydration so an intervening unlink is observed.
+  const party = workspace.root_namespace === "business" ? await readBusinessPartyForRoot(env, principal,
+    { sourceId: workspace.source_id, kind: workspace.kind, recordId: workspace.public_id })
+    : { businessParty: null, canManageBusinessParties: false };
+  // Cross-database reads are not an atomic snapshot; retain the source/authority
+  // check around this final independently authorized metadata read.
+  await verifyContext(env, principal, context);
   return {
+    ...party,
     client: { ...workspace, route_kind: clientHubRouteKind(workspace.kind), detail_path: clientHubDetailPath(workspace) },
     contacts: items("businessContacts"),
     portalIdentities,
@@ -296,7 +306,7 @@ export function registerClientHubRoutes(app: App): void {
     requireHubAccess(access);
     const limit = c.req.query("limit");
     const result = access.directory ? await listClientHubRoots(c.env, c.get("principal"), {
-      q: c.req.query("q"), kind: c.req.query("kind"), source: c.req.query("source"), cursor: c.req.query("cursor"),
+      q: c.req.query("q"), kind: c.req.query("kind"), source: c.req.query("source"), cursor: c.req.query("cursor"), grouping: c.req.query("grouping"),
       limit: limit === undefined ? undefined : /^\d+$/.test(limit) ? Number(limit) : Number.NaN,
     }) : { clients: [], nextCursor: null };
     return c.json({ ...result, capabilities: access });

@@ -6,6 +6,7 @@ import { clientHubDetailPath, findClientHubRoot, listClientHubRoots, normalizeCl
 import type { Env, StaffPrincipal } from "../src/worker/types";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import { applyConnectorSchema, registerVisibleTestSource } from "./helpers/project-alpha-connectors";
+import { applyBusinessPartySchema } from "./helpers/business-parties";
 
 const staff: StaffPrincipal = { id: "staff-a", email: "a@example.test", displayName: "A", accessSubject: "subject-a", projectAlphaUserId: "pa-user-a" };
 const migration = readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8");
@@ -38,6 +39,7 @@ describe("source-qualified Client Hub directory", () => {
     await db.exec(sql(migration));
     await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0034_client_hub_projection_sources.sql", import.meta.url), "utf8")).map(statement => db.prepare(statement)));
     await applyConnectorSchema(db);
+    await applyBusinessPartySchema(db);
   });
   beforeEach(async () => {
     await db.batch([
@@ -63,6 +65,108 @@ describe("source-qualified Client Hub directory", () => {
     ]);
     for (let start = 0; start < statements.length; start += 50) await db.batch(statements.slice(start, start + 50));
   }
+
+  async function linkedParty(id: string, name: string, memberIds: [string, string]) {
+    await registerVisibleTestSource(db, "project-alpha:secondary", "Second company");
+    await roots([{ id: memberIds[0], kind: "organization", name: "A Trading" },
+      { id: memberIds[1], kind: "organization", name: "B Trading", source: "project-alpha:secondary" }]);
+    await db.batch([
+      db.prepare(`INSERT INTO business_parties(id,kind,display_name,sort_name,created_by,updated_by)
+        VALUES(?,'organization',?,?,'staff-a','staff-a')`).bind(id, name, normalizeClientHubText(name)),
+      ...memberIds.flatMap((recordId, index) => {
+        const source = index ? "project-alpha:secondary" : "project-alpha:primary";
+        return [db.prepare(`INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id)
+          VALUES(?,'organization',?,?)`).bind(source, recordId, recordId),
+        db.prepare(`INSERT INTO business_party_links(id,party_id,source_id,record_kind,record_id,linked_by)
+          VALUES(?,?,?,'organization',?,'staff-a')`).bind(`${id}-${index}`, id, source, recordId)];
+      }),
+    ]);
+  }
+
+  it("collapses linked records before pagination and sorts by the displayed customer name", async () => {
+    await linkedParty("party-page", "Z Unified Customer", ["group-page-a", "group-page-b"]);
+    await roots([{ id: "middle", name: "M Independent" }]);
+    const first = await listClientHubRoots(env, staff, { limit: 1 });
+    expect(first.clients.map(row => row.public_id)).toEqual(["middle"]);
+    const second = await listClientHubRoots(env, staff, { limit: 1, cursor: first.nextCursor! });
+    expect(second.clients).toHaveLength(1);
+    expect(second.clients[0]).toMatchObject({ business_party_id: "party-page",
+      business_party_name: "Z Unified Customer", business_party_member_count: 2, detail_path: "/clients/parties/party-page" });
+    expect(second.nextCursor).toBeNull();
+    expect(second.clients[0]).not.toHaveProperty("party_rank");
+    expect(await findClientHubRoot(env, "organization", "group-page-b", "project-alpha:secondary", "business"))
+      .toMatchObject({ public_id: "group-page-b", source_id: "project-alpha:secondary" });
+  });
+
+  it("finds a linked customer by its reviewed name or any matching visible source record", async () => {
+    await linkedParty("party-search", "Acme Combined", ["group-search-a", "group-search-b"]);
+    for (const q of ["Acme Combined", "B Trading"]) {
+      const page = await listClientHubRoots(env, staff, { q, limit: 1 });
+      expect(page.clients).toHaveLength(1);
+      expect(page.clients[0]).toMatchObject({ business_party_id: "party-search", business_party_member_count: 2 });
+      expect(page.nextCursor).toBeNull();
+    }
+    const filtered = await listClientHubRoots(env, staff, { source: "project-alpha:secondary" });
+    expect(filtered.clients[0]).toMatchObject({ public_id: "group-search-b", business_party_id: "party-search" });
+  });
+
+  it("keeps source records separate for the explicit linking picker and binds that mode to its cursor", async () => {
+    await linkedParty("party-picker", "Picker customer", ["group-picker-a", "group-picker-b"]);
+    const first = await listClientHubRoots(env, staff, { grouping: "records", limit: 1 });
+    expect(first.clients[0]).toMatchObject({ business_party_id: "party-picker",
+      detail_path: "/clients/sources/project-alpha%3Aprimary/business/organizations/group-picker-a" });
+    await expect(listClientHubRoots(env, staff, { cursor: first.nextCursor! })).rejects.toMatchObject({ status: 400 });
+    const second = await listClientHubRoots(env, staff, { grouping: "records", cursor: first.nextCursor!, limit: 1 });
+    expect(second.clients[0]?.public_id).toBe("group-picker-b");
+    expect(second.nextCursor).toBeNull();
+    await expect(listClientHubRoots(env, staff, { grouping: "untrusted" })).rejects.toMatchObject({ status: 400 });
+  });
+
+  it("normalizes non-ASCII reviewed names for search without wildcard interpretation", async () => {
+    await linkedParty("party-unicode", "ÉLAN %_ Client", ["group-unicode-a", "group-unicode-b"]);
+    expect((await listClientHubRoots(env, staff, { q: "e\u0301lan %_" })).clients[0])
+      .toMatchObject({ business_party_id: "party-unicode" });
+    expect((await listClientHubRoots(env, staff, { q: "ÉLAN not" })).clients).toEqual([]);
+  });
+
+  it("suppresses party names and counts when any member becomes hidden or inactive", async () => {
+    await linkedParty("party-private", "Private aggregate label", ["group-private-a", "group-private-b"]);
+    await db.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id='project-alpha:secondary'").run();
+    const hidden = await listClientHubRoots(env, staff);
+    expect(hidden.clients).toHaveLength(1);
+    expect(hidden.clients[0]).not.toHaveProperty("business_party_id");
+    expect(JSON.stringify(hidden)).not.toContain("Private aggregate label");
+    expect((await listClientHubRoots(env, staff, { q: "Private aggregate" })).clients).toEqual([]);
+    await registerVisibleTestSource(db, "project-alpha:secondary", "Second company");
+    await db.prepare("UPDATE pa_organizations SET active=0 WHERE id='group-private-b'").run();
+    const inactive = await listClientHubRoots(env, staff);
+    expect(inactive.clients).toHaveLength(1);
+    expect(inactive.clients[0]).not.toHaveProperty("business_party_id");
+  });
+
+  it("invalidates pagination after audited links change and restores the unlinked source row", async () => {
+    await linkedParty("party-unlink", "A Unified", ["group-unlink-a", "group-unlink-b"]);
+    await roots([{ id: "z-after-party", name: "Z Other" }]);
+    const first = await listClientHubRoots(env, staff, { limit: 1 });
+    await db.prepare("UPDATE business_party_links SET unlinked_by='staff-a',unlinked_at=datetime('now') WHERE id='party-unlink-1'").run();
+    await expect(listClientHubRoots(env, staff, { cursor: first.nextCursor! })).rejects.toMatchObject({ status: 409 });
+    const refreshed = await listClientHubRoots(env, staff);
+    expect(refreshed.clients).toHaveLength(3);
+    expect(refreshed.clients.find(row => row.public_id === "group-unlink-b")).not.toHaveProperty("business_party_id");
+    expect(refreshed.clients.find(row => row.business_party_id === "party-unlink")?.business_party_member_count).toBe(1);
+  });
+
+  it("invalidates grouped pages immediately when a live member deactivates before index reconciliation", async () => {
+    await linkedParty("party-lifecycle", "A Unified", ["group-life-a", "group-life-b"]);
+    await roots([{ id: "z-after-life", name: "Z Other" }]);
+    const first = await listClientHubRoots(env, staff, { limit: 1 });
+    expect(first.nextCursor).toBeTruthy();
+    await db.prepare("UPDATE pa_organizations SET active=0 WHERE id='group-life-b'").run();
+    await expect(listClientHubRoots(env, staff, { cursor: first.nextCursor! })).rejects.toMatchObject({ status: 409 });
+    const refreshed = await listClientHubRoots(env, staff);
+    expect(refreshed.clients).toHaveLength(2);
+    expect(refreshed.clients.every(row => !("business_party_id" in row))).toBe(true);
+  });
 
   it("labels secondary business roots and keeps exact source ownership during search and lookup", async () => {
     await registerVisibleTestSource(db, "project-alpha:secondary", "Second company");

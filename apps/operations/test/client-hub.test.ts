@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { applyConnectorSchema, registerVisibleTestSource } from "./helpers/project-alpha-connectors";
+import { applyBusinessPartySchema, applyBusinessPartyStaffSchema } from "./helpers/business-parties";
 
 const acl = vi.hoisted(() => ({
   sqlScope: vi.fn(async () => ({ global: true, deniedGlobal: false })),
@@ -61,6 +62,17 @@ async function fixture() {
   const ops = await miniflare.getD1Database("OPS_DB") as unknown as D1Database;
   const delivery = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
   await applyConnectorSchema(ops);
+  await applyBusinessPartyStaffSchema(ops);
+  await ops.batch([
+    ops.prepare("INSERT INTO permissions(key,description) VALUES('team.view','View directory'),('team.manage','Manage business links')"),
+    ops.prepare("INSERT INTO roles(id,name,description) VALUES('role-admin','Fixture administrator','Directory fixture authority')"),
+    ops.prepare("INSERT INTO role_permissions(role_id,permission_key) VALUES('role-admin','team.view'),('role-admin','team.manage')"),
+    ...["staff-one", "other-staff"].flatMap(id => [
+      ops.prepare("INSERT INTO staff_users(id,email,display_name,status) VALUES(?,?,?,'active')").bind(id, `${id}@example.test`, id),
+      ops.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key) VALUES(?,?,'role-admin','global','global')")
+        .bind(`fixture-${id}`, id),
+    ]),
+  ]);
   await applySql(ops, `
     CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
@@ -70,6 +82,7 @@ async function fixture() {
     INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES('pa-standalone','Standalone One',NULL,1,'{"public_id":"${standaloneUuid}"}');
   `);
   await applySql(ops, readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8").replace(/^\s*--.*$/gm, ""));
+  await applyBusinessPartySchema(ops);
   await applySql(ops, `
     INSERT INTO client_hub_roots(source_id,kind,public_id,display_name,sort_name,status,portal_status,workspace_id,legacy_account_id,account_count,project_count,request_count,contact_count)
       VALUES('project-alpha:primary','organization','pa-org','Organization One','organization one','active','active','workspace-org','account-org',1,0,0,2),
@@ -144,6 +157,62 @@ async function readCollection(app: Awaited<ReturnType<typeof fixture>>["app"], e
 }
 
 describe("Client Hub bounded detail collections", () => {
+  it.each(["link", "unlink"] as const)("reads current party metadata after delayed identity hydration and a concurrent %s", async action => {
+    const { app, env, ops } = await fixture();
+    await registerVisibleTestSource(ops, "project-alpha:secondary", "Second company");
+    await ops.batch([
+      ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id) VALUES('party-secondary-org','Second source customer',1,'{}','project-alpha:secondary')"),
+      ops.prepare(`INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id)
+        VALUES('project-alpha:primary','organization','pa-org','pa-org'),
+          ('project-alpha:secondary','organization','pa-org','party-secondary-org')`),
+    ]);
+    const link = () => ops.batch([
+      ops.prepare(`INSERT INTO business_parties(id,kind,display_name,sort_name,created_by,updated_by)
+        VALUES('hydration-party','organization','Live linked customer','live linked customer','staff-one','staff-one')`),
+      ops.prepare(`INSERT INTO business_party_links(id,party_id,source_id,record_kind,record_id,linked_by)
+        VALUES('hydration-primary','hydration-party','project-alpha:primary','organization','pa-org','staff-one'),
+          ('hydration-secondary','hydration-party','project-alpha:secondary','organization','party-secondary-org','staff-one')`),
+    ]);
+    if (action === "unlink") await link();
+    let hydrated = false, prematurePartyRead = false;
+    // Observe the real party reader's first policy query without mocking its
+    // result: the previous Promise.all placement starts it before hydration.
+    const traced = new Proxy(ops, { get(target, property) {
+      if (property === "withSession") return (...args: Parameters<D1Database["withSession"]>) => {
+        const session = target.withSession(...args);
+        return new Proxy(session, { get(current, key) {
+          if (key === "prepare") return (sql: string) => {
+            if (sql.includes("can_read") && sql.includes("can_manage") && !hydrated) prematurePartyRead = true;
+            return current.prepare(sql);
+          };
+          const value = Reflect.get(current, key, current);
+          return typeof value === "function" ? value.bind(current) : value;
+        } });
+      };
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    const original = identityReads.listPortalIdentityPage.getMockImplementation()!;
+    identityReads.listPortalIdentityPage.mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      if (action === "link") await link();
+      else await ops.batch([
+        ops.prepare("UPDATE business_party_links SET unlinked_by='staff-one',unlinked_at=datetime('now') WHERE id='hydration-primary'"),
+        ops.prepare("UPDATE business_parties SET version=version+1,updated_by='staff-one' WHERE id='hydration-party' AND version=1"),
+      ]);
+      hydrated = true;
+      return result;
+    });
+    const response = await app.request(organizationPath, {}, { ...env, OPS_DB: traced });
+    expect(response.status).toBe(200);
+    expect(prematurePartyRead).toBe(false);
+    const result = await response.json() as { businessParty: unknown; contacts: unknown[]; canManageBusinessParties: boolean };
+    expect(result.contacts).toHaveLength(2);
+    expect(result.canManageBusinessParties).toBe(true);
+    if (action === "link") expect(result.businessParty).toMatchObject({ id: "hydration-party", displayName: "Live linked customer", version: 1 });
+    else expect(result.businessParty).toBeNull();
+  }, 30_000);
+
   it("hydrates an unindexed secondary business root without borrowing a matching primary portal identity or grant", async () => {
     const { app, env, ops } = await fixture();
     await ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id) VALUES('secondary-org','Secondary Organization',1,?,'project-alpha:secondary')")

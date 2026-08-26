@@ -6,6 +6,7 @@ import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
 import { ClientPortalAccessPanel, type PortalIdentityPage } from "./ClientPortalAccessPanel";
 import { businessProjectHref } from "./business-project-route";
 import { ClientDirectory, clientDirectoryReturnPath, clientPortalStatus, type ClientSummary, type ClientHubCapabilities, type ClientRootNamespace } from "./ClientDirectory";
+import { ClientBusinessParty, SourceBusinessParty, type BusinessPartyReference } from "./ClientBusinessParty";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
@@ -30,6 +31,8 @@ interface ClientDetailResponse {
   pages?: Partial<Record<ClientCollectionName, ClientCollectionPage>>;
   portalIdentities?: PortalIdentityPage;
   businessProjects?: BusinessProject[];
+  businessParty?: BusinessPartyReference | null;
+  canManageBusinessParties?: boolean;
 }
 interface BusinessProject extends CollectionItem { id: string; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null; created_at: string | null }
 type ClientCollectionName = "businessContacts" | "businessProjects" | "accounts" | "projects" | "requests" | "deliveryGrants" | "authenticatedDeliveryGrants" | "viewerGrants";
@@ -318,6 +321,8 @@ function ClientWorkspace({ route, canReviewFeedback }: { route: ClientRoute; can
         {data.client.root_namespace === "portal" && <p>Portal workspace · business link pending</p>}</div>
       <StatusPill tone={clientPortalStatus(data.client).tone}>{clientPortalStatus(data.client).label}</StatusPill>
     </div>
+    <SourceBusinessParty key={revision} client={data.client} party={data.businessParty} canManage={data.canManageBusinessParties}
+      contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} onRefresh={refresh} />
     <p className="client-hub-inventory-note">{data.businessProjects ? "Business projects are separate from the work shared with this client and their portal access." : "These sections show work shared with this client. Full business project history is separate."}</p>
     <div className="dashboard-grid client-hub-detail-grid" key={revision}>
       <Card title="Business contacts">
@@ -375,6 +380,12 @@ export function ClientHub({ mapToken, permissions, feedbackEnabled=false }: { ma
   const route = clientRoute();
   const canReview = permissions.includes("operations.manage");
   const canViewDirectory = permissions.includes("team.view");
+  if (location.pathname.startsWith("/clients/parties/")) {
+    let partyId = "";
+    try { const parts = location.pathname.split("/").filter(Boolean); if (parts.length === 3) partyId = decodeURIComponent(parts[2]!); } catch { /* Invalid encoded routes fail closed. */ }
+    return canViewDirectory && partyId ? <ClientBusinessParty key={partyId} partyId={partyId} />
+      : <Card><EmptyState title="Linked customer unavailable" detail={canViewDirectory ? "This customer link is invalid." : "Client-directory access is required."} /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
+  }
   if (selectedRequest)
     return canReview ? <ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" /> : <Card><EmptyState title="Request unavailable" detail="Request-review access is required." /></Card>;
   if (route && "invalid" in route) return <Card><EmptyState title="Client workspace unavailable" detail="This client link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;

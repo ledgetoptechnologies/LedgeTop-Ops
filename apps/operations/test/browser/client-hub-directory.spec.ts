@@ -288,7 +288,8 @@ test("initial failures, stale continuations, and empty searches have recoverable
   await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toBeVisible();
   await page.getByRole("button", { name: "Load more clients" }).click();
   await expect(page.getByRole("alert")).toContainText("Client directory changed");
-  await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toBeVisible();
+  // A regrouping can supersede old cards, so no obsolete customer identity remains visible.
+  await expect(page.getByRole("link", { name: "Open Acme client workspace" })).toHaveCount(0);
   await page.getByRole("button", { name: "Refresh clients" }).click();
   await expect(page.getByRole("alert")).toHaveCount(0);
   expect(requested.filter(url => url.searchParams.get("cursor") === "old-cursor")).toHaveLength(1);

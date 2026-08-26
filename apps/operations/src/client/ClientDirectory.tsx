@@ -22,6 +22,9 @@ export interface ClientSummary {
   source_name?: string;
   root_namespace?: ClientRootNamespace;
   pa_public_id?: string | null;
+  business_party_id?: string | null;
+  business_party_name?: string | null;
+  business_party_member_count?: number;
 }
 export interface ClientHubCapabilities {
   directory: boolean;
@@ -78,6 +81,7 @@ function detailPath(client: ClientSummary, query: DirectoryQuery): string {
 }
 
 function clientKey(client: ClientSummary): string {
+  if (client.business_party_id) return JSON.stringify(["party", client.business_party_id]);
   return JSON.stringify([client.source_id || "", client.root_namespace || "", client.kind, client.public_id]);
 }
 
@@ -156,12 +160,12 @@ export function ClientDirectory() {
       failedCursor.current = null;
     } catch (caught) {
       if (abort.signal.aborted || request !== requestNumber.current) return;
-      const sourceChanged = caught instanceof ApiError && caught.status === 409 && caught.payload.code === "source_visibility_changed";
-      if (caught instanceof ApiError && ([401, 403, 404].includes(caught.status) || sourceChanged)) {
+      const contextChanged = caught instanceof ApiError && caught.status === 409;
+      if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) {
         setClients([]); setSources([]); setNextCursor(null); setIndexUpdatedAt(null); setLoaded(false);
         cursor = null;
       }
-      const stale = sourceChanged || Boolean(cursor && caught instanceof ApiError && caught.status === 409);
+      const stale = contextChanged;
       failedCursor.current = stale ? null : cursor;
       setStaleCursor(stale);
       setError(caught instanceof Error ? caught.message : "The client directory could not be loaded.");
@@ -242,17 +246,19 @@ export function ClientDirectory() {
     </Card>}
     <div className="client-directory-grid" aria-busy={Boolean(loading)}>
       {clients.map(client => <a className="client-directory-card" key={clientKey(client)}
-        href={detailPath(client, query)} aria-label={`Open ${client.display_name} client workspace`}>
+        href={detailPath(client, query)} aria-label={`Open ${client.business_party_name || client.display_name} client workspace`}>
         <div className="client-directory-card-header"><small>{client.kind === "organization" ? "Organization" : "Individual client"}</small>
-          <StatusPill tone={clientPortalStatus(client).tone}>{clientPortalStatus(client).label}</StatusPill></div>
-        <h3>{client.display_name}</h3>
-        {client.source_name && <small>{client.source_name}</small>}
-        {client.root_namespace === "portal" && <small>Portal workspace · business link pending</small>}
-        <dl className="client-directory-card-counts">
+          {!client.business_party_id && <StatusPill tone={clientPortalStatus(client).tone}>{clientPortalStatus(client).label}</StatusPill>}</div>
+        <h3>{client.business_party_name || client.display_name}</h3>
+        {client.business_party_id ? <><small>Linked customer · {number(client.business_party_member_count || 0)} business records</small>
+          <p className="client-directory-status">Open each source workspace for its contacts, history and access.</p></>
+          : client.source_name && <small>{client.source_name}</small>}
+        {!client.business_party_id && client.root_namespace === "portal" && <small>Portal workspace · business link pending</small>}
+        {!client.business_party_id && <dl className="client-directory-card-counts">
           <div><dt>Shared projects</dt><dd>{number(client.project_count)}</dd></div>
           <div><dt>Contact records</dt><dd>{number(client.contact_count ?? client.contacts?.length ?? 0)}</dd></div>
           <div><dt>Requests</dt><dd>{number(client.request_count)}</dd></div>
-        </dl>
+        </dl>}
         <span className="client-directory-open">Open client workspace <span aria-hidden="true">→</span></span>
       </a>)}
     </div>

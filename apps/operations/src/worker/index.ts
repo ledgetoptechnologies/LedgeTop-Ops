@@ -136,6 +136,7 @@ import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quot
 import { provePrimaryBusinessReferences } from "./project-alpha-primary-references";
 import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
+import { registerBusinessPartyRoutes } from "./business-party-routes";
 import { registerNotificationCenterRoutes } from "./notification-center";
 import { reconcileClientHubIndex } from "./client-hub-index";
 import {
@@ -1426,6 +1427,7 @@ registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerClientHubRoutes(app);
+registerBusinessPartyRoutes(app);
 registerNotificationCenterRoutes(app);
 registerClientFeedbackRoutes(app);
 registerViewerIntegrationRoutes(app);

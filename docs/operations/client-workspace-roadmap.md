@@ -374,8 +374,8 @@ migration, compatibility/replay tests and release limitations. Native portal
 ownership is also implemented locally; its exact verification state is recorded
 in [native portal source ownership](portal-source-ownership.md). The
 [connector registry](project-alpha-connector-registry.md) is now implemented
-and verified locally; explicit business-party linking
-remains unfinished.
+and verified locally; [explicit business-party linking](business-party-linking.md)
+is also implemented and verified locally, without merging portal authority.
 Local delivery-intent/guest receipt ownership is documented in
 [delivery intent ownership](delivery-intent-source-ownership.md); primary-only
 outbound quote/pricing destination ownership is documented in
@@ -644,8 +644,15 @@ desktop/mobile browser tests passed, with screenshots inspected. A pre-existing
 thumbnail-runbook source-layout invariant remains a separate documented failure;
 this is not a whole-monorepo green claim. The increment is not deployed, and
 no secondary source, production migration, credential change, or deployment has
-been performed. Automatic secondary scheduling and explicit business-party
-linking remain separate unfinished slices.
+been performed. Automatic secondary scheduling remains separate. The subsequent
+local increment implements [reviewed business-party linking](business-party-linking.md)
+with explicit preview/confirmation, independent source workspaces, audited
+unlink/repair and stale-context cancellation. Its own final gate passed **114
+backend tests in five files**, the Operations type check and production build,
+and **194 desktop/mobile browser cases in seven files**, including 38 new linking
+cases. Corrected desktop/mobile button layouts were visually inspected. These
+are scoped local checks; the connector checkpoint's full-suite results are not
+a new whole-monorepo claim. No real customers were linked or granted access.
 
 - [x] Read and reconcile the handoff against current released Operations source.
 - [x] Record the identity, authorization, source ownership, and Viewer-freeze boundaries.
@@ -705,7 +712,12 @@ linking remain separate unfinished slices.
       scoped business visibility and responsive administration. See
       [connector registry](project-alpha-connector-registry.md). Live enrollment,
       paired migration/deployment, Alpha public-ID export and unresolved
-      business-party/project-memory policies remain separate release gates.
+      portal-authorization/project-memory policies remain separate release gates.
+- [x] Locally implement and verify explicit business-party linking: reviewed
+      same-kind source records, one directory identity, independent source
+      workspaces, bounded repair/unlink, audit and stale-context protections.
+      See [business-party linking](business-party-linking.md) for exact results
+      and the paired migration/release order. No production deployment included.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

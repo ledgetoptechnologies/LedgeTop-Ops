@@ -26,7 +26,7 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
       script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
     db = await runtime.getD1Database("OPS_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
-    for (const file of readdirSync(directory).filter(file => /^\d{4}_.*\.sql$/.test(file) && file.slice(0, 4) <= "0035").sort()) {
+    for (const file of readdirSync(directory).filter(file => /^\d{4}_.*\.sql$/.test(file) && file.slice(0, 4) <= "0036").sort()) {
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(file, directory), "utf8")).map(sql => db.prepare(sql)));
     }
     await db.batch([

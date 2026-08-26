@@ -13,7 +13,8 @@ receipt replay, guest links and notification ownership. These are separate
 local increments, not second-source activation. The next local increment is the
 [source-bound connector registry](project-alpha-connector-registry.md), including
 authenticated snapshot/event selection and staff business-record visibility;
-its final verification is in progress. None of these local changes are evidence
+its local verification is complete. Explicit customer grouping is implemented
+and verified locally in [business-party linking](business-party-linking.md). None of these local changes are evidence
 of a production secondary connection. The
 original gaps below were audited against local Operations checkpoint
 `f055b2c` on August 26, 2026. This document
