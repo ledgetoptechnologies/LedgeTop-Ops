@@ -163,10 +163,10 @@ import {
 } from "./client-portal-deny-policies";
 import {
   createEligibilityBlock,
-  listClientIdentityEligibility,
   retryClientPortalInvitation,
   revokeEligibilityBlock,
 } from "./client-identity-eligibility";
+import { isPortalIdentityCollection, listPortalIdentityCollection, listPortalIdentityPage, portalIdentityQuery } from "./client-portal-identity-read";
 import {
   authenticatedDeliveryGrantsEnabled,
   createAuthenticatedDeliveryGrant,
@@ -1081,8 +1081,16 @@ app.post("/api/client-portal/identity-denials/:denialId/revoke", async (c) => {
   ));
 });
 app.get("/api/team/clients", async c => c.json(
-  await listClientIdentityEligibility(c.env, c.get("principal")),
+  await listPortalIdentityPage(c.env, c.get("principal"), { kind: "global" }, portalIdentityQuery(new URL(c.req.url).searchParams)),
 ));
+app.get("/api/team/clients/:workspaceId/:principalPublicId/:collection", async c => {
+  const collection = c.req.param("collection");
+  if (!isPortalIdentityCollection(collection)) throw new HTTPException(400, { message: "Portal identity collection is invalid" });
+  const query = portalIdentityQuery(new URL(c.req.url).searchParams);
+  return c.json(await listPortalIdentityCollection(c.env, c.get("principal"), { kind: "global" },
+    { workspaceId: c.req.param("workspaceId"), publicId: c.req.param("principalPublicId") }, collection,
+    { expectedPrincipalContext: c.req.query("expectedPrincipalContext") ?? "", cursor: query.cursor, limit: query.limit }));
+});
 app.post("/api/team/clients/:workspaceId/:principalPublicId/invitation/retry", async c => c.json(
   await retryClientPortalInvitation(c.env,c.get("principal"),c.req.param("workspaceId"),
     c.req.param("principalPublicId"),c.req.header("Idempotency-Key") || ""),

@@ -248,10 +248,10 @@ Release gates and remaining follow-up:
 - Periodic search state needs honest freshness and live ownership checks for
   moved/deactivated contacts and projects. Successful local tests must include
   those cases, not only unchanged synthetic source IDs.
-- Portal identity/access-list limits and missing meaningful activity rollups
-  remain separate unfinished work. The seven non-identity detail collections
-  are now paged as described below. This slice does not enable a second Alpha
-  producer, merge business records, grant access, or complete the roadmap.
+- At this baseline, portal identity/access-list limits remained separate work;
+  the follow-on below replaces that reader. Meaningful activity rollups remain
+  unfinished. This slice does not enable a second Alpha producer, merge business
+  records, grant access, or complete the roadmap.
 
 Detail pagination is implemented locally: seven non-identity collections start
 with five records and have independent continuation routes (25 by default, 100
@@ -279,8 +279,67 @@ the 26-case affected suite above. These are complete coverage results across a
 full run and explicit retries, not a claim of one clean final full-suite pass.
 Repeat the serial full gate from the runbook before publication/merge.
 
-Portal identity/entitlement/block/invitation pagination and full scoped business
-project history remain unfinished. Rollout and recovery steps are recorded in
+The clean serial baseline was subsequently completed against checkpoint
+`45800a9`: **768 tests across 104 files passed**, with no failures, in 710.63
+seconds on August 25. This baseline precedes the progressive portal-login and
+business-history integration below; it is not the final gate for those changes.
+
+### Follow-on local work: portal logins and business history
+
+- Replace eager portal principal/access reads with bounded, independent pages.
+  Keep business contacts, verified logins, workspace membership, explicit rules,
+  and effective resource authorization distinct. Current-principal context
+  fences must prevent a stale login header from receiving another identity's
+  rule history.
+- Add a separate business-project history, authorized with `projects.view` and
+  the existing assignment policy. Delivery access inventory is not a substitute
+  for that history. Source creation dates may order records; local sync times
+  are not business activity.
+- Invitation retry had a concrete receipt-format defect: the common hash helper
+  emits base64url, but deployed migration 0149 requires a 64-character receipt.
+  A new regression using the actual migration reproduced seven failures before
+  the fix. The narrow hexadecimal SHA-256 correction and normalized-email match
+  pass all **8 new cases**, including idempotent replay, expired/redacted
+  invitations, authorization flags and transactional audit-failure rollback.
+  Other fingerprint formats and the database constraint remain unchanged.
+- The isolated business-history module passes **10 focused tests**. The final
+  focused real-D1 portal-login reader run passes **11 tests**, including 532
+  principals, 5,005 access rules and 510 invitation records. The associated six
+  eligibility mutation tests pass. One Hub route-test expectation was corrected
+  to require 403 when project permission is absent; its isolated rerun passed.
+  The combined full suite is still required below, not inferred from these runs.
+- Additive Delivery migration 0152 passes a full-chain populated upgrade and
+  query-plan regression. Its four history indexes preserve all existing rows,
+  constraints and audit triggers, and avoid sorting the matching histories for
+  the tested exact lookups. No authority or source data is rewritten.
+- Client Portal's actual full-migration-chain end-to-end and eligibility suites
+  pass **13 tests** with 0152 included (55.03 seconds). Production data was not used.
+- The five-file focused browser gate passes **100 desktop/mobile tests**. A
+  subsequent expiry-badge and screenshot follow-up passes **60 affected tests**.
+  Expired grants are no longer labelled active, revoked/inactive status takes
+  precedence, and invalid/blank dates are explicitly unverified. This is display
+  logic only, not a change to content authorization or Viewer behavior.
+- Layouts were visually reviewed at 375, 640, 1280 and 3440 pixels, including long
+  names/emails, wrapping controls, spacing and keyboard focus. Generated Worker
+  types, TypeScript checking and the production build pass.
+- The final serial Operations unit run passes **796 tests across 108 files**,
+  zero failures, in 785.66 seconds. It includes the integrated history, portal
+  reader, routes, invitation-retry and populated-migration regressions. Both
+  Operations and Client Portal TypeScript checks pass.
+- The final complete Operations browser run passes **290 tests**, zero failures,
+  in 4.0 minutes with one worker. It includes both desktop and mobile coverage
+  for the new Client Hub workflow and existing navigation, scoped links, SOPs,
+  uploads, client requests, staff access and Viewer-launch behavior.
+
+These follow-on changes have passed local integrated backend/browser acceptance.
+They are not deployed. No live invitation or permission mutation was used for
+verification. The separate pre-existing thumbnail documentation assertion still
+fails the repository-level source-layout test; the runbook records this rather
+than claiming that the entire monorepo gate is green.
+
+Portal identity/entitlement/block/invitation pagination and scoped business
+project history are integrated and verified locally; publication and deployment
+remain pending. Rollout and recovery steps are recorded in
 [the directory runbook](client-hub-directory.md). No part of this new directory
 or detail checkpoint has been deployed.
 
@@ -324,6 +383,40 @@ or detail checkpoint has been deployed.
   a new authoritative job/project, and copies Ops-owned content independently.
 - Never copy grants, invitations, completion state, invoices, or pending notices
   implicitly. Historical records and attachment provenance remain intact.
+
+Read-only next-slice audit (August 25; not implemented):
+
+- Existing Job Briefs are operation-owned. Reuse their optimistic versions,
+  immutable revisions, private-attachment and pinned-SOP patterns; do not rename
+  them into project memory or reuse source-operation attachment URLs as if the
+  destination project authorizes them.
+- Alpha owns named contacts, departments, project-contact assignments and billing
+  flags. The current snapshot exports contact email/phone and a primary
+  `project.client_id`, but not every department/project role or organization
+  general contact channel. Missing projections are not proof of absent contacts,
+  and `project.client_id` must not be relabelled as the site contact.
+- A narrower existing display gap should be corrected first: the business-contact
+  collection currently returns names with an empty email placeholder, although
+  Alpha's existing snapshot supplies email and phone in `pa_clients.payload_json`.
+  Use guarded, bounded JSON text extraction and a business-contact-only DTO;
+  remove obsolete identity/access placeholder fields without inferring a login.
+  No new migration or Alpha export is needed. Cover malformed/non-string/long
+  values, private-field exclusion, exact current ownership and continuation in
+  real backend fixtures. Browser fixtures with example emails alone are not
+  evidence that those fields are populated by the current API.
+- The smallest proposed increment is a staff-only, source-scoped project detail
+  with explicit Ops-owned site roles referencing Alpha contacts, versioned text
+  memory, and selective copying into an **existing** authorized destination.
+  Creating a new Alpha project remains deferred until its authoritative contract
+  exists. Attachment/SOP copying needs separate staging and ownership checks.
+- Copy requires source-read and destination-write authority, current contact
+  ownership, an expected destination version and replay-safe request identity.
+  Destination content is independently editable with source-revision provenance;
+  do not copy grants, invoice-recipient flags or pending notifications.
+- Before extending this slice, settle field-staff write access, whether local-only
+  contacts are needed, cross-client copying and completed-project edit policy.
+  Conservative initial proposals are manager-only writes, existing Alpha contacts
+  and same-client/same-source copies; these are proposals, not enabled policies.
 
 ### 3. Predictable client and collaborator access
 
@@ -418,6 +511,8 @@ Test the complete workflow, not only whether a component renders:
 - [x] Correct the existing cross-workspace eligibility display defect and regress it.
 - [x] Implement and locally verify navigation and scoped delivery-link cleanup.
 - [x] Release the verified navigation slice and check it in the deployed UI.
+- [x] Integrate bounded portal-login reads and scoped business-project history
+      locally; keep authority separate from contact records and access inventory.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

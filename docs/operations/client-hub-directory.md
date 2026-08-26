@@ -46,7 +46,7 @@ not enable a second producer or authorize business-record linking.
   are live, bounded queries, not a transaction snapshot across both databases.
   Newly added rows above a continuation position become visible on refresh.
 - The canonical detail route adds `/collections/:collection` for business
-  contacts, accounts, shared projects, requests, legacy delivery links, portal
+  contacts, business project history, accounts, shared projects, requests, legacy delivery links, portal
   deliveries, and shared models. Collection keys are not additional permissions.
   Portal logins remain separate from paged business-contact records.
 - Source mapping or permission changes invalidate continuation. A successful
@@ -59,9 +59,58 @@ not enable a second producer or authorize business-record linking.
 - Project access inventory is not full business project history. The latter
   requires its own `projects.view` and assignment-scope checks.
 
-Do not claim every detail list is scalable yet: portal principal, entitlement,
-invitation, and eligibility-block listing still needs a separate pagination
-change. Raising the existing safety limits is not that change.
+### Portal pagination and business history (locally verified, not deployed)
+
+Portal logins use an independent five-record initial page and server-side
+name/email, link-state, sign-in-block and principal-status filters. Subsequent
+identity pages default to 25, maximum 50. Access rules, invitations and sign-in
+block histories are loaded only when opened, with independent bounded cursors.
+Business contacts are not login records and must remain in their own section.
+The former eager portal reader and duplicate access panel have been removed;
+the global staff client endpoint and scoped Client Hub use the same bounded
+reader. This does not enable a second Alpha producer or new access mutations.
+
+Nested reads send the selected summary's `expectedPrincipalContext`, including
+on their first request. The server compares this to current identity binding,
+source version, membership and eligibility facts before and after reading.
+An actor/root/principal-context change returns a refresh-required response;
+the browser clears every stale detail section. Ordinary network failures retain
+unrelated sections and provide a local retry. These are live pages, not a frozen
+snapshot of every unloaded entitlement or invitation.
+
+Rule history shows explicit allow/deny rules, not effective authorization.
+Invitation history is scoped to the exact workspace and current normalized email
+and is labelled **Invitations to this email**, not a verified personal history.
+Removing a global email sign-in block does not grant workspace or content access.
+Creation/removal confirmations must explain the all-workspaces effect. Never
+select a removable block from an incomplete first history page; use the exact
+effective summary or the explicitly chosen history row.
+
+Invitation delivery recovery remains administrator-only and rollout-gated. Its
+receipt format must match migration 0149's 64-character SHA-256 encoding. The
+existing base64url fingerprint helper serves other contracts and is not changed.
+Recovery only queues an existing valid invitation with intact delivery payload;
+it cannot manufacture an identity, membership or content grant.
+
+Business-project history is separate from shared-project access. It applies
+the existing project-view and assignment policy, current source ownership and
+source-qualified client root before pagination. Source-created dates order
+history (invalid/missing dates last); synchronization timestamps are not activity.
+Project permission changes participate in the shared detail context, and each
+page rechecks current ownership and assignments before returning its rows.
+Status filters include All, Current, Completed and Cancelled. Unknown legacy
+statuses remain visible under All with a neutral label. The `business_status`
+and `login_*` URL parameters retain independent filters through refresh and
+Back/Forward without discarding the directory search. Missing source-created
+dates are not replaced with synchronization dates.
+
+Delivery migration `0152_portal_identity_read_indexes.sql` supports these reads
+with normalized-email invitation/block indexes and identity/subject history
+indexes. It adds no triggers and changes no identity, grant, invitation or
+membership records. A populated upgrade test applies the complete earlier
+Delivery migration chain, verifies unchanged data and triggers, then checks
+foreign keys/integrity and the actual query plans before and after the upgrade.
+The latest-email-invitation read no longer requires a temporary sorting tree.
 
 ## Index lifecycle
 
@@ -86,6 +135,18 @@ roots inactive. It does not delete business records, source media, memberships,
 delivery links, or Viewer data.
 
 ## Release gate
+
+Local acceptance completed August 25, 2026:
+
+- Operations: 796 unit/integration tests across 108 files, zero failures; 290
+  desktop/mobile browser tests, zero failures. The final runs were serial.
+- Client Portal: 13 full-migration-chain end-to-end and eligibility tests passed
+  with migration 0152 included. No production identities or grants were changed.
+- Operations generated Worker types, both application TypeScript checks and the
+  Operations production build passed. Responsive captures were visually reviewed
+  at 375, 640, 1280 and 3440 pixels.
+- Repository-level source-layout verification is **not** fully green; the
+  pre-existing thumbnail documentation failure is detailed below.
 
 Run local acceptance from `apps/operations` using the committed lockfile:
 
@@ -113,7 +174,8 @@ a local test-server failure.
    and browser gates. Include the populated upgrade test, not only empty schema
    creation or mocked UI responses.
 4. With migration/deployment authority, apply the additive Operations migration
-   before releasing its consumer. Do not bypass another pending migration or
+   0032 and Delivery read-index migration 0152 before releasing their consumer.
+   Do not bypass another pending migration or
    assume an application deploy has applied database changes.
 5. Confirm the isolated cron runs and the initial index reaches `ready=1`.
    Read-only acceptance should cover client search, source-qualified details,
@@ -121,6 +183,15 @@ a local test-server failure.
 6. Record application revisions, migration state, actual gate results, and live
    acceptance separately. Passing local fixtures is not proof of a deployed
    cross-application integration.
+
+An additional repository-level check on August 25 found a pre-existing failure
+in `scripts/source-layout-invariants.test.mjs`: six of seven checks pass, but its
+thumbnail-runbook assertion still expects the old direct-scratch wording and
+`file,pipe` protocol contract. The unchanged runbook now documents a loopback
+range proxy. The test and referenced thumbnail files are identical to released
+`28827c4`; this Client Hub slice does not modify them. Do not report the entire
+monorepo gate as green or weaken the assertion here. Have the thumbnail owner
+reconcile that contract before a release requiring the root test gate.
 
 ## Diagnostics and rollback
 

@@ -1,13 +1,14 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { isAdministrator, sqlScope } from "./acl";
-import { eligibilityBlockManagementEnabled, listClientIdentityEligibility, portalOperationsManagementEnabled } from "./client-identity-eligibility";
+import { sqlScope } from "./acl";
 import { clientHubDetailPath, clientHubRouteKind, findClientHubRoot, listClientHubRoots,
   isClientHubRootNamespace, isClientHubSource, type ClientHubKind, type ClientHubRoot } from "./client-hub-directory";
 import { isAlphaPublicId, resolveClientHubSourceRoot, validatedUniquePublicIdExpression } from "./client-hub-source";
 import { resolveClientHubWorkspace, type ClientHubWorkspace } from "./client-hub-workspace";
 import { CLIENT_HUB_COLLECTIONS, createClientHubCollectionContext, isClientHubCollection, listClientHubCollection,
   type ClientHubCollectionContext, type ClientHubPermissions } from "./client-hub-collections";
+import { listClientHubBusinessProjects, BUSINESS_PROJECT_FILTERS, type BusinessProjectFilter } from "./client-hub-business-projects";
+import { isPortalIdentityCollection, listPortalIdentityCollection, listPortalIdentityPage, portalIdentityQuery } from "./client-portal-identity-read";
 import type { Env, StaffPrincipal } from "./types";
 
 type AppEnv = {
@@ -18,6 +19,7 @@ type App = Hono<AppEnv>;
 type ClientKind = ClientHubKind;
 
 type WorkspaceRow = ClientHubRoot;
+const DETAIL_COLLECTIONS = [...CLIENT_HUB_COLLECTIONS, "businessProjects"] as const;
 
 function database(env: Env) {
   return env.DELIVERY_DB.withSession("first-primary");
@@ -146,21 +148,6 @@ async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRo
     portal_status: workspace?.status ?? (resolved.status === "conflict" ? "mapping_conflict"
       : resolved.status === "pending" ? "projection_pending" : source.mapping_status !== "mapped" ? "mapping_unavailable" : "not_provisioned") };
 }
-function contactsForRoot(
-  root: WorkspaceRow,
-  sourceClients: Array<Record<string, unknown>>,
-  projected: Array<Record<string, unknown>>,
-): Array<Record<string, unknown>> {
-  const projectedContacts: Array<Record<string, unknown>> = root.workspace_id
-    ? projected.filter(contact => contact.workspace_id === root.workspace_id).map(contact => ({ ...contact,
-      contact_key: `principal:${root.workspace_id}:${String(contact.public_id)}`, record_type: "portal_principal" }))
-    : [];
-  // Only the independently paged business contacts are appended. They never
-  // acquire a portal identity by equal raw IDs, names, or email addresses.
-  projectedContacts.push(...sourceClients);
-  return projectedContacts.sort((left, right) => String(left.display_name).localeCompare(String(right.display_name)));
-}
-
 async function resolveDetailContext(env: Env, principal: StaffPrincipal, kind: ClientKind, publicId: string,
   sourceId?: string, rootNamespace?: string): Promise<ClientHubCollectionContext> {
   // Validate before either the portal alias or live-source fallback can bypass
@@ -212,27 +199,21 @@ async function verifyContext(env: Env, principal: StaffPrincipal, context: Clien
 async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: ClientKind, publicId: string, sourceId?: string, rootNamespace?: string) {
   const context = await resolveDetailContext(env, principal, kind, publicId, sourceId, rootNamespace);
   const workspace = context.root, access = context.access;
-  const administrator = await isAdministrator(env, principal);
-  const [identityDirectory, collections] = await Promise.all([
-    workspace.workspace_id ? listClientIdentityEligibility(env, principal, { workspaceId: workspace.workspace_id }) : Promise.resolve({
-      clients: [], blocks: [], canManageEligibilityBlocks: eligibilityBlockManagementEnabled(env) && administrator,
-      canManagePortal: portalOperationsManagementEnabled(env) && administrator,
-    }),
-    Promise.all(CLIENT_HUB_COLLECTIONS.map(async collection => ({ collection,
-      result: await listClientHubCollection(env, context, collection, { initial: true, limit: 5 }) }))),
+  const [portalIdentities, collections] = await Promise.all([
+    listPortalIdentityPage(env, principal, { kind: "client", context }, { limit: 5 }),
+    Promise.all(DETAIL_COLLECTIONS.map(async collection => ({ collection,
+      result: collection === "businessProjects" ? await listClientHubBusinessProjects(env, principal, context, { initial: true, limit: 5 })
+        : await listClientHubCollection(env, context, collection, { initial: true, limit: 5 }) }))),
   ]);
-  const items = (collection: typeof CLIENT_HUB_COLLECTIONS[number]) => collections.find(page => page.collection === collection)!.result.items;
+  const items = (collection: typeof DETAIL_COLLECTIONS[number]) => collections.find(page => page.collection === collection)!.result.items;
   await verifyContext(env, principal, context);
   return {
     client: { ...workspace, route_kind: clientHubRouteKind(workspace.kind), detail_path: clientHubDetailPath(workspace) },
-    contacts: contactsForRoot(workspace, items("businessContacts"), identityDirectory.clients as Array<Record<string, unknown>>),
-    accessManagement: {
-      blocks: identityDirectory.blocks,
-      canManageEligibilityBlocks: identityDirectory.canManageEligibilityBlocks,
-      canManagePortal: identityDirectory.canManagePortal,
-    },
+    contacts: items("businessContacts"),
+    portalIdentities,
     accounts: items("accounts"),
     projects: items("projects"),
+    businessProjects: items("businessProjects"),
     requests: items("requests"),
     deliveryGrants: items("deliveryGrants"),
     authenticatedDeliveryGrants: items("authenticatedDeliveryGrants"),
@@ -244,16 +225,45 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
 }
 
 export function registerClientHubRoutes(app: App): void {
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/identities", async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    const result = await listPortalIdentityPage(c.env, principal, { kind: "client", context }, portalIdentityQuery(new URL(c.req.url).searchParams));
+    await verifyContext(c.env, principal, context);
+    return c.json(result);
+  });
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/identities/:principalId/:collection", async c => {
+    const kind = routeKind(c.req.param("kind")), collection = c.req.param("collection");
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    if (!isPortalIdentityCollection(collection)) throw new HTTPException(400, { message: "Portal identity collection is invalid" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    if (!context.root.workspace_id) throw new HTTPException(404, { message: "Client portal workspace is unavailable" });
+    const query = portalIdentityQuery(new URL(c.req.url).searchParams);
+    const result = await listPortalIdentityCollection(c.env, principal, { kind: "client", context },
+      { workspaceId: context.root.workspace_id, publicId: c.req.param("principalId") }, collection,
+      { expectedPrincipalContext: c.req.query("expectedPrincipalContext") ?? "", cursor: query.cursor, limit: query.limit });
+    await verifyContext(c.env, principal, context);
+    return c.json(result);
+  });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/collections/:collection", async c => {
     const kind = routeKind(c.req.param("kind")), collection = c.req.param("collection");
     if (!kind) throw new HTTPException(404, { message: "Client not found" });
-    if (!isClientHubCollection(collection)) throw new HTTPException(400, { message: "Client collection is invalid" });
+    if (!isClientHubCollection(collection) && collection !== "businessProjects") throw new HTTPException(400, { message: "Client collection is invalid" });
     const principal = c.get("principal");
     const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
     const rawLimit = c.req.query("limit");
-    const result = await listClientHubCollection(c.env, context, collection, {
+    const options = {
       cursor: c.req.query("cursor"), limit: rawLimit === undefined ? undefined : /^\d+$/.test(rawLimit) ? Number(rawLimit) : Number.NaN,
-    });
+    };
+    const filter = c.req.query("filter");
+    if (collection === "businessProjects" && filter !== undefined && !(BUSINESS_PROJECT_FILTERS as readonly string[]).includes(filter))
+      throw new HTTPException(400, { message: "Business project filter is invalid" });
+    const result = collection === "businessProjects"
+      ? await listClientHubBusinessProjects(c.env, principal, context, { ...options, filter: filter as BusinessProjectFilter | undefined })
+      : await listClientHubCollection(c.env, context, collection, options);
     await verifyContext(c.env, principal, context);
     return c.json(result);
   });

@@ -3,29 +3,17 @@ import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import type { Permission } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
-import { ClientIdentityAccess, type ClientAccessManagementState, type ClientIdentityContact } from "./ClientIdentityAccess";
+import { ClientPortalAccessPanel, type PortalIdentityPage } from "./ClientPortalAccessPanel";
 import { ClientDirectory, clientDirectoryReturnPath, clientPortalStatus, type ClientSummary, type ClientHubCapabilities, type ClientRootNamespace } from "./ClientDirectory";
 
-interface ContactAccess {
-  capability: string;
-  effect: "allow" | "deny";
-  scope_type: string;
-  scope_public_id: string;
-  scope_label: string;
-}
 interface CollectionItem { row_key?: string }
-interface ClientContact extends ClientIdentityContact, CollectionItem {
+interface ClientContact extends CollectionItem {
   contact_key?: string;
-  record_type?: "business_contact" | "portal_principal";
-  workspace_id: string;
+  record_type: "business_contact";
+  workspace_id?: string | null;
   public_id: string;
   display_name: string;
   email_hint: string;
-  status: string;
-  identity_id: string | null;
-  has_workspace_access: number;
-  blocked: number;
-  access: ContactAccess[];
 }
 interface ClientDetailResponse {
   client: ClientSummary;
@@ -36,12 +24,14 @@ interface ClientDetailResponse {
   deliveryGrants: Array<CollectionItem & { share_id: string; account_id?: string; label: string | null; r2_prefix: string; project_name: string; revoked_at: string | null; expires_at: string | null }>;
   authenticatedDeliveryGrants: Array<CollectionItem & { id: string; status: string; r2_prefix: string; audience_type: string; expires_at: string | null }>;
   viewerGrants: Array<CollectionItem & { id: string; status: string; scope_type: string; project_name: string; model_title: string | null; authorization_expires_at: string | null }>;
-  accessManagement: ClientAccessManagementState;
   capabilities: ClientHubCapabilities;
   contextVersion?: string;
   pages?: Partial<Record<ClientCollectionName, ClientCollectionPage>>;
+  portalIdentities?: PortalIdentityPage;
+  businessProjects?: BusinessProject[];
 }
-type ClientCollectionName = "businessContacts" | "accounts" | "projects" | "requests" | "deliveryGrants" | "authenticatedDeliveryGrants" | "viewerGrants";
+interface BusinessProject extends CollectionItem { id: string; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null; created_at: string | null }
+type ClientCollectionName = "businessContacts" | "businessProjects" | "accounts" | "projects" | "requests" | "deliveryGrants" | "authenticatedDeliveryGrants" | "viewerGrants";
 interface ClientCollectionPage {
   available: boolean;
   reason: null | "permission_required" | "workspace_unavailable" | "not_applicable";
@@ -52,10 +42,13 @@ interface ClientCollectionPage {
 }
 interface CanonicalClientRoot { sourceId: string; rootNamespace: ClientRootNamespace; kind: ClientSummary["kind"]; publicId: string }
 
+function utcDate(value: string): Date {
+  return new Date(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$/.test(value) ? `${value.replace(" ", "T")}Z` : value);
+}
 function date(value?: string | null): string {
-  if (!value) return "No expiry";
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.valueOf()) ? value : parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+  if (value === null || value === undefined) return "No expiry";
+  const parsed = utcDate(value);
+  return Number.isNaN(parsed.valueOf()) ? value || "Unknown date" : parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
 }
 
 function tone(status: string): "neutral" | "success" | "warning" | "danger" {
@@ -66,6 +59,13 @@ function tone(status: string): "neutral" | "success" | "warning" | "danger" {
       : status === "submitted" || status === "under_review" || status === "expired"
         ? "warning"
         : "neutral";
+}
+
+function GrantStatus({ status, expiresAt }: { status: string; expiresAt: string | null }) {
+  const timestamp = expiresAt === null ? null : utcDate(expiresAt).valueOf();
+  const current = status !== "active" || timestamp === null ? status
+    : !Number.isFinite(timestamp) ? "expiry_unverified" : timestamp <= Date.now() ? "expired" : status;
+  return <StatusPill tone={current === "expiry_unverified" ? "warning" : tone(current)}>{current === "expiry_unverified" ? "Expiry not verified" : current}</StatusPill>;
 }
 
 function useClientHub<T>(path: string | null) {
@@ -109,10 +109,11 @@ function rootIdentity(root: CanonicalClientRoot): string {
 }
 
 function ClientCollection<T extends CollectionItem>({ collection, label, initial, page: initialPage, client, contextVersion,
-  contextSignal, onInvalidated, emptyTitle, emptyDetail, children }: {
+  contextSignal, onInvalidated, emptyTitle, emptyDetail, children, requestParams }: {
   collection: ClientCollectionName; label: string; initial: T[]; page?: ClientCollectionPage; client: ClientSummary;
   contextVersion?: string; contextSignal: AbortSignal; onInvalidated: (message: string) => void; emptyTitle: string; emptyDetail: string;
   children: (items: T[]) => ReactNode;
+  requestParams?: Record<string, string>;
 }) {
   const [items, setItems] = useState(initial);
   const [page, setPage] = useState(initialPage);
@@ -135,7 +136,7 @@ function ClientCollection<T extends CollectionItem>({ collection, label, initial
     controller.current = abort;
     setBusy(true); setError("");
     try {
-      const parameters = new URLSearchParams({ limit: "25", cursor: page.nextCursor });
+      const parameters = new URLSearchParams({ ...requestParams, limit: "25", cursor: page.nextCursor });
       const path = `/api/client-hub/sources/${encodeURIComponent(client.source_id)}/${client.root_namespace}/${client.route_kind}/${encodeURIComponent(client.public_id)}/collections/${collection}?${parameters}`;
       const result = await api<{ items: T[]; page: ClientCollectionPage; canonicalRoot: CanonicalClientRoot; contextVersion: string }>(path, { signal: abort.signal });
       if (!active.current || contextSignal.aborted || abort.signal.aborted || sequence.current !== request) return;
@@ -181,26 +182,98 @@ function ClientCollection<T extends CollectionItem>({ collection, label, initial
 }
 
 function ContactList({ contacts }: { contacts: ClientContact[] }) {
-  if (!contacts.length) return <EmptyState title="No client logins" detail="Eligible contacts and verified logins will appear here after synchronization." />;
+  if (!contacts.length) return <EmptyState title="No business contacts" detail="Business contact records will appear here after synchronization." />;
   return <div className="client-hub-contact-list">{contacts.map(contact => {
-    const businessContact = contact.record_type === "business_contact";
-    const status = businessContact ? "contact" : contact.blocked ? "blocked" : contact.identity_id && contact.has_workspace_access ? "active" : "eligible";
     return <article key={collectionKey("businessContacts", contact)}>
       <div>
         <strong>{contact.display_name}</strong>
-        <small>{contact.email_hint || (businessContact ? "Business contact · no portal login" : "No portal login yet")}</small>
+        <small>{contact.email_hint || "Business contact"}</small>
       </div>
-      <StatusPill tone={tone(status)}>{status}</StatusPill>
-      <small>{contact.access.length
-        ? contact.access.map(item => `${item.effect === "deny" ? "Denied" : "Allowed"}: ${item.scope_label} (${item.capability})`).join(" · ")
-        : businessContact ? "Contact records do not grant portal access" : "No project or content access explicitly granted"}</small>
+      <StatusPill tone="neutral">contact</StatusPill>
+      <small>Contact records do not grant portal access</small>
     </article>;
   })}</div>;
+}
+
+function BusinessProjects({ initial, page, client, contextVersion, contextSignal, onInvalidated }: {
+  initial: BusinessProject[]; page?: ClientCollectionPage; client: ClientSummary; contextVersion?: string;
+  contextSignal: AbortSignal; onInvalidated: (message: string) => void;
+}) {
+  const readFilter = () => {
+    const value = new URLSearchParams(location.search).get("business_status");
+    return value === "current" || value === "completed" || value === "cancelled" ? value : "all";
+  };
+  const [filter, setFilter] = useState(readFilter);
+  const [state, setState] = useState({ filter: "all", items: initial, page, busy: false, error: "", revision: 0 });
+  const pending = useRef<AbortController | null>(null), active = useRef(true), sequence = useRef(0);
+  const initialConsumed = useRef(false);
+  useEffect(() => {
+    active.current = true;
+    const abort = () => { sequence.current += 1; pending.current?.abort(); };
+    const sync = () => setFilter(readFilter());
+    addEventListener("popstate", sync);
+    contextSignal.addEventListener("abort", abort);
+    return () => { active.current = false; abort(); removeEventListener("popstate", sync); contextSignal.removeEventListener("abort", abort); };
+  }, [contextSignal]);
+  const load = async (next: string) => {
+    if (contextSignal.aborted || !client.source_id || !client.root_namespace || !contextVersion) return;
+    pending.current?.abort();
+    const abort = new AbortController(), request = ++sequence.current;
+    pending.current = abort;
+    setState(value => ({ ...value, filter: next, items: [], page: undefined, busy: true, error: "" }));
+    try {
+      const parameters = new URLSearchParams({ filter: next, limit: "5" });
+      const result = await api<{ items: BusinessProject[]; page: ClientCollectionPage; canonicalRoot: CanonicalClientRoot; contextVersion: string }>(
+        `/api/client-hub/sources/${encodeURIComponent(client.source_id)}/${client.root_namespace}/${client.route_kind}/${encodeURIComponent(client.public_id)}/collections/businessProjects?${parameters}`, { signal: abort.signal });
+      if (!active.current || contextSignal.aborted || abort.signal.aborted || sequence.current !== request) return;
+      if (result.contextVersion !== contextVersion || !result.canonicalRoot || rootIdentity(result.canonicalRoot) !== rootIdentity({ sourceId: client.source_id, rootNamespace: client.root_namespace, kind: client.kind, publicId: client.public_id }))
+        throw new ApiError("This client's business project context changed. Refresh the workspace.", 409, {});
+      if (!result.page?.available) throw new ApiError("Access to business projects changed. Refresh this workspace.", 403, {});
+      if (!Array.isArray(result.items) || (result.page.hasMore && !result.page.nextCursor))
+        throw new ApiError("Business projects could not be loaded safely. Refresh this workspace.", 409, {});
+      setState(value => ({ filter: next, items: result.items, page: result.page, busy: false, error: "", revision: value.revision + 1 }));
+    } catch (error) {
+      if (!active.current || contextSignal.aborted || abort.signal.aborted || sequence.current !== request) return;
+      const message = error instanceof Error ? error.message : "Business projects could not be loaded.";
+      if (error instanceof ApiError && [401, 403, 404, 409].includes(error.status)) onInvalidated(message);
+      else setState(value => ({ ...value, busy: false, error: message }));
+    }
+  };
+  useEffect(() => {
+    if (page?.available === false) return;
+    if (!initialConsumed.current && filter === "all") { initialConsumed.current = true; return; }
+    initialConsumed.current = true;
+    void load(filter);
+  }, [filter]);
+  const selectFilter = (next: string) => {
+    const url = new URL(location.href);
+    if (next === "all") url.searchParams.delete("business_status"); else url.searchParams.set("business_status", next);
+    history.pushState({}, "", `${url.pathname}${url.search}${url.hash}`);
+    setFilter(next);
+  };
+  const calendarDate = (value: string | null) => value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : value ? date(value) : "Not set";
+  return <Card title="Business projects">
+    <p>Projects recorded for this client in Project Alpha. This list does not grant portal or delivery access.</p>
+    {page?.available !== false && <label className="client-hub-business-filter">Project status<select value={filter} onChange={event => selectFilter(event.target.value)}>
+      <option value="all">All projects</option><option value="current">Current projects</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option>
+    </select></label>}
+    {state.busy || (page?.available !== false && state.filter !== filter) ? <p role="status">Loading business projects…</p> : state.error ? <div role="alert"><p>{state.error}</p><button className="button-ghost" type="button" onClick={() => void load(filter)}>Retry business projects</button></div>
+      : <ClientCollection key={`${state.filter}:${state.revision}`} collection="businessProjects" label="Business projects" initial={state.items} page={state.page}
+        client={client} contextVersion={contextVersion} contextSignal={contextSignal} onInvalidated={onInvalidated} requestParams={{ filter }}
+        emptyTitle="No matching business projects" emptyDetail="Try another status. Shared work and portal access are listed separately.">
+        {items => <div className="simple-rows">{items.map(project => <div key={collectionKey("businessProjects", project)}><div><strong>{project.name}</strong>
+          <small>{project.manager_name ? `Manager: ${project.manager_name}` : "Manager not recorded"}</small>
+          <small>Start: {calendarDate(project.start_date)} · End: {calendarDate(project.end_date)}</small>
+          {project.created_at && <small>Project created: {date(project.created_at)}</small>}</div>
+          <StatusPill tone={project.status === "overdue" ? "warning" : tone(project.status || "")}>{project.status?.replaceAll("_", " ") || "Status not recorded"}</StatusPill></div>)}</div>}
+      </ClientCollection>}
+  </Card>;
 }
 
 function ClientWorkspace({ route }: { route: ClientRoute }) {
   const [revision, setRevision] = useState(0);
   const [invalidated, setInvalidated] = useState("");
+  const [portalFeedback, setPortalFeedback] = useState("");
   const contextController = useRef<AbortController | null>(null);
   if (!contextController.current) contextController.current = new AbortController();
   const refresh = () => {
@@ -212,6 +285,7 @@ function ClientWorkspace({ route }: { route: ClientRoute }) {
   const invalidate = (message: string) => {
     // Invalidate every in-flight section immediately, before React removes the old workspace.
     contextController.current?.abort();
+    setPortalFeedback("");
     setInvalidated(message);
   };
   const sourcePath = route.sourceId ? `sources/${encodeURIComponent(route.sourceId)}/${route.rootNamespace ? `${route.rootNamespace}/` : ""}` : "";
@@ -227,7 +301,8 @@ function ClientWorkspace({ route }: { route: ClientRoute }) {
   </Card>;
   const data = state.data;
   const collectionProps = { client: data.client, contextVersion: data.contextVersion, contextSignal: contextController.current.signal, onInvalidated: invalidate };
-  const portalContacts = data.contacts.filter(contact => contact.record_type !== "business_contact");
+  const portalBasePath = data.client.source_id && data.client.root_namespace
+    ? `/api/client-hub/sources/${encodeURIComponent(data.client.source_id)}/${data.client.root_namespace}/${data.client.route_kind}/${encodeURIComponent(data.client.public_id)}` : null;
   return <>
     <a className="button-ghost button-small client-hub-back" href={clientDirectoryReturnPath()}>← Client Hub</a>
     <div className="client-hub-title">
@@ -235,23 +310,24 @@ function ClientWorkspace({ route }: { route: ClientRoute }) {
         {data.client.root_namespace === "portal" && <p>Portal workspace · business link pending</p>}</div>
       <StatusPill tone={clientPortalStatus(data.client).tone}>{clientPortalStatus(data.client).label}</StatusPill>
     </div>
-    <p className="client-hub-inventory-note">These sections show work shared with this client. Full business project history is separate.</p>
+    <p className="client-hub-inventory-note">{data.businessProjects ? "Business projects are separate from the work shared with this client and their portal access." : "These sections show work shared with this client. Full business project history is separate."}</p>
     <div className="dashboard-grid client-hub-detail-grid" key={revision}>
-      <Card title="Contacts and logins">
-        <h3 className="client-hub-subheading">Business contacts</h3>
+      <Card title="Business contacts">
         <ClientCollection {...collectionProps} collection="businessContacts" label="Business contacts" initial={data.contacts.filter(contact => contact.record_type === "business_contact")} page={data.pages?.businessContacts}
           emptyTitle="No business contacts" emptyDetail="Synchronized business contact records will appear here. They do not grant login access.">
           {items => <ContactList contacts={items} />}
         </ClientCollection>
-        <h3 className="client-hub-subheading">Portal logins</h3>
-        <p className="muted">Business contacts do not grant portal login or file access.</p>
-        <ContactList contacts={portalContacts} />
       </Card>
-      <ClientIdentityAccess contacts={portalContacts} management={data.accessManagement} onChanged={() => { if (!collectionProps.contextSignal.aborted) refresh(); }} />
+      {data.portalIdentities ? portalBasePath ? <ClientPortalAccessPanel initialPage={data.portalIdentities} basePath={portalBasePath}
+        contextVersion={data.contextVersion || data.portalIdentities.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate}
+        feedback={portalFeedback} onChanged={message => { if (!collectionProps.contextSignal.aborted) { setPortalFeedback(message); refresh(); } }} />
+        : <Card title="Portal logins"><p>Refresh this client workspace before viewing portal logins.</p></Card>
+        : <Card title="Portal logins"><p>Portal login information is unavailable. Refresh this client workspace to try again.</p></Card>}
       <Card title="Accounts"><ClientCollection {...collectionProps} collection="accounts" label="Accounts" initial={data.accounts} page={data.pages?.accounts}
         emptyTitle="No accounts" emptyDetail="No linked portal account is active.">
         {items => <div className="simple-rows">{items.map(account => <div key={collectionKey("accounts", account)}><div><strong>{account.display_name}</strong><small>Explicit account record</small></div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div>}
       </ClientCollection></Card>
+      {data.businessProjects && <BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects} />}
       <Card title="Shared projects"><ClientCollection {...collectionProps} collection="projects" label="Shared projects" initial={data.projects} page={data.pages?.projects}
         emptyTitle="No project access" emptyDetail="Projects remain unavailable until explicitly granted.">
         {items => <div className="simple-rows">{items.map(project => <div key={collectionKey("projects", project)}><div><strong>{project.project_name}</strong><small>{project.client_name} · {project.can_request_service ? "Requests allowed" : "View access only"}</small></div><StatusPill tone={project.active ? "success" : "neutral"}>{project.active ? "active" : "inactive"}</StatusPill></div>)}</div>}
@@ -260,17 +336,17 @@ function ClientWorkspace({ route }: { route: ClientRoute }) {
         <h3 className="client-hub-subheading">Delivery links</h3>
         <ClientCollection {...collectionProps} collection="deliveryGrants" label="Delivery links" initial={data.deliveryGrants} page={data.pages?.deliveryGrants}
           emptyTitle="No delivery links" emptyDetail="Folders and files remain unavailable until explicitly shared.">
-          {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("deliveryGrants", grant)}><div><strong>{grant.label || grant.project_name}</strong><small>{grant.r2_prefix} · {date(grant.expires_at)}</small></div><StatusPill tone={tone(grant.revoked_at ? "revoked" : "active")}>{grant.revoked_at ? "revoked" : "active"}</StatusPill></div>)}</div>}
+          {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("deliveryGrants", grant)}><div><strong>{grant.label || grant.project_name}</strong><small>{grant.r2_prefix} · {date(grant.expires_at)}</small></div><GrantStatus status={grant.revoked_at ? "revoked" : "active"} expiresAt={grant.expires_at} /></div>)}</div>}
         </ClientCollection>
         <h3 className="client-hub-subheading">Client portal deliveries</h3>
         <ClientCollection {...collectionProps} collection="authenticatedDeliveryGrants" label="Client portal deliveries" initial={data.authenticatedDeliveryGrants} page={data.pages?.authenticatedDeliveryGrants}
           emptyTitle="No client portal deliveries" emptyDetail="No delivery content has been shared through this client's portal.">
-          {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("authenticatedDeliveryGrants", grant)}><div><strong>{grant.r2_prefix}</strong><small>{grant.audience_type} audience · {date(grant.expires_at)}</small></div><StatusPill tone={tone(grant.status)}>{grant.status}</StatusPill></div>)}</div>}
+          {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("authenticatedDeliveryGrants", grant)}><div><strong>{grant.r2_prefix}</strong><small>{grant.audience_type} audience · {date(grant.expires_at)}</small></div><GrantStatus status={grant.status} expiresAt={grant.expires_at} /></div>)}</div>}
         </ClientCollection>
       </Card>}
       {data.capabilities.viewer && <Card title="Shared models"><ClientCollection {...collectionProps} collection="viewerGrants" label="Shared models" initial={data.viewerGrants} page={data.pages?.viewerGrants}
         emptyTitle="No Viewer access" emptyDetail="Models remain unavailable until explicitly granted.">
-        {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("viewerGrants", grant)}><div><strong>{grant.model_title || grant.project_name}</strong><small>{grant.scope_type} access · {date(grant.authorization_expires_at)}</small></div><StatusPill tone={tone(grant.status)}>{grant.status}</StatusPill></div>)}</div>}
+        {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("viewerGrants", grant)}><div><strong>{grant.model_title || grant.project_name}</strong><small>{grant.scope_type} access · {date(grant.authorization_expires_at)}</small></div><GrantStatus status={grant.status} expiresAt={grant.authorization_expires_at} /></div>)}</div>}
       </ClientCollection></Card>}
       {data.capabilities.requests && <Card title="Request history"><ClientCollection {...collectionProps} collection="requests" label="Requests" initial={data.requests} page={data.pages?.requests}
         emptyTitle="No requests" emptyDetail="This client has not submitted a service request.">

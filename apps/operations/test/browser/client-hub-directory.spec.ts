@@ -34,7 +34,9 @@ async function mock(page: Page, directory: DirectoryHandler, permissions = ["tea
       const kind = parts.at(-2) === "standalone" ? "standalone_client" : "organization";
       return route.fulfill({ json: { client: client(decodeURIComponent(parts.at(-1)!), "Hidden customer", kind, source, rootNamespace), contacts: [], accounts: [],
         projects: [], requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [],
-        accessManagement: { blocks: [], canManageEligibilityBlocks: false, canManagePortal: false }, capabilities,
+        contextVersion: "directory-detail", portalIdentities: { items: [], page: { available: rootNamespace === "portal", reason: rootNamespace === "portal" ? null : "workspace_unavailable",
+          nextCursor: null, hasMore: false, returned: 0, limit: 5 }, contextVersion: "directory-detail", refreshedAt: "2026-08-25T12:00:00Z",
+          capabilities: { canManageEligibilityBlocks: false, canManagePortal: false } }, capabilities,
       } });
     }
     return route.fulfill({ status: 404, json: { error: "Not found" } });

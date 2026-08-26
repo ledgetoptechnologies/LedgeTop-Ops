@@ -2,6 +2,7 @@ import { HTTPException } from "hono/http-exception";
 import { sha256 } from "./crypto";
 import { isAdministrator } from "./acl";
 import { eligibilityBlockManagementEnabled, portalOperationsManagementEnabled } from "./client-identity-eligibility";
+import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import type { ClientHubRoot } from "./client-hub-directory";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -69,10 +70,11 @@ export async function createClientHubCollectionContext(env: Env, principal: Staf
       AND entity.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id)
     WHERE workspace.id=? ORDER BY entity.public_id LIMIT 2`).bind(root.workspace_id).all<Record<string, unknown>>() : null;
   const canonicalRoot = { sourceId: root.source_id, rootNamespace: root.root_namespace, kind: root.kind, publicId: root.public_id };
+  const businessProjectPolicy = await readClientHubBusinessProjectPolicy(env, principal);
   const contextVersion = await sha256(JSON.stringify([canonicalRoot, principal.id, access,
     root.pa_public_id, root.mapping_status, root.status, root.workspace_id, root.legacy_account_id,
     root.portal_status, proof?.results ?? [], accountProof.results, await isAdministrator(env, principal),
-    eligibilityBlockManagementEnabled(env), portalOperationsManagementEnabled(env)]));
+    eligibilityBlockManagementEnabled(env), portalOperationsManagementEnabled(env), businessProjectPolicy.proof]));
   return { root, access, canonicalRoot, contextVersion };
 }
 

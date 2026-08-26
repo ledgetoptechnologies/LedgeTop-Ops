@@ -10,22 +10,34 @@ const acl = vi.hoisted(() => ({
   isAdministrator: vi.fn(async () => true),
   hasLocalGlobalAllow: vi.fn(async () => false),
 }));
+const identityReads = vi.hoisted(() => ({
+  listPortalIdentityPage: vi.fn(async (_env: unknown, _actor: unknown, scope: { kind: "client"; context: import("../src/worker/client-hub-collections").ClientHubCollectionContext }, _options?: Record<string, unknown>) => {
+    const workspaceId = scope.context.root.workspace_id;
+    return {
+      items: workspaceId ? [{ workspace_id: workspaceId, public_id: "pa-child-login", display_name: "Login Contact",
+        identity_id: "identity-login", email_hint: "login@example.test", contact_key: "login-contact", accessLoaded: false }] : [],
+      page: { available: Boolean(workspaceId), reason: workspaceId ? null : "workspace_unavailable", nextCursor: null,
+        hasMore: false, returned: workspaceId ? 1 : 0, limit: 5 },
+      contextVersion: scope.context.contextVersion, refreshedAt: "2026-08-25T00:00:00Z",
+      capabilities: { canManagePortal: true, canManageEligibilityBlocks: true },
+    };
+  }),
+  listPortalIdentityCollection: vi.fn(async (_env: unknown, _actor: unknown, scope: { kind: "client"; context: import("../src/worker/client-hub-collections").ClientHubCollectionContext },
+    _key: { workspaceId: string; publicId: string }, _collection: string, _options: Record<string, unknown>) => ({
+      items: [], page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 0, limit: 25 },
+      contextVersion: scope.context.contextVersion, principalContextVersion: "principal-version", refreshedAt: "2026-08-25T00:00:00Z",
+    })),
+}));
 const eligibility = vi.hoisted(() => ({
   eligibilityBlockManagementEnabled: vi.fn(() => true),
   portalOperationsManagementEnabled: vi.fn(() => true),
-  listClientIdentityEligibility: vi.fn(async (_env: unknown, _principal: unknown, _options?: { workspaceId?: string }) => ({
-    clients: [{
-      workspace_id: "workspace-org", public_id: "pa-child-login", display_name: "Login Contact",
-      email_hint: "login@example.test", status: "active", identity_id: "identity-login",
-      has_workspace_access: 1, blocked: 0, access: [], invitation: null,
-    }],
-    blocks: [{ id: "block-one", match_type: "email", normalized_email: "login@example.test", status: "active" }],
-    canManageEligibilityBlocks: true,
-    canManagePortal: true,
-  })),
+
 }));
 vi.mock("../src/worker/acl", () => acl);
 vi.mock("../src/worker/client-identity-eligibility", () => eligibility);
+vi.mock("../src/worker/client-portal-identity-read", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/worker/client-portal-identity-read")>(), ...identityReads,
+}));
 
 import { registerClientHubRoutes } from "../src/worker/client-hub";
 import type { Env, StaffPrincipal } from "../src/worker/types";
@@ -130,6 +142,43 @@ async function readCollection(app: Awaited<ReturnType<typeof fixture>>["app"], e
 }
 
 describe("Client Hub bounded detail collections", () => {
+  it("routes principal pages and lazy histories through the exact live workspace and rechecks authority", async () => {
+    const { app, env, delivery } = await fixture();
+    const list = await app.request(organizationPath + "/identities?q=Login&link=linked&blocked=no&principalStatus=active&limit=7", {}, env);
+    expect(list.status).toBe(200);
+    const call = identityReads.listPortalIdentityPage.mock.calls.at(-1)!;
+    expect(call[2].context.root.workspace_id).toBe("workspace-org");
+    expect(call[3]).toMatchObject({ q: "Login", link: "linked", blocked: "no", principalStatus: "active", limit: 7 });
+    const nested = await app.request(organizationPath + "/identities/pa-child-login/access?expectedPrincipalContext=exact-proof&limit=9&cursor=position", {}, env);
+    expect(nested.status).toBe(200);
+    const nestedCall = identityReads.listPortalIdentityCollection.mock.calls.at(-1)!;
+    expect(nestedCall[3]).toEqual({ workspaceId: "workspace-org", publicId: "pa-child-login" });
+    expect(nestedCall[4]).toBe("access");
+    expect(nestedCall[5]).toEqual({ expectedPrincipalContext: "exact-proof", limit: 9, cursor: "position" });
+    expect((await app.request(organizationPath + "/identities/pa-child-login/unsupported", {}, env)).status).toBe(400);
+    expect((await app.request(standalonePath + "/identities/pa-child-login/access?expectedPrincipalContext=proof", {}, env)).status).toBe(404);
+    identityReads.listPortalIdentityPage.mockImplementationOnce(async (...args) => {
+      await delivery.prepare("UPDATE client_accounts SET project_alpha_organization_id='reassigned' WHERE id='account-org'").run();
+      return { items: [], page: { available: false, reason: "workspace_unavailable", nextCursor: null, hasMore: false, returned: 0, limit: 5 },
+        contextVersion: args[2].context.contextVersion, refreshedAt: "2026-08-25T00:00:00Z",
+        capabilities: { canManagePortal: true, canManageEligibilityBlocks: true } };
+    });
+    expect((await app.request(organizationPath + "/identities", {}, env)).status).toBe(409);
+  }, 30_000);
+
+  it("registers business-project inventory separately from portal project grants", async () => {
+    const { app, env } = await fixture();
+    const detail = await app.request(organizationPath, {}, env);
+    expect(detail.status).toBe(200);
+    const body = await detail.json() as Record<string, unknown>;
+    expect(body).not.toHaveProperty("accessManagement");
+    expect(body).toHaveProperty("businessProjects");
+    expect(body).toHaveProperty("portalIdentities");
+    expect(body).toHaveProperty("pages.businessProjects", expect.objectContaining({ available: false, reason: "permission_required" }));
+    expect((await app.request(organizationPath + "/collections/businessProjects", {}, env)).status).toBe(403);
+    expect((await app.request(organizationPath + "/collections/businessProjects?filter=unknown", {}, env)).status).toBe(400);
+  });
+
   it("pages more than 500 business contacts separately from the existing portal identities", async () => {
     const { app, env, ops } = await fixture();
     await applySql(ops, `WITH RECURSIVE ids(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM ids WHERE n<528)
@@ -138,11 +187,11 @@ describe("Client Hub bounded detail collections", () => {
     expect(detail.status).toBe(200);
     const initial = await detail.json() as { contacts: Array<Record<string, unknown>>; pages: Record<string, Page>; contextVersion: string };
     expect(initial.contacts.filter(row => row.record_type === "business_contact")).toHaveLength(5);
-    expect(initial.contacts.filter(row => row.record_type === "portal_principal")).toHaveLength(1);
+    expect(initial.contacts.filter(row => row.record_type === "portal_principal")).toHaveLength(0);
     expect(initial.pages.businessContacts).toMatchObject({ available: true, hasMore: true, returned: 5, limit: 5 });
     const seen = initial.contacts.filter(row => row.record_type === "business_contact").map(row => row.public_id);
     let cursor = initial.pages.businessContacts!.nextCursor;
-    eligibility.listClientIdentityEligibility.mockClear();
+    identityReads.listPortalIdentityPage.mockClear();
     while (cursor) {
       const page = await readCollection(app, env, organizationPath, "businessContacts", cursor);
       expect(page.contextVersion).toBe(initial.contextVersion);
@@ -153,7 +202,7 @@ describe("Client Hub bounded detail collections", () => {
     }
     expect(seen).toHaveLength(531);
     expect(new Set(seen).size).toBe(531);
-    expect(eligibility.listClientIdentityEligibility).not.toHaveBeenCalled();
+    expect(identityReads.listPortalIdentityPage.mock.calls.every(call => call[2].context.root.workspace_id === null)).toBe(true);
   }, 60_000);
 
   it("loads bounded first pages and every row beyond 200 across each grant/request inventory", async () => {
@@ -320,11 +369,7 @@ describe("Client Hub", () => {
       requests: [expect.objectContaining({ id: "request-one" })],
       deliveryGrants: [expect.objectContaining({ share_id: "share-one" })],
       authenticatedDeliveryGrants: [],
-      accessManagement: {
-        blocks: [],
-        canManageEligibilityBlocks: true,
-        canManagePortal: true,
-      },
+      portalIdentities: { capabilities: { canManageEligibilityBlocks: true, canManagePortal: true } },
     });
   });
 
@@ -335,17 +380,17 @@ describe("Client Hub", () => {
     const organization = body.clients.find(client => client.public_id === "pa-org");
     expect(organization).toMatchObject({ workspace_id: "workspace-org", contact_count: 2 });
     expect(organization).not.toHaveProperty("contacts");
-    expect(eligibility.listClientIdentityEligibility).not.toHaveBeenCalled();
+    expect(identityReads.listPortalIdentityPage.mock.calls.every(call => call[2].context.root.workspace_id === null)).toBe(true);
     const detail = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/organizations/pa-org", {}, env);
     expect(detail.status).toBe(200);
-    const result = await detail.json() as { contacts: Array<Record<string, unknown>> };
+    const result = await detail.json() as { contacts: Array<Record<string, unknown>>; portalIdentities: { items: Array<Record<string, unknown>> } };
     expect(result.contacts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ public_id: "pa-child-login", identity_id: "identity-login", record_type: "portal_principal" }),
       expect.objectContaining({ public_id: "pa-child-login", identity_id: null, record_type: "business_contact" }),
       expect.objectContaining({ public_id: "pa-child-no-login", identity_id: null, record_type: "business_contact" }),
     ]));
-    expect(new Set(result.contacts.map(contact => contact.contact_key)).size).toBe(3);
-    expect(eligibility.listClientIdentityEligibility.mock.calls.at(-1)?.[2]).toEqual({ workspaceId: "workspace-org" });
+    expect(new Set(result.contacts.map(contact => contact.contact_key)).size).toBe(2);
+    expect(result.portalIdentities.items).toEqual([expect.objectContaining({ public_id: "pa-child-login", identity_id: "identity-login", accessLoaded: false })]);
+    expect(identityReads.listPortalIdentityPage.mock.calls.at(-1)?.[2].context.root.workspace_id).toBe("workspace-org");
   });
 
   it("does not confuse local accounts with an Alpha client having the same raw ID", async () => {
@@ -369,7 +414,7 @@ describe("Client Hub", () => {
       SELECT 'delivery:local','account','standalone_client','other-'||n,'Other '||n,'other '||n,'active' FROM ids;`);
     const response = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/standalone/pa-standalone", {}, env);
     expect(response.status).toBe(200);
-    expect(eligibility.listClientIdentityEligibility).not.toHaveBeenCalled();
+    expect(identityReads.listPortalIdentityPage.mock.calls.every(call => call[2].context.root.workspace_id === null)).toBe(true);
   }, 30_000);
 
   it("does not hydrate a stale cached workspace or legacy account after reassignment", async () => {
@@ -379,7 +424,7 @@ describe("Client Hub", () => {
     const response = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/organizations/pa-org", {}, env);
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ client: { workspace_id: null }, accounts: [], projects: [], authenticatedDeliveryGrants: [] });
-    expect(eligibility.listClientIdentityEligibility).not.toHaveBeenCalled();
+    expect(identityReads.listPortalIdentityPage.mock.calls.every(call => call[2].context.root.workspace_id === null)).toBe(true);
   });
 
   it("does not revive an inactive or organization-reassigned Alpha client through a stale indexed root", async () => {
@@ -388,7 +433,7 @@ describe("Client Hub", () => {
     expect((await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/standalone/pa-standalone", {}, env)).status).toBe(404);
     await ops.prepare("UPDATE pa_organizations SET active=0 WHERE id='pa-org'").run();
     expect((await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/organizations/pa-org", {}, env)).status).toBe(404);
-    expect(eligibility.listClientIdentityEligibility).not.toHaveBeenCalled();
+    expect(identityReads.listPortalIdentityPage.mock.calls.every(call => call[2].context.root.workspace_id === null)).toBe(true);
   });
 
   it("joins numeric business IDs to distinct native public IDs without changing legacy account joins", async () => {
@@ -404,7 +449,7 @@ describe("Client Hub", () => {
     await expect(response.json()).resolves.toMatchObject({ client: {
       public_id: "101", pa_public_id: organizationUuid, workspace_id: "workspace-org", root_namespace: "business",
     }, accounts: [{ id: "account-org", project_alpha_organization_id: "101" }] });
-    expect(eligibility.listClientIdentityEligibility.mock.calls.at(-1)?.[2]).toEqual({ workspaceId: "workspace-org" });
+    expect(identityReads.listPortalIdentityPage.mock.calls.at(-1)?.[2].context.root.workspace_id).toBe("workspace-org");
   });
 
   it.each([
@@ -418,7 +463,7 @@ describe("Client Hub", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ client: { pa_public_id: null, mapping_status: status,
       workspace_id: null, portal_status: "mapping_unavailable" }, accounts: [{ id: "account-org" }], authenticatedDeliveryGrants: [] });
-    expect(eligibility.listClientIdentityEligibility).not.toHaveBeenCalled();
+    expect(identityReads.listPortalIdentityPage.mock.calls.every(call => call[2].context.root.workspace_id === null)).toBe(true);
   });
 
   it("does not pick a winner when two source records export the same public ID", async () => {
@@ -428,7 +473,7 @@ describe("Client Hub", () => {
     const response = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/pa-org", {}, env);
     await expect(response.json()).resolves.toMatchObject({ client: { pa_public_id: null, mapping_status: "ambiguous",
       workspace_id: null, portal_status: "mapping_unavailable" } });
-    expect(eligibility.listClientIdentityEligibility).not.toHaveBeenCalled();
+    expect(identityReads.listPortalIdentityPage.mock.calls.every(call => call[2].context.root.workspace_id === null)).toBe(true);
   });
 
   it("re-reads changed source public IDs instead of trusting stale cached directory associations", async () => {
@@ -441,7 +486,7 @@ describe("Client Hub", () => {
     await expect(listing.json()).resolves.toMatchObject({ clients: expect.arrayContaining([
       expect.objectContaining({ public_id: "pa-org", pa_public_id: replacementUuid, workspace_id: null, portal_status: "mapping_unavailable" }),
     ]) });
-    expect(eligibility.listClientIdentityEligibility).not.toHaveBeenCalled();
+    expect(identityReads.listPortalIdentityPage.mock.calls.every(call => call[2].context.root.workspace_id === null)).toBe(true);
   });
 
   it("retains exact portal-only detail without inventing business or legacy account ownership", async () => {
@@ -451,7 +496,7 @@ describe("Client Hub", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ client: { root_namespace: "portal", public_id: "workspace-org",
       workspace_id: "workspace-org", legacy_account_id: null }, accounts: [], projects: [],
-      contacts: [expect.objectContaining({ record_type: "portal_principal" })] });
+      contacts: [], portalIdentities: { items: [expect.objectContaining({ identity_id: "identity-login" })] } });
   });
 
   it("resolves retained portal URLs to a verified business alias even after its index row was folded away", async () => {

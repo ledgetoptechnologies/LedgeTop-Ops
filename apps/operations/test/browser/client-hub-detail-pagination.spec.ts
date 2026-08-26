@@ -34,10 +34,14 @@ function detail(revision = 1) {
       root_namespace: "business", pa_public_id: "a".repeat(32), detail_path: canonicalPath, display_name: revision === 1 ? "Acme Construction" : "Acme refreshed",
       status: "active", portal_status: "active", account_count: 1, project_count: 1, request_count: 1, contact_count: 2 },
     contextVersion: `context-${revision}`, pages: Object.fromEntries(collections.map(collection => [collection, metadata(collection, true, 5)])),
-    contacts: [contact("business-one", "Business Bailey", true), contact("portal-one", "Portal Alex")],
+    contacts: [contact("business-one", "Business Bailey", true)],
     accounts: [item("accounts", 1)], projects: [item("projects", 1)], requests: [item("requests", 1)],
     deliveryGrants: [item("deliveryGrants", 1)], authenticatedDeliveryGrants: [item("authenticatedDeliveryGrants", 1)], viewerGrants: [item("viewerGrants", 1)],
-    accessManagement: { blocks: [], canManageEligibilityBlocks: true, canManagePortal: true }, capabilities,
+    portalIdentities: { items: [{ ...contact("portal-one", "Portal Alex"), binding_status: "linked", principalContextVersion: `principal-${revision}`,
+      hasExplicitAccess: false, accessLoaded: false, effectiveEmailBlockCount: 0, effectiveSubjectBlock: false, removableEmailBlockId: null,
+      actions: { canRetryInvitation: false, canCreateEmailBlock: true, canReviewEligibilityBlocks: true } }],
+      page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 }, contextVersion: `context-${revision}`,
+      refreshedAt: "2026-08-25T12:00:00Z", capabilities: { canManageEligibilityBlocks: true, canManagePortal: true } }, capabilities,
   };
 }
 function reply(collection: Collection, items = [item(collection, 2)], more = false, contextVersion = "context-1") {
@@ -77,14 +81,14 @@ test("detail pages each non-identity collection independently using the canonica
   await expect(page.getByRole("link", { name: "← Client Hub" })).toHaveAttribute("href", "/clients?q=acme&kind=organization");
   await expect(page.getByRole("heading", { name: "Business contacts", exact: true })).toBeVisible();
   await expect(page.getByRole("heading", { name: "Portal logins", exact: true })).toBeVisible();
-  await expect(page.getByRole("button", { name: "Block portal eligibility" })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Block portal sign-in" })).toHaveCount(1);
   await expect(page.getByText("These sections show work shared with this client. Full business project history is separate.")).toBeVisible();
   for (const collection of collections) {
     await loadButton(page, collection).click();
     await expect(region(page, collection).getByRole("status")).toHaveText("2 shown");
     await expect(region(page, collection).getByRole("button", { name: `All ${labels[collection].toLowerCase()} loaded` })).toHaveAttribute("aria-disabled", "true");
   }
-  await expect(page.getByRole("button", { name: "Block portal eligibility" })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "Block portal sign-in" })).toHaveCount(1);
   expect(state.detailCalls()).toBe(1);
   const continuations = state.requests.filter(url => url.pathname.includes("/collections/"));
   expect(continuations).toHaveLength(7);
@@ -175,7 +179,7 @@ for (const failure of [401, 403, 404, 409, "context", "root", "permission"] as c
     await expect(page.getByRole("button", { name: "Refresh client workspace", exact: true })).toBeVisible();
     await expect(page.locator(".client-hub-detail-grid")).toHaveCount(0);
     await expect(page.getByText("Business Bailey", { exact: true })).toHaveCount(0);
-    await expect(page.getByRole("heading", { name: "Client access management" })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "Portal logins" })).toHaveCount(0);
     await lateFulfill(pending!, reply("projects"));
     await expect(page.getByText("Shared project 2", { exact: true })).toHaveCount(0);
     await page.getByRole("button", { name: "Refresh client workspace", exact: true }).click();
@@ -203,6 +207,7 @@ test("navigating to another client aborts pending sections and never appends old
 });
 
 test("an identity mutation refreshes all loaded sections and aborts pending old-context pages", async ({ page }) => {
+  page.on("dialog", dialog => dialog.accept());
   let pending: Route | undefined;
   const state = await mock(page, async (route, collection) => {
     if (collection === "projects") { pending = route; return; }
@@ -213,7 +218,7 @@ test("an identity mutation refreshes all loaded sections and aborts pending old-
   await expect(region(page, "accounts").getByText("Account 2")).toBeVisible();
   await loadButton(page, "projects").click();
   await expect.poll(() => Boolean(pending)).toBe(true);
-  await page.getByRole("button", { name: "Block portal eligibility", exact: true }).click();
+  await page.getByRole("button", { name: "Block portal sign-in", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Acme refreshed" })).toBeVisible();
   await lateFulfill(pending!, reply("projects"));
   await expect(region(page, "accounts").getByText("Account 2", { exact: true })).toHaveCount(0);
@@ -221,7 +226,7 @@ test("an identity mutation refreshes all loaded sections and aborts pending old-
   expect(state.detailCalls()).toBe(2);
 });
 
-test("unavailable collection metadata is explicit and legacy detail does not invent continuation", async ({ page }) => {
+test("unavailable or missing collection metadata never invents continuation", async ({ page }) => {
   let collectionCalls = 0;
   const first = detail();
   first.pages.businessContacts = { ...metadata("businessContacts", false), available: false, reason: "not_applicable" };
@@ -248,7 +253,7 @@ test("populated detail remains readable on mobile, narrow, laptop and ultrawide 
   const response = detail();
   response.client.display_name = "Acme Construction Services — Regional Property Management";
   response.contacts[0]!.email_hint = "long-business-contact-address@construction-services.example.test";
-  response.contacts = [response.contacts[0]!, ...[2, 3, 4, 5].map(index => contact(`business-${index}`, `Business contact ${index}`, true)), response.contacts[1]!];
+  response.contacts = [response.contacts[0]!, ...[2, 3, 4, 5].map(index => contact(`business-${index}`, `Business contact ${index}`, true))];
   for (const collection of collections) {
     response.pages[collection]!.returned = 5;
     if (collection !== "businessContacts") response[collection] = [1, 2, 3, 4, 5].map(index => item(collection, index));
@@ -273,5 +278,36 @@ test("populated detail remains readable on mobile, narrow, laptop and ultrawide 
     await page.evaluate(() => scrollTo(0, 0));
     await page.screenshot({ path: testInfo.outputPath(`client-detail-${width}.png`) });
     await page.screenshot({ path: testInfo.outputPath(`client-detail-${width}-full.png`), fullPage: true });
+  }
+});
+
+test("grant badges respect UTC expiry while preserving revoked or inactive status", async ({ page }) => {
+  await page.clock.setFixedTime(new Date("2026-08-25T12:00:00Z"));
+  const value = detail();
+  const cases = [
+    { label: "past", expiry: "2026-08-25 11:59:59", status: "active", expected: "expired" },
+    { label: "boundary", expiry: "2026-08-25T12:00:00Z", status: "active", expected: "expired" },
+    { label: "future", expiry: "2026-08-25 12:00:01", status: "active", expected: "active" },
+    { label: "no-expiry", expiry: null, status: "active", expected: "active" },
+    { label: "revoked", expiry: "2020-01-01T00:00:00Z", status: "revoked", expected: "revoked" },
+    { label: "invalid", expiry: "not-a-timestamp", status: "active", expected: "Expiry not verified" },
+    { label: "blank", expiry: "", status: "active", expected: "Expiry not verified" },
+  ];
+  for (const collection of ["deliveryGrants", "authenticatedDeliveryGrants", "viewerGrants"] as const) {
+    value[collection] = cases.map((entry, index) => ({ ...item(collection, index), label: entry.label, model_title: entry.label, r2_prefix: entry.label,
+      status: entry.status, expires_at: entry.expiry, authorization_expires_at: entry.expiry, revoked_at: entry.status === "revoked" ? "2026-08-01T12:00:00Z" : null }));
+    value.pages[collection] = { ...metadata(collection, false), returned: cases.length };
+  }
+  value.authenticatedDeliveryGrants.push({ ...item("authenticatedDeliveryGrants", 99), r2_prefix: "inactive", status: "inactive", expires_at: "2020-01-01T00:00:00Z" });
+  value.viewerGrants.push({ ...item("viewerGrants", 99), model_title: "inactive", status: "inactive", authorization_expires_at: "2020-01-01T00:00:00Z" });
+  await mock(page, route => route.fulfill({ status: 500 }), () => value);
+  await open(page);
+  for (const collection of ["deliveryGrants", "authenticatedDeliveryGrants", "viewerGrants"] as const) {
+    for (const entry of cases) {
+      const row = region(page, collection).locator(".simple-rows > div").filter({ has: page.locator("strong", { hasText: new RegExp(`^${entry.label}$`) }) });
+      await expect(row.locator(".status-pill")).toHaveText(entry.expected);
+      if (entry.label === "invalid" || entry.label === "blank") await expect(row.getByText(/No expiry/)).toHaveCount(0);
+    }
+    if (collection !== "deliveryGrants") await expect(region(page, collection).locator(".simple-rows > div").filter({ has: page.locator("strong", { hasText: /^inactive$/ }) }).locator(".status-pill")).toHaveText("inactive");
   }
 });
