@@ -1,4 +1,6 @@
-import type { Env } from "../types";
+import type { Env as ClientEnv } from "../types";
+import type { PortalAuthorizationEnv } from "./workspace-v2";
+type Env = PortalAuthorizationEnv & Pick<ClientEnv, "AUTHENTICATED_DELIVERY_GRANTS_ENABLED">;
 import type { VerifiedClientPrincipal } from "./types";
 import { authorizePortalWorkspaceCapability, portalHierarchyV2Enabled } from "./workspace-v2";
 

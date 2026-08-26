@@ -545,8 +545,21 @@ A native workspace may still require an active legacy account/identity bridge
 for requests. Per-client service visibility is not projected yet, and the
 singleton catalog checkpoint is not a multi-producer contract. Existing
 authorized draft pricing hints are supported and retained; catalog browsing
-does not expose internal pricing. Generic asset/folder/project feedback remains
-a separate unimplemented feature, not a relabelled request or inspection note.
+does not expose internal pricing. Generic asset/folder/project feedback is a
+separate feature, not a relabelled request or inspection note.
+
+The feedback increment is implemented and verified locally on August 26, not
+published. Its additive `0155` migration and transactional store pass populated
+upgrade, replay, concurrent-transition, revocation-guard, and audit/outbox rollback
+checks. Final package gates pass **566 Client backend tests (52 files)** and
+**905 Operations backend tests (114 files)**, without failures or skips; full
+browser gates pass **172 Client and 410 Operations tests**, with four intentional
+duplicate-viewport skips in Client. Both types/builds pass and layouts were
+independently reviewed at 375, 640, 1280, and 3440 pixels. The first slice
+targets authenticated project/folder/file feedback only; it does not modify the
+Viewer or add anonymous, annotation, attachment, or timestamp feedback. See
+[the feedback contract and rollout checklist](client-feedback.md) for scope,
+ownership, mail semantics, and the outstanding gates.
 
 ### 6. Unified activity and release acceptance
 

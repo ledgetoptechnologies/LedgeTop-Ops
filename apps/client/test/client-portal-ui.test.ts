@@ -23,6 +23,7 @@ import {
 import { neutralMapLocation } from "../src/client/MapAreaSelector";
 import { clientPortalPath, clientProjectPath, clientRequestNewPath, parseClientPortalRoute } from "../src/client/portal-route";
 import { isSafeViewerSessionUrl } from "@ltds/ui";
+import { safeFeedbackTargetPath } from "../src/client/feedback-api";
 
 describe("Viewer session navigation", () => {
   it.each([
@@ -57,6 +58,19 @@ describe("client portal browser routing", () => {
     expect(parseClientPortalRoute("/")).toEqual({ isPortal: false, page: "dashboard", projectId: null });
   });
 
+  it("parses feedback details and rejects malformed paths without throwing", () => {
+    expect(parseClientPortalRoute("/portal/feedback/feedback-one")).toEqual({isPortal: true, page: "feedback", projectId: null, feedbackId: "feedback-one"});
+    expect(parseClientPortalRoute("/portal/feedback/%E0%A4%A").page).toBe("not-found");
+    expect(parseClientPortalRoute("/portal/projects/%E0%A4%A").page).toBe("not-found");
+    vi.stubGlobal("location", {origin: "https://client.example.test"});
+    try {
+      expect(safeFeedbackTargetPath("/portal/feedback/feedback-one?workspace=workspace-a")).toBe("/portal/feedback/feedback-one?workspace=workspace-a");
+      expect(safeFeedbackTargetPath("/portal/../api/private")).toBeNull();
+      expect(safeFeedbackTargetPath("/portal/%2e%2e/api/private")).toBeNull();
+      expect(safeFeedbackTargetPath("//other.example.test/portal/feedback")).toBeNull();
+    } finally { vi.unstubAllGlobals(); }
+  });
+
   it("builds stable same-origin paths", () => {
     expect(clientPortalPath("dashboard")).toBe("/portal");
     expect(clientPortalPath("requests")).toBe("/portal/requests");
@@ -86,7 +100,7 @@ describe("client portal browser API boundary", () => {
     await Promise.resolve();
     expect(calls).toEqual(["/api/client/session"]);
     resolveSession({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false } });
-    await expect(bootstrap).resolves.toEqual({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false, workspaceHierarchyV2: false, workspaceMembershipManagement: false, hierarchyScopedInvitations: false, invitationEmailDelivery: false, delegatedShares: false, viewer: false, viewerShares: false }, projects: [], requests: [], mapboxPublicToken: null, workspaces: [], selectedWorkspaceId: null, viewerDisplayUnits: "imperial" });
+    await expect(bootstrap).resolves.toEqual({ account: { id: "account-a", displayName: "Acme" }, capabilities: { manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false, workspaceHierarchyV2: false, workspaceMembershipManagement: false, hierarchyScopedInvitations: false, invitationEmailDelivery: false, delegatedShares: false, viewer: false, viewerShares: false, feedback: false }, projects: [], requests: [], mapboxPublicToken: null, workspaces: [], selectedWorkspaceId: null, viewerDisplayUnits: "imperial" });
     expect(calls).toEqual(["/api/client/session", "/api/client/projects", "/api/client/service-requests", "/api/client/map-config"]);
   });
 

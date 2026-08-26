@@ -307,7 +307,7 @@ export function createClientPortalFileHandle(env: Env, key: string): Promise<str
   return encodeFileId(env, key);
 }
 
-async function decodeFileId(env: Env, value: string): Promise<string | null> {
+export async function decodeClientPortalFileHandle(env: Env, value: string): Promise<string | null> {
   const values = await decodeHandle(env, value, FILE_HANDLE_PREFIX, "file");
   const key = values?.length === 1 ? values[0]! : "";
   return key.length > 0 && key.length <= 1000 && !key.startsWith("/") && !key.includes("\\") && !/[\u0000-\u001f\u007f]/.test(key)
@@ -322,11 +322,11 @@ function validRelativeFolderPath(value: string): boolean {
   return segments.every(segment => segment.length > 0 && segment.length <= 255 && segment !== "." && segment !== "..");
 }
 
-function encodeProjectFolderHandle(env: Env, associationId: string, relativePath: string): Promise<string> {
+export function encodeProjectFolderHandle(env: Env, associationId: string, relativePath: string): Promise<string> {
   return encodeHandle(env, PROJECT_FOLDER_HANDLE_PREFIX, "project-folder", [associationId, relativePath]);
 }
 
-async function decodeProjectFolderHandle(env: Env, value: string): Promise<{ associationId: string; relativePath: string } | null> {
+export async function decodeProjectFolderHandle(env: Env, value: string): Promise<{ associationId: string; relativePath: string } | null> {
   const values = await decodeHandle(env, value, PROJECT_FOLDER_HANDLE_PREFIX, "project-folder");
   return values?.length === 2 && HANDLE_ID.test(values[0]!) && validRelativeFolderPath(values[1]!)
     ? { associationId: values[0]!, relativePath: values[1]! }
@@ -1111,7 +1111,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
     fileId: string,
     projectId?: string | null,
   ): Promise<AuthorizedClientPortalFile | null> {
-    const key = await decodeFileId(env, fileId);
+    const key = await decodeClientPortalFileHandle(env, fileId);
     if (!key) return null;
     const grantPrefixes = await deliveryGrantPrefixes(env, session);
     const associationGrantFilter = prefixSqlFilter(grantPrefixes, "association.r2_prefix");

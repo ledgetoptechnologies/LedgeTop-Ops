@@ -325,7 +325,7 @@ test("workspace-v2 selection scopes every authenticated resource request and swi
   await expect(page.getByRole("heading", { name: "Welcome, Beta" })).toBeVisible();
   await expect(page.getByText("Beta Site")).toBeVisible();
   expect(observed.filter(item => item.path === "/api/client/projects").at(-1)?.workspace).toBe("workspace-b");
-  await expect(page).toHaveURL(/\/portal$/);
+  await expect(page).toHaveURL(/\/portal\?workspace=workspace-b$/);
 });
 
 test("authorized portal supports project, delivery, and request workflows", async ({ page }) => {

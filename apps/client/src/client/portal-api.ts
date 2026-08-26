@@ -13,6 +13,7 @@ export interface PortalCapabilities {
   delegatedShares: boolean;
   viewer: boolean;
   viewerShares: boolean;
+  feedback: boolean;
 }
 
 export interface PortalAccount {
@@ -189,8 +190,12 @@ export interface PortalServiceRequestInput {
 export type PortalRequest = typeof requestJson;
 
 export async function loadPortalBootstrap(
-  request: PortalRequest = requestJson,
+  requestApi: PortalRequest = requestJson,
+  requestedWorkspaceId?: string | null,
+  signal?: AbortSignal,
 ): Promise<PortalBootstrap> {
+  const request: PortalRequest = (url, init) => requestApi(url, signal ? {...init, signal} : init);
+  if (requestedWorkspaceId !== undefined && requestedWorkspaceId !== null && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(requestedWorkspaceId)) throw Object.assign(new Error("Invalid workspace link"), {status: 403});
   const session = await request<{
     account: PortalAccount;
     capabilities?: Partial<PortalCapabilities>;
@@ -200,12 +205,17 @@ export async function loadPortalBootstrap(
   let selectedWorkspaceId: string | null = null;
   if (session.capabilities?.workspaceHierarchyV2 === true) {
     workspaces = await loadPortalWorkspaces(request);
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
     const prior = selectedClientWorkspaceId();
-    selectedWorkspaceId = workspaces.some(workspace => workspace.id === prior)
+    if (requestedWorkspaceId && !workspaces.some(workspace => workspace.id === requestedWorkspaceId)) throw Object.assign(new Error("This workspace is not available to your account"), {status: 403});
+    selectedWorkspaceId = requestedWorkspaceId || (workspaces.some(workspace => workspace.id === prior)
       ? prior
-      : workspaces[0]?.id ?? null;
+      : workspaces[0]?.id ?? null);
     selectClientWorkspaceId(selectedWorkspaceId);
     if (!selectedWorkspaceId) throw new Error("No authorized client workspace is available");
+  } else {
+    if (requestedWorkspaceId) throw Object.assign(new Error("This workspace is not available to your account"), {status: 403});
+    selectClientWorkspaceId(null);
   }
   const [projects, requests, mapConfig] = await Promise.all([
     request<{ projects: PortalProject[] }>("/api/client/projects"),
@@ -228,6 +238,7 @@ export async function loadPortalBootstrap(
       delegatedShares: session.capabilities?.delegatedShares === true,
       viewer: session.capabilities?.viewer === true,
       viewerShares: session.capabilities?.viewerShares === true,
+      feedback: session.capabilities?.feedback === true,
     },
     projects: projects.projects,
     requests: requests.requests,

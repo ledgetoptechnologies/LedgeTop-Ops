@@ -48,7 +48,7 @@ test("creates a distinct authenticated Client Portal grant with keyboard typeahe
   await expect(audience).toHaveValue("Acme Organization");
   await expect(page.getByText(/dynamic current authorized members/i).first()).toBeVisible();
   await page.getByRole("button", { name: "Grant authenticated access" }).click();
-  await expect(page.getByRole("status")).toContainText("Authenticated portal access granted");
+  await expect(page.getByRole("status").filter({ hasText: "Authenticated portal access granted" })).toBeVisible();
   expect(posted).toMatchObject({ folderBindingId: "binding-acme", audienceType: "organization",
     audiencePublicId: "org-acme", reasonCode: "client_delivery_access", expiresAt: null });
   await expect(page.getByText("Dynamic current authorized members")).toBeVisible();

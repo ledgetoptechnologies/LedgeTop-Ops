@@ -51,6 +51,7 @@ export const PERMISSIONS = [
 ] as const;
 
 export * from "./viewer-service";
+export * from "./client-feedback";
 
 export type Permission = (typeof PERMISSIONS)[number];
 export type PermissionScope = "global" | "division" | "assigned" | "own";

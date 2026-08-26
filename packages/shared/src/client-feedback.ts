@@ -1,0 +1,62 @@
+/** Public feedback contracts. Storage keys and authorization proofs never belong here. */
+export type ClientFeedbackStatus = "new" | "in_progress" | "done";
+
+export type ClientFeedbackTargetInput =
+  | { kind: "project"; projectId: string }
+  | { kind: "folder"; projectId: string; folderId: string }
+  | { kind: "file"; projectId: string | null; fileId: string };
+
+export interface ClientFeedbackTarget {
+  kind: ClientFeedbackTargetInput["kind"];
+  projectId: string | null;
+  label: string;
+  projectName: string | null;
+  available: boolean;
+  /** Server-built, same-origin portal path, requiring fresh authorization. */
+  actionPath: string | null;
+}
+
+export interface ClientFeedbackItem {
+  id: string;
+  status: ClientFeedbackStatus;
+  revision: number;
+  message: string;
+  completionNote: string | null;
+  target: ClientFeedbackTarget;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+}
+
+export interface ClientFeedbackPage {
+  items: ClientFeedbackItem[];
+  nextCursor: string | null;
+}
+
+export interface StaffClientFeedbackItem extends ClientFeedbackItem {
+  accountName: string;
+  canStart: boolean;
+  canComplete: boolean;
+}
+
+export interface ClientFeedbackEvent {
+  revision: number;
+  actor: "client" | "staff";
+  status: ClientFeedbackStatus;
+  note: string | null;
+  createdAt: string;
+}
+
+export interface ClientFeedbackDetail {
+  feedback: ClientFeedbackItem;
+  events: ClientFeedbackEvent[];
+}
+
+export const CLIENT_FEEDBACK_MESSAGE_LIMIT = 5000;
+export const CLIENT_FEEDBACK_NOTE_LIMIT = 2000;
+
+/** Acknowledging feedback may go directly to Done; reopening is not implicit. */
+export function canTransitionClientFeedback(from: ClientFeedbackStatus, to: ClientFeedbackStatus): boolean {
+  return (from === "new" && (to === "in_progress" || to === "done")) ||
+    (from === "in_progress" && to === "done");
+}

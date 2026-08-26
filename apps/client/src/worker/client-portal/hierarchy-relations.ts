@@ -1,4 +1,5 @@
-import type { Env } from "../types";
+import type { Env as ClientEnv } from "../types";
+type Env = Pick<ClientEnv, "DELIVERY_DB" | "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED">;
 
 export const PORTAL_HIERARCHY_RELATIONS_FLAG = "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED";
 

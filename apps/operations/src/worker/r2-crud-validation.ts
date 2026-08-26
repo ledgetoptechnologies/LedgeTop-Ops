@@ -89,6 +89,8 @@ export function requiresAdministratorForMutation(method:string,path:string):bool
   // Notification-only controls use current folder-scoped delivery permissions.
   // No other notification endpoint or method bypasses the administrator gate.
   const folderNotificationControl=normalizedMethod==="POST"&&parts.length===5&&parts[0]==="api"&&parts[1]==="notifications"&&parts[2]==="deliveries"&&delegatedRouteToken(parts[3])&&["send-now","cancel"].includes(parts[4]||"");
+  // This exact endpoint independently checks current source/division authority.
+  const feedbackTransition=normalizedMethod==="POST"&&parts.length===5&&parts[0]==="api"&&parts[1]==="operations"&&parts[2]==="feedback"&&delegatedRouteToken(parts[3])&&parts[4]==="status";
   const streamTicket=normalizedMethod==="POST"&&parts.length===5&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="items"&&delegatedRouteToken(parts[3])&&parts[4]==="stream-ticket";
   const incomingLink=parts.length>=3&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="incoming-link";
   const dropboxImport=parts.length>=3&&parts[0]==="api"&&parts[1]==="dropbox-import";
@@ -99,5 +101,5 @@ export function requiresAdministratorForMutation(method:string,path:string):bool
     (normalizedMethod==="PUT"&&parts.length===5&&parts[4]==="sops")||
     (normalizedMethod==="POST"&&parts.length===6&&parts[4]==="attachments"&&["upload","reference"].includes(parts[5]||""))
   );
-  return !shareCreate&&!shareRevoke&&!internalFolderGrantCreate&&!internalFolderGrantRevoke&&!folderNotificationControl&&!streamTicket&&!incomingLink&&!dropboxImport&&!viewerPublicShareCreate&&!viewerPublicShareRevoke&&!jobBrief;
+  return !shareCreate&&!shareRevoke&&!internalFolderGrantCreate&&!internalFolderGrantRevoke&&!folderNotificationControl&&!feedbackTransition&&!streamTicket&&!incomingLink&&!dropboxImport&&!viewerPublicShareCreate&&!viewerPublicShareRevoke&&!jobBrief;
 }

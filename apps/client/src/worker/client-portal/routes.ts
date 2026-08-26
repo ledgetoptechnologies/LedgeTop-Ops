@@ -11,6 +11,7 @@ import { z } from "zod";
 import type { Env } from "../types";
 import { serveAuthorizedThumbnail } from "../thumbnails";
 import { d1ClientPortalRepository } from "./repository";
+import { clientFeedbackSchemaAvailable, createClientFeedbackRouter } from "./feedback-routes";
 import type {
   ClientPortalRepository,
   ClientPortalSession,
@@ -88,6 +89,7 @@ interface ClientPortalDependencies {
   pricingHintProvider?: ClientPricingHintProvider;
   pricingAuthorizationContextResolver?: ProjectAlphaPricingAuthorizationContextResolver;
   notificationSchemaAvailable?: (env: Env) => Promise<boolean>;
+  feedbackSchemaAvailable?: (env: Env) => Promise<boolean>;
 }
 
 type ClientPortalVariables = {
@@ -376,6 +378,8 @@ export function createClientPortalRouter(
   const repository = dependencies.repository ?? d1ClientPortalRepository;
   const notificationSchemaAvailable = dependencies.notificationSchemaAvailable ??
     (dependencies.repository ? async () => true : clientPortalNotificationsAvailable);
+  const feedbackSchemaAvailable = dependencies.feedbackSchemaAvailable ??
+    (dependencies.repository ? async () => false : clientFeedbackSchemaAvailable);
   const router = new Hono<{
     Bindings: Env;
     Variables: ClientPortalVariables;
@@ -463,6 +467,7 @@ export function createClientPortalRouter(
       account: { id: session.accountId, displayName: session.displayName },
       viewerDisplayUnits,
       capabilities: {
+        feedback: await feedbackSchemaAvailable(c.env),
         manageTeam:
           c.env.CLIENT_PORTAL_TEAM_ENABLED === "true" &&
           !portalHierarchyV2Enabled(c.env) &&
@@ -1903,6 +1908,7 @@ export function createClientPortalRouter(
     return c.json({ request });
   });
 
+  router.route("/",createClientFeedbackRouter(feedbackSchemaAvailable));
   return router;
 }
 type ClientFileRange = { offset: number; length: number };

@@ -74,6 +74,13 @@ async function clickMappedPoint(page: Page) {
   await expect(canvas.locator("canvas.mapboxgl-canvas")).toBeVisible();
   const box = await canvas.boundingBox();
   expect(box).not.toBeNull();
+  // A visible WebGL canvas precedes the loaded point layer. Wait for the
+  // actual mapped point's hover target before clicking, not an empty canvas.
+  await expect(async () => {
+    await page.mouse.move(box!.x + box!.width / 2 + 24, box!.y + box!.height / 2);
+    await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
+    await expect(canvas.locator("canvas.mapboxgl-canvas")).toHaveCSS("cursor", "pointer", { timeout: 500 });
+  }).toPass({ timeout: 10_000 });
   await page.mouse.click(box!.x + box!.width / 2, box!.y + box!.height / 2);
 }
 

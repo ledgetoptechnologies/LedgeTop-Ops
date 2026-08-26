@@ -1,0 +1,30 @@
+.portal-feedback-page, .portal-feedback-list, .portal-feedback-summary, .portal-feedback-history, .portal-feedback-composer { display: grid; gap: 1rem; min-width: 0; }
+.portal-feedback-page > header, .portal-feedback-actions { display: flex; gap: .75rem; justify-content: space-between; align-items: center; flex-wrap: wrap; }
+.portal-feedback-entry { min-width: 0; }
+.portal-feedback-entry > button, .portal-feedback-page button, .portal-feedback-page .button-ghost, .portal-feedback-actions button { min-height: 44px; }
+.portal-feedback-composer { padding: 1rem; margin-top: .75rem; border: 1px solid #ed5107; border-radius: 12px; background: #fffaf7; color: #1c2730; text-align: left; }
+.portal-feedback-composer label { display: grid; gap: .5rem; }
+.portal-feedback-composer textarea { width: 100%; min-width: 0; resize: vertical; }
+.portal-feedback-composer h3, .portal-feedback-composer p, .portal-feedback-summary p, .portal-feedback-history p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.portal-feedback-history article { display: grid; gap: .4rem; padding-top: .75rem; border-top: 1px solid #dce1e6; }
+.portal-feedback-page h1, .portal-feedback-page h2 { overflow-wrap: anywhere; }
+.portal-feedback-page h2 { font-size: 1.1rem; }
+.portal-feedback-summary > .status-pill, .portal-feedback-summary > a { justify-self: start; }
+@media(min-width:961px) {
+  .client-portal-header:not(:has(.portal-workspace-switcher)) { grid-template-columns: auto minmax(0, 1fr) auto auto; }
+}
+@media(min-width:961px) and (max-width:1200px) {
+  .client-portal-header { gap: 1rem; }
+  .client-portal-header:has(.portal-workspace-switcher) .ltds-brand > span { display: none; }
+}
+.portal-file-preview .portal-feedback-composer { max-height: 45vh; overflow: auto; }
+.portal-file-preview:has(> .portal-feedback-entry) { grid-template-rows: auto auto minmax(0, 1fr); }
+.portal-file-preview > .portal-feedback-entry { padding: .5rem 1rem; }
+.portal-file-actions:has(.portal-feedback-entry) { flex-wrap: wrap; min-width: 0; }
+.portal-file-row:has(.portal-feedback-composer) { grid-template-columns: 44px minmax(0, 1fr); }
+.portal-file-row:has(.portal-feedback-composer) .portal-file-actions { grid-column: 2; display: grid; grid-template-columns: auto auto minmax(0, 1fr); }
+.portal-file-row:has(.portal-feedback-composer) .portal-feedback-entry { grid-column: 1 / -1; }
+.portal-notification-panel > section { border-top: 1px solid #dce1e6; padding-top: .75rem; margin-top: .75rem; }
+.portal-notification-panel > section h3 { font-size: 1rem; margin: 0 0 .75rem; }
+.portal-feedback-unread { color: #ee5007; font-size: 1.5rem; line-height: 1; }
+@media(max-width: 640px) { .portal-feedback-page > header { display: grid; } .portal-feedback-actions > button { flex: 1 1 auto; } }

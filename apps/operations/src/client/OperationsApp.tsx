@@ -32,6 +32,7 @@ import { deliveryViewCountText } from "./delivery-view-count";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
 import { OperationsNotifications } from "./OperationsNotifications";
+import { OperationsFeedback } from "./OperationsFeedback";
 import { WorkContextSops } from "./WorkContextSops";
 import { TeamAssignedWork } from "./TeamAssignedWork";
 import { ImageLocationMap } from "./ImageLocationMap";
@@ -73,6 +74,7 @@ interface Session {
     clientWorkspaceManagerRecovery?: { enabled: boolean };
     portalIdentityDenials?: { enabled: boolean };
     authenticatedDeliveryGrants?: { enabled: boolean };
+    clientFeedback?: { enabled: boolean };
   };
 }
 interface ActiveDeliveryShare {
@@ -150,9 +152,9 @@ const MANAGE_NAV: typeof NAV = [
 function allowed(user: SessionUser, permission: Permission) {
   return user.permissions.includes(permission);
 }
-function navAllowed(user: OperationsUser, item: (typeof NAV)[number]) {
+function navAllowed(user: OperationsUser, item: (typeof NAV)[number], feedbackEnabled=false) {
   return (
-    item.permissions.some((permission) => allowed(user, permission)) &&
+    (item.permissions.some((permission) => allowed(user, permission)) || (item.page === "operations" && feedbackEnabled)) &&
     (!item.administrator || user.isAdministrator)
   );
 }
@@ -184,17 +186,18 @@ export function OperationsApp() {
     mobileNavPanel = useRef<HTMLDivElement>(null),
     manageMenu = useRef<HTMLDivElement>(null),
     manageTrigger = useRef<HTMLButtonElement>(null);
-  const routeForPage = (requested: Page, user: OperationsUser): { page: Page; href: string } | null => {
+  const routeForPage = (requested: Page, user: OperationsUser, feedbackEnabled=false): { page: Page; href: string } | null => {
     const item = [...NAV, ...MANAGE_NAV].find(candidate => candidate.page === requested);
-    return item && navAllowed(user, item)
-      ? { page: item.page, href: item.page === "operations" ? operationsLandingPath(user.permissions) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`) }
+    return item && navAllowed(user, item, feedbackEnabled)
+      ? { page: item.page, href: item.page === "operations" ? operationsLandingPath(user.permissions, feedbackEnabled) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`) }
       : null;
   };
   const normalizeLocation = (value: Session) => {
     const requested = pathPage(location.pathname);
-    const authorized = routeForPage(requested, value.user);
-    const fallbackItem = [...NAV, ...MANAGE_NAV].find(item => navAllowed(value.user, item));
-    const fallback = fallbackItem ? routeForPage(fallbackItem.page, value.user) : null;
+    const feedbackEnabled = value.capabilities?.clientFeedback?.enabled === true;
+    const authorized = routeForPage(requested, value.user, feedbackEnabled);
+    const fallbackItem = [...NAV, ...MANAGE_NAV].find(item => navAllowed(value.user, item, feedbackEnabled));
+    const fallback = fallbackItem ? routeForPage(fallbackItem.page, value.user, feedbackEnabled) : null;
     const target = authorized || fallback;
     if (!target) return;
     setPage(target.page);
@@ -287,10 +290,10 @@ export function OperationsApp() {
       </main>
     );
   const props = { session };
-  const primaryNavigation = NAV.filter((item) => navAllowed(session.user, item));
+  const primaryNavigation = NAV.filter((item) => navAllowed(session.user, item, session.capabilities?.clientFeedback?.enabled === true));
   const manageNavigation = MANAGE_NAV.filter((item) => navAllowed(session.user, item));
   const navigationLink = (item: (typeof NAV)[number], mobile = false) => {
-    const href = item.page === "operations" ? operationsLandingPath(session.user.permissions) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
+    const href = item.page === "operations" ? operationsLandingPath(session.user.permissions, session.capabilities?.clientFeedback?.enabled === true) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
     return <a
       key={`${mobile ? "mobile" : "desktop"}-${item.page}`}
       href={href}
@@ -329,7 +332,7 @@ export function OperationsApp() {
         {page === "dashboard" && <Dashboard {...props} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
         {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage")) && (
-          <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions} />
+          <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions} feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} />
         )}{" "}
         {page === "airspace" && <Airspace />}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (
@@ -688,9 +691,10 @@ function OperationsHub({ session }: { session: Session }) {
     { id: "tasks", label: "Tasks", permission: "tasks.view" },
     { id: "sops", label: "SOP Library", permission: "sops.view" },
     { id: "notifications", label: "Notifications", permission: "delivery.share.audit" },
+    { id: "feedback", label: "Client feedback", permission: "operations.manage" },
   ];
   const visible = sections.filter((item) =>
-    allowed(session.user, item.permission),
+    item.id === "feedback" ? session.capabilities?.clientFeedback?.enabled === true : allowed(session.user, item.permission),
   );
   const initial = pathOperationsSection(location.pathname);
   const [section, setSection] = useState<OperationsSection>(
@@ -710,13 +714,14 @@ function OperationsHub({ session }: { session: Session }) {
       const isSopRoute = next === "sops" &&
         (location.pathname === "/sops" || location.pathname.startsWith("/sops/") ||
           location.pathname === expected || location.pathname.startsWith(`${expected}/`));
-      if (!isSopRoute && location.pathname !== expected)
+      const isFeedbackRoute = next === "feedback" && location.pathname.startsWith(`${expected}/`);
+      if (!isSopRoute && !isFeedbackRoute && location.pathname !== expected)
         history.replaceState(null, "", expected);
     };
     sync();
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
-  }, [session.user.permissions.join("|")]);
+  }, [session.user.permissions.join("|"), session.capabilities?.clientFeedback?.enabled]);
   const open = (next: OperationsSection) => {
     if (next === section) return;
     setSection(next);
@@ -751,6 +756,7 @@ function OperationsHub({ session }: { session: Session }) {
       {section === "tasks" && allowed(session.user, "tasks.view") && <Tasks />}
       {section === "sops" && allowed(session.user, "sops.view") && <SopLibrary user={session.user} />}
       {section === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}
+      {section === "feedback" && session.capabilities?.clientFeedback?.enabled === true && <OperationsFeedback />}
     </>
   );
 }

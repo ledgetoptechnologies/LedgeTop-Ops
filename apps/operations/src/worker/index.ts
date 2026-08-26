@@ -86,6 +86,8 @@ import {
   registerR2CrudRoutes,
 } from "./r2-crud";
 import { requiresAdministratorForMutation } from "./r2-crud-validation";
+import { registerClientFeedbackRoutes, staffFeedbackEntryEnabled } from "./client-feedback";
+import { processClientFeedbackNotifications } from "./client-feedback-notifications";
 import {
   enqueueExpiringNotifications,
   processClientPortalRequestNotifications,
@@ -673,11 +675,12 @@ app.get("/health", (c) => c.json({ status: "ok", service: "ltds-ops" }));
 app.get("/api/session", async (c) => {
   const principal = c.get("principal"),
     administrator = c.get("administrator");
-  const [permissions, globalScope, deliveryBrowseScope, displayUnits] = await Promise.all([
+  const [permissions, globalScope, deliveryBrowseScope, displayUnits, clientFeedbackEnabled] = await Promise.all([
     permissionKeys(c.env, principal),
     sqlScope(c.env, principal, "dashboard.view"),
     sqlScope(c.env, principal, "delivery.browse"),
     resolveViewerUnits(c.env, principal.id),
+    staffFeedbackEntryEnabled(c.env, principal),
   ]);
   const divisions =
     administrator && globalScope.global
@@ -706,6 +709,7 @@ app.get("/api/session", async (c) => {
     mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null,
     units: { default: defaultViewerUnits(c.env), resolved: displayUnits },
     capabilities: {
+      clientFeedback: { enabled: clientFeedbackEnabled },
       dropboxImport: dropboxImportCapability(c.env),
       incomingUploads: incomingUploadsCapability(c.env),
       directDeliveryUploads: directDeliveryUploadsCapability(c.env),
@@ -1410,6 +1414,7 @@ registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerClientHubRoutes(app);
 registerNotificationCenterRoutes(app);
+registerClientFeedbackRoutes(app);
 registerViewerIntegrationRoutes(app);
 registerViewerProcessingRoutes(app);
 app.post("/api/internal/project-alpha/delivery-intents/preflight", handleProjectAlphaDeliveryPreflight);
@@ -3045,6 +3050,7 @@ async function scheduled(
         processClientPortalRequestNotifications(env),
         processClientFolderGrantNotifications(env),
         processClientFolderChangeNotifications(env),
+        processClientFeedbackNotifications(env),
         processViewerProcessingNotifications(env),
       ]);
     } catch (error) {

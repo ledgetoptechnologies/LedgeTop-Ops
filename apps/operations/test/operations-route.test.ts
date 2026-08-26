@@ -20,6 +20,8 @@ describe("consolidated Operations routes", () => {
     ["/operations/tasks", "tasks"],
     ["/operations/sops", "sops"],
     ["/operations/notifications", "notifications"],
+    ["/operations/feedback", "feedback"],
+    ["/operations/feedback/feedback-one", "feedback"],
   ] as const)("resolves %s to the Operations page and %s section", (pathname, section) => {
     expect(pathPage(pathname)).toBe("operations");
     expect(pathOperationsSection(pathname)).toBe(section);
@@ -55,6 +57,12 @@ describe("consolidated Operations routes", () => {
     expect(operationsLandingPath(["projects.view", "delivery.share.audit"])).toBe("/operations/projects");
     expect(operationsLandingPath(["operations.view", "delivery.share.audit"])).toBe("/operations");
     expect(operationsLandingPath([])).toBe("/operations");
+  });
+
+  it("uses only the explicit feedback capability for a feedback-only landing", () => {
+    expect(operationsLandingPath([], true)).toBe("/operations/feedback");
+    expect(operationsLandingPath(["operations.manage"], false)).toBe("/operations");
+    expect(operationsLandingPath(["sops.view"], true)).toBe("/operations/sops");
   });
 
   it.each([

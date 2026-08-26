@@ -1,4 +1,9 @@
-import type { Env } from "../types";
+import type { Env as ClientEnv } from "../types";
+export type PortalAuthorizationEnv = Pick<ClientEnv, "DELIVERY_DB" | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED" |
+  "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED" | "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED" |
+  "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED" | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED" |
+  "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY">;
+type Env = PortalAuthorizationEnv;
 import type { VerifiedClientPrincipal } from "./types";
 import {
   portalHierarchyRelationsEnabled,

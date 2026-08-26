@@ -277,7 +277,7 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
   </Card>;
 }
 
-function ClientWorkspace({ route }: { route: ClientRoute }) {
+function ClientWorkspace({ route, canReviewFeedback }: { route: ClientRoute; canReviewFeedback: boolean }) {
   const [revision, setRevision] = useState(0);
   const [invalidated, setInvalidated] = useState("");
   const [portalFeedback, setPortalFeedback] = useState("");
@@ -332,7 +332,7 @@ function ClientWorkspace({ route }: { route: ClientRoute }) {
         : <Card title="Portal logins"><p>Portal login information is unavailable. Refresh this client workspace to try again.</p></Card>}
       <Card title="Accounts"><ClientCollection {...collectionProps} collection="accounts" label="Accounts" initial={data.accounts} page={data.pages?.accounts}
         emptyTitle="No accounts" emptyDetail="No linked portal account is active.">
-        {items => <div className="simple-rows">{items.map(account => <div key={collectionKey("accounts", account)}><div><strong>{account.display_name}</strong><small>Explicit account record</small></div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div>}
+        {items => <div className="simple-rows">{items.map(account => <div key={collectionKey("accounts", account)}><div><strong>{account.display_name}</strong><small>Explicit account record</small>{canReviewFeedback && <a href={`/operations/feedback?accountId=${encodeURIComponent(account.id)}`}>View client feedback</a>}</div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div>}
       </ClientCollection></Card>
       {data.businessProjects && <BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects} />}
       <Card title="Shared projects"><ClientCollection {...collectionProps} collection="projects" label="Shared projects" initial={data.projects} page={data.pages?.projects}
@@ -363,7 +363,7 @@ function ClientWorkspace({ route }: { route: ClientRoute }) {
   </>;
 }
 
-export function ClientHub({ mapToken, permissions }: { mapToken: string | null; permissions: Permission[] }) {
+export function ClientHub({ mapToken, permissions, feedbackEnabled=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean }) {
   const [, setLocationRevision] = useState(0);
   useEffect(() => {
     const sync = () => setLocationRevision(value => value + 1);
@@ -377,7 +377,7 @@ export function ClientHub({ mapToken, permissions }: { mapToken: string | null; 
   if (selectedRequest)
     return canReview ? <ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" /> : <Card><EmptyState title="Request unavailable" detail="Request-review access is required." /></Card>;
   if (route && "invalid" in route) return <Card><EmptyState title="Client workspace unavailable" detail="This client link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
-  if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
+  if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} canReviewFeedback={feedbackEnabled} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
   return <>
     {canReview && <section className="client-hub-queue"><ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" pendingOnly /></section>}
     {canViewDirectory && <section>
