@@ -113,8 +113,11 @@ enabled, define its exact routing and replay contract without invalidating the
 old primary receipts. Open catalog pages may need to refresh their continuation
 after deployment; saved selection snapshots do not need to be recreated.
 
-Still outstanding: source-aware Operations business projection/leases,
-identity mapping, authenticated source registry, portal root/workspace
+The next local increment implements Operations business projection/leases;
+see [business source isolation](business-source-isolation.md) for its verification
+and coordinated release gates. It does not enable another live connection.
+Still outstanding: explicit business-party linking, an authenticated source
+registry, source-aware Delivery mappings, portal root/workspace
 ownership, scoped producer credentials, multi-source request routing, and the
 user's decision about which source owns staff-role authority. Viewer and
 thumbnail runtime changes are outside this increment.

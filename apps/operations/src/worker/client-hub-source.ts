@@ -1,4 +1,9 @@
 import type { Env } from "./types";
+import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
+
+export function isBusinessProjectionSource(value: string): value is `project-alpha:${string}` {
+  return /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(value);
+}
 
 export type ClientHubSourceKind = "organization" | "standalone_client";
 export type ClientHubMappingStatus = "mapped" | "missing" | "invalid" | "ambiguous" | "not_applicable";
@@ -35,7 +40,8 @@ export function validatedUniquePublicIdExpression(table: SourceTable, alias: str
   const value = sourcePublicIdExpression(alias);
   const other = sourcePublicIdExpression("mapping_candidate");
   return `(CASE WHEN length(${value})=32 AND ${value} NOT GLOB '*[^0-9a-f]*'
-    AND (SELECT count(*) FROM ${table} mapping_candidate WHERE ${other}=${value})=1 THEN ${value} END)`;
+    AND (SELECT count(*) FROM ${table} mapping_candidate WHERE ${other}=${value}
+      AND mapping_candidate.projection_source_id=${alias}.projection_source_id)=1 THEN ${value} END)`;
 }
 
 export interface ClientHubSourceRoot {
@@ -44,13 +50,13 @@ export interface ClientHubSourceRoot {
 }
 
 export async function resolveClientHubSourceRoot(
-  env: Pick<Env, "OPS_DB">, kind: ClientHubSourceKind, internalId: string,
+  env: Pick<Env, "OPS_DB">, kind: ClientHubSourceKind, internalId: string, sourceId: string = PRIMARY_ALPHA_SOURCE_ID,
 ): Promise<ClientHubSourceRoot | null> {
   const table = kind === "organization" ? "pa_organizations" : "pa_clients";
   const row = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id,source.name display_name,
     ${kind === "organization" ? "NULL" : "source.organization_id"} organization_id,source.active,source.payload_json,
     ${validatedUniquePublicIdExpression(table, "source")} pa_public_id
-    FROM ${table} source WHERE source.id=?`).bind(internalId)
+    FROM ${table} source WHERE source.id=? AND source.projection_source_id=?`).bind(internalId, sourceId)
     .first<Omit<ClientHubSourceRoot, "mapping_status"> & { payload_json: string }>();
   if (!row) return null;
   const parsed = readClientHubSourcePublicId(row.payload_json);

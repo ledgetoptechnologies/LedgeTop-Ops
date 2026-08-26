@@ -6,7 +6,8 @@ describe("Access rule-group reconciliation", () => {
 
   it("replaces include rules with sorted desired emails and preserves constraints", async () => {
     const all=vi.fn(async()=>({results:[{email:"owner@example.com"},{email:"user@example.com"}]}));
-    const db={prepare:vi.fn(()=>({all}))} as unknown as D1Database;
+    const bind=vi.fn(()=>({all}));
+    const db={prepare:vi.fn(()=>({bind}))} as unknown as D1Database;
     const calls: Array<{url:string;init?:RequestInit}> = [];
     vi.stubGlobal("fetch",vi.fn(async(url:string,init?:RequestInit)=>{
       calls.push({url,init});
@@ -19,11 +20,13 @@ describe("Access rule-group reconciliation", () => {
     expect(body.include).toEqual([{email:{email:"owner@example.com"}},{email:{email:"user@example.com"}}]);
     expect(body.exclude).toEqual([{geo:{country_code:"XX"}}]);
     expect(calls[1]?.init?.method).toBe("PUT");
+    expect(bind).toHaveBeenCalledWith("project-alpha:primary","project-alpha:primary");
+    expect(db.prepare).toHaveBeenCalledWith(expect.stringContaining("u.projection_source_id=? AND e.projection_source_id=?"));
   });
 
   it("recovers a stale group identifier through an exact configured group name", async () => {
     const all=vi.fn(async()=>({results:[{email:"user@example.com"}]}));
-    const db={prepare:vi.fn(()=>({all}))} as unknown as D1Database;
+    const db={prepare:vi.fn(()=>({bind:()=>({all})}))} as unknown as D1Database;
     const calls: Array<{url:string;init?:RequestInit}> = [];
     vi.stubGlobal("fetch",vi.fn(async(url:string,init?:RequestInit)=>{
       calls.push({url,init});
@@ -44,7 +47,7 @@ describe("Access rule-group reconciliation", () => {
 
   it("skips the PUT when managed email membership already matches", async () => {
     const all=vi.fn(async()=>({results:[{email:"owner@example.com"},{email:"user@example.com"}]}));
-    const db={prepare:vi.fn(()=>({all}))} as unknown as D1Database;
+    const db={prepare:vi.fn(()=>({bind:()=>({all})}))} as unknown as D1Database;
     const fetchMock=vi.fn(async()=>Response.json({success:true,result:{id:"group",name:"LTDS Ops Users",include:[{email:{email:"user@example.com"}},{email:{email:"owner@example.com"}}],exclude:[],require:[]}}));
     vi.stubGlobal("fetch",fetchMock);
     const env={OPS_DB:db,CF_ACCOUNT_ID:"account",CF_ACCESS_GROUP_ID:"group",CF_ACCESS_GROUP_API_TOKEN:"token"};
@@ -54,7 +57,7 @@ describe("Access rule-group reconciliation", () => {
   });
 
   it("reports a failed group update so the event remains retryable", async () => {
-    const db={prepare:vi.fn(()=>({all:vi.fn(async()=>({results:[{email:"user@example.com"}]}))}))} as unknown as D1Database;
+    const db={prepare:vi.fn(()=>({bind:()=>({all:vi.fn(async()=>({results:[{email:"user@example.com"}]}))})}))} as unknown as D1Database;
     vi.stubGlobal("fetch",vi.fn(async(_url:string,init?:RequestInit)=>{
       if(!init?.method)return Response.json({success:true,result:{id:"group",name:"LTDS Ops Users",exclude:[],require:[]}});
       return Response.json({success:false,result:null,errors:[{message:"denied"}]},{status:403});

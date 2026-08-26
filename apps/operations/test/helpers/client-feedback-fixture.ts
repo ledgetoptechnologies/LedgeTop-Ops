@@ -13,7 +13,7 @@ export async function feedbackFixture() {
     if (/CREATE\s+TRIGGER\b/i.test(sql)) await db.exec(sql.replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i,"").replace(/\s*\n\s*/g," "));
     else { const statements=sql.split(/;\s*(?:\n|$)/).map(s=>s.trim()).filter(s=>s&&!/^PRAGMA/i.test(s)); if(statements.length)await db.batch(statements.map(s=>db.prepare(s))); }
   }
-  await ops.exec(`CREATE TABLE pa_projects(id TEXT PRIMARY KEY,client_id TEXT,organization_id TEXT,active INTEGER,business_unit_id TEXT,manager_user_id TEXT);
+  await ops.exec(`CREATE TABLE pa_projects(id TEXT PRIMARY KEY,client_id TEXT,organization_id TEXT,active INTEGER,business_unit_id TEXT,manager_user_id TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_clients(id TEXT PRIMARY KEY,organization_id TEXT,active INTEGER);
     CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,active INTEGER);
     CREATE TABLE divisions(id TEXT PRIMARY KEY,project_alpha_business_unit_id TEXT UNIQUE,active INTEGER);
@@ -40,7 +40,7 @@ export async function feedbackFixture() {
       db.prepare("INSERT INTO client_folder_associations(id,scope_type,account_id,r2_prefix,logical_grant_id,division_id,created_by) VALUES (?,'client',?,?,?,?,'staff')").bind(id,id,prefix,id,division),
     ]);
     await ops.batch([
-      ops.prepare("INSERT INTO pa_projects VALUES(?,?,NULL,1,?,'staff-pa')").bind(pa,pa,division),
+      ops.prepare("INSERT INTO pa_projects(id,client_id,organization_id,active,business_unit_id,manager_user_id) VALUES(?,?,NULL,1,?,'staff-pa')").bind(pa,pa,division),
       ops.prepare("INSERT INTO pa_clients VALUES(?,NULL,1)").bind(pa),
       ops.prepare("INSERT INTO divisions VALUES(?,?,1)").bind(division,division),
       ops.prepare("INSERT INTO project_folders VALUES(?,?,?,?)").bind(id,pa,division,prefix),

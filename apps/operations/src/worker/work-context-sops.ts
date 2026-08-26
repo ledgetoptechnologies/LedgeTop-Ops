@@ -162,9 +162,9 @@ function unscopedPermissionSql(permission: Permission): string {
 function authoritativeContextSql(kind: WorkContextKind): { ctes: string; allowed: string } {
   const target = kind === "project"
     ? `SELECT p.id,d.id division_id,
-        CASE WHEN actor.project_alpha_user_id IS NOT NULL
+        CASE WHEN p.projection_source_id='project-alpha:primary' AND actor.project_alpha_user_id IS NOT NULL
           AND p.manager_user_id=actor.project_alpha_user_id THEN 1 ELSE 0 END owned,
-        CASE WHEN actor.project_alpha_user_id IS NOT NULL AND (
+        CASE WHEN p.projection_source_id='project-alpha:primary' AND actor.project_alpha_user_id IS NOT NULL AND (
           p.manager_user_id=actor.project_alpha_user_id
           OR EXISTS (SELECT 1 FROM pa_project_assignments a
             WHERE a.project_id=p.id AND a.user_id=actor.project_alpha_user_id AND a.active=1)
@@ -175,7 +175,7 @@ function authoritativeContextSql(kind: WorkContextKind): { ctes: string; allowed
             ON a.task_id=t.id AND a.user_id=actor.project_alpha_user_id AND a.active=1
             WHERE t.project_id=p.id AND t.active=1)
         ) THEN 1 ELSE 0 END assigned,
-        CASE WHEN actor.project_alpha_user_id IS NOT NULL AND (
+        CASE WHEN p.projection_source_id='project-alpha:primary' AND actor.project_alpha_user_id IS NOT NULL AND (
           p.manager_user_id=actor.project_alpha_user_id
           OR EXISTS (SELECT 1 FROM pa_project_assignments a
             WHERE a.project_id=p.id AND a.user_id=actor.project_alpha_user_id AND a.active=1)
@@ -184,13 +184,13 @@ function authoritativeContextSql(kind: WorkContextKind): { ctes: string; allowed
        LEFT JOIN divisions d ON d.project_alpha_business_unit_id=p.business_unit_id
        WHERE p.id=? AND p.active=1`
     : `SELECT t.id,d.id division_id,
-        CASE WHEN actor.project_alpha_user_id IS NOT NULL
+        CASE WHEN t.projection_source_id='project-alpha:primary' AND actor.project_alpha_user_id IS NOT NULL
           AND t.created_by_user_id=actor.project_alpha_user_id THEN 1 ELSE 0 END owned,
-        CASE WHEN actor.project_alpha_user_id IS NOT NULL AND EXISTS (
+        CASE WHEN t.projection_source_id='project-alpha:primary' AND actor.project_alpha_user_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM pa_task_assignments a
           WHERE a.task_id=t.id AND a.user_id=actor.project_alpha_user_id AND a.active=1
         ) THEN 1 ELSE 0 END assigned,
-        CASE WHEN actor.project_alpha_user_id IS NOT NULL AND EXISTS (
+        CASE WHEN t.projection_source_id='project-alpha:primary' AND actor.project_alpha_user_id IS NOT NULL AND EXISTS (
           SELECT 1 FROM pa_task_assignments a
           WHERE a.task_id=t.id AND a.user_id=actor.project_alpha_user_id AND a.active=1
         ) THEN 1 ELSE 0 END manage_assigned

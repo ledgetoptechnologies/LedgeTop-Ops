@@ -180,9 +180,9 @@ function distanceToBoxNm(lat: number, lon: number, box: NonNullable<ReturnType<t
 
 export async function rebuildOperationAirspaceMatches(env: Env): Promise<number> {
   const [operations, tfrs, suas] = await Promise.all([
-    env.OPS_DB.prepare(`SELECT o.id,sl.latitude,sl.longitude,o.scheduled_start_at scheduled_start,o.scheduled_end_at scheduled_end
+    env.OPS_DB.prepare(`SELECT o.id,o.projection_source_id,sl.latitude,sl.longitude,o.scheduled_start_at scheduled_start,o.scheduled_end_at scheduled_end
       FROM pa_operations o JOIN pa_service_locations sl ON sl.id=(SELECT candidate.id FROM pa_service_locations candidate WHERE candidate.project_id=o.project_id AND candidate.active=1 AND candidate.latitude IS NOT NULL AND candidate.longitude IS NOT NULL ORDER BY candidate.id LIMIT 1)
-      WHERE o.active=1 AND o.status IN ('scheduled','in_progress')`).all<{ id: string; latitude: number; longitude: number; scheduled_start: string | null; scheduled_end: string | null }>(),
+      WHERE o.active=1 AND o.status IN ('scheduled','in_progress')`).all<{ id: string; projection_source_id: string; latitude: number; longitude: number; scheduled_start: string | null; scheduled_end: string | null }>(),
     env.OPS_DB.prepare("SELECT n.id,n.effective_at,n.expires_at,g.geojson,g.min_lat,g.min_lon,g.max_lat,g.max_lon FROM tfr_notices n JOIN tfr_geometries g ON g.tfr_id=n.id WHERE n.status IN ('active','scheduled')").all<any>(),
     env.OPS_DB.prepare("SELECT r.id,r.starts_at,r.ends_at,a.geojson,a.min_lat,a.min_lon,a.max_lat,a.max_lon FROM sua_reservations r JOIN sua_areas a ON a.id=r.area_id WHERE r.status IN ('active','upcoming','pending')").all<any>(),
   ]);
@@ -193,7 +193,7 @@ export async function rebuildOperationAirspaceMatches(env: Env): Promise<number>
       const start = item.start ? new Date(item.start).getTime() : Number.NEGATIVE_INFINITY, end = item.end ? new Date(item.end).getTime() : Number.POSITIVE_INFINITY; if (end < opStart || start > opEnd) continue;
       const box = { minLat: item.min_lat, minLon: item.min_lon, maxLat: item.max_lat, maxLon: item.max_lon }; if (Object.values(box).some(value => typeof value !== "number")) continue;
       const geometry = JSON.parse(item.geojson) as Geometry, intersects = pointInGeometry(operation.longitude, operation.latitude, geometry), nearby = !intersects && distanceToBoxNm(operation.latitude, operation.longitude, box) <= 5; if (!intersects && !nearby) continue;
-      statements.push(env.OPS_DB.prepare("INSERT INTO pa_operation_airspace_matches (operation_id,source_type,source_id,match_type) VALUES (?,?,?,?)").bind(operation.id, item.source, item.id, intersects ? "intersects" : "nearby")); count += 1;
+      statements.push(env.OPS_DB.prepare("INSERT INTO pa_operation_airspace_matches (operation_id,source_type,source_id,match_type,projection_source_id) VALUES (?,?,?,?,?)").bind(operation.id, item.source, item.id, intersects ? "intersects" : "nearby",operation.projection_source_id)); count += 1;
     }
   }
   await batches(env.OPS_DB, statements); return count;

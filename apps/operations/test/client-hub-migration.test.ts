@@ -27,6 +27,9 @@ describe("Client Hub populated migration upgrade", () => {
       expect(["pa_organizations", "pa_clients"].map(table => database.prepare(`SELECT * FROM ${table} ORDER BY id`).all())).toEqual(before);
       expect(database.prepare("SELECT ready,revision,generation,backfill_phase FROM client_hub_directory_state").get())
         .toEqual({ ready: 0, revision: 0, generation: 1, backfill_phase: null });
+      // Current mapping readers require the additive producer provenance while
+      // this test still verifies the original populated directory migration.
+      database.exec(readFileSync(new URL("0033_projection_sources.sql", directory), "utf8"));
       for (const table of ["pa_organizations", "pa_clients"] as const) {
         const plan = database.prepare(`EXPLAIN QUERY PLAN SELECT id FROM ${table} source WHERE ${sourcePublicIdExpression("source") }=?`).all(publicId);
         expect(plan.some(row => String(row.detail).includes(`idx_${table}_client_hub_public_id`))).toBe(true);

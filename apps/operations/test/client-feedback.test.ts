@@ -62,6 +62,13 @@ describe("staff feedback current-owner authority and transitions",{timeout:30_00
     expect((await action(record.id)).feedback.status).toBe("done");
     await f.ops.prepare("DELETE FROM staff_permission_overrides WHERE permission_key='operations.view_all'").run();
   });
+  it("does not carry primary staff assignments into a secondary-source feedback target",async()=>{
+    const owner=await f.seed(),record=await owner.create();
+    await f.ops.prepare("UPDATE pa_projects SET projection_source_id='project-alpha:secondary' WHERE id=?").bind(owner.pa).run();
+    expect((await listStaffFeedback(f.env,feedbackStaff,{accountId:owner.id})).items).toEqual([]);
+    await expect(getStaffFeedback(f.env,feedbackStaff,record.id)).rejects.toMatchObject({status:404});
+    await expect(action(record.id)).rejects.toMatchObject({status:404});
+  });
   it("rejects moved source project and local account remapping",async()=>{
     const owner=await f.seed(),record=await owner.create();
     await f.ops.prepare("UPDATE pa_projects SET client_id='different-client' WHERE id=?").bind(owner.pa).run();

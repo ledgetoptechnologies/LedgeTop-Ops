@@ -104,6 +104,7 @@ function decode(value: string): Cursor {
   } catch { throw new HTTPException(400, { message: "Client collection cursor is invalid" }); }
 }
 function accountScope(root: ClientHubRoot): { where: string; values: string[] } {
+  if (root.root_namespace === "business" && root.source_id !== "project-alpha:primary") return { where: "0=1", values: [] };
   if (root.root_namespace === "portal") return { where: "0=1", values: [] };
   if (root.root_namespace === "account") return { where: "account.id=? AND account.project_alpha_client_id IS NULL AND account.project_alpha_organization_id IS NULL", values: [root.public_id] };
   return { where: root.kind === "organization" ? "account.project_alpha_organization_id=?"
@@ -114,8 +115,9 @@ function availability(context: ClientHubCollectionContext, collection: ClientHub
     || (["deliveryGrants", "authenticatedDeliveryGrants"].includes(collection) && !context.access.delivery)
     || (collection === "viewerGrants" && !context.access.viewer)) return "permission_required";
   if (collection === "authenticatedDeliveryGrants" && !context.root.workspace_id) return "workspace_unavailable";
-  if (collection === "businessContacts" && (context.root.source_id !== "project-alpha:primary"
-    || context.root.root_namespace !== "business")) return "not_applicable";
+  if (collection === "businessContacts" && context.root.root_namespace !== "business") return "not_applicable";
+  if (collection !== "businessContacts" && context.root.root_namespace === "business"
+    && context.root.source_id !== "project-alpha:primary") return "not_applicable";
   return null;
 }
 function collectionQuery(context: ClientHubCollectionContext, collection: ClientHubCollection): Query {
@@ -123,8 +125,8 @@ function collectionQuery(context: ClientHubCollectionContext, collection: Client
   const common = { where: scope.where, values: scope.values, descending: true };
   switch (collection) {
     case "businessContacts": return { select: `id public_id,organization_id,name display_name,${businessContactChannelsSql()}`, from: "pa_clients",
-      where: `active=1 AND ${root.kind === "organization" ? "organization_id=?" : "id=? AND organization_id IS NULL"}`,
-      values: [root.public_id], order: ["id"], descending: false, keys: ["public_id"], business: true };
+      where: `active=1 AND projection_source_id=? AND ${root.kind === "organization" ? "organization_id=?" : "id=? AND organization_id IS NULL"}`,
+      values: [root.source_id, root.public_id], order: ["id"], descending: false, keys: ["public_id"], business: true };
     case "accounts": return { ...common,
       select: "account.id,account.display_name,account.status,account.project_alpha_client_id,account.project_alpha_organization_id,account.created_at,account.updated_at",
       from: "client_accounts account", order: ["COALESCE(account.created_at,'')", "account.id"], keys: ["id"] };

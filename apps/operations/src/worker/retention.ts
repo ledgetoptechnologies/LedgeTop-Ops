@@ -30,6 +30,17 @@ async function archiveSpec(env: Env, spec: ArchiveSpec): Promise<number> {
     httpMetadata: { contentType: "application/gzip" },
     customMetadata: { table: spec.table, rows: String(result.results.length), retentionDays: String(spec.days) },
   });
+  if (spec.table === "integration_event_receipts") {
+    // Event IDs are producer-local. Delete only the exact archived source/id
+    // pairs; an old receipt must not remove another source's recent delivery.
+    for (let offset = 0; offset < result.results.length; offset += 40) {
+      const rows = result.results.slice(offset, offset + 40);
+      await database.prepare(`DELETE FROM integration_event_receipts
+        WHERE (projection_source_id,event_id) IN (VALUES ${rows.map(() => "(?,?)").join(",")})`)
+        .bind(...rows.flatMap(row => [row.projection_source_id,row.event_id])).run();
+    }
+    return result.results.length;
+  }
   const ids = result.results.map((row) => row[spec.id]);
   await database.prepare(`DELETE FROM ${spec.table} WHERE ${spec.id} IN (${ids.map(() => "?").join(",")})`).bind(...ids).run();
   return ids.length;

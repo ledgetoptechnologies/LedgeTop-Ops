@@ -66,7 +66,8 @@ function setup() {
     CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT NOT NULL);
     CREATE TABLE pa_operations(
       id TEXT PRIMARY KEY,project_id TEXT,business_unit_id TEXT,title TEXT NOT NULL,status TEXT NOT NULL,
-      scheduled_start_at TEXT,updated_at TEXT NOT NULL,active INTEGER NOT NULL
+      scheduled_start_at TEXT,updated_at TEXT NOT NULL,active INTEGER NOT NULL,
+      projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary'
     );
     CREATE TABLE pa_operation_assignments(
       operation_id TEXT NOT NULL,user_id TEXT NOT NULL,active INTEGER NOT NULL,
@@ -76,7 +77,7 @@ function setup() {
     CREATE TABLE operational_job_brief_sop_links(operation_id TEXT NOT NULL,revision_id TEXT NOT NULL);
     INSERT INTO divisions VALUES ('division-flight','unit-flight');
     INSERT INTO pa_projects VALUES ('project-1','North site');
-    INSERT INTO pa_operations VALUES
+    INSERT INTO pa_operations(id,project_id,business_unit_id,title,status,scheduled_start_at,updated_at,active) VALUES
       ('operation-1','project-1','unit-flight','North capture','scheduled','2026-08-15T15:00:00Z','2026-08-10T00:00:00Z',1),
       ('operation-2','project-1','unit-flight','South capture','ready',NULL,'2026-08-11T00:00:00Z',1);
     INSERT INTO pa_operation_assignments VALUES

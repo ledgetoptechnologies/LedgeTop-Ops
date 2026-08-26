@@ -98,6 +98,8 @@ function statusTone(status: string): "neutral" | "success" | "warning" | "danger
 }
 
 export function clientPortalStatus(client: ClientSummary) {
+  if (client.portal_status === "not_supported")
+    return { label: "Portal unavailable for this source", tone: "neutral" as const };
   if (client.portal_status === "mapping_conflict")
     return { label: "Portal link needs review", tone: "warning" as const };
   if (client.portal_status === "mapping_unavailable" || (client.root_namespace === "business" && !client.pa_public_id && !client.workspace_id))

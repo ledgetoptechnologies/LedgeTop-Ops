@@ -4,6 +4,7 @@ import { accessCircuitIsOpen, completeEvent, applyEntitlementEvent, applyProject
 import { parseIntegrationEvent } from "./schema";
 import { MAX_BODY_BYTES, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookSignature } from "./security";
 import type { Env } from "./types";
+import { PRIMARY_PROJECT_ALPHA_SOURCE } from "../../operations/src/worker/project-alpha-source";
 
 type AccessVerifier = (request: Request, env: Env) => Promise<unknown>;
 
@@ -30,7 +31,7 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
     if (env.EXPECTED_HOST && url.hostname !== env.EXPECTED_HOST) return json(421,{error:"unexpected-host"});
     await accessVerifier(request,env);
     if (request.method === "GET" && url.pathname === "/health") {
-      const state = await env.OPS_DB.prepare("SELECT last_event_at,last_access_success_at,last_access_error,access_consecutive_failures,access_circuit_open_until,updated_at FROM integration_reconciliation WHERE integration='project-alpha'").first();
+      const state = await env.OPS_DB.prepare("SELECT last_event_at,last_access_success_at,last_access_error,access_consecutive_failures,access_circuit_open_until,updated_at FROM integration_reconciliation WHERE projection_source_id=? AND integration='project-alpha'").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId).first();
       return json(200,{status:"ok",integration:state??null});
     }
     if (request.method !== "POST" || url.pathname !== "/v1/project-alpha/events") return json(404,{error:"not-found"});
@@ -51,6 +52,8 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
       env.PROJECT_ALPHA_ALLOW_LEGACY_HMAC === "true",
     );
     const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
+    // The authenticated deployment is the primary producer. Neither application
+    // keys, body properties nor request headers select another projection source.
     const event = parseIntegrationEvent(parsed,env.APPLICATION_KEY);
     eventId = event.event_id;
     if (request.headers.get("X-PA-Event-ID") !== event.event_id) return json(422,{error:"event-id-mismatch"});

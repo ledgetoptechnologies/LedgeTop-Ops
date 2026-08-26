@@ -48,9 +48,11 @@ describe("legacy client account Project Alpha root activation", () => {
     `.replace(/\s*\n\s*/g, " "));
     await opsDb.exec(`
       CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT NOT NULL,active INTEGER NOT NULL,
-        last_sync_id TEXT NOT NULL,updated_at TEXT NOT NULL);
+        last_sync_id TEXT NOT NULL,updated_at TEXT NOT NULL,
+        projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT NOT NULL,organization_id TEXT,active INTEGER NOT NULL,
-        last_sync_id TEXT NOT NULL,updated_at TEXT NOT NULL);
+        last_sync_id TEXT NOT NULL,updated_at TEXT NOT NULL,
+        projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       INSERT INTO pa_organizations(id,name,active,last_sync_id,updated_at) VALUES
         ('pa-org','PA Organization',1,'sync-org','2026-08-16T00:00:00Z'),
         ('inactive-org','Inactive',0,'sync-inactive-org','2026-08-16T00:00:00Z');
@@ -131,6 +133,22 @@ describe("legacy client account Project Alpha root activation", () => {
     expect(await deliveryDb.prepare("SELECT COUNT(*) count FROM audit_log").first("count")).toBe(1);
   });
 
+  it.each(["pa-local-secondary-client", "pa-local-secondary-standalone", "primary-client-secondary-ancestor"])(
+    "excludes unsupported source %s and rejects direct activation without Delivery writes", async clientId => {
+      await seedSecondaryActivationSources(opsDb);
+      const before = (await deliveryDb.prepare("SELECT * FROM client_accounts ORDER BY id").all()).results;
+      const result = await listClientAccountRootActivation(env);
+      expect(result.sources.map(source => source.clientId)).toEqual(["pa-client", "pa-standalone"]);
+      await deliveryDb.prepare(`CREATE TRIGGER forbid_unsupported_activation BEFORE UPDATE ON client_accounts
+        BEGIN SELECT RAISE(ABORT,'unexpected Delivery write'); END`).run();
+      await expect(activateClientAccountRoot(env, principal, "legacy-account", {
+        projectAlphaClientId: clientId, expectedUpdatedAt: "2026-08-16T00:00:00Z",
+      })).rejects.toMatchObject({ status: 404 });
+      expect((await deliveryDb.prepare("SELECT * FROM client_accounts ORDER BY id").all()).results).toEqual(before);
+      expect(await deliveryDb.prepare("SELECT COUNT(*) count FROM audit_log").first("count")).toBe(0);
+    },
+  );
+
   it("fails closed on remapping, duplicate roots, stale versions, and inactive source ancestry", async () => {
     await expect(activateClientAccountRoot(env, principal, "a".repeat(119), {
       projectAlphaClientId: "pa-standalone",
@@ -201,6 +219,17 @@ describe("legacy client account Project Alpha root activation", () => {
     })).rejects.toMatchObject({ status: 409 });
   });
 });
+
+async function seedSecondaryActivationSources(db: D1Database) {
+  await db.batch([
+    db.prepare(`INSERT INTO pa_organizations(id,name,active,last_sync_id,updated_at,projection_source_id)
+      VALUES('pa-local-secondary-org','Secondary organization',1,'secondary','2026-08-16','project-alpha:secondary')`),
+    db.prepare(`INSERT INTO pa_clients(id,name,organization_id,active,last_sync_id,updated_at,projection_source_id) VALUES
+      ('pa-local-secondary-client','Secondary client','pa-local-secondary-org',1,'secondary','2026-08-16','project-alpha:secondary'),
+      ('pa-local-secondary-standalone','Secondary standalone',NULL,1,'secondary','2026-08-16','project-alpha:secondary'),
+      ('primary-client-secondary-ancestor','Invalid historical link','pa-local-secondary-org',1,'primary','2026-08-16','project-alpha:primary')`),
+  ]);
+}
 
 async function applyClientMigrationsWithUnrootedFixture(db: D1Database) {
   const migrationsDirectory = fileURLToPath(new URL("../../client/migrations/", import.meta.url));
@@ -279,12 +308,14 @@ describe("post-0121 client account root activation on the real Client migration 
       CREATE TABLE pa_organizations(
         id TEXT PRIMARY KEY,name TEXT NOT NULL,active INTEGER NOT NULL,
         payload_json TEXT NOT NULL DEFAULT '{}',last_sync_id TEXT NOT NULL,
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary'
       );
       CREATE TABLE pa_clients(
         id TEXT PRIMARY KEY,name TEXT NOT NULL,organization_id TEXT,active INTEGER NOT NULL,
         payload_json TEXT NOT NULL DEFAULT '{}',last_sync_id TEXT NOT NULL,
-        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary'
       );
       INSERT INTO pa_organizations(id,name,active,last_sync_id,updated_at)
         VALUES ('pa-org-late','Late Organization',1,'sync-org-late','2026-08-17T00:00:00Z');
@@ -302,9 +333,21 @@ describe("post-0121 client account root activation on the real Client migration 
   afterEach(async () => miniflare.dispose());
 
   it("creates, repairs, replays, rejects conflicts, rolls back, and remains race-safe", async () => {
+    await seedSecondaryActivationSources(opsDb);
     const preflight = await listClientAccountRootActivation(env);
     expect(preflight.workspaceMigrationApplied).toBe(true);
     expect(preflight.accounts.find(account => account.id === "late-account")?.activationState).toBe("unlinked");
+    expect(preflight.sources.some(source => source.clientId.includes("secondary"))).toBe(false);
+    const beforeUnsupported = (await deliveryDb.prepare("SELECT * FROM client_accounts ORDER BY id").all()).results;
+    const beforeAudit = await deliveryDb.prepare("SELECT COUNT(*) count FROM audit_log").first<number>("count");
+    for (const clientId of ["pa-local-secondary-client", "pa-local-secondary-standalone", "primary-client-secondary-ancestor"]) {
+      await expect(activateClientAccountRoot(env, principal, "late-account", {
+        projectAlphaClientId: clientId, expectedUpdatedAt: "2026-08-16T00:00:00Z",
+      })).rejects.toMatchObject({ status: 404 });
+    }
+    expect((await deliveryDb.prepare("SELECT * FROM client_accounts ORDER BY id").all()).results).toEqual(beforeUnsupported);
+    expect(await deliveryDb.prepare("SELECT COUNT(*) count FROM audit_log").first("count")).toBe(beforeAudit);
+    expect(await deliveryDb.prepare("SELECT COUNT(*) count FROM portal_v2_workspaces").first("count")).toBe(0);
 
     const activated = await activateClientAccountRoot(env, principal, "late-account", {
       projectAlphaClientId: "pa-client-late",

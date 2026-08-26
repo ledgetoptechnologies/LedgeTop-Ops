@@ -1,4 +1,5 @@
 import { HTTPException } from "hono/http-exception";
+import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import type { Env, StaffPrincipal } from "./types";
 
 export interface ClientAccountRootActivationAccount {
@@ -84,6 +85,8 @@ function sameSourceVersion(left: SourceRow, right: SourceRow): boolean {
     && left.organization_updated_at === right.organization_updated_at;
 }
 
+// Legacy Delivery roots are still primary-owned. Keep provenance in the shared
+// selector so both discovery and every exact pre-write reread use this fence.
 const SOURCE_SELECT = `SELECT client.id client_id,client.name client_name,
   client.organization_id,organization.name organization_name,
   client.last_sync_id client_last_sync_id,client.updated_at client_updated_at,
@@ -91,14 +94,16 @@ const SOURCE_SELECT = `SELECT client.id client_id,client.name client_name,
   organization.updated_at organization_updated_at
   FROM pa_clients client
   LEFT JOIN pa_organizations organization
-    ON organization.id=client.organization_id AND organization.active=1`;
+    ON organization.id=client.organization_id AND organization.active=1
+      AND organization.projection_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
+  WHERE client.projection_source_id='${PRIMARY_ALPHA_SOURCE_ID}'`;
 
 async function activeSource(
   env: Env,
   clientId: string,
 ): Promise<SourceRow | null> {
   return env.OPS_DB.withSession("first-primary").prepare(`${SOURCE_SELECT}
-    WHERE client.id=? AND client.active=1
+    AND client.id=? AND client.active=1
       AND (client.organization_id IS NULL OR organization.id IS NOT NULL)`)
     .bind(clientId).first<SourceRow>();
 }
@@ -421,7 +426,7 @@ export async function listClientAccountRootActivation(env: Env): Promise<{
       project_alpha_organization_id,updated_at
       FROM client_accounts ORDER BY lower(display_name),id`).all<AccountRow>(),
     env.OPS_DB.withSession("first-primary").prepare(`${SOURCE_SELECT}
-      WHERE client.active=1
+      AND client.active=1
         AND (client.organization_id IS NULL OR organization.id IS NOT NULL)
       ORDER BY lower(COALESCE(organization.name,client.name)),lower(client.name),client.id`)
       .all<SourceRow>(),

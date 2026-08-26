@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
@@ -6,6 +6,15 @@ import { applyProjectionEvent, completeEvent } from "../../ops-sync/src/projecti
 import type { Env as OpsSyncEnv, ProjectionEvent } from "../../ops-sync/src/types";
 import { syncProjectAlpha } from "../src/worker/project-alpha";
 import type { Env } from "../src/worker/types";
+import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+
+async function migrateOperations(db: D1Database): Promise<void> {
+  const directory = resolve(import.meta.dirname, "../migrations");
+  for (const name of (await readdir(directory)).filter(name => /^\d+.*\.sql$/.test(name)).sort()) {
+    const statements = splitD1MigrationStatements(await readFile(resolve(directory, name), "utf8"));
+    if (statements.length) await db.batch(statements.map(sql => db.prepare(sql)));
+  }
+}
 
 const collections=["users","business_units","worker_business_units","clients","organizations","projects","project_assignments","service_locations","application_entitlements","operations","operation_assignments","tasks","task_assignments","calendar_events"];
 
@@ -17,10 +26,7 @@ describe("Project Alpha snapshot/webhook ordering",()=>{
     try{
       const ops=await miniflare.getD1Database("OPS_DB") as D1Database;
       const delivery=await miniflare.getD1Database("DELIVERY_DB") as D1Database;
-      for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql","0007_pa_projection_fingerprints.sql","0008_project_units_task_assignments.sql","0009_project_managers.sql","0016_projection_entity_leases.sql","0021_project_alpha_sync_hardening.sql"]){
-        const sql=await readFile(resolve(import.meta.dirname,"../migrations",migration),"utf8");
-        for(const statement of sql.replace(/\r\n/g,"\n").split(";").map((part)=>part.trim()).filter((part)=>part&&!part.startsWith("PRAGMA foreign_keys")))await ops.prepare(statement).run();
-      }
+      await migrateOperations(ops);
       for(const statement of [
         "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,display_name TEXT,project_alpha_client_id TEXT,project_alpha_organization_id TEXT,updated_at TEXT)",
         "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,project_name TEXT,client_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT)",
@@ -48,10 +54,7 @@ describe("Project Alpha snapshot/webhook ordering",()=>{
     try{
       const ops=await miniflare.getD1Database("OPS_DB") as D1Database;
       const delivery=await miniflare.getD1Database("DELIVERY_DB") as D1Database;
-      for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql","0007_pa_projection_fingerprints.sql","0008_project_units_task_assignments.sql","0009_project_managers.sql","0016_projection_entity_leases.sql","0021_project_alpha_sync_hardening.sql"]){
-        const sql=await readFile(resolve(import.meta.dirname,"../migrations",migration),"utf8");
-        for(const statement of sql.replace(/\r\n/g,"\n").split(";").map((part)=>part.trim()).filter((part)=>part&&!part.startsWith("PRAGMA foreign_keys")))await ops.prepare(statement).run();
-      }
+      await migrateOperations(ops);
       for(const statement of [
         "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,display_name TEXT,project_alpha_client_id TEXT,project_alpha_organization_id TEXT,updated_at TEXT)",
         "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,project_name TEXT,client_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT)",

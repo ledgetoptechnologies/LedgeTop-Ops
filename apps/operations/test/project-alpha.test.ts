@@ -2,6 +2,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { syncProjectAlpha } from "../src/worker/project-alpha";
 import type { Env } from "../src/worker/types";
 
+// This suite inspects the snapshot statement plan. Real D1 identity allocation,
+// collisions and source guards are covered by the source/migration suites.
+vi.mock("../src/worker/project-alpha-source", async importOriginal => {
+  const actual = await importOriginal<typeof import("../src/worker/project-alpha-source")>();
+  return { ...actual, prepareProjectAlphaSourceRecords: vi.fn(async (_db, source) => {
+    if (source.sourceId !== "project-alpha:primary") throw new Error("mock-primary-only");
+    return { sourceId: source.sourceId, get: (_kind: string, id: string) => id, optional: (_kind: string, id: string | null) => id };
+  }) };
+});
+
 class Statement {
   values: unknown[] = [];
   constructor(readonly sql: string, private readonly database: Database) {}

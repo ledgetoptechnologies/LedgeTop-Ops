@@ -1,3 +1,5 @@
+import { PRIMARY_PROJECT_ALPHA_SOURCE } from "../../operations/src/worker/project-alpha-source";
+
 interface ReconciliationEnvironment {
   OPS_DB: D1Database;
   CF_ACCOUNT_ID: string;
@@ -87,13 +89,14 @@ export async function desiredAccessEmails(db: D1Database): Promise<string[]> {
   const result = await db.prepare(`
     SELECT lower(email) AS email FROM pa_users u
     JOIN pa_application_entitlements e ON e.user_id=u.id
-    WHERE u.active=1 AND e.active=1 AND e.enabled=1 AND email IS NOT NULL
+    WHERE u.projection_source_id=? AND e.projection_source_id=?
+      AND u.active=1 AND e.active=1 AND e.enabled=1 AND email IS NOT NULL
     UNION
     SELECT lower(s.email) AS email FROM staff_users s
     JOIN staff_role_assignments a ON a.staff_id=s.id
     WHERE s.status='active' AND s.sync_protected=1 AND a.role_id='role-owner' AND a.scope='global'
     ORDER BY email
-  `).all<{ email: string }>();
+  `).bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId,PRIMARY_PROJECT_ALPHA_SOURCE.sourceId).all<{ email: string }>();
   return result.results.map((row) => row.email).filter(Boolean);
 }
 

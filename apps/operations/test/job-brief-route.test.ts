@@ -107,7 +107,7 @@ function setup() {
     CREATE TABLE roles(id TEXT PRIMARY KEY);
     CREATE TABLE role_permissions(role_id TEXT NOT NULL,permission_key TEXT NOT NULL,PRIMARY KEY(role_id,permission_key),FOREIGN KEY(role_id) REFERENCES roles(id),FOREIGN KEY(permission_key) REFERENCES permissions(key));
     CREATE TABLE divisions(id TEXT PRIMARY KEY,project_alpha_business_unit_id TEXT UNIQUE);
-    CREATE TABLE pa_operations(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,business_unit_id TEXT,title TEXT NOT NULL,status TEXT NOT NULL,scheduled_start_at TEXT,scheduled_end_at TEXT,location TEXT,active INTEGER NOT NULL);
+    CREATE TABLE pa_operations(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,business_unit_id TEXT,title TEXT NOT NULL,status TEXT NOT NULL,scheduled_start_at TEXT,scheduled_end_at TEXT,location TEXT,active INTEGER NOT NULL,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_operation_assignments(operation_id TEXT,user_id TEXT,active INTEGER NOT NULL,PRIMARY KEY(operation_id,user_id));
     CREATE TABLE pa_service_locations(id TEXT PRIMARY KEY,project_id TEXT,name TEXT,latitude REAL,longitude REAL,active INTEGER NOT NULL);
     CREATE TABLE audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT,actor_type TEXT,actor_id TEXT,actor_email TEXT,actor_display_name TEXT,action TEXT,entity_type TEXT,entity_id TEXT,division_id TEXT,details_json TEXT,client_address_hash TEXT,created_at TEXT DEFAULT(datetime('now')));
@@ -118,11 +118,11 @@ function setup() {
   const insertStaff = ops.prepare("INSERT INTO staff_users VALUES (?,?,?,?)");
   for (const value of Object.values(principals)) insertStaff.run(value.id, value.email, value.displayName, value.projectAlphaUserId);
   ops.prepare("INSERT INTO divisions VALUES (?,?)").run("division-flight", "unit-flight");
-  ops.prepare("INSERT INTO pa_operations VALUES (?,?,?,?,?,?,?,?,?)").run(
+  ops.prepare("INSERT INTO pa_operations(id,project_id,business_unit_id,title,status,scheduled_start_at,scheduled_end_at,location,active) VALUES (?,?,?,?,?,?,?,?,?)").run(
     "operation-1", "pa-project-1", "unit-flight", "North parcel mapping", "scheduled",
     "2026-08-10T15:00:00Z", "2026-08-10T18:00:00Z", "North parcel", 1,
   );
-  ops.prepare("INSERT INTO pa_operations VALUES (?,?,?,?,?,?,?,?,?)").run(
+  ops.prepare("INSERT INTO pa_operations(id,project_id,business_unit_id,title,status,scheduled_start_at,scheduled_end_at,location,active) VALUES (?,?,?,?,?,?,?,?,?)").run(
     "operation-2", "pa-project-1", "unit-flight", "South parcel mapping", "scheduled",
     "2026-08-11T15:00:00Z", "2026-08-11T18:00:00Z", "South parcel", 1,
   );

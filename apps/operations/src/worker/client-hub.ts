@@ -3,7 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { sqlScope } from "./acl";
 import { clientHubDetailPath, clientHubRouteKind, findClientHubRoot, listClientHubRoots,
   isClientHubRootNamespace, isClientHubSource, type ClientHubKind, type ClientHubRoot } from "./client-hub-directory";
-import { isAlphaPublicId, resolveClientHubSourceRoot, validatedUniquePublicIdExpression } from "./client-hub-source";
+import { isAlphaPublicId, isBusinessProjectionSource, resolveClientHubSourceRoot, validatedUniquePublicIdExpression } from "./client-hub-source";
 import { resolveClientHubWorkspace, type ClientHubWorkspace } from "./client-hub-workspace";
 import { CLIENT_HUB_COLLECTIONS, createClientHubCollectionContext, isClientHubCollection, listClientHubCollection,
   type ClientHubCollectionContext, type ClientHubPermissions } from "./client-hub-collections";
@@ -80,7 +80,7 @@ async function businessAlias(env: Env, root: WorkspaceRow, portal: ClientHubWork
   if (isAlphaPublicId(publicId)) {
     const table = portal.root_type === "organization" ? "pa_organizations" : "pa_clients";
     const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id FROM ${table} source
-      WHERE source.active=1 ${portal.root_type === "standalone_client" ? "AND source.organization_id IS NULL" : ""}
+      WHERE source.active=1 AND source.projection_source_id='project-alpha:primary' ${portal.root_type === "standalone_client" ? "AND source.organization_id IS NULL" : ""}
         AND ${validatedUniquePublicIdExpression(table, "source")}=? LIMIT 2`).bind(publicId).all<{ id: string }>();
     for (const row of rows.results) candidates.add(row.id);
   }
@@ -117,8 +117,9 @@ async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRo
     return { ...root, display_name: account.display_name, status: account.status, workspace_id: null,
       legacy_account_id: account.id, portal_status: "not_provisioned", pa_public_id: null, mapping_status: "not_applicable" };
   }
-  if (root.source_id !== "project-alpha:primary") throw new HTTPException(404, { message: "Client not found" });
+  if (!isBusinessProjectionSource(root.source_id)) throw new HTTPException(404, { message: "Client not found" });
   if (root.root_namespace === "portal") {
+    if (root.source_id !== "project-alpha:primary") throw new HTTPException(404, { message: "Client not found" });
     const portal = await readPortalRoot(env, root.kind, root.public_id);
     if (!portal) throw new HTTPException(404, { message: "Client not found" });
     const resolved = await resolveClientHubWorkspace(env, { key: root.public_id, kind: root.kind,
@@ -135,9 +136,15 @@ async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRo
       portal_status: resolved.status === "mapped" ? portal.status : "projection_pending" };
   }
   if (root.root_namespace !== "business") throw new HTTPException(404, { message: "Client not found" });
-  const source = await resolveClientHubSourceRoot(env, root.kind, root.public_id);
+  const source = await resolveClientHubSourceRoot(env, root.kind, root.public_id, root.source_id);
   if (!source || !source.active || (root.kind === "standalone_client" && source.organization_id !== null))
     throw new HTTPException(404, { message: "Client not found" });
+  // Business provenance is not a portal grant. Until a separately authenticated
+  // source/workspace contract exists, no secondary root may resolve a primary
+  // workspace even when both producers export the same public ID.
+  if (root.source_id !== "project-alpha:primary") return { ...root, display_name: source.display_name, status: "active",
+    pa_public_id: source.pa_public_id, mapping_status: source.mapping_status, workspace_id: null,
+    legacy_account_id: null, portal_status: "not_supported", account_count: 0, project_count: 0, request_count: 0 };
   const resolved = await resolveClientHubWorkspace(env, { key: root.public_id, kind: root.kind,
     workspace_id: null, business_id: source.id, pa_public_id: source.pa_public_id });
   const workspace = resolved.workspace;
@@ -174,8 +181,8 @@ async function resolveDetailContext(env: Env, principal: StaffPrincipal, kind: C
     // guess or cached portal association, can hydrate that route in the meantime.
     if (!(error instanceof HTTPException) || !(error.status === 404 || (error.status === 503
       && error.message === "The client directory is being prepared; please retry shortly"))
-      || sourceId !== "project-alpha:primary" || rootNamespace !== "business") throw error;
-    const source = await resolveClientHubSourceRoot(env, kind, publicId);
+      || !sourceId || !isBusinessProjectionSource(sourceId) || rootNamespace !== "business") throw error;
+    const source = await resolveClientHubSourceRoot(env, kind, publicId, sourceId);
     if (!source?.active || (kind === "standalone_client" && source.organization_id !== null)) throw error;
     indexed = { source_id: sourceId, root_namespace: "business", kind, public_id: source.id,
       pa_public_id: source.pa_public_id, mapping_status: source.mapping_status, display_name: source.display_name,
@@ -227,7 +234,7 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
 
 export function registerClientHubRoutes(app: App): void {
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId", async c => {
-    if (c.req.param("rootNamespace") !== "business" || c.req.param("sourceId") !== "project-alpha:primary")
+    if (c.req.param("rootNamespace") !== "business" || !isBusinessProjectionSource(c.req.param("sourceId")))
       throw new HTTPException(404, { message: "Business project not found" });
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });

@@ -56,7 +56,13 @@ function database(kind: "ops" | "delivery", state: DbState) {
           }
           return null;
         },
-        async all() { return { results: state.all?.(kind, sql, this.values) ?? [] }; },
+        async all() {
+          const configured = state.all?.(kind, sql, this.values);
+          if (configured !== undefined) return { results: configured };
+          if (kind === "ops" && sql.includes("SELECT source.id,source.projection_source_id,source.active"))
+            return { results: [{ id: this.values[0], projection_source_id: "project-alpha:primary", active: 1 }] };
+          return { results: [] };
+        },
         async run() {
           (state.runs ??= []).push(sql);
           const configured = state.run?.(kind, sql, this.values);
@@ -797,6 +803,7 @@ describe("verified Project Alpha quote linkage", () => {
         return null;
       },
       all(kind, sql) {
+        if (kind === "ops") return undefined;
         return kind === "delivery" && sql.includes("FROM client_service_request_services")
           ? [{ service_source_id: "project-alpha:secondary", service_public_id: "svc-ortho", service_source_version: "catalog-7", answers_json: "{}" }] : [];
       },
@@ -812,6 +819,34 @@ describe("verified Project Alpha quote linkage", () => {
     expect(response.status).toBe(409);
     expect(await response.text()).toContain("inconsistent catalog source");
     expect(upstream).not.toHaveBeenCalled();
+  });
+
+  it.each(["unsupported_source", "mapping_unavailable"])("does not send a primary request with %s business references to the sole connector", async reason => {
+    const state: DbState = {
+      batches: [],
+      first(kind, sql) {
+        if (kind === "delivery" && sql.includes("request_revision") && sql.includes("FROM client_service_requests"))
+          return { id: "request-a", account_id: "account-a", catalog_source_id: "project-alpha:primary", status: "under_review",
+            title: "Reviewed work", details: "Capture site", deliverables_text: null,
+            project_alpha_client_id: "foreign-client", project_alpha_organization_id: null,
+            project_alpha_project_id: null, portal_project_id: null, project_authorized: 1,
+            area_geojson: null, poi_points_json: "[]", effective_area_geojson: null, effective_poi_points_json: null,
+            area_revision: null, request_revision: 1, scope_text: "Capture site" };
+        return null;
+      },
+      all(kind, sql, values) {
+        if (kind === "ops" && sql.includes("SELECT source.id,source.projection_source_id,source.active"))
+          return reason === "unsupported_source" ? [{ id: values[0], projection_source_id: "project-alpha:secondary", active: 1 }] : [];
+        return [];
+      },
+    };
+    const upstream = vi.fn(); vi.stubGlobal("fetch", upstream);
+    const response = await worker.fetch(new Request("https://ops.example/api/client-service-requests/request-a/pa-draft", {
+      method: "POST", headers: { Origin: "https://ops.example" },
+    }), environment(state, { APPLICATION_KEY: "ltds_ops", PROJECT_ALPHA_DRAFT_QUOTES_ENABLED: "true",
+      PROJECT_ALPHA_DRAFT_QUOTE_API_KEY: "draft-only-key", PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET: "0123456789abcdef0123456789abcdef" }) as any, executionCtx);
+    expect(response.status).toBe(409); expect(await response.text()).toContain(reason);
+    expect(upstream).not.toHaveBeenCalled(); expect(state.batches).toEqual([]);
   });
 
   it("exports only the authorized stored request geometry as KML", async () => {

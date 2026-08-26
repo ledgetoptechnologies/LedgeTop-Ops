@@ -2,11 +2,11 @@ import { HTTPException } from "hono/http-exception";
 import { hasLocalGlobalAllow, hasPermission, isAdministrator, sqlScope } from "./acl";
 import { paProjectFilter } from "./visibility";
 import { sha256 } from "./crypto";
-import { validatedUniquePublicIdExpression, type ClientHubMappingStatus } from "./client-hub-source";
+import { isBusinessProjectionSource, validatedUniquePublicIdExpression, type ClientHubMappingStatus } from "./client-hub-source";
 import type { Env, StaffPrincipal } from "./types";
 
 export const CLIENT_HUB_SOURCES = ["project-alpha:primary", "delivery:local"] as const;
-export type ClientHubSource = (typeof CLIENT_HUB_SOURCES)[number];
+export type ClientHubSource = `project-alpha:${string}` | "delivery:local";
 export type ClientHubKind = "organization" | "standalone_client";
 export type ClientHubRootNamespace = "business" | "portal" | "account";
 export interface ClientHubRoot {
@@ -53,7 +53,7 @@ export function normalizeClientHubText(value: string): string {
 }
 export function normalizeClientHubPhone(value: string): string { return value.replace(/\D/g, ""); }
 export function isClientHubSource(value: string): value is ClientHubSource {
-  return (CLIENT_HUB_SOURCES as readonly string[]).includes(value);
+  return value === "delivery:local" || isBusinessProjectionSource(value);
 }
 export function isClientHubKind(value: string): value is ClientHubKind {
   return value === "organization" || value === "standalone_client";
@@ -71,15 +71,15 @@ const visibleRoot = "root.status NOT IN ('closed','inactive')";
 // An index refresh can lag an authoritative business reassignment/deactivation.
 // Only live business roots belong to this source. A portal UUID by itself never
 // establishes a business-root mapping, even when it resembles a record ID.
-const liveBusinessRoot = `(root.root_namespace<>'business' OR (root.source_id='project-alpha:primary' AND (
+const liveBusinessRoot = `(root.root_namespace<>'business' OR (
   (root.kind='organization' AND EXISTS (SELECT 1 FROM pa_organizations organization
-    WHERE organization.id=root.public_id AND organization.active=1)) OR
+    WHERE organization.id=root.public_id AND organization.projection_source_id=root.source_id AND organization.active=1)) OR
   (root.kind='standalone_client' AND EXISTS (SELECT 1 FROM pa_clients client
-    WHERE client.id=root.public_id AND client.active=1 AND client.organization_id IS NULL)))))`;
-const currentMapping = `CASE WHEN root.root_namespace='business' AND root.source_id='project-alpha:primary'
+    WHERE client.id=root.public_id AND client.projection_source_id=root.source_id AND client.active=1 AND client.organization_id IS NULL))))`;
+const currentMapping = `CASE WHEN root.root_namespace='business'
   THEN CASE WHEN root.kind='organization' THEN (SELECT ${validatedUniquePublicIdExpression("pa_organizations", "source")}
-    FROM pa_organizations source WHERE source.id=root.public_id)
-  ELSE (SELECT ${validatedUniquePublicIdExpression("pa_clients", "source")} FROM pa_clients source WHERE source.id=root.public_id) END
+    FROM pa_organizations source WHERE source.id=root.public_id AND source.projection_source_id=root.source_id)
+  ELSE (SELECT ${validatedUniquePublicIdExpression("pa_clients", "source")} FROM pa_clients source WHERE source.id=root.public_id AND source.projection_source_id=root.source_id) END
   ELSE root.pa_public_id END`;
 function unavailable(): never {
   throw new HTTPException(503, { message: "The client directory is being prepared; please retry shortly" });
@@ -149,14 +149,14 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
       SELECT 1 FROM client_hub_search_values search WHERE search.source_id=root.source_id
         AND search.root_namespace=root.root_namespace AND search.kind=root.kind AND search.root_public_id=root.public_id
         AND (instr(search.normalized_value,?)>0${phone.length >= 3 ? " OR (search.field='phone' AND instr(search.normalized_value,?)>0)" : ""})
-        AND search.source_id='project-alpha:primary' AND search.root_namespace='business' AND (
+        AND search.root_namespace='business' AND (
           (search.record_type='pa_client' AND search.project_id IS NULL AND EXISTS (
-            SELECT 1 FROM pa_clients contact WHERE contact.id=search.record_id AND contact.active=1 AND
+            SELECT 1 FROM pa_clients contact WHERE contact.id=search.record_id AND contact.projection_source_id=root.source_id AND contact.active=1 AND
               ((root.kind='organization' AND contact.organization_id=root.public_id) OR
                (root.kind='standalone_client' AND contact.id=root.public_id AND contact.organization_id IS NULL))))
           OR (search.record_type='pa_project' AND search.record_id=search.project_id AND EXISTS (
-            SELECT 1 FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.active=1
-            WHERE p.id=search.project_id AND ${filter.sql} AND
+            SELECT 1 FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
+            WHERE p.id=search.project_id AND p.projection_source_id=root.source_id AND ${filter.sql} AND
               ((root.kind='organization' AND COALESCE(p.organization_id,owner.organization_id)=root.public_id) OR
                (root.kind='standalone_client' AND p.client_id=root.public_id AND owner.id IS NOT NULL
                  AND COALESCE(p.organization_id,owner.organization_id) IS NULL)))))))`);
@@ -193,7 +193,7 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
         pa_public_id: live_pa_public_id, mapping_status: live_pa_public_id ? "mapped" : "missing",
         workspace_id: null, portal_status: "mapping_unavailable",
       } : {}),
-      source_name: root.source_id === "project-alpha:primary" ? "Project Alpha" : "Local delivery",
+      source_name: root.source_id === "project-alpha:primary" ? "Project Alpha" : root.source_id === "delivery:local" ? "Local delivery" : root.source_id,
       route_kind: clientHubRouteKind(root.kind), detail_path: clientHubDetailPath(root) })),
     indexUpdatedAt: state.last_success_at,
     searchCapabilities: { businessContacts: true, portalContacts: false },

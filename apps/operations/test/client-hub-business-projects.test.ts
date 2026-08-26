@@ -30,24 +30,24 @@ async function fixture() {
     script: "export default { fetch(){ return new Response('ok'); } }", d1Databases: { OPS_DB: "business-projects" } });
   active.push(mf);
   const db = await mf.getD1Database("OPS_DB") as unknown as D1Database;
-  await sql(db, `CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT);
-    CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT);
+  await sql(db, `CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT,status TEXT,start_date TEXT,end_date TEXT,client_id TEXT,
-      organization_id TEXT,manager_user_id TEXT,active INTEGER,payload_json TEXT,updated_at TEXT);
-    CREATE TABLE pa_users(id TEXT PRIMARY KEY,display_name TEXT);
-    CREATE TABLE pa_project_assignments(project_id TEXT,user_id TEXT,active INTEGER);
-    CREATE TABLE pa_operations(id TEXT PRIMARY KEY,project_id TEXT,active INTEGER);
-    CREATE TABLE pa_operation_assignments(operation_id TEXT,user_id TEXT,active INTEGER);
-    CREATE TABLE pa_tasks(id TEXT PRIMARY KEY,project_id TEXT,active INTEGER);
-    CREATE TABLE pa_task_assignments(task_id TEXT,user_id TEXT,active INTEGER);
-    INSERT INTO pa_organizations VALUES('org-a','Org A',1,'{}'),('org-b','Org B',1,'{}');
-    INSERT INTO pa_clients VALUES('client-a','Contact A','org-a',1,'{}'),('client-b','Contact B','org-b',1,'{}'),
+      organization_id TEXT,manager_user_id TEXT,active INTEGER,payload_json TEXT,updated_at TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_users(id TEXT PRIMARY KEY,display_name TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_project_assignments(project_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_operations(id TEXT PRIMARY KEY,project_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_operation_assignments(operation_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_tasks(id TEXT PRIMARY KEY,project_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_task_assignments(task_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('org-a','Org A',1,'{}'),('org-b','Org B',1,'{}');
+    INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES('client-a','Contact A','org-a',1,'{}'),('client-b','Contact B','org-b',1,'{}'),
       ('standalone','Standalone',NULL,1,'{}'),('inactive','Inactive','org-a',0,'{}');
-    INSERT INTO pa_users VALUES('user-a','Manager A');`);
+    INSERT INTO pa_users(id,display_name) VALUES('user-a','Manager A');`);
   const env = { OPS_DB: db } as Env;
   async function project(id: string, values: { client?: string | null; organization?: string | null; status?: string;
     created?: unknown; payload?: string; active?: number; manager?: string | null; syncTime?: string } = {}) {
-    await db.prepare(`INSERT INTO pa_projects VALUES(?,?,?,'2026-08-01',NULL,?,?,?,?,?,?)`)
+    await db.prepare(`INSERT INTO pa_projects(id,name,status,start_date,end_date,client_id,organization_id,manager_user_id,active,payload_json,updated_at) VALUES(?,?,?,'2026-08-01',NULL,?,?,?,?,?,?)`)
       .bind(id, `Project ${id}`, values.status ?? "active", values.client === undefined ? "client-a" : values.client,
         values.organization ?? null, values.manager ?? null, values.active ?? 1,
         values.payload ?? JSON.stringify({ created_at: values.created ?? "2026-01-01T00:00:00Z", confidential: "do not expose" }),
@@ -67,7 +67,7 @@ describe("Client Hub business project history", () => {
   it("pages past 200 records independently of delivery grants, with bounded first and subsequent pages", async () => {
     const { db, env } = await fixture();
     await sql(db, `WITH RECURSIVE ids(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM ids WHERE n<212)
-      INSERT INTO pa_projects SELECT printf('project-%04d',n),'Project '||n,'completed',NULL,NULL,'client-a',NULL,NULL,1,
+      INSERT INTO pa_projects(id,name,status,start_date,end_date,client_id,organization_id,manager_user_id,active,payload_json,updated_at) SELECT printf('project-%04d',n),'Project '||n,'completed',NULL,NULL,'client-a',NULL,NULL,1,
         '{"created_at":"2026-01-01T00:00:00Z","private":"hidden"}','2026-08-25' FROM ids;`);
     const first = await listClientHubBusinessProjects(env, staff, context(), { initial: true });
     expect(first.page).toMatchObject({ available: true, limit: 5, returned: 5, hasMore: true });
@@ -150,11 +150,11 @@ describe("Client Hub business project history", () => {
     acl.isAdministrator.mockResolvedValue(false);
     await project("managed", { manager: "user-a" });
     for (const id of ["direct", "operation", "task", "hidden"]) await project(id);
-    await sql(db, `INSERT INTO pa_project_assignments VALUES('direct','user-a',1);
-      INSERT INTO pa_operations VALUES('operation-a','operation',1);
-      INSERT INTO pa_operation_assignments VALUES('operation-a','user-a',1);
-      INSERT INTO pa_tasks VALUES('task-a','task',1);
-      INSERT INTO pa_task_assignments VALUES('task-a','user-a',1);`);
+    await sql(db, `INSERT INTO pa_project_assignments(project_id,user_id,active) VALUES('direct','user-a',1);
+      INSERT INTO pa_operations(id,project_id,active) VALUES('operation-a','operation',1);
+      INSERT INTO pa_operation_assignments(operation_id,user_id,active) VALUES('operation-a','user-a',1);
+      INSERT INTO pa_tasks(id,project_id,active) VALUES('task-a','task',1);
+      INSERT INTO pa_task_assignments(task_id,user_id,active) VALUES('task-a','user-a',1);`);
     expect((await listClientHubBusinessProjects(env, staff, context())).items.map(row => row.id).sort())
       .toEqual(["direct", "managed", "operation", "task"]);
     acl.hasLocalGlobalAllow.mockResolvedValue(true);
@@ -173,7 +173,7 @@ describe("Client Hub business project history", () => {
 
   it("rechecks live assignments after the data query, not only cached policy flags", async () => {
     const { db, env, project } = await fixture(); await project("assigned");
-    await db.prepare("INSERT INTO pa_project_assignments VALUES('assigned','user-a',1)").run();
+    await db.prepare("INSERT INTO pa_project_assignments(project_id,user_id,active) VALUES('assigned','user-a',1)").run();
     acl.isAdministrator.mockImplementationOnce(async () => false).mockImplementationOnce(async () => {
       await db.prepare("UPDATE pa_project_assignments SET active=0").run(); return false;
     });

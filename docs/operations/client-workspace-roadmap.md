@@ -633,7 +633,12 @@ Test the complete workflow, not only whether a component renders:
 - [x] Implement the local primary-compatible catalog provenance migration,
       source-scoped ingestion/readers and saved-request/provider boundaries.
       See [catalog source isolation](catalog-source-isolation.md); second-source
-      authentication, business projection and portal ownership remain disabled.
+      authentication and portal ownership remain disabled.
+- [x] Locally implement business-projection provenance, isolated snapshots and
+      event replay, source-qualified Client Hub readers and primary-only staff
+      and outbound authority. See [business source isolation](business-source-isolation.md)
+      for exact test results, the corrected feedback fixture and paired release
+      gates. No second live connection or production migration was enabled.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

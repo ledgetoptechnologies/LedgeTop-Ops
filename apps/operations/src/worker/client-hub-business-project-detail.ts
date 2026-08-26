@@ -65,9 +65,9 @@ async function readRow(env: Env, context: ClientHubCollectionContext, projectId:
     p.client_id,p.organization_id,${sourceText("$.description", 8000)} description,${sourceText("$.created_at", 64)} created_at,
     manager.id manager_id,manager.display_name manager_name,contact.id contact_id,contact.name contact_name,
     ${businessContactChannelsSql("contact.payload_json")}
-    FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.active=1
-      LEFT JOIN pa_clients contact ON contact.id=p.client_id AND contact.active=1 AND (${contact})
-      LEFT JOIN pa_users manager ON manager.id=p.manager_user_id AND manager.active=1
+    FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
+      LEFT JOIN pa_clients contact ON contact.id=p.client_id AND contact.projection_source_id=p.projection_source_id AND contact.active=1 AND (${contact})
+      LEFT JOIN pa_users manager ON manager.id=p.manager_user_id AND manager.projection_source_id=p.projection_source_id AND manager.active=1
     WHERE p.id=? AND (${owner.sql}) AND (${policy.filter.sql}) LIMIT 1`)
     .bind(context.root.public_id, projectId, ...owner.values, ...policy.filter.values).first<DetailRow>();
 }
@@ -84,7 +84,7 @@ export async function readClientHubBusinessProjectDetail(env: Env, principal: St
   if (options.expectedContextVersion !== undefined && !/^[A-Za-z0-9_-]{43}$/.test(options.expectedContextVersion))
     throw new HTTPException(400, { message: "Client context is invalid" });
   if (options.expectedContextVersion !== undefined && options.expectedContextVersion !== context.contextVersion) changed();
-  if (context.root.source_id !== "project-alpha:primary" || context.root.root_namespace !== "business")
+  if (context.root.root_namespace !== "business")
     throw new HTTPException(404, { message: "Business project not found" });
   const policy = await readClientHubBusinessProjectPolicy(env, principal);
   if (!context.access.directory || !policy.allowed)

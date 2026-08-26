@@ -40,6 +40,9 @@ async function fixture() {
     await sql(db, table("0004_project_alpha_authority.sql", name));
   await sql(db, table("0008_project_units_task_assignments.sql", "pa_task_assignments"));
   await sql(db, "ALTER TABLE pa_projects ADD COLUMN manager_user_id TEXT;");
+  for (const name of ["pa_organizations", "pa_clients", "pa_projects", "pa_users", "pa_project_assignments",
+    "pa_operations", "pa_operation_assignments", "pa_tasks", "pa_task_assignments"])
+    await sql(db, `ALTER TABLE ${name} ADD COLUMN projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary';`);
   await sql(db, `INSERT INTO pa_organizations(id,name,payload_json,last_sync_id) VALUES('org-a','Org A','{}','sync'),('org-b','Org B','{}','sync');
     INSERT INTO pa_clients(id,name,organization_id,payload_json,last_sync_id) VALUES
       ('client-a','Contact A','org-a','{"email":" a@example.test ","phone":"+1 (555) 123-4567","billing":"never-return"}','sync'),
@@ -59,6 +62,23 @@ afterEach(async () => {
 });
 
 describe("read-only source-qualified business project detail", () => {
+  it("reads only the selected producer's project and contacts even when relationships are malformed", async () => {
+    const { db, env } = await fixture();
+    await sql(db, `INSERT INTO pa_organizations(id,name,payload_json,last_sync_id,projection_source_id)
+      VALUES('secondary-org','Secondary','{}','sync','project-alpha:secondary');
+      INSERT INTO pa_clients(id,name,organization_id,payload_json,last_sync_id,projection_source_id)
+      VALUES('secondary-client','Secondary contact','secondary-org','{}','sync','project-alpha:secondary');
+      INSERT INTO pa_projects(id,name,status,organization_id,client_id,payload_json,last_sync_id,projection_source_id)
+      VALUES('secondary-project','Secondary project','active','secondary-org','secondary-client','{}','sync','project-alpha:secondary');`);
+    const secondary = context("organization", "secondary-org");
+    secondary.root.source_id = "project-alpha:secondary";
+    secondary.canonicalRoot.sourceId = "project-alpha:secondary";
+    expect((await readClientHubBusinessProjectDetail(env, staff, secondary, "secondary-project")).linkedContact?.id).toBe("secondary-client");
+    await expect(readClientHubBusinessProjectDetail(env, staff, secondary, "project-a")).rejects.toMatchObject({ status: 404 });
+    await expect(readClientHubBusinessProjectDetail(env, staff, context("organization", "secondary-org"), "secondary-project")).rejects.toMatchObject({ status: 404 });
+    await db.prepare("UPDATE pa_projects SET client_id='client-a' WHERE id='secondary-project'").run();
+    expect((await readClientHubBusinessProjectDetail(env, staff, secondary, "secondary-project")).linkedContact).toBeNull();
+  });
   it("returns only documented business fields and a factual linked contact, never grants or billing payload", async () => {
     const { db, env } = await fixture();
     // Session bookkeeping can increment SQLite total_changes independently of

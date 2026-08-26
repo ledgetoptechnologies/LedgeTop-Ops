@@ -1,6 +1,6 @@
 import { HTTPException } from "hono/http-exception";
 import { sha256 } from "./crypto";
-import { resolveClientHubSourceRoot } from "./client-hub-source";
+import { isBusinessProjectionSource, resolveClientHubSourceRoot } from "./client-hub-source";
 import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import type { SqlFilter } from "./visibility";
 import type { ClientHubCollectionContext, ClientHubCollectionResult } from "./client-hub-collections";
@@ -16,7 +16,7 @@ interface ProjectRow extends Record<string, unknown> { id: string; __created: st
 
 function eligible(context: ClientHubCollectionContext): boolean {
   const root = context.root;
-  return root.source_id === "project-alpha:primary" && root.root_namespace === "business";
+  return isBusinessProjectionSource(root.source_id) && root.root_namespace === "business";
 }
 function rootTuple(context: ClientHubCollectionContext): string[] {
   const root = context.root;
@@ -50,7 +50,7 @@ export async function clientHubBusinessProjectSourceProof(env: Env, context: Cli
   const root = context.root;
   if (!validId(root.public_id) || !["organization", "standalone_client"].includes(root.kind))
     throw new HTTPException(404, { message: "Client not found" });
-  const source = await resolveClientHubSourceRoot(env, root.kind, root.public_id);
+  const source = await resolveClientHubSourceRoot(env, root.kind, root.public_id, root.source_id);
   if (!source?.active || (root.kind === "standalone_client" && source.organization_id !== null))
     throw new HTTPException(404, { message: "Client not found" });
   return sha256(JSON.stringify([rootTuple(context), source.id, source.active, source.organization_id,
@@ -59,8 +59,8 @@ export async function clientHubBusinessProjectSourceProof(env: Env, context: Cli
 
 export function clientHubBusinessProjectOwnership(context: ClientHubCollectionContext): SqlFilter {
   return context.root.kind === "organization"
-    ? { sql: "(p.organization_id=? OR (p.organization_id IS NULL AND owner.organization_id=?))", values: [context.root.public_id, context.root.public_id] }
-    : { sql: "p.client_id=? AND owner.id IS NOT NULL AND owner.organization_id IS NULL AND p.organization_id IS NULL", values: [context.root.public_id] };
+    ? { sql: "p.projection_source_id=? AND (p.organization_id=? OR (p.organization_id IS NULL AND owner.organization_id=?))", values: [context.root.source_id, context.root.public_id, context.root.public_id] }
+    : { sql: "p.projection_source_id=? AND p.client_id=? AND owner.id IS NOT NULL AND owner.organization_id IS NULL AND p.organization_id IS NULL", values: [context.root.source_id, context.root.public_id] };
 }
 function statusFilter(filter: BusinessProjectFilter): string {
   if (filter === "current") return " AND p.status IN ('not_started','active','overdue')";
@@ -108,8 +108,8 @@ export async function listClientHubBusinessProjects(env: Env, principal: StaffPr
   const rows = (await env.OPS_DB.withSession("first-primary").prepare(`WITH owned AS (
     SELECT p.id,p.name,p.status,p.start_date,p.end_date,p.client_id,p.organization_id,
       p.manager_user_id,manager.display_name manager_name,${rawDate} source_created_at
-    FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.active=1
-      LEFT JOIN pa_users manager ON manager.id=p.manager_user_id
+    FROM pa_projects p LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
+      LEFT JOIN pa_users manager ON manager.id=p.manager_user_id AND manager.projection_source_id=p.projection_source_id
     WHERE ${where}
   ), dated AS (
     SELECT *,CASE WHEN length(source_created_at) BETWEEN 10 AND 64
@@ -133,7 +133,7 @@ export async function listClientHubBusinessProjects(env: Env, principal: StaffPr
   for (let start = 0; start < pageRows.length; start += 40) {
     const ids = pageRows.slice(start, start + 40).map(row => row.id);
     const count = await env.OPS_DB.withSession("first-primary").prepare(`SELECT count(*) count FROM pa_projects p
-      LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.active=1
+      LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
       WHERE ${where} AND p.id IN (${ids.map(() => "?").join(",")})`).bind(...values, ...ids).first<number>("count");
     if (count !== ids.length) changed();
   }

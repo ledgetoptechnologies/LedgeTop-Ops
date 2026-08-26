@@ -130,6 +130,7 @@ import {
   type ClientRequestServiceReviewRow,
 } from "./client-request-service-review";
 import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quote";
+import { provePrimaryBusinessReferences } from "./project-alpha-primary-references";
 import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
 import { registerNotificationCenterRoutes } from "./notification-center";
@@ -615,6 +616,10 @@ async function verifyProjectAlphaQuote(
   env: Env,
   input: { artifactId: number; clientId: string; projectId: string | null },
 ) {
+  const provenance = await provePrimaryBusinessReferences(env, { clientId: input.clientId, projectId: input.projectId });
+  if (!provenance.available) throw new HTTPException(409, { message: provenance.reason === "unsupported_source"
+    ? "unsupported_source: This business source has no configured artifact connection"
+    : "mapping_unavailable: Refresh the primary Alpha projection before verifying this artifact" });
   if (!env.PROJECT_ALPHA_BASE_URL || !env.PROJECT_ALPHA_API_KEY)
     throw new HTTPException(503, {
       message: "Project Alpha artifact verification is not configured",
@@ -816,7 +821,7 @@ app.get("/api/dashboard", async (c) => {
       .all(),
     airspaceView(c.env, op),
     c.env.OPS_DB.prepare(
-      `SELECT integration,status,last_success_at,last_error_code,updated_at FROM integration_health ${administrator ? "" : "WHERE integration='project-alpha'"} ORDER BY integration`,
+      `SELECT integration,status,last_success_at,last_error_code,updated_at FROM integration_health WHERE projection_source_id='project-alpha:primary' ${administrator ? "" : "AND integration='project-alpha'"} ORDER BY integration`,
     ).all(),
     administrator
       ? listDeliveryShares(c.env, principal, { limit: 6 }).then(page => page.shares).catch(() => [])
@@ -940,10 +945,10 @@ app.get("/api/client-portal/source-accounts", async (c) => {
   await requireGlobal(c.env, c.get("principal"), "operations.manage");
   const [clients, organizations] = await Promise.all([
     c.env.OPS_DB.prepare(
-      "SELECT id,name,organization_id FROM pa_clients WHERE active=1 ORDER BY name",
+      "SELECT id,name,organization_id FROM pa_clients WHERE active=1 AND projection_source_id='project-alpha:primary' ORDER BY name",
     ).all(),
     c.env.OPS_DB.prepare(
-      "SELECT id,name FROM pa_organizations WHERE active=1 ORDER BY name",
+      "SELECT id,name FROM pa_organizations WHERE active=1 AND projection_source_id='project-alpha:primary' ORDER BY name",
     ).all(),
   ]);
   return c.json({
@@ -956,7 +961,7 @@ app.post("/api/client-portal/accounts", async (c) => {
   await requireGlobal(c.env, principal, "operations.manage");
   const value = await body(c, portalAccountSchema);
   const projectAlphaClient = await c.env.OPS_DB.prepare(
-    "SELECT id,organization_id FROM pa_clients WHERE id=? AND active=1",
+    "SELECT id,organization_id FROM pa_clients WHERE id=? AND active=1 AND projection_source_id='project-alpha:primary'",
   )
     .bind(value.projectAlphaClientId)
     .first<{ id: string; organization_id: string | null }>();
@@ -965,7 +970,7 @@ app.post("/api/client-portal/accounts", async (c) => {
   if (
     value.projectAlphaOrganizationId &&
     !(await c.env.OPS_DB.prepare(
-      "SELECT 1 ok FROM pa_organizations WHERE id=? AND active=1",
+      "SELECT 1 ok FROM pa_organizations WHERE id=? AND active=1 AND projection_source_id='project-alpha:primary'",
     )
       .bind(value.projectAlphaOrganizationId)
       .first())
@@ -1215,7 +1220,7 @@ app.post("/api/client-portal/projects", async (c) => {
   await requireGlobal(c.env, principal, "operations.manage");
   const value = await body(c, portalProjectLinkSchema),
     project = await c.env.OPS_DB.prepare(
-      "SELECT p.id,p.name,p.status,p.client_id,p.organization_id,p.updated_at,COALESCE(client.name,organization.name,'Client') client_name FROM pa_projects p LEFT JOIN pa_clients client ON client.id=p.client_id LEFT JOIN pa_organizations organization ON organization.id=p.organization_id WHERE p.id=? AND p.active=1",
+      "SELECT p.id,p.name,p.status,p.client_id,p.organization_id,p.updated_at,COALESCE(client.name,organization.name,'Client') client_name FROM pa_projects p LEFT JOIN pa_clients client ON client.id=p.client_id AND client.projection_source_id=p.projection_source_id LEFT JOIN pa_organizations organization ON organization.id=p.organization_id AND organization.projection_source_id=p.projection_source_id WHERE p.id=? AND p.active=1 AND p.projection_source_id='project-alpha:primary'",
     )
       .bind(value.projectAlphaProjectId)
       .first<any>(),
@@ -1300,6 +1305,9 @@ app.post("/api/projects/:id/folder", async (c) => {
     { divisionId: value.divisionId },
     true,
   );
+  if (!await c.env.OPS_DB.prepare("SELECT 1 ok FROM pa_projects WHERE id=? AND active=1 AND projection_source_id='project-alpha:primary'")
+    .bind(c.req.param("id")).first("ok"))
+    throw new HTTPException(404, { message: "A primary Project Alpha project is required for delivery provisioning" });
   const prefix = value.r2Prefix
     .trim()
     .replace(/\\/g, "/")

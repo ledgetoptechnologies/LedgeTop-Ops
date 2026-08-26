@@ -26,19 +26,26 @@ describe("explicit Alpha source public IDs", () => {
     runtime = new Miniflare({ compatibilityDate: "2026-08-06", modules: true,
       script: "export default { fetch(){return new Response('ok')} }", d1Databases: { OPS_DB: "source-contract" } });
     const db = await runtime.getD1Database("OPS_DB") as unknown as D1Database;
-    await db.exec("CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT); CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT);");
+    await db.exec("CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary'); CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');");
     await db.exec(readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8")
       .replace(/^\s*--.*$/gm, "").replace(/\s*\n\s*/g, " "));
     const plan = await db.prepare(`EXPLAIN QUERY PLAN SELECT id FROM pa_organizations source
       WHERE ${sourcePublicIdExpression("source") }=?`).bind(publicId).all<{ detail: string }>();
     expect(plan.results.some(row => row.detail.includes("idx_pa_organizations_client_hub_public_id"))).toBe(true);
-    await db.prepare("INSERT INTO pa_organizations VALUES('42','Business',1,?)").bind(JSON.stringify({ id: 42, public_id: publicId })).run();
+    await db.prepare("INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('42','Business',1,?)").bind(JSON.stringify({ id: 42, public_id: publicId })).run();
     expect(await resolveClientHubSourceRoot({ OPS_DB: db }, "organization", "42"))
       .toEqual({ id: "42", display_name: "Business", organization_id: null, active: 1, pa_public_id: publicId, mapping_status: "mapped" });
-    await db.prepare("INSERT INTO pa_organizations VALUES('99','Inactive collision',0,?)").bind(JSON.stringify({ id: 99, public_id: publicId })).run();
+    await db.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id) VALUES('secondary-42','Other producer',1,?,'project-alpha:secondary')")
+      .bind(JSON.stringify({ id: 42, public_id: publicId })).run();
+    expect(await resolveClientHubSourceRoot({ OPS_DB: db }, "organization", "42"))
+      .toMatchObject({ pa_public_id: publicId, mapping_status: "mapped" });
+    expect(await resolveClientHubSourceRoot({ OPS_DB: db }, "organization", "secondary-42")).toBeNull();
+    expect(await resolveClientHubSourceRoot({ OPS_DB: db }, "organization", "secondary-42", "project-alpha:secondary"))
+      .toMatchObject({ id: "secondary-42", pa_public_id: publicId, mapping_status: "mapped" });
+    await db.prepare("INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('99','Inactive collision',0,?)").bind(JSON.stringify({ id: 99, public_id: publicId })).run();
     expect(await resolveClientHubSourceRoot({ OPS_DB: db }, "organization", "42"))
       .toMatchObject({ pa_public_id: null, mapping_status: "ambiguous" });
-    await db.prepare("INSERT INTO pa_clients VALUES('42','Contact','99',1,'{}'),('missing','Missing',NULL,0,'{}'),('invalid','Invalid',NULL,1,'broken-json')").run();
+    await db.prepare("INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES('42','Contact','99',1,'{}'),('missing','Missing',NULL,0,'{}'),('invalid','Invalid',NULL,1,'broken-json')").run();
     expect(await resolveClientHubSourceRoot({ OPS_DB: db }, "standalone_client", "42"))
       .toMatchObject({ organization_id: "99", pa_public_id: null, mapping_status: "missing" });
     expect(await resolveClientHubSourceRoot({ OPS_DB: db }, "standalone_client", "missing"))

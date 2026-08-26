@@ -31,6 +31,7 @@ interface Facts {
   account_count: number; project_count: number; request_count: number; principal_count: number;
 }
 interface SearchValue {
+  source?: string;
   namespace: Namespace; kind: Kind; root: string; type: string; id: string;
   field: "contact" | "email" | "phone" | "project";
   value: string; project?: string;
@@ -60,15 +61,15 @@ function contactFields(payload: string): { email?: string; phone?: string } {
 
 async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
   if (!roots.length) return [];
-  const key = (root: Pick<Root, "root_namespace" | "kind" | "public_id">) => JSON.stringify([root.root_namespace, root.kind, root.public_id]);
-  const linked = await resolveClientHubWorkspaces(env, roots.filter(root => root.root_namespace !== "account").map(root => ({
+  const key = (root: Pick<Root, "source_id" | "root_namespace" | "kind" | "public_id">) => JSON.stringify([root.source_id, root.root_namespace, root.kind, root.public_id]);
+  const linked = await resolveClientHubWorkspaces(env, roots.filter(root => root.source_id === PA && root.root_namespace !== "account").map(root => ({
     key: key(root), kind: root.kind, business_id: root.root_namespace === "business" ? root.public_id : null,
     pa_public_id: root.pa_public_id, workspace_id: root.root_namespace === "portal" ? root.public_id : null,
   })));
   const values = roots.flatMap(root => [root.source_id, root.root_namespace, root.kind, root.public_id, linked.get(key(root))?.workspace?.id ?? null]);
   const accountMatch = `(CASE WHEN wanted.root_namespace='account' THEN account.id=wanted.public_id
       AND account.project_alpha_client_id IS NULL AND account.project_alpha_organization_id IS NULL
-    WHEN wanted.root_namespace='business' THEN (wanted.kind='organization' AND account.project_alpha_organization_id=wanted.public_id)
+    WHEN wanted.root_namespace='business' AND wanted.source_id='${PA}' THEN (wanted.kind='organization' AND account.project_alpha_organization_id=wanted.public_id)
       OR (wanted.kind='standalone_client' AND account.project_alpha_client_id=wanted.public_id AND account.project_alpha_organization_id IS NULL)
     ELSE 0 END)`;
   const counts = (await env.DELIVERY_DB.withSession("first-primary").prepare(`
@@ -87,7 +88,7 @@ async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
     const link = linked.get(key(fact));
     const root = roots.find(root => key(root) === key(fact))!;
     return { ...fact, legacy_account_id: root.root_namespace === "account" ? root.public_id : link?.workspace?.legacy_account_id ?? null,
-      portal_status: link?.workspace?.status ?? (link?.status === "conflict" ? "mapping_conflict" : link?.status === "pending" ? "projection_pending"
+      portal_status: root.source_id !== PA && root.root_namespace === "business" ? "not_supported" : link?.workspace?.status ?? (link?.status === "conflict" ? "mapping_conflict" : link?.status === "pending" ? "projection_pending"
         : root.root_namespace === "business" && root.mapping_status !== "mapped" ? "mapping_unavailable" : "not_provisioned") };
   });
 }
@@ -128,7 +129,8 @@ async function writeSearch(env: IndexEnv, values: SearchValue[], generation: num
     const statements = values.slice(offset, offset + 20).flatMap(row => {
       const value = normalize(row.value);
       if (!value) return [];
-      const keys = [PA, row.namespace, row.kind, row.root, row.type, row.id, row.field];
+      const source = row.source ?? PA;
+      const keys = [source, row.namespace, row.kind, row.root, row.type, row.id, row.field];
       return [
         env.OPS_DB.prepare(`INSERT INTO client_hub_search_values
           (source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value,project_id,scan_generation)
@@ -138,7 +140,7 @@ async function writeSearch(env: IndexEnv, values: SearchValue[], generation: num
             normalized_value=excluded.normalized_value,project_id=excluded.project_id,scan_generation=excluded.scan_generation
           WHERE client_hub_search_values.normalized_value IS NOT excluded.normalized_value
             OR client_hub_search_values.project_id IS NOT excluded.project_id`)
-          .bind(...keys, value, row.project || null, generation, token, PA, row.namespace, row.kind, row.root),
+          .bind(...keys, value, row.project || null, generation, token, source, row.namespace, row.kind, row.root),
         env.OPS_DB.prepare(`UPDATE client_hub_search_values SET scan_generation=?
           WHERE source_id=? AND root_namespace=? AND kind=? AND root_public_id=? AND record_type=? AND record_id=? AND field=? AND ${leaseGuard}`)
           .bind(generation, ...keys, token),
@@ -154,11 +156,11 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
   if (phase === "organizations" || phase === "standalone") {
     const organizations = phase === "organizations";
     const table = organizations ? "pa_organizations" : "pa_clients";
-    const sources = (await ops.prepare(`SELECT '${PA}' source_id,'business' root_namespace,
+    const sources = (await ops.prepare(`SELECT source.projection_source_id source_id,'business' root_namespace,
       '${organizations ? "organization" : "standalone_client"}' kind,
       source.id public_id,source.name display_name,'active' status,source.id cursor,source.payload_json,
       ${validatedUniquePublicIdExpression(table, "source")} pa_public_id,
-      ${organizations ? "(SELECT count(*) FROM pa_clients contact WHERE contact.organization_id=source.id AND contact.active=1)" : "1"} contact_count
+      ${organizations ? "(SELECT count(*) FROM pa_clients contact WHERE contact.organization_id=source.id AND contact.projection_source_id=source.projection_source_id AND contact.active=1)" : "1"} contact_count
       FROM ${table} source WHERE source.active=1 ${organizations ? "" : "AND source.organization_id IS NULL"}
         AND source.id>? ORDER BY source.id COLLATE BINARY LIMIT ?`)
       .bind(cursor, PAGE_SIZE).all<Omit<Root, "mapping_status"> & { cursor: string; payload_json: string }>()).results;
@@ -196,12 +198,12 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
   const values: SearchValue[] = [];
   let count = 0, next = cursor;
   if (phase === "contacts") {
-    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT id,name,organization_id,payload_json FROM pa_clients
+    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT id,name,organization_id,payload_json,projection_source_id FROM pa_clients
       WHERE active=1 AND id>? ORDER BY id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE)
-      .all<{ id: string; name: string; organization_id: string | null; payload_json: string }>()).results;
+      .all<{ id: string; name: string; organization_id: string | null; payload_json: string; projection_source_id: string }>()).results;
     count = rows.length; next = rows.at(-1)?.id || cursor;
     for (const row of rows) {
-      const base = { namespace: "business" as const, kind: (row.organization_id ? "organization" : "standalone_client") as Kind,
+      const base = { source: row.projection_source_id, namespace: "business" as const, kind: (row.organization_id ? "organization" : "standalone_client") as Kind,
         root: row.organization_id || row.id, type: "pa_client", id: row.id };
       values.push({ ...base, field: "contact", value: row.name });
       const fields = contactFields(row.payload_json);
@@ -236,15 +238,15 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
       if (row.email_hint) values.push({ ...base, field: "email", value: row.email_hint });
     }
   } else {
-    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT project.id,project.name,
+    const rows = (await env.OPS_DB.withSession("first-primary").prepare(`SELECT project.id,project.name,project.projection_source_id,
       COALESCE(project.organization_id,client.organization_id) organization_id,project.client_id
-      FROM pa_projects project LEFT JOIN pa_clients client ON client.id=project.client_id AND client.active=1
+      FROM pa_projects project LEFT JOIN pa_clients client ON client.id=project.client_id AND client.projection_source_id=project.projection_source_id AND client.active=1
       WHERE project.active=1 AND project.id>? ORDER BY project.id COLLATE BINARY LIMIT ?`)
-      .bind(cursor, PAGE_SIZE).all<{ id: string; name: string; organization_id: string | null; client_id: string | null }>()).results;
+      .bind(cursor, PAGE_SIZE).all<{ id: string; name: string; organization_id: string | null; client_id: string | null; projection_source_id: string }>()).results;
     count = rows.length; next = rows.at(-1)?.id || cursor;
     for (const row of rows) {
       const root = row.organization_id || row.client_id;
-      if (root) values.push({ namespace: "business", kind: row.organization_id ? "organization" : "standalone_client", root,
+      if (root) values.push({ source: row.projection_source_id, namespace: "business", kind: row.organization_id ? "organization" : "standalone_client", root,
         type: "pa_project", id: row.id, field: "project", value: `${row.name} ${row.id}`, project: row.id });
     }
   }

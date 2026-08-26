@@ -1,8 +1,12 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import { resolve } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
-import { applyEntitlementEvent, applyProjectionEvent, completeEvent, recordAccessFailure } from "../src/projection";
+import { unstable_splitSqlQuery } from "wrangler";
+import { applyEntitlementEvent, applyEntitlementEventForSource, applyProjectionEvent, applyProjectionEventForSource, completeEvent, recordAccessFailure, recordEventFailure } from "../src/projection";
+import { createProjectAlphaSourceContext, prepareProjectAlphaSourceRecords, PRIMARY_PROJECT_ALPHA_SOURCE } from "../../operations/src/worker/project-alpha-source";
+import { desiredAccessEmails } from "../src/access-group";
+import { handleRequest } from "../src/index";
 import type { EntitlementEvent, Env, ProjectionEvent } from "../src/types";
 
 let miniflare: Miniflare;
@@ -22,6 +26,12 @@ function event(overrides: Partial<EntitlementEvent> = {}): EntitlementEvent {
 
 function env(deliveryDb?: D1Database): Env { return {OPS_DB:db,DELIVERY_DB:deliveryDb} as Env; }
 
+const secondary=createProjectAlphaSourceContext("project-alpha:secondary");
+function projection(entityType:ProjectionEvent["projection"]["entity_type"],entityId:string,data:Record<string,unknown>,at="2026-08-26T12:00:00Z"):ProjectionEvent {
+  return {event_id:crypto.randomUUID(),event_type:"projection.changed",occurred_at:at,schema_version:1,application_key:"ltds_ops",
+    projection:{entity_type:entityType,entity_id:entityId,action:"upsert",source_updated_at:at,data}};
+}
+
 function portalDatabase(state:{failNext:boolean;writes:Array<{sql:string;values:unknown[]}>;beforeWrite?:()=>Promise<void>}):D1Database {
   const database={
     prepare(sql:string){
@@ -37,15 +47,15 @@ describe("entitlement projection",()=>{
   beforeEach(async()=>{
     miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await miniflare.getD1Database("OPS_DB") as D1Database;
-    for(const migration of ["0001_operations.sql","0002_seed_acl.sql","0004_project_alpha_authority.sql","0005_project_alpha_ops_acl.sql","0007_pa_projection_fingerprints.sql","0008_project_units_task_assignments.sql","0009_project_managers.sql","0016_projection_entity_leases.sql","0021_project_alpha_sync_hardening.sql"]){
-      const sql=await readFile(resolve(import.meta.dirname,"../../operations/migrations",migration),"utf8");
-      for(const statement of sql.replace(/\r\n/g,"\n").split(";").map((part)=>part.trim()).filter((part)=>part && !part.startsWith("PRAGMA foreign_keys"))){
-        await db.prepare(statement).run();
-      }
+    const migrationsPath=resolve(import.meta.dirname,"../../operations/migrations");
+    for(const migration of (await readdir(migrationsPath)).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0033").sort()){
+      const sql=await readFile(resolve(migrationsPath,migration),"utf8");
+      const statements=unstable_splitSqlQuery(sql.replace(/\r\n/g,"\n")).map(part=>part.trim()).filter(part=>part&&!/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/i.test(part));
+      if(statements.length)await db.batch(statements.map(statement=>db.prepare(statement)));
     }
     await db.prepare("INSERT INTO divisions (id,name,code,project_alpha_business_unit_id) VALUES ('division-pa-30','PA 30','pa-30','30')").run();
   });
-  afterEach(async()=>miniflare.dispose());
+  afterEach(async()=>{vi.unstubAllGlobals();await miniflare.dispose();});
 
   it("grants, retries a pending event, completes idempotently, and revokes",async()=>{
     const grant=event();
@@ -271,5 +281,125 @@ describe("entitlement projection",()=>{
     await applyProjectionEvent(env(delivery),organization,"organization-revoke-hash");
     const organizationStatus=state.writes.find(write=>write.sql.includes("project_alpha_organization_id=? AND project_alpha_client_id IS NULL")&&write.values.includes("80"));
     expect(organizationStatus?.values).toEqual(expect.arrayContaining([0,"80"]));
+  });
+
+  it("keeps colliding event IDs, versions, receipts, failures and mapped client IDs independent by source",async()=>{
+    const deliveryState={failNext:false,writes:[] as Array<{sql:string;values:unknown[]}>};
+    const primaryEvent=projection("client","70",{id:70,name:"Primary client",organization_id:80},"2026-08-26T14:00:00Z");
+    const secondaryEvent:ProjectionEvent={...primaryEvent,occurred_at:"2026-08-26T10:00:00Z",projection:{...primaryEvent.projection,source_updated_at:"2026-08-26T10:00:00Z",data:{id:70,name:"Secondary client",organization_id:80}}};
+    await applyProjectionEvent(env(portalDatabase(deliveryState)),primaryEvent,"primary-hash");
+    const portalWrites=deliveryState.writes.length;
+    await expect(applyProjectionEventForSource(env(portalDatabase(deliveryState)),secondary,secondaryEvent,"secondary-hash")).resolves.toBe("applied");
+    expect(deliveryState.writes).toHaveLength(portalWrites);
+    const ids=await prepareProjectAlphaSourceRecords(db,secondary,[{kind:"client",externalId:"70"},{kind:"organization",externalId:"80"}]);
+    expect(ids.get("client","70")).not.toBe("70");
+    expect(await db.prepare("SELECT name,organization_id,payload_json FROM pa_clients WHERE id=? AND projection_source_id=?").bind(ids.get("client","70"),secondary.sourceId).first()).toEqual({name:"Secondary client",organization_id:ids.get("organization","80"),payload_json:JSON.stringify(secondaryEvent.projection.data)});
+    expect(await db.prepare("SELECT name FROM pa_clients WHERE id='70'").first("name")).toBe("Primary client");
+    expect(await db.prepare("SELECT count(*) total FROM pa_projection_entity_versions WHERE entity_type='client' AND entity_id='70'").first("total")).toBe(2);
+    await recordEventFailure(env(),secondaryEvent.event_id,"secondary-only-failure",secondary);
+    expect(await db.prepare("SELECT last_error FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId,primaryEvent.event_id).first("last_error")).toBeNull();
+    await completeEvent(env(),secondaryEvent,true,secondary);
+    expect(await db.prepare("SELECT status,last_error FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?").bind(secondary.sourceId,secondaryEvent.event_id).first()).toEqual({status:"completed",last_error:"secondary-only-failure"});
+    expect(await db.prepare("SELECT status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId,primaryEvent.event_id).first("status")).toBe("pending");
+    expect(await db.prepare("SELECT last_event_at FROM integration_reconciliation WHERE projection_source_id=? AND integration='project-alpha'").bind(secondary.sourceId).first("last_event_at")).toBe(secondaryEvent.occurred_at);
+    expect(await db.prepare("SELECT last_event_at FROM integration_reconciliation WHERE projection_source_id=? AND integration='project-alpha'").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId).first("last_event_at")).toBeNull();
+    await expect(applyProjectionEventForSource(env(),secondary,secondaryEvent,"secondary-hash")).resolves.toBe("duplicate");
+    await expect(applyProjectionEventForSource(env(),secondary,secondaryEvent,"primary-hash")).rejects.toThrow("event-id-conflict");
+  });
+
+  it("maps every relational reference and synthesized calendar identity without changing payload JSON",async()=>{
+    const rows:ProjectionEvent[]=[
+      projection("business_unit","30",{name:"Secondary branch",code:"green-bay"}),
+      projection("project","40",{name:"Secondary project",client_id:70,organization_id:80,business_unit_id:30,manager_user_id:42}),
+      projection("project_assignment","90",{project_id:40,user_id:42}),
+      projection("operation","100",{project_id:40,business_unit_id:30,title:"Flight",created_by:42,scheduled_start_at:"2026-08-27T12:00:00Z"}),
+      projection("operation_assignment","100:42",{operation_id:100,user_id:42,assigned_by:43}),
+      projection("task","110",{project_id:40,operation_id:100,business_unit_id:30,assignee_user_id:42,created_by:43,title:"Map site",due_at:"2026-08-28T12:00:00Z"}),
+      projection("task_assignment","110:42",{task_id:110,user_id:42,assigned_by:43}),
+    ];
+    for(const row of rows)await applyProjectionEventForSource(env(),secondary,row,`hash-${row.event_id}`);
+    const ids=await prepareProjectAlphaSourceRecords(db,secondary,[{kind:"project",externalId:"40"},{kind:"client",externalId:"70"},{kind:"organization",externalId:"80"},{kind:"business_unit",externalId:"30"},{kind:"user",externalId:"42"},{kind:"user",externalId:"43"},{kind:"operation",externalId:"100"},{kind:"task",externalId:"110"},{kind:"calendar_event",externalId:"operation:100"},{kind:"calendar_event",externalId:"task:110"}]);
+    const project=await db.prepare("SELECT client_id,organization_id,business_unit_id,manager_user_id,payload_json FROM pa_projects WHERE id=?").bind(ids.get("project","40")).first();
+    expect(project).toEqual({client_id:ids.get("client","70"),organization_id:ids.get("organization","80"),business_unit_id:ids.get("business_unit","30"),manager_user_id:ids.get("user","42"),payload_json:JSON.stringify(rows[1]!.projection.data)});
+    expect(await db.prepare("SELECT project_id,user_id FROM pa_project_assignments WHERE projection_source_id=?").bind(secondary.sourceId).first()).toEqual({project_id:ids.get("project","40"),user_id:ids.get("user","42")});
+    expect(await db.prepare("SELECT created_by_user_id FROM pa_operations WHERE id=?").bind(ids.get("operation","100")).first("created_by_user_id")).toBe(ids.get("user","42"));
+    expect(await db.prepare("SELECT operation_id,user_id,assigned_by_user_id FROM pa_operation_assignments WHERE projection_source_id=?").bind(secondary.sourceId).first()).toEqual({operation_id:ids.get("operation","100"),user_id:ids.get("user","42"),assigned_by_user_id:ids.get("user","43")});
+    expect(await db.prepare("SELECT operation_id,project_id,business_unit_id,assignee_user_id,created_by_user_id FROM pa_tasks WHERE id=?").bind(ids.get("task","110")).first()).toEqual({operation_id:ids.get("operation","100"),project_id:ids.get("project","40"),business_unit_id:ids.get("business_unit","30"),assignee_user_id:ids.get("user","42"),created_by_user_id:ids.get("user","43")});
+    expect(await db.prepare("SELECT task_id,user_id,assigned_by_user_id FROM pa_task_assignments WHERE projection_source_id=?").bind(secondary.sourceId).first()).toEqual({task_id:ids.get("task","110"),user_id:ids.get("user","42"),assigned_by_user_id:ids.get("user","43")});
+    for(const [kind,external] of [["operation","100"],["task","110"]] as const){
+      expect(await db.prepare("SELECT source_id,project_id FROM pa_calendar_events WHERE id=?").bind(ids.get("calendar_event",`${kind}:${external}`)).first()).toEqual({source_id:ids.get(kind,external),project_id:ids.get("project","40")});
+    }
+    expect(await db.prepare("SELECT name FROM divisions WHERE project_alpha_business_unit_id='30'").first("name")).toBe("PA 30");
+    expect(await db.prepare("SELECT count(*) total FROM divisions WHERE project_alpha_business_unit_id=?").bind(ids.get("business_unit","30")).first("total")).toBe(0);
+    const revoke=projection("project","40",{name:"Secondary project",business_unit_id:31},"2026-08-26T13:00:00Z");revoke.projection.action="revoke";
+    await applyProjectionEventForSource(env(),secondary,revoke,"revoke-secondary-project");
+    expect(await db.prepare("SELECT active FROM pa_tasks WHERE id=?").bind(ids.get("task","110")).first("active")).toBe(0);
+    expect(await db.prepare("SELECT active FROM pa_calendar_events WHERE id=?").bind(ids.get("calendar_event","task:110")).first("active")).toBe(0);
+  },20_000);
+
+  it("revalidates a forged source authority flag before leases, staff mutations or source metadata writes",async()=>{
+    const forged={sourceId:secondary.sourceId,staffAuthority:true};
+    await expect(applyEntitlementEventForSource(env(),forged,event(),"forged-admin")).rejects.toThrow("projection-source-authority-unsupported");
+    expect(await db.prepare("SELECT count(*) total FROM integration_event_receipts").first("total")).toBe(0);
+    expect(await db.prepare("SELECT count(*) total FROM pa_projection_entity_leases").first("total")).toBe(0);
+    const branch=projection("business_unit","30",{name:"Secondary data only",code:"foreign-branch"});
+    await applyProjectionEventForSource(env(),forged,branch,"forged-branch");
+    expect(await db.prepare("SELECT name FROM divisions WHERE project_alpha_business_unit_id='30'").first("name")).toBe("PA 30");
+    expect(await db.prepare("SELECT count(*) total FROM divisions WHERE name='Secondary data only'").first("total")).toBe(0);
+    const invalid={sourceId:"not-a-source",staffAuthority:true};
+    await expect(applyProjectionEventForSource(env(),invalid,branch,"invalid-source")).rejects.toThrow();
+    await expect(completeEvent(env(),branch,false,invalid)).rejects.toThrow();
+    await expect(recordEventFailure(env(),branch.event_id,"invalid-source",invalid)).rejects.toThrow();
+    expect(await db.prepare("SELECT status,last_error FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?").bind(secondary.sourceId,branch.event_id).first()).toEqual({status:"pending",last_error:null});
+  });
+
+  it("rejects secondary entitlement authority before any state mutation and excludes secondary business users",async()=>{
+    const before=(await db.prepare("SELECT * FROM staff_users ORDER BY id").all()).results;
+    const fetchMock=vi.fn();vi.stubGlobal("fetch",fetchMock);
+    await expect(applyEntitlementEventForSource(env(),secondary,event({entitlement:{application_key:"ltds_ops",enabled:true,role_key:"role-admin",business_unit_ids:["30"]}}),"foreign-admin")).rejects.toThrow("projection-source-authority-unsupported");
+    for(const table of ["integration_event_receipts","pa_projection_entity_leases","pa_projection_record_ids","pa_application_entitlements","pa_users"])
+      expect(await db.prepare(`SELECT count(*) total FROM ${table} WHERE projection_source_id=?`).bind(secondary.sourceId).first("total")).toBe(0);
+    expect((await db.prepare("SELECT * FROM staff_users ORDER BY id").all()).results).toEqual(before);
+    expect(fetchMock).not.toHaveBeenCalled();
+    // A secondary business user remains data only; the schema also refuses a
+    // secondary entitlement even if a future caller bypasses the event wrapper.
+    await applyEntitlementEvent(env(),event(),"primary-access");
+    const foreignIds=await prepareProjectAlphaSourceRecords(db,secondary,[{kind:"user",externalId:"42"},{kind:"application_entitlement",externalId:"entitlement-42"}]);
+    await db.prepare("INSERT INTO pa_users(projection_source_id,id,email,active,payload_json,last_sync_id) VALUES (?,?,'foreign@example.com',1,'{}','test')").bind(secondary.sourceId,foreignIds.get("user","42")).run();
+    await expect(db.prepare("INSERT INTO pa_application_entitlements(projection_source_id,id,user_id,application_key,enabled,role_key,payload_json,last_sync_id) VALUES (?,?,?,'ltds_ops',1,'role-admin','{}','test')").bind(secondary.sourceId,foreignIds.get("application_entitlement","entitlement-42"),foreignIds.get("user","42")).run()).rejects.toThrow();
+    const desired=await desiredAccessEmails(db);
+    expect(desired).toContain("pilot@example.com");
+    expect(desired).not.toContain("foreign@example.com");
+  });
+
+  it("does not let a secondary source claim or release a busy primary lease with the same event and entity IDs",async()=>{
+    let started!:()=>void,release!:()=>void;
+    const entered=new Promise<void>(resolve=>{started=resolve;});
+    const resumed=new Promise<void>(resolve=>{release=resolve;});
+    const state={failNext:false,writes:[] as Array<{sql:string;values:unknown[]}>,beforeWrite:async()=>{started();await resumed;}};
+    const primaryEvent=projection("client","71",{name:"Primary held client"});
+    const run=applyProjectionEvent(env(portalDatabase(state)),primaryEvent,"held-primary");
+    await entered;
+    try{
+      await expect(applyProjectionEventForSource(env(),secondary,primaryEvent,"secondary-independent")).resolves.toBe("applied");
+      expect(await db.prepare("SELECT count(*) total FROM pa_projection_entity_leases WHERE projection_source_id=? AND owner_event_id=?").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId,primaryEvent.event_id).first("total")).toBe(2);
+      expect(await db.prepare("SELECT count(*) total FROM pa_projection_entity_leases WHERE projection_source_id=?").bind(secondary.sourceId).first("total")).toBe(0);
+    }finally{release();await run;}
+  });
+
+  it("keeps authenticated public ingress primary-only despite source hints and rejects body selectors",async()=>{
+    const item=projection("business_unit","30",{name:"Public primary branch",code:"public-primary"});
+    const requestEnv={...env(),APPLICATION_KEY:"ltds_ops",PROJECT_ALPHA_WEBHOOK_HMAC_SECRET:"test-hmac-secret",PROJECT_ALPHA_ALLOW_LEGACY_HMAC:"true"} as Env;
+    const send=async(payload:unknown)=>{
+      const raw=JSON.stringify(payload),timestamp=new Date().toISOString();
+      const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(requestEnv.PROJECT_ALPHA_WEBHOOK_HMAC_SECRET),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+      const bytes=new Uint8Array(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(`${timestamp}.${raw}`)));
+      const signature=`sha256=${[...bytes].map(byte=>byte.toString(16).padStart(2,"0")).join("")}`;
+      return handleRequest(new Request("https://ops-sync.example/v1/project-alpha/events?sourceId=project-alpha%3Asecondary",{method:"POST",headers:{"Content-Type":"application/json","X-PA-Timestamp":timestamp,"X-PA-Event-ID":item.event_id,"X-PA-Signature":signature,"X-Projection-Source":"project-alpha:secondary"},body:raw}),requestEnv,async()=>({}));
+    };
+    const response=await send(item);expect(response.status).toBe(200);
+    expect(await db.prepare("SELECT projection_source_id,name FROM pa_business_units WHERE id='30'").first()).toEqual({projection_source_id:PRIMARY_PROJECT_ALPHA_SOURCE.sourceId,name:"Public primary branch"});
+    expect((await send({...item,sourceId:secondary.sourceId})).status).toBe(422);
+    expect(await db.prepare("SELECT count(*) total FROM integration_event_receipts WHERE projection_source_id=?").bind(secondary.sourceId).first("total")).toBe(0);
   });
 });

@@ -126,11 +126,11 @@ function setup(options: { withLinkSchema?: boolean } = {}) {
     CREATE TABLE staff_permission_overrides(id TEXT PRIMARY KEY,staff_id TEXT NOT NULL,permission_key TEXT NOT NULL,effect TEXT NOT NULL,scope TEXT NOT NULL,division_id TEXT);
     CREATE TABLE operational_job_briefs(operation_id TEXT PRIMARY KEY);
     CREATE TABLE divisions(id TEXT PRIMARY KEY,project_alpha_business_unit_id TEXT UNIQUE);
-    CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,status TEXT,business_unit_id TEXT,manager_user_id TEXT,active INTEGER NOT NULL);
+    CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT NOT NULL,status TEXT,business_unit_id TEXT,manager_user_id TEXT,active INTEGER NOT NULL,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_project_assignments(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,user_id TEXT NOT NULL,active INTEGER NOT NULL);
     CREATE TABLE pa_operations(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,active INTEGER NOT NULL);
     CREATE TABLE pa_operation_assignments(operation_id TEXT NOT NULL,user_id TEXT NOT NULL,active INTEGER NOT NULL,PRIMARY KEY(operation_id,user_id));
-    CREATE TABLE pa_tasks(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,title TEXT NOT NULL,status TEXT,business_unit_id TEXT,created_by_user_id TEXT,active INTEGER NOT NULL);
+    CREATE TABLE pa_tasks(id TEXT PRIMARY KEY,project_id TEXT NOT NULL,title TEXT NOT NULL,status TEXT,business_unit_id TEXT,created_by_user_id TEXT,active INTEGER NOT NULL,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_task_assignments(task_id TEXT NOT NULL,user_id TEXT NOT NULL,active INTEGER NOT NULL,PRIMARY KEY(task_id,user_id));
     CREATE TABLE audit_events(id INTEGER PRIMARY KEY AUTOINCREMENT,actor_type TEXT,actor_id TEXT,actor_email TEXT,actor_display_name TEXT,action TEXT,entity_type TEXT,entity_id TEXT,division_id TEXT,details_json TEXT,client_address_hash TEXT,created_at TEXT DEFAULT(datetime('now')));
   `);
@@ -142,8 +142,8 @@ function setup(options: { withLinkSchema?: boolean } = {}) {
   for (const principal of Object.values(principals))
     addStaff.run(principal.id, principal.email, principal.displayName, principal.projectAlphaUserId);
   database.prepare("INSERT INTO divisions VALUES ('division-flight','unit-flight')").run();
-  database.prepare("INSERT INTO pa_projects VALUES ('project-1','North site','active','unit-flight','pa-admin',1)").run();
-  database.prepare("INSERT INTO pa_tasks VALUES ('task-1','project-1','Capture LiDAR','todo','unit-flight','pa-admin',1)").run();
+  database.prepare("INSERT INTO pa_projects(id,name,status,business_unit_id,manager_user_id,active) VALUES ('project-1','North site','active','unit-flight','pa-admin',1)").run();
+  database.prepare("INSERT INTO pa_tasks(id,project_id,title,status,business_unit_id,created_by_user_id,active) VALUES ('task-1','project-1','Capture LiDAR','todo','unit-flight','pa-admin',1)").run();
   database.prepare("INSERT INTO pa_operations VALUES ('operation-1','project-1',1)").run();
   database.prepare("INSERT INTO pa_operation_assignments VALUES ('operation-1','pa-operation',1)").run();
   database.prepare("INSERT INTO pa_project_assignments VALUES ('project-pilot','project-1','pa-pilot',1)").run();
@@ -230,6 +230,20 @@ describe("Project and Task direct SOP links", () => {
     ) => permission === "sops.view"
       ? principal.id !== principals.noSop.id
       : permission === "sops.assign" && principal.id === principals.admin.id);
+  });
+
+  it("does not infer secondary-source SOP access from a primary staff assignment", async () => {
+    const state = setup();
+    for (const kind of ["project", "task"] as const) {
+      const id = `${kind}-1`;
+      const path = `/api/work-contexts/${kind}/${id}/sops`;
+      expect((await state.app.fetch(request(path, "pilot"), state.env)).status).toBe(200);
+      // Deliberately leave the synthetic same-ID assignment in place: source
+      // provenance must reject it even before migration relationship guards.
+      state.database.prepare(`UPDATE pa_${kind}s SET projection_source_id='project-alpha:secondary' WHERE id=?`).run(id);
+      expect((await state.app.fetch(request(path, "pilot"), state.env)).status).toBe(404);
+      expect((await state.app.fetch(request(path, "admin"), state.env)).status).toBe(200);
+    }
   });
 
   it("degrades list decoration and returns a stable capability response before migration 0023", async () => {

@@ -6,7 +6,7 @@ function client(id: string, name: string, kind: "organization" | "standalone_cli
   const routeKind = kind === "organization" ? "organizations" : "standalone";
   return { workspace_id: rootNamespace === "portal" ? id : null, public_id: id, display_name: name, kind, route_kind: routeKind,
     root_namespace: rootNamespace, pa_public_id: rootNamespace === "portal" ? "a".repeat(32) : null,
-    source_id: source, source_name: source === "delivery:local" ? "Delivery" : "Project Alpha",
+    source_id: source, source_name: source === "delivery:local" ? "Delivery" : source === "project-alpha:primary" ? "Project Alpha" : source,
     detail_path: `/clients/sources/${encodeURIComponent(source)}/${rootNamespace}/${routeKind}/${encodeURIComponent(id)}`,
     status: "active", portal_status: rootNamespace === "portal" ? "active" : "not_provisioned", account_count: 0, project_count: 3,
     request_count: 1, contact_count: 2 };
@@ -43,6 +43,73 @@ async function mock(page: Page, directory: DirectoryHandler, permissions = ["tea
   });
   return requested;
 }
+
+test("matching business IDs from two producers retain source labels, contacts and project navigation without borrowing portal access", async ({ page }, testInfo) => {
+  const errors: string[] = [], reads: URL[] = [];
+  page.on("pageerror", error => errors.push(error.message));
+  page.on("console", message => { if (message.type() === "error" && /same key/i.test(message.text())) errors.push(message.text()); });
+  const roots = [client("42", "Primary business"), client("42", "Secondary business", "organization", "project-alpha:secondary")]
+    .map(row => ({ ...row, pa_public_id: "a".repeat(32), account_count: 0, project_count: 0, request_count: 0,
+      contact_count: 1, portal_status: row.source_id === "project-alpha:primary" ? "not_provisioned" : "not_supported" }));
+  await mock(page, route => route.fulfill({ json: { clients: roots, nextCursor: null, capabilities } }));
+  await page.route("**/api/client-hub/sources/**", route => {
+    const url = new URL(route.request().url()); reads.push(url);
+    const source = decodeURIComponent(url.pathname.split("/")[4]!);
+    const root = roots.find(row => row.source_id === source);
+    if (!root) return route.fulfill({ status: 404, json: { error: "Unknown source" } });
+    const label = source === "project-alpha:primary" ? "Primary" : "Secondary";
+    const project = { id: "9", row_key: `${source}:project:9`, name: `${label} project`, status: "active",
+      start_date: null, end_date: null, created_at: null, manager: null, manager_name: null, manager_user_id: null, description: null };
+    const contact = { id: "7", public_id: "7", contact_key: `${source}:7`, row_key: `${source}:contact:7`,
+      record_type: "business_contact", organization_id: "42", display_name: `${label} contact`,
+      email: `${label.toLowerCase()}@example.test`, phone: null, sourceField: "project.client_id" };
+    if (url.pathname.endsWith("/business-projects/9")) return route.fulfill({ json: {
+      canonicalRoot: { sourceId: source, rootNamespace: "business", kind: "organization", publicId: "42" },
+      client: { display_name: root.display_name, detail_path: root.detail_path }, contextVersion: source, refreshedAt: "2026-08-25T12:00:00Z",
+      project, linkedContact: contact,
+      availability: { linkedContact: "available", siteContacts: "not_projected", billingContacts: "not_projected", projectMemory: "not_projected" },
+    } });
+    return route.fulfill({ json: { client: root, contacts: [contact], businessProjects: [project],
+      accounts: [], projects: [], requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [],
+      pages: { businessProjects: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 } },
+      portalIdentities: { items: [], page: { available: false, reason: "workspace_unavailable", nextCursor: null, hasMore: false, returned: 0, limit: 5 },
+        contextVersion: source, refreshedAt: "2026-08-25T12:00:00Z", capabilities: { canManagePortal: false, canManageEligibilityBlocks: false } },
+      contextVersion: source, capabilities,
+    } });
+  });
+  await page.goto("/clients");
+  await expect(page.locator(".client-directory-card")).toHaveCount(2);
+  await expect(page.getByRole("link", { name: "Open Primary business client workspace" })).toContainText("Project Alpha");
+  await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("project-alpha:secondary");
+  await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("Portal unavailable for this source");
+  await page.getByRole("link", { name: "Open Primary business client workspace" }).click();
+  await expect(page.getByText("Primary contact", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Primary project", exact: true })).toHaveAttribute("href", roots[0]!.detail_path + "/projects/9");
+  await page.goBack();
+  await page.getByRole("link", { name: "Open Secondary business client workspace" }).click();
+  await expect(page.getByText("Secondary contact", { exact: true })).toBeVisible();
+  await expect(page.getByText("Primary contact", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Block portal sign-in|Invite|Grant access/ })).toHaveCount(0);
+  await page.reload();
+  await expect(page.getByText("Secondary contact", { exact: true })).toBeVisible();
+  const link = page.getByRole("link", { name: "Secondary project", exact: true });
+  await expect(link).toHaveAttribute("href", roots[1]!.detail_path + "/projects/9");
+  await link.click();
+  await expect(page.getByRole("region", { name: "Business project workspace", exact: true }).getByRole("heading", { name: "Secondary project", exact: true })).toBeVisible();
+  await expect(page.getByText("secondary@example.test", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByText("Secondary contact", { exact: true })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole("heading", { name: "Secondary business", exact: true })).toBeVisible();
+  await page.goBack();
+  await expect(page.locator(".client-directory-card")).toHaveCount(2);
+  await page.goForward();
+  await expect(page.getByText("Secondary contact", { exact: true })).toBeVisible();
+  await page.screenshot({ path: testInfo.outputPath("secondary-client-source.png"), fullPage: true });
+  expect(reads.some(url => url.pathname.includes("project-alpha%3Asecondary") && url.pathname.endsWith("/business-projects/9"))).toBe(true);
+  expect(reads.some(url => /\/identities\/|\/grants\//.test(url.pathname))).toBe(false);
+  expect(errors).toEqual([]);
+});
 
 test("directory loads bounded direct-link cards and appends pages without losing source or namespace identity", async ({ page }) => {
   const errors: string[] = [];

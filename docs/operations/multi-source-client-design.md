@@ -2,8 +2,10 @@
 
 Status: staged implementation sequence; no second connection is enabled. The
 first local catalog-provenance increment is described in
-[catalog source isolation](catalog-source-isolation.md); the other boundaries
-below remain outstanding. Audited against local Operations checkpoint
+[catalog source isolation](catalog-source-isolation.md). The next local business
+projection increment is described in [business source isolation](business-source-isolation.md)
+and is verified locally but unpublished; no second live connection is enabled. The
+original gaps below were audited against local Operations checkpoint
 `f055b2c` on August 26, 2026. This document
 does not authorize a second connection, change staff roles, or replace the
 [client workspace roadmap](client-workspace-roadmap.md).
@@ -18,12 +20,12 @@ incident or an assertion that a second producer is currently connected.
 
 | Boundary | Current evidence | Required isolation |
 | --- | --- | --- |
-| Operations snapshot | `apps/operations/src/worker/project-alpha.ts` uses one configured base URL, collection-only fingerprints, and the `integration_projection/project-alpha` lease. Projection rows use source IDs without a connector key. | Qualify records, relationships, fingerprints, versions, leases, sync runs and missing-record cleanup by the authenticated source. |
+| Operations snapshot | The audited baseline used global external IDs and coordination keys. Local `0033` and the paired snapshot/event code now carry source context and immutable local handles; populated upgrade and primary compatibility checks passed locally. | Release the paired schema/code safely; bind future calls to an authenticated source registry before activation. |
 | Staff authority | The same snapshot rebuilds Project Alpha-managed staff roles/divisions. `apps/ops-sync/src/projection.ts` processes entitlements against the same staff projection. | Preserve the existing authority explicitly. A business-data connection must not gain staff-role, Access-group or identity-management authority. |
 | Delivery legacy mapping | Client migration `0103_client_portal_workspace.sql` has globally unique Alpha client, organization and project references. | Associate each reference with a source; preserve existing account/project/grant IDs and old URLs during migration. |
 | Service catalog | The released schema has one checkpoint and global catalog state. Local migration `0156` now source-qualifies the catalog, saved request parents and selections; public ingress remains primary-only. | Verify and deploy the compatible migration/code together before any registry or second-source activation. |
 | Portal projection | Client migration `0121_client_workspace_hierarchy_v2.sql` has globally unique Alpha root IDs. Migration `0125_project_alpha_portal_projection.sql` scopes much state to workspace, but receipts are global and workspace ownership is not a multi-connector authority contract. | Bind each workspace/root and projection operation to an authenticated source; scope replay, mapping and lifecycle state consistently. |
-| Client Hub | Operations migration `0032_client_hub_directory.sql` and `client-hub-directory.ts` accept only `project-alpha:primary` and `delivery:local`. Business lookup still reads the single-source `pa_*` tables. | Extend the underlying reader/index and continuation contracts together; do not merely add an accepted source string. |
+| Client Hub | Local migration `0034` and the paired readers/index extend source-qualified business roots; secondary business roots cannot infer a primary portal/account bridge. Source-pinned backend and browser checks passed locally. | Apply the coordinated release and live acceptance gates. Business display is not portal activation. |
 
 ## Identity and authority contract
 
@@ -191,6 +193,6 @@ before the other ingestion, staff, portal and Delivery boundaries are verified.
   migration/backfill/rollback gates and do not bypass the Alpha prerequisite by
   labeling synthetic browser tests as live acceptance.
 
-This audit adds no runtime code or migration and does not complete the broader
-goal. The last application test results remain those recorded for `f055b2c`;
-no new full-suite or production verification is claimed by this document.
+The design audit does not complete the broader goal. Subsequent implementation
+and verification evidence is recorded in the linked increment documents; no
+production verification or second-connection activation is claimed here.

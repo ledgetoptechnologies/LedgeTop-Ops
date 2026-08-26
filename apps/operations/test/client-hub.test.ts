@@ -60,12 +60,12 @@ async function fixture() {
   const ops = await miniflare.getD1Database("OPS_DB") as unknown as D1Database;
   const delivery = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
   await applySql(ops, `
-    CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}');
-    CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}');
-    INSERT INTO pa_organizations VALUES('pa-org','Organization One',1,'{"public_id":"${organizationUuid}"}');
+    CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('pa-org','Organization One',1,'{"public_id":"${organizationUuid}"}');
     INSERT INTO pa_clients(id,name,organization_id,active) VALUES('pa-child-login','Login Contact','pa-org',1);
     INSERT INTO pa_clients(id,name,organization_id,active) VALUES('pa-child-no-login','No Login Contact','pa-org',1);
-    INSERT INTO pa_clients VALUES('pa-standalone','Standalone One',NULL,1,'{"public_id":"${standaloneUuid}"}');
+    INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES('pa-standalone','Standalone One',NULL,1,'{"public_id":"${standaloneUuid}"}');
   `);
   await applySql(ops, readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8").replace(/^\s*--.*$/gm, ""));
   await applySql(ops, `
@@ -142,12 +142,39 @@ async function readCollection(app: Awaited<ReturnType<typeof fixture>>["app"], e
 }
 
 describe("Client Hub bounded detail collections", () => {
+  it("hydrates an unindexed secondary business root without borrowing a matching primary portal identity or grant", async () => {
+    const { app, env, ops } = await fixture();
+    await ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id) VALUES('secondary-org','Secondary Organization',1,?,'project-alpha:secondary')")
+      .bind(JSON.stringify({ public_id: organizationUuid })).run();
+    for (let index = 0; index < 7; index++) await ops.prepare(`INSERT INTO pa_clients(id,name,organization_id,active,payload_json,projection_source_id)
+      VALUES(?,?,'secondary-org',1,'{}','project-alpha:secondary')`).bind(`secondary-contact-${index}`, `Secondary contact ${index}`).run();
+    const path = organizationPath.replace("project-alpha%3Aprimary", "project-alpha%3Asecondary").replace("pa-org", "secondary-org");
+    const response = await app.request(path, {}, env);
+    expect(response.status).toBe(200);
+    const result = await response.json() as { contacts: unknown[]; pages: Record<string, Page> };
+    expect(result).toMatchObject({ client: { source_id: "project-alpha:secondary", public_id: "secondary-org",
+      workspace_id: null, legacy_account_id: null, portal_status: "not_supported", pa_public_id: organizationUuid },
+      accounts: [], projects: [], requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [],
+      portalIdentities: { items: [], page: { available: false } },
+    });
+    expect(result.contacts).toHaveLength(5);
+    expect(result.pages.accounts).toMatchObject({ available: false, reason: "not_applicable" });
+    const contactsPage = result.pages.businessContacts!;
+    expect(contactsPage.hasMore).toBe(true);
+    const next = await readCollection(app, env, path, "businessContacts", contactsPage.nextCursor);
+    expect(next.items).toHaveLength(2);
+    expect(next.items.every(row => String(row.contact_key).startsWith("business:project-alpha:secondary:"))).toBe(true);
+    expect((await app.request(`${organizationPath}/collections/businessContacts?cursor=${encodeURIComponent(contactsPage.nextCursor!)}`, {}, env)).status).toBe(400);
+    expect((await app.request(path.replace("project-alpha%3Asecondary", "project-alpha%3Aprimary"), {}, env)).status).toBe(404);
+    expect((await app.request(path + "/identities/pa-child-login/access", {}, env)).status).toBe(404);
+  }, 30_000);
+
   it("serves business-project detail through the canonical route and rechecks cross-database root ownership", async () => {
     const { app, env, ops, delivery } = await fixture();
     await applySql(ops, `CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT,status TEXT,start_date TEXT,end_date TEXT,
-      client_id TEXT,organization_id TEXT,manager_user_id TEXT,active INTEGER,payload_json TEXT);
-      CREATE TABLE pa_users(id TEXT PRIMARY KEY,display_name TEXT,active INTEGER);
-      INSERT INTO pa_projects VALUES('business-one','Business One','active','2026-01-01',NULL,'pa-child-login',NULL,NULL,1,'{"description":"Business detail"}');`);
+      client_id TEXT,organization_id TEXT,manager_user_id TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE pa_users(id TEXT PRIMARY KEY,display_name TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      INSERT INTO pa_projects(id,name,status,start_date,end_date,client_id,organization_id,manager_user_id,active,payload_json) VALUES('business-one','Business One','active','2026-01-01',NULL,'pa-child-login',NULL,NULL,1,'{"description":"Business detail"}');`);
     try {
       acl.hasPermission.mockImplementation(async (_env, _principal, permission) =>
         ["delivery.share.audit", "viewer.view", "projects.view"].includes(permission));
@@ -274,7 +301,7 @@ describe("Client Hub bounded detail collections", () => {
       JSON.stringify({ email: " \t ", phone: " " }),
       // Do not fall back to a different field when the canonical phone is present but invalid.
       JSON.stringify({ email: false, phone: {}, phone_number: "do not substitute" })];
-    await ops.batch(payloads.map((payload, index) => ops.prepare("INSERT INTO pa_clients VALUES(?,?,'pa-org',1,?)")
+    await ops.batch(payloads.map((payload, index) => ops.prepare("INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES(?,?,'pa-org',1,?)")
       .bind(`channel-${index}`, `Channel ${index}`, payload)));
     const result = await readCollection(app, env, organizationPath, "businessContacts");
     const channels = result.items.filter(row => String(row.public_id).startsWith("channel-"));
@@ -416,7 +443,7 @@ describe("Client Hub bounded detail collections", () => {
   it("does not bypass canonical ID validation through live-source fallback", async () => {
     const { app, env, ops } = await fixture();
     for (const id of ["x".repeat(513), "bad\u0001id"]) {
-      await ops.prepare("INSERT INTO pa_organizations VALUES(?,'Invalid source ID',1,'{}')").bind(id).run();
+      await ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json) VALUES(?,'Invalid source ID',1,'{}')").bind(id).run();
       const path = `http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/${encodeURIComponent(id)}`;
       expect((await app.request(path, {}, env)).status).toBe(404);
       expect((await app.request(`${path}/collections/businessContacts`, {}, env)).status).toBe(404);
@@ -559,7 +586,7 @@ describe("Client Hub", () => {
 
   it("does not pick a winner when two source records export the same public ID", async () => {
     const { app, env, ops } = await fixture();
-    await ops.prepare("INSERT INTO pa_organizations VALUES('other-org','Other organization',1,?)")
+    await ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('other-org','Other organization',1,?)")
       .bind(JSON.stringify({ public_id: organizationUuid })).run();
     const response = await app.request("http://local/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/pa-org", {}, env);
     await expect(response.json()).resolves.toMatchObject({ client: { pa_public_id: null, mapping_status: "ambiguous",

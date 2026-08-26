@@ -6,6 +6,7 @@ import { sqlScope } from "./acl";
 import { auditStatement } from "./request-security";
 import { parseStoredWorkArea, type StaffRequestArea } from "./request-area-revision";
 import type { Env, StaffPrincipal } from "./types";
+import { provePrimaryBusinessReferences } from "./project-alpha-primary-references";
 
 type AppEnv = {
   Bindings: Env;
@@ -25,6 +26,7 @@ const SHA256_HEX = /^[a-f0-9]{64}$/;
 
 interface RequestRow {
   id: string;
+  account_id: string;
   catalog_source_id: string;
   status: string;
   title: string;
@@ -438,7 +440,7 @@ export async function sendProjectAlphaDraftQuoteCommand(
 
 async function requestForDraft(env: Env, requestId: string): Promise<RequestRow | null> {
   return database(env).prepare(
-    `SELECT r.id,r.catalog_source_id,r.status,r.title,r.details,r.deliverables_text,
+    `SELECT r.id,r.account_id,r.catalog_source_id,r.status,r.title,r.details,r.deliverables_text,
       account.project_alpha_client_id,account.project_alpha_organization_id,
       project.project_alpha_project_id,r.project_id portal_project_id,
       CASE WHEN r.project_id IS NULL THEN 1 WHEN project.active=1 AND EXISTS (
@@ -492,6 +494,11 @@ async function buildPayload(env: Env, row: RequestRow): Promise<ProjectAlphaDraf
     if (optionalId !== null && !OPAQUE_PUBLIC_ID.test(optionalId))
       throw new HTTPException(409, { message: "This request has an invalid Project Alpha authorization link" });
   }
+  const provenance = await provePrimaryBusinessReferences(env, { accountId: row.account_id,
+    clientId: row.project_alpha_client_id, organizationId: row.project_alpha_organization_id, projectId: row.project_alpha_project_id });
+  if (!provenance.available) throw new HTTPException(409, { message: provenance.reason === "unsupported_source"
+    ? "unsupported_source: This request's business source has no configured quote connection"
+    : "mapping_unavailable: Refresh the primary Alpha business or portal projection before creating this quote" });
   if (row.request_revision < 1)
     throw new HTTPException(409, { message: "This request has no immutable revision to send to Project Alpha" });
 

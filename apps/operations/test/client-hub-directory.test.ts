@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { clientHubDetailPath, findClientHubRoot, listClientHubRoots, normalizeClientHubText,
   type ClientHubKind, type ClientHubSource } from "../src/worker/client-hub-directory";
 import type { Env, StaffPrincipal } from "../src/worker/types";
+import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 
 const staff: StaffPrincipal = { id: "staff-a", email: "a@example.test", displayName: "A", accessSubject: "subject-a", projectAlphaUserId: "pa-user-a" };
 const migration = readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8");
@@ -24,16 +25,17 @@ describe("source-qualified Client Hub directory", () => {
       CREATE TABLE local_staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT);
       CREATE TABLE staff_permission_overrides(staff_id TEXT,permission_key TEXT,effect TEXT,scope TEXT,division_id TEXT);
       INSERT INTO role_permissions VALUES('directory','team.view'),('projects','projects.view');
-      CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}');
-      CREATE TABLE pa_clients(id TEXT PRIMARY KEY,active INTEGER,organization_id TEXT,payload_json TEXT NOT NULL DEFAULT '{}');
-      CREATE TABLE pa_projects(id TEXT PRIMARY KEY,active INTEGER,manager_user_id TEXT,client_id TEXT,organization_id TEXT);
-      CREATE TABLE pa_project_assignments(project_id TEXT,user_id TEXT,active INTEGER);
-      CREATE TABLE pa_operations(id TEXT,project_id TEXT,active INTEGER);
-      CREATE TABLE pa_operation_assignments(operation_id TEXT,user_id TEXT,active INTEGER);
-      CREATE TABLE pa_tasks(id TEXT,project_id TEXT,active INTEGER);
-      CREATE TABLE pa_task_assignments(task_id TEXT,user_id TEXT,active INTEGER);
+      CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE pa_clients(id TEXT PRIMARY KEY,active INTEGER,organization_id TEXT,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE pa_projects(id TEXT PRIMARY KEY,active INTEGER,manager_user_id TEXT,client_id TEXT,organization_id TEXT,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE pa_project_assignments(project_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE pa_operations(id TEXT,project_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE pa_operation_assignments(operation_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE pa_tasks(id TEXT,project_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE pa_task_assignments(task_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     `));
     await db.exec(sql(migration));
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0034_client_hub_projection_sources.sql", import.meta.url), "utf8")).map(statement => db.prepare(statement)));
   });
   beforeEach(async () => {
     await db.batch([
@@ -53,11 +55,34 @@ describe("source-qualified Client Hub directory", () => {
       .bind(row.source ?? "project-alpha:primary", row.source === "delivery:local" ? "account" : "business", row.kind ?? "standalone_client", row.id,
         row.name ?? row.id, normalizeClientHubText(row.name ?? row.id), row.status ?? "active"),
       ...(row.source === "delivery:local" ? [] : [db.prepare(row.kind === "organization"
-        ? "INSERT OR IGNORE INTO pa_organizations(id,active) VALUES(?,1)"
-        : "INSERT OR IGNORE INTO pa_clients(id,active,organization_id) VALUES(?,1,NULL)").bind(row.id)]),
+        ? "INSERT OR IGNORE INTO pa_organizations(id,active,projection_source_id) VALUES(?,1,?)"
+        : "INSERT OR IGNORE INTO pa_clients(id,active,organization_id,projection_source_id) VALUES(?,1,NULL,?)").bind(row.id, row.source ?? "project-alpha:primary")]),
     ]);
     for (let start = 0; start < statements.length; start += 50) await db.batch(statements.slice(start, start + 50));
   }
+
+  it("labels secondary business roots and keeps exact source ownership during search and lookup", async () => {
+    await roots([{ id: "primary-org", kind: "organization", name: "Same name" },
+      { id: "secondary-org", kind: "organization", name: "Same name", source: "project-alpha:secondary" }]);
+    const publicId = "b".repeat(32);
+    await db.prepare("UPDATE pa_organizations SET payload_json=?").bind(JSON.stringify({ public_id: publicId })).run();
+    const page = await listClientHubRoots(env, staff, { q: "Same name" });
+    expect(page.clients).toHaveLength(2);
+    expect(page.clients.find(row => row.source_id === "project-alpha:secondary")).toMatchObject({
+      public_id: "secondary-org", pa_public_id: publicId, source_name: "project-alpha:secondary",
+      workspace_id: null, account_count: 0,
+      detail_path: "/clients/sources/project-alpha%3Asecondary/business/organizations/secondary-org",
+    });
+    await expect(findClientHubRoot(env, "organization", "secondary-org", "project-alpha:primary", "business"))
+      .rejects.toMatchObject({ status: 404 });
+    await db.prepare("INSERT INTO pa_clients(id,active,organization_id,projection_source_id) VALUES('secondary-contact',1,'secondary-org','project-alpha:secondary')").run();
+    for (const [source, root] of [["project-alpha:primary", "primary-org"], ["project-alpha:secondary", "secondary-org"]]) {
+      await db.prepare(`INSERT INTO client_hub_search_values(source_id,root_namespace,kind,root_public_id,record_type,record_id,field,normalized_value)
+        VALUES(?,'business','organization',?,'pa_client','secondary-contact','contact','secondary-only@example.test')`).bind(source, root).run();
+    }
+    expect((await listClientHubRoots(env, staff, { q: "secondary-only@example.test" })).clients.map(row => row.source_id))
+      .toEqual(["project-alpha:secondary"]);
+  });
   async function field(root: string, type: string, value: string, projectId: string | null = null) {
     await db.prepare("INSERT OR IGNORE INTO pa_clients(id,active,organization_id) VALUES(?,1,NULL)").bind(root).run();
     await db.prepare(`INSERT INTO client_hub_search_values
@@ -205,11 +230,11 @@ describe("source-qualified Client Hub directory", () => {
     await roots([{ id: "a" }, { id: "b" }]);
     await field("a", "project", "Hidden renovation", "hidden");
     await field("b", "project", "Visible renovation", "visible");
-    await db.exec("INSERT INTO pa_projects VALUES('hidden',1,NULL,'a',NULL),('visible',1,'pa-user-a','b',NULL);");
+    await db.exec("INSERT INTO pa_projects(id,active,manager_user_id,client_id,organization_id) VALUES('hidden',1,NULL,'a',NULL),('visible',1,'pa-user-a','b',NULL);");
     expect((await listClientHubRoots(env, staff, { q: "renovation" })).clients).toEqual([]);
     await db.prepare("INSERT INTO staff_role_assignments VALUES('staff-a','projects','global',NULL)").run();
     expect((await listClientHubRoots(env, staff, { q: "renovation" })).clients.map(client => client.public_id)).toEqual(["b"]);
-    await db.prepare("INSERT INTO pa_project_assignments VALUES('hidden','pa-user-a',1)").run();
+    await db.prepare("INSERT INTO pa_project_assignments(project_id,user_id,active) VALUES('hidden','pa-user-a',1)").run();
     expect((await listClientHubRoots(env, staff, { q: "renovation" })).clients.map(client => client.public_id)).toEqual(["a", "b"]);
     await db.prepare("INSERT INTO staff_permission_overrides VALUES('staff-a','projects.view','deny','global',NULL)").run();
     expect((await listClientHubRoots(env, staff, { q: "renovation" })).clients).toEqual([]);
@@ -219,7 +244,7 @@ describe("source-qualified Client Hub directory", () => {
     await roots([{ id: "client-a" }, { id: "client-b" }, { id: "org-a", kind: "organization" }]);
     await field("client-a", "project", "Scoped renovation", "project-a");
     await db.batch([
-      db.prepare("INSERT INTO pa_projects VALUES('project-a',1,'pa-user-a','client-a',NULL)"),
+      db.prepare("INSERT INTO pa_projects(id,active,manager_user_id,client_id,organization_id) VALUES('project-a',1,'pa-user-a','client-a',NULL)"),
       db.prepare("INSERT INTO staff_role_assignments VALUES('staff-a','projects','global',NULL)"),
     ]);
   }
