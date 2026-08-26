@@ -15,7 +15,7 @@ describe("isolated secondary Alpha recovery schedule", () => {
 
   it("preserves all other crons and awaits only the recovery job", async () => {
     const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-    expect(config).toContain('"crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *"]');
+    expect(config).toContain('"crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *", "4-59/15 * * * *"]');
     const env = new Proxy({} as Env, { get() { throw new Error("Unrelated job touched an environment binding"); } });
     const ctx = context();
     const log = vi.spyOn(console, "log").mockImplementation(() => {});

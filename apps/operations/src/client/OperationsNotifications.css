@@ -20,6 +20,8 @@
 .notification-batch header > div { min-width: 0; }
 .notification-batch h3 { margin: 0; font-size: 1.05rem; }
 .notification-batch header p { margin: .35rem 0 0; }
+.notification-kind { display: inline-block; margin-top: .5rem; padding: .2rem .45rem; border: 1px solid #d4dde7; border-radius: .4rem; color: var(--muted, #607085); }
+.notification-availability { font-weight: 600; }
 .notification-batch dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin: 1.15rem 0; }
 .notification-batch dl > div { min-width: 0; display: grid; align-content: start; gap: .3rem; }
 .notification-batch dt { font-size: .8rem; font-weight: 650; color: var(--muted, #607085); }

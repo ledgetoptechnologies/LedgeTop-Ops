@@ -21,7 +21,7 @@ function feedbackItem(id = "feedback-one", message = "Please check the north edg
     target: { kind: "file", projectId: "project-one", label: "Church survey north edge.jpg", projectName: "Church survey", available: true, actionPath: null } };
 }
 function deliveryItem(id = "notice-one", accountName = "Acme Construction") {
-  return { id, revision: 1, status: "pending", accountName, folderLabel: "Church survey · Edited",
+  return { id, kind: "folder_changes", revision: 1, status: "pending", accountName, folderLabel: "Church survey · Edited",
     recipientEmail: "alex@example.test", addedCount: 12, removedCount: 2, eligibleAt: "2026-08-26T12:05:00Z",
     createdAt: now, updatedAt: now, deliveredAt: null, errorCode: null, canSendNow: true, canCancel: true };
 }
@@ -35,7 +35,7 @@ function health(sourceId = secondary, status = "error") {
 }
 const requestPage = (items = [requestItem()], nextCursor: string | null = null) => ({ items, nextCursor });
 const feedbackPage = (items = [feedbackItem()], nextCursor: string | null = null) => ({ items, nextCursor });
-const deliveryPage = (items = [deliveryItem()], nextCursor: string | null = null) => ({ items, nextCursor, serverNow: now, coverage: "legacy_folder_changes" });
+const deliveryPage = (items: Record<string, unknown>[] = [deliveryItem()], nextCursor: string | null = null) => ({ items, nextCursor, serverNow: now, coverage: "delivery_notifications_v2", availability: { folderChanges: true, nativeDeliveries: true } });
 const connectionPage = (connectors = [connector()], rows = [health()], legacyPrimary = false) => ({ connectors, health: rows, legacyPrimary });
 
 interface Access { permissions: string[]; isAdministrator?: boolean; feedback?: boolean }
@@ -380,6 +380,43 @@ test("keyboard navigation reaches the inbox and real feedback detail without req
   await expect(page).toHaveURL(/\/operations\/feedback\/feedback-one\?status=all$/);
   await expect(page.getByRole("region", { name: "Client feedback", exact: true })).toContainText("Please check the north edge of the roof.");
   expect(calls.every(call => call.method === "GET")).toBe(true);
+});
+
+test("the inbox keeps native and folder notices with equal raw IDs and opens the exact native record read-only", async ({ page }) => {
+  const native = { id: "nb_same", kind: "portal_delivery", revision: 1, status: "pending", workspaceName: "Acme portal workspace",
+    sourceName: "Survey business source", eventLabel: "Delivery ready", deliveryMode: "staged", folderLabel: "Church survey · Edited",
+    recipientEmail: "private-recipient@example.test", eligibleAt: "2026-08-26T12:05:00Z", createdAt: now, updatedAt: now,
+    deliveredAt: null, errorCode: null, canSendNow: false, canCancel: false };
+  const calls = await fixture(page, { permissions: ["delivery.share.audit"] }, async (route, url) => {
+    if (url.pathname === endpoints.deliveries) { await route.fulfill({ json: deliveryPage([deliveryItem("nb_same"), native]) }); return true; }
+    if (url.pathname === `${endpoints.deliveries}/portal_delivery/nb_same`) {
+      await route.fulfill({ json: { item: native, serverNow: now, coverage: "delivery_notifications_v2", availability: { folderChanges: true, nativeDeliveries: true } } }); return true;
+    }
+    return false;
+  });
+  await open(page);
+  const notices = section(page, "Pending delivery notices");
+  await expect(notices.getByRole("article")).toHaveCount(2);
+  await expect(notices).toContainText("Acme portal workspace · Survey business source · Delivery ready");
+  await expect(notices).not.toContainText("private-recipient@example.test");
+  const target = notices.locator('a[href="/operations/notifications?kind=portal_delivery&batchId=nb_same"]');
+  await target.focus(); await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/\?kind=portal_delivery&batchId=nb_same$/);
+  await expect(page.getByRole("region", { name: "Delivery notification center" }).getByText("private-recipient@example.test", { exact: true })).toBeVisible();
+  expect(calls.filter(call => call.path === endpoints.deliveries).every(call => call.query.get("format") === "combined")).toBe(true);
+  expect(calls.every(call => call.method === "GET")).toBe(true);
+});
+
+test("the inbox shows native upgrade-required coverage while keeping folder notices usable", async ({ page }) => {
+  await fixture(page, { permissions: ["delivery.share.audit"] }, async (route, url) => {
+    if (url.pathname !== endpoints.deliveries) return false;
+    await route.fulfill({ json: { ...deliveryPage(), availability: { folderChanges: true, nativeDeliveries: false } } }); return true;
+  });
+  await open(page);
+  const notices = section(page, "Pending delivery notices");
+  await expect(notices.getByRole("status").filter({ hasText: "database upgrade" })).toBeVisible();
+  await expect(notices.locator('a[href="/operations/notifications?batchId=notice-one"]')).toBeVisible();
+  await expect(notices.getByRole("alert")).toHaveCount(0);
 });
 
 for (const width of [375, 640, 1280, 3440]) test(`populated inbox spacing and keyboard-visible controls at ${width}px`, async ({ page }, info) => {

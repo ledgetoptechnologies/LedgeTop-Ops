@@ -2,8 +2,9 @@ import { readFileSync, readdirSync } from "node:fs";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { Miniflare } from "miniflare";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { controlDeliveryNotificationBatch, listDeliveryNotificationBatches, registerNotificationCenterRoutes } from "../src/worker/notification-center";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { controlDeliveryNotificationBatch, listCombinedDeliveryNotifications, listDeliveryNotificationBatches, registerNotificationCenterRoutes } from "../src/worker/notification-center";
+import * as native from "../src/worker/native-delivery-notification-center";
 import { csrfToken, requireMutationSecurity } from "../src/worker/request-security";
 import { requiresAdministratorForMutation } from "../src/worker/r2-crud-validation";
 import type { Env, StaffPrincipal } from "../src/worker/types";
@@ -28,7 +29,8 @@ describe("folder notification center — real D1 authority and control receipts"
         else for (const statement of statements) await db.prepare(statement).run();
       }
     }
-    await ops.exec(`CREATE TABLE pa_projects(id TEXT PRIMARY KEY,client_id TEXT,organization_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    await ops.exec(`CREATE TABLE staff_users(id TEXT PRIMARY KEY,email TEXT,access_subject TEXT,project_alpha_user_id TEXT,status TEXT);
+      CREATE TABLE pa_projects(id TEXT PRIMARY KEY,client_id TEXT,organization_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE project_folders(id TEXT PRIMARY KEY,project_id TEXT,division_id TEXT,r2_prefix TEXT UNIQUE);
       CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT);
       CREATE TABLE local_staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT);
@@ -38,9 +40,11 @@ describe("folder notification center — real D1 authority and control receipts"
   }, 90_000);
   afterAll(async () => mf.dispose());
   beforeEach(async () => {
+    vi.restoreAllMocks();
     for (const table of ["client_folder_notification_batch_controls", "client_folder_notification_batches", "client_accounts", "audit_log"])
       await db.prepare(`DELETE FROM ${table}`).run();
     await ops.batch([ops.prepare("DELETE FROM project_folders"), ops.prepare("DELETE FROM pa_projects"), ops.prepare("DELETE FROM staff_permission_overrides")]);
+    await ops.prepare("INSERT OR REPLACE INTO staff_users VALUES(?,?,?,NULL,'active')").bind(staff.id,staff.email,staff.accessSubject).run();
     for (const permission of ["audit", "create", "revoke"])
       await ops.prepare("INSERT INTO staff_permission_overrides VALUES('staff',?,'allow','global',NULL)").bind(`delivery.share.${permission}`).run();
     await owner("a", "division-a");
@@ -238,6 +242,101 @@ describe("folder notification center — real D1 authority and control receipts"
     finally { await db.exec("ALTER TABLE pending_control_upgrade RENAME TO client_folder_notification_batch_controls;"); }
   });
 
+  // These tests exercise the real legacy D1 feed and the unified API/merge.
+  // Native audience/claim/migration correctness has its own real-D1 suite.
+  function nativeFeed(ids: string[], visible = true) {
+    type NativeRow = Awaited<ReturnType<typeof native.nativeNotificationCandidates>>[number];
+    const rows = ids.map(id => ({ id, scopeKey: id, createdAt: "2026-08-25T12:00:00.000Z", status: "processing" } as NativeRow));
+    vi.spyOn(native,"nativeDeliveryNotificationsReady").mockResolvedValue(true);
+    const candidates = vi.spyOn(native,"nativeNotificationCandidates").mockImplementation(async (_env,_view,after,limit=101) =>
+      rows.filter(row => !after || row.createdAt<after[0] || (row.createdAt===after[0] && row.id<after[1]))
+        .sort((a,b)=>a.id===b.id?0:a.id>b.id?-1:1).slice(0,limit));
+    vi.spyOn(native,"readNativeDeliveryNotificationScope").mockResolvedValue(visible ? {
+      divisionId:"division-a",sourceId:"project-alpha:primary",sourceName:"Primary Alpha",workspaceId:"workspace-a",
+      workspaceName:"Native workspace",folderLabel:"Delivery",recipientEmail:null,contextProof:"fixed-scope-proof",
+    } : null);
+    vi.spyOn(native,"presentNativeDeliveryNotification").mockImplementation((row,scope) => ({
+      kind:"portal_delivery",id:row.id,revision:1,status:"processing",eligibleAt:row.createdAt,createdAt:row.createdAt,
+      updatedAt:row.createdAt,deliveredAt:null,errorCode:null,canSendNow:false,canCancel:false,sourceName:scope.sourceName,
+      workspaceName:scope.workspaceName,eventLabel:"Delivery available",folderLabel:scope.folderLabel,recipientEmail:null,deliveryMode:"staged",
+    }));
+    return { candidates };
+  }
+
+  it("merges typed native and folder feeds with stable per-feed cursors even at identical timestamps", async () => {
+    nativeFeed(Array.from({length:26},(_,i)=>`nb_${String(i).padStart(3,"0")}`));
+    await db.batch(Array.from({length:26},(_,i)=>batchStatement(`nb_${String(i).padStart(3,"0")}`,"a","processing")));
+    const items: Array<{kind:string;id:string}> = [];
+    let cursor: string|undefined;
+    for (let page=0;page<3;page+=1) {
+      const result=await listCombinedDeliveryNotifications(env,staff,{cursor});
+      expect(result.coverage).toBe("delivery_notifications_v2");
+      expect(result.availability).toEqual({folderChanges:true,nativeDeliveries:true});
+      expect(result.items.length).toBeLessThanOrEqual(25);
+      items.push(...result.items);
+      cursor=result.nextCursor??undefined;
+    }
+    expect(cursor).toBeUndefined();
+    expect(items).toHaveLength(52);
+    expect(new Set(items.map(row=>`${row.kind}:${row.id}`)).size).toBe(52);
+    expect(items.slice(0,26).every(row=>row.kind==="portal_delivery")).toBe(true);
+    expect(items.slice(26).every(row=>row.kind==="folder_changes")).toBe(true);
+  },30_000);
+
+  it("advances a bounded unauthorized native scan without hiding the next legacy page",async()=>{
+    const {candidates}=nativeFeed(Array.from({length:51},(_,i)=>`nb_${String(i).padStart(3,"0")}`),false);
+    await batch("legacy-visible");
+    const first=await listCombinedDeliveryNotifications(env,staff,{});
+    expect(first.items).toEqual([]);expect(first.nextCursor).toBeTypeOf("string");
+    const next=await listCombinedDeliveryNotifications(env,staff,{cursor:first.nextCursor!});
+    expect(next.items.map(row=>row.id)).toEqual(["legacy-visible"]);expect(next.nextCursor).toBeNull();
+    expect(candidates.mock.calls[0]?.[3]).toBe(51);
+    expect(candidates.mock.calls[1]?.[2]).toEqual(["2026-08-25T12:00:00.000Z","nb_001"]);
+  },15_000);
+
+  it("reports unavailable native coverage and invalidates a cursor when its upgrade state changes",async()=>{
+    nativeFeed([]);
+    await db.batch(Array.from({length:26},(_,i)=>batchStatement(`row-${i}`,"a","processing")));
+    vi.spyOn(native,"nativeDeliveryNotificationsReady").mockResolvedValue(false);
+    const page=await listCombinedDeliveryNotifications(env,staff,{});
+    expect(page.availability).toEqual({folderChanges:true,nativeDeliveries:false});
+    expect(native.nativeNotificationCandidates).not.toHaveBeenCalled();
+    vi.spyOn(native,"nativeDeliveryNotificationsReady").mockResolvedValue(true);
+    await expect(listCombinedDeliveryNotifications(env,staff,{cursor:page.nextCursor!})).rejects.toMatchObject({status:409});
+  },15_000);
+
+  it("binds combined cursors to actor, filters and current authority",async()=>{
+    nativeFeed(Array.from({length:26},(_,i)=>`nb_${String(i).padStart(3,"0")}`));
+    const cursor=(await listCombinedDeliveryNotifications(env,staff,{})).nextCursor!;
+    await expect(listCombinedDeliveryNotifications(env,staff,{cursor:`${cursor}x`})).rejects.toMatchObject({status:400});
+    for (const query of [{q:"other"},{view:"history"}])
+      await expect(listCombinedDeliveryNotifications(env,staff,{cursor,...query})).rejects.toMatchObject({status:409});
+    await ops.prepare("INSERT INTO staff_permission_overrides SELECT 'other',permission_key,effect,scope,division_id FROM staff_permission_overrides").run();
+    await ops.prepare("INSERT OR REPLACE INTO staff_users VALUES('other',?,?,NULL,'active')").bind(staff.email,staff.accessSubject).run();
+    await expect(listCombinedDeliveryNotifications(env,{...staff,id:"other"},{cursor})).rejects.toMatchObject({status:400});
+    await ops.prepare("DELETE FROM staff_permission_overrides WHERE permission_key='delivery.share.create'").run();
+    await expect(listCombinedDeliveryNotifications(env,staff,{cursor})).rejects.toMatchObject({status:409});
+  },15_000);
+
+  it("checks current native scope again before returning a selected row",async()=>{
+    nativeFeed(["nb_a"]);
+    vi.spyOn(native,"readNativeDeliveryNotificationScope").mockResolvedValueOnce({
+      divisionId:"division-a",sourceId:"project-alpha:primary",sourceName:"Alpha",workspaceId:"workspace-a",
+      workspaceName:"Workspace",folderLabel:"Delivery",recipientEmail:null,contextProof:"before",
+    }).mockResolvedValue(null);
+    await expect(listCombinedDeliveryNotifications(env,staff,{})).rejects.toMatchObject({status:409});
+  });
+  it.each(["status='suspended'","access_subject='rebound'","email='changed@example.test'","project_alpha_user_id='another-user'"])("rechecks active staff identity after combined hydration (%s)",async change=>{
+    nativeFeed(["nb_a"]);
+    const readScope=vi.mocked(native.readNativeDeliveryNotificationScope).getMockImplementation()!;
+    vi.spyOn(native,"readNativeDeliveryNotificationScope").mockImplementationOnce(async(...args)=>{
+      const scope=await readScope(...args);
+      await ops.prepare(`UPDATE staff_users SET ${change} WHERE id='staff'`).run();
+      return scope;
+    });
+    await expect(listCombinedDeliveryNotifications(env,staff,{})).rejects.toMatchObject({status:403});
+  });
+
   function app() {
     const result = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
     result.use("/api/*", async (c, next) => {
@@ -271,5 +370,43 @@ describe("folder notification center — real D1 authority and control receipts"
     for (const path of ["/api/notifications/deliveries/batch-a/retry","/api/notifications/deliveries/batch-a/cancel/extra","/api/notifications/deliveries/a%2Fb/cancel","/api/notifications/settings"])
       expect(requiresAdministratorForMutation("POST",path)).toBe(true);
     for (const method of ["DELETE","PATCH","PUT"]) expect(requiresAdministratorForMutation(method,"/api/notifications/deliveries/batch-a/cancel")).toBe(true);
+  });
+  it("delegates only staged native controls, never direct legacy notices or a different kind",()=>{
+    for(const action of ["cancel","send-now"])
+      expect(requiresAdministratorForMutation("POST",`/api/notifications/deliveries/portal_delivery/nb_a/${action}`)).toBe(false);
+    for(const path of ["portal_delivery/nd_a/cancel","portal_delivery/nb_a/retry","portal_delivery/nb_a/cancel/extra","other/nb_a/cancel","portal_delivery/nb_a%2Fb/cancel"])
+      expect(requiresAdministratorForMutation("POST",`/api/notifications/deliveries/${path}`)).toBe(true);
+    for(const method of ["PUT","PATCH","DELETE"])
+      expect(requiresAdministratorForMutation(method,"/api/notifications/deliveries/portal_delivery/nb_a/cancel")).toBe(true);
+  });
+  it("rejects ambiguous combined list/detail queries and retains the legacy list contract",async()=>{
+    nativeFeed([]);await batch();
+    const target=app(),url="https://ops.example.test/api/notifications/deliveries";
+    expect(await (await target.request(url,{},env)).json()).toMatchObject({coverage:"legacy_folder_changes"});
+    const combined=await target.request(`${url}?format=combined`,{},env);
+    expect(combined.headers.get("Cache-Control")).toBe("no-store");
+    expect(await combined.json()).toMatchObject({coverage:"delivery_notifications_v2"});
+    for(const query of ["format=old","format=combined&format=combined","view=pending&view=history","q=a&q=b","kind=portal_delivery"])
+      expect((await target.request(`${url}?${query}`,{},env)).status).toBe(400);
+    expect((await target.request(`${url}/portal_delivery/nb_a?kind=folder_changes`,{},env)).status).toBe(400);
+  });
+  it("uses native typed endpoints behind origin/CSRF checks without dispatching the legacy control",async()=>{
+    const controlNative=vi.spyOn(native,"controlNativeDeliveryNotification").mockResolvedValue({
+      ok:true,id:"nb_a",action:"cancel",revision:8,status:"cancelled",replayed:false,
+    });
+    const target=app(),url="https://ops.example.test/api/notifications/deliveries/portal_delivery/nb_a/cancel";
+    const headers={"Content-Type":"application/json","Idempotency-Key":requestKey,Origin:env.PUBLIC_BASE_URL,"X-CSRF-Token":await csrfToken(env,staff)};
+    for(const override of [{Origin:"https://evil.test"},{"X-CSRF-Token":"bad"}])
+      expect((await target.request(url,{method:"POST",headers:{...headers,...override},body:'{"expectedRevision":7}'},env)).status).toBe(403);
+    expect(controlNative).not.toHaveBeenCalled();
+    const response=await target.request(url,{method:"POST",headers,body:'{"expectedRevision":7}'},env);
+    expect(response.status).toBe(200);expect(await response.json()).toMatchObject({kind:"portal_delivery",id:"nb_a",status:"cancelled"});
+    expect(controlNative).toHaveBeenCalledTimes(1);
+    const called=controlNative.mock.calls[0]!;
+    // Avoid deep-inspecting Miniflare's RPC-backed binding proxies in matchers.
+    expect(called[0].DELIVERY_DB===env.DELIVERY_DB).toBe(true);
+    expect(called[1]).toEqual(staff);
+    expect(called.slice(2)).toEqual(["nb_a","cancel",7,requestKey]);
+    expect(await count("client_folder_notification_batch_controls")).toBe(0);
   });
 });

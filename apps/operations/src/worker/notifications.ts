@@ -12,6 +12,7 @@ import { sendNotificationMail } from "./mailer";
 import { d1TablesPresent } from "./schema-readiness";
 import { resolveProjectAlphaDeliveryPrincipal } from "./share-recipients";
 import { HTTPException } from "hono/http-exception";
+import { nativeDeliveryNotificationsReady, processPortalDeliveryNotificationBatches } from "./portal-delivery-notification-batches";
 
 export type NotificationKind = "share_created" | "share_updated" | "share_revoked" | "first_access" | "expiring_72h";
 export interface NotificationPayload { publicId?: string | null; shareUrl?: string; clientName?: string; projectName?: string; r2Prefix?: string; expiresAt?: string | null; }
@@ -190,6 +191,11 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
 }
 
 export async function processProjectAlphaDeliveryPortalNotifications(env:Env):Promise<number>{
+  const staging=await nativeDeliveryNotificationsReady(env);
+  const stagedProcessed=staging?await processPortalDeliveryNotificationBatches(env):0;
+  // Never let the direct sender race adoption. Already attempted/inflight jobs
+  // and revocations retain their original outbox/provider identity unchanged.
+  const directLane=staging?"AND NOT(outbox.event_type='granted' AND outbox.status='pending' AND outbox.attempt_count=0 AND outbox.lease_expires_at IS NULL)":"";
   const liveOwner=`EXISTS(SELECT 1 FROM portal_v2_directory_checkpoints checkpoint
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
       AND generation.workspace_id=checkpoint.workspace_id AND generation.status='active' AND generation.complete=1
@@ -228,6 +234,7 @@ export async function processProjectAlphaDeliveryPortalNotifications(env:Env):Pr
         AND binding.source_version=grant_record.binding_source_version
       WHERE ((outbox.status='pending' AND datetime(outbox.next_attempt_at)<=datetime('now')) OR
         (outbox.status='processing' AND datetime(outbox.lease_expires_at)<=datetime('now')))
+        ${directLane}
         AND ${liveOwner}
         AND (outbox.event_type='revoked' OR (grant_record.status='active' AND
           (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))))
@@ -253,7 +260,7 @@ export async function processProjectAlphaDeliveryPortalNotifications(env:Env):Pr
     }catch(error){if(error instanceof HTTPException){await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error='recipient-no-longer-eligible',updated_at=datetime('now') WHERE id=?`).bind(row.id).run();continue;}const attempt=row.attempt_count+1,terminal=attempt>=MAX_ATTEMPTS;
       await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status=?,next_attempt_at=datetime('now',?),lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=?`).bind(terminal?"failed":"pending",terminal?"+0 seconds":`+${2**attempt*5} minutes`,(error instanceof Error?error.message:"email-send-failed").slice(0,240),row.id).run();}
   }
-  return processed;
+  return processed+stagedProcessed;
 }
 
 const lifecyclePresentation: Record<

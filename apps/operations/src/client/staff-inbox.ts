@@ -3,7 +3,7 @@ import { z } from "zod";
 export type InboxSource = "requests" | "feedback" | "deliveries" | "connections";
 export interface InboxAccess { permissions: readonly string[]; isAdministrator: boolean; feedbackEnabled: boolean }
 export interface InboxItem { id: string; title: string; detail: string; status: string; date: string | null; href: string; action: string }
-export interface InboxPage { items: InboxItem[]; nextCursor: string | null }
+export interface InboxPage { items: InboxItem[]; nextCursor: string | null; notice?: string }
 
 export function inboxSources(access: InboxAccess): InboxSource[] {
   const sources: InboxSource[] = [];
@@ -17,7 +17,7 @@ export function inboxSources(access: InboxAccess): InboxSource[] {
 export const inboxLabels: Record<InboxSource, { title: string; description: string }> = {
   requests: { title: "Client requests", description: "Oldest first: submitted, under review, or waiting for Project Alpha linkage." },
   feedback: { title: "Client feedback", description: "Oldest first: new and in-progress project, folder, and file feedback." },
-  deliveries: { title: "Pending delivery notices", description: "Newest batches first. Client-folder change notices only; review the countdown and available actions before sending or cancelling." },
+  deliveries: { title: "Pending delivery notices", description: "Newest notices first. Folder changes and explicit Project Alpha portal deliveries; review the exact notice before taking action." },
   connections: { title: "Connection failures", description: "Reported synchronization failures for active Project Alpha connections. Other integrations are not included here." },
 };
 
@@ -25,7 +25,7 @@ export function inboxEndpoint(source: InboxSource, q: string, cursor: string | n
   if (source === "connections") return "/api/admin/integrations/project-alpha/connectors";
   const params = new URLSearchParams();
   if (source === "feedback") params.set("status", "open");
-  if (source === "deliveries") params.set("view", "pending");
+  if (source === "deliveries") { params.set("format", "combined"); params.set("view", "pending"); }
   if (q) params.set("q", q);
   if (cursor) params.set("cursor", cursor);
   const path = source === "requests" ? "/api/operations/inbox/requests" : source === "feedback" ? "/api/operations/feedback" : "/api/notifications/deliveries";
@@ -40,9 +40,14 @@ const requestPage = z.object({ items: z.array(z.object({ id, title: text, accoun
   status: z.enum(["submitted", "under_review", "accepted_pending_pa_linkage"]), createdAt: date })).max(25), nextCursor });
 const feedbackPage = z.object({ items: z.array(z.object({ id, accountName: text, message: text,
   status: z.enum(["new", "in_progress"]), createdAt: date, target: z.object({ label: text, projectName: text.nullable() }) })).max(25), nextCursor });
-const deliveryPage = z.object({ items: z.array(z.object({ id, accountName: text, folderLabel: text,
-  status: z.enum(["pending", "processing"]), createdAt: date, addedCount: z.number().int().nonnegative(), removedCount: z.number().int().nonnegative() })).max(25), nextCursor,
-  coverage: z.literal("legacy_folder_changes") });
+const deliveryFields = { id, folderLabel: text, status: z.enum(["pending", "processing"]), createdAt: date };
+const deliveryPage = z.object({ items: z.array(z.discriminatedUnion("kind", [
+  z.object({ ...deliveryFields, kind: z.literal("folder_changes"), accountName: text, addedCount: z.number().int().nonnegative(), removedCount: z.number().int().nonnegative() }),
+  z.object({ ...deliveryFields, kind: z.literal("portal_delivery"), sourceName: text, workspaceName: text, eventLabel: text,
+    deliveryMode: z.enum(["staged", "direct_legacy", "awaiting_staging"]) }),
+])).max(25), nextCursor, coverage: z.literal("delivery_notifications_v2"),
+  availability: z.object({ folderChanges: z.literal(true), nativeDeliveries: z.boolean() })
+}).refine(value => value.availability.nativeDeliveries || value.items.every(item => item.kind === "folder_changes"));
 const connectionPage = z.object({ connectors: z.array(z.object({ sourceId: text, displayName: text,
   state: z.enum(["pending", "active", "suspended", "retired"]) })).max(32), legacyPrimary: z.boolean(),
   health: z.array(z.object({ sourceId: text, status: z.enum(["healthy", "error", "unknown", "disabled", "stale"]), lastAttemptAt: date.nullable() })).max(33) });
@@ -68,10 +73,12 @@ export function parseInboxPage(source: InboxSource, value: unknown, q: string): 
   }
   if (source === "deliveries") {
     const page = deliveryPage.parse(value);
-    return { nextCursor: page.nextCursor, items: page.items.map(row => ({ id: row.id, title: row.folderLabel,
-      detail: `${row.accountName} · ${row.addedCount.toLocaleString("en-US")} added · ${row.removedCount.toLocaleString("en-US")} removed`,
+    return { nextCursor: page.nextCursor, ...(page.availability.nativeDeliveries ? {} : { notice: "Native delivery notices require a database upgrade. Only folder-change notices are shown." }),
+      items: page.items.map(row => ({ id: `${row.kind}:${row.id}`, title: row.folderLabel,
+      detail: row.kind === "folder_changes" ? `${row.accountName} · ${row.addedCount.toLocaleString("en-US")} added · ${row.removedCount.toLocaleString("en-US")} removed`
+        : `${row.workspaceName} · ${row.sourceName} · ${row.eventLabel}`,
       date: row.createdAt, status: row.status === "pending" ? "Pending" : "Processing",
-      href: `/operations/notifications?${new URLSearchParams({ batchId: row.id })}`, action: "Review notice" })) };
+      href: `/operations/notifications?${new URLSearchParams(row.kind === "folder_changes" ? { batchId: row.id } : { kind: row.kind, batchId: row.id })}`, action: "Review notice" })) };
   }
   const page = connectionPage.parse(value), names = new Map(page.connectors.filter(row => row.state === "active").map(row => [row.sourceId, row.displayName]));
   if (page.legacyPrimary) names.set("project-alpha:primary", "Project Alpha · Primary");

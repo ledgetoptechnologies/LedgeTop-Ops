@@ -3059,12 +3059,25 @@ const CONSOLIDATED_CRON = "*/15 * * * *";
 const CLIENT_REQUEST_NOTIFICATION_CRON = "*/5 * * * *";
 const CLIENT_HUB_INDEX_CRON = "2-57/5 * * * *";
 const PROJECT_ALPHA_RECOVERY_CRON = "17 * * * *";
+const NATIVE_DELIVERY_NOTIFICATION_CRON = "4-59/15 * * * *";
 
 async function scheduled(
   event: ScheduledController,
   env: Env,
   ctx: ExecutionContext,
 ) {
+  if (event.cron === NATIVE_DELIVERY_NOTIFICATION_CRON) {
+    // Native staged + retained direct mail share ownership, but not a budget
+    // with bucket reconciliation, thumbnails, Viewer or other maintenance.
+    try {
+      const processed = await processProjectAlphaDeliveryPortalNotifications(env);
+      console.log(JSON.stringify({ event: "native_delivery_notifications.tick", processed }));
+    } catch {
+      console.error(JSON.stringify({ event: "native_delivery_notifications.error" }));
+      throw new Error("Native delivery notification dispatch failed");
+    }
+    return;
+  }
   if (event.cron === PROJECT_ALPHA_RECOVERY_CRON) {
     // Secondary snapshots have their own bounded, awaited invocation. A slow
     // producer must not consume the thumbnail, notification or primary budget.
@@ -3169,7 +3182,6 @@ async function scheduled(
       processDeliveryNotifications(env),
     ),
   );
-  ctx.waitUntil(processProjectAlphaDeliveryPortalNotifications(env));
   if (env.DROPBOX_IMPORT_TOKEN_SECRET)
     ctx.waitUntil(cleanupDropboxImports(env));
   ctx.waitUntil(pruneViewerEventNonces(env));

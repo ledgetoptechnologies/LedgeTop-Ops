@@ -5,6 +5,7 @@ import type { Env } from "./types";
 import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE, type CatalogSourceContext } from "@ltds/shared";
 import { createProjectAlphaDeliveryGuestShare, revokeProjectAlphaDeliveryGuestShare } from "./delivery";
 import { projectAlphaDeliveryPrincipalGuard, resolveProjectAlphaDeliveryPrincipal } from "./share-recipients";
+import { nativeDeliveryNotificationsReady, stagePortalDeliveryNotificationStatements } from "./portal-delivery-notification-batches";
 
 const PATH = "/api/internal/project-alpha/delivery-intents";
 const PREFLIGHT_PATH = `${PATH}/preflight`;
@@ -175,7 +176,8 @@ export async function applyProjectAlphaDeliveryIntent(env: Env, payload: unknown
   const exact=active.results.find(row=>row.live===1),expiring=active.results.find(row=>row.live===0);
   if(exact&&exact.expires_at!==(effectiveExpiry??null))
     throw new HTTPException(409,{message:"An existing delivery authorization has different policy"});
-  const receiptId=crypto.randomUUID(),grantId=exact?.id??crypto.randomUUID();
+  const receiptId=crypto.randomUUID(),grantId=exact?.id??crypto.randomUUID(),outboxId=crypto.randomUUID();
+  const staging=source.sourceId===PRIMARY_CATALOG_SOURCE.sourceId&&await nativeDeliveryNotificationsReady(env);
   const recipientGuard=projectAlphaDeliveryPrincipalGuard({audience:recipient,principalSourceVersion:audience.source_version,
     bindingSourceVersion:binding.source_version,prefix:binding.r2_prefix,allowUnclaimed:env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==="true",source});
   const guards=[`(${recipientGuard.sql})`,`(SELECT COUNT(*) FROM project_alpha_delivery_portal_grants grant_record WHERE ${grantScope})=?`];
@@ -201,8 +203,9 @@ export async function applyProjectAlphaDeliveryIntent(env: Env, payload: unknown
   if(!exact)statements.push(database.prepare(`INSERT INTO project_alpha_delivery_portal_grants(id,receipt_id,workspace_id,folder_binding_id,binding_source_version,audience_type,audience_public_id,audience_source_version,expires_at,label,actor_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(grantId,receiptId,binding.workspace_id,binding.id,binding.source_version,parsed.data.audience.type,parsed.data.audience.publicId,audience.source_version,effectiveExpiry,parsed.data.label,auth.deliveryId));
   statements.push(
     database.prepare(`INSERT INTO project_alpha_delivery_intent_audit(id,receipt_id,action,actor_id,details_json) VALUES(?,?,'portal.accepted',?,?)`).bind(crypto.randomUUID(),receiptId,auth.deliveryId,JSON.stringify({reused:Boolean(exact),scopeType:parsed.data.scope.type,scopePublicId:parsed.data.scope.publicId,audienceType:parsed.data.audience.type,audiencePublicId:parsed.data.audience.publicId})),
-    database.prepare(`INSERT INTO project_alpha_delivery_portal_notification_outbox(id,receipt_id,grant_id,principal_public_id,principal_source_version,event_type) VALUES(?,?,?,?,?,'granted')`).bind(crypto.randomUUID(),receiptId,grantId,parsed.data.audience.publicId,audience.source_version),
+    database.prepare(`INSERT INTO project_alpha_delivery_portal_notification_outbox(id,receipt_id,grant_id,principal_public_id,principal_source_version,event_type) VALUES(?,?,?,?,?,'granted')`).bind(outboxId,receiptId,grantId,parsed.data.audience.publicId,audience.source_version),
   );
+  if(staging)statements.push(...stagePortalDeliveryNotificationStatements(database,outboxId));
   try{await database.batch(statements);}catch{
     const raced=await priorReceipt(database,source,auth);
     if(raced)return raced;

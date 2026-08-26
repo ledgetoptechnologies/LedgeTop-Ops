@@ -735,6 +735,13 @@ a new whole-monorepo claim. No real customers were linked or granted access.
       attempt accounting, version/lease guards, bounded work and visible source
       status. See [snapshot recovery](project-alpha-snapshot-recovery.md); it does
       not activate producers or expand staff/client authority.
+- [x] Locally implement and verify staged explicit-principal native delivery
+      notices, typed combined Pending/History and inbox navigation, current
+      source/division authority, transactional controls, bounded retries and
+      isolated scheduling. See [native delivery notifications](native-delivery-notifications.md)
+      for exact backend/browser/build evidence and retained direct-lane behavior.
+      Paired Alpha public-ID export approval and live rollout remain gates; no
+      production migration, email or deployment is included in this checkpoint.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [x] Locally verify the implemented recent-first Client Hub and source-record update
       history increment. See [business activity](client-business-activity.md).

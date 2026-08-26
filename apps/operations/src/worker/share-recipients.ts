@@ -167,6 +167,30 @@ export function projectAlphaDeliveryPrincipalGuard(input: {
   };
 }
 
+/** Notification publication additionally freezes the exact linked identity,
+ * not merely its email. An unclaimed principal remains an explicit Alpha
+ * audience; claiming/rebinding it changes this proof, never another recipient. */
+export async function resolveProjectAlphaDeliveryPrincipalProof(env:Env,prefix:string,publicIdValue:string,
+  sourceVersion:string,bindingSourceVersion:string,source:CatalogSourceContext=PRIMARY_CATALOG_SOURCE) {
+  const validated=createCatalogSourceContext(source?.sourceId),publicId=publicIdValue.trim();
+  if(!publicId||publicId.length>128)throw new HTTPException(400,{message:"Recipient selection is invalid"});
+  const context=await bindingContext(env,prefix,validated),allowUnclaimed=env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==='true';
+  const candidates=principalCandidatesSql(context,publicId,sourceVersion,allowUnclaimed);
+  const rows=(await env.DELIVERY_DB.withSession('first-primary').prepare(candidates.sql).bind(...candidates.bindings)
+    .all<{display_name:string;identity_id:string;issuer:string;subject:string;verified_email:string}>()).results;
+  if(rows.length!==1)throw new HTTPException(409,{message:"Delivery recipient is not uniquely eligible"});
+  const selected=rows[0]!;
+  if(selected.verified_email.length>254||!/^[^\s@<>]+@[^\s@<>]+\.[^\s@<>]+$/.test(selected.verified_email))
+    throw new HTTPException(409,{message:"Delivery recipient address is unavailable"});
+  const audience:ShareAudienceSnapshot={...context,audienceType:'principal',audiencePublicId:publicId,
+    audienceDisplayName:selected.display_name,recipients:[{principalPublicId:publicId,displayName:selected.display_name,email:selected.verified_email}]};
+  const identity={id:selected.identity_id,issuer:selected.issuer,subject:selected.subject,email:selected.verified_email};
+  const base=projectAlphaDeliveryPrincipalGuard({audience,principalSourceVersion:sourceVersion,bindingSourceVersion,prefix,allowUnclaimed,source:validated});
+  return {audience,identity,guard:{sql:`${base.sql} AND EXISTS(SELECT 1 FROM (${candidates.sql})
+      WHERE identity_id=? AND issuer=? AND subject=? AND verified_email=?)`,
+    bindings:[...base.bindings,...candidates.bindings,identity.id,identity.issuer,identity.subject,identity.email]}};
+}
+
 export async function latestShareAudienceSnapshot(env:Env,shareId:string):Promise<ShareAudienceSnapshot|null>{
   const db=env.DELIVERY_DB.withSession("first-primary"),audience=await db.prepare(`SELECT snapshot.workspace_id,snapshot.folder_binding_id,snapshot.owner_scope_type,snapshot.owner_public_id,snapshot.directory_generation_id,snapshot.audience_type,snapshot.audience_public_id,snapshot.audience_display_name,snapshot.share_version
     FROM shares share JOIN delivery_share_audience_snapshots snapshot

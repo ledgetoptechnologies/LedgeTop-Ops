@@ -7,7 +7,7 @@ function item(id="selected-batch",status="pending") {
     errorCode:null,canSendNow:status==="pending",canCancel:status==="pending"};
 }
 const detail=(status="pending",id="selected-batch")=>({item:item(id,status),serverNow:at,coverage:"legacy_folder_changes"});
-const list=()=>({items:[],nextCursor:null,serverNow:at,coverage:"legacy_folder_changes"});
+const list=()=>({items:[],nextCursor:null,serverNow:at,coverage:"delivery_notifications_v2",availability:{folderChanges:true,nativeDeliveries:true}});
 const center=(page:Page)=>page.getByRole("region",{name:"Delivery notification center"});
 async function fixture(page:Page,handler:(route:Route,url:URL)=>Promise<unknown>){
   const calls:Array<{path:string;query:string;method:string}>=[];

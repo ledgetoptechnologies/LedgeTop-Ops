@@ -27,10 +27,28 @@ describe("staff inbox presentation contract", () => {
     expect(page.items[0]?.detail).toBe(`Acme — ${"x".repeat(240)}…`);
   });
   it("opens the authorized notices workflow and never embeds a recipient or invokes a mutation", () => {
-    const page = parseInboxPage("deliveries", { coverage: "legacy_folder_changes", items: [{ id: "batch-a", accountName: "Acme & Sons", folderLabel: "Edited", status: "pending", createdAt, addedCount: 1234, removedCount: 2, recipientEmail: "private@example.test" }], nextCursor: null }, "");
+    const page = parseInboxPage("deliveries", { coverage: "delivery_notifications_v2", availability: { folderChanges: true, nativeDeliveries: true }, items: [{ kind: "folder_changes", id: "batch-a", accountName: "Acme & Sons", folderLabel: "Edited", status: "pending", createdAt, addedCount: 1234, removedCount: 2, recipientEmail: "private@example.test" }], nextCursor: null }, "");
     expect(page.items[0]?.detail).toBe("Acme & Sons · 1,234 added · 2 removed");
     expect(page.items[0]?.href).toBe("/operations/notifications?batchId=batch-a");
     expect(JSON.stringify(page)).not.toContain("private@");
+  });
+  it("keeps native and folder identities separate and opens exact native notices without recipient leakage or fabricated counts", () => {
+    const rows = [
+      { kind: "folder_changes", id: "same-id", accountName: "Acme", folderLabel: "Edited", status: "pending", createdAt, addedCount: 2, removedCount: 0 },
+      { kind: "portal_delivery", id: "same-id", sourceName: "Survey source", workspaceName: "Acme workspace", eventLabel: "Delivery ready", deliveryMode: "staged", folderLabel: "Edited", status: "pending", createdAt, recipientEmail: "private@example.test" },
+    ];
+    const page = parseInboxPage("deliveries", { coverage: "delivery_notifications_v2", availability: { folderChanges: true, nativeDeliveries: true }, items: rows, nextCursor: null }, "");
+    expect(page.items.map(row => row.id)).toEqual(["folder_changes:same-id", "portal_delivery:same-id"]);
+    expect(page.items[1]?.detail).toBe("Acme workspace · Survey source · Delivery ready");
+    expect(page.items[1]?.href).toBe("/operations/notifications?kind=portal_delivery&batchId=same-id");
+    expect(JSON.stringify(page)).not.toContain("private@");
+    expect(new URL(inboxEndpoint("deliveries", "Acme", null), "https://ops.test").searchParams.get("format")).toBe("combined");
+  });
+  it("keeps native upgrade-required coverage explicit and rejects native rows when their source is unavailable", () => {
+    const page = { coverage: "delivery_notifications_v2", availability: { folderChanges: true, nativeDeliveries: false }, items: [], nextCursor: null };
+    expect(parseInboxPage("deliveries", page, "").notice).toContain("database upgrade");
+    expect(() => parseInboxPage("deliveries", { ...page, items: [{ kind: "portal_delivery", id: "nb_one", sourceName: "Source", workspaceName: "Workspace", eventLabel: "Ready", deliveryMode: "staged", folderLabel: "Folder", status: "pending", createdAt }] }, "")).toThrow();
+    expect(() => parseInboxPage("deliveries", { ...page, coverage: "legacy_folder_changes" }, "")).toThrow();
   });
   it("reports only explicit failures from active registered or legacy-primary connections", () => {
     const value = { legacyPrimary: true, connectors: [

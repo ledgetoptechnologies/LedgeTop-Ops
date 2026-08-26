@@ -3,13 +3,19 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 const centerPath = "/operations/notifications", endpoint = "/api/notifications/deliveries";
 const now = "2026-08-25T12:00:00Z";
 function batch(id = "batch-one", overrides: Record<string, unknown> = {}) {
-  return { id, revision: 1, status: "pending", accountName: "Acme Construction", folderLabel: "Church survey · Edited",
+  return { id, kind: "folder_changes", revision: 1, status: "pending", accountName: "Acme Construction", folderLabel: "Church survey · Edited",
     recipientEmail: "alex@example.test", addedCount: 40, removedCount: 2, eligibleAt: "2026-08-25T12:05:00Z", createdAt: now,
     updatedAt: now, deliveredAt: null, errorCode: null, canSendNow: false, canCancel: false, ...overrides };
 }
-function result(items = [batch()], nextCursor: string | null = null, serverNow = now) {
-  return { items, nextCursor, serverNow, coverage: "legacy_folder_changes" };
+function result(items: Record<string, unknown>[] = [batch()], nextCursor: string | null = null, serverNow = now) {
+  return { items, nextCursor, serverNow, coverage: "delivery_notifications_v2", availability: { folderChanges: true, nativeDeliveries: true } };
 }
+function nativeNotice(id = "nb_one", overrides: Record<string, unknown> = {}) {
+  const { accountName: _accountName, addedCount: _addedCount, removedCount: _removedCount, ...common } = batch(id);
+  return { ...common, kind: "portal_delivery", sourceName: "Survey business source", workspaceName: "Acme portal workspace",
+    eventLabel: "Delivery ready", deliveryMode: "staged", ...overrides };
+}
+const nativeArticle = (page: Page) => center(page).locator('article[data-notification-kind="portal_delivery"]');
 async function mock(page: Page, handler: (route: Route, url: URL) => Promise<unknown>, permissions = ["delivery.share.audit"]) {
   const requests: Array<{ path: string; query: URLSearchParams; method: string; key: string | undefined; body: unknown }> = [];
   await page.route("**/api/**", route => {
@@ -54,7 +60,7 @@ test("audit-only staff land on Notifications inside Operations without other ope
   await expect(page.getByRole("tab", { name: "Notifications", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("tab", { name: "Operations", exact: true })).toHaveCount(0);
   await expect(article(page)).toBeVisible();
-  await expect(center(page).getByText(/Legacy client-workspace folder subscriptions; other notification sources are not shown/)).toBeVisible();
+  await expect(center(page).getByText(/Legacy folder subscriptions and delivery notices addressed to an explicit Project Alpha portal recipient/)).toBeVisible();
   await expect(center(page).getByText("40 added · 2 removed", { exact: true })).toBeVisible();
   await expect(center(page).getByRole("button", { name: "Send now", exact: true })).toHaveCount(0);
   await expect(center(page).getByRole("button", { name: "Cancel notification", exact: true })).toHaveCount(0);
@@ -237,7 +243,7 @@ test("server eligibility controls override staff mutation permissions and retry 
     batch("retry", { accountName: "Retry client", errorCode: "delivery-attempt-failed", canSendNow: false, canCancel: true })]) }),
   ["delivery.share.audit", "delivery.share.create", "delivery.share.revoke"]);
   await open(page);
-  await expect(article(page).getByText("Recipient no longer available", { exact: true })).toBeVisible();
+  await expect(article(page).getByText("Recipient unavailable", { exact: true })).toBeVisible();
   await expect(article(page).getByRole("button")).toHaveCount(0);
   const retry = article(page, "Retry client · Church survey · Edited");
   await expect(retry.getByText(/An earlier email may already have been accepted/)).toBeVisible();
@@ -413,4 +419,146 @@ test("notification guidance and simultaneous action and load errors retain acces
     await page.evaluate(() => scrollTo(0, 0));
     await page.screenshot({ path: testInfo.outputPath(`notification-errors-${width}.png`), fullPage: true });
   }
+});
+
+test("combined pages retain equal raw IDs across kinds and show native audience without invented file counts", async ({ page }) => {
+  const calls = await mock(page, (route, url) => route.fulfill({ json: result(url.searchParams.has("cursor")
+    ? [nativeNotice("nb_same", { revision: 2, eventLabel: "Updated delivery ready" }), batch("nb_same", { revision: 2, addedCount: 15 })]
+    : [batch("nb_same"), nativeNotice("nb_same")], url.searchParams.has("cursor") ? null : "next") }));
+  await open(page);
+  await expect(center(page).getByRole("article")).toHaveCount(2);
+  await expect(nativeArticle(page)).toContainText("Acme portal workspace");
+  await expect(nativeArticle(page)).toContainText("Survey business source");
+  await expect(nativeArticle(page)).toContainText("Delivery ready");
+  await expect(nativeArticle(page).getByText("Net changes", { exact: true })).toHaveCount(0);
+  await expect(nativeArticle(page)).not.toContainText(/\d+ added|\d+ removed/);
+  await center(page).getByRole("button", { name: "Load more notifications" }).click();
+  await expect(nativeArticle(page)).toContainText("Updated delivery ready");
+  await expect(center(page).getByRole("article")).toHaveCount(2);
+  await expect(center(page).locator('article[data-notification-kind="folder_changes"]')).toContainText("15 added");
+  expect(calls.filter(call => call.path === endpoint).every(call => call.query.get("format") === "combined")).toBe(true);
+});
+
+test("unavailable native storage shows upgrade-required coverage without hiding available folder notices", async ({ page }) => {
+  await mock(page, route => route.fulfill({ json: { ...result(), availability: { folderChanges: true, nativeDeliveries: false } } }));
+  await open(page);
+  await expect(article(page)).toBeVisible();
+  await expect(center(page).getByRole("status").filter({ hasText: "notification database upgrade" })).toBeVisible();
+  await expect(nativeArticle(page)).toHaveCount(0);
+  await expect(center(page).getByText("No pending notifications found", { exact: true })).toHaveCount(0);
+});
+
+test("an unavailable native exact notice never falls back to legacy or a list scan", async ({ page }) => {
+  const calls = await mock(page, route => route.fulfill({ status: 503, json: { error: "Native delivery notification upgrade required." } }));
+  await open(page, "?kind=portal_delivery&batchId=nb_one");
+  await expect(center(page).getByRole("alert")).toContainText("upgrade required");
+  await expect(center(page).getByRole("article")).toHaveCount(0);
+  await expect(center(page).getByText("No pending notifications found", { exact: true })).toHaveCount(0);
+  expect(calls.filter(call => call.path.startsWith(endpoint)).map(call => call.path)).toEqual([`${endpoint}/portal_delivery/nb_one`]);
+});
+
+test("native exact links preserve kind through reload and Back and reject a same-ID folder response", async ({ page }) => {
+  let wrong = true;
+  const calls = await mock(page, (route, url) => route.fulfill({ json: url.pathname === endpoint ? result([])
+    : { item: wrong ? batch("nb_one") : nativeNotice(), serverNow: now, coverage: "delivery_notifications_v2", availability: { folderChanges: true, nativeDeliveries: true } } }));
+  await open(page, "?kind=portal_delivery&batchId=nb_one");
+  await expect(center(page).getByRole("alert")).toContainText("could not be verified");
+  await expect(center(page).getByRole("article")).toHaveCount(0);
+  wrong = false; await center(page).getByRole("button", { name: "Retry notifications" }).click();
+  await expect(nativeArticle(page)).toBeVisible();
+  await page.reload(); await expect(nativeArticle(page)).toBeVisible();
+  await center(page).getByRole("button", { name: "History", exact: true }).click();
+  await expect(page).toHaveURL(/\?view=history$/);
+  await page.goBack(); await expect(nativeArticle(page)).toBeVisible();
+  await expect(page).toHaveURL(/\?kind=portal_delivery&batchId=nb_one$/);
+  expect(calls.filter(call => call.path.startsWith(endpoint) && call.path !== endpoint).every(call => call.path === `${endpoint}/portal_delivery/nb_one`)).toBe(true);
+  expect(calls.every(call => call.method === "GET")).toBe(true);
+});
+
+for (const query of ["kind=unknown&batchId=nb_one", "kind=portal_delivery&kind=folder_changes&batchId=nb_one", "kind=portal_delivery"]) test(`ambiguous native route ${query} cannot probe a different notification namespace`, async ({ page }) => {
+  const calls = await mock(page, route => route.fulfill({ json: result() }));
+  await open(page, `?${query}`);
+  await expect(center(page).getByRole("alert")).toContainText("notification link is invalid");
+  expect(calls.filter(call => call.path.startsWith(endpoint))).toEqual([]);
+});
+
+test("native Send now retries the original kind, revision and operation key across history navigation", async ({ page }) => {
+  let attempts = 0;
+  const calls = await mock(page, (route, url) => {
+    if (route.request().method() === "POST") return route.fulfill(++attempts === 1 ? { status: 503, json: { error: "Uncertain" } }
+      : { json: { ok: true, kind: "portal_delivery", id: "nb_one", action: "send-now", revision: 2, status: "pending", replayed: true } });
+    return route.fulfill({ json: result(url.searchParams.get("view") === "history" ? [] : [nativeNotice("nb_one", { canSendNow: true })]) });
+  });
+  await open(page); await nativeArticle(page).getByRole("button", { name: "Send now", exact: true }).click();
+  await expect(center(page).getByRole("button", { name: "Retry action" })).toBeVisible();
+  await center(page).getByRole("button", { name: "History", exact: true }).click();
+  await center(page).getByRole("button", { name: "Retry action" }).click();
+  await expect(center(page).getByRole("status").filter({ hasText: "does not confirm delivery or change recipient access" })).toBeVisible();
+  const posts = calls.filter(call => call.method === "POST");
+  expect(posts.map(call => call.path)).toEqual([`${endpoint}/portal_delivery/nb_one/send-now`, `${endpoint}/portal_delivery/nb_one/send-now`]);
+  expect(posts[0]?.key).toBeTruthy(); expect(posts[1]?.key).toBe(posts[0]?.key);
+  expect(posts.map(call => call.body)).toEqual([{ expectedRevision: 1 }, { expectedRevision: 1 }]);
+  await expect(page).toHaveURL(/\?view=history$/);
+});
+
+test("native cancellation cannot remove a same-ID folder notice or resurrect its own stale pre-action row", async ({ page }) => {
+  const calls = await mock(page, route => route.fulfill(route.request().method() === "POST"
+    ? { json: { ok: true, kind: "portal_delivery", id: "nb_same", action: "cancel", revision: 2, status: "cancelled", replayed: false } }
+    : { json: result([batch("nb_same"), nativeNotice("nb_same", { canCancel: true })]) }));
+  await open(page);
+  page.once("dialog", async dialog => {
+    expect(dialog.message()).toContain("Acme portal workspace"); expect(dialog.message()).toContain("Survey business source");
+    expect(dialog.message()).toContain("alex@example.test"); expect(dialog.message()).toContain("delivery itself is not revoked");
+    expect(dialog.message()).toContain("cannot be recalled"); await dialog.accept();
+  });
+  await nativeArticle(page).getByRole("button", { name: "Cancel notification" }).click();
+  await expect(center(page).getByRole("status").filter({ hasText: "Notification cancelled" })).toBeVisible();
+  await expect(nativeArticle(page)).toHaveCount(0);
+  await expect(center(page).locator('article[data-notification-kind="folder_changes"]')).toBeVisible();
+  expect(calls.filter(call => call.method === "POST").map(call => call.path)).toEqual([`${endpoint}/portal_delivery/nb_same/cancel`]);
+});
+
+test("a native action receipt without its kind stays uncertain and cannot confirm cancellation", async ({ page }) => {
+  await mock(page, route => route.fulfill(route.request().method() === "POST"
+    ? { json: { ok: true, id: "nb_one", action: "cancel", revision: 2, status: "cancelled", replayed: false } }
+    : { json: result([nativeNotice("nb_one", { canCancel: true })]) }));
+  await open(page); page.once("dialog", dialog => dialog.accept());
+  await nativeArticle(page).getByRole("button", { name: "Cancel notification" }).click();
+  await expect(center(page).getByRole("button", { name: "Retry action" })).toBeVisible();
+  await expect(center(page).getByText(/Notification cancelled\./)).toHaveCount(0);
+  await expect(nativeArticle(page)).toBeVisible();
+});
+
+for (const deliveryMode of ["direct_legacy", "awaiting_staging"]) test(`${deliveryMode} native notices remain read-only without implying file-change counts`, async ({ page }) => {
+  await mock(page, route => route.fulfill({ json: result([nativeNotice("nd_one", { deliveryMode })]) }));
+  await open(page);
+  await expect(nativeArticle(page)).toContainText(deliveryMode === "direct_legacy" ? "Earlier direct-dispatch notice" : "Awaiting staging");
+  await expect(nativeArticle(page).getByRole("button")).toHaveCount(0);
+  await expect(nativeArticle(page).getByText("Net changes", { exact: true })).toHaveCount(0);
+  if (deliveryMode === "awaiting_staging") await expect(nativeArticle(page)).not.toContainText("Ready for dispatch");
+});
+
+test("mixed native and folder notices stay readable and keyboard accessible at four viewport widths", async ({ page }, testInfo) => {
+  const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+  await mock(page, route => route.fulfill({ json: result([batch(), nativeNotice("nb_one", {
+    workspaceName: "North district construction and environmental survey documentation workspace",
+    sourceName: "Regional aerial surveying and environmental documentation business source",
+    folderLabel: "Community building construction survey · Approved delivery photographs", recipientEmail: "long-recipient-name@regional-survey-company.example.test", canSendNow: true, canCancel: true,
+  })]) }));
+  await open(page); await expect(nativeArticle(page)).toBeVisible();
+  for (const width of [375, 640, 1280, 3440]) {
+    await page.setViewportSize({ width, height: 1000 }); await expectNotificationSpacing(page);
+    const button = nativeArticle(page).getByRole("button", { name: "Send now", exact: true });
+    await button.focus(); await expect(button).toBeFocused();
+    expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    const fields = await nativeArticle(page).locator("dl > div").evaluateAll(nodes => nodes.map(node => {
+      const label = node.querySelector("dt")!.getBoundingClientRect(), value = node.querySelector("dd")!.getBoundingClientRect();
+      return value.top - label.bottom;
+    }));
+    for (const gap of fields) expect(gap).toBeGreaterThanOrEqual(4);
+    await page.evaluate(() => scrollTo(0, 0));
+    await page.screenshot({ path: testInfo.outputPath(`combined-notifications-${width}-viewport.png`) });
+    await page.screenshot({ path: testInfo.outputPath(`combined-notifications-${width}-full.png`), fullPage: true });
+  }
+  expect(errors).toEqual([]);
 });

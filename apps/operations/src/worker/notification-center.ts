@@ -5,6 +5,12 @@ import { evaluatePermission, loadGrants } from "./acl";
 import { base64Url, sha256 } from "./crypto";
 import { d1TablesPresent } from "./schema-readiness";
 import { authorizeClientFolderNotificationBatch, readClientFolderNotificationBatchScope } from "./client-folder-notification-batches";
+import {
+  nativeDeliveryNotificationsReady, nativeNotificationCandidates,
+  readNativeDeliveryNotificationScope, authorizeNativeDeliveryNotification,
+  presentNativeDeliveryNotification, readNativeDeliveryNotification,
+  controlNativeDeliveryNotification,
+} from "./native-delivery-notification-center";
 import type { Env, GrantRow, StaffPrincipal } from "./types";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
@@ -20,6 +26,10 @@ interface BatchRow {
 interface Receipt { batch_id: string; action: Action; fingerprint: string; result_revision: number; result_status: "pending" | "cancelled" }
 type Scope = NonNullable<Awaited<ReturnType<typeof readClientFolderNotificationBatchScope>>>;
 interface Cursor { v: 1; view: View; q: string; policy: string; after: [string,string]; expires: number }
+interface CombinedCursor {
+  v: 2; view: View; q: string; policy: string; nativeReady: boolean;
+  legacyAfter: [string,string] | null; nativeAfter: [string,string] | null; expires: number;
+}
 const selectBatch = `SELECT batch.*,association.r2_prefix,account.status account_status,account.project_alpha_client_id,account.project_alpha_organization_id
   FROM client_folder_notification_batches batch
   JOIN client_folder_associations association ON association.id=batch.association_id
@@ -50,6 +60,14 @@ async function policy(env: Env, principal: StaffPrincipal) {
   const proof = await sha256(JSON.stringify([principal.id, grants.map(row => JSON.stringify(row)).sort()]));
   return { grants, proof };
 }
+async function combinedPolicy(env: Env, principal: StaffPrincipal) {
+  const [access, staff] = await Promise.all([policy(env,principal),
+    env.OPS_DB.withSession("first-primary").prepare("SELECT email,access_subject,project_alpha_user_id FROM staff_users WHERE id=? AND status='active'")
+      .bind(principal.id).first<{email:string;access_subject:string|null;project_alpha_user_id:string|null}>()]);
+  if (!staff || staff.email !== principal.email || staff.access_subject !== principal.accessSubject || staff.project_alpha_user_id !== principal.projectAlphaUserId)
+    throw new HTTPException(403,{message:"Current staff authentication required"});
+  return {grants:access.grants,proof:await sha256(JSON.stringify([access.proof,staff]))};
+}
 // Encrypt cursors, not just sign them: a bounded scan may end at a notification
 // the caller cannot see, and its identifier/date must not become cursor metadata.
 async function cursorKey(env: Env) {
@@ -61,10 +79,106 @@ function unbase64(value: string): Uint8Array<ArrayBuffer> {
   if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("invalid-base64");
   return Uint8Array.from(atob(value.replaceAll("-", "+").replaceAll("_", "/")), c => c.charCodeAt(0));
 }
-async function encodeCursor(env: Env, principal: StaffPrincipal, value: Cursor) {
+async function encodeCursor(env: Env, principal: StaffPrincipal, value: Cursor | CombinedCursor) {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const data = await crypto.subtle.encrypt({ name: "AES-GCM", iv, additionalData: new TextEncoder().encode(principal.id) }, await cursorKey(env), new TextEncoder().encode(JSON.stringify(value)));
   return `${base64Url(iv)}.${base64Url(new Uint8Array(data))}`;
+}
+
+async function decodeCombinedCursor(env: Env, principal: StaffPrincipal, value: string, view: View, q: string, proof: string, nativeReady: boolean): Promise<CombinedCursor> {
+  let cursor: CombinedCursor;
+  try {
+    if (value.length > 4096) throw new Error();
+    const [iv, data, extra] = value.split(".");
+    if (!iv || !data || extra !== undefined) throw new Error();
+    const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unbase64(iv), additionalData: new TextEncoder().encode(principal.id) }, await cursorKey(env), unbase64(data));
+    const after = z.tuple([z.string().min(1).max(64), z.string().min(1).max(128)]).nullable();
+    cursor = z.object({ v: z.literal(2), view: z.enum(["pending", "history"]), q: z.string().max(200), policy: z.string(),
+      nativeReady: z.boolean(), legacyAfter: after, nativeAfter: after, expires: z.number().int() }).strict()
+      .parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(plain)));
+  } catch { throw new HTTPException(400, { message: "Notification cursor is invalid" }); }
+  if (cursor.view !== view || cursor.q !== q || cursor.policy !== proof || cursor.nativeReady !== nativeReady || cursor.expires < Date.now()) changed();
+  return cursor;
+}
+
+/** One bounded server-side merge; independent scan positions retain each store's
+ * indexed ordering without exposing an unauthorized candidate in the cursor. */
+export async function listCombinedDeliveryNotifications(env: Env, principal: StaffPrincipal, query: { view?: string; q?: string; cursor?: string }) {
+  const view = query.view || "pending";
+  if (view !== "pending" && view !== "history") throw new HTTPException(400, { message: "Notification view is invalid" });
+  const q = cleanQuery(query.q || ""), access = await combinedPolicy(env, principal);
+  await ready(env);
+  const nativeReady = await nativeDeliveryNotificationsReady(env);
+  const cursor = query.cursor ? await decodeCombinedCursor(env, principal, query.cursor, view, q, access.proof, nativeReady) : null;
+  let legacyAfter = cursor?.legacyAfter ?? null, nativeAfter = cursor?.nativeAfter ?? null;
+  const legacy = await env.DELIVERY_DB.withSession("first-primary").prepare(`${selectBatch}
+    WHERE batch.status ${view === "pending" ? "IN ('pending','processing')" : "IN ('sent','cancelled','suppressed','failed')"}
+    ${legacyAfter ? "AND (batch.created_at<? OR (batch.created_at=? AND batch.id<?))" : ""}
+    ORDER BY batch.created_at DESC,batch.id DESC LIMIT 51`)
+    .bind(...(legacyAfter ? [legacyAfter[0], legacyAfter[0], legacyAfter[1]] : [])).all<BatchRow>();
+  const native = nativeReady ? await nativeNotificationCandidates(env, view, nativeAfter ?? undefined, 51) : [];
+  type NativeRow = (typeof native)[number];
+  type NativeScope = NonNullable<Awaited<ReturnType<typeof readNativeDeliveryNotificationScope>>>;
+  type Candidate = { kind: "folder_changes"; row: BatchRow; createdAt: string } | { kind: "portal_delivery"; row: NativeRow; createdAt: string };
+  const candidates: Candidate[] = [
+    ...legacy.results.map(row => ({ kind: "folder_changes" as const, row, createdAt: iso(row.created_at) })),
+    ...native.map(row => ({ kind: "portal_delivery" as const, row, createdAt: row.createdAt })),
+  ];
+  const descending = (a: string, b: string) => a === b ? 0 : a > b ? -1 : 1;
+  candidates.sort((a,b) => descending(a.createdAt,b.createdAt) || descending(a.kind,b.kind) || descending(a.row.id,b.row.id));
+  const legacyKey = (row: BatchRow) => JSON.stringify([row.account_id,row.logical_grant_id,row.association_id,row.recipient_identity_id]);
+  const legacyScopes = new Map<string, Scope | null>(), nativeScopes = new Map<string, NativeScope | null>();
+  const selected: Array<{ kind: "folder_changes"; row: BatchRow; scope: Scope } | { kind: "portal_delivery"; row: NativeRow; scope: NativeScope }> = [];
+  let examined = 0;
+  for (const candidate of candidates.slice(0,50)) {
+    examined += 1;
+    if (candidate.kind === "folder_changes") {
+      const row = candidate.row, key = legacyKey(row);
+      legacyAfter = [row.created_at,row.id];
+      if (!legacyScopes.has(key)) legacyScopes.set(key, await readClientFolderNotificationBatchScope(env,row));
+      const scope = legacyScopes.get(key);
+      if (!scope || !allowed(access.grants,principal,"delivery.share.audit",scope.divisionId)) continue;
+      const search = `${scope.accountName}\n${scope.prefix.split("/").filter(Boolean).at(-1) || ""}\n${scope.recipientEmail || ""}`.normalize("NFC").toLocaleLowerCase("en-US");
+      if (q && !search.includes(q)) continue;
+      selected.push({ kind: candidate.kind, row, scope });
+    } else {
+      const row = candidate.row;
+      nativeAfter = [row.createdAt,row.id];
+      if (!nativeScopes.has(row.scopeKey)) nativeScopes.set(row.scopeKey,await readNativeDeliveryNotificationScope(env,row));
+      const scope = nativeScopes.get(row.scopeKey);
+      if (!scope || !allowed(access.grants,principal,"delivery.share.audit",scope.divisionId)) continue;
+      const search = `${scope.sourceName}\n${scope.workspaceName}\n${scope.folderLabel}\n${scope.recipientEmail || ""}`.normalize("NFC").toLocaleLowerCase("en-US");
+      if (q && !search.includes(q)) continue;
+      selected.push({ kind: candidate.kind, row, scope });
+    }
+    if (selected.length === 25) break;
+  }
+  const items = [];
+  const checked = new Set<string>(), legacySendable = new Map<string, boolean>();
+  for (const entry of selected) {
+    if (entry.kind === "folder_changes") {
+      const key = legacyKey(entry.row);
+      if (!checked.has(`legacy:${key}`)) {
+        if (JSON.stringify(await readClientFolderNotificationBatchScope(env,entry.row)) !== JSON.stringify(entry.scope)) changed();
+        checked.add(`legacy:${key}`);
+      }
+      if (entry.row.status === "pending" && !legacySendable.has(key)) legacySendable.set(key,Boolean(await authorizeClientFolderNotificationBatch(env,entry.row)));
+      items.push({ ...presentation(entry.row,entry.scope,access.grants,principal,legacySendable.get(key) === true), kind: "folder_changes" as const });
+    } else {
+      const key = entry.row.scopeKey;
+      const sendable = entry.row.status === "pending" ? Boolean(await authorizeNativeDeliveryNotification(env,entry.row)) : false;
+      if (!checked.has(`native:${key}`)) {
+        if (JSON.stringify(await readNativeDeliveryNotificationScope(env,entry.row)) !== JSON.stringify(entry.scope)) changed();
+        checked.add(`native:${key}`);
+      }
+      items.push(presentNativeDeliveryNotification(entry.row,entry.scope,sendable,access.grants,principal));
+    }
+  }
+  if ((await combinedPolicy(env,principal)).proof !== access.proof || await nativeDeliveryNotificationsReady(env) !== nativeReady) changed();
+  return { items, nextCursor: examined < candidates.length ? await encodeCursor(env,principal,{ v:2, view,q,policy:access.proof,nativeReady,
+    legacyAfter,nativeAfter,expires:Date.now()+30*60_000 }) : null,
+    serverNow: new Date().toISOString(), coverage: "delivery_notifications_v2" as const,
+    availability: { folderChanges: true as const, nativeDeliveries: nativeReady } };
 }
 async function decodeCursor(env: Env, principal: StaffPrincipal, value: string, view: View, q: string, proof: string): Promise<Cursor> {
   let cursor: Cursor;
@@ -246,7 +360,31 @@ async function actionBody(request: Request): Promise<z.infer<typeof actions>> {
 }
 
 export function registerNotificationCenterRoutes(app: App): void {
-  app.get("/api/notifications/deliveries", async c => c.json(await listDeliveryNotificationBatches(c.env,c.get("principal"),c.req.query())));
+  app.get("/api/notifications/deliveries", async c => {
+    const params = new URL(c.req.url).searchParams;
+    for (const key of params.keys()) {
+      if (!["format", "view", "q", "cursor"].includes(key) || params.getAll(key).length !== 1)
+        throw new HTTPException(400, { message: "Notification list query is invalid" });
+    }
+    if (params.has("format") && params.get("format") !== "combined")
+      throw new HTTPException(400, { message: "Notification format is invalid" });
+    c.header("Cache-Control", "no-store");
+    return c.json(await (params.get("format") === "combined" ? listCombinedDeliveryNotifications : listDeliveryNotificationBatches)(c.env,c.get("principal"),c.req.query()));
+  });
+  app.get("/api/notifications/deliveries/portal_delivery/:id", async c => {
+    if (new URL(c.req.url).searchParams.size) throw new HTTPException(400, { message: "Notification detail query is invalid" });
+    c.header("Cache-Control", "no-store");
+    return c.json({ ...await readNativeDeliveryNotification(c.env,c.req.param("id"),c.get("principal")),
+      coverage: "delivery_notifications_v2" as const, availability: { folderChanges: true, nativeDeliveries: true } });
+  });
+  app.post("/api/notifications/deliveries/portal_delivery/:id/:action", async c => {
+    const action = c.req.param("action");
+    if (action !== "send-now" && action !== "cancel") throw new HTTPException(404, { message: "Notification action not found" });
+    if (new URL(c.req.url).searchParams.size) throw new HTTPException(400, { message: "Notification action query is invalid" });
+    const parsed = await actionBody(c.req.raw);
+    c.header("Cache-Control", "no-store");
+    return c.json({ ...await controlNativeDeliveryNotification(c.env,c.get("principal"),c.req.param("id"),action,parsed.expectedRevision,c.req.header("Idempotency-Key") || ""),kind: "portal_delivery" as const });
+  });
   app.get("/api/notifications/deliveries/:id", async c => {
     if (new URL(c.req.url).searchParams.size) throw new HTTPException(400, { message: "Notification detail query is invalid" });
     c.header("Cache-Control", "no-store");
@@ -255,8 +393,10 @@ export function registerNotificationCenterRoutes(app: App): void {
   app.post("/api/notifications/deliveries/:id/:action", async c => {
     const action = c.req.param("action");
     if (action !== "send-now" && action !== "cancel") throw new HTTPException(404, { message: "Notification action not found" });
+    if (new URL(c.req.url).searchParams.size) throw new HTTPException(400, { message: "Notification action query is invalid" });
     // The Operations /api middleware authenticates and enforces origin + CSRF.
     const parsed = await actionBody(c.req.raw);
+    c.header("Cache-Control", "no-store");
     return c.json(await controlDeliveryNotificationBatch(c.env,c.get("principal"),c.req.param("id"),action,parsed.expectedRevision,c.req.header("Idempotency-Key") || ""));
   });
 }

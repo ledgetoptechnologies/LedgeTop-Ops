@@ -50,11 +50,14 @@ Cancel, each evaluated against that current division. A division-specific deny
 does not hide unrelated authorized divisions. No notification-wide mutation
 exception is introduced: only the exact two POST control routes are delegated.
 
-Scope of this first increment is deliberately narrow: **legacy authenticated
+Scope of this first increment was deliberately narrow: **legacy authenticated
 client-folder change subscriptions only**. Initial folder-access messages,
 public-link mail, native workspace access notices, request mail, recipient
 editing, and a general staff inbox are not covered by this page or batch engine.
-The UI states this limitation. Those producers retain their existing contracts.
+Those producers retain their existing contracts unless explicitly covered by
+the later [native delivery notification increment](operations/native-delivery-notifications.md).
+That local increment adds typed native delivery-ready records and scoped staff
+controls, not general recipient selection or notifications for every upload.
 
 The lifecycle is:
 

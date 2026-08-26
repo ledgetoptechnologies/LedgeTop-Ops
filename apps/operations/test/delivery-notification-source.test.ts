@@ -16,6 +16,18 @@ const prefix = "jobs/shared/project/", email = "same-email@example.test";
 function asD1(db: DatabaseSync): D1Database {
   const adapter = {
     withSession: () => adapter,
+    async batch(statements: { run(): Promise<unknown> }[]) {
+      db.exec("BEGIN");
+      try {
+        const results = [];
+        for (const statement of statements) results.push(await statement.run());
+        db.exec("COMMIT");
+        return results;
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    },
     prepare(sql: string) {
       let bindings: SQLInputValue[] = [];
       const statement = {
@@ -40,7 +52,8 @@ describe("delivery notification source and live ownership", () => {
     db = new DatabaseSync(":memory:");
     for (const sql of migrations) { db.exec("BEGIN"); db.exec(sql); db.exec("COMMIT"); }
     env = { DELIVERY_DB: asD1(db), DELIVERY_BASE_URL: "https://client.example.test",
-      CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true" } as Env;
+      CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
+      CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true" } as Env;
     for (const name of ["primary", "secondary"]) {
       const source = `project-alpha:${name}`, workspace = `workspace-${name}`, generation = `generation-${name}`;
       db.prepare("INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id) VALUES(?,?,?)")
@@ -82,15 +95,15 @@ describe("delivery notification source and live ownership", () => {
       VALUES(?,?,?,'share_created',?,?)`).run(`notice-${name}`, `dedupe-${name}`, `share-${name}`, email,
         JSON.stringify({ projectName: "Project", shareUrl: "https://delivery.example.test/r/test-only" }));
   }
-  function portal(name: string) {
+  function portal(name: string, attempted = true) {
     receipt(name, "portal", `grant-${name}`);
     db.prepare(`INSERT INTO project_alpha_delivery_portal_grants
       (id,receipt_id,workspace_id,folder_binding_id,binding_source_version,audience_type,audience_public_id,audience_source_version,actor_id)
       VALUES(?,?,?,?,'binding-v1','principal','same-principal','principal-v1',?)`)
       .run(`grant-${name}`, `receipt-${name}`, `workspace-${name}`, `binding-${name}`, `delivery-${name}`);
     db.prepare(`INSERT INTO project_alpha_delivery_portal_notification_outbox
-      (id,receipt_id,grant_id,principal_public_id,principal_source_version,event_type)
-      VALUES(?,?,?,'same-principal','principal-v1','granted')`).run(`notice-${name}`, `receipt-${name}`, `grant-${name}`);
+      (id,receipt_id,grant_id,principal_public_id,principal_source_version,event_type,attempt_count)
+      VALUES(?,?,?,'same-principal','principal-v1','granted',?)`).run(`notice-${name}`, `receipt-${name}`, `grant-${name}`, attempted ? 1 : 0);
   }
 
   it("sends valid primary guest mail despite another source's identical prefix, IDs and email", async () => {
@@ -121,7 +134,7 @@ describe("delivery notification source and live ownership", () => {
     expect(db.prepare("SELECT status FROM delivery_notifications").get()?.status).toBe("failed");
   });
 
-  it("sends primary portal mail while terminally suppressing a synthetic secondary portal notice", async () => {
+  it("retains attempted primary portal mail while terminally suppressing a synthetic secondary portal notice", async () => {
     portal("primary"); portal("secondary");
     expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(1);
     expect(sendNotificationMail).toHaveBeenCalledTimes(1);
@@ -131,6 +144,21 @@ describe("delivery notification source and live ownership", () => {
     ]);
     expect(db.prepare("SELECT last_error FROM project_alpha_delivery_portal_notification_outbox WHERE id='notice-secondary'").get()?.last_error)
       .toBe("authorization-no-longer-live");
+  });
+
+  it("stages untouched primary portal mail without borrowing another source's overlapping recipient", async () => {
+    portal("primary", false); portal("secondary", false);
+    expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(0);
+    expect(sendNotificationMail).not.toHaveBeenCalled();
+    const staged = db.prepare("SELECT id,status,source_id FROM portal_delivery_notification_batches").all();
+    expect(staged).toEqual([{ id: expect.any(String), status: "pending", source_id: "project-alpha:primary" }]);
+    expect(db.prepare("SELECT last_error FROM project_alpha_delivery_portal_notification_outbox WHERE id='notice-secondary'").get()?.last_error)
+      .toBe("authorization-no-longer-live");
+    db.exec("UPDATE portal_delivery_notification_batches SET eligible_at=datetime('now','-1 second')");
+    expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(1);
+    expect(sendNotificationMail).toHaveBeenCalledTimes(1);
+    expect(sendNotificationMail).toHaveBeenCalledWith(env, expect.objectContaining({ to: email, messageIdKey: `native-batch-${staged[0]!.id}` }));
+    expect(db.prepare("SELECT status FROM portal_delivery_notification_batches").get()?.status).toBe("sent");
   });
 
   it.each(["guest", "portal"] as const)("suppresses %s mail when the owner's source revision no longer matches its binding", async kind => {
