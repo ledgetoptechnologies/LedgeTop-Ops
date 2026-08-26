@@ -28,6 +28,7 @@ import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
+import { deliveryViewCountText } from "./delivery-view-count";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
 import { OperationsNotifications } from "./OperationsNotifications";
@@ -2793,6 +2794,15 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
     : [];
   const searching = Boolean(searchQuery.trim());
   const items = searching ? searchState.items : folderItems;
+  const itemCountText = deliveryViewCountText({
+    items,
+    searching,
+    loading: searching
+      ? searchState.query !== searchQuery.trim() || searchState.loading
+      : loading || (!displayData && !error),
+    error: Boolean(searching ? searchState.error : error),
+    partial: Boolean(searching ? searchState.nextCursor : displayData?.nextCursor || displayData?.reconciliationNeeded),
+  });
   const [renderWindowStart,setRenderWindowStart]=useState(0);
   useEffect(()=>setRenderWindowStart(0),[prefix,searching]);
   useEffect(()=>{
@@ -3384,6 +3394,7 @@ function DeliveryWorkspaceV2({ session }: { session: Session }) {
         }}
       >
         <Card className="file-browser">
+          <p className="muted" role="status" aria-live="polite" aria-label="Current view item count">{itemCountText}</p>
           {searching && searchState.loading && items.length === 0 ? (
             <DeliverySkeleton />
           ) : loading && items.length === 0 ? (
