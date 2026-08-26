@@ -3,6 +3,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { registerVisibleTestSource } from "./helpers/project-alpha-connectors";
 
 const mocks = vi.hoisted(() => ({
   requirePermission: vi.fn(),
@@ -138,6 +139,7 @@ function setup(options: { withLinkSchema?: boolean } = {}) {
   if (withLinkSchema)
     database.exec(readFileSync(new URL("../migrations/0023_project_task_sop_links.sql", import.meta.url), "utf8"));
   database.exec(readFileSync(new URL("../migrations/0025_sop_assignment_permission.sql", import.meta.url), "utf8"));
+  database.exec(readFileSync(new URL("../migrations/0035_project_alpha_connectors.sql", import.meta.url), "utf8"));
   const addStaff = database.prepare("INSERT INTO staff_users VALUES (?,?,?,?)");
   for (const principal of Object.values(principals))
     addStaff.run(principal.id, principal.email, principal.displayName, principal.projectAlphaUserId);
@@ -234,6 +236,7 @@ describe("Project and Task direct SOP links", () => {
 
   it("does not infer secondary-source SOP access from a primary staff assignment", async () => {
     const state = setup();
+    await registerVisibleTestSource(state.env.OPS_DB,"project-alpha:secondary");
     for (const kind of ["project", "task"] as const) {
       const id = `${kind}-1`;
       const path = `/api/work-contexts/${kind}/${id}/sops`;

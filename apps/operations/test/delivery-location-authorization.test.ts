@@ -2,6 +2,7 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { listDeliveryFolderLocations, resolveDeliveryLocationAsset } from "../src/worker/delivery-locations";
 import type { Env, StaffPrincipal } from "../src/worker/types";
+import { applyConnectorSchema } from "./helpers/project-alpha-connectors";
 
 const principal: StaffPrincipal = {
   id: "staff-a",
@@ -39,6 +40,7 @@ describe("Operations delivery location authorization", () => {
     });
     opsDb = (await miniflare.getD1Database("OPS_DB")) as unknown as D1Database;
     deliveryDb = (await miniflare.getD1Database("DELIVERY_DB")) as unknown as D1Database;
+    await applyConnectorSchema(opsDb);
 
     await applySql(
       opsDb,
@@ -47,7 +49,7 @@ describe("Operations delivery location authorization", () => {
        CREATE TABLE local_staff_role_assignments(staff_id TEXT NOT NULL,role_id TEXT NOT NULL,scope TEXT NOT NULL,division_id TEXT);
        CREATE TABLE staff_permission_overrides(staff_id TEXT NOT NULL,permission_key TEXT NOT NULL,effect TEXT NOT NULL,scope TEXT NOT NULL,division_id TEXT);
        CREATE TABLE project_folders(project_id TEXT PRIMARY KEY,division_id TEXT NOT NULL,r2_prefix TEXT NOT NULL);
-       CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT);`,
+       CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');`,
     );
     await applySql(
       deliveryDb,

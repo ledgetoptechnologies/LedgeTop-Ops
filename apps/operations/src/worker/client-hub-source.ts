@@ -1,5 +1,6 @@
 import type { Env } from "./types";
 import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
+import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 
 export function isBusinessProjectionSource(value: string): value is `project-alpha:${string}` {
   return /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(value);
@@ -56,7 +57,8 @@ export async function resolveClientHubSourceRoot(
   const row = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id,source.name display_name,
     ${kind === "organization" ? "NULL" : "source.organization_id"} organization_id,source.active,source.payload_json,
     ${validatedUniquePublicIdExpression(table, "source")} pa_public_id
-    FROM ${table} source WHERE source.id=? AND source.projection_source_id=?`).bind(internalId, sourceId)
+    FROM ${table} source WHERE source.id=? AND source.projection_source_id=?
+      AND ${projectAlphaReadVisibleSql("source.projection_source_id")}`).bind(internalId, sourceId)
     .first<Omit<ClientHubSourceRoot, "mapping_status"> & { payload_json: string }>();
   if (!row) return null;
   const parsed = readClientHubSourcePublicId(row.payload_json);

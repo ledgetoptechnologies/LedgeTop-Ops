@@ -2,6 +2,7 @@ import { Miniflare } from "miniflare";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it } from "vitest";
 import { isAlphaPublicId, readClientHubSourcePublicId, resolveClientHubSourceRoot, sourcePublicIdExpression } from "../src/worker/client-hub-source";
+import { applyConnectorSchema, registerVisibleTestSource } from "./helpers/project-alpha-connectors";
 
 let runtime: Miniflare | undefined;
 afterEach(async () => { await runtime?.dispose(); runtime = undefined; });
@@ -26,6 +27,7 @@ describe("explicit Alpha source public IDs", () => {
     runtime = new Miniflare({ compatibilityDate: "2026-08-06", modules: true,
       script: "export default { fetch(){return new Response('ok')} }", d1Databases: { OPS_DB: "source-contract" } });
     const db = await runtime.getD1Database("OPS_DB") as unknown as D1Database;
+    await applyConnectorSchema(db);
     await db.exec("CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary'); CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');");
     await db.exec(readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8")
       .replace(/^\s*--.*$/gm, "").replace(/\s*\n\s*/g, " "));
@@ -40,6 +42,8 @@ describe("explicit Alpha source public IDs", () => {
     expect(await resolveClientHubSourceRoot({ OPS_DB: db }, "organization", "42"))
       .toMatchObject({ pa_public_id: publicId, mapping_status: "mapped" });
     expect(await resolveClientHubSourceRoot({ OPS_DB: db }, "organization", "secondary-42")).toBeNull();
+    expect(await resolveClientHubSourceRoot({ OPS_DB: db }, "organization", "secondary-42", "project-alpha:secondary")).toBeNull();
+    await registerVisibleTestSource(db, "project-alpha:secondary");
     expect(await resolveClientHubSourceRoot({ OPS_DB: db }, "organization", "secondary-42", "project-alpha:secondary"))
       .toMatchObject({ id: "secondary-42", pa_public_id: publicId, mapping_status: "mapped" });
     await db.prepare("INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('99','Inactive collision',0,?)").bind(JSON.stringify({ id: 99, public_id: publicId })).run();

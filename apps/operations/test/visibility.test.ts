@@ -3,6 +3,7 @@ import type { Permission } from "@ltds/shared";
 import type { SqlScope } from "../src/worker/acl";
 import type { StaffPrincipal } from "../src/worker/types";
 import { employeePermissions, paCalendarFilter, paProjectFilter, paResourceFilter } from "../src/worker/visibility";
+import { projectAlphaReadVisibleSql } from "../src/worker/project-alpha-read-visibility";
 
 const employee: StaffPrincipal = { id: "staff-7", email: "pilot@example.com", displayName: "Pilot", accessSubject: "sub-7", projectAlphaUserId: "7" };
 const scope: SqlScope = { global: false, divisions: ["division-30"], assigned: false, own: false, deniedDivisions: [], deniedGlobal: false };
@@ -56,16 +57,16 @@ describe("operations visibility", () => {
     expect(filter.values).toEqual(["7", "7"]);
   });
 
-  it("gives administrators global active-record visibility", () => {
-    expect(paResourceFilter(scope, employee, true, "o", "operation")).toEqual({ sql: "o.active=1", values: [] });
-    expect(paProjectFilter(scope, employee, true)).toEqual({ sql: "p.active=1", values: [] });
+  it("gives administrators active records only from visible sources", () => {
+    expect(paResourceFilter(scope, employee, true, "o", "operation")).toEqual({ sql: `o.active=1 AND ${projectAlphaReadVisibleSql("o.projection_source_id")}`, values: [] });
+    expect(paProjectFilter(scope, employee, true)).toEqual({ sql: `p.active=1 AND ${projectAlphaReadVisibleSql("p.projection_source_id")}`, values: [] });
   });
 
   it("requires an LTDS-local explicit all-operations grant before a synced employee can see all records", () => {
     const globalScope: SqlScope = { ...scope, global: true };
     expect(paResourceFilter(globalScope, employee, false, "o", "operation")).not.toEqual({ sql: "o.active=1", values: [] });
-    expect(paResourceFilter(globalScope, employee, false, "o", "operation", true)).toEqual({ sql: "o.active=1", values: [] });
-    expect(paProjectFilter(globalScope, employee, false, true)).toEqual({ sql: "p.active=1", values: [] });
-    expect(paCalendarFilter(globalScope, employee, false, "e", true)).toEqual({ sql: "e.active=1", values: [] });
+    expect(paResourceFilter(globalScope, employee, false, "o", "operation", true)).toEqual({ sql: `o.active=1 AND ${projectAlphaReadVisibleSql("o.projection_source_id")}`, values: [] });
+    expect(paProjectFilter(globalScope, employee, false, true)).toEqual({ sql: `p.active=1 AND ${projectAlphaReadVisibleSql("p.projection_source_id")}`, values: [] });
+    expect(paCalendarFilter(globalScope, employee, false, "e", true)).toEqual({ sql: `e.active=1 AND ${projectAlphaReadVisibleSql("e.projection_source_id")}`, values: [] });
   });
 });

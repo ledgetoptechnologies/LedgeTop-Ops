@@ -17,9 +17,10 @@ const CONTROL_PLANE_ATTEMPTS = 3;
 function retryable(response: Response): boolean { return response.status === 429 || response.status >= 500; }
 async function delay(milliseconds: number): Promise<void> { await new Promise((resolve) => setTimeout(resolve,milliseconds)); }
 
-async function boundedFetch(input: string, init: RequestInit = {}): Promise<Response> {
+async function boundedFetch(input: string, init: RequestInit = {}, authorize?: () => Promise<void>): Promise<Response> {
   let lastError: unknown;
   for(let attempt=1;attempt<=CONTROL_PLANE_ATTEMPTS;attempt+=1){
+    await authorize?.();
     try {
       const response=await fetch(input,{...init,signal:AbortSignal.timeout(CONTROL_PLANE_TIMEOUT_MS)});
       if(!retryable(response)||attempt===CONTROL_PLANE_ATTEMPTS)return response;
@@ -57,10 +58,11 @@ async function responseEnvelope<T>(response: Response): Promise<CloudflareEnvelo
 async function loadAccessGroup(
   env: ReconciliationEnvironment,
   headers: Record<string, string>,
+  authorize?: () => Promise<void>,
 ): Promise<{ endpoint: string; group: AccessGroup }> {
   const accountEndpoint = `https://api.cloudflare.com/client/v4/accounts/${encodeURIComponent(env.CF_ACCOUNT_ID)}/access/groups`;
   const configuredEndpoint = `${accountEndpoint}/${encodeURIComponent(env.CF_ACCESS_GROUP_ID)}`;
-  const configuredResponse = await boundedFetch(configuredEndpoint, { headers });
+  const configuredResponse = await boundedFetch(configuredEndpoint, { headers }, authorize);
   const configuredEnvelope = await responseEnvelope<AccessGroup>(configuredResponse);
   if (configuredResponse.ok && configuredEnvelope.success && configuredEnvelope.result) {
     return { endpoint: configuredEndpoint, group: configuredEnvelope.result };
@@ -71,7 +73,7 @@ async function loadAccessGroup(
   // rotation does not permanently block Project Alpha provisioning.
   const groupName = String(env.CF_ACCESS_GROUP_NAME ?? "").trim();
   if (groupName !== "") {
-    const listResponse = await boundedFetch(`${accountEndpoint}?per_page=50`, { headers });
+    const listResponse = await boundedFetch(`${accountEndpoint}?per_page=50`, { headers }, authorize);
     const listEnvelope = await responseEnvelope<AccessGroup[]>(listResponse);
     if (!listResponse.ok || !listEnvelope.success || !Array.isArray(listEnvelope.result)) {
       throw cloudflareError("access-group-list", listResponse, listEnvelope);
@@ -100,10 +102,10 @@ export async function desiredAccessEmails(db: D1Database): Promise<string[]> {
   return result.results.map((row) => row.email).filter(Boolean);
 }
 
-export async function reconcileAccessGroup(env: ReconciliationEnvironment): Promise<string[]> {
+export async function reconcileAccessGroup(env: ReconciliationEnvironment, authorize?: () => Promise<void>): Promise<string[]> {
   if (![env.CF_ACCOUNT_ID, env.CF_ACCESS_GROUP_ID, env.CF_ACCESS_GROUP_API_TOKEN].every(configured)) throw new Error("access-group-configuration-invalid");
   const headers = { Authorization: `Bearer ${env.CF_ACCESS_GROUP_API_TOKEN}`, "Content-Type": "application/json", Accept: "application/json" };
-  const { endpoint, group } = await loadAccessGroup(env, headers);
+  const { endpoint, group } = await loadAccessGroup(env, headers, authorize);
   const emails = await desiredAccessEmails(env.OPS_DB);
   const currentEmails=(group.include??[]).map((rule)=>{
     if(!rule||typeof rule!=="object"||!("email" in rule))throw new Error("access-group-unmanaged-include-rule");
@@ -122,7 +124,7 @@ export async function reconcileAccessGroup(env: ReconciliationEnvironment): Prom
       require: group.require ?? [],
       is_default: group.is_default ?? false,
     }),
-  });
+  }, authorize);
   const updateEnvelope = await responseEnvelope<AccessGroup>(updateResponse);
   if (!updateResponse.ok || !updateEnvelope.success) throw cloudflareError("access-group-update", updateResponse, updateEnvelope);
   return emails;

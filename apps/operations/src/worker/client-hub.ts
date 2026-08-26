@@ -11,6 +11,7 @@ import { listClientHubBusinessProjects, BUSINESS_PROJECT_FILTERS, type BusinessP
 import { readClientHubBusinessProjectDetail } from "./client-hub-business-project-detail";
 import { isPortalIdentityCollection, listPortalIdentityCollection, listPortalIdentityPage, portalIdentityQuery } from "./client-portal-identity-read";
 import type { Env, StaffPrincipal } from "./types";
+import { requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
 
 type AppEnv = {
   Bindings: Env;
@@ -60,7 +61,7 @@ function routeKind(value: string): ClientKind | null {
 async function readPortalRoot(env: Env, kind: ClientKind, workspaceId: string): Promise<ClientHubWorkspace | null> {
   return database(env).prepare(`SELECT id,root_type,display_name,status,legacy_account_id,
     pa_organization_public_id,pa_client_public_id FROM portal_v2_workspaces
-    WHERE id=? AND root_type=? AND status<>'closed'`).bind(workspaceId, kind).first<ClientHubWorkspace>();
+    WHERE id=? AND root_type=? AND project_alpha_source_id='project-alpha:primary' AND status<>'closed'`).bind(workspaceId, kind).first<ClientHubWorkspace>();
 }
 
 function portalDirectoryRoot(portal: ClientHubWorkspace): WorkspaceRow {
@@ -108,6 +109,8 @@ async function businessAlias(env: Env, root: WorkspaceRow, portal: ClientHubWork
 }
 
 async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRow> {
+  const visibility = await requireProjectAlphaReadVisibility(env, root.source_id);
+  root = { ...root, source_name: visibility.display_name! };
   const db = database(env);
   if (root.root_namespace === "account" && root.source_id === "delivery:local") {
     const account = await db.prepare(`SELECT id,display_name,status FROM client_accounts WHERE id=?
@@ -126,7 +129,7 @@ async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRo
       workspace_id: portal.id, business_id: null, pa_public_id: null });
     if (resolved.workspace) {
       const alias = await businessAlias(env, root, portal);
-      if (alias) return alias;
+      if (alias) return { ...alias, source_name: visibility.display_name! };
     }
     // The portal namespace identifies the workspace itself, not a business ID.
     // Its legacy account bridge is never enough to invent business ownership.
@@ -168,6 +171,7 @@ async function resolveDetailContext(env: Env, principal: StaffPrincipal, kind: C
   requireHubAccess(access);
   if (!access.directory)
     throw new HTTPException(403, { message: "Global team.view permission required" });
+  if (sourceId) await requireProjectAlphaReadVisibility(env, sourceId);
   // Portal aliases outlive index folding into a business root. Resolve their
   // exact live workspace even after the old materialized portal row is swept.
   const portal = sourceId === "project-alpha:primary" && rootNamespace === "portal"
@@ -292,7 +296,7 @@ export function registerClientHubRoutes(app: App): void {
     requireHubAccess(access);
     const limit = c.req.query("limit");
     const result = access.directory ? await listClientHubRoots(c.env, c.get("principal"), {
-      q: c.req.query("q"), kind: c.req.query("kind"), cursor: c.req.query("cursor"),
+      q: c.req.query("q"), kind: c.req.query("kind"), source: c.req.query("source"), cursor: c.req.query("cursor"),
       limit: limit === undefined ? undefined : /^\d+$/.test(limit) ? Number(limit) : Number.NaN,
     }) : { clients: [], nextCursor: null };
     return c.json({ ...result, capabilities: access });

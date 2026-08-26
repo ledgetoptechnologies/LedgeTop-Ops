@@ -81,7 +81,10 @@ type NavigationGeometry = {
 
 function navigationCoordinate(value: unknown): [number, number] | null {
   if (!Array.isArray(value) || value.length < 2) return null;
-  const longitude = Number(value[0]), latitude = Number(value[1]);
+  // Missing or malformed data is not a location. In particular, Number(null)
+  // would invent a destination at zero while genuine numeric zero is valid.
+  const [longitude, latitude] = value;
+  if (typeof longitude !== "number" || typeof latitude !== "number") return null;
   return Number.isFinite(longitude) && Number.isFinite(latitude) &&
     longitude >= -180 && longitude <= 180 && latitude >= -90 && latitude <= 90
     ? [longitude, latitude]

@@ -57,6 +57,9 @@ import {
 } from "./delivery";
 import { searchShareRecipients, shareDirectoryRecipientsEnabled } from "./share-recipients";
 import { syncProjectAlpha } from "./project-alpha";
+import { registerProjectAlphaConnectorAdminRoutes } from "./project-alpha-connector-admin";
+import { ProjectAlphaConnectorError } from "./project-alpha-connectors";
+import { ClientHubSourcesChangedError } from "./client-hub-directory";
 import { buildConnectionSummaries, projectAlphaHealthIsStale } from "./integration-health";
 import {
   auditStatement,
@@ -2987,6 +2990,7 @@ app.get("/api/admin/audit", async (c) => {
     ).results,
   });
 });
+registerProjectAlphaConnectorAdminRoutes(app);
 app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
   const principal = c.get("principal");
   await requireGlobal(c.env, principal, "integrations.manage");
@@ -3015,6 +3019,14 @@ app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
 
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {
+  if (error instanceof ClientHubSourcesChangedError)
+    return c.json({ error: error.message, code: error.code }, 409);
+  if (error instanceof Error && error.message.includes("pa_connector_active_revision_guard"))
+    return c.json({ error: "Connection configuration changed. Refresh its status before retrying.", code: "PROJECT_ALPHA_CONNECTOR_CHANGED" }, 409);
+  if (error instanceof ProjectAlphaConnectorError) {
+    const status = error.code === "invalid" ? 400 : ["changed", "conflict", "capacity"].includes(error.code) ? 409 : 503;
+    return c.json({ error: error.message, code: `PROJECT_ALPHA_CONNECTOR_${error.code.toUpperCase()}` }, status);
+  }
   const schemaOutdated = c.req.path.startsWith("/api/client-service-requests") &&
     missingD1SchemaObject(error);
   const status = schemaOutdated

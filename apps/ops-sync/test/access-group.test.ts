@@ -65,4 +65,14 @@ describe("Access rule-group reconciliation", () => {
     const env={OPS_DB:db,CF_ACCOUNT_ID:"account",CF_ACCESS_GROUP_ID:"group",CF_ACCESS_GROUP_API_TOKEN:"token"};
     await expect(reconcileAccessGroup(env)).rejects.toThrow("access-group-update-403");
   });
+
+  it("rechecks current connector authority before the PUT after an earlier authorized GET", async () => {
+    const db={prepare:vi.fn(()=>({bind:()=>({all:async()=>({results:[{email:"user@example.com"}]})})}))} as unknown as D1Database;
+    const fetchMock=vi.fn(async()=>Response.json({success:true,result:{id:"group",name:"LTDS Ops Users",include:[],exclude:[],require:[]}}));
+    vi.stubGlobal("fetch",fetchMock);
+    const authorize=vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("project-alpha-connector-stale"));
+    await expect(reconcileAccessGroup({OPS_DB:db,CF_ACCOUNT_ID:"account",CF_ACCESS_GROUP_ID:"group",CF_ACCESS_GROUP_API_TOKEN:"token"},authorize)).rejects.toThrow("project-alpha-connector-stale");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(authorize).toHaveBeenCalledTimes(2);
+  });
 });

@@ -7,8 +7,27 @@ import {
   projectAlphaSourceReferences,
   type ProjectAlphaSourceContext,
 } from "../../operations/src/worker/project-alpha-source";
+import { assertProjectAlphaConnectorProof, connectorFenceStatement, type ProjectAlphaConnectorProof } from "../../operations/src/worker/project-alpha-connectors";
 
 export type ProjectionResult = "applied" | "duplicate" | "ignored";
+
+async function fencedBatch<T = unknown>(env: Env, proof: ProjectAlphaConnectorProof | undefined,
+  statements: D1PreparedStatement[]): Promise<D1Result<T>[]> {
+  if (!proof) return env.OPS_DB.batch<T>(statements);
+  const fence = connectorFenceStatement(env.OPS_DB,proof);
+  const results = await env.OPS_DB.batch<T>([fence,...statements]);
+  return results.slice(1);
+}
+
+function mappingDatabase(env: Env, proof: ProjectAlphaConnectorProof | undefined): Pick<D1Database,"prepare"|"batch"> {
+  return {prepare: query => env.OPS_DB.prepare(query), batch: statements => fencedBatch(env,proof,statements)};
+}
+
+async function validateSourceProof(env: Env, source: ProjectAlphaSourceContext, proof?: ProjectAlphaConnectorProof): Promise<void> {
+  if (!proof) return; // Existing internal callers do not expose an HTTP trust seam.
+  if (source.sourceId !== proof.sourceId) throw new Error("project-alpha-connector-source-mismatch");
+  await assertProjectAlphaConnectorProof(env,proof);
+}
 
 function staffId(userId: string): string { return `staff-pa-${userId.replace(/[^a-zA-Z0-9_-]/g, "-")}`; }
 
@@ -40,17 +59,17 @@ async function refreshGlobalProjection(env:Env,source:ProjectAlphaSourceContext,
   if(refreshed?.owner_event_id!==ownerEventId)throw new Error("projection-global-lease-lost");
 }
 
-async function applyEntitlementEventLocked(env: Env, source: ProjectAlphaSourceContext, event: EntitlementEvent, payloadHash: string): Promise<ProjectionResult> {
+async function applyEntitlementEventLocked(env: Env, source: ProjectAlphaSourceContext, event: EntitlementEvent, payloadHash: string, proof?: ProjectAlphaConnectorProof): Promise<ProjectionResult> {
   const receipt = await env.OPS_DB.prepare("SELECT payload_hash,status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?").bind(source.sourceId,event.event_id).first<{ payload_hash: string; status: string }>();
   if (receipt) {
     if (receipt.payload_hash !== payloadHash) throw new Error("event-id-conflict");
     if (receipt.status === "completed" || receipt.status === "ignored") return "duplicate";
   } else {
-    await env.OPS_DB.prepare(`INSERT INTO integration_event_receipts (projection_source_id,event_id,integration,event_type,user_id,occurred_at,payload_hash,status) VALUES (?,?,'project-alpha',?,?,?,?, 'pending')`)
-      .bind(source.sourceId,event.event_id,event.event_type,event.user.id,event.occurred_at,payloadHash).run();
+    await fencedBatch(env,proof,[env.OPS_DB.prepare(`INSERT INTO integration_event_receipts (projection_source_id,event_id,integration,event_type,user_id,occurred_at,payload_hash,status) VALUES (?,?,'project-alpha',?,?,?,?, 'pending')`)
+      .bind(source.sourceId,event.event_id,event.event_type,event.user.id,event.occurred_at,payloadHash)]);
   }
 
-  const ids = await prepareProjectAlphaSourceRecords(env.OPS_DB,source,[
+  const ids = await prepareProjectAlphaSourceRecords(mappingDatabase(env,proof),source,[
     {kind:"user",externalId:event.user.id},
     {kind:"application_entitlement",externalId:`entitlement-${event.user.id}`},
   ]);
@@ -58,13 +77,13 @@ async function applyEntitlementEventLocked(env: Env, source: ProjectAlphaSourceC
   const entitlementId = ids.get("application_entitlement",`entitlement-${event.user.id}`);
   const latest = await env.OPS_DB.prepare("SELECT last_event_at FROM pa_application_entitlements WHERE projection_source_id=? AND user_id=?").bind(source.sourceId,userId).first<{ last_event_at: string | null }>();
   if (latest?.last_event_at && (Date.parse(event.occurred_at) < Date.parse(latest.last_event_at) || (!receipt && Date.parse(event.occurred_at) === Date.parse(latest.last_event_at)))) {
-    await env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='ignored',processed_at=datetime('now'),last_error=NULL WHERE projection_source_id=? AND event_id=?").bind(source.sourceId,event.event_id).run();
+    await fencedBatch(env,proof,[env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='ignored',processed_at=datetime('now'),last_error=NULL WHERE projection_source_id=? AND event_id=?").bind(source.sourceId,event.event_id)]);
     return "ignored";
   }
 
   const enabled = event.entitlement.enabled && event.user.active && event.event_type !== "application_entitlement.revoked";
   const syncMarker = `event:${event.event_id}`;
-  await env.OPS_DB.batch([
+  await fencedBatch(env,proof,[
     env.OPS_DB.prepare(`INSERT INTO pa_users (projection_source_id,id,email,display_name,role,active,payload_json,last_sync_id) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET email=excluded.email,display_name=excluded.display_name,active=excluded.active,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,updated_at=datetime('now') WHERE pa_users.projection_source_id=excluded.projection_source_id`).bind(source.sourceId,userId,event.user.email,event.user.display_name,null,event.user.active?1:0,JSON.stringify(event.user),syncMarker),
     env.OPS_DB.prepare(`INSERT INTO pa_application_entitlements (projection_source_id,id,user_id,application_key,enabled,role_key,business_unit_ids_json,payload_json,last_event_at,last_sync_id,active) VALUES (?,?,?,?,?,?,?,?,?,?,1) ON CONFLICT(user_id) DO UPDATE SET application_key=excluded.application_key,enabled=excluded.enabled,role_key=excluded.role_key,business_unit_ids_json=excluded.business_unit_ids_json,payload_json=excluded.payload_json,last_event_at=excluded.last_event_at,last_sync_id=excluded.last_sync_id,active=1,updated_at=datetime('now') WHERE pa_application_entitlements.projection_source_id=excluded.projection_source_id`).bind(source.sourceId,entitlementId,userId,event.entitlement.application_key,enabled?1:0,event.entitlement.role_key,JSON.stringify(event.entitlement.business_unit_ids),JSON.stringify(event.entitlement),event.occurred_at,syncMarker),
   ]);
@@ -73,7 +92,7 @@ async function applyEntitlementEventLocked(env: Env, source: ProjectAlphaSourceC
   if (!protectedStaff) {
     const existing = await env.OPS_DB.prepare("SELECT id FROM staff_users WHERE project_alpha_user_id=? OR lower(email)=? ORDER BY CASE WHEN project_alpha_user_id=? THEN 0 ELSE 1 END LIMIT 1").bind(event.user.id,event.user.email,event.user.id).first<{ id: string }>();
     const id = existing?.id ?? staffId(event.user.id);
-    await env.OPS_DB.batch([
+    await fencedBatch(env,proof,[
       env.OPS_DB.prepare(`INSERT INTO staff_users (id,email,display_name,project_alpha_user_id,status,provisioning_source) VALUES (?,?,?,?,?,'project-alpha') ON CONFLICT(id) DO UPDATE SET email=excluded.email,display_name=excluded.display_name,project_alpha_user_id=excluded.project_alpha_user_id,status=excluded.status,provisioning_source='project-alpha',access_subject=CASE WHEN excluded.status='inactive' THEN NULL ELSE access_subject END,updated_at=datetime('now')`).bind(id,event.user.email,event.user.display_name,event.user.id,enabled?"active":"inactive"),
       env.OPS_DB.prepare("DELETE FROM staff_role_assignments WHERE staff_id=? AND role_id<>'role-owner'").bind(id),
       env.OPS_DB.prepare("DELETE FROM staff_divisions WHERE staff_id=?").bind(id),
@@ -81,13 +100,13 @@ async function applyEntitlementEventLocked(env: Env, source: ProjectAlphaSourceC
     if (enabled) {
       const roleKey = event.entitlement.role_key;
       if (roleKey === "role-admin") {
-        await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-admin','global',NULL,'global') ON CONFLICT(id) DO NOTHING")
-          .bind(`assignment-pa-${event.user.id}-global`,id).run();
+        await fencedBatch(env,proof,[env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-admin','global',NULL,'global') ON CONFLICT(id) DO NOTHING")
+          .bind(`assignment-pa-${event.user.id}-global`,id)]);
       } else {
         // Keep incremental authorization identical to daily recovery: PA
         // assignments grant visibility; non-admin entitlement labels do not.
-        await env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-operator','assigned',NULL,'assigned') ON CONFLICT(id) DO NOTHING")
-          .bind(`assignment-pa-${event.user.id}-assigned`,id).run();
+        await fencedBatch(env,proof,[env.OPS_DB.prepare("INSERT INTO staff_role_assignments (id,staff_id,role_id,scope,division_id,scope_key) VALUES (?,?,'role-operator','assigned',NULL,'assigned') ON CONFLICT(id) DO NOTHING")
+          .bind(`assignment-pa-${event.user.id}-assigned`,id)]);
       }
     }
   }
@@ -98,14 +117,15 @@ export async function applyEntitlementEvent(env: Env, event: EntitlementEvent, p
   return applyEntitlementEventForSource(env,PRIMARY_PROJECT_ALPHA_SOURCE,event,payloadHash);
 }
 
-export async function applyEntitlementEventForSource(env: Env, source: ProjectAlphaSourceContext, event: EntitlementEvent, payloadHash: string): Promise<ProjectionResult> {
+export async function applyEntitlementEventForSource(env: Env, source: ProjectAlphaSourceContext, event: EntitlementEvent, payloadHash: string, proof?: ProjectAlphaConnectorProof): Promise<ProjectionResult> {
   source=createProjectAlphaSourceContext(source.sourceId);
   // Staff authority is unresolved for additional producers. Reject before even
   // reserving a lease/receipt; their ordinary users remain snapshot business data.
   if(!source.staffAuthority)throw new Error("projection-source-authority-unsupported");
+  await validateSourceProof(env,source,proof);
   await claimGlobalProjection(env,source,event.event_id);
   let processingError: unknown;
-  try { return await applyEntitlementEventLocked(env,source,event,payloadHash); }
+  try { return await applyEntitlementEventLocked(env,source,event,payloadHash,proof); }
   catch(error) { processingError=error; throw error; }
   finally {
     try { await releaseGlobalProjection(env,source,event.event_id); }
@@ -221,10 +241,10 @@ async function releaseProjectionEntity(env: Env, source: ProjectAlphaSourceConte
     .bind(source.sourceId,event.projection.entity_type,event.projection.entity_id,event.event_id).run();
 }
 
-async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceContext, event: ProjectionEvent, payloadHash: string): Promise<ProjectionResult> {
+async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceContext, event: ProjectionEvent, payloadHash: string, proof?: ProjectAlphaConnectorProof): Promise<ProjectionResult> {
   const receipt=await env.OPS_DB.prepare("SELECT payload_hash,status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?").bind(source.sourceId,event.event_id).first<{payload_hash:string;status:string}>();
   if(receipt){if(receipt.payload_hash!==payloadHash)throw new Error("event-id-conflict");if(receipt.status==="completed"||receipt.status==="ignored")return "duplicate";}
-  else await env.OPS_DB.prepare("INSERT INTO integration_event_receipts (projection_source_id,event_id,integration,event_type,user_id,occurred_at,payload_hash,status) VALUES (?,?,'project-alpha',?,?,?,?, 'pending')").bind(source.sourceId,event.event_id,event.event_type,value(event.projection.data,"user_id")??event.projection.entity_id,event.occurred_at,payloadHash).run();
+  else await fencedBatch(env,proof,[env.OPS_DB.prepare("INSERT INTO integration_event_receipts (projection_source_id,event_id,integration,event_type,user_id,occurred_at,payload_hash,status) VALUES (?,?,'project-alpha',?,?,?,?, 'pending')").bind(source.sourceId,event.event_id,event.event_type,value(event.projection.data,"user_id")??event.projection.entity_id,event.occurred_at,payloadHash)]);
   await claimProjectionEntity(env,source,event);
   let processingError:unknown;
   try {
@@ -234,7 +254,7 @@ async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceCo
       // before its receipt/reconciliation acknowledgement. Let the handler finish
       // that same pending event instead of permanently misclassifying it as stale.
       if(receipt?.status==="pending"&&latest.event_id===event.event_id)return "applied";
-      await env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='ignored',processed_at=datetime('now') WHERE projection_source_id=? AND event_id=?").bind(source.sourceId,event.event_id).run();return "ignored";
+      await fencedBatch(env,proof,[env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='ignored',processed_at=datetime('now') WHERE projection_source_id=? AND event_id=?").bind(source.sourceId,event.event_id)]);return "ignored";
     }
     const rawData=event.projection.data,active=event.projection.action==="upsert"?1:0,marker=`event:${event.event_id}`;
     const collection = projectionCollections[event.projection.entity_type];
@@ -243,7 +263,7 @@ async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceCo
     const calendarExternalId = `${event.projection.entity_type}:${event.projection.entity_id}`;
     if(event.projection.entity_type==="operation"||event.projection.entity_type==="task")
       references.push({kind:"calendar_event",externalId:calendarExternalId});
-    const ids=await prepareProjectAlphaSourceRecords(env.OPS_DB,source,references);
+    const ids=await prepareProjectAlphaSourceRecords(mappingDatabase(env,proof),source,references);
     const data=mapProjectAlphaSourceRow(collection,row,ids);
     const localId=requiredValue(data,"id");
     const rawJson=JSON.stringify(rawData);
@@ -286,18 +306,19 @@ async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceCo
     statements.push(env.OPS_DB.prepare(`INSERT INTO pa_task_assignments (projection_source_id,task_id,user_id,assigned_by_user_id,assigned_at,payload_json,last_sync_id,active) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(task_id,user_id) DO UPDATE SET assigned_by_user_id=excluded.assigned_by_user_id,assigned_at=excluded.assigned_at,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,active=excluded.active WHERE pa_task_assignments.projection_source_id=excluded.projection_source_id`).bind(source.sourceId,requiredValue(data,"task_id"),requiredValue(data,"user_id"),value(data,"assigned_by"),value(data,"assigned_at"),rawJson,marker,active));
     }
     await refreshProjectionEntityLease(env,source,event);
-    if(statements.length)await env.OPS_DB.batch(statements);
+    if(statements.length)await fencedBatch(env,proof,statements);
     // Keep a failed portal write retryable: the source version is advanced only
     // after DELIVERY_DB has accepted its idempotent projection.
     await refreshProjectionEntityLease(env,source,event);
     // Delivery projections are still primary-only; a secondary data projection
     // must not update or revoke an existing primary client account's grants.
     if(source.sourceId===PRIMARY_PROJECT_ALPHA_SOURCE.sourceId){
+      await validateSourceProof(env,source,proof);
       await applyPortalProjection(env,event,active);
       if(event.projection.entity_type==="client"||event.projection.entity_type==="organization"||event.projection.entity_type==="project")await reconcilePortalProjectionAccess(env,source,event.event_id);
     }
     await refreshProjectionEntityLease(env,source,event);
-    await env.OPS_DB.prepare(`INSERT INTO pa_projection_entity_versions (projection_source_id,entity_type,entity_id,source_updated_at,event_id) VALUES (?,?,?,?,?) ON CONFLICT(projection_source_id,entity_type,entity_id) DO UPDATE SET source_updated_at=excluded.source_updated_at,event_id=excluded.event_id,updated_at=datetime('now')`).bind(source.sourceId,event.projection.entity_type,event.projection.entity_id,event.projection.source_updated_at,event.event_id).run();
+    await fencedBatch(env,proof,[env.OPS_DB.prepare(`INSERT INTO pa_projection_entity_versions (projection_source_id,entity_type,entity_id,source_updated_at,event_id) VALUES (?,?,?,?,?) ON CONFLICT(projection_source_id,entity_type,entity_id) DO UPDATE SET source_updated_at=excluded.source_updated_at,event_id=excluded.event_id,updated_at=datetime('now')`).bind(source.sourceId,event.projection.entity_type,event.projection.entity_id,event.projection.source_updated_at,event.event_id)]);
     return "applied";
   } catch(error) {
     processingError=error;
@@ -311,11 +332,12 @@ export async function applyProjectionEvent(env: Env, event: ProjectionEvent, pay
   return applyProjectionEventForSource(env,PRIMARY_PROJECT_ALPHA_SOURCE,event,payloadHash);
 }
 
-export async function applyProjectionEventForSource(env: Env, source: ProjectAlphaSourceContext, event: ProjectionEvent, payloadHash: string): Promise<ProjectionResult> {
+export async function applyProjectionEventForSource(env: Env, source: ProjectAlphaSourceContext, event: ProjectionEvent, payloadHash: string, proof?: ProjectAlphaConnectorProof): Promise<ProjectionResult> {
   source=createProjectAlphaSourceContext(source.sourceId);
+  await validateSourceProof(env,source,proof);
   await claimGlobalProjection(env,source,event.event_id);
   let processingError: unknown;
-  try { return await applyProjectionEventLocked(env,source,event,payloadHash); }
+  try { return await applyProjectionEventLocked(env,source,event,payloadHash,proof); }
   catch(error) { processingError=error; throw error; }
   finally {
     try { await releaseGlobalProjection(env,source,event.event_id); }
@@ -323,17 +345,19 @@ export async function applyProjectionEventForSource(env: Env, source: ProjectAlp
   }
 }
 
-export async function completeEvent(env: Env, event: IntegrationEvent, preserveError = false, source: ProjectAlphaSourceContext = PRIMARY_PROJECT_ALPHA_SOURCE): Promise<void> {
+export async function completeEvent(env: Env, event: IntegrationEvent, preserveError = false, source: ProjectAlphaSourceContext = PRIMARY_PROJECT_ALPHA_SOURCE, proof?: ProjectAlphaConnectorProof): Promise<void> {
   source=createProjectAlphaSourceContext(source.sourceId);
-  await env.OPS_DB.batch([
+  await validateSourceProof(env,source,proof);
+  await fencedBatch(env,proof,[
     env.OPS_DB.prepare("UPDATE integration_event_receipts SET status='completed',processed_at=datetime('now'),last_error=CASE WHEN ?=1 THEN last_error ELSE NULL END WHERE projection_source_id=? AND event_id=?").bind(preserveError?1:0,source.sourceId,event.event_id),
     env.OPS_DB.prepare(`INSERT INTO integration_reconciliation(projection_source_id,integration,last_event_at) VALUES (?,'project-alpha',?)
       ON CONFLICT(projection_source_id,integration) DO UPDATE SET last_event_at=excluded.last_event_at,updated_at=datetime('now')`).bind(source.sourceId,event.occurred_at),
   ]);
 }
 
-export async function recordAccessSuccess(env: Env): Promise<void> {
-  await env.OPS_DB.prepare("UPDATE integration_reconciliation SET last_access_attempt_at=datetime('now'),last_access_success_at=datetime('now'),last_access_error=NULL,access_consecutive_failures=0,access_circuit_open_until=NULL,updated_at=datetime('now') WHERE projection_source_id=? AND integration='project-alpha'").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId).run();
+export async function recordAccessSuccess(env: Env, proof?: ProjectAlphaConnectorProof): Promise<void> {
+  await validateSourceProof(env,PRIMARY_PROJECT_ALPHA_SOURCE,proof);
+  await fencedBatch(env,proof,[env.OPS_DB.prepare("UPDATE integration_reconciliation SET last_access_attempt_at=datetime('now'),last_access_success_at=datetime('now'),last_access_error=NULL,access_consecutive_failures=0,access_circuit_open_until=NULL,updated_at=datetime('now') WHERE projection_source_id=? AND integration='project-alpha'").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId)]);
 }
 
 export async function accessCircuitIsOpen(env: Env): Promise<boolean> {
@@ -343,7 +367,7 @@ export async function accessCircuitIsOpen(env: Env): Promise<boolean> {
   return Number.isFinite(timestamp)&&timestamp>Date.now();
 }
 
-export async function recordAccessFailure(env: Env, eventId: string | null, error: string): Promise<void> {
+export async function recordAccessFailure(env: Env, eventId: string | null, error: string, proof?: ProjectAlphaConnectorProof): Promise<void> {
   const safeError = error.slice(0, 500);
   const statements = [
     env.OPS_DB.prepare(`UPDATE integration_reconciliation SET
@@ -355,11 +379,13 @@ export async function recordAccessFailure(env: Env, eventId: string | null, erro
   if (eventId) {
     statements.unshift(env.OPS_DB.prepare("UPDATE integration_event_receipts SET last_error=? WHERE projection_source_id=? AND event_id=?").bind(safeError,PRIMARY_PROJECT_ALPHA_SOURCE.sourceId,eventId));
   }
-  await env.OPS_DB.batch(statements);
+  await validateSourceProof(env,PRIMARY_PROJECT_ALPHA_SOURCE,proof);
+  await fencedBatch(env,proof,statements);
 }
 
-export async function recordEventFailure(env: Env, eventId: string, error: string, source: ProjectAlphaSourceContext = PRIMARY_PROJECT_ALPHA_SOURCE): Promise<void> {
+export async function recordEventFailure(env: Env, eventId: string, error: string, source: ProjectAlphaSourceContext = PRIMARY_PROJECT_ALPHA_SOURCE, proof?: ProjectAlphaConnectorProof): Promise<void> {
   source=createProjectAlphaSourceContext(source.sourceId);
-  await env.OPS_DB.prepare("UPDATE integration_event_receipts SET last_error=? WHERE projection_source_id=? AND event_id=? AND status='pending'")
-    .bind(error.slice(0,500),source.sourceId,eventId).run();
+  await validateSourceProof(env,source,proof);
+  await fencedBatch(env,proof,[env.OPS_DB.prepare("UPDATE integration_event_receipts SET last_error=? WHERE projection_source_id=? AND event_id=? AND status='pending'")
+    .bind(error.slice(0,500),source.sourceId,eventId)]);
 }

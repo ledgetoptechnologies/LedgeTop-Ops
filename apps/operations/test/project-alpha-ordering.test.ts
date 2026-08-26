@@ -28,8 +28,8 @@ describe("Project Alpha snapshot/webhook ordering",()=>{
       const delivery=await miniflare.getD1Database("DELIVERY_DB") as D1Database;
       await migrateOperations(ops);
       for(const statement of [
-        "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,display_name TEXT,project_alpha_client_id TEXT,project_alpha_organization_id TEXT,updated_at TEXT)",
-        "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,project_name TEXT,client_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT)",
+        "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,display_name TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary',project_alpha_client_id TEXT,project_alpha_organization_id TEXT,updated_at TEXT)",
+        "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary',project_alpha_project_id TEXT,project_name TEXT,client_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT)",
         "CREATE TABLE client_project_grants(account_id TEXT,project_id TEXT,can_request_service INTEGER NOT NULL,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
         "CREATE TABLE client_folder_associations(id TEXT PRIMARY KEY,scope_type TEXT,account_id TEXT,project_id TEXT,revoked_at TEXT)",
         "CREATE TABLE client_delivery_grants(account_id TEXT,project_id TEXT,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
@@ -56,8 +56,8 @@ describe("Project Alpha snapshot/webhook ordering",()=>{
       const delivery=await miniflare.getD1Database("DELIVERY_DB") as D1Database;
       await migrateOperations(ops);
       for(const statement of [
-        "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,display_name TEXT,project_alpha_client_id TEXT,project_alpha_organization_id TEXT,updated_at TEXT)",
-        "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,project_name TEXT,client_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT)",
+        "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,display_name TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary',project_alpha_client_id TEXT,project_alpha_organization_id TEXT,updated_at TEXT)",
+        "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary',project_alpha_project_id TEXT,project_name TEXT,client_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT)",
         "CREATE TABLE client_project_grants(account_id TEXT,project_id TEXT,can_request_service INTEGER NOT NULL,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
         "CREATE TABLE client_folder_associations(id TEXT PRIMARY KEY,scope_type TEXT,account_id TEXT,project_id TEXT,revoked_at TEXT)",
         "CREATE TABLE client_delivery_grants(account_id TEXT,project_id TEXT,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",

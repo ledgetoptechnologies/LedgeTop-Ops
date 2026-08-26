@@ -1524,6 +1524,8 @@ tbody tr:last-child td { border: 0; }
 .client-hub-section-heading p, .client-hub-title small { margin: .25rem 0 0; color: var(--muted); }
 .client-hub-groups { display: grid; gap: 1rem; }
 .client-directory-workspace { display: grid; gap: 1rem; min-width: 0; }
+.client-directory-source { display: grid; gap: .45rem; width: min(100%, 30rem); min-width: 0; font-weight: 800; }
+.client-directory-source select { width: 100%; min-width: 0; min-height: 44px; border: 1px solid var(--line); border-radius: 10px; padding: .65rem; font: inherit; background: #fff; color: var(--ink); }
 .client-directory-search { display: grid; gap: .45rem; min-width: 0; }
 .client-directory-search > label { font-size: .9rem; font-weight: 800; }
 .client-directory-search > div { display: flex; flex-wrap: wrap; gap: .5rem; min-width: 0; }
@@ -1735,10 +1737,15 @@ tbody tr:last-child td { border: 0; }
   flex-wrap: wrap;
   justify-content: space-between;
   margin: 1rem 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   padding: .85rem;
 }
-.navigation-actions > div:first-child { display: grid; gap: .2rem; }
+.navigation-actions > * { min-width: 0; max-width: 100%; }
+.navigation-actions > div:first-child { display: grid; gap: .2rem; flex: 1 1 12rem; }
 .navigation-actions > small { flex-basis: 100%; }
+.navigation-action-buttons a { min-width: 0; max-width: 100%; white-space: normal; text-align: center; }
 
 @media (max-width: 640px) {
   .job-brief-section-heading, .job-brief-attachments article, .navigation-actions {
@@ -1749,6 +1756,8 @@ tbody tr:last-child td { border: 0; }
     min-height: 44px;
     justify-content: center;
   }
+  .navigation-actions > div:first-child, .navigation-actions > small { flex-basis: auto; }
+  .navigation-action-buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
 }
 
 /* ---------------------------------------------------------------------------
@@ -2491,6 +2500,22 @@ ul { color: var(--muted); }
   .sop-markdown a { color: #000; text-decoration: underline; }
 }
 .delegated-share-admin-list { display: grid; gap: .75rem; }
+.alpha-connections { display: grid; gap: 1rem; min-width: 0; }
+.alpha-connections > button { justify-self: start; }
+.alpha-connection { border-top: 1px solid var(--line); padding-top: 1rem; min-width: 0; overflow-wrap: anywhere; }
+.alpha-connection h3 { margin-top: 0; }
+.alpha-connection-actions { display: flex; flex-wrap: wrap; gap: .65rem; margin: .8rem 0; }
+.alpha-connections details { margin-top: .6rem; }
+.alpha-connections summary { cursor: pointer; padding: .55rem 0; }
+.alpha-connection-form { display: grid; gap: .9rem; margin: 1rem 0; min-width: 0; }
+.alpha-connection-form label { display: grid; gap: .4rem; min-width: 0; }
+.alpha-connection-form input { width: 100%; min-width: 0; box-sizing: border-box; }
+.alpha-connection-form button { justify-self: start; }
+.alpha-connection dd { margin-left: 0; margin-bottom: .7rem; }
+@media (max-width: 640px) {
+  .alpha-connection-actions { display: grid; grid-template-columns: 1fr; }
+  .alpha-connections button { min-height: 44px; white-space: normal; }
+}
 .delegated-share-admin-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem 0; border-top: 1px solid var(--line); }
 .delegated-share-admin-row > span { display: grid; min-width: 0; gap: .25rem; }
 .delegated-share-admin-row small { color: var(--muted); overflow-wrap: anywhere; }

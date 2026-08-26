@@ -17,7 +17,7 @@ class Statement {
   values: unknown[] = [];
   constructor(readonly sql: string, private readonly database: Database) {}
   bind(...values: unknown[]): this { this.values = values; return this; }
-  async run(): Promise<object> { return {}; }
+  async run(): Promise<object> { this.database.runs.push(this); return {}; }
   async all<T>(): Promise<{ results: T[] }> {
     if (this.sql.includes("FROM pa_projection_fingerprints")) return { results: this.database.fingerprints as T[] };
     if (this.sql.includes("FROM pa_projection_entity_versions")) return { results: this.database.versions as T[] };
@@ -27,6 +27,7 @@ class Statement {
     return { results: [] };
   }
   async first<T>(column?: string): Promise<T | null> {
+    if (this.sql.startsWith("SELECT 1 ok WHERE NOT EXISTS(SELECT 1 FROM pa_connectors")) return { ok: 1 } as T;
     if (this.sql.includes("RETURNING owner_event_id")) {
       const owner=this.sql.includes("UPDATE pa_projection_entity_leases")?this.values[1]:this.values[0];
       return (column ? owner : { owner_event_id: owner }) as T;
@@ -36,6 +37,7 @@ class Statement {
 }
 
 class Database {
+  runs: Statement[] = [];
   batches: Statement[][] = [];
   fingerprints: Array<{ collection: string; fingerprint: string }> = [];
   versions: Array<{ entity_type: string; entity_id: string; source_updated_at: string }> = [];
@@ -44,8 +46,12 @@ class Database {
   portalProjects: Array<{ id: string; client_id: string | null; organization_id: string | null; active: number }> = [];
   preparedSql: string[] = [];
   prepare(sql: string): Statement { this.preparedSql.push(sql); return new Statement(sql, this); }
-  async batch(statements: Statement[]): Promise<object[]> { this.batches.push(statements); return statements.map(() => ({})); }
-  allSql(): string { return this.batches.flat().map((statement) => statement.sql).join("\n"); }
+  withSession() { return this; }
+  async batch(statements: Statement[]): Promise<object[]> {
+    this.batches.push(statements);
+    return Promise.all(statements.map(async statement => ({ results: statement.sql.includes("RETURNING owner_event_id") ? [await statement.first()] : [] })));
+  }
+  allSql(): string { return [...this.batches.flat(), ...this.runs].map((statement) => statement.sql).join("\n"); }
   rememberFingerprints(): void {
     this.fingerprints = this.batches.flat()
       .filter((statement) => statement.sql.includes("INSERT INTO pa_projection_fingerprints"))

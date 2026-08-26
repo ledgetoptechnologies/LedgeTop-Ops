@@ -5,6 +5,7 @@ import { requirePermission, sqlScope } from "./acl";
 import { auditStatement } from "./request-security";
 import type { Env, StaffPrincipal } from "./types";
 import { aliasMap } from "./aliases";
+import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import { activeTombstones, assertNotTrashed, tombstoneMatches } from "./trash";
 import { normalizeRecipientEmail, notificationDedupeKey, notificationStatement } from "./notifications";
 import { thumbnailSourceEligible, thumbnailStateForObject, type ThumbnailJobRow } from "./image-thumbnails";
@@ -189,7 +190,7 @@ async function visibleDeliveryFolders(env:Env,candidates:readonly string[]):Prom
 
 interface FolderAssociation { division_id: string; r2_prefix: string }
 
-async function browseRoots(env:Env,principal:StaffPrincipal):Promise<{global:boolean;roots:Array<{prefix:string;name:string;divisionId:string}>}>{const scope=await sqlScope(env,principal,"delivery.browse");if(scope.deniedGlobal)return{global:false,roots:[]};if(scope.global&&!scope.deniedDivisions.length)return{global:true,roots:[]};const denied=new Set(scope.deniedDivisions),divisions=scope.divisions.filter(divisionId=>!denied.has(divisionId));if(!divisions.length)return{global:false,roots:[]};const result=await env.OPS_DB.prepare(`SELECT pf.r2_prefix,p.name,pf.division_id FROM project_folders pf LEFT JOIN pa_projects p ON p.id=pf.project_id WHERE pf.division_id IN (${divisions.map(()=>"?").join(",")}) ORDER BY p.name,pf.r2_prefix`).bind(...divisions).all<{r2_prefix:string;name:string|null;division_id:string}>();return{global:false,roots:result.results.map(row=>({prefix:normalizePrefix(row.r2_prefix),name:row.name||row.r2_prefix,divisionId:row.division_id}))};}
+async function browseRoots(env:Env,principal:StaffPrincipal):Promise<{global:boolean;roots:Array<{prefix:string;name:string;divisionId:string}>}>{const scope=await sqlScope(env,principal,"delivery.browse");if(scope.deniedGlobal)return{global:false,roots:[]};if(scope.global&&!scope.deniedDivisions.length)return{global:true,roots:[]};const denied=new Set(scope.deniedDivisions),divisions=scope.divisions.filter(divisionId=>!denied.has(divisionId));if(!divisions.length)return{global:false,roots:[]};const result=await env.OPS_DB.prepare(`SELECT pf.r2_prefix,p.name,pf.division_id FROM project_folders pf LEFT JOIN pa_projects p ON p.id=pf.project_id AND ${projectAlphaReadVisibleSql("p.projection_source_id")} WHERE pf.division_id IN (${divisions.map(()=>"?").join(",")}) ORDER BY p.name,pf.r2_prefix`).bind(...divisions).all<{r2_prefix:string;name:string|null;division_id:string}>();return{global:false,roots:result.results.map(row=>({prefix:normalizePrefix(row.r2_prefix),name:row.name||row.r2_prefix,divisionId:row.division_id}))};}
 
 export async function deliveryBrowseRevision(env:Env,principal:StaffPrincipal):Promise<string>{
   await requirePermission(env,principal,"delivery.browse");

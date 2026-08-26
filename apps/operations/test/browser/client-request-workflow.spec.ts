@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 const requestRecord = {
   id: "request-a",
@@ -140,4 +140,65 @@ test("request queue distinguishes a schema update from an empty queue and recove
   await page.getByRole("button", { name: "Retry queue" }).click();
   await expect(page.getByText("North site progress flight")).toBeVisible();
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+async function mockRequestLocation(page: Page, latitude: number | null, longitude: number | null) {
+  const request = { ...requestRecord, latitude, longitude, area_geojson: null, poi_points_json: "[]" };
+  await page.route("**/api/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/session") return route.fulfill({ json: {
+      user: { id: "staff-a", email: "staff@example.com", displayName: "Staff Reviewer", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["operations.view", "operations.manage"], divisions: [] },
+      csrfToken: "csrf-test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {},
+    } });
+    if (path === "/api/client-service-requests") return route.fulfill({ json: { requests: [request] } });
+    if (path === "/api/client-service-requests/request-a") return route.fulfill({ json: {
+      request, services: [], revisions: [], estimates: [], history: [], children: [], areaRevisions: [],
+      effectiveWorkArea: { revisionNumber: 0, areaGeoJson: null, poiPointsJson: "[]", reason: null, changeSummary: null, createdBy: null, createdAt: null },
+      capabilities: { legacyPaQuoteLinkEnabled: false },
+    } });
+    if (path === "/api/client-service-requests/request-a/pa-draft") return route.fulfill({ json: {
+      capability: { enabled: false, reason: "not configured" }, receipt: null,
+    } });
+    if (path === "/api/client-service-requests/request-a/attachments") return route.fulfill({ json: { attachments: [] } });
+    return route.fulfill({ status: 404, json: { error: "Not found" } });
+  });
+}
+
+test("a request without geometry or selected coordinates has no external navigation", async ({ page }) => {
+  await mockRequestLocation(page, null, null);
+  await page.goto("/clients/requests/request-a");
+  await expect(page.getByRole("heading", { name: requestRecord.title })).toBeVisible();
+  await expect(page.getByRole("region", { name: "External navigation" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Google Maps" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Apple Maps" })).toHaveCount(0);
+  await expect(page.getByText("0.000000, 0.000000", { exact: true })).toHaveCount(0);
+});
+
+test("a genuine zero-coordinate request keeps usable navigation inside the mobile panel", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 375, height: 812 });
+  await mockRequestLocation(page, 0, 0);
+  await page.goto("/clients/requests/request-a");
+  const navigation = page.getByRole("region", { name: "External navigation" });
+  await expect(navigation).toBeVisible();
+  const google = navigation.getByRole("link", { name: "Google Maps" });
+  const apple = navigation.getByRole("link", { name: "Apple Maps" });
+  await expect(google).toHaveAttribute("href", "https://www.google.com/maps/search/?api=1&query=0.000000%2C0.000000");
+  await expect(apple).toHaveAttribute("href", "https://maps.apple.com/?ll=0.000000%2C0.000000&q=100%20Main%20St");
+  await google.focus();
+  await expect(google).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(apple).toBeFocused();
+  const bounds = await navigation.boundingBox();
+  expect(bounds).not.toBeNull();
+  expect(bounds!.x).toBeGreaterThanOrEqual(0);
+  expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(375);
+  for (const link of [google, apple]) {
+    const box = await link.boundingBox();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+    expect(box!.x).toBeGreaterThanOrEqual(bounds!.x);
+    expect(box!.x + box!.width).toBeLessThanOrEqual(bounds!.x + bounds!.width);
+  }
+  expect(await navigation.evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+  await navigation.screenshot({ path: testInfo.outputPath("request-navigation-zero-375.png") });
 });

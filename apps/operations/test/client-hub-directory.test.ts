@@ -5,6 +5,7 @@ import { clientHubDetailPath, findClientHubRoot, listClientHubRoots, normalizeCl
   type ClientHubKind, type ClientHubSource } from "../src/worker/client-hub-directory";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
+import { applyConnectorSchema, registerVisibleTestSource } from "./helpers/project-alpha-connectors";
 
 const staff: StaffPrincipal = { id: "staff-a", email: "a@example.test", displayName: "A", accessSubject: "subject-a", projectAlphaUserId: "pa-user-a" };
 const migration = readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8");
@@ -36,6 +37,7 @@ describe("source-qualified Client Hub directory", () => {
     `));
     await db.exec(sql(migration));
     await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0034_client_hub_projection_sources.sql", import.meta.url), "utf8")).map(statement => db.prepare(statement)));
+    await applyConnectorSchema(db);
   });
   beforeEach(async () => {
     await db.batch([
@@ -45,6 +47,7 @@ describe("source-qualified Client Hub directory", () => {
       db.prepare("DELETE FROM pa_clients"), db.prepare("DELETE FROM pa_organizations"),
       db.prepare("INSERT INTO staff_role_assignments VALUES('staff-a','directory','global',NULL)"),
       db.prepare("UPDATE client_hub_directory_state SET ready=1,last_success_at=NULL WHERE id='directory'"),
+      db.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id<>'project-alpha:primary'"),
     ]);
   });
   afterAll(async () => runtime.dispose());
@@ -62,6 +65,7 @@ describe("source-qualified Client Hub directory", () => {
   }
 
   it("labels secondary business roots and keeps exact source ownership during search and lookup", async () => {
+    await registerVisibleTestSource(db, "project-alpha:secondary", "Second company");
     await roots([{ id: "primary-org", kind: "organization", name: "Same name" },
       { id: "secondary-org", kind: "organization", name: "Same name", source: "project-alpha:secondary" }]);
     const publicId = "b".repeat(32);
@@ -69,7 +73,7 @@ describe("source-qualified Client Hub directory", () => {
     const page = await listClientHubRoots(env, staff, { q: "Same name" });
     expect(page.clients).toHaveLength(2);
     expect(page.clients.find(row => row.source_id === "project-alpha:secondary")).toMatchObject({
-      public_id: "secondary-org", pa_public_id: publicId, source_name: "project-alpha:secondary",
+      public_id: "secondary-org", pa_public_id: publicId, source_name: "Second company",
       workspace_id: null, account_count: 0,
       detail_path: "/clients/sources/project-alpha%3Asecondary/business/organizations/secondary-org",
     });
@@ -82,6 +86,38 @@ describe("source-qualified Client Hub directory", () => {
     }
     expect((await listClientHubRoots(env, staff, { q: "secondary-only@example.test" })).clients.map(row => row.source_id))
       .toEqual(["project-alpha:secondary"]);
+  });
+  it("hides unregistered and hidden sources before limits, search, and exact lookup", async () => {
+    await roots([{ id: "hidden", name: "A hidden", source: "project-alpha:unregistered" }, { id: "primary", name: "Z primary" }]);
+    expect((await listClientHubRoots(env, staff, { limit: 1 })).clients.map(row => row.public_id)).toEqual(["primary"]);
+    expect((await listClientHubRoots(env, staff, { q: "hidden" })).clients).toEqual([]);
+    await expect(findClientHubRoot(env, "standalone_client", "hidden", "project-alpha:unregistered", "business")).rejects.toMatchObject({ status: 404 });
+    await expect(listClientHubRoots(env, staff, { source: "project-alpha:unregistered" })).rejects.toMatchObject({ status: 404 });
+    await registerVisibleTestSource(db, "project-alpha:unregistered", "Business B");
+    const visible = await listClientHubRoots(env, staff, { source: "project-alpha:unregistered", limit: 1 });
+    expect(visible.clients.map(row => row.public_id)).toEqual(["hidden"]);
+    expect(visible.sources).toContainEqual({ source_id: "project-alpha:unregistered", display_name: "Business B" });
+    await db.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id='project-alpha:unregistered'").run();
+    expect((await listClientHubRoots(env, staff)).sources.some(row => row.source_id === "project-alpha:unregistered")).toBe(false);
+    await expect(findClientHubRoot(env, "standalone_client", "hidden", "project-alpha:unregistered", "business")).rejects.toMatchObject({ status: 404 });
+  });
+
+  it("binds cursors to source selection and registry revision while suspension retains visible projected data", async () => {
+    await registerVisibleTestSource(db, "project-alpha:secondary", "Business B");
+    await roots([{ id: "a", source: "project-alpha:secondary" }, { id: "b", source: "project-alpha:secondary" }, { id: "primary" }]);
+    const selection = { source: "project-alpha:secondary", limit: 1 };
+    const first = await listClientHubRoots(env, staff, selection);
+    await expect(listClientHubRoots(env, staff, { limit: 1, cursor: first.nextCursor! })).rejects.toMatchObject({ status: 400 });
+    expect((await listClientHubRoots(env, staff, { ...selection, cursor: first.nextCursor! })).clients[0]?.public_id).toBe("b");
+    await db.prepare("UPDATE pa_connectors SET state='suspended',version=version+1 WHERE source_id='project-alpha:secondary'").run();
+    const stale = await listClientHubRoots(env, staff, { ...selection, cursor: first.nextCursor! }).catch(error => error);
+    expect(stale.status).toBe(409);
+    expect(await stale.getResponse().json()).toMatchObject({ code: "source_visibility_changed" });
+    const refreshed = await listClientHubRoots(env, staff, selection);
+    expect(refreshed.clients[0]?.public_id).toBe("a");
+    await db.prepare("UPDATE pa_connectors SET display_name='Renamed business',version=version+1 WHERE source_id='project-alpha:secondary'").run();
+    await expect(listClientHubRoots(env, staff, { ...selection, cursor: refreshed.nextCursor! })).rejects.toMatchObject({ status: 409 });
+    expect((await listClientHubRoots(env, staff, selection)).clients[0]?.source_name).toBe("Renamed business");
   });
   async function field(root: string, type: string, value: string, projectId: string | null = null) {
     await db.prepare("INSERT OR IGNORE INTO pa_clients(id,active,organization_id) VALUES(?,1,NULL)").bind(root).run();
@@ -300,7 +336,7 @@ describe("source-qualified Client Hub directory", () => {
     expect(await db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE name LIKE 'portal_v2_%'").first("n")).toBe(0);
   });
 
-  it.each([{ limit: 0 }, { limit: 101 }, { limit: 1.5 }, { kind: "all" }, { q: "x".repeat(201) }, { q: "bad\0query" }, { cursor: "" }, { cursor: "not-a-cursor" }])
+  it.each([{ limit: 0 }, { limit: 101 }, { limit: 1.5 }, { kind: "all" }, { source: "bad-source" }, { source: "" }, { q: "x".repeat(201) }, { q: "bad\0query" }, { cursor: "" }, { cursor: "not-a-cursor" }])
     ("rejects invalid search input %j", async options => {
       await expect(listClientHubRoots(env, staff, options)).rejects.toMatchObject({ status: 400 });
     });

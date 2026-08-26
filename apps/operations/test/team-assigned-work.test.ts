@@ -1,4 +1,5 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -59,6 +60,7 @@ const principals = {
 
 function setup() {
   const database = new DatabaseSync(":memory:");
+  database.exec(readFileSync(new URL("../migrations/0035_project_alpha_connectors.sql",import.meta.url),"utf8"));
   database.exec(`
     CREATE TABLE staff_users(id TEXT PRIMARY KEY,email TEXT,display_name TEXT,project_alpha_user_id TEXT UNIQUE);
     CREATE TABLE staff_divisions(staff_id TEXT NOT NULL,division_id TEXT NOT NULL);

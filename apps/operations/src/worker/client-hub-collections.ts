@@ -6,6 +6,7 @@ import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy"
 import { businessContactChannels, businessContactChannelsSql } from "./client-business-contact";
 import type { ClientHubRoot } from "./client-hub-directory";
 import type { Env, StaffPrincipal } from "./types";
+import { requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
 
 export const CLIENT_HUB_COLLECTIONS = ["businessContacts", "accounts", "projects", "requests", "deliveryGrants",
   "authenticatedDeliveryGrants", "viewerGrants"] as const;
@@ -46,6 +47,7 @@ export function isClientHubCollection(value: string): value is ClientHubCollecti
  * selected projection proof, actor, or permission changes. It is not a grant. */
 export async function createClientHubCollectionContext(env: Env, principal: StaffPrincipal,
   root: ClientHubRoot, access: ClientHubPermissions): Promise<ClientHubCollectionContext> {
+  const visibility = await requireProjectAlphaReadVisibility(env, root.source_id);
   const scope = accountScope(root);
   // Migration 0103 uniquely indexes each non-null Alpha organization/client
   // account link; local roots identify exactly one account and portal roots none.
@@ -72,7 +74,7 @@ export async function createClientHubCollectionContext(env: Env, principal: Staf
     WHERE workspace.id=? ORDER BY entity.public_id LIMIT 2`).bind(root.workspace_id).all<Record<string, unknown>>() : null;
   const canonicalRoot = { sourceId: root.source_id, rootNamespace: root.root_namespace, kind: root.kind, publicId: root.public_id };
   const businessProjectPolicy = await readClientHubBusinessProjectPolicy(env, principal);
-  const contextVersion = await sha256(JSON.stringify([canonicalRoot, principal.id, access,
+  const contextVersion = await sha256(JSON.stringify([canonicalRoot, principal.id, access, visibility.read_revision, root.source_name,
     root.pa_public_id, root.mapping_status, root.status, root.workspace_id, root.legacy_account_id,
     root.portal_status, proof?.results ?? [], accountProof.results, await isAdministrator(env, principal),
     eligibilityBlockManagementEnabled(env), portalOperationsManagementEnabled(env), businessProjectPolicy.proof]));

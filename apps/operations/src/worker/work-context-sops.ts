@@ -13,6 +13,7 @@ import { auditAddress } from "./request-security";
 import { d1TablesPresent } from "./schema-readiness";
 import type { Env, ResourceContext, StaffPrincipal } from "./types";
 import { paProjectFilter, paResourceFilter } from "./visibility";
+import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 
 type AppEnv = {
   Bindings: Env;
@@ -182,7 +183,7 @@ function authoritativeContextSql(kind: WorkContextKind): { ctes: string; allowed
         ) THEN 1 ELSE 0 END manage_assigned
        FROM pa_projects p CROSS JOIN actor
        LEFT JOIN divisions d ON d.project_alpha_business_unit_id=p.business_unit_id
-       WHERE p.id=? AND p.active=1`
+       WHERE p.id=? AND p.active=1 AND ${projectAlphaReadVisibleSql("p.projection_source_id")}`
     : `SELECT t.id,d.id division_id,
         CASE WHEN t.projection_source_id='project-alpha:primary' AND actor.project_alpha_user_id IS NOT NULL
           AND t.created_by_user_id=actor.project_alpha_user_id THEN 1 ELSE 0 END owned,
@@ -196,7 +197,7 @@ function authoritativeContextSql(kind: WorkContextKind): { ctes: string; allowed
         ) THEN 1 ELSE 0 END manage_assigned
        FROM pa_tasks t CROSS JOIN actor
        LEFT JOIN divisions d ON d.project_alpha_business_unit_id=t.business_unit_id
-       WHERE t.id=? AND t.active=1`;
+       WHERE t.id=? AND t.active=1 AND ${projectAlphaReadVisibleSql("t.projection_source_id")}`;
   const view = viewPermission(kind);
   return {
     ctes: `WITH actor AS (
@@ -361,7 +362,7 @@ async function contextRows(
             UNION SELECT p.manager_user_id WHERE p.manager_user_id IS NOT NULL
           )) manage_staff_ids
          FROM pa_projects p LEFT JOIN divisions d ON d.project_alpha_business_unit_id=p.business_unit_id
-         WHERE p.active=1 AND p.id IN (${placeholders})`
+         WHERE p.active=1 AND p.id IN (${placeholders}) AND ${projectAlphaReadVisibleSql("p.projection_source_id")}`
       : `SELECT t.id,t.title,t.status,d.id division_id,
           (SELECT owner.id FROM staff_users owner WHERE owner.project_alpha_user_id=t.created_by_user_id LIMIT 1) owner_id,
           (SELECT GROUP_CONCAT(s.id) FROM pa_task_assignments a
@@ -371,7 +372,7 @@ async function contextRows(
             JOIN staff_users s ON s.project_alpha_user_id=a.user_id
             WHERE a.task_id=t.id AND a.active=1) manage_staff_ids
          FROM pa_tasks t LEFT JOIN divisions d ON d.project_alpha_business_unit_id=t.business_unit_id
-         WHERE t.active=1 AND t.id IN (${placeholders})`;
+         WHERE t.active=1 AND t.id IN (${placeholders}) AND ${projectAlphaReadVisibleSql("t.projection_source_id")}`;
     const rows = await env.OPS_DB.withSession("first-primary").prepare(query)
       .bind(...chunk).all<WorkContextRow>();
     output.push(...rows.results);

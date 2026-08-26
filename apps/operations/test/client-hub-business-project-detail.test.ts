@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SqlScope } from "../src/worker/acl";
 import type { ClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import type { Env, StaffPrincipal } from "../src/worker/types";
+import { applyConnectorSchema, registerVisibleTestSource } from "./helpers/project-alpha-connectors";
 
 const fullScope: SqlScope = { global: true, divisions: [], assigned: false, own: false, deniedDivisions: [], deniedGlobal: false };
 const acl = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true),
@@ -34,6 +35,7 @@ async function fixture() {
     script: "export default { fetch(){return new Response('ok')} }", d1Databases: { OPS_DB: "business-project-detail" } });
   active.push(mf);
   const db = await mf.getD1Database("OPS_DB") as unknown as D1Database;
+  await applyConnectorSchema(db);
   for (const name of ["pa_organizations", "pa_clients", "pa_projects", "pa_users", "pa_project_assignments"])
     await sql(db, table("0001_operations.sql", name));
   for (const name of ["pa_operations", "pa_operation_assignments", "pa_tasks"])
@@ -64,6 +66,7 @@ afterEach(async () => {
 describe("read-only source-qualified business project detail", () => {
   it("reads only the selected producer's project and contacts even when relationships are malformed", async () => {
     const { db, env } = await fixture();
+    await registerVisibleTestSource(db,"project-alpha:secondary");
     await sql(db, `INSERT INTO pa_organizations(id,name,payload_json,last_sync_id,projection_source_id)
       VALUES('secondary-org','Secondary','{}','sync','project-alpha:secondary');
       INSERT INTO pa_clients(id,name,organization_id,payload_json,last_sync_id,projection_source_id)

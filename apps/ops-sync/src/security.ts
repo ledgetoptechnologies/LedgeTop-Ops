@@ -1,8 +1,51 @@
 import { createRemoteJWKSet, jwtVerify, type JWTPayload } from "jose";
-interface AccessEnvironment { TEAM_DOMAIN: string; CF_ACCESS_AUD: string; }
+export interface AccessEnvironment { TEAM_DOMAIN: string; CF_ACCESS_AUD: string; }
 
 export const MAX_BODY_BYTES = 64 * 1024;
 export const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
+
+/** The declared length is only an early rejection, never the memory bound. */
+export async function readWebhookBody(request: Request, timeoutMs = 10_000): Promise<Uint8Array> {
+  const declared = request.headers.get("content-length");
+  if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > MAX_BODY_BYTES)) throw new Error("payload-too-large");
+  if (!request.body) throw new Error("payload-size-invalid");
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let bytes = 0;
+  const expiresAt = Date.now() + timeoutMs;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error("payload-read-timeout")), timeoutMs);
+  });
+  let complete = false;
+  try {
+    while (true) {
+      const result = await Promise.race([reader.read(), deadline]);
+      if (Date.now() > expiresAt) throw new Error("payload-read-timeout");
+      if (result.done) break;
+      if (!result.value.byteLength) continue;
+      bytes += result.value.byteLength;
+      if (bytes > MAX_BODY_BYTES) throw new Error("payload-too-large");
+      chunks.push(result.value);
+    }
+    if (bytes === 0) throw new Error("payload-size-invalid");
+    const body = new Uint8Array(bytes);
+    let offset = 0;
+    for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
+    complete = true;
+    return body;
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    if (!complete) void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}
+
+export function requireAccessSubject(claims: unknown, expected: string): void {
+  if (!expected || !claims || typeof claims !== "object" || !("sub" in claims) || claims.sub !== expected) {
+    throw new Error("access-subject-invalid");
+  }
+}
 
 export async function verifyAccessAssertion(request: Request, env: AccessEnvironment): Promise<JWTPayload> {
   const assertion = request.headers.get("Cf-Access-Jwt-Assertion");
@@ -43,9 +86,11 @@ export async function verifyWebhookHmac(rawBody: Uint8Array, timestamp: string, 
 }
 
 function base64UrlBytes(value: string): Uint8Array {
-  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error("signature-invalid");
-  const raw = atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "="));
-  return Uint8Array.from(raw, (character) => character.charCodeAt(0));
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(value)) throw new Error("signature-invalid");
+  try {
+    const raw = atob(value.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(value.length / 4) * 4, "="));
+    return Uint8Array.from(raw, (character) => character.charCodeAt(0));
+  } catch { throw new Error("signature-invalid"); }
 }
 
 async function verifyEd25519(rawBody: Uint8Array, timestamp: string, signature: Uint8Array, publicKey: string): Promise<boolean> {
@@ -69,6 +114,7 @@ export async function verifyWebhookSignature(
   legacyHmacHeader: string | null,
   legacyHmacSecret: string,
   allowLegacyHmac: boolean,
+  previousLegacyHmacSecret?: string,
 ): Promise<"ed25519-current" | "ed25519-previous" | "hmac-legacy"> {
   if (ed25519Header) {
     if (!ed25519Header.startsWith("ed25519=")) throw new Error("signature-invalid");
@@ -78,7 +124,11 @@ export async function verifyWebhookSignature(
     throw new Error("signature-invalid");
   }
   if (!allowLegacyHmac) throw new Error("signature-required");
-  await verifyWebhookHmac(rawBody, timestamp, legacyHmacHeader, legacyHmacSecret);
+  try { await verifyWebhookHmac(rawBody, timestamp, legacyHmacHeader, legacyHmacSecret); }
+  catch (error) {
+    if (!previousLegacyHmacSecret || !(error instanceof Error) || error.message !== "signature-invalid") throw error;
+    await verifyWebhookHmac(rawBody,timestamp,legacyHmacHeader,previousLegacyHmacSecret);
+  }
   return "hmac-legacy";
 }
 

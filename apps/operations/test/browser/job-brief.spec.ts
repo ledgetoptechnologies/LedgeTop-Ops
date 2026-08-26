@@ -69,7 +69,8 @@ function brief(canEdit: boolean, version = 1, items = [
   };
 }
 
-async function mock(page: Page, canEdit: boolean, canAssignSops = canEdit) {
+async function mock(page: Page, canEdit: boolean, canAssignSops = canEdit,
+  navigation?: ReturnType<typeof brief>["operation"]["navigation"] | null) {
   let current = brief(canEdit, 1, undefined, canAssignSops);
   await page.route("**/api/**", async route => {
     const incoming = route.request();
@@ -95,7 +96,10 @@ async function mock(page: Page, canEdit: boolean, canAssignSops = canEdit) {
     } else if (incoming.method() === "GET" && path === "/api/operations") {
       await route.fulfill({ json: { operations: [operation] } });
     } else if (incoming.method() === "GET" && path === "/api/operations/operation-1/job-brief") {
-      await route.fulfill({ json: current });
+      await route.fulfill({ json: {
+        ...current,
+        operation: { ...current.operation, navigation: navigation === undefined ? current.operation.navigation : navigation },
+      } });
     } else if (incoming.method() === "GET" && path === "/api/sops") {
       await route.fulfill({ json: { sops: [{
         id: "sop-mapping",
@@ -204,4 +208,55 @@ test("background refresh preserves a dirty draft and explicit refresh adopts the
   await page.getByRole("button", { name: "Refresh" }).click();
   await expect(instructions).toHaveValue("Server altitude change");
   await expect(page.getByText("LTDS brief v2")).toBeVisible();
+});
+
+test("a job brief without an authorized destination has no external navigation", async ({ page }) => {
+  await mock(page, false, false, null);
+  await page.goto("/operations?brief=operation-1");
+  await expect(page.getByRole("heading", { name: `Job brief · ${operation.title}` })).toBeVisible();
+  await expect(page.getByText("Fly 300 ft AGL with 80/75 overlap.")).toBeVisible();
+  await expect(page.getByRole("region", { name: "External navigation" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Google Maps" })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "Apple Maps" })).toHaveCount(0);
+});
+
+test("zero-coordinate job navigation wraps long labels without overflowing or losing keyboard actions", async ({ page }, testInfo) => {
+  const label = `Survey site ${"FieldReference".repeat(12)}`;
+  await mock(page, false, false, {
+    latitude: 0, longitude: 0, label, coordinateSource: "fallback_point",
+    googleMapsUrl: "https://www.google.com/maps/search/?api=1&query=0.000000%2C0.000000",
+    appleMapsUrl: `https://maps.apple.com/?ll=0.000000%2C0.000000&q=${encodeURIComponent(label)}`,
+  });
+  await page.goto("/operations?brief=operation-1");
+  const navigation = page.getByRole("region", { name: "External navigation" });
+  await expect(navigation).toContainText(`${label} · 0.000000, 0.000000`);
+  for (const width of [375, 640, 1280]) {
+    await page.setViewportSize({ width, height: 900 });
+    const google = navigation.getByRole("link", { name: "Google Maps" });
+    const apple = navigation.getByRole("link", { name: "Apple Maps" });
+    await expect(google).toHaveAttribute("href", "https://www.google.com/maps/search/?api=1&query=0.000000%2C0.000000");
+    await expect(apple).toHaveAttribute("href", `https://maps.apple.com/?ll=0.000000%2C0.000000&q=${encodeURIComponent(label)}`);
+    await google.focus();
+    await expect(google).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(apple).toBeFocused();
+    const boxes = await navigation.evaluate(element => {
+      const panel = element.getBoundingClientRect();
+      return { left: panel.left, right: panel.right, overflow: element.scrollWidth > element.clientWidth,
+        children: [...element.querySelectorAll("strong, small, a")].map(child => {
+          const box = child.getBoundingClientRect();
+          return { left: box.left, right: box.right, height: box.height, link: child.tagName === "A" };
+        }) };
+    });
+    expect(boxes.left).toBeGreaterThanOrEqual(0);
+    expect(boxes.right).toBeLessThanOrEqual(width);
+    expect(boxes.overflow).toBe(false);
+    for (const box of boxes.children) {
+      expect(box.left).toBeGreaterThanOrEqual(boxes.left);
+      expect(box.right).toBeLessThanOrEqual(boxes.right);
+      if (box.link && width <= 640) expect(box.height).toBeGreaterThanOrEqual(44);
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+    await navigation.screenshot({ path: testInfo.outputPath(`job-navigation-zero-${width}.png`) });
+  }
 });

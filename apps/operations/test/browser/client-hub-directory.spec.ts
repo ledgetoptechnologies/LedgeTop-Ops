@@ -1,6 +1,8 @@
 import { expect, test, type Page, type Route } from "@playwright/test";
 
 const capabilities = { directory: true, requests: true, delivery: false, viewer: false };
+const availableSources = [{ source_id: "project-alpha:primary", display_name: "Primary business" },
+  { source_id: "project-alpha:secondary", display_name: "Second business" }, { source_id: "delivery:local", display_name: "Local delivery" }];
 function client(id: string, name: string, kind: "organization" | "standalone_client" = "organization", source = "project-alpha:primary",
   rootNamespace: "business" | "portal" | "account" = source === "delivery:local" ? "account" : "business") {
   const routeKind = kind === "organization" ? "organizations" : "standalone";
@@ -300,11 +302,11 @@ test("initial failures, stale continuations, and empty searches have recoverable
 
 test("directory cards fit mobile, laptop, and ultrawide layouts without fixed column counts", async ({ page }, testInfo) => {
   const clients = Array.from({ length: 12 }, (_, index) => client(`client-${index}`, `Organization ${index} ${"LongName".repeat(8)}`));
-  await mock(page, route => route.fulfill({ json: { clients, nextCursor: null, capabilities } }));
+  await mock(page, route => route.fulfill({ json: { clients, nextCursor: null, sources: availableSources, capabilities } }));
   await page.goto("/clients");
   await expect(page.locator(".client-directory-card")).toHaveCount(12);
   let previousColumns = 0;
-  for (const width of [375, 1280, 3440]) {
+  for (const width of [375, 640, 1280, 3440]) {
     await page.setViewportSize({ width, height: 900 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
     const columns = await page.locator(".client-directory-grid").evaluate(node => getComputedStyle(node).gridTemplateColumns.split(" ").length);
@@ -319,11 +321,85 @@ test("directory cards fit mobile, laptop, and ultrawide layouts without fixed co
     expect(bounds!.width).toBeLessThanOrEqual(width);
     expect(bounds!.height).toBeGreaterThanOrEqual(44);
     await expect(page.getByRole("button", { name: "Individual Clients" })).toHaveCSS("min-height", "44px");
+    const source = page.getByRole("combobox", { name: "Client source" });
+    await source.focus();
+    await expect(source).toBeFocused();
+    const sourceBounds = await source.boundingBox();
+    expect(sourceBounds!.height).toBeGreaterThanOrEqual(44);
+    expect(sourceBounds!.x + sourceBounds!.width).toBeLessThanOrEqual(width);
     await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }));
     await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
     await page.screenshot({ path: testInfo.outputPath(`client-directory-${width}.png`) });
     await page.screenshot({ path: testInfo.outputPath(`client-directory-${width}-full.png`), fullPage: true });
   }
+});
+
+test("source selection is server-filtered and survives search, detail, refresh and history", async ({ page }) => {
+  const requested = await mock(page, (route, url) => {
+    const source = url.searchParams.get("source"), more = url.searchParams.has("cursor");
+    return route.fulfill({ json: { clients: [client(more ? "second" : "first", source ? "Second business client" : "All source client", "organization", source || "project-alpha:primary")],
+      sources: availableSources, nextCursor: source && !more ? "second-page" : null, capabilities } });
+  });
+  await page.goto("/clients?q=building&kind=organization");
+  await page.getByRole("combobox", { name: "Client source" }).selectOption("project-alpha:secondary");
+  await expect(page).toHaveURL(/q=building&kind=organization&source=project-alpha%3Asecondary$/);
+  await expect(page.getByRole("link", { name: "Open Second business client client workspace" })).toBeVisible();
+  await page.getByRole("button", { name: "Load more clients" }).click();
+  await expect(page.locator(".client-directory-card")).toHaveCount(2);
+  expect(requested.some(url => url.searchParams.get("cursor") === "second-page" && url.searchParams.get("source") === "project-alpha:secondary" && url.searchParams.get("q") === "building")).toBe(true);
+  await page.locator(".client-directory-card").first().click();
+  await expect(page.getByRole("link", { name: "← Client Hub" })).toHaveAttribute("href", "/clients?q=building&kind=organization&source=project-alpha%3Asecondary");
+  await page.reload();
+  await page.getByRole("link", { name: "← Client Hub" }).click();
+  await expect(page.getByRole("combobox", { name: "Client source" })).toHaveValue("project-alpha:secondary");
+  await page.getByRole("combobox", { name: "Client source" }).selectOption("");
+  await expect(page.getByRole("link", { name: "Open All source client client workspace" })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole("combobox", { name: "Client source" })).toHaveValue("project-alpha:secondary");
+  await page.goForward();
+  await expect(page.getByRole("combobox", { name: "Client source" })).toHaveValue("");
+});
+
+for (const status of [404, 409]) test(`source ${status} continuation clears obsolete rows and recovers without the old cursor`, async ({ page }) => {
+  let hidden = false;
+  const requested = await mock(page, (route, url) => {
+    if (url.searchParams.has("cursor")) { hidden = true; return route.fulfill({ status,
+      json: { code: status === 409 ? "source_visibility_changed" : undefined, error: "Client source is unavailable. Refresh the directory." } }); }
+    if (hidden && url.searchParams.has("source")) return route.fulfill({ status: 404, json: { error: "Client source is unavailable. Refresh the directory." } });
+    return route.fulfill({ json: { clients: hidden ? [] : [client("one", "Now hidden")], capabilities,
+      sources: hidden ? availableSources.filter(row => row.source_id !== "project-alpha:secondary") : availableSources,
+      nextCursor: hidden ? null : "stale-source-cursor" } });
+  });
+  await page.goto("/clients?source=project-alpha%3Asecondary");
+  await expect(page.getByRole("link", { name: "Open Now hidden client workspace" })).toBeVisible();
+  await page.getByRole("button", { name: "Load more clients" }).click();
+  await expect(page.getByRole("alert")).toContainText("Client source is unavailable");
+  await expect(page.locator(".client-directory-card")).toHaveCount(0);
+  await expect(page.getByRole("combobox", { name: "Client source" }).locator("option:checked")).toHaveText("Unavailable source");
+  await page.getByRole("button", { name: status === 409 ? "Refresh clients" : "Retry clients" }).click();
+  await expect(page.getByRole("alert")).toContainText("Client source is unavailable");
+  expect(requested.filter(url => url.searchParams.get("cursor") === "stale-source-cursor")).toHaveLength(1);
+  await page.getByRole("combobox", { name: "Client source" }).selectOption("");
+  await expect(page).toHaveURL(/\/clients$/);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("changing source cancels an obsolete continuation without restoring its rows", async ({ page }) => {
+  let late: Route | null = null;
+  await mock(page, (route, url) => {
+    if (url.searchParams.has("cursor")) { late = route; return Promise.resolve(); }
+    const secondary = url.searchParams.get("source") === "project-alpha:secondary";
+    return route.fulfill({ json: { clients: [client(secondary ? "second" : "first", secondary ? "Current source" : "Old source")],
+      nextCursor: secondary ? null : "slow-page", sources: availableSources, capabilities } });
+  });
+  await page.goto("/clients");
+  await page.getByRole("button", { name: "Load more clients" }).click();
+  await expect.poll(() => Boolean(late)).toBe(true);
+  await page.getByRole("combobox", { name: "Client source" }).selectOption("project-alpha:secondary");
+  await expect(page.getByRole("link", { name: "Open Current source client workspace" })).toBeVisible();
+  await late!.fulfill({ json: { clients: [client("late", "Obsolete source row")], nextCursor: null, sources: availableSources, capabilities } }).catch(() => undefined);
+  await expect(page.getByRole("link", { name: "Open Obsolete source row client workspace" })).toHaveCount(0);
+  await expect(page.locator(".client-directory-card")).toHaveCount(1);
 });
 
 for (const status of [401, 403]) {

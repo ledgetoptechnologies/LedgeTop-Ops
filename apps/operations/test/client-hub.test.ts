@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { readFileSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { applyConnectorSchema, registerVisibleTestSource } from "./helpers/project-alpha-connectors";
 
 const acl = vi.hoisted(() => ({
   sqlScope: vi.fn(async () => ({ global: true, deniedGlobal: false })),
@@ -59,6 +60,7 @@ async function fixture() {
   active.push(miniflare);
   const ops = await miniflare.getD1Database("OPS_DB") as unknown as D1Database;
   const delivery = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
+  await applyConnectorSchema(ops);
   await applySql(ops, `
     CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
@@ -149,11 +151,13 @@ describe("Client Hub bounded detail collections", () => {
     for (let index = 0; index < 7; index++) await ops.prepare(`INSERT INTO pa_clients(id,name,organization_id,active,payload_json,projection_source_id)
       VALUES(?,?,'secondary-org',1,'{}','project-alpha:secondary')`).bind(`secondary-contact-${index}`, `Secondary contact ${index}`).run();
     const path = organizationPath.replace("project-alpha%3Aprimary", "project-alpha%3Asecondary").replace("pa-org", "secondary-org");
+    expect((await app.request(path, {}, env)).status).toBe(404);
+    await registerVisibleTestSource(ops, "project-alpha:secondary", "Second company");
     const response = await app.request(path, {}, env);
     expect(response.status).toBe(200);
     const result = await response.json() as { contacts: unknown[]; pages: Record<string, Page> };
     expect(result).toMatchObject({ client: { source_id: "project-alpha:secondary", public_id: "secondary-org",
-      workspace_id: null, legacy_account_id: null, portal_status: "not_supported", pa_public_id: organizationUuid },
+      workspace_id: null, legacy_account_id: null, portal_status: "not_supported", pa_public_id: organizationUuid, source_name: "Second company" },
       accounts: [], projects: [], requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [],
       portalIdentities: { items: [], page: { available: false } },
     });
@@ -167,7 +171,28 @@ describe("Client Hub bounded detail collections", () => {
     expect((await app.request(`${organizationPath}/collections/businessContacts?cursor=${encodeURIComponent(contactsPage.nextCursor!)}`, {}, env)).status).toBe(400);
     expect((await app.request(path.replace("project-alpha%3Asecondary", "project-alpha%3Aprimary"), {}, env)).status).toBe(404);
     expect((await app.request(path + "/identities/pa-child-login/access", {}, env)).status).toBe(404);
+    await ops.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id='project-alpha:secondary'").run();
+    expect((await app.request(path, {}, env)).status).toBe(404);
+    expect((await app.request(path + "/collections/businessContacts", {}, env)).status).toBe(404);
+    await registerVisibleTestSource(ops, "project-alpha:secondary", "Second company");
+    expect((await app.request(`${path}/collections/businessContacts?cursor=${encodeURIComponent(contactsPage.nextCursor!)}`, {}, env)).status).toBe(409);
   }, 30_000);
+
+  it("does not return hydrated contacts after source visibility changes mid-read", async () => {
+    const { app, env, ops } = await fixture();
+    await ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id) VALUES('secondary-org','Hidden business',1,'{}','project-alpha:secondary')").run();
+    await registerVisibleTestSource(ops, "project-alpha:secondary");
+    const original = identityReads.listPortalIdentityPage.getMockImplementation()!;
+    identityReads.listPortalIdentityPage.mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await ops.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id='project-alpha:secondary'").run();
+      return result;
+    });
+    const path = organizationPath.replace("project-alpha%3Aprimary", "project-alpha%3Asecondary").replace("pa-org", "secondary-org");
+    const response = await app.request(path, {}, env);
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain("Hidden business");
+  });
 
   it("serves business-project detail through the canonical route and rechecks cross-database root ownership", async () => {
     const { app, env, ops, delivery } = await fixture();

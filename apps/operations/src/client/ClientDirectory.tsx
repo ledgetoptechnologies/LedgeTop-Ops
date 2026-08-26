@@ -31,12 +31,13 @@ export interface ClientHubCapabilities {
 }
 interface DirectoryResponse {
   clients: ClientSummary[];
+  sources?: Array<{ source_id: string; display_name: string }>;
   nextCursor?: string | null;
   indexUpdatedAt?: string | null;
   searchCapabilities?: { businessContacts: boolean; portalContacts: boolean };
   capabilities: ClientHubCapabilities;
 }
-interface DirectoryQuery { q: string; kind: ClientKind | "all" }
+interface DirectoryQuery { q: string; kind: ClientKind | "all"; source: string }
 const FILTERS: Array<{ kind: DirectoryQuery["kind"]; label: string }> = [
   { kind: "all", label: "All" },
   { kind: "organization", label: "Organizations" },
@@ -46,13 +47,14 @@ const FILTERS: Array<{ kind: DirectoryQuery["kind"]; label: string }> = [
 function readQuery(search = location.search): DirectoryQuery {
   const parameters = new URLSearchParams(search), kind = parameters.get("kind");
   return { q: (parameters.get("q") || "").trim(),
-    kind: kind === "organization" || kind === "standalone_client" ? kind : "all" };
+    kind: kind === "organization" || kind === "standalone_client" ? kind : "all", source: parameters.get("source") || "" };
 }
 
 function queryString(query: DirectoryQuery): string {
   const parameters = new URLSearchParams();
   if (query.q) parameters.set("q", query.q);
   if (query.kind !== "all") parameters.set("kind", query.kind);
+  if (query.source) parameters.set("source", query.source);
   const value = parameters.toString();
   return value ? `?${value}` : "";
 }
@@ -112,6 +114,7 @@ export function ClientDirectory() {
   const [query, setQuery] = useState(readQuery);
   const [draft, setDraft] = useState(query.q);
   const [clients, setClients] = useState<ClientSummary[]>([]);
+  const [sources, setSources] = useState<NonNullable<DirectoryResponse["sources"]>>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [indexUpdatedAt, setIndexUpdatedAt] = useState<string | null>(null);
   const [searchCapabilities, setSearchCapabilities] = useState({ businessContacts: true, portalContacts: false });
@@ -145,6 +148,7 @@ export function ClientDirectory() {
         return [...combined.values()];
       });
       setNextCursor(result.nextCursor || null);
+      setSources(result.sources || []);
       setIndexUpdatedAt(refreshedTime(result.indexUpdatedAt));
       setSearchCapabilities({ businessContacts: result.searchCapabilities?.businessContacts ?? true,
         portalContacts: result.searchCapabilities?.portalContacts === true });
@@ -152,11 +156,12 @@ export function ClientDirectory() {
       failedCursor.current = null;
     } catch (caught) {
       if (abort.signal.aborted || request !== requestNumber.current) return;
-      if (caught instanceof ApiError && [401, 403].includes(caught.status)) {
-        setClients([]); setNextCursor(null); setIndexUpdatedAt(null); setLoaded(false);
+      const sourceChanged = caught instanceof ApiError && caught.status === 409 && caught.payload.code === "source_visibility_changed";
+      if (caught instanceof ApiError && ([401, 403, 404].includes(caught.status) || sourceChanged)) {
+        setClients([]); setSources([]); setNextCursor(null); setIndexUpdatedAt(null); setLoaded(false);
         cursor = null;
       }
-      const stale = Boolean(cursor && caught instanceof ApiError && caught.status === 409);
+      const stale = sourceChanged || Boolean(cursor && caught instanceof ApiError && caught.status === 409);
       failedCursor.current = stale ? null : cursor;
       setStaleCursor(stale);
       setError(caught instanceof Error ? caught.message : "The client directory could not be loaded.");
@@ -168,7 +173,7 @@ export function ClientDirectory() {
   useEffect(() => {
     void load(query, null);
     return () => { controller.current?.abort(); requestNumber.current += 1; };
-  }, [query.q, query.kind, load]);
+  }, [query.q, query.kind, query.source, load]);
   useEffect(() => {
     const restore = () => {
       const restored = readQuery();
@@ -208,6 +213,15 @@ export function ClientDirectory() {
         {searchCapabilities.portalContacts ? " Portal contact records are also searchable." : " Portal-only contact and login search is not available."}
       </small>
     </form>
+    {(sources.length > 0 || query.source) && <label className="client-directory-source" htmlFor="client-directory-source">
+      Client source
+      <select id="client-directory-source" value={query.source}
+        onChange={event => changeQuery({ ...query, source: event.target.value })}>
+        <option value="">All available sources</option>
+        {query.source && !sources.some(source => source.source_id === query.source) && <option value={query.source} disabled>Unavailable source</option>}
+        {sources.map(source => <option key={source.source_id} value={source.source_id}>{source.display_name}</option>)}
+      </select>
+    </label>}
     <div className="client-directory-filters" role="group" aria-label="Client type">
       {FILTERS.map(filter => <button key={filter.kind} type="button" className="button-ghost"
         aria-pressed={query.kind === filter.kind}
@@ -243,10 +257,10 @@ export function ClientDirectory() {
       </a>)}
     </div>
     {loaded && !loading && !error && !clients.length && <Card>
-      <EmptyState title={query.q || query.kind !== "all" ? "No matching clients" : "No clients yet"}
-        detail={query.q || query.kind !== "all" ? "Try another search or client type." : "Clients will appear after they have synchronized."} />
-      {(query.q || query.kind !== "all") && <button type="button" className="button-ghost"
-        onClick={() => changeQuery({ q: "", kind: "all" })}>Reset filters</button>}
+      <EmptyState title={query.q || query.kind !== "all" || query.source ? "No matching clients" : "No clients yet"}
+        detail={query.q || query.kind !== "all" || query.source ? "Try another search, client type, or source." : "Clients will appear after they have synchronized."} />
+      {(query.q || query.kind !== "all" || query.source) && <button type="button" className="button-ghost"
+        onClick={() => changeQuery({ q: "", kind: "all", source: "" })}>Reset filters</button>}
     </Card>}
     {nextCursor && !error && <div className="client-directory-more"><button type="button" className="button-ghost"
       disabled={Boolean(loading)} onClick={() => void load(query, nextCursor)}>{loading === "more" ? "Loading more…" : "Load more clients"}</button></div>}

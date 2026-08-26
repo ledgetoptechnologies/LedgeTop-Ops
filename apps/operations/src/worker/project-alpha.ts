@@ -1,4 +1,6 @@
 import type { Env } from "./types";
+import { assertProjectAlphaConnectorProof, connectorFenceStatement, resolveProjectAlphaConnector,
+  type ProjectAlphaConnectorProof } from "./project-alpha-connectors";
 import { PRIMARY_PROJECT_ALPHA_SOURCE, createProjectAlphaSourceContext, mapProjectAlphaSourceRow,
   prepareProjectAlphaSourceRecords, projectAlphaSourceReferences,
   type ProjectAlphaSourceContext, type ProjectAlphaSourceMap } from "./project-alpha-source";
@@ -73,8 +75,8 @@ function configuredApplicationKey(value: string): string {
 function snapshotBaseUrl(value: string): URL {
   let url: URL;
   try { url = new URL(value); } catch { throw new Error("project-alpha-base-url-invalid"); }
-  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
-  if ((url.protocol !== "https:" && !(local && url.protocol === "http:")) || url.username || url.password) {
+  const local = url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]";
+  if ((url.protocol !== "https:" && !(local && url.protocol === "http:")) || url.username || url.password || url.search || url.hash) {
     throw new Error("project-alpha-base-url-invalid");
   }
   return url;
@@ -193,7 +195,46 @@ async function fetchSnapshotPage(url: URL, connection: ProjectAlphaSourceConnect
     }
     await retryDelay(50*2**(attempt-1));
   }
-  throw new Error(`project-alpha-network:${lastError instanceof Error?lastError.message:"unknown"}`);
+  throw new Error(lastError instanceof Error && lastError.name === "TimeoutError"
+    ? "project-alpha-network-timeout" : "project-alpha-network-error");
+}
+
+async function readSnapshotPage(response: Response): Promise<unknown> {
+  const declaredBytes=Number(response.headers.get("content-length")??0);
+  if(declaredBytes>SNAPSHOT_MAX_PAGE_BYTES){
+    await response.body?.cancel();
+    throw new Error("project-alpha-page-too-large");
+  }
+  if(!response.body)throw new Error("project-alpha-empty-page");
+  const reader=response.body.getReader();
+  const chunks:Uint8Array[]=[];
+  let length=0;
+  const deadline=Date.now()+SNAPSHOT_TIMEOUT_MS;
+  try {
+    while(true){
+      let timer:ReturnType<typeof setTimeout>|undefined;
+      const next=await Promise.race([
+        reader.read(),
+        new Promise<never>((_,reject)=>{timer=setTimeout(()=>reject(new Error("project-alpha-body-timeout")),Math.max(0,deadline-Date.now()));}),
+      ]).finally(()=>{if(timer!==undefined)clearTimeout(timer);});
+      if(next.done)break;
+      length+=next.value.byteLength;
+      if(length>SNAPSHOT_MAX_PAGE_BYTES)throw new Error("project-alpha-page-too-large");
+      if(next.value.byteLength)chunks.push(next.value);
+    }
+    const bytes=new Uint8Array(length);
+    let offset=0;
+    for(const chunk of chunks){bytes.set(chunk,offset);offset+=chunk.byteLength;}
+    try { return JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes)); }
+    catch { throw new Error("project-alpha-page-invalid-json"); }
+  } catch(error){
+    // Cancellation is best effort: an uncooperative producer must not hold the
+    // request open after the byte/deadline bound has already been exceeded.
+    let cancelTimer:ReturnType<typeof setTimeout>|undefined;
+    await Promise.race([reader.cancel().catch(()=>undefined),new Promise<void>(resolve=>{cancelTimer=setTimeout(resolve,50);})]);
+    if(cancelTimer!==undefined)clearTimeout(cancelTimer);
+    throw error;
+  } finally { reader.releaseLock(); }
 }
 
 async function fetchCompleteSnapshot(connection: ProjectAlphaSourceConnection, beforeAttempt?:()=>Promise<void>): Promise<{data:SnapshotCollections;generatedAt:string}> {
@@ -204,16 +245,12 @@ async function fetchCompleteSnapshot(connection: ProjectAlphaSourceConnection, b
   let generatedAt="";
   let generatedAtTimestamp=-Infinity;
   for (let pagesRead = 0; pagesRead < SNAPSHOT_MAX_PAGES; pagesRead += 1) {
-    const url = new URL("/api/v1/ops/snapshot", baseUrl);
+    const url = new URL(`${baseUrl.pathname.replace(/\/$/, "")}/api/v1/ops/snapshot`, baseUrl.origin);
     url.searchParams.set("page", String(pageNumber));
     url.searchParams.set("limit", "500");
     const response = await fetchSnapshotPage(url,connection,beforeAttempt);
-    if (!response.ok) throw new Error(`project-alpha-http-${response.status}`);
-    const declaredBytes=Number(response.headers.get("content-length")??0);
-    if(declaredBytes>SNAPSHOT_MAX_PAGE_BYTES)throw new Error("project-alpha-page-too-large");
-    const bytes=await response.arrayBuffer();
-    if(bytes.byteLength>SNAPSHOT_MAX_PAGE_BYTES)throw new Error("project-alpha-page-too-large");
-    const page = validatePage(JSON.parse(new TextDecoder().decode(bytes)));
+    if (!response.ok) { await response.body?.cancel(); throw new Error(`project-alpha-http-${response.status}`); }
+    const page = validatePage(await readSnapshotPage(response));
     const pageGeneratedAt=Date.parse(page.generated_at);
     if(pageGeneratedAt>generatedAtTimestamp){generatedAtTimestamp=pageGeneratedAt;generatedAt=page.generated_at;}
     for (const key of SNAPSHOT_COLLECTIONS) {
@@ -228,12 +265,14 @@ async function fetchCompleteSnapshot(connection: ProjectAlphaSourceConnection, b
   throw new Error("project-alpha-page-limit");
 }
 
-async function claimSnapshotLease(db: D1Database, owner: string, source: ProjectAlphaSourceContext): Promise<void> {
-  const claimed=await db.prepare(`INSERT INTO pa_projection_entity_leases (entity_type,entity_id,owner_event_id,lease_until,projection_source_id)
+async function claimSnapshotLease(db: D1Database, owner: string, source: ProjectAlphaSourceContext, proof?: ProjectAlphaConnectorProof): Promise<void> {
+  const statement=db.prepare(`INSERT INTO pa_projection_entity_leases (entity_type,entity_id,owner_event_id,lease_until,projection_source_id)
     VALUES ('integration_projection','project-alpha',?,datetime('now',?),?)
     ON CONFLICT(projection_source_id,entity_type,entity_id) DO UPDATE SET owner_event_id=excluded.owner_event_id,lease_until=excluded.lease_until,updated_at=datetime('now')
     WHERE datetime(pa_projection_entity_leases.lease_until)<=datetime('now') RETURNING owner_event_id`)
-    .bind(owner,PROJECTION_LEASE_DURATION,source.sourceId).first<{owner_event_id:string}>();
+    .bind(owner,PROJECTION_LEASE_DURATION,source.sourceId);
+  const claimed=proof ? (await db.batch<{owner_event_id:string}>([connectorFenceStatement(db,proof),statement]))[1]?.results[0]
+    : await statement.first<{owner_event_id:string}>();
   if(claimed?.owner_event_id!==owner)throw new Error("project-alpha-sync-busy");
 }
 
@@ -241,17 +280,19 @@ async function releaseSnapshotLease(db: D1Database, owner: string, source: Proje
   await db.prepare("DELETE FROM pa_projection_entity_leases WHERE entity_type='integration_projection' AND entity_id='project-alpha' AND owner_event_id=? AND projection_source_id=?").bind(owner,source.sourceId).run();
 }
 
-async function refreshSnapshotLease(db:D1Database,owner:string,source:ProjectAlphaSourceContext):Promise<void>{
-  const refreshed=await db.prepare(`UPDATE pa_projection_entity_leases SET lease_until=datetime('now',?),updated_at=datetime('now')
+async function refreshSnapshotLease(db:D1Database,owner:string,source:ProjectAlphaSourceContext,proof?:ProjectAlphaConnectorProof):Promise<void>{
+  const statement=db.prepare(`UPDATE pa_projection_entity_leases SET lease_until=datetime('now',?),updated_at=datetime('now')
     WHERE entity_type='integration_projection' AND entity_id='project-alpha' AND owner_event_id=? AND projection_source_id=? RETURNING owner_event_id`)
-    .bind(PROJECTION_LEASE_DURATION,owner,source.sourceId).first<{owner_event_id:string}>();
+    .bind(PROJECTION_LEASE_DURATION,owner,source.sourceId);
+  const refreshed=proof ? (await db.batch<{owner_event_id:string}>([connectorFenceStatement(db,proof),statement]))[1]?.results[0]
+    : await statement.first<{owner_event_id:string}>();
   if(refreshed?.owner_event_id!==owner)throw new Error("project-alpha-sync-lease-lost");
 }
 
-async function runBatches(db: D1Database, statements: D1PreparedStatement[], beforeBatch?:()=>Promise<void>): Promise<void> {
+async function runBatches(db: D1Database, statements: D1PreparedStatement[], beforeBatch?:()=>Promise<void>, proof?:ProjectAlphaConnectorProof): Promise<void> {
   for (let index = 0; index < statements.length; index += 75) {
     await beforeBatch?.();
-    await db.batch(statements.slice(index, index + 75));
+    await db.batch([...(proof ? [connectorFenceStatement(db,proof)] : []), ...statements.slice(index, index + 75)]);
   }
 }
 
@@ -625,21 +666,29 @@ export interface ProjectAlphaSourceConnection {
 }
 
 export async function syncProjectAlpha(env: Env): Promise<ProjectAlphaSyncResult> {
-  if (!env.PROJECT_ALPHA_BASE_URL || !env.PROJECT_ALPHA_API_KEY) {
-    await env.OPS_DB.prepare("UPDATE integration_health SET status='disabled',updated_at=datetime('now') WHERE integration='project-alpha' AND projection_source_id='project-alpha:primary'").run();
-    return { status: "disabled", records: 0, changedCollections: [] };
-  }
-  return syncProjectAlphaForSource(env, PRIMARY_PROJECT_ALPHA_SOURCE, {
-    baseUrl: env.PROJECT_ALPHA_BASE_URL, apiKey: env.PROJECT_ALPHA_API_KEY, applicationKey: env.APPLICATION_KEY,
-  });
+  return syncRegisteredProjectAlpha(env,PRIMARY_PROJECT_ALPHA_SOURCE.sourceId);
 }
 
-/** Internal source-scoped ingestion. No secondary public receiver/configuration is
- * enabled here. A future registry must bind this context to an authenticated
- * producer before calling it; credentials never fall back to the primary Env. */
+/** Resolve configuration on the server, never accept a destination or credential from a caller. */
+export async function syncRegisteredProjectAlpha(env: Env, sourceId: string): Promise<ProjectAlphaSyncResult> {
+  const resolved = await resolveProjectAlphaConnector(env,sourceId,"snapshot");
+  if (!resolved.snapshot) {
+    await env.OPS_DB.batch([connectorFenceStatement(env.OPS_DB,resolved.proof),
+      env.OPS_DB.prepare("UPDATE integration_health SET status='disabled',updated_at=datetime('now') WHERE integration='project-alpha' AND projection_source_id='project-alpha:primary'")]);
+    return { status: "disabled", records: 0, changedCollections: [] };
+  }
+  return syncProjectAlphaForSource(env,resolved.source,resolved.snapshot,resolved.proof);
+}
+
+/** Internal source-scoped ingestion. Public callers must use the registry entry
+ * point above; this explicit seam is also used by isolated migration fixtures. */
 export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaSourceContext,
-  connection: ProjectAlphaSourceConnection): Promise<ProjectAlphaSyncResult> {
+  connection: ProjectAlphaSourceConnection, proof?:ProjectAlphaConnectorProof): Promise<ProjectAlphaSyncResult> {
   const source = createProjectAlphaSourceContext(context.sourceId);
+  if(proof){
+    if(proof.sourceId!==source.sourceId)throw new Error("connector-source-mismatch");
+    await assertProjectAlphaConnectorProof(env,proof);
+  }
   const applicationKey = configuredApplicationKey(connection.applicationKey);
   snapshotBaseUrl(connection.baseUrl);
   if (typeof connection.apiKey !== "string" || !connection.apiKey.trim()) throw new Error("project-alpha-api-key-required");
@@ -647,20 +696,24 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
   const runId = crypto.randomUUID();
   const leaseOwner=`snapshot:${runId}`;
   let leaseClaimed=false;
-  await env.OPS_DB.prepare("INSERT INTO integration_health(integration,status,projection_source_id) VALUES('project-alpha','unknown',?) ON CONFLICT(projection_source_id,integration) DO NOTHING").bind(source.sourceId).run();
+  await env.OPS_DB.batch([
+    ...(proof ? [connectorFenceStatement(env.OPS_DB,proof)] : []),
+    env.OPS_DB.prepare("INSERT INTO integration_health(integration,status,projection_source_id) VALUES('project-alpha','unknown',?) ON CONFLICT(projection_source_id,integration) DO NOTHING").bind(source.sourceId),
+  ]);
   const circuit=await env.OPS_DB.prepare("SELECT circuit_open_until FROM integration_health WHERE integration='project-alpha' AND projection_source_id=?").bind(source.sourceId).first<{circuit_open_until:string|null}>();
   if(circuit?.circuit_open_until&&Date.parse(`${circuit.circuit_open_until.replace(" ","T")}Z`)>Date.now())throw new Error("project-alpha-circuit-open");
   await env.OPS_DB.batch([
+    ...(proof ? [connectorFenceStatement(env.OPS_DB,proof)] : []),
     env.OPS_DB.prepare("INSERT INTO sync_runs (id,integration,status,projection_source_id) VALUES (?,'project-alpha','running',?)").bind(runId,source.sourceId),
     env.OPS_DB.prepare("UPDATE integration_health SET last_attempt_at=datetime('now'),updated_at=datetime('now') WHERE integration='project-alpha' AND projection_source_id=?").bind(source.sourceId),
   ]);
   try {
     if (source.staffAuthority && !env.DELIVERY_DB) throw new Error("delivery-db-binding-required");
-    await claimSnapshotLease(env.OPS_DB,leaseOwner,source);
+    await claimSnapshotLease(env.OPS_DB,leaseOwner,source,proof);
     leaseClaimed=true;
     // Fetch and validate every page before touching projection data. A failed or partial
     // snapshot therefore leaves the last known good projection entirely intact.
-    const refreshLease=()=>refreshSnapshotLease(env.OPS_DB,leaseOwner,source);
+    const refreshLease=()=>refreshSnapshotLease(env.OPS_DB,leaseOwner,source,proof);
     const snapshot = await fetchCompleteSnapshot(connection,refreshLease);
     await refreshLease();
     // Project Alpha uses OFFSET pagination and assigns generated_at per page.
@@ -685,9 +738,15 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     const refs = SNAPSHOT_COLLECTIONS.filter(collection => source.staffAuthority || collection !== "application_entitlements")
       .flatMap(collection => data[collection].flatMap(row => projectAlphaSourceReferences(collection,snapshotMappingRow(collection,row))));
     await refreshLease();
-    const ids = await prepareProjectAlphaSourceRecords(env.OPS_DB,source,refs);
-    await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt,source,ids),refreshLease);
-    await runBatches(env.OPS_DB, reconciliationStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt,source),refreshLease);
+    const mappingDb = proof ? {
+      prepare: (sql:string)=>env.OPS_DB.prepare(sql),
+      batch: async <T>(statements:D1PreparedStatement[]) => (await env.OPS_DB.batch<T>([
+        connectorFenceStatement(env.OPS_DB,proof),...statements,
+      ])).slice(1),
+    } : env.OPS_DB;
+    const ids = await prepareProjectAlphaSourceRecords(mappingDb,source,refs);
+    await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt,source,ids),refreshLease,proof);
+    await runBatches(env.OPS_DB, reconciliationStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt,source),refreshLease,proof);
     await refreshLease();
     // Legacy Delivery references are still primary-owned. A business source
     // cannot update account eligibility, project grants or delivery mappings.
@@ -696,21 +755,26 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     // Commit source fingerprints only after the idempotent portal projection.
     // If DELIVERY_DB is unavailable, the next run must retry the same changed
     // collections instead of falsely reporting a healthy but stale portal.
-    await runBatches(env.OPS_DB,snapshotVersionStatements(env.OPS_DB,data,changed,syncId,generatedAt,source),refreshLease);
-    await runBatches(env.OPS_DB, fingerprintStatements(env.OPS_DB, fingerprints, fingerprintChanged, syncId,source),refreshLease);
+    await runBatches(env.OPS_DB,snapshotVersionStatements(env.OPS_DB,data,changed,syncId,generatedAt,source),refreshLease,proof);
+    await runBatches(env.OPS_DB, fingerprintStatements(env.OPS_DB, fingerprints, fingerprintChanged, syncId,source),refreshLease,proof);
     await env.OPS_DB.batch([
+      ...(proof ? [connectorFenceStatement(env.OPS_DB,proof)] : []),
       env.OPS_DB.prepare("UPDATE sync_runs SET status='success',completed_at=datetime('now'),records_seen=? WHERE id=? AND projection_source_id=?").bind(records, runId,source.sourceId),
       env.OPS_DB.prepare("UPDATE integration_health SET status='healthy',last_success_at=datetime('now'),last_error_code=NULL,consecutive_failures=0,circuit_open_until=NULL,updated_at=datetime('now') WHERE integration='project-alpha' AND projection_source_id=?").bind(source.sourceId),
     ]);
     return { status: "success", records, changedCollections: [...changed] };
   } catch (error) {
-    const code = error instanceof Error ? error.message.slice(0, 120) : "unknown";
-    await env.OPS_DB.batch([
-      env.OPS_DB.prepare("UPDATE sync_runs SET status='failed',completed_at=datetime('now'),error_code=? WHERE id=? AND projection_source_id=?").bind(code, runId,source.sourceId),
+    const code = error instanceof Error && /^[a-z][a-z0-9-]{0,119}$/.test(error.message)
+      ? error.message : "project-alpha-sync-failed";
+    await env.OPS_DB.prepare("UPDATE sync_runs SET status='failed',completed_at=datetime('now'),error_code=? WHERE id=? AND projection_source_id=?").bind(code, runId,source.sourceId).run();
+    // Record this attempt's failure, but never let an obsolete run overwrite a
+    // newer revision's health. The guard and health update share one transaction.
+    try { await env.OPS_DB.batch([
+      ...(proof ? [connectorFenceStatement(env.OPS_DB,proof)] : []),
       env.OPS_DB.prepare(`UPDATE integration_health SET status='error',last_error_code=?,
         circuit_open_until=CASE WHEN consecutive_failures+1>=3 THEN datetime('now','+5 minutes') ELSE circuit_open_until END,
         consecutive_failures=consecutive_failures+1,updated_at=datetime('now') WHERE integration='project-alpha' AND projection_source_id=?`).bind(code,source.sourceId),
-    ]);
+    ]); } catch { /* A stale connector proof cannot update source health. */ }
     throw error;
   } finally {
     if(leaseClaimed)await releaseSnapshotLease(env.OPS_DB,leaseOwner,source);

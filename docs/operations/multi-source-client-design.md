@@ -10,7 +10,11 @@ workspace ownership and transactional projection replay are covered in
 [native portal source ownership](portal-source-ownership.md). The subsequent
 [delivery-intent source boundary](delivery-intent-source-ownership.md) covers
 receipt replay, guest links and notification ownership. These are separate
-local increments, not second-source activation. The
+local increments, not second-source activation. The next local increment is the
+[source-bound connector registry](project-alpha-connector-registry.md), including
+authenticated snapshot/event selection and staff business-record visibility;
+its final verification is in progress. None of these local changes are evidence
+of a production secondary connection. The
 original gaps below were audited against local Operations checkpoint
 `f055b2c` on August 26, 2026. This document
 does not authorize a second connection, change staff roles, or replace the
@@ -18,11 +22,12 @@ does not authorize a second connection, change staff roles, or replace the
 
 ## Why another connection cannot be enabled yet
 
-The source-qualified Client Hub URLs protect the current directory's identity
-namespace. They do not make its upstream stores multi-source. In the current
-code, a second producer could collide with the first even when their client
-names differ. The following are implementation constraints, not evidence of an
-incident or an assertion that a second producer is currently connected.
+The source-qualified Client Hub URLs alone do not make upstream stores
+multi-source. The audited baseline allowed a second producer to collide with
+the first even when client names differed. Local isolation and registry changes
+address those boundaries, but release, producer provenance, and live acceptance
+remain gates. The following records implementation constraints and local
+progress, not evidence of an incident or a connected second producer.
 
 | Boundary | Current evidence | Required isolation |
 | --- | --- | --- |
@@ -58,8 +63,9 @@ if the administrator sees one connection form per Alpha instance.
 
 The existing `applicationKey` identifies an application; it is not a durable
 Alpha-instance identifier. Current/previous signing keys are a rotation pair for
-one authority, not two connector identities. A future source registry must bind
-the verified connection to its producer and allowed workspaces explicitly. Do
+one authority, not two connector identities. The local source registry binds
+the verified business connection to its producer explicitly; separate portal
+contracts still govern allowed workspaces. Do
 not reinterpret an existing field or add a body-only `sourceId` and call it
 authenticated provenance.
 

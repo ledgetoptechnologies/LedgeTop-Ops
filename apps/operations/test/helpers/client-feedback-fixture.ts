@@ -2,11 +2,13 @@ import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { createFeedbackRecord, type FeedbackWriteAuthorization } from "../../../client/src/worker/client-portal/feedback-store";
 import type { Env, StaffPrincipal } from "../../src/worker/types";
+import { applyConnectorSchema } from "./project-alpha-connectors";
 
 export const feedbackStaff: StaffPrincipal = { id:"feedback-staff",email:"staff@example.test",displayName:"Staff",accessSubject:"staff-subject",projectAlphaUserId:"staff-pa" };
 export async function feedbackFixture() {
   const runtime = new Miniflare({ compatibilityDate:"2026-07-22",modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:{DB:crypto.randomUUID(),OPS:crypto.randomUUID()} });
   const db = await runtime.getD1Database("DB") as unknown as D1Database, ops = await runtime.getD1Database("OPS") as unknown as D1Database;
+  await applyConnectorSchema(ops);
   const directory = new URL("../../../client/migrations/",import.meta.url);
   for (const file of readdirSync(directory).filter(name=>name.endsWith(".sql")).sort()) {
     const sql = readFileSync(new URL(file,directory),"utf8").replace(/\r\n/g,"\n").replace(/^\s*--.*$/gm,"");

@@ -372,8 +372,10 @@ now implemented with primary-compatible guards and scoped verification. See
 [Delivery source provenance](delivery-source-provenance.md) for the paired
 migration, compatibility/replay tests and release limitations. Native portal
 ownership is also implemented locally; its exact verification state is recorded
-in [native portal source ownership](portal-source-ownership.md). The verified
-connector registry and explicit business-party linking remain unfinished gates.
+in [native portal source ownership](portal-source-ownership.md). The
+[connector registry](project-alpha-connector-registry.md) is now implemented
+and verified locally; explicit business-party linking
+remains unfinished.
 Local delivery-intent/guest receipt ownership is documented in
 [delivery intent ownership](delivery-intent-source-ownership.md); primary-only
 outbound quote/pricing destination ownership is documented in
@@ -623,16 +625,27 @@ Test the complete workflow, not only whether a component renders:
 
 ## Current checkpoint
 
-Follow-up found during August 26 local quote UI inspection: absent request
-coordinates currently become `0,0` in shared `navigationCoordinate` because it
-coerces null with `Number(...)`. This affects request navigation and Job Brief
-destinations. Before release, require actual finite numeric ordinates without
-rejecting a valid zero, regress null/undefined/string/boolean/array coordinates,
-and prove missing-location request/Job Brief screens offer no map navigation.
-This is recorded separately from the quote-destination increment, not dismissed
-as a successful location lookup. The full-page mobile screenshot also exposes
-overflow from that navigation panel's explanatory text; include responsive
-layout verification in the same follow-up.
+The August 26 missing-coordinate follow-up is corrected locally: shared
+`navigationCoordinate` now requires real, finite numeric ordinates and preserves
+valid zeros. Missing/malformed coordinates no longer create a false `0,0`
+destination. Request/Job Brief navigation text wraps and the buttons remain
+usable on mobile. The standalone gate passed 36 targeted unit/route tests, type
+checking, build, and 20 desktop/mobile browser workflows; screenshots were
+inspected. This is not yet deployed. The final integrated connector gate also
+passed the relevant navigation and Job Brief workflows; see the results below.
+
+The verified local increment adds the authenticated business-source registry and
+its source-specific event/snapshot path, safe administration, and staff
+business-record visibility. See [connector registry](project-alpha-connector-registry.md)
+for the precise boundary, exact verification results and release prerequisites.
+Operations passed all 1,135 unique tests in 128 files across serial partitions;
+ops-sync passed all 59 tests in four files. Both type checks/builds and 172
+desktop/mobile browser tests passed, with screenshots inspected. A pre-existing
+thumbnail-runbook source-layout invariant remains a separate documented failure;
+this is not a whole-monorepo green claim. The increment is not deployed, and
+no secondary source, production migration, credential change, or deployment has
+been performed. Automatic secondary scheduling and explicit business-party
+linking remain separate unfinished slices.
 
 - [x] Read and reconcile the handoff against current released Operations source.
 - [x] Record the identity, authorization, source ownership, and Viewer-freeze boundaries.
@@ -687,6 +700,12 @@ layout verification in the same follow-up.
       transports. See [outbound quote ownership](outbound-quote-source-ownership.md)
       for the exact focused backend/browser/build evidence. Secondary routing,
       production migrations and live Alpha acceptance remain separate gates.
+- [x] Locally implement and verify the source-bound connector registry, immutable
+      revisions and credential ownership, fenced event/snapshot ingestion,
+      scoped business visibility and responsive administration. See
+      [connector registry](project-alpha-connector-registry.md). Live enrollment,
+      paired migration/deployment, Alpha public-ID export and unresolved
+      business-party/project-memory policies remain separate release gates.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

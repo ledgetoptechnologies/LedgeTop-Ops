@@ -59,4 +59,46 @@ describe("external navigation destinations", () => {
       .toMatchObject({ coordinateSource: "fallback_point", label: "Rural parcel" });
     expect(buildNavigationDestination({ latitude: 200, longitude: -88.1 })).toBeNull();
   });
+
+  it.each([
+    {}, { latitude: null, longitude: null },
+    { latitude: null, longitude: -88 }, { latitude: 44, longitude: null },
+    { latitude: undefined, longitude: -88 }, { latitude: 44, longitude: undefined },
+  ])("does not invent a destination for missing coordinates: %j", input => {
+    expect(buildNavigationDestination(input)).toBeNull();
+  });
+
+  it.each([
+    [null, null], [null, 44], [-88, null], [undefined, undefined],
+    ["-88", "44"], ["", ""], [false, false], [true, true], [[], []],
+    [{}, {}], [NaN, 44], [-88, Infinity], [181, 44], [-88, -91],
+  ])("rejects malformed geometry ordinates: %j", (longitude, latitude) => {
+    for (const type of ["Point", "MultiPoint", "Polygon", "MultiPolygon"] as const) {
+      const point = [longitude, latitude];
+      const coordinates = type === "Point" ? point : type === "MultiPoint" ? [point]
+        : type === "Polygon" ? [[point]] : [[[point]]];
+      expect(buildNavigationDestination({ geometry: { type, coordinates } })).toBeNull();
+    }
+  });
+
+  it("preserves genuine numeric zero for stored and geometric locations", () => {
+    for (const input of [
+      { latitude: 0, longitude: 0 },
+      { geometry: { type: "Point" as const, coordinates: [0, 0] }, latitude: null, longitude: null },
+    ]) {
+      const destination = buildNavigationDestination(input);
+      expect(destination).toMatchObject({ latitude: 0, longitude: 0 });
+      expect(destination?.googleMapsUrl).toContain("query=0.000000%2C0.000000");
+    }
+  });
+
+  it("uses valid geometry despite missing fallback and valid fallback despite invalid geometry", () => {
+    expect(buildNavigationDestination({
+      geometry: { type: "MultiPoint", coordinates: [[null, null], [-88, 44]] },
+      latitude: null, longitude: null,
+    })).toMatchObject({ latitude: 44, longitude: -88, coordinateSource: "multipoint_representative" });
+    expect(buildNavigationDestination({
+      geometry: { type: "Point", coordinates: [null, null] }, latitude: 44, longitude: -88,
+    })).toMatchObject({ latitude: 44, longitude: -88, coordinateSource: "fallback_point" });
+  });
 });

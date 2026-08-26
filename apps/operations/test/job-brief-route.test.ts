@@ -115,6 +115,7 @@ function setup() {
   ops.exec(readFileSync(new URL("../migrations/0017_operational_job_briefs.sql", import.meta.url), "utf8"));
   ops.exec(readFileSync(new URL("../migrations/0020_internal_sop_library.sql", import.meta.url), "utf8"));
   ops.exec(readFileSync(new URL("../migrations/0025_sop_assignment_permission.sql", import.meta.url), "utf8"));
+  ops.exec(readFileSync(new URL("../migrations/0035_project_alpha_connectors.sql", import.meta.url), "utf8"));
   const insertStaff = ops.prepare("INSERT INTO staff_users VALUES (?,?,?,?)");
   for (const value of Object.values(principals)) insertStaff.run(value.id, value.email, value.displayName, value.projectAlphaUserId);
   ops.prepare("INSERT INTO divisions VALUES (?,?)").run("division-flight", "unit-flight");
@@ -269,6 +270,37 @@ describe("operational job brief routes", () => {
     expect(refreshedPayload.history[0].author.displayName).toBe("Ops Admin");
     expect(state.ops.prepare("SELECT COUNT(*) count FROM audit_events").get()).toEqual({ count: 2 });
     expect(() => state.ops.prepare("UPDATE operational_job_brief_revisions SET change_kind='scope_saved'").run()).toThrow("immutable");
+  });
+
+  it.each(["absent", "null", "missing-latitude", "missing-longitude"])("returns no navigation for %s service coordinates", async variant => {
+    const state = setup();
+    try {
+      if (variant === "absent") state.ops.exec("DELETE FROM pa_service_locations");
+      else if (variant === "null") state.ops.exec("UPDATE pa_service_locations SET latitude=NULL,longitude=NULL");
+      else if (variant === "missing-latitude") state.ops.exec("UPDATE pa_service_locations SET latitude=NULL");
+      else state.ops.exec("UPDATE pa_service_locations SET longitude=NULL");
+      const response = await worker.fetch(request("/api/operations/operation-1/job-brief", "pilot"), state.env, executionCtx);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ operation: { navigation: null } });
+    } finally {
+      state.ops.close();
+      state.delivery.close();
+    }
+  });
+
+  it("retains navigation for an explicitly stored zero-coordinate service location", async () => {
+    const state = setup();
+    try {
+      state.ops.exec("UPDATE pa_service_locations SET latitude=0,longitude=0");
+      const response = await worker.fetch(request("/api/operations/operation-1/job-brief", "pilot"), state.env, executionCtx);
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ operation: { navigation: {
+        latitude: 0, longitude: 0, googleMapsUrl: "https://www.google.com/maps/search/?api=1&query=0.000000%2C0.000000",
+      } } });
+    } finally {
+      state.ops.close();
+      state.delivery.close();
+    }
   });
 
   it("does not resolve a secondary operation through a primary Delivery project with the same raw ID", async () => {

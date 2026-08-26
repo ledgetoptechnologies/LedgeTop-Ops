@@ -27,6 +27,7 @@ import {
 import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
+import { ProjectAlphaConnections } from "./ProjectAlphaConnections";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
 import { deliveryViewCountText } from "./delivery-view-count";
 import { JobBriefPanel } from "./JobBriefPanel";
@@ -6407,7 +6408,7 @@ function Configurations({ session }: { session: Session }) {
 }
 
 function Administration({ session }: { session: Session }) {
-  const [message, setMessage] = useState("");
+  const canManageConnections = session.user.isAdministrator && allowed(session.user, "integrations.manage");
   const audit = useLoad(
     () =>
       allowed(session.user, "audit.view")
@@ -6418,33 +6419,8 @@ function Administration({ session }: { session: Session }) {
   return (
     <>
       <div className="dashboard-grid">
-        <Card title="Project Alpha">
-          <p>
-            Receives signed operational changes as they happen and uses a daily
-            full snapshot for reconciliation.
-          </p>
-          {allowed(session.user, "integrations.manage") && (
-            <button
-              className="button-orange"
-              onClick={async () => {
-                try {
-                  const result = await api<any>(
-                    "/api/admin/integrations/project-alpha/sync",
-                    { method: "POST", body: "{}" },
-                  );
-                  setMessage(
-                    `Sync complete: ${result.records} records processed.`,
-                  );
-                } catch (caught) {
-                  setMessage((caught as Error).message);
-                }
-              }}
-            >
-              Sync now
-            </button>
-          )}
-          {message && <div className="notice">{message}</div>}
-        </Card>
+        {canManageConnections && <ProjectAlphaConnections />}
+        {!canManageConnections && <Card title="Project Alpha"><p>Connection management requires an administrator with global integration-management permission.</p></Card>}
         <Card title="Security model">
           <p>
             Cloudflare Access authenticates staff. LTDS roles, explicit grants,

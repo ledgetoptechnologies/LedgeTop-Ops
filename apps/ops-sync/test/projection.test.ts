@@ -49,7 +49,7 @@ describe("entitlement projection",()=>{
     miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await miniflare.getD1Database("OPS_DB") as D1Database;
     const migrationsPath=resolve(import.meta.dirname,"../../operations/migrations");
-    for(const migration of (await readdir(migrationsPath)).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0033").sort()){
+    for(const migration of (await readdir(migrationsPath)).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0035").sort()){
       const sql=await readFile(resolve(migrationsPath,migration),"utf8");
       const statements=unstable_splitSqlQuery(sql.replace(/\r\n/g,"\n")).map(part=>part.trim()).filter(part=>part&&!/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/i.test(part));
       if(statements.length)await db.batch(statements.map(statement=>db.prepare(statement)));
@@ -421,7 +421,7 @@ describe("entitlement projection",()=>{
 
   it("keeps authenticated public ingress primary-only despite source hints and rejects body selectors",async()=>{
     const item=projection("business_unit","30",{name:"Public primary branch",code:"public-primary"});
-    const requestEnv={...env(),APPLICATION_KEY:"ltds_ops",PROJECT_ALPHA_WEBHOOK_HMAC_SECRET:"test-hmac-secret",PROJECT_ALPHA_ALLOW_LEGACY_HMAC:"true"} as Env;
+    const requestEnv={...env(),TEAM_DOMAIN:"https://primary.cloudflareaccess.com",CF_ACCESS_AUD:"primary-audience",APPLICATION_KEY:"ltds_ops",PROJECT_ALPHA_WEBHOOK_HMAC_SECRET:"test-hmac-secret",PROJECT_ALPHA_ALLOW_LEGACY_HMAC:"true"} as Env;
     const send=async(payload:unknown)=>{
       const raw=JSON.stringify(payload),timestamp=new Date().toISOString();
       const key=await crypto.subtle.importKey("raw",new TextEncoder().encode(requestEnv.PROJECT_ALPHA_WEBHOOK_HMAC_SECRET),{name:"HMAC",hash:"SHA-256"},false,["sign"]);

@@ -1,12 +1,13 @@
 import { ZodError } from "zod";
 import { reconcileAccessGroup } from "./access-group";
-import { accessCircuitIsOpen, completeEvent, applyEntitlementEvent, applyProjectionEvent, recordAccessFailure, recordAccessSuccess, recordEventFailure } from "./projection";
+import { accessCircuitIsOpen, completeEvent, applyEntitlementEventForSource, applyProjectionEventForSource, recordAccessFailure, recordAccessSuccess, recordEventFailure } from "./projection";
 import { parseIntegrationEvent } from "./schema";
-import { MAX_BODY_BYTES, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookSignature } from "./security";
+import { readWebhookBody, requireAccessSubject, sha256Hex, validateRequestTimestamp, verifyAccessAssertion, verifyWebhookSignature, type AccessEnvironment } from "./security";
 import type { Env } from "./types";
-import { PRIMARY_PROJECT_ALPHA_SOURCE } from "../../operations/src/worker/project-alpha-source";
+import { PRIMARY_PROJECT_ALPHA_SOURCE, type ProjectAlphaSourceContext } from "../../operations/src/worker/project-alpha-source";
+import { assertProjectAlphaConnectorProof, ProjectAlphaConnectorError, resolveProjectAlphaConnector, type ProjectAlphaConnectorProof } from "../../operations/src/worker/project-alpha-connectors";
 
-type AccessVerifier = (request: Request, env: Env) => Promise<unknown>;
+type AccessVerifier = (request: Request, env: AccessEnvironment) => Promise<unknown>;
 
 function json(status: number, body: Record<string, unknown>): Response {
   return Response.json(body, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
@@ -14,7 +15,13 @@ function json(status: number, body: Record<string, unknown>): Response {
 
 function errorStatus(error: unknown): number {
   const message = error instanceof Error ? error.message : "internal-error";
+  if (error instanceof ProjectAlphaConnectorError) return error.code === "invalid" ? 400 : error.code === "changed" || error.code === "conflict" ? 409 : 503;
+  if (message.includes("pa_connector_active_revision_guard")) return 409;
   if (error instanceof SyntaxError) return 400;
+  if (message === "payload-too-large" || message === "payload-size-invalid") return 413;
+  if (message === "payload-read-timeout") return 408;
+  if (message.startsWith("project-alpha-connector-")) return 409;
+  if (message === "projection-source-authority-unsupported") return 403;
   if (message === "event-id-conflict") return 409;
   if (message === "projection-entity-busy" || message === "projection-global-busy") return 503;
   if (message.startsWith("access-group-")) return 503;
@@ -26,22 +33,36 @@ function errorStatus(error: unknown): number {
 
 export async function handleRequest(request: Request, env: Env, accessVerifier: AccessVerifier = verifyAccessAssertion): Promise<Response> {
   let eventId: string | null = null;
+  let source: ProjectAlphaSourceContext | undefined;
+  let proof: ProjectAlphaConnectorProof | undefined;
   try {
     const url = new URL(request.url);
     if (env.EXPECTED_HOST && url.hostname !== env.EXPECTED_HOST) return json(421,{error:"unexpected-host"});
-    await accessVerifier(request,env);
     if (request.method === "GET" && url.pathname === "/health") {
+      await accessVerifier(request,env);
       const state = await env.OPS_DB.prepare("SELECT last_event_at,last_access_success_at,last_access_error,access_consecutive_failures,access_circuit_open_until,updated_at FROM integration_reconciliation WHERE projection_source_id=? AND integration='project-alpha'").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId).first();
       return json(200,{status:"ok",integration:state??null});
     }
-    if (request.method !== "POST" || url.pathname !== "/v1/project-alpha/events") return json(404,{error:"not-found"});
+    const sourceRoute = /^\/v1\/project-alpha\/sources\/([^/]+)\/events$/.exec(url.pathname);
+    if (request.method !== "POST" || (url.pathname !== "/v1/project-alpha/events" && !sourceRoute)) return json(404,{error:"not-found"});
+    // A route identifies a candidate configuration, not a trusted producer.
+    // Only verified Access claims plus that candidate's signing key establish it.
+    let candidateId = PRIMARY_PROJECT_ALPHA_SOURCE.sourceId;
+    if (sourceRoute) {
+      try { candidateId = decodeURIComponent(sourceRoute[1]!); }
+      catch { return json(400,{error:"source-id-invalid"}); }
+    }
+    const candidate = await resolveProjectAlphaConnector(env,candidateId,"events");
+    if (sourceRoute && candidate.proof.mode !== "registry") throw new Error("project-alpha-connector-enrollment-required");
+    const eventConfig = candidate.event;
+    if (candidate.proof.mode === "registry" && !eventConfig) throw new Error("project-alpha-connector-events-unavailable");
+    const claims = await accessVerifier(request,eventConfig
+      ? {TEAM_DOMAIN:eventConfig.accessIssuer,CF_ACCESS_AUD:eventConfig.accessAudience} : env);
+    if (candidate.proof.mode === "registry") requireAccessSubject(claims,eventConfig?.accessSubject ?? "");
     if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) return json(415,{error:"content-type-required"});
-    const declaredLength = Number(request.headers.get("content-length") ?? 0);
-    if (declaredLength > MAX_BODY_BYTES) return json(413,{error:"payload-too-large"});
-    const rawBody = new Uint8Array(await request.arrayBuffer());
-    if (rawBody.byteLength === 0 || rawBody.byteLength > MAX_BODY_BYTES) return json(413,{error:"payload-size-invalid"});
+    const rawBody = await readWebhookBody(request);
     const timestamp = validateRequestTimestamp(request.headers.get("X-PA-Timestamp"));
-    await verifyWebhookSignature(
+    if (candidate.proof.mode === "legacy_primary") await verifyWebhookSignature(
       rawBody,
       timestamp,
       request.headers.get("X-PA-Signature-Ed25519"),
@@ -51,51 +72,82 @@ export async function handleRequest(request: Request, env: Env, accessVerifier: 
       env.PROJECT_ALPHA_WEBHOOK_HMAC_SECRET,
       env.PROJECT_ALPHA_ALLOW_LEGACY_HMAC === "true",
     );
-    const parsed: unknown = JSON.parse(new TextDecoder().decode(rawBody));
-    // The authenticated deployment is the primary producer. Neither application
-    // keys, body properties nor request headers select another projection source.
-    const event = parseIntegrationEvent(parsed,env.APPLICATION_KEY);
-    eventId = event.event_id;
+    else {
+      if (!eventConfig) throw new Error("project-alpha-connector-events-unavailable");
+      const current = eventConfig.current;
+      const previous = eventConfig.previous;
+      if (!candidate.source.staffAuthority && (current.algorithm !== "ed25519" || (previous && previous.algorithm !== "ed25519"))) {
+        throw new Error("project-alpha-connector-signing-configuration-invalid");
+      }
+      // No fallback to deployment-wide keys for an enrolled source. Secondary
+      // producers never accept HMAC, including during a signing-key rotation.
+      const edCurrent = current.algorithm === "ed25519" ? current.value : undefined;
+      const edPrevious = previous?.algorithm === "ed25519" ? previous.value : undefined;
+      const hmac = current.algorithm === "hmac-sha256" ? current.value : previous?.algorithm === "hmac-sha256" ? previous.value : "";
+      await verifyWebhookSignature(rawBody,timestamp,request.headers.get("X-PA-Signature-Ed25519"),edCurrent,edPrevious,
+        request.headers.get("X-PA-Signature"),hmac,candidate.source.staffAuthority && Boolean(hmac),
+        current.algorithm === "hmac-sha256" && previous?.algorithm === "hmac-sha256" ? previous.value : undefined);
+    }
+    let parsed: unknown;
+    try { parsed = JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(rawBody)); }
+    catch { throw new SyntaxError("json-invalid"); }
+    const event = parseIntegrationEvent(parsed,eventConfig?.applicationKey ?? env.APPLICATION_KEY);
     if (request.headers.get("X-PA-Event-ID") !== event.event_id) return json(422,{error:"event-id-mismatch"});
+    if (!candidate.source.staffAuthority && event.event_type !== "projection.changed") throw new Error("projection-source-authority-unsupported");
+    await assertProjectAlphaConnectorProof(env,candidate.proof);
+    source = candidate.source;
+    proof = candidate.proof;
+    eventId = event.event_id;
     const result = event.event_type === "projection.changed"
-      ? await applyProjectionEvent(env,event,await sha256Hex(rawBody))
-      : await applyEntitlementEvent(env,event,await sha256Hex(rawBody));
-    if (result === "duplicate" || result === "ignored") return json(200,{ok:true,event_id:event.event_id,status:result});
+      ? await applyProjectionEventForSource(env,source,event,await sha256Hex(rawBody),proof)
+      : await applyEntitlementEventForSource(env,source,event,await sha256Hex(rawBody),proof);
+    if (result === "duplicate" || result === "ignored") {
+      await assertProjectAlphaConnectorProof(env,proof);
+      return json(200,{ok:true,event_id:event.event_id,status:result});
+    }
     let accessMembers = 0;
     let accessPending = false;
     if (event.event_type !== "projection.changed") {
       try {
         if(await accessCircuitIsOpen(env))throw new Error("access-group-circuit-open");
-        const emails = await reconcileAccessGroup(env);
+        await assertProjectAlphaConnectorProof(env,proof);
+        const emails = await reconcileAccessGroup(env,() => assertProjectAlphaConnectorProof(env,candidate.proof));
         accessMembers = emails.length;
-        await recordAccessSuccess(env);
+        await recordAccessSuccess(env,proof);
       } catch (error) {
         const message = error instanceof Error?error.message:"access-group-error";
-        if(message==="access-group-circuit-open")await recordEventFailure(env,event.event_id,message);
-        else await recordAccessFailure(env,event.event_id,message);
+        if(message==="access-group-circuit-open")await recordEventFailure(env,event.event_id,message,source,proof);
+        else await recordAccessFailure(env,event.event_id,message,proof);
         console.error(JSON.stringify({event:"ops_sync_access_reconciliation_pending",error:message}));
         accessPending = true;
       }
     }
-    await completeEvent(env,event,accessPending);
+    await completeEvent(env,event,accessPending,source,proof);
     return json(accessPending?202:200,{ok:true,event_id:event.event_id,status:accessPending?"completed-access-reconciliation-pending":"completed",access_members:accessMembers});
   } catch (error) {
-    const message = error instanceof ZodError ? "event-schema-invalid" : error instanceof SyntaxError ? "json-invalid" : error instanceof Error ? error.message : "internal-error";
-    if(eventId)await recordEventFailure(env,eventId,message).catch(()=>undefined);
+    const message = error instanceof ZodError ? "event-schema-invalid" : error instanceof SyntaxError ? "json-invalid"
+      : error instanceof ProjectAlphaConnectorError ? `project-alpha-connector-${error.code}`
+      : error instanceof Error && error.message.includes("pa_connector_active_revision_guard") ? "project-alpha-connector-changed"
+      : error instanceof Error ? error.message : "internal-error";
+    if(eventId && source && proof)await recordEventFailure(env,eventId,message,source,proof).catch(()=>undefined);
     console.error(JSON.stringify({event:"ops_sync_request_failed",error:message}));
     return json(errorStatus(error),{error:message});
   }
 }
 
 export async function reconcileScheduledAccess(env: Env): Promise<number> {
+  let proof: ProjectAlphaConnectorProof | undefined;
   try {
+    const connector = await resolveProjectAlphaConnector(env,PRIMARY_PROJECT_ALPHA_SOURCE.sourceId,"events");
+    proof = connector.proof;
+    await assertProjectAlphaConnectorProof(env,proof);
     if(await accessCircuitIsOpen(env))throw new Error("access-group-circuit-open");
-    const emails = await reconcileAccessGroup(env);
-    await recordAccessSuccess(env);
+    const emails = await reconcileAccessGroup(env,() => assertProjectAlphaConnectorProof(env,connector.proof));
+    await recordAccessSuccess(env,proof);
     return emails.length;
   } catch (error) {
     const message = error instanceof Error?error.message:"access-group-error";
-    if(message!=="access-group-circuit-open")await recordAccessFailure(env,null,message);
+    if(proof && message!=="access-group-circuit-open")await recordAccessFailure(env,null,message,proof).catch(()=>undefined);
     console.error(JSON.stringify({event:"ops_sync_scheduled_access_reconciliation_failed",error:message}));
     throw error;
   }

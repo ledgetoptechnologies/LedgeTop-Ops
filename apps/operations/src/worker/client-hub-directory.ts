@@ -4,6 +4,7 @@ import { paProjectFilter } from "./visibility";
 import { sha256 } from "./crypto";
 import { isBusinessProjectionSource, validatedUniquePublicIdExpression, type ClientHubMappingStatus } from "./client-hub-source";
 import type { Env, StaffPrincipal } from "./types";
+import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 
 export const CLIENT_HUB_SOURCES = ["project-alpha:primary", "delivery:local"] as const;
 export type ClientHubSource = `project-alpha:${string}` | "delivery:local";
@@ -19,6 +20,7 @@ export interface ClientHubRoot {
   pa_public_id: string | null;
   mapping_status: ClientHubMappingStatus;
   display_name: string;
+  source_name?: string;
   sort_name: string;
   status: string;
   portal_status: string;
@@ -44,9 +46,9 @@ export interface ClientHubDirectoryState {
   lease_until: string | null;
   next_run_at: string | null;
 }
-export interface ClientHubDirectoryQuery { q?: string; kind?: string; cursor?: string; limit?: number }
+export interface ClientHubDirectoryQuery { q?: string; kind?: string; source?: string; cursor?: string; limit?: number }
 type Position = [string, ClientHubSource, ClientHubRootNamespace, ClientHubKind, string];
-interface Cursor { v: 2; revision: number; q: string; kind: ClientHubKind | null; policy: string; after: Position }
+interface Cursor { v: 3; revision: number; visibility: number; source: ClientHubSource | null; q: string; kind: ClientHubKind | null; policy: string; after: Position }
 
 export function normalizeClientHubText(value: string): string {
   return value.normalize("NFC").trim().toLocaleLowerCase("en-US");
@@ -68,6 +70,7 @@ export function clientHubDetailPath(root: Pick<ClientHubRoot, "source_id" | "roo
   return `/clients/sources/${encodeURIComponent(root.source_id)}/${root.root_namespace}/${clientHubRouteKind(root.kind)}/${encodeURIComponent(root.public_id)}`;
 }
 const visibleRoot = "root.status NOT IN ('closed','inactive')";
+const visibleSource = `(root.source_id='delivery:local' OR ${projectAlphaReadVisibleSql("root.source_id")})`;
 // An index refresh can lag an authoritative business reassignment/deactivation.
 // Only live business roots belong to this source. A portal UUID by itself never
 // establishes a business-root mapping, even when it resembles a record ID.
@@ -87,6 +90,18 @@ function unavailable(): never {
 function changed(): never {
   throw new HTTPException(409, { message: "The client directory changed. Refresh the results to continue" });
 }
+/** The app's error boundary must retain this specific code so clients clear
+ * already-loaded rows after a source's read visibility changes. */
+export class ClientHubSourcesChangedError extends HTTPException {
+  readonly code = "source_visibility_changed" as const;
+  constructor() {
+    const message = "Client sources changed. Refresh the results to continue.";
+    super(409, { message, res: Response.json({ code: "source_visibility_changed", error: message }, { status: 409 }) });
+  }
+}
+function sourcesChanged(): never {
+  throw new ClientHubSourcesChangedError();
+}
 function encodeCursor(cursor: Cursor): string {
   const bytes = new TextEncoder().encode(JSON.stringify(cursor));
   return btoa(Array.from(bytes, byte => String.fromCharCode(byte)).join(""))
@@ -99,7 +114,9 @@ function decodeCursor(value: string): Cursor {
     const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     if (!parsed || typeof parsed !== "object") throw new Error();
     const cursor = parsed as Partial<Cursor>;
-    if (cursor.v !== 2 || !Number.isSafeInteger(cursor.revision) || cursor.revision! < 0 ||
+    if (cursor.v !== 3 || !Number.isSafeInteger(cursor.revision) || cursor.revision! < 0 ||
+      !Number.isSafeInteger(cursor.visibility) || cursor.visibility! < 1 ||
+      (cursor.source !== null && (typeof cursor.source !== "string" || !isClientHubSource(cursor.source))) ||
       typeof cursor.q !== "string" || typeof cursor.policy !== "string" ||
       (cursor.kind !== null && (typeof cursor.kind !== "string" || !isClientHubKind(cursor.kind))) ||
       !Array.isArray(cursor.after) || cursor.after.length !== 5 ||
@@ -132,15 +149,19 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   if (options.kind !== undefined && !isClientHubKind(options.kind))
     throw new HTTPException(400, { message: "Client directory kind is invalid" });
   const kind = options.kind as ClientHubKind | undefined;
+  if (options.source !== undefined && !isClientHubSource(options.source))
+    throw new HTTPException(400, { message: "Client directory source is invalid" });
+  const source = options.source as ClientHubSource | undefined;
   if ((options.q?.length ?? 0) > 200 || /[\0-\x1f\x7f]/.test(options.q ?? ""))
     throw new HTTPException(400, { message: "Client directory search is invalid" });
   const q = normalizeClientHubText(options.q ?? "");
   const cursor = options.cursor === undefined ? null : decodeCursor(options.cursor);
   const { filter, policy } = await projectSearchAccess(env, principal);
-  if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.policy !== policy))
+  if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.policy !== policy))
     throw new HTTPException(400, { message: "Client directory cursor does not match this search" });
-  const clauses = [visibleRoot, liveBusinessRoot], values: unknown[] = [];
+  const clauses = [visibleRoot, visibleSource, liveBusinessRoot], values: unknown[] = [];
   if (kind) { clauses.push("root.kind=?"); values.push(kind); }
+  if (source) { clauses.push("root.source_id=?"); values.push(source); }
   if (q) {
     const phone = /^[\d\s()+.\-]+$/.test(q) ? normalizeClientHubPhone(q) : "";
     // D1 limits LIKE/GLOB patterns to 50 bytes. Literal instr supports the full
@@ -174,17 +195,31 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   const db = env.OPS_DB.withSession("first-primary");
   // State and page share one transaction. The writer advances revision only
   // alongside effective root/search changes, so mutable names cannot skip rows.
-  type Snapshot = Pick<ClientHubDirectoryState, "revision" | "ready" | "last_success_at">;
+  type Snapshot = Pick<ClientHubDirectoryState, "revision" | "ready" | "last_success_at"> & { source_read_revision: number | null };
   type LiveRoot = ClientHubRoot & { live_pa_public_id: string | null };
-  const results = await db.batch<LiveRoot | Snapshot>([
-    db.prepare("SELECT revision,ready,last_success_at FROM client_hub_directory_state WHERE id='directory'"),
+  type SourceSummary = { source_id: ClientHubSource; display_name: string };
+  const results = await db.batch<LiveRoot | Snapshot | SourceSummary>([
+    db.prepare(`SELECT revision,ready,last_success_at,
+      (SELECT read_revision FROM pa_connector_directory_state WHERE id='directory') source_read_revision
+      FROM client_hub_directory_state WHERE id='directory'`),
     db.prepare(`SELECT root.*,${currentMapping} live_pa_public_id FROM client_hub_roots root WHERE ${clauses.join(" AND ")}
       ORDER BY root.sort_name,root.source_id,root.root_namespace,root.kind,root.public_id LIMIT ?`).bind(...values, limit + 1),
+    db.prepare(`SELECT source_id,display_name FROM pa_connectors WHERE read_visible=1
+      UNION ALL SELECT 'project-alpha:primary','Project Alpha' WHERE NOT EXISTS (
+        SELECT 1 FROM pa_connectors WHERE source_id='project-alpha:primary')
+      UNION ALL SELECT 'delivery:local','Local delivery'
+      ORDER BY display_name COLLATE NOCASE,source_id LIMIT 35`),
   ]);
   const state = results[0]!.results.find((row): row is Snapshot => "revision" in row);
   if (!state?.ready) unavailable();
+  if (!Number.isSafeInteger(state.source_read_revision) || state.source_read_revision! < 1) unavailable();
+  if (cursor && cursor.visibility !== state.source_read_revision) sourcesChanged();
+  const sources = results[2]!.results.filter((row): row is SourceSummary => "source_id" in row && "display_name" in row);
+  if (sources.length > 34) unavailable();
+  if (source && !sources.some(item => item.source_id === source))
+    throw new HTTPException(404, { message: "Client source is unavailable" });
   if (cursor && cursor.revision !== state.revision) changed();
-  const roots = results[1]!.results.filter((row): row is LiveRoot => "source_id" in row);
+  const roots = results[1]!.results.filter((row): row is LiveRoot => "root_namespace" in row);
   const page = roots.slice(0, limit);
   const last = page.at(-1);
   return {
@@ -193,11 +228,13 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
         pa_public_id: live_pa_public_id, mapping_status: live_pa_public_id ? "mapped" : "missing",
         workspace_id: null, portal_status: "mapping_unavailable",
       } : {}),
-      source_name: root.source_id === "project-alpha:primary" ? "Project Alpha" : root.source_id === "delivery:local" ? "Local delivery" : root.source_id,
+      source_name: sources.find(item => item.source_id === root.source_id)!.display_name,
       route_kind: clientHubRouteKind(root.kind), detail_path: clientHubDetailPath(root) })),
     indexUpdatedAt: state.last_success_at,
+    sources,
     searchCapabilities: { businessContacts: true, portalContacts: false },
-    nextCursor: roots.length > limit && last ? encodeCursor({ v: 2, revision: state.revision, q, kind: kind ?? null, policy,
+    nextCursor: roots.length > limit && last ? encodeCursor({ v: 3, revision: state.revision, visibility: state.source_read_revision!,
+      source: source ?? null, q, kind: kind ?? null, policy,
       after: [last.sort_name, last.source_id, last.root_namespace, last.kind, last.public_id] }) : null,
   };
 }
@@ -210,7 +247,7 @@ export async function findClientHubRoot(env: Env, kind: ClientHubKind, publicId:
     throw new HTTPException(404, { message: "Client not found" });
   const db = env.OPS_DB.withSession("first-primary");
   const rows = await db.prepare(`SELECT root.* FROM client_hub_roots root
-    WHERE root.kind=? AND root.public_id=? AND ${visibleRoot}${sourceId === undefined ? "" : " AND root.source_id=?"}
+    WHERE root.kind=? AND root.public_id=? AND ${visibleRoot} AND ${visibleSource} AND ${liveBusinessRoot}${sourceId === undefined ? "" : " AND root.source_id=?"}
       ${rootNamespace === undefined ? "" : " AND root.root_namespace=?"} LIMIT 2`)
     .bind(kind, publicId, ...(sourceId === undefined ? [] : [sourceId]), ...(rootNamespace === undefined ? [] : [rootNamespace])).all<ClientHubRoot>();
   if (rows.results.length > 1)

@@ -314,6 +314,7 @@ function ClientWorkspace({ route, canReviewFeedback }: { route: ClientRoute; can
     <a className="button-ghost button-small client-hub-back" href={clientDirectoryReturnPath()}>← Client Hub</a>
     <div className="client-hub-title">
       <div><small>{data.client.kind === "organization" ? "Organization" : "Standalone client"}</small><h2>{data.client.display_name}</h2>
+        {data.client.source_name && <p>{data.client.source_name}</p>}
         {data.client.root_namespace === "portal" && <p>Portal workspace · business link pending</p>}</div>
       <StatusPill tone={clientPortalStatus(data.client).tone}>{clientPortalStatus(data.client).label}</StatusPill>
     </div>

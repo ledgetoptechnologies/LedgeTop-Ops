@@ -13,6 +13,8 @@ export type Env = Omit<
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
+  /** Deploy-managed connector credential sets; never returned by registry APIs. */
+  PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   /** Temporary, default-off gate for numeric quote linkage on pre-catalog requests only. */
   LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED?: string;
   /** Enables the separately scoped, staff-triggered private draft command. */

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { SqlScope } from "../src/worker/acl";
 import type { ClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import type { Env, StaffPrincipal } from "../src/worker/types";
+import { applyConnectorSchema } from "./helpers/project-alpha-connectors";
 
 const acl = vi.hoisted(() => ({ hasPermission: vi.fn(async () => true),
   sqlScope: vi.fn(async (): Promise<SqlScope> => ({ global: true, divisions: [], assigned: false, own: false, deniedDivisions: [], deniedGlobal: false })),
@@ -30,6 +31,7 @@ async function fixture() {
     script: "export default { fetch(){ return new Response('ok'); } }", d1Databases: { OPS_DB: "business-projects" } });
   active.push(mf);
   const db = await mf.getD1Database("OPS_DB") as unknown as D1Database;
+  await applyConnectorSchema(db);
   await sql(db, `CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT,status TEXT,start_date TEXT,end_date TEXT,client_id TEXT,

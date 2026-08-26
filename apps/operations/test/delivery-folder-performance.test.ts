@@ -2,6 +2,7 @@ import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DELIVERY_FOLDER_PAGE_SIZE, deliveryBrowseRevision, listDeliveryFolder, listDeliveryFolderMedia, listDeliveryShares, searchDeliveryItems } from "../src/worker/delivery";
 import type { Env, StaffPrincipal } from "../src/worker/types";
+import { applyConnectorSchema } from "./helpers/project-alpha-connectors";
 
 const principal:StaffPrincipal={
   id:"staff-a",email:"staff@example.test",displayName:"Staff",accessSubject:"subject-a",projectAlphaUserId:null,
@@ -36,12 +37,13 @@ describe("Delivery folder-only listing performance",()=>{
     });
     opsDb=(await miniflare.getD1Database("OPS_DB")) as unknown as D1Database;
     deliveryDb=(await miniflare.getD1Database("DELIVERY_DB")) as unknown as D1Database;
+    await applyConnectorSchema(opsDb);
     await applySql(opsDb,`CREATE TABLE role_permissions(role_id TEXT NOT NULL,permission_key TEXT NOT NULL);
       CREATE TABLE staff_role_assignments(staff_id TEXT NOT NULL,role_id TEXT NOT NULL,scope TEXT NOT NULL,division_id TEXT);
       CREATE TABLE local_staff_role_assignments(staff_id TEXT NOT NULL,role_id TEXT NOT NULL,scope TEXT NOT NULL,division_id TEXT);
       CREATE TABLE staff_permission_overrides(staff_id TEXT NOT NULL,permission_key TEXT NOT NULL,effect TEXT NOT NULL,scope TEXT NOT NULL,division_id TEXT);
       CREATE TABLE project_folders(project_id TEXT PRIMARY KEY,division_id TEXT NOT NULL,r2_prefix TEXT NOT NULL);
-      CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT);`);
+      CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');`);
     await applySql(deliveryDb,`CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT NOT NULL,size INTEGER NOT NULL,uploaded_at TEXT NOT NULL,content_type TEXT,media_kind TEXT NOT NULL,stream_uid TEXT,stream_status TEXT);
       CREATE TABLE delivery_tombstones(id TEXT PRIMARY KEY,physical_key TEXT NOT NULL,tombstone_kind TEXT NOT NULL,deleted_by TEXT,deleted_at TEXT,purge_after TEXT,restored_by TEXT,restored_at TEXT);
       CREATE TABLE projects(id TEXT PRIMARY KEY,r2_prefix TEXT NOT NULL,active INTEGER NOT NULL,division_id TEXT,client_name TEXT,project_name TEXT);
