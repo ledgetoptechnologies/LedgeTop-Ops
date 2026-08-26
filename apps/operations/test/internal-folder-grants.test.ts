@@ -89,7 +89,16 @@ describe("direct authenticated client folder grants", () => {
       withSession() { return this; },
       prepare(sql: string) {
         if (!sql.includes("FROM project_folders")) throw new Error(`unexpected-ops-query:${sql}`);
-        return { async all() { return { results: folderAssociations }; } };
+        return {
+          bind() { return this; },
+          async all() {
+            return { results: sql.includes("WITH matching") ? folderAssociations.map(row => ({
+              division_id: row.division_id,
+              owner_type: row.project_alpha_client_id ? "client" : "organization",
+              owner_id: row.project_alpha_client_id || row.project_alpha_organization_id,
+            })) : folderAssociations };
+          },
+        };
       },
       async batch() { return []; },
     };
@@ -266,10 +275,10 @@ describe("direct authenticated client folder grants", () => {
     }, "folder-grant-owner-change-0001");
     await db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES('Jobs/Clients/Acme/OwnerCheck/photo.jpg','etag-owner',8,'2026-08-13T12:00:00Z','image/jpeg','image')").run();
     expect(await recordClientFolderFileChange(env, "Jobs/Clients/Acme/OwnerCheck/photo.jpg", true)).toBe(1);
-    await db.prepare("UPDATE client_folder_change_notifications SET next_attempt_at=datetime('now','-1 minute') WHERE logical_grant_id=?").bind(created.grantId).run();
+    await db.prepare("UPDATE client_folder_notification_batches SET eligible_at=datetime('now','-1 minute') WHERE logical_grant_id=?").bind(created.grantId).run();
     folderAssociations = [{ division_id: "division-a", r2_prefix: "Jobs/Clients/Acme/", project_alpha_client_id: "pa-client-b", project_alpha_organization_id: null }];
     await processClientFolderChangeNotifications(env);
-    expect(await db.prepare("SELECT status FROM client_folder_change_notifications WHERE logical_grant_id=?").bind(created.grantId).first("status")).toBe("suppressed");
+    expect(await db.prepare("SELECT status FROM client_folder_notification_batches WHERE logical_grant_id=?").bind(created.grantId).first("status")).toBe("suppressed");
     expect(mocks.sendNotificationMail).not.toHaveBeenCalled();
   });
 });

@@ -7,6 +7,7 @@ import { auditStatement } from "./request-security";
 import { normalizeCrudKey } from "./r2-crud-validation";
 import { d1TablesPresent } from "./schema-readiness";
 import type { Env, StaffPrincipal } from "./types";
+import { clientFolderNotificationBatchesAvailable, processClientFolderNotificationBatches, recordClientFolderBatchChange } from "./client-folder-notification-batches";
 
 const MAX_ATTEMPTS = 3;
 const CLIENT_FOLDER_CHANGE_NOTIFICATION_TABLES = [
@@ -444,6 +445,7 @@ async function objectFingerprint(key: string): Promise<string> {
  * through this path; the R2 event consumer has already verified object state. */
 export async function recordClientFolderFileChange(env: Env, key: string, present: boolean): Promise<number> {
   if (!env.DELIVERY_DB) throw new Error("delivery-db-binding-required");
+  if (await clientFolderNotificationBatchesAvailable(env)) return recordClientFolderBatchChange(env, key, present);
   if (!(await clientFolderChangeNotificationsAvailable(env))) return 0;
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT association.id association_id,
       association.logical_grant_id,association.account_id,preference.recipient_identity_id
@@ -482,6 +484,7 @@ interface FolderChangeRow {
 
 export async function processClientFolderChangeNotifications(env: Env): Promise<number> {
   if (!env.DELIVERY_DB) throw new Error("delivery-db-binding-required");
+  if (await clientFolderNotificationBatchesAvailable(env)) return processClientFolderNotificationBatches(env);
   if (!(await clientFolderChangeNotificationsAvailable(env))) return 0;
   let processed = 0;
   for (; processed < 50; processed += 1) {

@@ -30,6 +30,7 @@ import { DeliveryLinksPage } from "./DeliveryLinksPage";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
+import { OperationsNotifications } from "./OperationsNotifications";
 import { WorkContextSops } from "./WorkContextSops";
 import { TeamAssignedWork } from "./TeamAssignedWork";
 import { ImageLocationMap } from "./ImageLocationMap";
@@ -130,7 +131,7 @@ const NAV: Array<{
   {
     page: "operations",
     label: "Operations",
-    permissions: ["operations.view", "projects.view", "tasks.view", "sops.view"],
+    permissions: ["operations.view", "projects.view", "tasks.view", "sops.view", "delivery.share.audit"],
   },
   { page: "clients", label: "Client Hub", href: "/clients", permissions: ["team.view", "operations.manage"] },
   { page: "viewer", label: "Models", href: "/viewer", permissions: ["viewer.view"] },
@@ -685,6 +686,7 @@ function OperationsHub({ session }: { session: Session }) {
     { id: "projects", label: "Projects", permission: "projects.view" },
     { id: "tasks", label: "Tasks", permission: "tasks.view" },
     { id: "sops", label: "SOP Library", permission: "sops.view" },
+    { id: "notifications", label: "Notifications", permission: "delivery.share.audit" },
   ];
   const visible = sections.filter((item) =>
     allowed(session.user, item.permission),
@@ -715,6 +717,7 @@ function OperationsHub({ session }: { session: Session }) {
     return () => removeEventListener("popstate", sync);
   }, [session.user.permissions.join("|")]);
   const open = (next: OperationsSection) => {
+    if (next === section) return;
     setSection(next);
     history.pushState(null, "", operationsSectionPath(next));
     window.scrollTo(0, 0);
@@ -746,6 +749,7 @@ function OperationsHub({ session }: { session: Session }) {
       )}{" "}
       {section === "tasks" && allowed(session.user, "tasks.view") && <Tasks />}
       {section === "sops" && allowed(session.user, "sops.view") && <SopLibrary user={session.user} />}
+      {section === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}
     </>
   );
 }

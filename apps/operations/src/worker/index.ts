@@ -129,6 +129,7 @@ import {
 import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quote";
 import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
+import { registerNotificationCenterRoutes } from "./notification-center";
 import { reconcileClientHubIndex } from "./client-hub-index";
 import {
   decorateWorkContextsWithSops,
@@ -1408,6 +1409,7 @@ registerClientRequestAttachmentRoutes(app);
 registerProjectAlphaDraftQuoteRoutes(app);
 registerTeamAssignedWorkRoutes(app);
 registerClientHubRoutes(app);
+registerNotificationCenterRoutes(app);
 registerViewerIntegrationRoutes(app);
 registerViewerProcessingRoutes(app);
 app.post("/api/internal/project-alpha/delivery-intents/preflight", handleProjectAlphaDeliveryPreflight);

@@ -467,6 +467,37 @@ local and unpublished.
   failures, access changes/expiry, and other actionable events.
 - Keep client preference controls as a later backlog item.
 
+Local follow-on implemented and verified (August 25; not published): the existing `0115` subscriptions
+debounce per object, not per audience, so one forty-photo upload can emit forty
+messages to one person. This bounded increment adds `0153` audience batches
+and `0154` staff-control receipts, an Operations Notifications subpage, current
+division-scoped audit/create/revoke permissions, a grace countdown, Send Now,
+Cancel, terminal history, and progressive server search. Existing subscribers
+remain the only recipients. Viewer and thumbnail code stay frozen.
+
+Each batch keeps one exact account, logical folder grant and subscribed identity;
+it does not combine independent grants or infer a notification audience from
+business contacts. Send Now ends the current grace period but does not claim
+delivery success. Cancel stops pending work, including remaining retry attempts;
+it cannot recall a message already accepted by the mail provider or remove an
+already-published portal notice. Existing files and access grants are unchanged.
+
+The final Operations gate passed **867 unit tests across 111 files**, including
+the populated legacy-database upgrade proof, and **370 desktop/mobile browser
+tests**. TypeScript and the production build passed; layouts were visually
+accepted at 375, 640, 1280 and 3440 pixels. The separate focused notification UI
+gate passed 48 cases, and 29 focused Client notification/workspace/eligibility
+tests passed. No production migration, mail, access mutation or deployment
+was performed for this increment. These checks do not complete the outstanding
+multi-source identity, project-memory or general-notification roadmap.
+
+This is not the entire delivery/notification roadmap: initial-access,
+public-share, native-workspace and request outboxes remain separate; editable
+recipient staging, explicit project/delivery-contact defaults, and the unified
+staff inbox remain outstanding. See [notifications.md](../notifications.md)
+for adoption, retry/cancellation semantics, provider boundaries and rollout
+requirements. Do not publish or claim production acceptance from local tests.
+
 ### 5. Generic feedback and service requests
 
 - One Leave Feedback flow with typed project/folder/asset targets and a shared
@@ -481,6 +512,16 @@ local and unpublished.
 - Keep internal prices private by default. Starting-at/fixed-price visibility
   requires an authoritative versioned Alpha contract; never infer it locally.
 - Routine technical deployments do not automatically notify clients.
+
+The source audit also found that the current flat catalog is not a category-first
+request workflow, and the New Request entry point can appear from a feature flag
+without proving current `request.create` readiness. A native workspace may still
+require an active legacy account/identity bridge for requests. A later slice
+should expose scoped request readiness and category search using the existing
+wizard, not derive access from service categories. Per-client service visibility
+is not projected yet, and the singleton catalog checkpoint is not safe to treat
+as a multi-producer contract. Generic asset/folder/project feedback remains a
+separate unimplemented feature, not a relabelled request or inspection note.
 
 ### 6. Unified activity and release acceptance
 
@@ -534,6 +575,8 @@ Test the complete workflow, not only whether a component renders:
       locally; keep authority separate from contact records and access inventory.
 - [x] Add projected business contact channels and a read-only, source-qualified
       project workspace, with responsive layouts and permission/race regressions.
+- [x] Locally implement and verify legacy folder-change notification batches,
+      scoped staff controls, retry/cancellation races and populated upgrades.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

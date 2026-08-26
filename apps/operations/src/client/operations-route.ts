@@ -1,5 +1,5 @@
 export type OperationsPage="dashboard"|"operations"|"clients"|"airspace"|"delivery"|"viewer"|"team"|"configurations"|"administration";
-export type OperationsSection="operations"|"projects"|"tasks"|"sops"|"client-requests";
+export type OperationsSection="operations"|"projects"|"tasks"|"sops"|"notifications"|"client-requests";
 export type DeliverySection="delivery"|"incoming"|"links";
 
 export const DATA_PAGE_PERMISSIONS = ["delivery.browse", "delivery.share.audit"] as const;
@@ -14,7 +14,9 @@ export function operationsLandingPath(permissions:readonly string[]):string{
   if(permissions.includes("operations.view"))return"/operations";
   if(permissions.includes("projects.view"))return"/operations/projects";
   if(permissions.includes("tasks.view"))return"/operations/tasks";
-  return"/operations/sops";
+  if(permissions.includes("sops.view"))return"/operations/sops";
+  if(permissions.includes("delivery.share.audit"))return"/operations/notifications";
+  return"/operations";
 }
 
 export function pathPage(pathname:string):OperationsPage{
@@ -31,7 +33,7 @@ export function pathPage(pathname:string):OperationsPage{
 export function pathOperationsSection(pathname:string):OperationsSection{
   const parts=pathname.split("/").filter(Boolean);
   const value=parts[0]==="operations"?parts[1]:parts[0];
-  return value==="projects"||value==="tasks"||value==="sops"||value==="client-requests"?value:"operations";
+  return value==="projects"||value==="tasks"||value==="sops"||value==="notifications"||value==="client-requests"?value:"operations";
 }
 
 export function operationsSectionPath(section:OperationsSection):string{

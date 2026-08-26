@@ -19,6 +19,7 @@ describe("consolidated Operations routes", () => {
     ["/operations/projects", "projects"],
     ["/operations/tasks", "tasks"],
     ["/operations/sops", "sops"],
+    ["/operations/notifications", "notifications"],
   ] as const)("resolves %s to the Operations page and %s section", (pathname, section) => {
     expect(pathPage(pathname)).toBe("operations");
     expect(pathOperationsSection(pathname)).toBe(section);
@@ -45,6 +46,15 @@ describe("consolidated Operations routes", () => {
     expect(operationsLandingPath(["projects.view", "sops.view"])).toBe("/operations/projects");
     expect(operationsLandingPath(["tasks.view", "sops.view"])).toBe("/operations/tasks");
     expect(operationsLandingPath(["operations.view", "sops.view"])).toBe("/operations");
+  });
+
+  it("lands notification auditors under Operations without granting other operation views", () => {
+    expect(operationsLandingPath(["delivery.share.audit"])).toBe("/operations/notifications");
+    expect(operationsLandingPath(["sops.view", "delivery.share.audit"])).toBe("/operations/sops");
+    expect(operationsLandingPath(["tasks.view", "delivery.share.audit"])).toBe("/operations/tasks");
+    expect(operationsLandingPath(["projects.view", "delivery.share.audit"])).toBe("/operations/projects");
+    expect(operationsLandingPath(["operations.view", "delivery.share.audit"])).toBe("/operations");
+    expect(operationsLandingPath([])).toBe("/operations");
   });
 
   it.each([

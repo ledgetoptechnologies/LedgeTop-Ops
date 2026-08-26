@@ -32,6 +32,126 @@ identity, membership, preference, prefix coverage, and current file-index state
 before either email or in-app publication. A reassigned folder therefore cannot
 notify its former client even when a delayed event and stale association remain.
 
+## Folder-change batches and staff controls (local release candidate)
+
+Delivery migrations `0153` and `0154` replace the per-object change dispatcher
+with a batch per **account, logical folder grant, and exact subscribed portal
+identity**. Forty files in one subscribed folder produce one notice for each
+subscribed person, not forty notices for that person. Independent grants and
+recipients are not merged. This does not add subscriptions or grant access.
+
+Operations → Notifications (`/operations/notifications`) lists pending batches
+and terminal history, with server-side search by client, folder leaf label or
+recipient, bounded continuation pages, and an eligibility countdown. Current
+folder ownership determines the division used for staff permissions; the stored
+grant's old division is not sufficient. `delivery.share.audit` allows reading,
+`delivery.share.create` allows Send Now, and `delivery.share.revoke` allows
+Cancel, each evaluated against that current division. A division-specific deny
+does not hide unrelated authorized divisions. No notification-wide mutation
+exception is introduced: only the exact two POST control routes are delegated.
+
+Scope of this first increment is deliberately narrow: **legacy authenticated
+client-folder change subscriptions only**. Initial folder-access messages,
+public-link mail, native workspace access notices, request mail, recipient
+editing, and a general staff inbox are not covered by this page or batch engine.
+The UI states this limitation. Those producers retain their existing contracts.
+
+The lifecycle is:
+
+1. An indexed create/delete event updates net changes and restarts a five-minute
+   grace window. Duplicate events do not restart it. Opposite events can cancel
+   the net change; the observed-object ledger prevents an old duplicate from
+   recreating a sent or cancelled notice.
+2. Send Now moves a pending batch's eligibility to now; it does not send directly,
+   skip the scheduled dispatcher, reset retry attempts, or confirm receipt. A
+   genuinely new change before dispatch can restart the grace window.
+3. Claiming seals a batch and increments its revision. Subsequent uploads form a
+   separate pending batch. Cancel only affects a still-pending notification;
+   it does not delete files, revoke access, or recall a processing/sent email.
+   For a pending retry after an uncertain transport result, cancellation stops
+   remaining attempts; it cannot recall an already accepted email or remove an
+   already published client-inbox notice.
+4. The dispatcher rechecks active membership, exact grant version, subscription,
+   current authoritative owner, indexed object state, and prefix coverage.
+   Ineligible batches are suppressed. The first published dispatch content is
+   fingerprinted; a retry whose validated content/authority changed is suppressed
+   instead of sending different content under the same message identity.
+5. Lease tokens fence worker completion and failure writes. The maximum is three
+   attempts total, including attempts adopted from the old outbox; an expired
+   final lease becomes failed. No unlimited automatic retry is introduced.
+
+Staff controls require the displayed revision and an actor-scoped idempotency
+key. The status update, durable result receipt and audit row commit in one D1
+transaction. A stale/claimed row cannot leave a success receipt; an audit failure
+rolls the action back. Retrying an uncertain response uses the same key and
+requires current access. The UI clears protected data after permission changes
+and rejects stale reads that would resurrect a cancelled notification.
+
+History uses encrypted, actor- and permission-bound cursors. An empty candidate
+page may still offer Load More when unauthorized or nonmatching records were
+scanned; it is not presented as an exhaustive empty result. Public responses do
+not include storage paths, internal owner IDs, lease tokens, raw mail errors or
+arbitrary recipient-edit controls.
+
+### Upgrade and verification boundary
+
+This increment is **local and unpublished** until its release gate and deployment
+are explicitly recorded. Apply the Delivery migration chain in order; no OPS
+database migration is required. Before the new tables are available, existing
+folder-change production/dispatch remains on the old path and the staff center
+returns an explicit upgrade-required response rather than a false empty list.
+
+After capability detection succeeds, only the batch dispatcher runs. Bounded,
+restart-safe adoption moves pending/expired old rows into batches, preserving
+attempt budgets; active old leases are left alone. Do not run a rolled-back old
+consumer alongside the new one or drop batch tables to roll back: old code cannot
+dispatch new batch records. Prefer a forward fix; otherwise pause affected
+dispatch and reconcile both outboxes before an authorized rollback.
+
+The Operations and Delivery databases do not share a transaction, and SMTP
+does not share a transaction with either. Ownership/permission checks are repeated
+around control and dispatch boundaries, but a change after the final check or
+provider acceptance cannot recall mail. A crash after provider acceptance can
+still cause an at-least-once retry, even with a stable Message-ID. The portal
+link always requires current access. “Sent” records provider acceptance, not
+delivery to a recipient's inbox.
+
+Use isolated fixtures and a mocked mail transport for the first verification:
+40-file batching, duplicate/opposite events, adoption, recipient/grant revocation,
+reassignment, claim/cancel races, uncertain-response replay, audit rollback,
+authorization-scoped pagination, and mobile/desktop controls. Do not exercise
+Send Now against real clients merely to test the UI. Production mail transport,
+Viewer and thumbnail workers are unchanged by this increment.
+
+Local verification checkpoint, August 25, 2026:
+
+- The frozen focused Operations gate passed **89 tests in six files** (233.92
+  seconds): batch generation/dispatch, legacy compatibility, staff API controls,
+  route resolution and existing delegated mutation boundaries. Earlier failures
+  exposed repeated permission lookup cost and a stale-grant replacement race;
+  the passing run includes their corrected source and regressions.
+- The first complete browser run passed **368 desktop/mobile tests**. Visual
+  review then found and corrected section spacing and a redundant page heading;
+  this first count is not the final visual release gate.
+- The corrected layouts passed the **48-case focused browser gate** and were
+  visually checked at 375, 640, 1280 and 3440 pixels. Two additional assertions
+  cover expanded help and error/retry spacing. A sandboxed full rerun passed 368
+  of 370 cases; the two existing draft-quote tests rejected a blocked public-logo
+  request (`ERR_NETWORK_ACCESS_DENIED`). The final full suite passed **370/370**
+  in 5.1 minutes with approved network access, the same built assets and unchanged
+  tests. No assertions were weakened to ignore the blocked requests.
+- The complete Operations backend suite passed **867 tests across 111 files**
+  in 1052.42 seconds. This includes the populated pre-0153 upgrade proof: existing
+  accounts, identities, grants and pending notification retry history were
+  preserved, foreign keys remained valid, and the migrations created no notices
+  or emails. The only reported warnings were dependency source-map references.
+- The separate client-portal compatibility gate passed **29 tests in three
+  files** (124.13 seconds): existing notifications, workspace-v2 authority and
+  portal identity eligibility. This was a focused check, not the full Client suite.
+- TypeScript checking and the production build passed. No migrations or mail
+  tests were run against production, and no new application code has been
+  published in this increment.
+
 The portal notification list is scoped by `(account_id,recipient_identity_id)`.
 Read and dismiss mutations require the authenticated portal origin and current
 membership. Browser/API responses and mail contain bounded presentation text
