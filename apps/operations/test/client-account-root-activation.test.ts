@@ -213,7 +213,8 @@ describe("legacy client account Project Alpha root activation", () => {
     await deliveryDb.exec(`
       CREATE TABLE portal_v2_workspaces(
         id TEXT PRIMARY KEY,legacy_account_id TEXT UNIQUE,root_type TEXT NOT NULL,
-        pa_organization_public_id TEXT,pa_client_public_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL
+        pa_organization_public_id TEXT,pa_client_public_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL,
+        project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary'
       );
       UPDATE client_accounts SET project_alpha_source_id='project-alpha:primary',project_alpha_client_id='pa-client',project_alpha_organization_id='pa-org'
         WHERE id='legacy-account';
@@ -364,11 +365,25 @@ describe("post-0121 client account root activation on the real Client migration 
     expect(await deliveryDb.prepare("SELECT COUNT(*) count FROM audit_log").first("count")).toBe(beforeAudit);
     expect(await deliveryDb.prepare("SELECT COUNT(*) count FROM portal_v2_workspaces").first("count")).toBe(0);
 
+    // A different producer may use the exact same root bytes. Its reserved,
+    // unbridged workspace must neither block nor satisfy primary activation.
+    await deliveryDb.batch([
+      deliveryDb.prepare(`INSERT INTO pa_portal_workspace_sources
+        (workspace_id,projection_source_id,source_workspace_id)
+        VALUES('secondary-workspace','project-alpha:secondary','source-workspace')`),
+      deliveryDb.prepare(`INSERT INTO portal_v2_workspaces
+        (id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id)
+        VALUES('secondary-workspace','organization','pa-org-late','Other source','active','project-alpha:secondary')`),
+    ]);
     const activated = await activateClientAccountRoot(env, principal, "late-account", {
       projectAlphaClientId: "pa-client-late",
       expectedUpdatedAt: "2026-08-16T00:00:00Z",
     });
     expect(activated).toMatchObject({ unchanged: false, rootType: "organization", rootPublicId: "pa-org-late" });
+    expect(await deliveryDb.prepare(`SELECT project_alpha_source_id FROM portal_v2_workspaces
+      WHERE id='workspace-late-account'`).first("project_alpha_source_id")).toBe("project-alpha:primary");
+    expect(await deliveryDb.prepare(`SELECT legacy_account_id FROM portal_v2_workspaces
+      WHERE id='secondary-workspace'`).first("legacy_account_id")).toBeNull();
     expect(await deliveryDb.prepare(`SELECT root_type,pa_organization_public_id,pa_client_public_id,legacy_account_id
       FROM portal_v2_workspaces WHERE id='workspace-late-account'`).first()).toEqual({
       root_type: "organization",

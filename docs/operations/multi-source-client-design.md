@@ -4,7 +4,11 @@ Status: staged implementation sequence; no second connection is enabled. The
 first local catalog-provenance increment is described in
 [catalog source isolation](catalog-source-isolation.md). The next local business
 projection increment is described in [business source isolation](business-source-isolation.md)
-and is verified locally but unpublished; no second live connection is enabled. The
+and is verified locally but unpublished. Delivery account/project ownership is
+covered in [Delivery source provenance](delivery-source-provenance.md); native
+workspace ownership and transactional projection replay are covered in
+[native portal source ownership](portal-source-ownership.md). These are separate
+local increments, not second-source activation. The
 original gaps below were audited against local Operations checkpoint
 `f055b2c` on August 26, 2026. This document
 does not authorize a second connection, change staff roles, or replace the
@@ -22,9 +26,9 @@ incident or an assertion that a second producer is currently connected.
 | --- | --- | --- |
 | Operations snapshot | The audited baseline used global external IDs and coordination keys. Local `0033` and the paired snapshot/event code now carry source context and immutable local handles; populated upgrade and primary compatibility checks passed locally. | Release the paired schema/code safely; bind future calls to an authenticated source registry before activation. |
 | Staff authority | The same snapshot rebuilds Project Alpha-managed staff roles/divisions. `apps/ops-sync/src/projection.ts` processes entitlements against the same staff projection. | Preserve the existing authority explicitly. A business-data connection must not gain staff-role, Access-group or identity-management authority. |
-| Delivery legacy mapping | Client migration `0103_client_portal_workspace.sql` has globally unique Alpha client, organization and project references. | Associate each reference with a source; preserve existing account/project/grant IDs and old URLs during migration. |
+| Delivery legacy mapping | Local `0157` source-qualifies Alpha client, organization and project references while retaining local account/project/grant IDs and URLs. | Release paired schema/consumers safely; source-aware outbound routing remains separate. |
 | Service catalog | The released schema has one checkpoint and global catalog state. Local migration `0156` now source-qualifies the catalog, saved request parents and selections; public ingress remains primary-only. | Verify and deploy the compatible migration/code together before any registry or second-source activation. |
-| Portal projection | Client migration `0121_client_workspace_hierarchy_v2.sql` has globally unique Alpha root IDs. Migration `0125_project_alpha_portal_projection.sql` scopes much state to workspace, but receipts are global and workspace ownership is not a multi-connector authority contract. | Bind each workspace/root and projection operation to an authenticated source; scope replay, mapping and lifecycle state consistently. |
+| Portal projection | Local `0158` reserves source-owned local workspace handles, source-qualifies native roots and replay receipts, and guards authority writes against stale checkpoints. Populated migration and paired primary-consumer checks passed locally. | Release paired schema/code safely; implement the authenticated source registry and remaining delivery-intent/guest receipt boundaries before activation. |
 | Client Hub | Local migration `0034` and the paired readers/index extend source-qualified business roots; secondary business roots cannot infer a primary portal/account bridge. Source-pinned backend and browser checks passed locally. | Apply the coordinated release and live acceptance gates. Business display is not portal activation. |
 
 ## Identity and authority contract

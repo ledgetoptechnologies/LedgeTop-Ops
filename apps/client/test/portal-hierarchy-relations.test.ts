@@ -40,6 +40,7 @@ describe("portal relation hierarchy compatibility", () => {
       CREATE TABLE client_folder_associations(id TEXT PRIMARY KEY,scope_type TEXT NOT NULL,project_id TEXT,account_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),revoked_at TEXT);
     `.replace(/\s*\n\s*/g, " "));
     await migrate(db, hierarchyMigration);
+    await db.prepare("ALTER TABLE portal_v2_workspaces ADD COLUMN project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary'").run();
     await migrate(db, membershipMigration);
     await migrate(db, projectionMigration);
     await migrate(db, scrubMigration);

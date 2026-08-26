@@ -3,9 +3,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import hierarchyMigration from "../migrations/0121_client_workspace_hierarchy_v2.sql?raw";
 import projectionMigration from "../migrations/0125_project_alpha_portal_projection.sql?raw";
 import eligibilityMigration from "../migrations/0145_portal_identity_eligibility.sql?raw";
+import bridgeMigration from "../migrations/0132_portal_v2_legacy_member_bridges.sql?raw";
+import sourceMigration from "../migrations/0158_portal_source_ownership.sql?raw";
+import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
-import { handleProjectAlphaPortalProjectionRequest, parsePortalProjectionDelivery } from "../src/worker/project-alpha-portal";
+import { applyPortalProjectionDelivery, handleProjectAlphaPortalProjectionRequest, parsePortalProjectionDelivery } from "../src/worker/project-alpha-portal";
+import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import type { Env } from "../src/worker/types";
 import portalFixture from "../../../packages/shared/fixtures/project-alpha-portal-v2.json";
 
@@ -38,7 +42,22 @@ function envelope(kind: string, deliveryId: string, sourceSequence: number, extr
 }
 
 async function applyMigration(db: D1Database, sql: string): Promise<void> {
-  await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
+  await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));
+}
+
+function beforeFirstBatch(database: D1Database, before: () => Promise<void>): D1Database {
+  let called = false;
+  let proxy: D1Database;
+  proxy = new Proxy(database, { get(target, property) {
+    if (property === "withSession") return () => proxy;
+    if (property === "batch") return async (statements: D1PreparedStatement[]) => {
+      if (!called) { called = true; await before(); }
+      return target.batch(statements);
+    };
+    const value = target[property as keyof D1Database];
+    return typeof value === "function" ? value.bind(target) : value;
+  } });
+  return proxy;
 }
 
 describe("Project Alpha portal hierarchy projection", () => {
@@ -61,6 +80,9 @@ describe("Project Alpha portal hierarchy projection", () => {
     await applyMigration(db, hierarchyMigration);
     await applyMigration(db, projectionMigration);
     await applyMigration(db, eligibilityMigration);
+    await db.exec("ALTER TABLE client_account_members ADD COLUMN can_view_billing INTEGER DEFAULT 0; ALTER TABLE client_member_project_grants ADD COLUMN granted_by_identity_id TEXT;");
+    await applyMigration(db, bridgeMigration);
+    await applyMigration(db, sourceMigration);
     await db.prepare("PRAGMA foreign_keys=ON").run();
     env = {
       DELIVERY_DB: db,
@@ -189,6 +211,150 @@ describe("Project Alpha portal hierarchy projection", () => {
     ), env, access);
     expect(response.status).toBe(413);
   });
+
+  async function applyFrom(sourceId: string, payload: Record<string, unknown>, environment = env) {
+    return applyPortalProjectionDelivery(environment, parsePortalProjectionDelivery(payload, applicationKey), await bodyHash(JSON.stringify(payload)), createCatalogSourceContext(sourceId));
+  }
+
+  function sourceSnapshot(sequence: number, sourceGeneration: string) {
+    const common = { sourceSequence: sequence, sourceGeneration, deliveryId: `source-page-${sequence}`, snapshotHash: String(sequence % 10).repeat(64) };
+    return {
+      page: { ...structuredClone(portalFixture.valid.snapshotPage), ...common } as Record<string, unknown>,
+      activate: { ...structuredClone(portalFixture.valid.snapshotActivate), ...common, deliveryId: `source-activate-${sequence}` } as Record<string, unknown>,
+    };
+  }
+
+  async function baseline(sourceId: string) {
+    const snapshot = sourceSnapshot(10, "source-generation-ten");
+    await applyFrom(sourceId, snapshot.page); await applyFrom(sourceId, snapshot.activate);
+    return await db.prepare("SELECT workspace_id FROM pa_portal_workspace_sources WHERE projection_source_id=? AND source_workspace_id=?")
+      .bind(sourceId, workspace.publicId).first<string>("workspace_id") as string;
+  }
+
+  it("isolates equal workspace, root, principal, entitlement and delivery IDs by producer while retaining primary URLs and raw hashes", async () => {
+    const primaryState = () => db.prepare(`SELECT workspace.status,checkpoint.source_generation,checkpoint.source_sequence,
+      checkpoint.snapshot_generation_id,directory.active_generation_id,principal.status principal_status,
+      principal.source_version principal_source_version,principal.identity_id
+      FROM portal_v2_workspaces workspace
+      JOIN pa_portal_projection_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+      JOIN portal_v2_directory_checkpoints directory ON directory.workspace_id=workspace.id
+      JOIN pa_portal_principals principal ON principal.workspace_id=workspace.id AND principal.public_id=?
+      WHERE workspace.id=?`).bind(projectedPrincipal.publicId, workspace.publicId).first();
+    const primaryBefore = await primaryState();
+    expect(primaryBefore).not.toBeNull();
+    const sourceB = "project-alpha:source-b";
+    const page = portalFixture.valid.snapshotPage as Record<string, unknown>;
+    const activate = portalFixture.valid.snapshotActivate as Record<string, unknown>;
+    expect(await applyFrom(PRIMARY_ALPHA_SOURCE_ID, page)).toBe("duplicate");
+    expect(await applyFrom(sourceB, page)).toBe("completed");
+    expect(await applyFrom(sourceB, activate)).toBe("completed");
+    const maps = (await db.prepare("SELECT workspace_id,projection_source_id FROM pa_portal_workspace_sources WHERE source_workspace_id=? AND projection_source_id IN (?,?) ORDER BY projection_source_id")
+      .bind(workspace.publicId, PRIMARY_ALPHA_SOURCE_ID, sourceB).all<{ workspace_id: string; projection_source_id: string }>()).results;
+    expect(maps).toHaveLength(2);
+    expect(maps.find(row => row.projection_source_id === PRIMARY_ALPHA_SOURCE_ID)?.workspace_id).toBe(workspace.publicId);
+    const localB = maps.find(row => row.projection_source_id === sourceB)!.workspace_id;
+    expect(localB).not.toBe(workspace.publicId);
+    expect(await db.prepare("SELECT pa_organization_public_id FROM portal_v2_workspaces WHERE id=?").bind(localB).first("pa_organization_public_id")).toBe(workspace.rootPublicId);
+    const receipts = (await db.prepare("SELECT payload_hash FROM pa_portal_projection_receipts WHERE delivery_id=?").bind(String(page.deliveryId)).all<{ payload_hash: string }>()).results;
+    expect(receipts).toHaveLength(2);
+    expect(receipts.every(row => row.payload_hash === receipts[0]!.payload_hash)).toBe(true);
+    expect(await db.prepare("SELECT scope_public_id FROM pa_portal_entitlement_intents WHERE workspace_id=? AND scope_type='workspace' LIMIT 1").bind(localB).first("scope_public_id")).toBe(localB);
+    expect(await applyFrom(sourceB, page)).toBe("duplicate");
+    await expect(applyFrom(sourceB, { ...page, occurredAt: "2026-08-13T18:01:00.000Z" })).rejects.toThrow("portal-delivery-id-conflict");
+    await db.prepare("UPDATE pa_portal_principals SET identity_id='verified-identity' WHERE workspace_id=? AND public_id=?").bind(localB, projectedPrincipal.publicId).run();
+    const refresh = envelope("event", "source-b-refresh", 11, { event: { resource: "principal", action: "upsert", principal: { ...projectedPrincipal, sourceVersion: "source-b-principal-v2" } } });
+    await applyFrom(sourceB, refresh);
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_identities WHERE issuer=? AND subject=?").bind(principal.issuer, principal.subject).first("count")).toBe(1);
+    expect(await authorizePortalWorkspaceCapability(env, principal, localB, "delivery.view", { scopeType: "project", publicId: project.publicId })).toBe(false);
+    expect(await primaryState()).toEqual(primaryBefore);
+    await applyFrom(sourceB, envelope("event", "source-b-close", 12, { event: { resource: "workspace", action: "tombstone", publicId: workspace.publicId, sourceVersion: "source-b-closed" } }));
+    expect(await db.prepare("SELECT status FROM portal_v2_workspaces WHERE id=?").bind(localB).first("status")).toBe("suspended");
+    expect(await primaryState()).toEqual(primaryBefore);
+  }, 20_000);
+
+  it("rejects an event raced by a newer snapshot before any authority or receipt mutation", async () => {
+    const source = "project-alpha:event-race";
+    const localId = await baseline(source);
+    const newer = sourceSnapshot(12, "source-generation-twelve");
+    const event = envelope("event", "raced-event-eleven", 11, { sourceGeneration: "source-generation-ten", event: { resource: "principal", action: "tombstone", publicId: projectedPrincipal.publicId, sourceVersion: "stale-principal" } });
+    const racedEnv = { ...env, DELIVERY_DB: beforeFirstBatch(db, async () => { await applyFrom(source, newer.page); await applyFrom(source, newer.activate); }) };
+    await expect(applyFrom(source, event, racedEnv)).rejects.toThrow("portal-write-conflict");
+    expect(await db.prepare("SELECT source_sequence FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(localId).first("source_sequence")).toBe(12);
+    expect(await db.prepare("SELECT status FROM portal_v2_directory_generations WHERE id=(SELECT active_generation_id FROM portal_v2_directory_checkpoints WHERE workspace_id=?)").bind(localId).first("status")).toBe("active");
+    expect(await db.prepare("SELECT status FROM pa_portal_principals WHERE workspace_id=? AND public_id=?").bind(localId, projectedPrincipal.publicId).first("status")).toBe("active");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_receipts WHERE projection_source_id=? AND delivery_id=?").bind(source, event.deliveryId).first("count")).toBe(0);
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_audit WHERE workspace_id=? AND delivery_id=?").bind(localId, event.deliveryId).first("count")).toBe(0);
+  }, 20_000);
+
+  it("rejects a stale snapshot activation read after another snapshot commits", async () => {
+    const source = "project-alpha:activation-race";
+    const localId = await baseline(source);
+    const older = sourceSnapshot(12, "source-generation-twelve");
+    const newer = sourceSnapshot(14, "source-generation-fourteen");
+    await applyFrom(source, older.page); await applyFrom(source, newer.page);
+    const racedEnv = { ...env, DELIVERY_DB: beforeFirstBatch(db, async () => { await applyFrom(source, newer.activate); }) };
+    await expect(applyFrom(source, older.activate, racedEnv)).rejects.toThrow("portal-write-conflict");
+    expect(await db.prepare("SELECT source_sequence FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(localId).first("source_sequence")).toBe(14);
+    expect(await db.prepare("SELECT status FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation='source-generation-twelve'").bind(localId).first("status")).toBe("staging");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_receipts WHERE projection_source_id=? AND delivery_id=?").bind(source, older.activate.deliveryId).first("count")).toBe(0);
+  }, 20_000);
+
+  it("does not append a page after its initial checkpoint read has become stale", async () => {
+    const source = "project-alpha:page-race";
+    const localId = await baseline(source);
+    const older = sourceSnapshot(12, "source-generation-twelve");
+    const newer = sourceSnapshot(14, "source-generation-fourteen");
+    const racedEnv = { ...env, DELIVERY_DB: beforeFirstBatch(db, async () => { await applyFrom(source, newer.page); await applyFrom(source, newer.activate); }) };
+    await expect(applyFrom(source, older.page, racedEnv)).rejects.toThrow("portal-write-conflict");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_pages WHERE generation_id=(SELECT id FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation='source-generation-twelve')").bind(localId).first("count")).toBe(0);
+    expect(await db.prepare("SELECT source_sequence FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(localId).first("source_sequence")).toBe(14);
+  }, 20_000);
+
+  it("rejects producer-supplied local workspace coordinates before translating them", async () => {
+    const source = "project-alpha:coordinate-check";
+    const localId = await baseline(source);
+    const common = { sourceGeneration: "source-generation-ten" };
+    await expect(applyFrom(source, envelope("event", "bad-local-workspace-upsert", 11, { ...common, event: { resource: "workspace", action: "upsert", workspace: { ...workspace, publicId: localId } } }))).rejects.toThrow("portal-workspace-id-invalid");
+    await expect(applyFrom(source, envelope("event", "bad-local-workspace-tombstone", 11, { ...common, event: { resource: "workspace", action: "tombstone", publicId: localId, sourceVersion: "bad" } }))).rejects.toThrow("portal-workspace-id-invalid");
+    const grant = portalFixture.valid.snapshotPage.entitlements.find(row => row.scopeType === "workspace")!;
+    await expect(applyFrom(source, envelope("event", "bad-local-workspace-entitlement", 11, { ...common, event: { resource: "entitlement", action: "upsert", entitlement: { ...grant, scopePublicId: localId } } }))).rejects.toThrow("portal-entitlement-scope-invalid");
+    const snapshot = parsePortalProjectionDelivery(sourceSnapshot(12, "bad-coordinate-generation").page, applicationKey);
+    if (snapshot.kind !== "snapshot.page") throw new Error("fixture-shape");
+    await expect(applyPortalProjectionDelivery(env, { ...snapshot, workspace: { ...snapshot.workspace, publicId: localId } }, "f".repeat(64), createCatalogSourceContext("project-alpha:unreserved-bad"))).rejects.toThrow("portal-workspace-id-invalid");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_workspace_sources WHERE projection_source_id='project-alpha:unreserved-bad'").first("count")).toBe(0);
+    expect(await db.prepare("SELECT source_sequence FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(localId).first("source_sequence")).toBe(10);
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_receipts WHERE projection_source_id=? AND delivery_id LIKE 'bad-local-%'").bind(source).first("count")).toBe(0);
+  }, 20_000);
+
+  it("reuses the winning staging generation when concurrent first pages reserve different local IDs", async () => {
+    const source = "project-alpha:staging-race";
+    const snapshot = sourceSnapshot(10, "shared-staging-generation");
+    const parsed = parsePortalProjectionDelivery(snapshot.page, applicationKey);
+    if (parsed.kind !== "snapshot.page") throw new Error("fixture-shape");
+    const pageOne = { ...snapshot.page, pageCount: 2, pageNumber: 1, principals: [], entitlements: [] };
+    const pageTwo = { ...snapshot.page, deliveryId: "second-concurrent-page", pageCount: 2, pageNumber: 2, entities: [] };
+    let injected = false;
+    let proxy: D1Database;
+    const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(statement, { get(target, property) {
+      if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values), sql);
+      if (property === "run" && sql.includes("INSERT OR IGNORE INTO pa_portal_projection_generations")) return async () => {
+        if (!injected) { injected = true; await applyFrom(source, pageTwo); }
+        return target.run();
+      };
+      const value = target[property as keyof D1PreparedStatement];
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    proxy = new Proxy(db, { get(target, property) {
+      if (property === "withSession") return () => proxy;
+      if (property === "prepare") return (sql: string) => wrap(target.prepare(sql), sql);
+      const value = target[property as keyof D1Database];
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    expect(await applyFrom(source, pageOne, { ...env, DELIVERY_DB: proxy })).toBe("completed");
+    expect(await applyFrom(source, { ...snapshot.activate, pageCount: 2 })).toBe("completed");
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_generations WHERE projection_source_id=?").bind(source).first("count")).toBe(1);
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_pages page JOIN pa_portal_projection_generations generation ON generation.id=page.generation_id WHERE generation.projection_source_id=?").bind(source).first("count")).toBe(2);
+  }, 20_000);
 
   it("is migration-idempotent and keeps referential integrity", async () => {
     await applyMigration(db, projectionMigration);

@@ -4,10 +4,13 @@ import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type JWTVerifyG
 import hierarchyMigration from "../migrations/0121_client_workspace_hierarchy_v2.sql?raw";
 import projectionMigration from "../migrations/0125_project_alpha_portal_projection.sql?raw";
 import relationMigration from "../migrations/0129_portal_hierarchy_relations.sql?raw";
+import legacyBridgeMigration from "../migrations/0132_portal_v2_legacy_member_bridges.sql?raw";
 import denialMigration from "../migrations/0136_portal_v2_identity_denials.sql?raw";
 import authenticatedGrantMigration from "../migrations/0137_authenticated_delivery_grants.sql?raw";
 import eligibilityMigration from "../migrations/0145_portal_identity_eligibility.sql?raw";
 import deliveryIntentMigration from "../migrations/0147_project_alpha_delivery_intents.sql?raw";
+import sourceOwnershipMigration from "../migrations/0158_portal_source_ownership.sql?raw";
+import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import portalFixture from "../../../packages/shared/fixtures/project-alpha-portal-v2.json";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { resolveCloudflareClientPrincipal } from "../src/worker/client-portal/access-identity";
@@ -80,13 +83,13 @@ describe("Project Alpha to authenticated Client delivery cross-repository contra
     });
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await db.exec(`
-      CREATE TABLE client_accounts(id TEXT PRIMARY KEY,display_name TEXT NOT NULL,status TEXT NOT NULL,
+      CREATE TABLE client_accounts(id TEXT PRIMARY KEY,display_name TEXT NOT NULL,status TEXT NOT NULL,project_alpha_source_id TEXT DEFAULT 'project-alpha:primary',
         project_alpha_client_id TEXT,project_alpha_organization_id TEXT,created_at TEXT DEFAULT(datetime('now')),updated_at TEXT DEFAULT(datetime('now')));
       CREATE TABLE client_identity_links(id TEXT NOT NULL,account_id TEXT NOT NULL,issuer TEXT NOT NULL,subject TEXT NOT NULL,email TEXT,
         revoked_at TEXT,created_at TEXT DEFAULT(datetime('now')),last_seen_at TEXT,PRIMARY KEY(id),UNIQUE(id,account_id),UNIQUE(issuer,subject));
       CREATE TABLE client_account_members(account_id TEXT NOT NULL,identity_id TEXT NOT NULL,role TEXT NOT NULL,can_view_billing INTEGER NOT NULL DEFAULT 0,
         revoked_at TEXT,created_at TEXT DEFAULT(datetime('now')),updated_at TEXT DEFAULT(datetime('now')),PRIMARY KEY(account_id,identity_id));
-      CREATE TABLE projects(id TEXT PRIMARY KEY,external_ref TEXT NOT NULL,client_name TEXT NOT NULL,project_name TEXT NOT NULL,r2_prefix TEXT,
+      CREATE TABLE projects(id TEXT PRIMARY KEY,external_ref TEXT NOT NULL,client_name TEXT NOT NULL,project_name TEXT NOT NULL,r2_prefix TEXT,project_alpha_source_id TEXT DEFAULT 'project-alpha:primary',
         project_alpha_project_id TEXT,active INTEGER NOT NULL DEFAULT 1,status TEXT NOT NULL DEFAULT 'active',summary TEXT,site_address TEXT,
         service_address TEXT,project_contact_name TEXT,project_contact_email TEXT,project_contact_phone TEXT,next_milestone TEXT,source_updated_at TEXT);
       CREATE TABLE client_project_grants(account_id TEXT NOT NULL,project_id TEXT NOT NULL,can_request_service INTEGER NOT NULL DEFAULT 0,
@@ -102,10 +105,12 @@ describe("Project Alpha to authenticated Client delivery cross-repository contra
     await migrate(db, hierarchyMigration);
     await migrate(db, projectionMigration);
     await migrate(db, relationMigration);
+    await migrate(db, legacyBridgeMigration);
     await migrate(db, denialMigration);
     await migrate(db, authenticatedGrantMigration);
     await migrate(db, eligibilityMigration);
     await migrate(db, deliveryIntentMigration);
+    await db.batch(splitD1MigrationStatements(sourceOwnershipMigration).map(sql => db.prepare(sql)));
     await db.prepare("PRAGMA foreign_keys=ON").run();
 
     await db.prepare(`INSERT INTO client_accounts(id,display_name,status,project_alpha_organization_id)

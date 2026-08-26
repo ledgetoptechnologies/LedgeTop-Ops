@@ -33,7 +33,7 @@ describe("bounded staff grant and denial reads", () => {
       CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT NOT NULL,subject TEXT NOT NULL,verified_email TEXT,
         status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')),UNIQUE(issuer,subject));
       CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT NOT NULL,pa_organization_public_id TEXT,pa_client_public_id TEXT,
-        legacy_account_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active');
+        legacy_account_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE portal_v2_workspace_memberships(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,identity_id TEXT NOT NULL,source_type TEXT,
         status TEXT NOT NULL DEFAULT 'active',expires_at TEXT,revoked_at TEXT,UNIQUE(workspace_id,identity_id));
       CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,complete INTEGER NOT NULL);

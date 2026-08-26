@@ -103,6 +103,7 @@ export async function handleProjectAlphaDeliveryIntent(c: IntentContext) {
   if (prior) { if(prior.request_fingerprint!==auth.fingerprint) throw new HTTPException(409,{message:"Delivery ID was already used"}); return c.json({receiptId:prior.receipt_id,status:"accepted" as const},202); }
   const bindings=await database.prepare(`SELECT b.id,b.workspace_id,b.source_version,b.r2_prefix,cp.active_generation_id FROM portal_v2_folder_bindings b
     JOIN portal_v2_workspaces w ON w.id=b.workspace_id AND w.status='active'
+      AND w.project_alpha_source_id='project-alpha:primary'
     JOIN portal_v2_directory_checkpoints cp ON cp.workspace_id=b.workspace_id
     JOIN portal_v2_directory_generations g ON g.id=cp.active_generation_id AND g.status='active' AND g.complete=1
     JOIN portal_v2_directory_entities e ON e.workspace_id=b.workspace_id AND e.generation_id=cp.active_generation_id
@@ -115,7 +116,10 @@ export async function handleProjectAlphaDeliveryIntent(c: IntentContext) {
     ? await database.prepare(`SELECT source_version FROM pa_portal_principals WHERE workspace_id=? AND public_id=? AND status='active'`).bind(binding.workspace_id,parsed.data.audience.publicId).first<{source_version:string}>()
     : await database.prepare(`SELECT source_version FROM portal_v2_directory_entities WHERE workspace_id=? AND generation_id=? AND entity_type=? AND public_id=? AND active=1`).bind(binding.workspace_id,binding.active_generation_id,parsed.data.audience.type,parsed.data.audience.publicId).first<{source_version:string}>();
   if(!audience) throw new HTTPException(404,{message:"Delivery audience not found"});
-  await resolveProjectAlphaDeliveryPrincipal(c.env,binding.r2_prefix,parsed.data.audience.publicId,audience.source_version);
+  const recipient=await resolveProjectAlphaDeliveryPrincipal(c.env,binding.r2_prefix,parsed.data.audience.publicId,audience.source_version);
+  if(recipient.workspaceId!==binding.workspace_id||recipient.folderBindingId!==binding.id||
+    recipient.directoryGenerationId!==binding.active_generation_id)
+    throw new HTTPException(409,{message:"Delivery recipient binding changed"});
   if(parsed.data.accessMode==="guest"){
     if(c.env.PROJECT_ALPHA_DELIVERY_GUEST_ENABLED!=="true")throw new HTTPException(404,{message:"Not found"});
     const receiptId=crypto.randomUUID();

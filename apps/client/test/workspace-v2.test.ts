@@ -114,6 +114,7 @@ describe("client workspace hierarchy v2", () => {
       .replace(/^\s*--.*$/gm, "")
       .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
       .replace(/\s*\n\s*/g, " "));
+    await db.prepare("ALTER TABLE portal_v2_workspaces ADD COLUMN project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary'").run();
     await db.exec(membershipMigration
       .replace(/^\s*--.*$/gm, "")
       .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")

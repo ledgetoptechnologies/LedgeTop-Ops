@@ -17,7 +17,7 @@ describe("explicit Client Hub workspace provenance", () => {
     env = { DELIVERY_DB: db };
     await db.exec(`
       CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT,display_name TEXT,status TEXT,
-        legacy_account_id TEXT,pa_organization_public_id TEXT,pa_client_public_id TEXT);
+        legacy_account_id TEXT,pa_organization_public_id TEXT,pa_client_public_id TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT,project_alpha_organization_id TEXT,project_alpha_client_id TEXT,project_alpha_source_id TEXT);
       CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT,source_generation TEXT,source_sequence INTEGER,status TEXT,complete INTEGER);
       CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT,source_sequence INTEGER);
@@ -30,9 +30,9 @@ describe("explicit Client Hub workspace provenance", () => {
   });
   afterAll(async () => runtime.dispose());
 
-  async function workspace(id: string, root: string, legacy = false, proven = true) {
-    await db.prepare("INSERT INTO portal_v2_workspaces VALUES(?,'organization',?,'active',?,?,NULL)")
-      .bind(id, id, legacy ? `account-${id}` : null, root).run();
+  async function workspace(id: string, root: string, legacy = false, proven = true, source = "project-alpha:primary") {
+    await db.prepare("INSERT INTO portal_v2_workspaces VALUES(?,'organization',?,'active',?,?,NULL,?)")
+      .bind(id, id, legacy ? `account-${id}` : null, root, source).run();
     if (legacy) await db.prepare("INSERT INTO client_accounts VALUES(?,'active',?,NULL,'project-alpha:primary')").bind(`account-${id}`, root).run();
     if (!proven) return;
     await db.batch([
@@ -56,6 +56,14 @@ describe("explicit Client Hub workspace provenance", () => {
     await db.prepare("UPDATE client_accounts SET project_alpha_source_id='project-alpha:secondary' WHERE id='account-secondary'").run();
     expect(await resolveClientHubWorkspace(env, { ...lookup, pa_public_id: null })).toEqual({ status: "missing", workspace: null });
     expect(await resolveClientHubWorkspace(env, { ...lookup, business_id: null, workspace_id: "secondary" })).toEqual({ status: "missing", workspace: null });
+  });
+
+  it("ignores unbridged secondary native roots with identical public IDs", async () => {
+    await workspace("secondary", publicId, false, true, "project-alpha:secondary");
+    expect(await resolveClientHubWorkspace(env, lookup)).toEqual({ status: "missing", workspace: null });
+    expect(await resolveClientHubWorkspace(env, { ...lookup, workspace_id: "secondary" })).toEqual({ status: "missing", workspace: null });
+    await workspace("primary", publicId);
+    expect(await resolveClientHubWorkspace(env, lookup)).toMatchObject({ status: "mapped", workspace: { id: "primary" } });
   });
 
   it("recognizes a legacy workspace only with its current account bridge and selected legacy proof", async () => {

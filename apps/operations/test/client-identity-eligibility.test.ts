@@ -30,7 +30,7 @@ async function fixture() {
   const database = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
   await applySql(database, `
     CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,display_name TEXT,email_hint TEXT,source_version TEXT,status TEXT);
-    CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,display_name TEXT,status TEXT DEFAULT 'active');
+    CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,display_name TEXT,status TEXT DEFAULT 'active',project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT,status TEXT DEFAULT 'active',revoked_at TEXT);
     CREATE TABLE portal_v2_identity_eligibility_bindings(identity_id TEXT,workspace_id TEXT,principal_public_id TEXT);
     CREATE TABLE portal_v2_workspace_memberships(workspace_id TEXT,identity_id TEXT,status TEXT,revoked_at TEXT,expires_at TEXT,

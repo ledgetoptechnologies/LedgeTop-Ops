@@ -41,6 +41,7 @@ describe("workspace invitation email delivery", () => {
     // This focused fixture needs the additive v2 schema, not 0121's legacy
     // backfill SELECTs (those are covered by the full migration suite).
     await database.exec(executableMigration(hierarchyMigration.split("INSERT OR IGNORE INTO portal_v2_identities")[0]!));
+    await database.prepare("ALTER TABLE portal_v2_workspaces ADD COLUMN project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary'").run();
     await database.exec(executableMigration(membershipMigration));
     await database.exec(executableMigration(scrubMigration));
     await database.exec(executableMigration(accessReceiptMigration));

@@ -74,9 +74,11 @@ apply the paired migration and code, and verify primary sync, existing client
 URLs, explicit grants, request replay and historical feedback. A rollback must
 restore a compatible schema/code checkpoint, not strip provenance from rows.
 
-Secondary native portal roots, receipts and lifecycle ownership still need an
-end-to-end contract. A verified source registry, credential/workspace binding,
-outbound routing and explicit reference namespace resolution are also pending.
+The follow-on [native portal increment](portal-source-ownership.md) adds local
+source ownership for workspace roots, projection receipts and lifecycle state.
+It does not complete the end-to-end activation contract: delivery-intent/guest
+receipts, a verified source registry, credential/workspace binding, outbound
+routing and explicit reference namespace resolution are still pending.
 No browser field, same-name match or same-email match may select a producer or
 grant authority. Keep secondary activation disabled until those gates pass.
 
@@ -155,7 +157,7 @@ backend increment. The unchanged folder-count UI retains its previously recorded
 desktop/mobile browser verification; its unit cases were rerun here.
 
 No live database, connection, role, invitation, email or client content was
-changed. Remaining registry, native portal, outbound routing and frozen Viewer
+changed. Remaining registry, native portal activation, outbound routing and frozen Viewer
 adapter gates above must be completed before enabling another producer. Apply
 the documented populated-backup and integrity checks before any separately
 approved production cutover.

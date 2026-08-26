@@ -87,7 +87,7 @@ async function prepareGuestDeliveryDatabase(db:D1Database):Promise<void>{
       PRIMARY KEY(share_id,share_version,recipient_principal_public_id),
       FOREIGN KEY(share_id,share_version) REFERENCES delivery_share_audience_snapshots(share_id,share_version)
     );
-    CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT NOT NULL);
+    CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT NOT NULL,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE portal_v2_folder_bindings(
       id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,owner_scope_type TEXT NOT NULL,owner_public_id TEXT NOT NULL,
       r2_prefix TEXT NOT NULL,source_version TEXT NOT NULL,status TEXT NOT NULL,revoked_at TEXT,
@@ -152,7 +152,7 @@ async function prepareGuestDeliveryDatabase(db:D1Database):Promise<void>{
   `);
   await runSqlStatements(db,`
     INSERT INTO projects(id,division_id,client_name,project_name,r2_prefix) VALUES('project-row','division-one','Client One','Project One','jobs/client-one/project-one/');
-    INSERT INTO portal_v2_workspaces VALUES('workspace-one','active');
+    INSERT INTO portal_v2_workspaces(id,status) VALUES('workspace-one','active');
     INSERT INTO portal_v2_folder_bindings VALUES('binding-one','workspace-one','project','project-one','jobs/client-one/project-one/','binding-v1','active',NULL);
     INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-one','generation-one');
     INSERT INTO portal_v2_directory_generations VALUES('generation-one','workspace-one','active',1);
@@ -280,7 +280,7 @@ describe("Project Alpha delivery-intent boundary", () => {
       const delivery=await mf.getD1Database("DELIVERY_DB") as unknown as D1Database;
       await applyMigration(ops,new URL("../migrations/0031_project_alpha_delivery_intent_rate_limits.sql",import.meta.url));
       await runSqlStatements(delivery,`
-        CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT);
+        CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
         CREATE TABLE portal_v2_folder_bindings(id TEXT PRIMARY KEY,workspace_id TEXT,owner_scope_type TEXT,owner_public_id TEXT,r2_prefix TEXT,source_version TEXT,status TEXT,revoked_at TEXT);
         CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT);
         CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT,status TEXT,complete INTEGER);
@@ -296,7 +296,7 @@ describe("Project Alpha delivery-intent boundary", () => {
         CREATE TABLE project_alpha_delivery_intent_audit(id TEXT PRIMARY KEY,receipt_id TEXT,action TEXT,actor_kind TEXT DEFAULT 'project_alpha_delivery',actor_id TEXT,details_json TEXT,created_at TEXT DEFAULT(datetime('now')));
         CREATE TABLE project_alpha_delivery_portal_notification_outbox(id TEXT PRIMARY KEY,receipt_id TEXT,grant_id TEXT,principal_public_id TEXT,principal_source_version TEXT,event_type TEXT,status TEXT DEFAULT 'pending',attempt_count INTEGER DEFAULT 0,next_attempt_at TEXT DEFAULT(datetime('now')),lease_expires_at TEXT,last_error TEXT,delivered_at TEXT,created_at TEXT DEFAULT(datetime('now')),updated_at TEXT DEFAULT(datetime('now')));
         CREATE TABLE project_alpha_delivery_intent_revocation_receipts(receipt_id TEXT PRIMARY KEY,delivery_id TEXT UNIQUE,original_receipt_id TEXT,request_fingerprint TEXT,created_at TEXT DEFAULT(datetime('now')));
-        INSERT INTO portal_v2_workspaces VALUES('workspace-one','active');
+        INSERT INTO portal_v2_workspaces(id,status) VALUES('workspace-one','active');
         INSERT INTO portal_v2_folder_bindings VALUES('binding-one','workspace-one','project','project-one','client/project/','binding-v1','active',NULL);
         INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-one','generation-one');
         INSERT INTO portal_v2_directory_generations VALUES('generation-one','workspace-one','active',1);
@@ -324,6 +324,41 @@ describe("Project Alpha delivery-intent boundary", () => {
       expect((await app.fetch(await signedRequest("/api/internal/project-alpha/delivery-intents/revoke",revoke,secret),env)).status).toBe(202);
       expect((await app.fetch(await signedRequest("/api/internal/project-alpha/delivery-intents/revoke",{...revoke,deliveryId:"portal-revoke-two"},secret),env)).status).toBe(409);
     }finally{await mf.dispose();}
+  });
+
+  it.each(["portal", "guest"] as const)("keeps %s intents on primary native authority despite colliding secondary IDs and paths", async accessMode => {
+    const { mf, delivery, env, app, secret } = await createGuestHarness(`source-${accessMode}`);
+    try {
+      await runSqlStatements(delivery, `
+        INSERT INTO portal_v2_workspaces(id,status,project_alpha_source_id)
+          VALUES('secondary-workspace','active','project-alpha:secondary');
+        INSERT INTO portal_v2_folder_bindings
+          VALUES('secondary-binding','secondary-workspace','project','project-one','jobs/client-one/project-one/','binding-v1','active',NULL);
+        INSERT INTO portal_v2_directory_checkpoints VALUES('secondary-workspace','secondary-generation');
+        INSERT INTO portal_v2_directory_generations VALUES('secondary-generation','secondary-workspace','active',1);
+        INSERT INTO portal_v2_directory_entities
+          VALUES('secondary-workspace','secondary-generation','project','project-one',NULL,'Other project','binding-v1',1);
+        INSERT INTO pa_portal_principals
+          VALUES('secondary-workspace','principal-one',NULL,'other-source@example.test','Other person','principal-v1','active');
+      `);
+      const path = "/api/internal/project-alpha/delivery-intents";
+      const intent = { schemaVersion: 1, applicationKey: "project-alpha", deliveryId: crypto.randomUUID(),
+        occurredAt: new Date().toISOString(), scope: { type: "project", publicId: "project-one" },
+        audience: { type: "principal", publicId: "principal-one" }, accessMode,
+        expiresAt: accessMode === "guest" ? new Date(Date.now() + 86400000).toISOString() : null,
+        label: null, notify: true };
+      const accepted = await app.fetch(await signedRequest(path, intent, secret), env);
+      expect(accepted.status).toBe(202);
+      const authorityTable = accessMode === "guest" ? "project_alpha_delivery_guest_authority" : "project_alpha_delivery_portal_grants";
+      expect((await delivery.prepare(`SELECT workspace_id,folder_binding_id FROM ${authorityTable}`).all()).results)
+        .toEqual([{ workspace_id: "workspace-one", folder_binding_id: "binding-one" }]);
+      const before = await delivery.prepare("SELECT count(*) count FROM project_alpha_delivery_intent_receipts").first("count");
+      await delivery.prepare("UPDATE portal_v2_folder_bindings SET status='suspended' WHERE id='binding-one'").run();
+      const denied = await app.fetch(await signedRequest(path, { ...intent, deliveryId: crypto.randomUUID() }, secret), env);
+      expect(denied.status).toBe(409);
+      expect(await delivery.prepare("SELECT count(*) count FROM project_alpha_delivery_intent_receipts").first("count")).toBe(before);
+      expect(await delivery.prepare(`SELECT count(*) count FROM ${authorityTable} WHERE workspace_id='secondary-workspace'`).first("count")).toBe(0);
+    } finally { await mf.dispose(); }
   });
 
   it("creates, replays, conflicts, and revokes a real guest share with pinned authority",async()=>{

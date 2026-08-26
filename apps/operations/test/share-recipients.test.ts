@@ -19,7 +19,7 @@ describe("public-share directory recipients", () => {
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await db.exec(`
       CREATE TABLE shares(id TEXT PRIMARY KEY,recipient_email TEXT,share_version INTEGER NOT NULL DEFAULT 1);
-      CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT NOT NULL);
+      CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT NOT NULL,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,complete INTEGER NOT NULL);
       CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT NOT NULL);
       CREATE TABLE portal_v2_directory_entities(workspace_id TEXT NOT NULL,generation_id TEXT NOT NULL,entity_type TEXT NOT NULL,public_id TEXT NOT NULL,parent_public_id TEXT,display_name TEXT NOT NULL,active INTEGER NOT NULL);
@@ -29,7 +29,7 @@ describe("public-share directory recipients", () => {
     `.replace(/\s*\n\s*/g, " "));
     await db.exec(recipientMigration.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
     await db.batch([
-      db.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace-acme','active')"),
+      db.prepare("INSERT INTO portal_v2_workspaces(id,status) VALUES('workspace-acme','active')"),
       db.prepare("INSERT INTO portal_v2_directory_generations VALUES('generation-7','workspace-acme','active',1)"),
       db.prepare("INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-acme','generation-7')"),
       db.prepare("INSERT INTO portal_v2_directory_entities VALUES('workspace-acme','generation-7','organization','org-acme',NULL,'Acme',1)"),
@@ -64,6 +64,20 @@ describe("public-share directory recipients", () => {
     ]);
     expect(JSON.stringify(result)).not.toContain("principal-denied");
     expect(JSON.stringify(result)).not.toContain("principal-other");
+  });
+
+  it("does not resolve recipients from an overlapping secondary native workspace", async () => {
+    await db.batch([
+      db.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace-secondary','active','project-alpha:secondary')"),
+      db.prepare("INSERT INTO portal_v2_directory_generations VALUES('generation-secondary','workspace-secondary','active',1)"),
+      db.prepare("INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-secondary','generation-secondary')"),
+      db.prepare("INSERT INTO portal_v2_directory_entities VALUES('workspace-secondary','generation-secondary','project','project-north',NULL,'Secondary Project',1)"),
+      db.prepare("INSERT INTO portal_v2_folder_bindings VALUES('binding-secondary','workspace-secondary','project','project-north','jobs/acme/north/','active')"),
+    ]);
+    expect((await resolveShareAudience(env, "jobs/acme/north/", "principal", "principal-duplicate")).workspaceId).toBe("workspace-acme");
+    await db.prepare("UPDATE portal_v2_folder_bindings SET status='suspended' WHERE id='binding-north'").run();
+    try { await expect(searchShareRecipients(env, "jobs/acme/north/", "manager")).rejects.toMatchObject({ status: 409 }); }
+    finally { await db.prepare("UPDATE portal_v2_folder_bindings SET status='active' WHERE id='binding-north'").run(); }
   });
 
   it("offers only the exact folder owner's ancestor organization/department/client/project path", async () => {

@@ -95,6 +95,7 @@ export async function resolveClientHubWorkspaces(
           ELSE (${businessCandidate}) END verified,
         ROW_NUMBER() OVER(PARTITION BY wanted.lookup_key ORDER BY workspace.id) candidate_number
       FROM wanted JOIN portal_v2_workspaces workspace ON workspace.root_type=wanted.kind AND workspace.status<>'closed'
+        AND workspace.project_alpha_source_id='project-alpha:primary'
         AND (workspace.legacy_account_id IS NULL OR EXISTS (SELECT 1 FROM client_accounts account
           WHERE account.id=workspace.legacy_account_id AND (account.project_alpha_source_id IS NULL OR account.project_alpha_source_id='project-alpha:primary')))
       WHERE (wanted.workspace_id IS NOT NULL AND workspace.id=wanted.workspace_id)

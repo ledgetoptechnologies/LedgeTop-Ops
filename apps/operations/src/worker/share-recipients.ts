@@ -21,6 +21,7 @@ export function shareDirectoryRecipientsEnabled(env: Pick<Env, "DELIVERY_SHARE_D
 async function bindingContext(env: Env, prefix: string): Promise<BindingContext> {
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT binding.id folder_binding_id,binding.workspace_id,binding.owner_scope_type,binding.owner_public_id,checkpoint.active_generation_id directory_generation_id,length(binding.r2_prefix) prefix_length
     FROM portal_v2_folder_bindings binding JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'
+      AND workspace.project_alpha_source_id='project-alpha:primary'
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=binding.workspace_id
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id AND generation.workspace_id=binding.workspace_id AND generation.status='active' AND generation.complete=1
     JOIN portal_v2_directory_entities owner ON owner.workspace_id=binding.workspace_id AND owner.generation_id=checkpoint.active_generation_id AND owner.entity_type=binding.owner_scope_type AND owner.public_id=binding.owner_public_id AND owner.active=1

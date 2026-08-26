@@ -177,7 +177,7 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
     rows = (await delivery.prepare(`SELECT '${PA}' source_id,'portal' root_namespace,root_type kind,
       id public_id,NULL pa_public_id,'not_applicable' mapping_status,
       display_name,status,0 contact_count,id cursor FROM portal_v2_workspaces
-      WHERE status<>'closed' AND id>? ORDER BY id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE).all<Root & { cursor: string }>()).results;
+      WHERE project_alpha_source_id='project-alpha:primary' AND status<>'closed' AND id>? ORDER BY id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE).all<Root & { cursor: string }>()).results;
     if (rows.length) {
       // Fold only verified current-generation associations. A portal root with
       // no proven business link remains visible in its own explicit namespace.
@@ -215,6 +215,7 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
     const rows = (await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT principal.workspace_id,principal.public_id,
       principal.display_name,principal.email_hint,workspace.root_type kind
       FROM pa_portal_principals principal JOIN portal_v2_workspaces workspace ON workspace.id=principal.workspace_id
+        AND workspace.project_alpha_source_id='project-alpha:primary'
       WHERE principal.status='active' AND workspace.status<>'closed' AND (principal.workspace_id,principal.public_id)>(?,?)
       ORDER BY principal.workspace_id COLLATE BINARY,principal.public_id COLLATE BINARY LIMIT ?`)
       .bind(key[0], key[1], PAGE_SIZE).all<{ workspace_id: string; public_id: string; display_name: string; email_hint: string; kind: Kind }>()).results;

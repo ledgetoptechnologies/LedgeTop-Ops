@@ -1,5 +1,6 @@
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import type { Env } from "./types";
+import { PRIMARY_PORTAL_PROJECTION_SOURCE, resolvePortalWorkspaceSource, type PortalProjectionSource, type PortalWorkspaceSource } from "./project-alpha-portal-source";
 
 const MAX_BODY_BYTES = 256 * 1024;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -393,9 +394,31 @@ export async function verifyPortalProjectionAccessAssertion(
   }
 }
 
-function receiptStatement(db: D1Database, delivery: PortalProjectionDelivery, payloadHash: string, kind: "snapshot_page" | "snapshot_activate" | "event", status: "completed" | "ignored" = "completed"): D1PreparedStatement {
-  return db.prepare("INSERT INTO pa_portal_projection_receipts(delivery_id,workspace_id,delivery_kind,payload_hash,source_sequence,status) VALUES(?,?,?,?,?,?)")
-    .bind(delivery.deliveryId, delivery.workspaceId, kind, payloadHash, delivery.sourceSequence, status);
+interface ProjectionCheckpoint { source_generation: string; source_sequence: number; snapshot_generation_id: string }
+interface ProjectionWriteGuard { checkpoint: ProjectionCheckpoint | null; generationId?: string; generationStatus?: string; directoryGenerationId?: string }
+
+/** This must be the FIRST statement in every authority-changing batch. */
+function receiptStatement(db: D1Database, delivery: PortalProjectionDelivery, source: PortalWorkspaceSource, payloadHash: string, kind: "snapshot_page" | "snapshot_activate" | "event", guard: ProjectionWriteGuard, status: "completed" | "ignored" = "completed"): D1PreparedStatement {
+  const predicates = ["EXISTS(SELECT 1 FROM pa_portal_workspace_sources WHERE workspace_id=? AND projection_source_id=? AND source_workspace_id=?)"];
+  const args: (string | number)[] = [source.workspaceId, source.sourceId, source.sourceWorkspaceId];
+  if (guard.checkpoint) {
+    predicates.push("EXISTS(SELECT 1 FROM pa_portal_projection_checkpoints WHERE workspace_id=? AND source_generation=? AND source_sequence=? AND snapshot_generation_id=?)");
+    args.push(source.workspaceId, guard.checkpoint.source_generation, guard.checkpoint.source_sequence, guard.checkpoint.snapshot_generation_id);
+  } else {
+    predicates.push("NOT EXISTS(SELECT 1 FROM pa_portal_projection_checkpoints WHERE workspace_id=?)");
+    args.push(source.workspaceId);
+  }
+  if (guard.generationId) {
+    predicates.push("EXISTS(SELECT 1 FROM pa_portal_projection_generations WHERE id=? AND workspace_id=? AND projection_source_id=? AND status=?)");
+    args.push(guard.generationId, source.workspaceId, source.sourceId, guard.generationStatus!);
+  }
+  if (guard.directoryGenerationId) {
+    predicates.push("EXISTS(SELECT 1 FROM portal_v2_directory_checkpoints WHERE workspace_id=? AND active_generation_id=? AND source_sequence=?)");
+    args.push(source.workspaceId, guard.directoryGenerationId, guard.checkpoint!.source_sequence);
+  }
+  return db.prepare(`INSERT INTO pa_portal_projection_receipts(projection_source_id,delivery_id,workspace_id,delivery_kind,payload_hash,source_sequence,status,write_guard)
+    VALUES(?,?,?,?,?,?,?,CASE WHEN ${predicates.join(" AND ")} THEN 1 ELSE 0 END)`)
+    .bind(source.sourceId, delivery.deliveryId, delivery.workspaceId, kind, payloadHash, delivery.sourceSequence, status, ...args);
 }
 
 function auditStatement(db: D1Database, delivery: PortalProjectionDelivery, action: string, details: Record<string, unknown>): D1PreparedStatement {
@@ -403,23 +426,28 @@ function auditStatement(db: D1Database, delivery: PortalProjectionDelivery, acti
     .bind(crypto.randomUUID(), delivery.workspaceId, action, delivery.deliveryId, delivery.sourceGeneration, delivery.sourceSequence, JSON.stringify(details));
 }
 
-async function existingReceipt(db: D1Database, deliveryId: string, payloadHash: string): Promise<"duplicate" | null> {
-  const row = await db.prepare("SELECT payload_hash FROM pa_portal_projection_receipts WHERE delivery_id=?").bind(deliveryId).first<{ payload_hash: string }>();
+async function existingReceipt(db: D1Database, source: PortalWorkspaceSource, deliveryId: string, payloadHash: string): Promise<"duplicate" | null> {
+  const row = await db.prepare("SELECT payload_hash,workspace_id FROM pa_portal_projection_receipts WHERE projection_source_id=? AND delivery_id=?").bind(source.sourceId, deliveryId).first<{ payload_hash: string; workspace_id: string }>();
   if (!row) return null;
-  if (row.payload_hash !== payloadHash) throw new Error("portal-delivery-id-conflict");
+  if (row.payload_hash !== payloadHash || row.workspace_id !== source.workspaceId) throw new Error("portal-delivery-id-conflict");
   return "duplicate";
 }
 
-async function stageSnapshotPage(env: Env, delivery: SnapshotPageDelivery, payloadHash: string): Promise<"completed" | "ignored"> {
+async function stageSnapshotPage(env: Env, delivery: SnapshotPageDelivery, payloadHash: string, source: PortalWorkspaceSource): Promise<"completed" | "ignored"> {
   const db = database(env);
-  const checkpoint = await db.prepare("SELECT source_sequence FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(delivery.workspaceId).first<{ source_sequence: number }>();
+  const checkpoint = await db.prepare("SELECT source_generation,source_sequence,snapshot_generation_id FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(delivery.workspaceId).first<ProjectionCheckpoint>();
   if (checkpoint && delivery.sourceSequence <= checkpoint.source_sequence) throw new Error("portal-snapshot-stale");
   let generation = await db.prepare("SELECT * FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation=?").bind(delivery.workspaceId, delivery.sourceGeneration).first<ProjectionGenerationRow>();
   if (!generation) {
-    await db.prepare(`INSERT OR IGNORE INTO pa_portal_projection_generations
-      (id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,workspace_root_type,workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'staging')`)
-      .bind(crypto.randomUUID(), delivery.workspaceId, delivery.sourceGeneration, delivery.sourceSequence, delivery.snapshotHash, delivery.pageCount, delivery.recordCount, delivery.workspace.rootType, delivery.workspace.rootPublicId, delivery.workspace.displayName, delivery.workspace.sourceVersion, delivery.workspace.active ? 1 : 0).run();
+    try {
+      await db.prepare(`INSERT OR IGNORE INTO pa_portal_projection_generations
+      (id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,workspace_root_type,workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,projection_source_id)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'staging',?)`)
+      .bind(crypto.randomUUID(), delivery.workspaceId, delivery.sourceGeneration, delivery.sourceSequence, delivery.snapshotHash, delivery.pageCount, delivery.recordCount, delivery.workspace.rootType, delivery.workspace.rootPublicId, delivery.workspace.displayName, delivery.workspace.sourceVersion, delivery.workspace.active ? 1 : 0, source.sourceId).run();
+    } catch (error) {
+      generation = await db.prepare("SELECT * FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation=?").bind(delivery.workspaceId, delivery.sourceGeneration).first<ProjectionGenerationRow>();
+      if (!generation) throw error;
+    }
     generation = await db.prepare("SELECT * FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation=?").bind(delivery.workspaceId, delivery.sourceGeneration).first<ProjectionGenerationRow>();
   }
   if (!generation || generation.status !== "staging" || generation.source_sequence !== delivery.sourceSequence || generation.snapshot_hash !== delivery.snapshotHash || generation.page_count !== delivery.pageCount || generation.record_count !== delivery.recordCount || generation.workspace_root_type !== delivery.workspace.rootType || generation.workspace_root_public_id !== delivery.workspace.rootPublicId || generation.workspace_display_name !== delivery.workspace.displayName || generation.workspace_source_version !== delivery.workspace.sourceVersion || generation.workspace_active !== (delivery.workspace.active ? 1 : 0)) throw new Error("portal-generation-conflict");
@@ -431,11 +459,12 @@ async function stageSnapshotPage(env: Env, delivery: SnapshotPageDelivery, paylo
   const page = await db.prepare("SELECT payload_hash FROM pa_portal_projection_pages WHERE generation_id=? AND page_number=?").bind(generation.id, delivery.pageNumber).first<{ payload_hash: string }>();
   if (page) {
     if (page.payload_hash !== payloadHash) throw new Error("portal-page-conflict");
-    await db.batch([receiptStatement(db, delivery, payloadHash, "snapshot_page", "ignored"), auditStatement(db, delivery, "delivery_replayed", { pageNumber: delivery.pageNumber })]);
+    await db.batch([receiptStatement(db, delivery, source, payloadHash, "snapshot_page", { checkpoint, generationId: generation.id, generationStatus: "staging" }, "ignored"), auditStatement(db, delivery, "delivery_replayed", { pageNumber: delivery.pageNumber })]);
     return "ignored";
   }
   const recordCount = delivery.entities.length + delivery.principals.length + delivery.entitlements.length + delivery.relations.length + delivery.projectLifecycles.length;
   await db.batch([
+    receiptStatement(db, delivery, source, payloadHash, "snapshot_page", { checkpoint, generationId: generation.id, generationStatus: "staging" }),
     db.prepare("INSERT INTO pa_portal_projection_pages(generation_id,page_number,record_count,payload_hash) VALUES(?,?,?,?)").bind(generation.id, delivery.pageNumber, recordCount, payloadHash),
     ...delivery.entities.map(entity => db.prepare(`INSERT INTO pa_portal_projection_entities
       (generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active,primary_contact) VALUES(?,?,?,?,?,?,?,?)`)
@@ -452,7 +481,6 @@ async function stageSnapshotPage(env: Env, delivery: SnapshotPageDelivery, paylo
     ...delivery.projectLifecycles.map(lifecycle => db.prepare(`INSERT INTO pa_portal_projection_project_lifecycle
       (generation_id,project_public_id,lifecycle_status,completed_at,source_version) VALUES(?,?,?,?,?)`)
       .bind(generation!.id, lifecycle.projectPublicId, lifecycle.status, lifecycle.completedAt, lifecycle.sourceVersion)),
-    receiptStatement(db, delivery, payloadHash, "snapshot_page"),
     auditStatement(db, delivery, "snapshot_page_staged", { pageNumber: delivery.pageNumber, pageCount: delivery.pageCount, recordCount }),
   ]);
   return "completed";
@@ -598,7 +626,7 @@ function authorizationRefreshStatements(db: D1Database, workspaceId: string, sou
   ];
 }
 
-async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, payloadHash: string): Promise<"completed" | "ignored"> {
+async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, payloadHash: string, source: PortalWorkspaceSource): Promise<"completed" | "ignored"> {
   const db = database(env);
   const contractTablePresent = await directoryContractTablePresent(db);
   const generation = await db.prepare("SELECT * FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation=?").bind(delivery.workspaceId, delivery.sourceGeneration).first<ProjectionGenerationRow>();
@@ -609,7 +637,7 @@ async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, pa
   }
   const checkpoint = await db.prepare("SELECT source_generation,source_sequence,snapshot_generation_id FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(delivery.workspaceId).first<{ source_generation: string; source_sequence: number; snapshot_generation_id: string }>();
   if (checkpoint?.source_sequence === delivery.sourceSequence && checkpoint.snapshot_generation_id === generation.id && generation.status === "active") {
-    await db.batch([receiptStatement(db, delivery, payloadHash, "snapshot_activate", "ignored"), auditStatement(db, delivery, "delivery_replayed", {})]);
+    await db.batch([receiptStatement(db, delivery, source, payloadHash, "snapshot_activate", { checkpoint, generationId: generation.id, generationStatus: "active" }, "ignored"), auditStatement(db, delivery, "delivery_replayed", {})]);
     return "ignored";
   }
   if ((checkpoint && delivery.sourceSequence <= checkpoint.source_sequence) || generation.status !== "staging") throw new Error("portal-snapshot-stale");
@@ -625,10 +653,11 @@ async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, pa
   if (existingWorkspace && (existingWorkspace.root_type !== workspace.rootType || (existingWorkspace.pa_organization_public_id ?? existingWorkspace.pa_client_public_id) !== workspace.rootPublicId)) throw new Error("portal-workspace-reparent-denied");
   const directoryGenerationId = crypto.randomUUID();
   const statements: D1PreparedStatement[] = [
-    db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status)
-      VALUES(?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,status=excluded.status,updated_at=datetime('now')
+    receiptStatement(db, delivery, source, payloadHash, "snapshot_activate", { checkpoint, generationId: generation.id, generationStatus: "staging" }),
+    db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status,project_alpha_source_id)
+      VALUES(?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET display_name=excluded.display_name,status=excluded.status,updated_at=datetime('now')
       WHERE portal_v2_workspaces.root_type=excluded.root_type AND COALESCE(portal_v2_workspaces.pa_organization_public_id,'')=COALESCE(excluded.pa_organization_public_id,'') AND COALESCE(portal_v2_workspaces.pa_client_public_id,'')=COALESCE(excluded.pa_client_public_id,'')`)
-      .bind(workspace.publicId, workspace.rootType, workspace.rootType === "organization" ? workspace.rootPublicId : null, workspace.rootType === "standalone_client" ? workspace.rootPublicId : null, workspace.displayName, workspace.active ? "active" : "suspended"),
+      .bind(workspace.publicId, workspace.rootType, workspace.rootType === "organization" ? workspace.rootPublicId : null, workspace.rootType === "standalone_client" ? workspace.rootPublicId : null, workspace.displayName, workspace.active ? "active" : "suspended", source.sourceId),
     db.prepare("UPDATE portal_v2_directory_generations SET status='superseded' WHERE workspace_id=? AND status='active'").bind(workspace.publicId),
     db.prepare(`INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete,activated_at)
       VALUES(?,?,?,?,'active',1,datetime('now'))`).bind(directoryGenerationId, workspace.publicId, delivery.sourceGeneration, delivery.sourceSequence),
@@ -664,7 +693,6 @@ async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, pa
     db.prepare(`INSERT INTO pa_portal_projection_checkpoints(workspace_id,source_generation,source_sequence,snapshot_generation_id) VALUES(?,?,?,?)
       ON CONFLICT(workspace_id) DO UPDATE SET source_generation=excluded.source_generation,source_sequence=excluded.source_sequence,snapshot_generation_id=excluded.snapshot_generation_id,updated_at=datetime('now')`)
       .bind(workspace.publicId, delivery.sourceGeneration, delivery.sourceSequence, generation.id),
-    receiptStatement(db, delivery, payloadHash, "snapshot_activate"),
     auditStatement(db, delivery, "snapshot_activated", { pageCount: delivery.pageCount, recordCount: delivery.recordCount }),
   ];
   await db.batch(statements);
@@ -795,9 +823,9 @@ function closeRelationStateForTombstone(
   return closure;
 }
 
-async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string): Promise<"completed"> {
+async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string, source: PortalWorkspaceSource): Promise<"completed"> {
   const db = database(env);
-  const checkpoint = await db.prepare("SELECT source_generation,source_sequence FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(delivery.workspaceId).first<{ source_generation: string; source_sequence: number }>();
+  const checkpoint = await db.prepare("SELECT source_generation,source_sequence,snapshot_generation_id FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(delivery.workspaceId).first<ProjectionCheckpoint>();
   if (!checkpoint || checkpoint.source_generation !== delivery.sourceGeneration) throw new Error("portal-event-generation-mismatch");
   if (delivery.sourceSequence !== checkpoint.source_sequence + 1) throw new Error("portal-event-sequence-gap");
   const relationsEnabled = env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true";
@@ -951,28 +979,60 @@ async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string
       .bind(directoryGenerationId, delivery.sourceSequence, delivery.workspaceId, checkpoint.source_sequence),
     db.prepare("UPDATE pa_portal_projection_checkpoints SET source_sequence=?,updated_at=datetime('now') WHERE workspace_id=? AND source_generation=? AND source_sequence=?")
       .bind(delivery.sourceSequence, delivery.workspaceId, delivery.sourceGeneration, checkpoint.source_sequence),
-    receiptStatement(db, delivery, payloadHash, "event"),
     auditStatement(db, delivery, event.action === "upsert" ? "event_upserted" : "event_tombstoned", { resource: event.resource }),
   );
+  statements.unshift(receiptStatement(db, delivery, source, payloadHash, "event", { checkpoint, directoryGenerationId: current.directoryGenerationId }));
   await db.batch(statements);
   const updated = await db.prepare("SELECT source_sequence FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(delivery.workspaceId).first("source_sequence");
   if (updated !== delivery.sourceSequence) throw new Error("portal-event-conflict");
   return "completed";
 }
 
-async function processDelivery(env: Env, delivery: PortalProjectionDelivery, payloadHash: string): Promise<"completed" | "ignored" | "duplicate"> {
+async function processDelivery(env: Env, delivery: PortalProjectionDelivery, payloadHash: string, source: PortalWorkspaceSource): Promise<"completed" | "ignored" | "duplicate"> {
   const db = database(env);
-  const duplicate = await existingReceipt(db, delivery.deliveryId, payloadHash);
+  const duplicate = await existingReceipt(db, source, delivery.deliveryId, payloadHash);
   if (duplicate) return duplicate;
   try {
-    if (delivery.kind === "snapshot.page") return await stageSnapshotPage(env, delivery, payloadHash);
-    if (delivery.kind === "snapshot.activate") return await activateSnapshot(env, delivery, payloadHash);
-    return await applyEvent(env, delivery, payloadHash);
+    if (delivery.kind === "snapshot.page") return await stageSnapshotPage(env, delivery, payloadHash, source);
+    if (delivery.kind === "snapshot.activate") return await activateSnapshot(env, delivery, payloadHash, source);
+    return await applyEvent(env, delivery, payloadHash, source);
   } catch (error) {
-    const raced = await existingReceipt(db, delivery.deliveryId, payloadHash);
+    const raced = await existingReceipt(db, source, delivery.deliveryId, payloadHash);
     if (raced) return raced;
+    if (error instanceof Error && error.message.includes("pa_portal_projection_write_guard")) throw new Error("portal-write-conflict");
     throw error;
   }
+}
+
+/** Trusted server ingestion seam. Public HTTP callers cannot select this source. */
+export async function applyPortalProjectionDelivery(env: Env, delivery: PortalProjectionDelivery, payloadHash: string, sourceContext: PortalProjectionSource): Promise<"completed" | "ignored" | "duplicate"> {
+  if (!SHA256_HEX.test(payloadHash)) throw new Error("portal-body-digest-invalid");
+  const validateWireEntitlement = (value: EntitlementResource) => {
+    if (value.scopeType === "workspace" && value.scopePublicId !== delivery.workspaceId) throw new Error("portal-entitlement-scope-invalid");
+  };
+  if (delivery.kind === "snapshot.page") {
+    if (delivery.workspace.publicId !== delivery.workspaceId) throw new Error("portal-workspace-id-invalid");
+    delivery.entitlements.forEach(validateWireEntitlement);
+  } else if (delivery.kind === "event") {
+    const event = delivery.event;
+    if (event.resource === "workspace" && (event.action === "upsert" ? event.workspace.publicId : event.publicId) !== delivery.workspaceId) throw new Error("portal-workspace-id-invalid");
+    if (event.resource === "entitlement" && event.action === "upsert") validateWireEntitlement(event.entitlement);
+  }
+  const source = await resolvePortalWorkspaceSource(database(env), sourceContext, delivery.workspaceId, delivery.kind === "snapshot.page");
+  const entitlement = (value: EntitlementResource): EntitlementResource => value.scopeType === "workspace" && value.scopePublicId === source.sourceWorkspaceId
+    ? { ...value, scopePublicId: source.workspaceId } : value;
+  let mapped: PortalProjectionDelivery = { ...delivery, workspaceId: source.workspaceId };
+  if (delivery.kind === "snapshot.page") {
+    mapped = { ...delivery, workspaceId: source.workspaceId, workspace: { ...delivery.workspace, publicId: source.workspaceId }, entitlements: delivery.entitlements.map(entitlement) };
+  } else if (delivery.kind === "event") {
+    let event = delivery.event;
+    if (event.resource === "workspace") {
+      if (event.action === "upsert" && event.workspace.publicId === source.sourceWorkspaceId) event = { ...event, workspace: { ...event.workspace, publicId: source.workspaceId } };
+      if (event.action === "tombstone" && event.publicId === source.sourceWorkspaceId) event = { ...event, publicId: source.workspaceId };
+    } else if (event.resource === "entitlement" && event.action === "upsert") event = { ...event, entitlement: entitlement(event.entitlement) };
+    mapped = { ...delivery, workspaceId: source.workspaceId, event };
+  }
+  return processDelivery(env, mapped, payloadHash, source);
 }
 
 function statusForError(error: unknown): number {
@@ -1030,7 +1090,7 @@ export async function handleProjectAlphaPortalProjectionRequest(request: Request
       env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true",
     );
     if (deliveryId !== parsed.deliveryId) throw new Error("portal-delivery-id-mismatch");
-    const status = await processDelivery(env, parsed, await sha256Hex(rawBody));
+    const status = await applyPortalProjectionDelivery(env, parsed, await sha256Hex(rawBody), PRIMARY_PORTAL_PROJECTION_SOURCE);
     return json(200, { ok: true, deliveryId: parsed.deliveryId, status });
   } catch (error) {
     const message = error instanceof SyntaxError ? "portal-json-invalid" : error instanceof Error ? error.message : "portal-internal-error";

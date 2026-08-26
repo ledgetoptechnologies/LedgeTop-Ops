@@ -26,7 +26,7 @@ describe("authenticated delivery grant live authorization", () => {
       CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT NOT NULL,subject TEXT NOT NULL,verified_email TEXT,
         status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')),UNIQUE(issuer,subject));
       CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT NOT NULL,pa_organization_public_id TEXT,pa_client_public_id TEXT,
-        legacy_account_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active');
+        legacy_account_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE portal_v2_workspace_memberships(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,identity_id TEXT NOT NULL,source_type TEXT,
         status TEXT NOT NULL DEFAULT 'active',expires_at TEXT,revoked_at TEXT,UNIQUE(workspace_id,identity_id),FOREIGN KEY(workspace_id) REFERENCES portal_v2_workspaces(id),FOREIGN KEY(identity_id) REFERENCES portal_v2_identities(id));
       CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,status TEXT NOT NULL,complete INTEGER NOT NULL);
@@ -87,6 +87,19 @@ describe("authenticated delivery grant live authorization", () => {
     expect([...await listAuthorizedAuthenticatedDeliveryPrefixes(env, principal, "workspace-a")]).toEqual(["clients/a/"]);
     expect(await authorizeAuthenticatedDeliveryGrant(env, { ...principal, subject: "subject-b" }, "workspace-a", "binding-a")).toBe(true);
     expect(await authorizeAuthenticatedDeliveryGrant(env, { ...principal, subject: "different" }, "workspace-a", "binding-a")).toBe(false);
+  });
+
+  it("keeps secondary unbridged native workspaces unavailable despite matching identity and grants", async () => {
+    // This focused reader fixture intentionally allows a source swap; production
+    // migration coverage separately proves that ownership cannot be reassigned.
+    await db.prepare("UPDATE portal_v2_workspaces SET project_alpha_source_id='project-alpha:secondary' WHERE id='workspace-a'").run();
+    try {
+      expect(await authorizeAuthenticatedDeliveryGrant(env, principal, "workspace-a", "binding-a")).toBe(false);
+      expect(await listAuthorizedAuthenticatedDeliveryPrefixes(env, principal, "workspace-a")).toEqual(new Set());
+      expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_identities").first("count")).toBe(2);
+    } finally {
+      await db.prepare("UPDATE portal_v2_workspaces SET project_alpha_source_id='project-alpha:primary' WHERE id='workspace-a'").run();
+    }
   });
 
   it("fails closed immediately for revoke, source drift, identity denial, and hierarchy move", async () => {

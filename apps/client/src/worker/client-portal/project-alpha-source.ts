@@ -14,6 +14,6 @@ export function localOrPrimaryAlphaReference(alias: string): string {
 /** Existing local-only workspace wrappers remain usable, but are never Alpha proof. */
 export function primaryWorkspaceAccount(alias: string): string {
   if (!/^[a-z_][a-z0-9_]*$/.test(alias)) throw new Error("invalid-source-alias");
-  return `(${alias}.legacy_account_id IS NULL OR EXISTS(SELECT 1 FROM client_accounts source_account
-    WHERE source_account.id=${alias}.legacy_account_id AND ${localOrPrimaryAlphaReference("source_account")}))`;
+  return `(${primaryAlphaReference(alias)} AND (${alias}.legacy_account_id IS NULL OR EXISTS(SELECT 1 FROM client_accounts source_account
+    WHERE source_account.id=${alias}.legacy_account_id AND ${localOrPrimaryAlphaReference("source_account")})))`;
 }

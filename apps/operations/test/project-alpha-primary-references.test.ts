@@ -109,6 +109,28 @@ describe("primary outbound business provenance", () => {
       .toEqual({ available: false, reason: "mapping_unavailable" });
   });
 
+  it("keeps a matching secondary native root separate from primary outbound proof", async () => {
+    const refs = portal();
+    delivery.exec(`INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id)
+      VALUES('secondary-workspace','project-alpha:secondary','workspace')`);
+    delivery.prepare(`INSERT INTO portal_v2_workspaces
+      (id,root_type,pa_organization_public_id,display_name,project_alpha_source_id)
+      VALUES('secondary-workspace','organization',?,'Secondary workspace','project-alpha:secondary')`).run(orgPublic);
+    delivery.exec(`INSERT INTO portal_v2_directory_generations
+      (id,workspace_id,source_generation,source_sequence,status,complete)
+      VALUES('secondary-generation','secondary-workspace','source-generation',1,'active',1)`);
+    delivery.exec(`INSERT INTO portal_v2_directory_entities
+      (workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version)
+      SELECT 'secondary-workspace','secondary-generation',entity_type,public_id,parent_public_id,display_name,source_version
+      FROM portal_v2_directory_entities WHERE workspace_id='workspace'`);
+    delivery.exec(`INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence)
+      VALUES('secondary-workspace','secondary-generation',1)`);
+    expect(await provePrimaryBusinessReferences(env, refs)).toEqual({ available: true });
+    delivery.exec("UPDATE portal_v2_workspaces SET status='suspended' WHERE id='workspace'");
+    expect(await provePrimaryBusinessReferences(env, refs)).toEqual({ available: false, reason: "mapping_unavailable" });
+    expect(delivery.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+  });
+
   it.each(["inactive", "ambiguous"])("does not let native portal evidence revive %s business mapping", async kind => {
     business(); const refs = portal();
     if (kind === "inactive") ops.exec("UPDATE pa_clients SET active=0 WHERE id='1'");

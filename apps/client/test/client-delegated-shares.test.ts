@@ -56,12 +56,13 @@ describe("client-delegated public share foundation", () => {
     });
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await applySql(db, `
+      CREATE TABLE client_accounts(id TEXT PRIMARY KEY,project_alpha_source_id TEXT);
       CREATE TABLE portal_v2_identities(
         id TEXT PRIMARY KEY,issuer TEXT NOT NULL,subject TEXT NOT NULL,verified_email TEXT,
         status TEXT NOT NULL,revoked_at TEXT,UNIQUE(issuer,subject));
       CREATE TABLE portal_v2_workspaces(
         id TEXT PRIMARY KEY,root_type TEXT NOT NULL,pa_organization_public_id TEXT,
-        pa_client_public_id TEXT,legacy_account_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL);
+        pa_client_public_id TEXT,legacy_account_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE portal_v2_workspace_memberships(
         id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,identity_id TEXT NOT NULL,
         source_type TEXT NOT NULL,status TEXT NOT NULL,expires_at TEXT,revoked_at TEXT,

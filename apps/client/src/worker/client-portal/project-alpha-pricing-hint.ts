@@ -85,6 +85,7 @@ export const resolveProjectAlphaPricingAuthorizationContext: ProjectAlphaPricing
     FROM projects project
     JOIN client_accounts account ON account.id=? AND account.status='active' AND ${localOrPrimaryAlphaReference("account")}
     JOIN portal_v2_workspaces native_workspace ON native_workspace.id=? AND native_workspace.status='active'
+      AND ${primaryAlphaReference("native_workspace")}
       AND native_workspace.legacy_account_id=account.id AND native_workspace.root_type=?
       AND COALESCE(native_workspace.pa_organization_public_id,native_workspace.pa_client_public_id)=?
     JOIN client_project_grants grant_record

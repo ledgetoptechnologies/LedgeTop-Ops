@@ -21,7 +21,8 @@ describe("staff client workspace manager recovery", () => {
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await db.exec(`
       CREATE TABLE portal_v2_workspaces(
-        id TEXT PRIMARY KEY,display_name TEXT NOT NULL,status TEXT NOT NULL,legacy_account_id TEXT
+        id TEXT PRIMARY KEY,display_name TEXT NOT NULL,status TEXT NOT NULL,legacy_account_id TEXT,
+        project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary'
       );
       CREATE TABLE portal_v2_identities(
         id TEXT PRIMARY KEY,verified_email TEXT,status TEXT NOT NULL,revoked_at TEXT

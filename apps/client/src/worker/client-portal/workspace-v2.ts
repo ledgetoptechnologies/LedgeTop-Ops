@@ -241,6 +241,7 @@ async function resolveGlobalIdentity(
           workspace.legacy_account_id
         FROM pa_portal_principals principal
         JOIN portal_v2_workspaces workspace ON workspace.id=principal.workspace_id AND workspace.status='active'
+          AND ${primaryAlphaReference("workspace")}
           AND workspace.legacy_account_id IS NOT NULL
         JOIN client_accounts account ON account.id=workspace.legacy_account_id AND account.status='active'
           AND ${primaryAlphaReference("account")}

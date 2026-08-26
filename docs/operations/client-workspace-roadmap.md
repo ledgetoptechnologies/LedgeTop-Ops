@@ -371,8 +371,10 @@ Local catalog, business-projection and Delivery account/project provenance are
 now implemented with primary-compatible guards and scoped verification. See
 [Delivery source provenance](delivery-source-provenance.md) for the paired
 migration, compatibility/replay tests and release limitations. Native portal
-ownership, the verified connector registry, source-aware outbound routing and
-explicit business-party linking remain separate unfinished gates.
+ownership is the next local increment; its exact verification state is recorded
+in [native portal source ownership](portal-source-ownership.md). The verified
+connector registry, delivery-intent/guest receipt ownership, source-aware outbound
+routing and explicit business-party linking remain separate unfinished gates.
 
 - Introduce immutable connector provenance and an Operations business-party
   mapping without changing existing authorization identities or source URLs.
@@ -652,6 +654,12 @@ Test the complete workflow, not only whether a component renders:
       for the scoped results and whole-database integrity-probe limitation.
       Secondary native portal activation and frozen Viewer adapters remain pending;
       no production migration, access change or deployment was performed.
+- [x] Locally implement and verify native portal workspace-source reservations,
+      source-owned projection receipts, transaction-time stale-write guards and
+      paired primary-only consumers. See [native portal source ownership](portal-source-ownership.md)
+      for populated migration, replay/collision, compatibility and type/build
+      evidence. Secondary ingress, delivery-intent/guest receipt isolation,
+      outbound routing and frozen Viewer adapters remain separate gates.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

@@ -61,7 +61,7 @@ export async function provePrimaryBusinessReferences(
     JOIN client_accounts account ON account.id=? AND account.status='active'
       AND account.project_alpha_source_id='project-alpha:primary'
       AND account.project_alpha_client_id=? AND account.project_alpha_organization_id IS ?
-    WHERE workspace.status='active' AND (workspace.legacy_account_id=account.id
+    WHERE workspace.project_alpha_source_id='project-alpha:primary' AND workspace.status='active' AND (workspace.legacy_account_id=account.id
       OR EXISTS (SELECT 1 FROM portal_v2_identity_eligibility_legacy_bridges bridge
         WHERE bridge.workspace_id=workspace.id AND bridge.legacy_account_id=account.id AND bridge.status='active' AND bridge.revoked_at IS NULL)
       OR EXISTS (SELECT 1 FROM portal_v2_legacy_member_bridges bridge

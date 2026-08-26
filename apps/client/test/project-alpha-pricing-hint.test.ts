@@ -199,13 +199,13 @@ describe("Project Alpha pricing authorization context resolver", () => {
       await database.batch([
         database.prepare("CREATE TABLE projects (id TEXT PRIMARY KEY,project_alpha_project_id TEXT,active INTEGER NOT NULL,project_alpha_source_id TEXT)"),
         database.prepare("CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT,project_alpha_source_id TEXT)"),
-        database.prepare("CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT,legacy_account_id TEXT,root_type TEXT,pa_organization_public_id TEXT,pa_client_public_id TEXT)"),
+        database.prepare("CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT,legacy_account_id TEXT,root_type TEXT,pa_organization_public_id TEXT,pa_client_public_id TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary')"),
         database.prepare("CREATE TABLE client_project_grants (account_id TEXT NOT NULL,project_id TEXT NOT NULL,can_request_service INTEGER NOT NULL,revoked_at TEXT)"),
       ]);
       await database.batch([
         database.prepare("INSERT INTO projects VALUES ('project-local','pa-project-north-site',1,'project-alpha:primary'),('project-secondary','pa-project-north-site',1,'project-alpha:secondary')"),
         database.prepare("INSERT INTO client_accounts VALUES ('account-a','active','project-alpha:primary'),('account-b','active','project-alpha:secondary')"),
-        database.prepare("INSERT INTO portal_v2_workspaces VALUES ('workspace-a','active','account-a','organization','pa-org-acme',NULL)"),
+        database.prepare("INSERT INTO portal_v2_workspaces(id,status,legacy_account_id,root_type,pa_organization_public_id,pa_client_public_id) VALUES ('workspace-a','active','account-a','organization','pa-org-acme',NULL)"),
         database.prepare("INSERT INTO client_project_grants VALUES ('account-a','project-local',1,NULL)"),
         database.prepare("INSERT INTO client_project_grants VALUES ('account-a','project-secondary',1,NULL),('account-b','project-secondary',1,NULL)"),
       ]);

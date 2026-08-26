@@ -135,7 +135,7 @@ function baselineProjectionCondition(hasGenerationContract: boolean): string {
     : "";
   return `EXISTS (SELECT 1 FROM portal_v2_workspaces workspace
       WHERE workspace.id=e.workspace_id AND workspace.legacy_account_id=e.account_id
-        AND workspace.root_type=e.root_type
+        AND workspace.project_alpha_source_id='project-alpha:primary' AND workspace.root_type=e.root_type
         AND workspace.pa_organization_public_id IS e.organization_id
         AND workspace.pa_client_public_id IS e.standalone_client_id
         AND workspace.status='active')
@@ -341,7 +341,7 @@ async function authoritativeProjectionComplete(
     SELECT CASE WHEN
       EXISTS (SELECT 1 FROM portal_v2_workspaces workspace
         WHERE workspace.id=e.workspace_id AND workspace.legacy_account_id=e.account_id
-          AND workspace.root_type=e.root_type
+          AND workspace.project_alpha_source_id='project-alpha:primary' AND workspace.root_type=e.root_type
           AND workspace.pa_organization_public_id IS e.organization_id
           AND workspace.pa_client_public_id IS e.standalone_client_id
           AND workspace.status='active')
@@ -384,23 +384,23 @@ async function projectionState(
 ): Promise<ProjectionState> {
   const { workspaceId } = projectionIds(accountId);
   const rows = await db.prepare(`SELECT id,legacy_account_id,root_type,
-      pa_organization_public_id,pa_client_public_id
+      pa_organization_public_id,pa_client_public_id,project_alpha_source_id
     FROM portal_v2_workspaces
     WHERE id=? OR legacy_account_id=?
-      OR (? IS NOT NULL AND pa_organization_public_id=?)
+      OR (project_alpha_source_id='project-alpha:primary' AND ((? IS NOT NULL AND pa_organization_public_id=?)
       OR pa_client_public_id=?
-      OR (? IS NOT NULL AND pa_client_public_id=?)`)
+      OR (? IS NOT NULL AND pa_client_public_id=?)))`)
     .bind(workspaceId, accountId, source.organizationId, source.organizationId,
       source.clientId,
       source.organizationId === null ? source.clientId : null,
       source.organizationId === null ? source.clientId : null)
     .all<{ id: string; legacy_account_id: string | null; root_type: string;
-      pa_organization_public_id: string | null; pa_client_public_id: string | null }>();
+      pa_organization_public_id: string | null; pa_client_public_id: string | null; project_alpha_source_id: string }>();
   if (!rows.results.length) return "missing";
   if (rows.results.length !== 1) return "partial_or_conflicting";
   const row = rows.results[0];
   if (!row) return "partial_or_conflicting";
-  if (row.id !== workspaceId || row.legacy_account_id !== accountId
+  if (row.project_alpha_source_id !== PRIMARY_ALPHA_SOURCE_ID || row.id !== workspaceId || row.legacy_account_id !== accountId
     || row.root_type !== source.rootType
     || row.pa_organization_public_id !== source.organizationId
     || row.pa_client_public_id !== (source.organizationId === null ? source.clientId : null))
@@ -584,8 +584,8 @@ function postMigrationProjectionStatements(
     )`).bind(account.id));
   statements.push(db.prepare(`INSERT INTO portal_v2_workspaces
       (id,root_type,pa_organization_public_id,pa_client_public_id,legacy_account_id,
-        display_name,status,created_at,updated_at)
-    SELECT ?,?,?,?,?,display_name,status,created_at,updated_at
+        display_name,status,created_at,updated_at,project_alpha_source_id)
+    SELECT ?,?,?,?,?,display_name,status,created_at,updated_at,'project-alpha:primary'
     FROM client_accounts WHERE id=? AND status='active' AND project_alpha_source_id='project-alpha:primary'
       AND project_alpha_client_id=? AND project_alpha_organization_id IS ?`)
     .bind(workspaceId, source.rootType, source.organizationId,

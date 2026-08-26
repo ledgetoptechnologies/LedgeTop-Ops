@@ -172,7 +172,7 @@ describe("staff feedback current-owner authority and transitions",{timeout:30_00
     await f.db.prepare("UPDATE client_project_grants SET revoked_at=datetime('now') WHERE account_id=?").bind(owner.id).run();
     await expect(action(record.id,1,"done",key)).rejects.toMatchObject({status:404});
   });
-  it("accepts exact eligibility-bridge workspace provenance without a workspace legacy_account_id",async()=>{
+  it("accepts exact eligibility-bridge provenance, preserves workspace ownership and honors revocation",async()=>{
     const owner=await f.seed(),workspace=`workspace-${owner.id}`,native=`native-${owner.id}`;
     await f.db.batch([
       f.db.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES (?,'https://issuer.test',?,'author@example.test')").bind(native,owner.identity),
@@ -184,7 +184,16 @@ describe("staff feedback current-owner authority and transitions",{timeout:30_00
     owner.authorization.target.sourceOwner.workspace={rootType:"standalone_client",rootPublicId:owner.pa,generationId:"generation",sourceSequence:1};
     const record=await owner.create();
     expect((await getStaffFeedback(f.env,feedbackStaff,record.id)).feedback.id).toBe(record.id);
-    await f.db.prepare("UPDATE portal_v2_workspaces SET pa_client_public_id='different-source-root' WHERE id=?").bind(workspace).run();
+    await expect(f.db.prepare("UPDATE portal_v2_workspaces SET pa_client_public_id='different-source-root' WHERE id=?").bind(workspace).run())
+      .rejects.toThrow("portal workspace ownership is immutable");
+    expect(await f.db.prepare("SELECT pa_client_public_id FROM portal_v2_workspaces WHERE id=?").bind(workspace).first("pa_client_public_id")).toBe(owner.pa);
+    expect((await getStaffFeedback(f.env,feedbackStaff,record.id)).feedback.id).toBe(record.id);
+    await f.db.prepare("UPDATE portal_v2_workspaces SET status='suspended' WHERE id=?").bind(workspace).run();
+    await expect(action(record.id)).rejects.toMatchObject({status:404});
+    await f.db.prepare("UPDATE portal_v2_workspaces SET status='active' WHERE id=?").bind(workspace).run();
+    expect((await getStaffFeedback(f.env,feedbackStaff,record.id)).feedback.id).toBe(record.id);
+    await f.db.prepare("UPDATE portal_v2_identity_eligibility_legacy_bridges SET revoked_at=datetime('now') WHERE workspace_id=? AND identity_id=?")
+      .bind(workspace,native).run();
     await expect(action(record.id)).rejects.toMatchObject({status:404});
   });
   it("limits mutation exception to exactly POST status and bounds JSON",async()=>{

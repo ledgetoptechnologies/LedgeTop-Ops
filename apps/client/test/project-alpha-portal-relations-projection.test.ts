@@ -4,9 +4,13 @@ import hierarchyMigration from "../migrations/0121_client_workspace_hierarchy_v2
 import projectionMigration from "../migrations/0125_project_alpha_portal_projection.sql?raw";
 import relationMigration from "../migrations/0129_portal_hierarchy_relations.sql?raw";
 import eligibilityMigration from "../migrations/0145_portal_identity_eligibility.sql?raw";
+import bridgeMigration from "../migrations/0132_portal_v2_legacy_member_bridges.sql?raw";
+import sourceMigration from "../migrations/0158_portal_source_ownership.sql?raw";
+import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 import { authorizePortalWorkspaceCapability } from "../src/worker/client-portal/workspace-v2";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
-import { handleProjectAlphaPortalProjectionRequest, parsePortalProjectionDelivery } from "../src/worker/project-alpha-portal";
+import { applyPortalProjectionDelivery, handleProjectAlphaPortalProjectionRequest, parsePortalProjectionDelivery } from "../src/worker/project-alpha-portal";
+import { createCatalogSourceContext } from "@ltds/shared";
 import type { Env } from "../src/worker/types";
 import relationFixture from "../../../packages/shared/fixtures/project-alpha-portal-relations-v3.json";
 import portalV2Fixture from "../../../packages/shared/fixtures/project-alpha-portal-v2.json";
@@ -43,7 +47,7 @@ function envelope(kind: string, id: string, sequence: number, extra: Record<stri
 }
 
 async function migrate(db: D1Database, sql: string): Promise<void> {
-  await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
+  await db.batch(splitD1MigrationStatements(sql).map(statement => db.prepare(statement)));
 }
 
 async function signature(body: string, timestamp: string, deliveryId: string): Promise<string> {
@@ -96,6 +100,8 @@ describe("Project Alpha relation/lifecycle projection receiver", () => {
       CREATE TABLE client_folder_associations(id TEXT PRIMARY KEY,scope_type TEXT NOT NULL,project_id TEXT,account_id TEXT NOT NULL,r2_prefix TEXT NOT NULL,created_by TEXT NOT NULL,created_at TEXT DEFAULT (datetime('now')),revoked_at TEXT);
     `.replace(/\s*\n\s*/g, " "));
     await migrate(db, hierarchyMigration); await migrate(db, projectionMigration); await migrate(db, relationMigration); await migrate(db, eligibilityMigration);
+    await db.exec("ALTER TABLE client_account_members ADD COLUMN can_view_billing INTEGER DEFAULT 0; ALTER TABLE client_member_project_grants ADD COLUMN granted_by_identity_id TEXT;");
+    await migrate(db, bridgeMigration); await migrate(db, sourceMigration);
     env = { DELIVERY_DB: db, PROJECT_ALPHA_PORTAL_SYNC_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: applicationKey, PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: keyId, PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret, PROJECT_ALPHA_PORTAL_ACCESS_TEAM_DOMAIN: "https://access.example.test", PROJECT_ALPHA_PORTAL_ACCESS_AUD: "portal-aud", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true" } as Env;
   }, 30_000);
   afterAll(async () => mf.dispose());
@@ -235,6 +241,8 @@ describe("Project Alpha relation/lifecycle projection receiver", () => {
       await migrate(upgradeDb, hierarchyMigration);
       await migrate(upgradeDb, projectionMigration);
       await migrate(upgradeDb, eligibilityMigration);
+      await upgradeDb.exec("ALTER TABLE client_account_members ADD COLUMN can_view_billing INTEGER DEFAULT 0; ALTER TABLE client_member_project_grants ADD COLUMN granted_by_identity_id TEXT;");
+      await migrate(upgradeDb, bridgeMigration); await migrate(upgradeDb, sourceMigration);
       const upgradeEnv = { ...env, DELIVERY_DB: upgradeDb, CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "false" } as Env;
       const activePage = structuredClone(portalV2Fixture.valid.snapshotPage) as Record<string, unknown>;
       const activeActivate = structuredClone(portalV2Fixture.valid.snapshotActivate) as Record<string, unknown>;
@@ -272,6 +280,30 @@ describe("Project Alpha relation/lifecycle projection receiver", () => {
       await upgradeMf.dispose();
     }
   }, 30_000);
+
+  it("keeps same-ID relation graphs and project lifecycle events isolated by mapped producer workspace", async () => {
+    const sourceA = createCatalogSourceContext("project-alpha:relations-a");
+    const sourceB = createCatalogSourceContext("project-alpha:relations-b");
+    const page = relationFixture.valid.snapshotPage;
+    const activate = relationFixture.valid.snapshotActivate;
+    const apply = async (source: typeof sourceA, payload: unknown) => applyPortalProjectionDelivery(env, parsePortalProjectionDelivery(payload, applicationKey, true), await bodyHash(JSON.stringify(payload)), source);
+    for (const source of [sourceA, sourceB]) { await apply(source, page); await apply(source, activate); }
+    const localA = await db.prepare("SELECT workspace_id FROM pa_portal_workspace_sources WHERE projection_source_id=? AND source_workspace_id=?").bind(sourceA.sourceId, page.workspaceId).first<string>("workspace_id");
+    const localB = await db.prepare("SELECT workspace_id FROM pa_portal_workspace_sources WHERE projection_source_id=? AND source_workspace_id=?").bind(sourceB.sourceId, page.workspaceId).first<string>("workspace_id");
+    expect(localA).toBeTruthy(); expect(localB).toBeTruthy(); expect(localA).not.toBe(localB);
+    const lifecycle = page.projectLifecycles[0]!;
+    const event = { schemaVersion: 3, applicationKey, workspaceId: page.workspaceId, sourceGeneration: page.sourceGeneration, sourceSequence: page.sourceSequence + 1, deliveryId: "same-lifecycle-event", occurredAt: "2026-08-13T18:00:00.000Z", kind: "event", event: { resource: "project_lifecycle", action: "upsert", projectLifecycle: { ...lifecycle, status: "completed", completedAt: "2026-08-13T17:00:00.000Z", sourceVersion: "completed-a" } } };
+    await apply(sourceA, event);
+    const currentStatus = (localId: string | null) => db.prepare("SELECT lifecycle.lifecycle_status FROM portal_v2_project_lifecycle lifecycle JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=lifecycle.workspace_id AND checkpoint.active_generation_id=lifecycle.generation_id WHERE lifecycle.workspace_id=? AND lifecycle.project_public_id=?")
+      .bind(localId, lifecycle.projectPublicId).first("lifecycle_status");
+    expect(await currentStatus(localA)).toBe("completed"); expect(await currentStatus(localB)).toBe("active");
+    await apply(sourceB, { ...event, event: { ...event.event, projectLifecycle: { ...lifecycle, sourceVersion: "active-b" } } });
+    expect(await currentStatus(localA)).toBe("completed"); expect(await currentStatus(localB)).toBe("active");
+    const graph = await db.prepare("SELECT relation.public_id,relation.from_public_id,relation.to_public_id FROM portal_v2_directory_relations relation JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=relation.workspace_id AND checkpoint.active_generation_id=relation.generation_id WHERE relation.workspace_id=? ORDER BY relation.public_id").bind(localB).all();
+    expect(graph.results).toHaveLength(page.relations.length);
+    expect(graph.results.map(row => row.public_id).sort()).toEqual(page.relations.map(row => row.publicId).sort());
+    expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_receipts WHERE delivery_id='same-lifecycle-event'").first("count")).toBe(2);
+  }, 20_000);
 
   it("fails closed when the active generation contract cannot be read", async () => {
     const checkpoint = await db.prepare("SELECT source_sequence FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(workspace.publicId).first("source_sequence");

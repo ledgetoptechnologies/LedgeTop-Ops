@@ -82,7 +82,7 @@ async function fixture() {
     CREATE UNIQUE INDEX account_pa_client ON client_accounts(project_alpha_source_id,project_alpha_client_id) WHERE project_alpha_client_id IS NOT NULL;
     CREATE UNIQUE INDEX account_pa_organization ON client_accounts(project_alpha_source_id,project_alpha_organization_id) WHERE project_alpha_organization_id IS NOT NULL;
     CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT,pa_organization_public_id TEXT,
-      pa_client_public_id TEXT,display_name TEXT,status TEXT,legacy_account_id TEXT);
+      pa_client_public_id TEXT,display_name TEXT,status TEXT,legacy_account_id TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT,source_generation TEXT,
       source_sequence INTEGER,status TEXT,complete INTEGER);
     CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT,source_sequence INTEGER);
@@ -104,7 +104,7 @@ async function fixture() {
       authorization_expires_at TEXT,status TEXT,created_at TEXT,updated_at TEXT);
     INSERT INTO client_accounts VALUES('account-standalone','Standalone One','active','pa-standalone',NULL,datetime('now'),datetime('now'),'project-alpha:primary');
     INSERT INTO client_accounts VALUES('account-org','Organization One','active','pa-child-login','pa-org',datetime('now'),datetime('now'),'project-alpha:primary');
-    INSERT INTO portal_v2_workspaces VALUES('workspace-org','organization','${organizationUuid}',NULL,'Organization One','active','account-org');
+    INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,display_name,status,legacy_account_id) VALUES('workspace-org','organization','${organizationUuid}',NULL,'Organization One','active','account-org');
     INSERT INTO portal_v2_directory_generations VALUES('generation-org','workspace-org','native-1',1,'active',1);
     INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-org','generation-org',1);
     INSERT INTO portal_v2_directory_entities VALUES('workspace-org','generation-org','organization','${organizationUuid}',NULL,1,'native-version');
