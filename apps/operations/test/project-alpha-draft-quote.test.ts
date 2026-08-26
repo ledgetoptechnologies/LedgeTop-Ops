@@ -135,4 +135,74 @@ describe("Project Alpha private draft command", () => {
       { fetcher: async () => Response.json({}, { status: 503 }) },
     )).rejects.toMatchObject({ status: 503, code: "integration_unavailable" });
   });
+
+  it.each(["project-alpha:secondary", "", "untrusted"])("never signs another source with the primary credentials: %s", async sourceId => {
+    const fetcher = vi.fn();
+    await expect(sendProjectAlphaDraftQuoteCommand(environment(), payload, "saved-command-key", { sourceId, fetcher }))
+      .rejects.toMatchObject({ status: 409, code: "scope_denied" });
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("pins the whole destination while permitting credentials to rotate at that destination", async () => {
+    const target = { sourceId: "project-alpha:primary", commandEndpoint: "https://project-alpha.example/api/v2/integrations/ltds_ops/draft-quotes",
+      applicationKey: "ltds_ops", editorOrigin: "https://project-alpha.example" };
+    const destination = { ...target, destinationFingerprint: await sha256Hex(canonicalProjectAlphaJson(target)) };
+    const fetcher = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => Response.json(draftQuoteFixture.valid.response));
+    for (const changed of [{ PROJECT_ALPHA_BASE_URL: "https://different-alpha.example" }, { APPLICATION_KEY: "different_app" }]) {
+      await expect(sendProjectAlphaDraftQuoteCommand(environment(changed), payload, "saved-command-key", { destination, fetcher }))
+        .rejects.toMatchObject({ code: "destination_changed" });
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+    await expect(sendProjectAlphaDraftQuoteCommand(environment({ PROJECT_ALPHA_DRAFT_QUOTE_API_KEY: "rotated-key",
+      PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET: "r".repeat(32) }), payload, "saved-command-key", { destination, fetcher }))
+      .resolves.toEqual(draftQuoteFixture.valid.response);
+    expect(new Headers(fetcher.mock.calls[0]?.[1]?.headers).get("Authorization")).toBe("Bearer rotated-key");
+  });
+
+  it.each([301, 302, 303, 307, 308])("cancels redirects without forwarding credentials (%s)", async status => {
+    const cancelled = vi.fn();
+    const fetcher = vi.fn(async () => new Response(new ReadableStream({ cancel: cancelled }), {
+      status, headers: { Location: "https://another-alpha.example/private" },
+    }));
+    await expect(sendProjectAlphaDraftQuoteCommand(environment(), payload, "saved-command-key", { fetcher }))
+      .rejects.toMatchObject({ status: 502, code: "invalid_response" });
+    expect(fetcher).toHaveBeenCalledOnce(); expect(cancelled).toHaveBeenCalledOnce();
+  });
+
+  it.each(["declared overflow", "stream overflow", "non-JSON", "invalid UTF-8"])("rejects and releases bounded response: %s", async specimen => {
+    const cancelled = vi.fn();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        if (specimen === "stream overflow") controller.enqueue(new Uint8Array(16 * 1024 + 1));
+        if (specimen === "invalid UTF-8") { controller.enqueue(new Uint8Array([0xc3, 0x28])); controller.close(); }
+      }, cancel: cancelled,
+    });
+    const headers: Record<string,string> = { "Content-Type": specimen === "non-JSON" ? "text/html" : "application/json" };
+    if (specimen === "declared overflow") headers["Content-Length"] = "16385";
+    await expect(sendProjectAlphaDraftQuoteCommand(environment(), payload, "saved-command-key", {
+      fetcher: async () => new Response(stream, { headers }),
+    })).rejects.toMatchObject({ status: 502, code: "invalid_response" });
+    if (specimen !== "invalid UTF-8") expect(cancelled).toHaveBeenCalledOnce();
+    expect(stream.locked).toBe(false);
+  });
+
+  it.each(["fetch", "body"])("bounds a stalled %s and cancels any late response", async stage => {
+    vi.useFakeTimers();
+    try {
+      let started!: () => void, resolveFetch!: (response: Response) => void;
+      const start = new Promise<void>(resolve => { started = resolve; });
+      const cancelled = vi.fn();
+      const response = new Response(new ReadableStream({ cancel: cancelled }), { headers: { "Content-Type": "application/json" } });
+      const pending = sendProjectAlphaDraftQuoteCommand(environment(), payload, "saved-command-key", {
+        fetcher: async () => { started(); return stage === "body" ? response : new Promise<Response>(resolve => { resolveFetch = resolve; }); },
+      });
+      const rejected = expect(pending).rejects.toMatchObject({ status: 503, code: "integration_unavailable" });
+      await start;
+      await vi.advanceTimersByTimeAsync(8_001);
+      await rejected;
+      if (stage === "fetch") { resolveFetch(response); await Promise.resolve(); await Promise.resolve(); }
+      expect(cancelled).toHaveBeenCalledOnce();
+      expect(response.body?.locked).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
 });

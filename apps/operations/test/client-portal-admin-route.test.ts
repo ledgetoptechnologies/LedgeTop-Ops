@@ -31,6 +31,7 @@ type DbState = {
   outboxPayloads?: string[];
   first?: (kind: "ops" | "delivery", sql: string, values: unknown[]) => unknown;
   all?: (kind: "ops" | "delivery", sql: string, values: unknown[]) => unknown[] | undefined;
+  batch?: (kind: "ops" | "delivery", statements: Array<{ sql?: string; values?: unknown[] }>) => void;
   run?: (
     kind: "ops" | "delivery",
     sql: string,
@@ -73,6 +74,7 @@ function database(kind: "ops" | "delivery", state: DbState) {
     },
     async batch(statements: Array<{ sql?: string; values?: unknown[] }>) {
       state.batches.push(statements.map(statement => statement.sql || "audit"));
+      state.batch?.(kind, statements);
       for (const statement of statements) {
         if (statement.sql?.includes("client_portal_notification_outbox")) {
           const payload = [...(statement.values ?? [])].reverse().find((value: unknown) => typeof value === "string" && value.startsWith('{"presentationVersion"'));
@@ -565,13 +567,28 @@ describe("verified Project Alpha quote linkage", () => {
   });
 
   it("creates only a private PA draft from server-derived immutable request evidence", async () => {
+    const journal: { command: Record<string, unknown> | null; receipt: Record<string, unknown> | null } = {
+      command: null, receipt: null,
+    };
+    const sequence: string[] = [];
     const state: DbState = {
       batches: [],
-      first(kind, sql) {
+      first(kind, sql, values) {
         if (kind !== "delivery") return null;
+        if (sql.includes("SELECT * FROM request_pa_draft_quote_commands")) {
+          expect(values).toEqual(["request-a", 3, 0]);
+          return journal.command;
+        }
+        if (sql.startsWith("SELECT receipt.*") && sql.includes("FROM request_pa_draft_quote_receipts receipt")) {
+          expect(sql).toContain("command.source_id=receipt.source_id");
+          expect(values).toEqual(["request-a", 3, 0]);
+          if (!journal.receipt) return null;
+          sequence.push("receipt-readback");
+          return { ...journal.receipt, editor_origin: journal.command?.editor_origin ?? null };
+        }
         if (sql.includes("request_revision") && sql.includes("FROM client_service_requests"))
           return {
-            id: "request-a",
+            id: "request-a", account_id: "account-a",
             catalog_source_id: "project-alpha:primary", account_source_id: "project-alpha:primary", project_source_id: "project-alpha:primary",
             status: "under_review",
             title: "North site mapping",
@@ -600,6 +617,38 @@ describe("verified Project Alpha quote linkage", () => {
           return [{ original_name: "authorization.pdf", content_type: "application/pdf", actual_size: 2048, verified_sha256: "b".repeat(64), object_key: "must-not-leave-ltds" }];
         return undefined;
       },
+      run(kind, sql, values) {
+        if (kind !== "delivery" || !sql.includes("INSERT INTO request_pa_draft_quote_commands")) return undefined;
+        expect(journal.command).toBeNull();
+        expect(sql).toContain("WHERE EXISTS(");
+        expect(values.slice(13, 16)).toEqual(["request-a", "account-a", "project-alpha:primary"]);
+        const columns = ["id", "request_id", "request_revision", "area_revision", "source_id", "command_endpoint", "application_key", "editor_origin", "destination_fingerprint", "idempotency_key", "payload_hash", "payload_json", "created_by"];
+        journal.command = Object.fromEntries(columns.map((column, index) => [column, values[index]]));
+        sequence.push("command-reserved");
+        return { meta: { changes: 1 } };
+      },
+      batch(kind, statements) {
+        if (kind !== "delivery") return;
+        const receiptInsert = statements.find(statement => statement.sql?.includes("INSERT INTO request_pa_draft_quote_receipts"));
+        if (!receiptInsert) return;
+        expect(sequence).toEqual(["command-reserved", "upstream"]);
+        const values = receiptInsert.values!;
+        expect(values[13]).toBe(journal.command?.id);
+        expect(values[12]).toBe(journal.command?.source_id);
+        expect(values[5]).toBe(journal.command?.payload_hash);
+        expect(values[14]).toBe(1);
+        const columns = ["id", "request_id", "request_revision", "area_revision", "idempotency_key", "payload_hash", "project_alpha_receipt_id", "project_alpha_artifact_public_id", "document_number", "artifact_version", "editor_path", "created_by", "source_id", "command_id"];
+        journal.receipt = {
+          ...Object.fromEntries(columns.map((column, index) => [column, values[index]])),
+          artifact_status: "draft", scope_stale_at: null, created_at: "2026-08-13T12:00:00Z",
+        };
+        expect(statements).toHaveLength(3);
+        expect(statements[1]?.sql).toContain("INSERT INTO request_admin_audit");
+        expect(statements[2]?.sql).toContain("INSERT INTO audit_log");
+        expect(statements[1]?.values?.at(-1)).toBe(journal.receipt.id);
+        expect(statements[2]?.values?.at(-1)).toBe(journal.receipt.id);
+        sequence.push("receipt-persisted");
+      },
     };
     const env = {
       ...environment(state),
@@ -609,11 +658,19 @@ describe("verified Project Alpha quote linkage", () => {
       PROJECT_ALPHA_DRAFT_QUOTE_HMAC_SECRET: "0123456789abcdef0123456789abcdef",
     };
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      expect(journal.command).toMatchObject({
+        request_id: "request-a", request_revision: 3, area_revision: 0,
+        source_id: "project-alpha:primary", command_endpoint: String(input),
+        application_key: "ltds_ops", editor_origin: "https://project-alpha.example",
+        payload_json: init?.body, created_by: principal.id,
+      });
+      sequence.push("upstream");
       expect(new URL(String(input)).pathname).toBe("/api/v2/integrations/ltds_ops/draft-quotes");
       const headers = new Headers(init?.headers);
       expect(headers.get("Authorization")).toBe("Bearer draft-only-key");
       expect(headers.get("Idempotency-Key")).toBe("ltds-pa-draft:request-a:r3:a0");
       expect(headers.get("X-Portal-Integration-Signature")).toMatch(/^sha256=[a-f0-9]{64}$/);
+      expect(headers.get("X-Portal-Integration-Body-SHA256")).toBe(journal.command?.payload_hash);
       const command = JSON.parse(String(init?.body));
       expect(command).toMatchObject({
         request: { publicId: "request-a", revision: 3 },
@@ -642,16 +699,21 @@ describe("verified Project Alpha quote linkage", () => {
     expect(await response.json()).toMatchObject({
       requestRevision: 3,
       areaRevision: 0,
+      sourceId: "project-alpha:primary", editorUnavailableReason: null,
       editorUrl: "https://project-alpha.example/quotes/quote-public-a/edit",
       draftQuote: { status: "draft" },
       idempotentReplay: false,
     });
     expect(state.runs).toEqual(expect.arrayContaining([
-      expect.stringContaining("request_pa_draft_quote_receipts"),
+      expect.stringContaining("INSERT INTO request_pa_draft_quote_commands"),
     ]));
     expect(state.batches).toEqual(expect.arrayContaining([
-      expect.arrayContaining([expect.stringContaining("pa_draft_quote_created")]),
+      expect.arrayContaining([
+        expect.stringContaining("INSERT INTO request_pa_draft_quote_receipts"),
+        expect.stringContaining("pa_draft_quote_created"),
+      ]),
     ]));
+    expect(sequence).toEqual(["command-reserved", "upstream", "receipt-persisted", "receipt-readback"]);
   });
 
   it("denies PA draft creation before configuration or upstream access", async () => {
@@ -703,7 +765,7 @@ describe("verified Project Alpha quote linkage", () => {
 
   it("replays the immutable local PA receipt without a second upstream command", async () => {
     const requestRow = {
-      id: "request-a", catalog_source_id: "project-alpha:primary", account_source_id: "project-alpha:primary", project_source_id: "project-alpha:primary", status: "under_review", title: "North site mapping",
+      id: "request-a", account_id: "account-a", catalog_source_id: "project-alpha:primary", account_source_id: "project-alpha:primary", project_source_id: "project-alpha:primary", status: "under_review", title: "North site mapping",
       details: "Capture site.", deliverables_text: null,
       project_alpha_client_id: "client-public-a", project_alpha_organization_id: null,
       project_alpha_project_id: "project-public-a", area_geojson: null,
@@ -713,12 +775,16 @@ describe("verified Project Alpha quote linkage", () => {
     };
     const state: DbState = {
       batches: [],
-      first(kind, sql) {
+      first(kind, sql, values) {
         if (kind !== "delivery") return null;
         if (sql.includes("request_revision") && sql.includes("FROM client_service_requests")) return requestRow;
-        if (sql.includes("WHERE request_id=? AND request_revision=? AND area_revision=?"))
+        if (sql.includes("FROM request_pa_draft_quote_receipts receipt") &&
+          sql.includes("WHERE receipt.request_id=? AND receipt.request_revision=? AND receipt.area_revision=?")) {
+          expect(sql).toContain("command.source_id=receipt.source_id");
+          expect(values).toEqual(["request-a", 3, 0]);
           return {
             request_revision: 3, area_revision: 0,
+            source_id: "project-alpha:primary", command_id: null, editor_origin: null, scope_stale_at: null,
             idempotency_key: "ltds-pa-draft:request-a:r3:a0",
             payload_hash: replayPayloadHash,
             project_alpha_receipt_id: "receipt-public-a",
@@ -726,6 +792,9 @@ describe("verified Project Alpha quote linkage", () => {
             document_number: "Q-DRAFT-7", artifact_status: "draft", artifact_version: 1,
             editor_path: "/quotes/quote-public-a/edit", created_at: "2026-08-13T12:00:00Z",
           };
+        }
+        if (sql.includes("SELECT * FROM request_pa_draft_quote_commands"))
+          throw new Error("Historical receipts must not reserve a new command");
         return null;
       },
       all(kind, sql) {
@@ -759,7 +828,10 @@ describe("verified Project Alpha quote linkage", () => {
       method: "POST", headers: { Origin: "https://ops.example" },
     }), env as any, executionCtx);
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ receiptId: "receipt-public-a", idempotentReplay: true });
+    expect(await response.json()).toMatchObject({
+      receiptId: "receipt-public-a", idempotentReplay: true,
+      sourceId: "project-alpha:primary", editorUrl: null, editorUnavailableReason: "legacy_destination_unknown",
+    });
     expect(upstream).not.toHaveBeenCalled();
     expect(state.batches).toEqual([]);
   });

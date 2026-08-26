@@ -371,10 +371,14 @@ Local catalog, business-projection and Delivery account/project provenance are
 now implemented with primary-compatible guards and scoped verification. See
 [Delivery source provenance](delivery-source-provenance.md) for the paired
 migration, compatibility/replay tests and release limitations. Native portal
-ownership is the next local increment; its exact verification state is recorded
+ownership is also implemented locally; its exact verification state is recorded
 in [native portal source ownership](portal-source-ownership.md). The verified
-connector registry, delivery-intent/guest receipt ownership, source-aware outbound
-routing and explicit business-party linking remain separate unfinished gates.
+connector registry and explicit business-party linking remain unfinished gates.
+Local delivery-intent/guest receipt ownership is documented in
+[delivery intent ownership](delivery-intent-source-ownership.md); primary-only
+outbound quote/pricing destination ownership is documented in
+[outbound quote ownership](outbound-quote-source-ownership.md). None of these
+local checkpoints enables another live connector.
 
 - Introduce immutable connector provenance and an Operations business-party
   mapping without changing existing authorization identities or source URLs.
@@ -619,6 +623,17 @@ Test the complete workflow, not only whether a component renders:
 
 ## Current checkpoint
 
+Follow-up found during August 26 local quote UI inspection: absent request
+coordinates currently become `0,0` in shared `navigationCoordinate` because it
+coerces null with `Number(...)`. This affects request navigation and Job Brief
+destinations. Before release, require actual finite numeric ordinates without
+rejecting a valid zero, regress null/undefined/string/boolean/array coordinates,
+and prove missing-location request/Job Brief screens offer no map navigation.
+This is recorded separately from the quote-destination increment, not dismissed
+as a successful location lookup. The full-page mobile screenshot also exposes
+overflow from that navigation panel's explanatory text; include responsive
+layout verification in the same follow-up.
+
 - [x] Read and reconcile the handoff against current released Operations source.
 - [x] Record the identity, authorization, source ownership, and Viewer-freeze boundaries.
 - [x] Create an active goal and phased plan with UI/workflow acceptance.
@@ -666,6 +681,12 @@ Test the complete workflow, not only whether a component renders:
       for populated upgrade and runtime evidence. Public HTTP and Client portal
       authority remain primary-only; no production mail, migration or deployment
       was performed.
+- [x] Locally implement and verify source-pinned outbound quote reservations,
+      saved receipt destinations, uncertain/concurrent retry guards and primary
+      pricing provenance, including current-authority checks and bounded
+      transports. See [outbound quote ownership](outbound-quote-source-ownership.md)
+      for the exact focused backend/browser/build evidence. Secondary routing,
+      production migrations and live Alpha acceptance remain separate gates.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

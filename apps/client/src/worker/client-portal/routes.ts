@@ -1523,6 +1523,7 @@ export function createClientPortalRouter(
   // only the authorized stored draft and failures deliberately do not block a
   // client from continuing to review or submit the request.
   router.get("/service-request-drafts/:draftId/pricing-hint", async (c) => {
+    c.header("Cache-Control", "private, no-store");
     const draftId = opaqueId.safeParse(c.req.param("draftId"));
     if (!draftId.success || !repository.getServiceRequestDraft)
       throw new HTTPException(404, { message: "Service request draft not found" });
@@ -1534,18 +1535,29 @@ export function createClientPortalRouter(
       const workspace = selectedWorkspace(c);
       if (!workspace || !draft.projectId || !(await authorizeProject(c, "request.create", draft.projectId)))
         return c.json({ available: false, hint: null });
-      const authorizationContext = await (
-        dependencies.pricingAuthorizationContextResolver ?? resolveProjectAlphaPricingAuthorizationContext
-      )(c.env, workspace, draft.projectId);
-      if (!authorizationContext) return c.json({ available: false, hint: null });
+      const resolvePricingContext = dependencies.pricingAuthorizationContextResolver ?? resolveProjectAlphaPricingAuthorizationContext;
+      const pricingContext = await resolvePricingContext(c.env, workspace, draft.projectId, draft);
+      if (!pricingContext) return c.json({ available: false, hint: null });
       const provided = await dependencies.pricingHintProvider({
         services: draft.services,
         areaSquareMeters: draft.areaSquareMeters,
         areaAcres: draft.areaAcres,
-        authorizationContext,
+        ...pricingContext,
       }, c.env);
       const validated = pricingHint.safeParse(provided);
       if (!validated.success) return c.json({ available: false, hint: null });
+      // The upstream await must not publish a result for a changed draft or a
+      // relationship whose source/authorization was revoked while in flight.
+      const currentDraft = await repository.getServiceRequestDraft(c.env, c.get("clientSession"), draftId.data);
+      if (!currentDraft || currentDraft.version !== draft.version || currentDraft.projectId !== draft.projectId
+        || !(await authorizeProject(c, "request.create", draft.projectId))) return c.json({ available: false, hint: null });
+      const currentContext = await resolvePricingContext(c.env, workspace, draft.projectId, draft);
+      if (!currentContext || currentContext.catalogSource.sourceId !== pricingContext.catalogSource.sourceId
+        || currentContext.authorizationContext.sourceId !== pricingContext.authorizationContext.sourceId
+        || currentContext.authorizationContext.projectPublicId !== pricingContext.authorizationContext.projectPublicId
+        || currentContext.authorizationContext.workspaceRoot.type !== pricingContext.authorizationContext.workspaceRoot.type
+        || currentContext.authorizationContext.workspaceRoot.publicId !== pricingContext.authorizationContext.workspaceRoot.publicId)
+        return c.json({ available: false, hint: null });
       return c.json({ available: true, hint: validated.data });
     } catch {
       return c.json({ available: false, hint: null });

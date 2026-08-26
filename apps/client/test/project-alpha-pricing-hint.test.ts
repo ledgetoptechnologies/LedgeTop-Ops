@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
+import { PRIMARY_ALPHA_SOURCE_ID, PRIMARY_CATALOG_SOURCE } from "@ltds/shared";
 import {
   createProjectAlphaPricingHintProvider,
   fetchProjectAlphaPricingHint,
   projectAlphaPricingRequestSchema,
   projectAlphaPricingHintCapability,
-  resolveProjectAlphaPricingAuthorizationContext,
+  resolveProjectAlphaPricingAuthorizationContext as resolvePricingContext,
 } from "../src/worker/client-portal/project-alpha-pricing-hint";
 import pricingFixture from "../../../packages/shared/fixtures/project-alpha-pricing-hint-v1.json";
 import type { ClientPricingHintInput } from "../src/worker/client-portal/types";
@@ -16,9 +17,11 @@ const now = new Date("2026-08-13T12:00:00.000Z");
 const secret = "pricing-hint-hmac-secret-that-is-at-least-32-bytes";
 const bearer = "pricing-preview-service-token";
 const input: ClientPricingHintInput = {
+  catalogSource: PRIMARY_CATALOG_SOURCE,
   areaSquareMeters: 889_000,
   areaAcres: 219.7,
   authorizationContext: {
+    sourceId: PRIMARY_ALPHA_SOURCE_ID,
     workspaceRoot: { type: "organization", publicId: "pa-org-acme" },
     projectPublicId: "pa-project-north-site",
   },
@@ -33,6 +36,15 @@ const input: ClientPricingHintInput = {
     questions: [],
     answers: { browserControlledAnswer: "not-forwarded" },
   }],
+};
+
+const draftProof = { id: "draft-a", version: 1 };
+const resolveProjectAlphaPricingAuthorizationContext = (
+  candidate: Env, workspace: EffectivePortalWorkspaceContext, projectId: string,
+) => resolvePricingContext(candidate, workspace, projectId, draftProof);
+const expectedContext = {
+  catalogSource: PRIMARY_CATALOG_SOURCE,
+  authorizationContext: { ...pricingFixture.request.authorizationContext, sourceId: PRIMARY_ALPHA_SOURCE_ID },
 };
 
 function env(overrides: Partial<Env> = {}): Env {
@@ -81,6 +93,8 @@ describe("Project Alpha pricing hint provider", () => {
       expect(headers.get("X-Portal-Integration-Application-Key")).toBe("ltds-client-production");
       expect(headers.get("X-Portal-Integration-Scope")).toBe("portal.pricing.preview");
       expect(init?.signal).toBeInstanceOf(AbortSignal);
+      expect(init?.redirect).toBe("manual");
+      expect(body).not.toContain(PRIMARY_ALPHA_SOURCE_ID);
       const bodyHash = await hexDigest(body);
       expect(headers.get("X-Portal-Integration-Body-SHA256")).toBe(bodyHash);
       const signed = `${now.toISOString()}\nPOST\n/api/v2/integrations/ltds-client-production/pricing-hints\nportal.pricing.preview\n${bodyHash}`;
@@ -144,9 +158,132 @@ describe("Project Alpha pricing hint provider", () => {
       { workspaceRoot: { type: "department", publicId: "pa-org-acme" }, projectPublicId: "pa-project-north-site" },
       { workspaceRoot: { type: "organization", publicId: "pa-org-acme", localId: "account-a" }, projectPublicId: "pa-project-north-site" },
     ]) {
-      await expect(fetchProjectAlphaPricingHint({ ...input, authorizationContext } as ClientPricingHintInput, env(), { fetcher, now })).resolves.toBeNull();
+      await expect(fetchProjectAlphaPricingHint({ ...input, authorizationContext: authorizationContext
+        ? { ...authorizationContext, sourceId: PRIMARY_ALPHA_SOURCE_ID } : undefined } as ClientPricingHintInput, env(), { fetcher, now })).resolves.toBeNull();
     }
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it("never falls back to the primary scalar connector for missing, mismatched or secondary provenance", async () => {
+    const fetcher = vi.fn();
+    for (const [catalogSource, sourceId] of [
+      [undefined, PRIMARY_ALPHA_SOURCE_ID],
+      [PRIMARY_CATALOG_SOURCE, undefined],
+      [{ sourceId: "project-alpha:secondary" }, PRIMARY_ALPHA_SOURCE_ID],
+      [PRIMARY_CATALOG_SOURCE, "project-alpha:secondary"],
+      [{ sourceId: "project-alpha:secondary" }, "project-alpha:secondary"],
+      [{ sourceId: "project-alpha:primary " }, PRIMARY_ALPHA_SOURCE_ID],
+    ]) {
+      await expect(fetchProjectAlphaPricingHint({ ...input, catalogSource,
+        authorizationContext: { ...input.authorizationContext, sourceId } } as ClientPricingHintInput,
+      env(), { fetcher, now })).resolves.toBeNull();
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([301, 302, 303, 307, 308, 401, 500])("cancels a rejected %s response without following its location", async status => {
+    const cancel = vi.fn();
+    const fetcher = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      expect(init?.redirect).toBe("manual");
+      return new Response(new ReadableStream({ cancel }), { status,
+        headers: { Location: "https://other.example/private", "Content-Type": "application/json" } });
+    });
+    await expect(fetchProjectAlphaPricingHint(input, env(), { fetcher: fetcher as typeof fetch, now })).resolves.toBeNull();
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    { "Content-Type": "text/html" },
+    { "Content-Type": "application/json", "Content-Length": "16385" },
+    { "Content-Type": "application/json", "Content-Length": "invalid" },
+  ])("cancels unread bodies with rejected response headers %j", async headers => {
+    const cancel = vi.fn();
+    await expect(fetchProjectAlphaPricingHint(input, env(), { now,
+      fetcher: vi.fn(async () => new Response(new ReadableStream({ cancel }), { headers: headers as Record<string, string> })) as typeof fetch,
+    })).resolves.toBeNull();
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("bounds unknown-length streams and rejects malformed UTF-8", async () => {
+    const cancel = vi.fn();
+    const oversized = new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new Uint8Array(8192)); controller.enqueue(new Uint8Array(8193)); }, cancel,
+    });
+    await expect(fetchProjectAlphaPricingHint(input, env(), { now,
+      fetcher: vi.fn(async () => new Response(oversized, { headers: { "Content-Type": "application/json" } })) as typeof fetch,
+    })).resolves.toBeNull();
+    expect(cancel).toHaveBeenCalledOnce();
+    await expect(fetchProjectAlphaPricingHint(input, env(), { now,
+      fetcher: vi.fn(async () => new Response(new Uint8Array([123, 34, 255, 34, 58, 48, 125]),
+        { headers: { "Content-Type": "application/json" } })) as typeof fetch,
+    })).resolves.toBeNull();
+  });
+
+  it("bounds a hanging response body through the same four-second deadline", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    let started!: () => void;
+    const fetching = new Promise<void>(resolve => { started = resolve; });
+    const observed: { signal?: AbortSignal | null } = {};
+    try {
+      const result = fetchProjectAlphaPricingHint(input, env(), { now,
+        fetcher: vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+          observed.signal = init?.signal;
+          started();
+          return new Response(new ReadableStream({ cancel }), { headers: { "Content-Type": "application/json" } });
+        }) as typeof fetch,
+      });
+      await fetching;
+      await vi.advanceTimersByTimeAsync(4001);
+      await expect(result).resolves.toBeNull();
+      expect(observed.signal?.aborted).toBe(true);
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("bounds a fetch that ignores cancellation and cancels its late response", async () => {
+    vi.useFakeTimers();
+    let started!: () => void;
+    const fetching = new Promise<void>(resolve => { started = resolve; });
+    let finish!: (value: Response) => void;
+    const responsePending = new Promise<Response>(resolve => { finish = resolve; });
+    const cancel = vi.fn();
+    try {
+      const result = fetchProjectAlphaPricingHint(input, env(), { now,
+        fetcher: vi.fn(() => { started(); return responsePending; }) as typeof fetch,
+      });
+      await fetching;
+      await vi.advanceTimersByTimeAsync(4001);
+      await expect(result).resolves.toBeNull();
+      finish(new Response(new ReadableStream({ cancel }), { headers: { "Content-Type": "application/json" } }));
+      await Promise.resolve();
+      expect(cancel).toHaveBeenCalledOnce();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("rejects a hint that expires while the response is being read", async () => {
+    vi.useFakeTimers();
+    let started!: () => void;
+    const fetching = new Promise<void>(resolve => { started = resolve; });
+    let stream!: ReadableStreamDefaultController<Uint8Array>;
+    try {
+      const result = fetchProjectAlphaPricingHint(input, env(), { now,
+        fetcher: vi.fn(async () => {
+          started();
+          return new Response(new ReadableStream<Uint8Array>({ start(controller) { stream = controller; } }),
+            { headers: { "Content-Type": "application/json" } });
+        }) as typeof fetch,
+      });
+      await fetching;
+      await vi.advanceTimersByTimeAsync(2000);
+      stream.enqueue(new TextEncoder().encode(JSON.stringify({ ...pricingFixture.response, validUntil: "2026-08-13T12:00:01.000Z" })));
+      stream.close();
+      await expect(result).resolves.toBeNull();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally { vi.useRealTimers(); }
   });
 
   it.each([
@@ -201,6 +338,8 @@ describe("Project Alpha pricing authorization context resolver", () => {
         database.prepare("CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT,project_alpha_source_id TEXT)"),
         database.prepare("CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT,legacy_account_id TEXT,root_type TEXT,pa_organization_public_id TEXT,pa_client_public_id TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary')"),
         database.prepare("CREATE TABLE client_project_grants (account_id TEXT NOT NULL,project_id TEXT NOT NULL,can_request_service INTEGER NOT NULL,revoked_at TEXT)"),
+        database.prepare("CREATE TABLE client_service_request_drafts (id TEXT PRIMARY KEY,account_id TEXT,project_id TEXT,version INTEGER,catalog_source_id TEXT)"),
+        database.prepare("CREATE TABLE client_service_request_draft_services (draft_id TEXT,service_source_id TEXT)"),
       ]);
       await database.batch([
         database.prepare("INSERT INTO projects VALUES ('project-local','pa-project-north-site',1,'project-alpha:primary'),('project-secondary','pa-project-north-site',1,'project-alpha:secondary')"),
@@ -208,6 +347,8 @@ describe("Project Alpha pricing authorization context resolver", () => {
         database.prepare("INSERT INTO portal_v2_workspaces(id,status,legacy_account_id,root_type,pa_organization_public_id,pa_client_public_id) VALUES ('workspace-a','active','account-a','organization','pa-org-acme',NULL)"),
         database.prepare("INSERT INTO client_project_grants VALUES ('account-a','project-local',1,NULL)"),
         database.prepare("INSERT INTO client_project_grants VALUES ('account-a','project-secondary',1,NULL),('account-b','project-secondary',1,NULL)"),
+        database.prepare("INSERT INTO client_service_request_drafts VALUES ('draft-a','account-a','project-local',1,'project-alpha:primary')"),
+        database.prepare("INSERT INTO client_service_request_draft_services VALUES ('draft-a','project-alpha:primary')"),
       ]);
       const workspace: EffectivePortalWorkspaceContext = {
         workspaceId: "workspace-a", identityId: "identity-v2", rootType: "organization",
@@ -215,7 +356,7 @@ describe("Project Alpha pricing authorization context resolver", () => {
         displayName: "Acme", role: "manager", canViewBilling: false,
       };
       const resolved = await resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env, workspace, "project-local");
-      expect(resolved).toEqual(pricingFixture.request.authorizationContext);
+      expect(resolved).toEqual(expectedContext);
       expect(JSON.stringify(resolved)).not.toMatch(/project-local|account-a|identity/);
       await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env,workspace,"project-secondary")).resolves.toBeNull();
       await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env,{...workspace,legacyAccountId:"account-b"},"project-secondary")).resolves.toBeNull();
@@ -225,10 +366,28 @@ describe("Project Alpha pricing authorization context resolver", () => {
       // complete authorization context. A secondary wrapper never does.
       await database.prepare("UPDATE client_accounts SET project_alpha_source_id=NULL WHERE id='account-a'").run();
       await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env,workspace,"project-local"))
-        .resolves.toEqual(pricingFixture.request.authorizationContext);
+        .resolves.toEqual(expectedContext);
       await database.prepare("UPDATE client_accounts SET project_alpha_source_id='project-alpha:secondary' WHERE id='account-a'").run();
       await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env,workspace,"project-local")).resolves.toBeNull();
       await database.prepare("UPDATE client_accounts SET project_alpha_source_id='project-alpha:primary' WHERE id='account-a'").run();
+
+      for (const update of [
+        "UPDATE client_service_request_drafts SET catalog_source_id='project-alpha:secondary' WHERE id='draft-a'",
+        "UPDATE client_service_request_drafts SET account_id='account-b' WHERE id='draft-a'",
+        "UPDATE client_service_request_drafts SET version=2 WHERE id='draft-a'",
+        "UPDATE client_service_request_draft_services SET service_source_id='project-alpha:secondary' WHERE draft_id='draft-a'",
+        "UPDATE portal_v2_workspaces SET project_alpha_source_id='project-alpha:secondary' WHERE id='workspace-a'",
+      ]) {
+        await database.prepare(update).run();
+        await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env, workspace, "project-local")).resolves.toBeNull();
+        await database.batch([
+          database.prepare("UPDATE client_service_request_drafts SET catalog_source_id='project-alpha:primary',account_id='account-a',version=1 WHERE id='draft-a'"),
+          database.prepare("UPDATE client_service_request_draft_services SET service_source_id='project-alpha:primary' WHERE draft_id='draft-a'"),
+          database.prepare("UPDATE portal_v2_workspaces SET project_alpha_source_id='project-alpha:primary' WHERE id='workspace-a'"),
+        ]);
+      }
+      await expect(resolvePricingContext({ DELIVERY_DB: database } as Env, workspace, "project-local", { id: "draft-a", version: 2 })).resolves.toBeNull();
+      await expect(resolvePricingContext({ DELIVERY_DB: database } as Env, workspace, "project-local", { id: "missing-draft", version: 1 })).resolves.toBeNull();
 
       await database.prepare("UPDATE projects SET project_alpha_project_id='42' WHERE id='project-local'").run();
       await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env, workspace, "project-local")).resolves.toBeNull();

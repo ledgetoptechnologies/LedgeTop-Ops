@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page, type Request } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import type { DeliveryLocationCollection } from "@ltds/shared";
@@ -1408,6 +1408,10 @@ test("pricing guidance ignores an older response after the service basis changes
   await mockAuthorizedPortal(page);
   let mode: "initial" | "race" = "initial";
   let raceCalls = 0;
+  let oldRequest: Request | undefined, oldHandlerFinished = false;
+  const terminalRequests = new Set<Request>();
+  page.on("requestfinished", request => terminalRequests.add(request));
+  page.on("requestfailed", request => terminalRequests.add(request));
   let releaseOld!: () => void;
   const oldGate = new Promise<void>(resolve => { releaseOld = resolve; });
   await page.route("**/api/client/service-request-drafts/draft-a/pricing-hint", async route => {
@@ -1415,12 +1419,14 @@ test("pricing guidance ignores an older response after the service basis changes
       kind: "starting_at", currency: "USD", startingAtMinor: 100000,
       disclaimer: "Planning guidance only. Final quote after staff review.", basisVersion: "initial", validUntil: "2099-01-01T00:00:00.000Z",
     } } });
-    raceCalls += 1;
-    if (raceCalls === 1) await oldGate;
-    return route.fulfill({ json: { available: true, hint: {
-      kind: "starting_at", currency: "USD", startingAtMinor: raceCalls === 1 ? 100000 : 200000,
-      disclaimer: "Planning guidance only. Final quote after staff review.", basisVersion: raceCalls === 1 ? "old" : "new", validUntil: "2099-01-01T00:00:00.000Z",
-    } } });
+    const call = ++raceCalls;
+    if (call === 1) { oldRequest = route.request(); await oldGate; }
+    try {
+      await route.fulfill({ json: { available: true, hint: {
+        kind: "starting_at", currency: "USD", startingAtMinor: call === 1 ? 100000 : 200000,
+        disclaimer: "Planning guidance only. Final quote after staff review.", basisVersion: call === 1 ? "old" : "new", validUntil: "2099-01-01T00:00:00.000Z",
+      } } });
+    } finally { if (call === 1) oldHandlerFinished = true; }
   });
 
   await page.goto("/portal/requests/new");
@@ -1444,6 +1450,8 @@ test("pricing guidance ignores an older response after the service basis changes
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.locator(".portal-pricing-hint")).toContainText("Starting at $2,000");
   releaseOld();
+  await expect.poll(() => oldHandlerFinished && !!oldRequest && terminalRequests.has(oldRequest)).toBe(true);
+  await page.evaluate(() => new Promise<void>(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))));
   await expect(page.locator(".portal-pricing-hint")).toContainText("Starting at $2,000");
   await expect(page.locator(".portal-pricing-hint")).not.toContainText("Starting at $1,000");
 });

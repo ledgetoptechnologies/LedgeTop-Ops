@@ -1,5 +1,5 @@
 import type { Env } from "../types";
-import type { DeliveryLocationCollection } from "@ltds/shared";
+import type { CatalogSourceContext, DeliveryLocationCollection } from "@ltds/shared";
 
 export interface VerifiedClientPrincipal {
   issuer: string;
@@ -272,10 +272,14 @@ export interface ClientPricingHint {
 }
 
 export interface ClientPricingHintInput {
+  /** Server-only provenance from the saved draft, never a browser selector. */
+  catalogSource: CatalogSourceContext;
   services: ClientServiceDraftSelection[];
   areaSquareMeters: number | null;
   areaAcres: number | null;
   authorizationContext: {
+    /** Server-only provenance from the authorized native workspace/project. */
+    sourceId: string;
     workspaceRoot: {
       type: "organization" | "standalone_client";
       publicId: string;

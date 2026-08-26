@@ -50,6 +50,8 @@ test("staff can review and download accepted supporting files on desktop and mob
       } });
     } else if (path === "/api/client-service-requests") {
       await route.fulfill({ json: { requests: [requestRecord] } });
+    } else if (incoming.method() === "GET" && path === "/api/client-service-requests/request-a/pa-draft") {
+      await route.fulfill({ json: { capability: { enabled: false, reason: "not configured" }, receipt: null } });
     } else if (path === "/api/client-service-requests/request-a") {
       await route.fulfill({ json: {
         request: requestRecord,

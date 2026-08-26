@@ -139,6 +139,24 @@ describe("service request v2 transaction-time catalog contract", () => {
       database.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('identity-secondary','account-secondary','https://issuer.test','secondary-user','secondary@example.test')"),
       database.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('account-secondary','identity-secondary','manager')"),
       database.prepare("INSERT INTO client_project_grants(account_id,project_id,can_request_service) VALUES('account-secondary','project-secondary',1)"),
+      database.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES('pricing-identity','https://issuer.test','subject-a','client@example.test')"),
+      database.prepare(`INSERT INTO portal_v2_workspaces
+        (id,root_type,pa_organization_public_id,legacy_account_id,display_name,project_alpha_source_id)
+        VALUES('pricing-workspace','organization','same-org-id','account-a','Acme','project-alpha:primary')`),
+      database.prepare(`INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type)
+        VALUES('pricing-membership','pricing-workspace','pricing-identity','legacy')`),
+      database.prepare(`INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete)
+        VALUES('pricing-generation','pricing-workspace','legacy-backfill',0,'active',1)`),
+      database.prepare(`INSERT INTO portal_v2_directory_entities
+        (workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version)
+        VALUES('pricing-workspace','pricing-generation','organization','same-org-id',NULL,'Acme','legacy-backfill'),
+          ('pricing-workspace','pricing-generation','project','same-project-id','same-org-id','Mapping','legacy-backfill')`),
+      database.prepare(`INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence)
+        VALUES('pricing-workspace','pricing-generation',0)`),
+      database.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,scope_type,scope_public_id,source_type)
+        VALUES('pricing-workspace-view','pricing-workspace','pricing-identity','workspace.view','workspace','pricing-workspace','legacy'),
+          ('pricing-request-create','pricing-workspace','pricing-identity','request.create','project','same-project-id','legacy')`),
     ]);
     repositoryEnv = { DELIVERY_DB: database } as Env;
   }, 60_000);
@@ -152,6 +170,7 @@ describe("service request v2 transaction-time catalog contract", () => {
       database.prepare("DELETE FROM audit_log"),
       database.prepare("DELETE FROM pa_service_catalog_items"),
       database.prepare("UPDATE client_project_grants SET can_request_service=1,revoked_at=NULL"),
+      database.prepare("UPDATE portal_v2_entitlements SET status='active',revoked_at=NULL WHERE id='pricing-request-create'"),
       database.prepare(`INSERT INTO pa_service_catalog_items
         (public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at)
         VALUES(?,?,?,?,?,?,?,?,1,'2026-08-25T12:00:00Z')`)
@@ -182,6 +201,37 @@ describe("service request v2 transaction-time catalog contract", () => {
     if (!result || !("draft" in result)) throw new Error("Expected a created draft");
     return result.draft;
   }
+
+  it.each(["unchanged", "draft_changed", "grant_revoked", "entitlement_revoked"] as const)(
+    "publishes pricing only for the still-authorized source-bound stored draft: %s", async change => {
+      const saved = await createdDraft();
+      const provider = vi.fn(async (value: import("../src/worker/client-portal/types").ClientPricingHintInput) => {
+        expect(value.catalogSource).toEqual({ sourceId: PRIMARY_ALPHA_SOURCE_ID });
+        expect(value.authorizationContext).toEqual({ sourceId: PRIMARY_ALPHA_SOURCE_ID,
+          workspaceRoot: { type: "organization", publicId: "same-org-id" }, projectPublicId: "same-project-id" });
+        expect(value.services).toEqual(saved.services);
+        expect(value.areaSquareMeters).toBe(saved.areaSquareMeters);
+        if (change === "draft_changed") await database.prepare("UPDATE client_service_request_drafts SET version=version+1 WHERE id=?").bind(saved.id).run();
+        if (change === "grant_revoked") await database.prepare("UPDATE client_project_grants SET revoked_at=datetime('now') WHERE account_id='account-a' AND project_id='project-a'").run();
+        if (change === "entitlement_revoked") await database.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='pricing-request-create'").run();
+        return { kind: "starting_at" as const, currency: "USD", startingAtMinor: 150_000,
+          disclaimer: "Planning guidance only. Final quote after staff review.", basisVersion: "catalog-v19", validUntil: "2099-01-01T00:00:00.000Z" };
+      });
+      const app = createClientPortalRouter({
+        resolvePrincipal: async () => ({ issuer: "https://issuer.test", subject: "subject-a", email: "client@example.test" }),
+        pricingHintProvider: provider,
+      });
+      const response = await app.request(`https://client.example/service-request-drafts/${saved.id}/pricing-hint`, {
+        headers: { "X-LTDS-Workspace-Id": "pricing-workspace" },
+      }, { ...env, ...repositoryEnv, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true" });
+      expect(response.status).toBe(200);
+      expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+      expect(provider).toHaveBeenCalledOnce();
+      expect(await response.json()).toEqual(change === "unchanged"
+        ? { available: true, hint: expect.objectContaining({ startingAtMinor: 150_000 }) }
+        : { available: false, hint: null });
+    }, 30_000,
+  );
 
   async function requestState() {
     const results = await database.batch(tables.map(table => database.prepare(`SELECT * FROM ${table} ORDER BY rowid`)));

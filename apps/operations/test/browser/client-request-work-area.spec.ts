@@ -50,6 +50,8 @@ async function fixture(page: Page) {
       return route.fulfill({ json: { user: { id: "staff-area", email: "staff@example.test", displayName: "Staff Reviewer", status: "Active", profileType: "Administrator", isAdministrator: true, permissions: ["operations.view", "operations.manage"], divisions: [] }, csrfToken: "csrf-area", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: "pk.local-browser-test", capabilities: {} } });
     if (incoming.method() === "GET" && path === "/api/client-service-requests")
       return route.fulfill({ json: { requests: [baseRequest] } });
+    if (incoming.method() === "GET" && path === "/api/client-service-requests/request-area/pa-draft")
+      return route.fulfill({ json: { capability: { enabled: false, reason: "not configured" }, receipt: null } });
     if (incoming.method() === "GET" && path === "/api/client-service-requests/request-area")
       return route.fulfill({ json: {
         request: { ...baseRequest, status: revised ? "under_review" : "submitted", updated_at: revised ? "2026-08-13 18:00:00.123" : baseRequest.updated_at },

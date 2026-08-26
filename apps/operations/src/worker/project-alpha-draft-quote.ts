@@ -17,6 +17,7 @@ type App = Hono<AppEnv>;
 const COMMAND_SCOPE = "portal.quote-draft.create";
 const COMMAND_TIMEOUT_MS = 8_000;
 const MAX_COMMAND_BYTES = 96 * 1024;
+const MAX_RESPONSE_BYTES = 16 * 1024;
 const SQUARE_METERS_PER_ACRE = 4_046.8564224;
 const EARTH_RADIUS_METERS = 6_371_008.8;
 const SAFE_PUBLIC_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -146,6 +147,9 @@ const projectAlphaDraftQuotePayloadSchema = z.object({
 }).strict();
 
 interface ReceiptRow {
+  source_id: string;
+  command_id: string | null;
+  editor_origin: string | null;
   request_revision: number;
   area_revision: number;
   idempotency_key: string;
@@ -200,7 +204,7 @@ const errorSchema = z.object({
 export class ProjectAlphaDraftQuoteError extends Error {
   constructor(
     readonly status: 409 | 502 | 503,
-    readonly code: "integration_disabled" | "integration_unavailable" | "idempotency_conflict" | "stale_catalog" | "scope_denied" | "invalid_response",
+    readonly code: "integration_disabled" | "integration_unavailable" | "idempotency_conflict" | "stale_catalog" | "scope_denied" | "invalid_response" | "destination_changed" | "reconciliation_required",
     message: string,
   ) {
     super(message);
@@ -208,13 +212,8 @@ export class ProjectAlphaDraftQuoteError extends Error {
   }
 }
 
-function database(env: Env): D1Database {
-  const candidate = env.DELIVERY_DB as D1Database & {
-    withSession?: (consistency: "first-primary") => D1Database;
-  };
-  return typeof candidate.withSession === "function"
-    ? candidate.withSession("first-primary")
-    : env.DELIVERY_DB;
+function database(env: Env): Pick<D1Database, "prepare" | "batch"> {
+  return env.DELIVERY_DB.withSession?.("first-primary") ?? env.DELIVERY_DB;
 }
 
 async function requireOperationsManage(env: Env, principal: StaffPrincipal): Promise<void> {
@@ -244,8 +243,8 @@ function integrationConfiguration(env: Env): {
   } catch {
     return null;
   }
-  const local = ["localhost", "127.0.0.1", "::1"].includes(base.hostname);
-  if ((base.protocol !== "https:" && !(local && base.protocol === "http:")) || base.username || base.password)
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(base.hostname);
+  if ((base.protocol !== "https:" && !(local && base.protocol === "http:")) || base.username || base.password || base.search || base.hash)
     return null;
   return {
     url: new URL(commandPath(env.APPLICATION_KEY), base),
@@ -354,10 +353,11 @@ function resultFromReceipt(row: ReceiptRow): ProjectAlphaDraftQuoteResult {
   };
 }
 
-function editorUrl(env: Env, path: string): string | null {
+function editorUrl(origin: string | null, path: string): string | null {
+  if (!origin) return null;
   try {
-    const base = new URL(env.PROJECT_ALPHA_BASE_URL);
-    if (base.protocol !== "https:" || base.username || base.password) return null;
+    const base = new URL(origin);
+    if (base.protocol !== "https:" || base.username || base.password || base.origin !== origin) return null;
     const resolved = new URL(path, base);
     return resolved.origin === base.origin ? resolved.toString() : null;
   } catch {
@@ -365,25 +365,96 @@ function editorUrl(env: Env, path: string): string | null {
   }
 }
 
-function receiptResponse(env: Env, row: ReceiptRow) {
+function receiptResponse(row: ReceiptRow) {
   return {
     requestRevision: row.request_revision,
     areaRevision: row.area_revision,
     createdAt: row.created_at,
-    editorUrl: editorUrl(env, row.editor_path),
+    sourceId: row.source_id,
+    editorUrl: editorUrl(row.editor_origin, row.editor_path),
+    editorUnavailableReason: row.command_id === null ? "legacy_destination_unknown" : null,
     ...resultFromReceipt(row),
   };
+}
+
+interface QuoteDestination {
+  sourceId: string;
+  commandEndpoint: string;
+  applicationKey: string;
+  editorOrigin: string;
+  destinationFingerprint: string;
+}
+
+async function quoteDestination(env: Env, sourceId: string): Promise<QuoteDestination> {
+  // The public workflow has one configured authority. Never reinterpret its
+  // scalar credentials as another source, even when external IDs collide.
+  if (sourceId !== PRIMARY_ALPHA_SOURCE_ID)
+    throw new ProjectAlphaDraftQuoteError(409, "scope_denied", "This request's source has no configured quote connection");
+  const config = integrationConfiguration(env);
+  if (!config) throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "Project Alpha draft creation is not available");
+  const target = { sourceId, commandEndpoint: config.url.toString(), applicationKey: config.applicationKey, editorOrigin: config.url.origin };
+  return { ...target, destinationFingerprint: await sha256Hex(canonicalProjectAlphaJson(target)) };
+}
+
+async function boundedResponseJson(response: Response, signal: AbortSignal): Promise<unknown> {
+  const declared = response.headers.get("Content-Length");
+  if ((declared !== null && (!/^\d+$/.test(declared) || Number(declared) > MAX_RESPONSE_BYTES)) ||
+    !/^application\/json(?:;|$)/i.test(response.headers.get("Content-Type") ?? "")) {
+    void response.body?.cancel().catch(() => undefined);
+    throw new Error("invalid-quote-response");
+  }
+  if (!response.body) throw new Error("empty-quote-response");
+  const reader = response.body.getReader(), chunks: Uint8Array[] = [];
+  let length = 0;
+  const abort = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    signal.throwIfAborted();
+    while (true) {
+      const next = await untilAborted(reader.read(), signal);
+      signal.throwIfAborted();
+      if (next.done) break;
+      length += next.value.byteLength;
+      if (length > MAX_RESPONSE_BYTES) {
+        void reader.cancel().catch(() => undefined);
+        throw new Error("quote-response-too-large");
+      }
+      chunks.push(next.value);
+    }
+  } finally { signal.removeEventListener("abort", abort); reader.releaseLock(); }
+  const bytes = new Uint8Array(length); let offset = 0;
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+}
+
+async function untilAborted<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    void operation.catch(() => undefined);
+    throw signal.reason;
+  }
+  let abort: (() => void) | undefined;
+  try {
+    return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+    })]);
+  } finally {
+    if (abort) signal.removeEventListener("abort", abort);
+  }
 }
 
 export async function sendProjectAlphaDraftQuoteCommand(
   env: Env,
   payload: ProjectAlphaDraftQuotePayload,
   idempotencyKey: string,
-  options: { now?: Date; fetcher?: typeof fetch } = {},
+  options: { now?: Date; fetcher?: typeof fetch; sourceId?: string; destination?: QuoteDestination } = {},
 ): Promise<ProjectAlphaDraftQuoteResult> {
   const configuration = integrationConfiguration(env);
   if (!configuration)
     throw new ProjectAlphaDraftQuoteError(503, "integration_disabled", "Project Alpha draft creation is not available");
+  const destination = await quoteDestination(env, options.sourceId ?? PRIMARY_ALPHA_SOURCE_ID);
+  if (options.destination && canonicalProjectAlphaJson(options.destination) !== canonicalProjectAlphaJson(destination))
+    throw new ProjectAlphaDraftQuoteError(409, "destination_changed", "The quote destination changed; reconcile the saved command before retrying");
   const validatedPayload = parseProjectAlphaDraftQuotePayload(payload);
   if (!validatedPayload)
     throw new ProjectAlphaDraftQuoteError(409, "invalid_response", "The Project Alpha draft command is invalid");
@@ -394,9 +465,10 @@ export async function sendProjectAlphaDraftQuoteCommand(
   const timestamp = (options.now ?? new Date()).toISOString();
   const signatureInput = `${timestamp}\nPOST\n${commandPath(configuration.applicationKey)}\n${idempotencyKey}\n${bodyHash}`;
   const signature = await hmacHex(configuration.signingSecret, signatureInput);
-  let response: Response;
+  let response: Response, rawResponse: unknown;
+  const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), COMMAND_TIMEOUT_MS);
   try {
-    response = await (options.fetcher ?? globalThis.fetch)(configuration.url.toString(), {
+    const pending = (options.fetcher ?? globalThis.fetch)(configuration.url.toString(), {
       method: "POST",
       headers: {
         Accept: "application/json",
@@ -412,13 +484,28 @@ export async function sendProjectAlphaDraftQuoteCommand(
       // Cloudflare Workers rejects redirect:"error"; manual prevents the
       // signed request from following a destination-controlled Location.
       redirect: "manual",
-      signal: AbortSignal.timeout(COMMAND_TIMEOUT_MS),
+      signal: controller.signal,
     });
-  } catch {
-    throw new ProjectAlphaDraftQuoteError(503, "integration_unavailable", "Project Alpha did not accept the draft command; retry is safe");
-  }
+    // Even an injected transport that ignores abort must not prolong a request.
+    // Dispose a late response rather than leaving its body unread.
+    void pending.then(late => { if (controller.signal.aborted) void late.body?.cancel().catch(() => undefined); }, () => undefined);
+    response = await untilAborted(pending, controller.signal);
+    if (response.redirected || (response.status >= 300 && response.status < 400)) {
+      void response.body?.cancel().catch(() => undefined);
+      throw new ProjectAlphaDraftQuoteError(502, "invalid_response", "Project Alpha redirected the signed quote command");
+    }
+    try { rawResponse = await boundedResponseJson(response, controller.signal); }
+    catch {
+      if (controller.signal.aborted) throw new Error("quote-response-timeout");
+      if (response.ok) throw new ProjectAlphaDraftQuoteError(502, "invalid_response", "Project Alpha returned an invalid draft receipt");
+      rawResponse = null;
+    }
+  } catch (error) {
+    if (error instanceof ProjectAlphaDraftQuoteError) throw error;
+    throw new ProjectAlphaDraftQuoteError(503, "integration_unavailable", "Project Alpha did not return a confirmed receipt; retry the saved command to reconcile the outcome");
+  } finally { clearTimeout(timeout); }
   if (!response.ok) {
-    const parsed = errorSchema.safeParse(await response.json().catch(() => null));
+    const parsed = errorSchema.safeParse(rawResponse);
     const code = parsed.success ? parsed.data.code : undefined;
     if (response.status === 409 && code === "STALE_CATALOG")
       throw new ProjectAlphaDraftQuoteError(409, "stale_catalog", "Project Alpha service catalog changed; refresh the request before retrying");
@@ -430,11 +517,11 @@ export async function sendProjectAlphaDraftQuoteCommand(
       response.status >= 500 || response.status === 429 ? 503 : 502,
       "integration_unavailable",
       response.status >= 500 || response.status === 429
-        ? "Project Alpha could not create the draft; retry is safe"
+        ? "Project Alpha did not confirm the draft; retry the saved command to reconcile the outcome"
         : "Project Alpha rejected the draft command",
     );
   }
-  const parsed = parseProjectAlphaDraftQuoteResult(await response.json().catch(() => null));
+  const parsed = parseProjectAlphaDraftQuoteResult(rawResponse);
   if (!parsed)
     throw new ProjectAlphaDraftQuoteError(502, "invalid_response", "Project Alpha returned an invalid draft receipt");
   return parsed;
@@ -470,12 +557,104 @@ async function requestForDraft(env: Env, requestId: string): Promise<RequestRow 
 
 async function latestReceipt(env: Env, requestId: string): Promise<ReceiptRow | null> {
   return database(env).prepare(
-    `SELECT request_revision,area_revision,idempotency_key,payload_hash,
-      project_alpha_receipt_id,project_alpha_artifact_public_id,document_number,
-      artifact_status,artifact_version,editor_path,scope_stale_at,created_at
-     FROM request_pa_draft_quote_receipts WHERE request_id=? AND scope_stale_at IS NULL
-     ORDER BY request_revision DESC,area_revision DESC,created_at DESC LIMIT 1`,
+    `${receiptSelect} WHERE receipt.request_id=? AND receipt.scope_stale_at IS NULL
+     ORDER BY receipt.request_revision DESC,receipt.area_revision DESC,receipt.created_at DESC LIMIT 1`,
   ).bind(requestId).first<ReceiptRow>();
+}
+
+const receiptSelect = `SELECT receipt.*,command.editor_origin
+  FROM request_pa_draft_quote_receipts receipt
+  LEFT JOIN request_pa_draft_quote_commands command ON command.id=receipt.command_id
+    AND command.source_id=receipt.source_id`;
+
+async function exactReceipt(env: Env, requestId: string, revision: number, areaRevision: number): Promise<ReceiptRow | null> {
+  return database(env).prepare(`${receiptSelect} WHERE receipt.request_id=? AND receipt.request_revision=? AND receipt.area_revision=?`)
+    .bind(requestId, revision, areaRevision).first<ReceiptRow>();
+}
+
+interface QuoteCommandRow {
+  id: string;
+  source_id: string;
+  command_endpoint: string;
+  application_key: string;
+  editor_origin: string;
+  destination_fingerprint: string;
+  idempotency_key: string;
+  payload_hash: string;
+  payload_json: string;
+}
+
+const unresolvedOtherCommandSql = `SELECT 1 FROM request_pa_draft_quote_commands pending
+  WHERE pending.request_id=? AND (pending.request_revision<>? OR pending.area_revision<>?)
+    AND NOT EXISTS(SELECT 1 FROM request_pa_draft_quote_receipts receipt WHERE receipt.command_id=pending.id)`;
+const reconcileMessage = "An earlier quote command has no confirmed receipt. Reconcile its outcome in the original Project Alpha instance before creating a new revision.";
+
+async function hasUnresolvedOtherCommand(env: Env, row: RequestRow): Promise<boolean> {
+  return !!await database(env).prepare(unresolvedOtherCommandSql)
+    .bind(row.id, row.request_revision, row.area_revision || 0).first();
+}
+
+/** This proof belongs to DELIVERY_DB only, not a cross-database transaction. */
+function currentRequestProof(row: RequestRow): { sql: string; bindings: (string | number | null)[] } {
+  return {
+    sql: `SELECT 1 FROM client_service_requests r
+      JOIN client_accounts account ON account.id=r.account_id AND account.status='active'
+      LEFT JOIN projects project ON project.id=r.project_id
+      WHERE r.id=? AND r.account_id=? AND r.catalog_source_id=?
+        AND r.status IN ('under_review','accepted_pending_pa_linkage')
+        AND r.project_id IS ? AND account.project_alpha_source_id IS ?
+        AND account.project_alpha_client_id IS ? AND account.project_alpha_organization_id IS ?
+        AND project.project_alpha_source_id IS ? AND project.project_alpha_project_id IS ?
+        AND (r.project_id IS NULL OR (project.active=1 AND EXISTS(SELECT 1 FROM client_project_grants grant_row
+          WHERE grant_row.account_id=r.account_id AND grant_row.project_id=r.project_id AND grant_row.revoked_at IS NULL)))
+        AND r.title=? AND r.details=? AND r.deliverables_text IS ?
+        AND COALESCE((SELECT MAX(revision_number) FROM request_revisions WHERE request_id=r.id),0)=?
+        AND COALESCE((SELECT MAX(revision_number) FROM client_service_request_area_revisions WHERE request_id=r.id),0)=?
+        AND (SELECT estimate.scope_text FROM request_operational_estimates estimate WHERE estimate.request_id=r.id
+          AND estimate.status IN ('draft','ready','accepted','change_requested') ORDER BY estimate.version DESC LIMIT 1) IS ?`,
+    bindings: [row.id,row.account_id,row.catalog_source_id,row.portal_project_id,row.account_source_id,
+      row.project_alpha_client_id,row.project_alpha_organization_id,row.project_source_id,row.project_alpha_project_id,
+      row.title,row.details,row.deliverables_text,row.request_revision,row.area_revision || 0,row.scope_text],
+  };
+}
+
+async function reserveQuoteCommand(env: Env, row: RequestRow, target: QuoteDestination,
+  payload: string, payloadHash: string, idempotencyKey: string, actorId: string): Promise<QuoteCommandRow> {
+  if (await hasUnresolvedOtherCommand(env, row))
+    throw new ProjectAlphaDraftQuoteError(409, "reconciliation_required", reconcileMessage);
+  const read = () => database(env).prepare(`SELECT * FROM request_pa_draft_quote_commands
+    WHERE request_id=? AND request_revision=? AND area_revision=?`)
+    .bind(row.id,row.request_revision,row.area_revision || 0).first<QuoteCommandRow>();
+  const validate = (command: QuoteCommandRow): QuoteCommandRow => {
+    if (command.source_id !== target.sourceId || command.command_endpoint !== target.commandEndpoint ||
+      command.application_key !== target.applicationKey || command.editor_origin !== target.editorOrigin ||
+      command.destination_fingerprint !== target.destinationFingerprint)
+      throw new ProjectAlphaDraftQuoteError(409,"destination_changed","The quote destination changed; reconcile the saved command before retrying");
+    if (command.idempotency_key !== idempotencyKey || command.payload_hash !== payloadHash || command.payload_json !== payload)
+      throw new ProjectAlphaDraftQuoteError(409,"idempotency_conflict","This quote revision already has a different saved command");
+    return command;
+  };
+  const existing = await read(); if (existing) return validate(existing);
+  const proof=currentRequestProof(row),id=crypto.randomUUID();
+  try {
+    const result=await database(env).prepare(`INSERT INTO request_pa_draft_quote_commands
+      (id,request_id,request_revision,area_revision,source_id,command_endpoint,application_key,editor_origin,
+       destination_fingerprint,idempotency_key,payload_hash,payload_json,created_by)
+      SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE EXISTS(${proof.sql}) AND NOT EXISTS(${unresolvedOtherCommandSql})`)
+      .bind(id,row.id,row.request_revision,row.area_revision || 0,target.sourceId,target.commandEndpoint,target.applicationKey,
+        target.editorOrigin,target.destinationFingerprint,idempotencyKey,payloadHash,payload,actorId,...proof.bindings,
+        row.id,row.request_revision,row.area_revision || 0).run();
+    if(result.meta.changes!==1) throw new ProjectAlphaDraftQuoteError(409,"scope_denied","The request changed before the quote command could be saved");
+  } catch (error) {
+    if (await hasUnresolvedOtherCommand(env, row))
+      throw new ProjectAlphaDraftQuoteError(409, "reconciliation_required", reconcileMessage);
+    const winner=await read(); if(winner)return validate(winner);
+    if(error instanceof ProjectAlphaDraftQuoteError)throw error;
+    throw new ProjectAlphaDraftQuoteError(503,"integration_unavailable","The quote command could not be saved; nothing was sent");
+  }
+  const saved=await read();
+  if(!saved)throw new ProjectAlphaDraftQuoteError(503,"integration_unavailable","The saved quote command could not be verified; nothing was sent");
+  return validate(saved);
 }
 
 async function buildPayload(env: Env, row: RequestRow): Promise<ProjectAlphaDraftQuotePayload> {
@@ -593,12 +772,27 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
     const requestId = c.req.param("id");
     const request = await requestForDraft(c.env, requestId);
     if (!request) throw new HTTPException(404, { message: "Client request not found" });
+    c.header("Cache-Control", "no-store");
     if (request.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID)
       return c.json({ capability: { enabled: false, reason: "This request's catalog source has no configured quote connection" }, receipt: null });
     const receipt = await latestReceipt(c.env, requestId);
+    let capability = projectAlphaDraftQuoteCapability(c.env);
+    if (capability.enabled) {
+      try {
+        await buildPayload(c.env, request);
+        if (!["under_review", "accepted_pending_pa_linkage"].includes(request.status))
+          capability = { enabled: false, reason: "Review or accept the request before creating a Project Alpha draft" };
+        else if (await hasUnresolvedOtherCommand(c.env, request))
+          capability = { enabled: false, reason: reconcileMessage };
+      } catch (error) {
+        if (!(error instanceof HTTPException)) throw error;
+        capability = { enabled: false, reason: error.message };
+      }
+    }
+    c.header("Cache-Control", "no-store");
     return c.json({
-      capability: projectAlphaDraftQuoteCapability(c.env),
-      receipt: receipt ? receiptResponse(c.env, receipt) : null,
+      capability,
+      receipt: receipt ? receiptResponse(receipt) : null,
     });
   });
 
@@ -624,106 +818,105 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
       request.request_revision,
       areaRevision,
     );
-    const existing = await database(c.env).prepare(
-      `SELECT request_revision,area_revision,idempotency_key,payload_hash,
-        project_alpha_receipt_id,project_alpha_artifact_public_id,document_number,
-        artifact_status,artifact_version,editor_path,scope_stale_at,created_at
-       FROM request_pa_draft_quote_receipts
-       WHERE request_id=? AND request_revision=? AND area_revision=?`,
-    ).bind(requestId, request.request_revision, areaRevision).first<ReceiptRow>();
+    c.header("Cache-Control", "no-store");
+    const existing = await exactReceipt(c.env, requestId, request.request_revision, areaRevision);
     if (existing) {
-      if (existing.payload_hash !== payloadHash || existing.idempotency_key !== idempotencyKey)
+      if (existing.source_id !== request.catalog_source_id || existing.payload_hash !== payloadHash || existing.idempotency_key !== idempotencyKey)
         return c.json({ error: "This Project Alpha draft revision has a conflicting recorded payload", code: "idempotency_conflict" }, 409);
       if (existing.scope_stale_at)
         return c.json({ error: "This Project Alpha draft was created for an obsolete request scope and must be reconciled in Project Alpha", code: "scope_changed" }, 409);
-      return c.json({ ...receiptResponse(c.env, existing), idempotentReplay: true });
+      // A historical receipt has no verified origin. Do not manufacture a
+      // journal or resend it just because configuration has changed since then.
+      return c.json({ ...receiptResponse(existing), idempotentReplay: true });
     }
 
     let result: ProjectAlphaDraftQuoteResult;
+    let command: QuoteCommandRow;
     try {
-      result = await sendProjectAlphaDraftQuoteCommand(c.env, payload, idempotencyKey);
+      const destination = await quoteDestination(c.env, request.catalog_source_id);
+      command = await reserveQuoteCommand(c.env, request, destination, rawPayload, payloadHash, idempotencyKey, principal.id);
+      await requireOperationsManage(c.env, principal);
+      // Reservation is durable before the first network call. Check the current
+      // authority and content again after that await; never dispatch stale data.
+      const current = await requestForDraft(c.env, requestId);
+      if (!current || !["under_review", "accepted_pending_pa_linkage"].includes(current.status) ||
+        canonicalProjectAlphaJson(currentRequestProof(current).bindings) !== canonicalProjectAlphaJson(currentRequestProof(request).bindings) ||
+        canonicalProjectAlphaJson(await buildPayload(c.env, current)) !== rawPayload)
+        throw new ProjectAlphaDraftQuoteError(409, "scope_denied", "The request changed before the saved quote command could be sent");
+      result = await sendProjectAlphaDraftQuoteCommand(c.env, payload, idempotencyKey, {
+        sourceId: request.catalog_source_id, destination,
+      });
     } catch (error) {
       if (error instanceof ProjectAlphaDraftQuoteError)
         return c.json({ error: error.message, code: error.code }, error.status);
       throw error;
     }
 
-    const receiptId = crypto.randomUUID();
+    // A remote side effect cannot be rolled back with D1. Record its receipt
+    // even if local scope changed, but quarantine it from ordinary use.
+    let scopeCurrent = false;
     try {
-      const receiptInsert = await database(c.env).prepare(
+      await requireOperationsManage(c.env, principal);
+      const current = await requestForDraft(c.env, requestId);
+      scopeCurrent = !!current && ["under_review", "accepted_pending_pa_linkage"].includes(current.status) &&
+        canonicalProjectAlphaJson(currentRequestProof(current).bindings) === canonicalProjectAlphaJson(currentRequestProof(request).bindings) &&
+        canonicalProjectAlphaJson(await buildPayload(c.env, current)) === rawPayload;
+    } catch { /* Unverifiable authority is stale, never permission to use a quote. */ }
+    const receiptId = crypto.randomUUID(), proof = currentRequestProof(request);
+    const details = JSON.stringify({ sourceId: command.source_id, commandId: command.id,
+      requestRevision: request.request_revision, areaRevision, payloadHash,
+      projectAlphaReceiptId: result.receiptId, projectAlphaDraftPublicId: result.draftQuote.publicId });
+    let saved: ReceiptRow | null;
+    try {
+      const db = database(c.env);
+      await db.batch([
+        db.prepare(
           `INSERT INTO request_pa_draft_quote_receipts
             (id,request_id,request_revision,area_revision,idempotency_key,payload_hash,
              project_alpha_receipt_id,project_alpha_artifact_public_id,document_number,
-             artifact_status,artifact_version,editor_path,created_by)
-           SELECT ?,?,?,?,?,?,?,?,?,'draft',?,?,? WHERE EXISTS (
-             SELECT 1 FROM client_service_requests current_request
-             WHERE current_request.id=? AND current_request.catalog_source_id=? AND current_request.status IN ('under_review','accepted_pending_pa_linkage')
-               AND COALESCE((SELECT MAX(revision_number) FROM request_revisions WHERE request_id=current_request.id),0)=?
-               AND COALESCE((SELECT MAX(revision_number) FROM client_service_request_area_revisions WHERE request_id=current_request.id),0)=?
-           )`,
+             artifact_status,artifact_version,editor_path,created_by,source_id,command_id,scope_stale_at)
+           VALUES (?,?,?,?,?,?,?,?,?,'draft',?,?,?,?,?,
+             CASE WHEN ?=1 AND EXISTS(${proof.sql}) THEN NULL ELSE datetime('now') END)`,
         ).bind(
           receiptId, requestId, request.request_revision, areaRevision, idempotencyKey, payloadHash,
           result.receiptId, result.draftQuote.publicId, result.draftQuote.documentNumber,
-          result.draftQuote.version, result.draftQuote.editorPath, principal.id,
-          requestId,PRIMARY_ALPHA_SOURCE_ID,request.request_revision,areaRevision,
-        ).run();
-      if (receiptInsert.meta.changes !== 1) {
-        await database(c.env).batch([
-          database(c.env).prepare(`INSERT INTO request_pa_draft_quote_receipts
-            (id,request_id,request_revision,area_revision,idempotency_key,payload_hash,
-             project_alpha_receipt_id,project_alpha_artifact_public_id,document_number,
-             artifact_status,artifact_version,editor_path,scope_stale_at,created_by)
-            VALUES (?,?,?,?,?,?,?,?,?,'draft',?,?,datetime('now'),?)`)
-            .bind(receiptId,requestId,request.request_revision,areaRevision,idempotencyKey,payloadHash,
-              result.receiptId,result.draftQuote.publicId,result.draftQuote.documentNumber,
-              result.draftQuote.version,result.draftQuote.editorPath,principal.id),
-          database(c.env).prepare(`INSERT INTO request_admin_audit(request_id,actor_id,action,details_json)
-            VALUES (?,?,'pa_draft_quote_scope_stale',?)`).bind(requestId,principal.id,JSON.stringify({
-              requestRevision:request.request_revision,areaRevision,payloadHash,
-              projectAlphaReceiptId:result.receiptId,projectAlphaDraftPublicId:result.draftQuote.publicId,
-            })),
-        ]);
-        return c.json({
-          error:"The request scope changed while Project Alpha created the draft. The remote draft was recorded as stale and must be reconciled before use.",
-          code:"scope_changed",
-        },409);
-      }
-      await database(c.env).batch([
-        database(c.env).prepare(
+          result.draftQuote.version, result.draftQuote.editorPath, principal.id, command.source_id, command.id,
+          scopeCurrent ? 1 : 0, ...proof.bindings,
+        ),
+        db.prepare(
           `INSERT INTO request_admin_audit(request_id,actor_id,action,details_json)
-           VALUES (?,?,'pa_draft_quote_created',?)`,
-        ).bind(requestId, principal.id, JSON.stringify({
-          requestRevision: request.request_revision,
-          areaRevision,
-          payloadHash,
-          projectAlphaReceiptId: result.receiptId,
-          projectAlphaDraftPublicId: result.draftQuote.publicId,
-        })),
-        database(c.env).prepare(
+           SELECT request_id,?,CASE WHEN scope_stale_at IS NULL THEN 'pa_draft_quote_created'
+             ELSE 'pa_draft_quote_scope_stale' END,? FROM request_pa_draft_quote_receipts WHERE id=?`,
+        ).bind(principal.id, details, receiptId),
+        db.prepare(
           `INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
-           VALUES ('staff',?,'client.service_request.pa_draft_quote_created','client_service_request',?,?)`,
-        ).bind(principal.id, requestId, JSON.stringify({
-          requestRevision: request.request_revision,
-          areaRevision,
-          payloadHash,
-          projectAlphaReceiptId: result.receiptId,
-          projectAlphaDraftPublicId: result.draftQuote.publicId,
-        })),
+           SELECT 'staff',?,CASE WHEN scope_stale_at IS NULL THEN 'client.service_request.pa_draft_quote_created'
+             ELSE 'client.service_request.pa_draft_quote_scope_stale' END,'client_service_request',request_id,?
+           FROM request_pa_draft_quote_receipts WHERE id=?`,
+        ).bind(principal.id, details, receiptId),
       ]);
+      saved = await exactReceipt(c.env, requestId, request.request_revision, areaRevision);
     } catch {
-      const raced = await database(c.env).prepare(
-        `SELECT request_revision,area_revision,idempotency_key,payload_hash,
-          project_alpha_receipt_id,project_alpha_artifact_public_id,document_number,
-          artifact_status,artifact_version,editor_path,scope_stale_at,created_at
-         FROM request_pa_draft_quote_receipts
-         WHERE request_id=? AND request_revision=? AND area_revision=?`,
-      ).bind(requestId, request.request_revision, areaRevision).first<ReceiptRow>();
-      if (!raced || raced.payload_hash !== payloadHash || raced.idempotency_key !== idempotencyKey)
-        return c.json({ error: "The Project Alpha draft receipt could not be recorded safely", code: "receipt_conflict" }, 409);
-      if (raced.scope_stale_at)
+      const raced = await exactReceipt(c.env, requestId, request.request_revision, areaRevision);
+      if (!raced)
+        return c.json({ error: "Project Alpha may have created the draft, but its receipt could not be saved. Retry the saved command to reconcile it.", code: "receipt_unconfirmed" }, 503);
+      if (raced.command_id !== command.id || raced.source_id !== command.source_id ||
+        raced.payload_hash !== payloadHash || raced.idempotency_key !== idempotencyKey ||
+        canonicalProjectAlphaJson(resultFromReceipt(raced)) !== canonicalProjectAlphaJson(result))
+        return c.json({ error: "The Project Alpha draft receipt conflicts with its saved command", code: "receipt_conflict" }, 409);
+      let winnerAuthorized = scopeCurrent;
+      try {
+        await requireOperationsManage(c.env, principal);
+        winnerAuthorized = winnerAuthorized && !!await database(c.env).prepare(proof.sql).bind(...proof.bindings).first();
+      } catch { winnerAuthorized = false; }
+      if (!winnerAuthorized || raced.scope_stale_at)
         return c.json({ error: "This Project Alpha draft was created for an obsolete request scope and must be reconciled in Project Alpha", code: "scope_changed" }, 409);
-      return c.json({ ...receiptResponse(c.env, raced), idempotentReplay: true });
+      return c.json({ ...receiptResponse(raced), idempotentReplay: true });
     }
+    if (!saved)
+      return c.json({ error: "The saved draft receipt could not be verified. Retry the saved command to reconcile it.", code: "receipt_unconfirmed" }, 503);
+    if (saved.scope_stale_at)
+      return c.json({ error: "The request scope changed while Project Alpha created the draft. Its receipt was saved as stale and must be reconciled before use.", code: "scope_changed" }, 409);
 
     c.executionCtx.waitUntil(
       (async () => c.env.OPS_DB.batch([
@@ -732,6 +925,8 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
           "client.service_request.pa_draft_quote_created",
           "client_service_request", requestId, null,
           {
+            sourceId: command.source_id,
+            commandId: command.id,
             requestRevision: request.request_revision,
             areaRevision,
             payloadHash,
@@ -743,16 +938,9 @@ export function registerProjectAlphaDraftQuoteRoutes(app: App): void {
         event: "secondary_ops_audit_failed",
         requestId,
         action: "client.service_request.pa_draft_quote_created",
-        error: error instanceof Error ? error.message : "unknown",
+        error: "audit_write_failed",
       }))),
     );
-    return c.json({
-      requestRevision: request.request_revision,
-      areaRevision,
-      createdAt: new Date().toISOString(),
-      editorUrl: editorUrl(c.env, result.draftQuote.editorPath),
-      ...result,
-      idempotentReplay: false,
-    }, 201);
+    return c.json({ ...receiptResponse(saved), idempotentReplay: false }, 201);
   });
 }

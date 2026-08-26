@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { RequestMapViewer } from "./RequestMapViewer";
@@ -113,6 +113,8 @@ interface ProjectAlphaDraftState {
     areaRevision: number;
     createdAt: string;
     editorUrl: string | null;
+    sourceId: string;
+    editorUnavailableReason: "legacy_destination_unknown" | null;
     receiptId: string;
     draftQuote: {
       publicId: string;
@@ -218,6 +220,7 @@ export function ClientRequestWorkflow({
   if (selectedId)
     return (
       <ClientRequestDetail
+        key={selectedId}
         requestId={selectedId}
         mapToken={mapToken}
         basePath={basePath}
@@ -313,43 +316,102 @@ function ClientRequestDetail({
     [busy, setBusy] = useState(false),
     [editingWorkArea, setEditingWorkArea] = useState(false),
     [paDraft, setPaDraft] = useState<ProjectAlphaDraftState | null>(null),
+    [paDraftLoading, setPaDraftLoading] = useState(true),
+    [paDraftError, setPaDraftError] = useState(""),
     [scope, setScope] = useState("");
-  const load = () =>
-    api<DetailResponse>(
-      `/api/client-service-requests/${encodeURIComponent(requestId)}`,
-    )
-      .then((value) => {
+  const lifetime = useRef(0), active = useRef(false), mutationBusy = useRef(false);
+  const detailRead = useRef<AbortController | null>(null), quoteRead = useRef<AbortController | null>(null);
+  const current = (generation: number) => active.current && lifetime.current === generation;
+  const clearDenied = (caught: unknown) => {
+    if (caught instanceof ApiError && [401, 403, 404].includes(caught.status)) {
+      detailRead.current?.abort();
+      quoteRead.current?.abort();
+      setData(null);
+      setPaDraft(null);
+      setError(caught.message);
+      return true;
+    }
+    return false;
+  };
+  const load = async () => {
+    const generation = lifetime.current;
+    detailRead.current?.abort();
+    const controller = new AbortController();
+    detailRead.current = controller;
+    try {
+      const value = await api<DetailResponse>(
+        `/api/client-service-requests/${encodeURIComponent(requestId)}`, { signal: controller.signal },
+      );
+      if (current(generation) && !controller.signal.aborted) {
+        if (value.request.id !== requestId) throw new Error("The request changed. Return to the queue and reopen it.");
         setData(value);
         setEditingWorkArea(false);
         const draft = value.estimates.find((item) => ["draft", "change_requested"].includes(item.status));
-        if (draft) {
-          setScope(draft.scope_text);
-        }
-      })
-      .catch((caught) => setError(caught.message));
+        setScope(draft?.scope_text || "");
+      }
+    } catch (caught) {
+      if (current(generation) && !controller.signal.aborted) {
+        clearDenied(caught);
+        setError(caught instanceof Error ? caught.message : "Request details could not be loaded.");
+      }
+    }
+  };
+  const loadPaDraft = async () => {
+    const generation = lifetime.current;
+    quoteRead.current?.abort();
+    const controller = new AbortController();
+    quoteRead.current = controller;
+    setPaDraftLoading(true);
+    setPaDraftError("");
+    try {
+      const value = await api<ProjectAlphaDraftState>(
+        `/api/client-service-requests/${encodeURIComponent(requestId)}/pa-draft`, { signal: controller.signal },
+      );
+      if (current(generation) && !controller.signal.aborted) setPaDraft(value);
+    } catch (caught) {
+      if (current(generation) && !controller.signal.aborted) {
+        clearDenied(caught);
+        setPaDraftError(caught instanceof Error ? caught.message : "Project Alpha draft status is unavailable.");
+      }
+    } finally {
+      if (current(generation) && !controller.signal.aborted) setPaDraftLoading(false);
+    }
+  };
   useEffect(() => {
+    active.current = true;
+    lifetime.current += 1;
     void load();
-    void api<ProjectAlphaDraftState>(
-      `/api/client-service-requests/${encodeURIComponent(requestId)}/pa-draft`,
-    ).then(setPaDraft).catch(() => setPaDraft({
-      capability: {
-        enabled: false,
-        reason: "Project Alpha draft integration status is unavailable",
-      },
-      receipt: null,
-    }));
+    void loadPaDraft();
+    return () => {
+      active.current = false;
+      lifetime.current += 1;
+      detailRead.current?.abort();
+      quoteRead.current?.abort();
+    };
   }, [requestId]);
   const run = async (action: () => Promise<unknown>) => {
+    if (mutationBusy.current || !active.current) return;
+    const generation = lifetime.current;
+    mutationBusy.current = true;
+    detailRead.current?.abort();
+    quoteRead.current?.abort();
     setBusy(true);
     setError("");
     try {
       await action();
-      await load();
+      if (!current(generation)) return;
+      await Promise.all([load(), loadPaDraft()]);
+      if (!current(generation)) return;
       await changed();
     } catch (caught) {
-      setError((caught as Error).message);
+      if (!current(generation)) return;
+      if (!clearDenied(caught)) await loadPaDraft();
+      if (current(generation)) setError((caught as Error).message);
     } finally {
-      setBusy(false);
+      if (current(generation)) {
+        mutationBusy.current = false;
+        setBusy(false);
+      }
     }
   };
   if (!data && !error) return <Loading />;
@@ -417,16 +479,10 @@ function ClientRequestDetail({
       ),
     );
   };
-  const createProjectAlphaDraft = () => run(async () => {
-    const receipt = await api<ProjectAlphaDraftState["receipt"] & { idempotentReplay: boolean }>(
+  const createProjectAlphaDraft = () => run(() => api(
       `/api/client-service-requests/${encodeURIComponent(requestId)}/pa-draft`,
       { method: "POST" },
-    );
-    setPaDraft(current => ({
-      capability: current?.capability || { enabled: true, reason: null },
-      receipt,
-    }));
-  });
+    ));
   const saveWorkArea = (next: {
     areaGeoJson: EditableRequestArea | null;
     poiPoints: EditableRequestPoi[];
@@ -724,7 +780,7 @@ function ClientRequestDetail({
           {request.status === "accepted_pending_pa_linkage" && (
             <button
               className="button-orange"
-              disabled={busy || !paDraft?.capability.enabled}
+              disabled={busy || paDraftLoading || !!paDraftError || !paDraft?.capability.enabled}
               onClick={() => void createProjectAlphaDraft()}
             >
               Create Project Alpha draft
@@ -733,7 +789,7 @@ function ClientRequestDetail({
           {request.status === "under_review" && (
             <button
               className="button-orange"
-              disabled={busy || !paDraft?.capability.enabled}
+              disabled={busy || paDraftLoading || !!paDraftError || !paDraft?.capability.enabled}
               onClick={() => void createProjectAlphaDraft()}
             >
               Create Project Alpha draft
@@ -769,16 +825,28 @@ function ClientRequestDetail({
           )}
         </div>
         {(["under_review", "accepted_pending_pa_linkage"] as string[]).includes(request.status) &&
-          paDraft && !paDraft.capability.enabled && (
+          !paDraftLoading && !paDraftError && paDraft && !paDraft.capability.enabled && (
             <p className="muted">{paDraft.capability.reason}</p>
           )}
+        {paDraftLoading && <p className="muted" role="status">Checking Project Alpha draft availability…</p>}
+        {paDraftError && (
+          <div className="notice error" role="alert">
+            <span>Project Alpha draft status could not be refreshed. {paDraftError}</span>
+            <button type="button" className="button-ghost button-small" disabled={busy || paDraftLoading} onClick={() => void loadPaDraft()}>
+              Retry draft status
+            </button>
+          </div>
+        )}
         {paDraft?.receipt && (
-          <div className="notice" role="status">
+          <div className="notice pa-draft-receipt" role="status">
             <strong>
               Private Project Alpha draft {paDraft.receipt.draftQuote.documentNumber || paDraft.receipt.draftQuote.publicId}
             </strong>
             <span>
               Project Alpha owns pricing, approval, sending, invoicing, and payment.
+            </span>
+            <span>
+              Saved for request revision {paDraft.receipt.requestRevision} · Work-area revision {paDraft.receipt.areaRevision} · {date(paDraft.receipt.createdAt)}
             </span>
             {paDraft.receipt.editorUrl ? (
               <a
@@ -790,7 +858,11 @@ function ClientRequestDetail({
                 Open draft in Project Alpha
               </a>
             ) : (
-              <span className="muted">Project Alpha editor link unavailable</span>
+              <span className="muted">
+                {paDraft.receipt.editorUnavailableReason === "legacy_destination_unknown"
+                  ? "This historical receipt does not record its original Project Alpha destination. Open the original Project Alpha connection and find the draft by its document number or ID."
+                  : "Project Alpha editor link unavailable"}
+              </span>
             )}
           </div>
         )}

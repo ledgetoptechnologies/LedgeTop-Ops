@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import { localOrPrimaryAlphaReference, primaryAlphaReference } from "./project-alpha-source";
 import type { Env } from "../types";
 import type { ClientPricingHint, ClientPricingHintInput, ClientPricingHintProvider } from "./types";
@@ -62,7 +63,8 @@ export type ProjectAlphaPricingAuthorizationContextResolver = (
   env: Env,
   workspace: EffectivePortalWorkspaceContext,
   localProjectId: string,
-) => Promise<ClientPricingHintInput["authorizationContext"] | null>;
+  draft: { id: string; version: number },
+) => Promise<Pick<ClientPricingHintInput, "catalogSource" | "authorizationContext"> | null>;
 
 function validOpaquePaId(value: string): boolean {
   return OPAQUE_PA_ID.test(value) && !/^\d+$/.test(value);
@@ -77,11 +79,13 @@ export const resolveProjectAlphaPricingAuthorizationContext: ProjectAlphaPricing
   env,
   workspace,
   localProjectId,
+  draft,
 ) => {
-  if (!validOpaquePaId(workspace.rootPublicId) || !OPAQUE_PA_ID.test(localProjectId)) return null;
-  const candidate = env.DELIVERY_DB as D1Database & { withSession?: (consistency: "first-primary") => D1Database };
-  const database = typeof candidate.withSession === "function" ? candidate.withSession("first-primary") : env.DELIVERY_DB;
-  const project = await database.prepare(`SELECT project.project_alpha_project_id public_id
+  if (!validOpaquePaId(workspace.rootPublicId) || !OPAQUE_PA_ID.test(localProjectId)
+    || !draft || !OPAQUE_PA_ID.test(draft.id) || !Number.isSafeInteger(draft.version) || draft.version < 1) return null;
+  const database = env.DELIVERY_DB.withSession?.("first-primary") ?? env.DELIVERY_DB;
+  const project = await database.prepare(`SELECT project.project_alpha_project_id public_id,
+      draft.catalog_source_id, native_workspace.project_alpha_source_id
     FROM projects project
     JOIN client_accounts account ON account.id=? AND account.status='active' AND ${localOrPrimaryAlphaReference("account")}
     JOIN portal_v2_workspaces native_workspace ON native_workspace.id=? AND native_workspace.status='active'
@@ -91,13 +95,23 @@ export const resolveProjectAlphaPricingAuthorizationContext: ProjectAlphaPricing
     JOIN client_project_grants grant_record
       ON grant_record.project_id=project.id AND grant_record.account_id=?
       AND grant_record.revoked_at IS NULL AND grant_record.can_request_service=1
+    JOIN client_service_request_drafts draft ON draft.id=? AND draft.version=?
+      AND draft.account_id=account.id AND draft.project_id=project.id
+      AND draft.catalog_source_id=native_workspace.project_alpha_source_id
+      AND draft.catalog_source_id=project.project_alpha_source_id
+      AND NOT EXISTS (SELECT 1 FROM client_service_request_draft_services service
+        WHERE service.draft_id=draft.id AND service.service_source_id<>draft.catalog_source_id)
     WHERE project.id=? AND project.active=1 AND ${primaryAlphaReference("project")} AND project.project_alpha_project_id IS NOT NULL`)
-    .bind(workspace.legacyAccountId, workspace.workspaceId, workspace.rootType, workspace.rootPublicId, workspace.legacyAccountId, localProjectId)
-    .first<{ public_id: string }>();
+    .bind(workspace.legacyAccountId, workspace.workspaceId, workspace.rootType, workspace.rootPublicId, workspace.legacyAccountId, draft.id, draft.version, localProjectId)
+    .first<{ public_id: string; catalog_source_id: string; project_alpha_source_id: string }>();
   if (!project || !validOpaquePaId(project.public_id)) return null;
   return {
-    workspaceRoot: { type: workspace.rootType, publicId: workspace.rootPublicId },
-    projectPublicId: project.public_id,
+    catalogSource: createCatalogSourceContext(project.catalog_source_id),
+    authorizationContext: {
+      sourceId: project.project_alpha_source_id,
+      workspaceRoot: { type: workspace.rootType, publicId: workspace.rootPublicId },
+      projectPublicId: project.public_id,
+    },
   };
 };
 
@@ -173,31 +187,59 @@ export function projectAlphaPricingHintCapability(env: Env): { enabled: boolean 
   return { enabled: configuration(env) !== null };
 }
 
-async function readBoundedJson(response: Response): Promise<unknown> {
+function cancelBody(response: Response): void {
+  void response.body?.cancel().catch(() => undefined);
+}
+
+/** Race the whole exchange, including a response stream that never completes. */
+async function untilAborted<T>(operation: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) {
+    void operation.catch(() => undefined);
+    throw signal.reason;
+  }
+  let abort: (() => void) | undefined;
+  try {
+    return await Promise.race([operation, new Promise<never>((_resolve, reject) => {
+      abort = () => reject(signal.reason);
+      signal.addEventListener("abort", abort, { once: true });
+    })]);
+  } finally {
+    if (abort) signal.removeEventListener("abort", abort);
+  }
+}
+
+async function readBoundedJson(response: Response, signal: AbortSignal): Promise<unknown> {
   const declared = response.headers.get("Content-Length");
-  if (declared && (!/^\d+$/.test(declared) || Number(declared) > MAX_RESPONSE_BYTES)) throw new Error("pricing-response-too-large");
+  if (declared && (!/^\d+$/.test(declared) || Number(declared) > MAX_RESPONSE_BYTES)) {
+    cancelBody(response);
+    throw new Error("pricing-response-too-large");
+  }
   if (!response.body) throw new Error("pricing-response-empty");
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
+  const cancel = () => { void reader.cancel().catch(() => undefined); };
+  signal.addEventListener("abort", cancel, { once: true });
   try {
     while (true) {
-      const { done, value } = await reader.read();
+      const { done, value } = await untilAborted(reader.read(), signal);
       if (done) break;
       total += value.byteLength;
       if (total > MAX_RESPONSE_BYTES) {
-        await reader.cancel("pricing-response-too-large");
+        cancel();
         throw new Error("pricing-response-too-large");
       }
       chunks.push(value);
     }
   } finally {
+    signal.removeEventListener("abort", cancel);
     reader.releaseLock();
   }
   const bytes = new Uint8Array(total);
   let offset = 0;
   for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-  return JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+  signal.throwIfAborted();
+  return JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
 }
 
 function moneyMinor(value: string): number | null {
@@ -245,6 +287,13 @@ export async function fetchProjectAlphaPricingHint(
   env: Env,
   options: ProjectAlphaPricingOptions = {},
 ): Promise<ClientPricingHint | null> {
+  // Scalar connector settings belong only to this explicitly proven primary
+  // source. An unknown/missing source must never fall back to that connector.
+  try {
+    const catalog = createCatalogSourceContext(input.catalogSource?.sourceId);
+    const owner = createCatalogSourceContext(input.authorizationContext?.sourceId);
+    if (catalog.sourceId !== owner.sourceId || catalog.sourceId !== PRIMARY_ALPHA_SOURCE_ID) return null;
+  } catch { return null; }
   const config = configuration(env);
   if (!config || input.areaSquareMeters === null || !Number.isFinite(input.areaSquareMeters) || input.areaSquareMeters <= 0) return null;
   if (input.services.length < 1 || input.services.length > 10) return null;
@@ -260,20 +309,27 @@ export async function fetchProjectAlphaPricingHint(
     schemaVersion: 1,
     source: "ltds-client-portal",
     scope: PRICING_SCOPE,
-    authorizationContext: input.authorizationContext,
+    authorizationContext: {
+      workspaceRoot: input.authorizationContext.workspaceRoot,
+      projectPublicId: input.authorizationContext.projectPublicId,
+    },
     coverageSquareMetres: squareMetres,
     services,
   });
   if (!requestPayload.success) return null;
   const body = canonicalJson(requestPayload.data);
   const bodyHash = await sha256Hex(body);
-  const now = options.now ?? new Date();
+  const startedAt = Date.now();
+  const now = options.now ?? new Date(startedAt);
   const timestamp = now.toISOString();
   const signatureInput = `${timestamp}\nPOST\n${pricingPath(config.applicationKey)}\n${PRICING_SCOPE}\n${bodyHash}`;
   const signature = await hmacHex(config.hmacSecret, signatureInput);
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(new DOMException("Pricing response timed out", "TimeoutError")), PRICING_TIMEOUT_MS);
   try {
-    const response = await (options.fetcher ?? globalThis.fetch)(config.url.toString(), {
+    const response = await untilAborted((options.fetcher ?? globalThis.fetch)(config.url.toString(), {
       method: "POST",
+      redirect: "manual",
       headers: {
         Accept: "application/json",
         Authorization: `Bearer ${config.bearer}`,
@@ -285,12 +341,22 @@ export async function fetchProjectAlphaPricingHint(
         "X-Portal-Integration-Timestamp": timestamp,
       },
       body,
-      signal: AbortSignal.timeout(PRICING_TIMEOUT_MS),
-    });
-    if (!response.ok || !/^application\/json(?:;|$)/i.test(response.headers.get("Content-Type") ?? "")) return null;
-    return normalizeResponse(await readBoundedJson(response), squareMetres, config.allowedCurrencies, now);
+      signal: controller.signal,
+    }).then(result => {
+      if (controller.signal.aborted) cancelBody(result);
+      return result;
+    }), controller.signal);
+    if (!response.ok || response.redirected || !/^application\/json(?:;|$)/i.test(response.headers.get("Content-Type") ?? "")) {
+      cancelBody(response);
+      return null;
+    }
+    const raw = await readBoundedJson(response, controller.signal);
+    return normalizeResponse(raw, squareMetres, config.allowedCurrencies,
+      new Date(now.getTime() + Math.max(0, Date.now() - startedAt)));
   } catch {
     return null;
+  } finally {
+    clearTimeout(deadline);
   }
 }
 
