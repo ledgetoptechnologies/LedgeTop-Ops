@@ -4,16 +4,17 @@ import type { Permission } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
 import { ClientPortalAccessPanel, type PortalIdentityPage } from "./ClientPortalAccessPanel";
+import { businessProjectHref } from "./business-project-route";
 import { ClientDirectory, clientDirectoryReturnPath, clientPortalStatus, type ClientSummary, type ClientHubCapabilities, type ClientRootNamespace } from "./ClientDirectory";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
   contact_key?: string;
   record_type: "business_contact";
-  workspace_id?: string | null;
   public_id: string;
   display_name: string;
-  email_hint: string;
+  email: string | null;
+  phone: string | null;
 }
 interface ClientDetailResponse {
   client: ClientSummary;
@@ -187,7 +188,9 @@ function ContactList({ contacts }: { contacts: ClientContact[] }) {
     return <article key={collectionKey("businessContacts", contact)}>
       <div>
         <strong>{contact.display_name}</strong>
-        <small>{contact.email_hint || "Business contact"}</small>
+        {contact.email && <small>Email: {contact.email}</small>}
+        {contact.phone && <small>Phone: {contact.phone}</small>}
+        {!contact.email && !contact.phone && <small>No contact details provided by Project Alpha</small>}
       </div>
       <StatusPill tone="neutral">contact</StatusPill>
       <small>Contact records do not grant portal access</small>
@@ -261,11 +264,15 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
       : <ClientCollection key={`${state.filter}:${state.revision}`} collection="businessProjects" label="Business projects" initial={state.items} page={state.page}
         client={client} contextVersion={contextVersion} contextSignal={contextSignal} onInvalidated={onInvalidated} requestParams={{ filter }}
         emptyTitle="No matching business projects" emptyDetail="Try another status. Shared work and portal access are listed separately.">
-        {items => <div className="simple-rows">{items.map(project => <div key={collectionKey("businessProjects", project)}><div><strong>{project.name}</strong>
+        {items => <div className="simple-rows">{items.map(project => {
+          const href = businessProjectHref(client, project.id);
+          return <div key={collectionKey("businessProjects", project)}><div>
+          {href ? <a className="client-hub-project-link" href={href}><strong>{project.name}</strong></a> : <strong>{project.name}</strong>}
           <small>{project.manager_name ? `Manager: ${project.manager_name}` : "Manager not recorded"}</small>
           <small>Start: {calendarDate(project.start_date)} · End: {calendarDate(project.end_date)}</small>
           {project.created_at && <small>Project created: {date(project.created_at)}</small>}</div>
-          <StatusPill tone={project.status === "overdue" ? "warning" : tone(project.status || "")}>{project.status?.replaceAll("_", " ") || "Status not recorded"}</StatusPill></div>)}</div>}
+          <StatusPill tone={project.status === "overdue" ? "warning" : tone(project.status || "")}>{project.status?.replaceAll("_", " ") || "Status not recorded"}</StatusPill></div>;
+        })}</div>}
       </ClientCollection>}
   </Card>;
 }

@@ -3,6 +3,7 @@ import { sha256 } from "./crypto";
 import { isAdministrator } from "./acl";
 import { eligibilityBlockManagementEnabled, portalOperationsManagementEnabled } from "./client-identity-eligibility";
 import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
+import { businessContactChannels, businessContactChannelsSql } from "./client-business-contact";
 import type { ClientHubRoot } from "./client-hub-directory";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -121,7 +122,7 @@ function collectionQuery(context: ClientHubCollectionContext, collection: Client
   const root = context.root, scope = accountScope(root);
   const common = { where: scope.where, values: scope.values, descending: true };
   switch (collection) {
-    case "businessContacts": return { select: "id public_id,organization_id,name display_name", from: "pa_clients",
+    case "businessContacts": return { select: `id public_id,organization_id,name display_name,${businessContactChannelsSql()}`, from: "pa_clients",
       where: `active=1 AND ${root.kind === "organization" ? "organization_id=?" : "id=? AND organization_id IS NULL"}`,
       values: [root.public_id], order: ["id"], descending: false, keys: ["public_id"], business: true };
     case "accounts": return { ...common,
@@ -191,9 +192,8 @@ export async function listClientHubCollection(env: Env, context: ClientHubCollec
   response.items = rows.map(row => {
     const item: Record<string, unknown> = { ...row, row_key: JSON.stringify([collection, ...query.keys.map(key => row[key])]) };
     for (let index = 0; index < query.order.length; index++) delete item[`__cursor_${index}`];
-    return query.business ? { ...item, contact_key: `business:${context.root.source_id}:${String(row.public_id)}`,
-      record_type: "business_contact", workspace_id: context.root.workspace_id, email_hint: "", status: "active",
-      identity_id: null, has_workspace_access: 0, blocked: 0, access: [], invitation: null } : item;
+    return query.business ? { ...item, ...businessContactChannels(row),
+      contact_key: `business:${context.root.source_id}:${String(row.public_id)}`, record_type: "business_contact" } : item;
   });
   return response;
 }

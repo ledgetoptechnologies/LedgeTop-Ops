@@ -1,0 +1,21 @@
+.business-project-workspace { display: grid; gap: 1rem; min-width: 0; overflow-wrap: anywhere; }
+.business-project-breadcrumbs { display: flex; align-items: baseline; flex-wrap: wrap; gap: .4rem .6rem; font-size: .9rem; }
+.business-project-breadcrumbs a { display: inline-flex; min-height: 44px; align-items: center; color: var(--accent); text-underline-offset: .18em; }
+.business-project-breadcrumbs > span[aria-current] { color: var(--muted); }
+.business-project-heading { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: .75rem; }
+.business-project-heading h2 { margin: .25rem 0 0; }
+.business-project-heading small, .business-project-intro, .business-project-refreshed { color: var(--muted); }
+.business-project-workspace button, .business-project-recovery a { min-height: 44px; max-width: 100%; white-space: normal; }
+.business-project-workspace button[aria-disabled="true"] { opacity: .65; cursor: default; }
+.business-project-grid { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); align-items: start; gap: 1rem; }
+.business-project-grid > *, .business-project-workspace .card { min-width: 0; }
+.business-project-facts { display: grid; gap: .9rem; margin: 0; }
+.business-project-facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.business-project-facts > div { display: grid; align-content: start; gap: .3rem; min-width: 0; }
+.business-project-facts dt { font-size: .8rem; font-weight: 750; color: var(--muted); }
+.business-project-facts dd { margin: 0; }
+.business-project-description { white-space: pre-wrap; }
+.business-project-recovery { display: flex; flex-wrap: wrap; gap: .75rem; }
+.business-project-refreshed { margin: 0; font-size: .8rem; }
+@media (max-width: 800px) { .business-project-grid { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 480px) { .business-project-facts { grid-template-columns: minmax(0, 1fr); } }

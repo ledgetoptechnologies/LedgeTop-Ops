@@ -142,6 +142,41 @@ async function readCollection(app: Awaited<ReturnType<typeof fixture>>["app"], e
 }
 
 describe("Client Hub bounded detail collections", () => {
+  it("serves business-project detail through the canonical route and rechecks cross-database root ownership", async () => {
+    const { app, env, ops, delivery } = await fixture();
+    await applySql(ops, `CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT,status TEXT,start_date TEXT,end_date TEXT,
+      client_id TEXT,organization_id TEXT,manager_user_id TEXT,active INTEGER,payload_json TEXT);
+      CREATE TABLE pa_users(id TEXT PRIMARY KEY,display_name TEXT,active INTEGER);
+      INSERT INTO pa_projects VALUES('business-one','Business One','active','2026-01-01',NULL,'pa-child-login',NULL,NULL,1,'{"description":"Business detail"}');`);
+    try {
+      acl.hasPermission.mockImplementation(async (_env, _principal, permission) =>
+        ["delivery.share.audit", "viewer.view", "projects.view"].includes(permission));
+      const url = organizationPath + "/business-projects/business-one";
+      const first = await app.request(url, {}, env);
+      expect(first.status).toBe(200);
+      const result = await first.json() as { contextVersion: string };
+      expect(result).toMatchObject({ canonicalRoot: { sourceId: "project-alpha:primary", rootNamespace: "business", publicId: "pa-org" },
+        project: { id: "business-one", description: "Business detail" }, linkedContact: { id: "pa-child-login", sourceField: "project.client_id" } });
+      expect((await app.request(url + "?expectedContextVersion=" + result.contextVersion, {}, env)).status).toBe(200);
+      expect((await app.request(url + "?expectedContextVersion=" + "b".repeat(43), {}, env)).status).toBe(409);
+      expect((await app.request(organizationPath + "/business-projects/hidden-project", {}, env)).status).toBe(404);
+      expect((await app.request(url.replace("/business/organizations/pa-org", "/portal/organizations/workspace-org"), {}, env)).status).toBe(404);
+      expect((await app.request(url.replace("project-alpha%3Aprimary/business", "delivery%3Alocal/account"), {}, env)).status).toBe(404);
+      let projectPolicyReads = 0;
+      acl.hasPermission.mockImplementation(async (_env, _principal, permission) => {
+        if (permission === "projects.view" && ++projectPolicyReads === 3)
+          await delivery.prepare("UPDATE client_accounts SET project_alpha_organization_id='moved-org' WHERE id='account-org'").run();
+        return ["delivery.share.audit", "viewer.view", "projects.view"].includes(permission);
+      });
+      // The project itself remains unchanged in OPS_DB; only the outer shared
+      // context recheck observes this DELIVERY_DB account reassignment.
+      expect((await app.request(url, {}, env)).status).toBe(409);
+    } finally {
+      acl.hasPermission.mockImplementation(async (_env, _principal, permission) =>
+        ["delivery.share.audit", "viewer.view"].includes(permission));
+    }
+  }, 30_000);
+
   it("routes principal pages and lazy histories through the exact live workspace and rechecks authority", async () => {
     const { app, env, delivery } = await fixture();
     const list = await app.request(organizationPath + "/identities?q=Login&link=linked&blocked=no&principalStatus=active&limit=7", {}, env);
@@ -195,7 +230,7 @@ describe("Client Hub bounded detail collections", () => {
     while (cursor) {
       const page = await readCollection(app, env, organizationPath, "businessContacts", cursor);
       expect(page.contextVersion).toBe(initial.contextVersion);
-      expect(page.items.every(row => row.record_type === "business_contact" && row.identity_id === null)).toBe(true);
+      expect(page.items.every(row => row.record_type === "business_contact" && !("identity_id" in row))).toBe(true);
       expect(page.items.every(row => !Object.keys(row).some(key => key.startsWith("__cursor_")))).toBe(true);
       seen.push(...page.items.map(row => row.public_id));
       cursor = page.page.nextCursor;
@@ -204,6 +239,62 @@ describe("Client Hub bounded detail collections", () => {
     expect(new Set(seen).size).toBe(531);
     expect(identityReads.listPortalIdentityPage.mock.calls.every(call => call[2].context.root.workspace_id === null)).toBe(true);
   }, 60_000);
+
+  it("returns bounded Alpha email and phone on initial and continued contact pages without portal authority", async () => {
+    const { app, env, ops, delivery } = await fixture();
+    const payload = { email: "  Bailey@example.test  ", phone: "  +1 (920) 555-0101 ext. 4  ",
+      private_notes: "PRIVATE_PAYLOAD", billing_recipient: true, portal_identity: "not-authority" };
+    await ops.prepare("UPDATE pa_clients SET payload_json=? WHERE id='pa-child-login'").bind(JSON.stringify(payload)).run();
+    await ops.prepare("UPDATE pa_clients SET payload_json=? WHERE id='pa-child-no-login'")
+      .bind(JSON.stringify({ email: "NoLogin@example.test", phone: null, phone_number: "+1 920 555-0102" })).run();
+    const authorityBefore = await delivery.prepare("SELECT count(*) AS count FROM client_project_grants").first();
+    const detail = await (await app.request(organizationPath, {}, env)).json() as { contacts: Array<Record<string, unknown>> };
+    expect(detail.contacts[0]).toMatchObject({ record_type: "business_contact", public_id: "pa-child-login",
+      email: "Bailey@example.test", phone: "+1 (920) 555-0101 ext. 4" });
+    const first = await readCollection(app, env, organizationPath, "businessContacts", null, 1);
+    const second = await readCollection(app, env, organizationPath, "businessContacts", first.page.nextCursor, 1);
+    expect(first.items[0]).toEqual(detail.contacts[0]);
+    expect(second.items[0]).toMatchObject({ email: "NoLogin@example.test", phone: "+1 920 555-0102" });
+    for (const item of [...detail.contacts, ...second.items]) {
+      expect(Object.keys(item).sort()).toEqual(["contact_key", "display_name", "email", "organization_id", "phone", "public_id", "record_type", "row_key"]);
+      expect(JSON.stringify(item)).not.toContain("PRIVATE_PAYLOAD");
+      expect(item).not.toHaveProperty("identity_id");
+      expect(item).not.toHaveProperty("has_workspace_access");
+      expect(item).not.toHaveProperty("email_hint");
+    }
+    expect(await delivery.prepare("SELECT count(*) AS count FROM client_project_grants").first()).toEqual(authorityBefore);
+  }, 30_000);
+
+  it("treats missing, malformed, non-scalar, overlong and control-containing source channels as unavailable", async () => {
+    const { app, env, ops } = await fixture();
+    const payloads = ["invalid json", "null", "[]", "{}",
+      JSON.stringify({ email: { value: "private@example.test" }, phone: 9205550100 }),
+      JSON.stringify({ email: "x".repeat(321), phone: "1".repeat(81) }),
+      JSON.stringify({ email: "injected\r\nBcc: secret@example.test", phone: "123\u0000456" }),
+      JSON.stringify({ email: " \t ", phone: " " }),
+      // Do not fall back to a different field when the canonical phone is present but invalid.
+      JSON.stringify({ email: false, phone: {}, phone_number: "do not substitute" })];
+    await ops.batch(payloads.map((payload, index) => ops.prepare("INSERT INTO pa_clients VALUES(?,?,'pa-org',1,?)")
+      .bind(`channel-${index}`, `Channel ${index}`, payload)));
+    const result = await readCollection(app, env, organizationPath, "businessContacts");
+    const channels = result.items.filter(row => String(row.public_id).startsWith("channel-"));
+    expect(channels).toHaveLength(payloads.length);
+    for (const row of channels) expect(row).toMatchObject({ email: null, phone: null });
+  }, 30_000);
+
+  it("does not leak contact channels after deactivation or movement to a different organization", async () => {
+    const { app, env, ops } = await fixture();
+    await ops.prepare("UPDATE pa_clients SET payload_json=? WHERE id='pa-child-no-login'")
+      .bind(JSON.stringify({ email: "moved@example.test", phone: "private number" })).run();
+    const first = await readCollection(app, env, organizationPath, "businessContacts", null, 1);
+    await ops.prepare("UPDATE pa_clients SET organization_id='another-client' WHERE id='pa-child-no-login'").run();
+    const continued = await readCollection(app, env, organizationPath, "businessContacts", first.page.nextCursor, 1);
+    expect(continued.items).toEqual([]);
+    await ops.prepare("UPDATE pa_clients SET organization_id='pa-org',active=0 WHERE id='pa-child-no-login'").run();
+    const refreshed = await readCollection(app, env, organizationPath, "businessContacts");
+    expect(JSON.stringify(refreshed)).not.toContain("moved@example.test");
+    expect(JSON.stringify(refreshed)).not.toContain("private number");
+  }, 30_000);
 
   it("loads bounded first pages and every row beyond 200 across each grant/request inventory", async () => {
     const { app, env, delivery } = await fixture();
@@ -385,8 +476,8 @@ describe("Client Hub", () => {
     expect(detail.status).toBe(200);
     const result = await detail.json() as { contacts: Array<Record<string, unknown>>; portalIdentities: { items: Array<Record<string, unknown>> } };
     expect(result.contacts).toEqual(expect.arrayContaining([
-      expect.objectContaining({ public_id: "pa-child-login", identity_id: null, record_type: "business_contact" }),
-      expect.objectContaining({ public_id: "pa-child-no-login", identity_id: null, record_type: "business_contact" }),
+      expect.objectContaining({ public_id: "pa-child-login", email: null, phone: null, record_type: "business_contact" }),
+      expect.objectContaining({ public_id: "pa-child-no-login", email: null, phone: null, record_type: "business_contact" }),
     ]));
     expect(new Set(result.contacts.map(contact => contact.contact_key)).size).toBe(2);
     expect(result.portalIdentities.items).toEqual([expect.objectContaining({ public_id: "pa-child-login", identity_id: "identity-login", accessLoaded: false })]);

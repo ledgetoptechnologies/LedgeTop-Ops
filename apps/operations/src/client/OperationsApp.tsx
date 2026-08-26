@@ -25,7 +25,7 @@ import {
   type DeliverySection,
 } from "./operations-route";
 import { DropboxImportDialog } from "./DropboxImportDialog";
-import { ClientHub } from "./ClientHub";
+import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
 import { JobBriefPanel } from "./JobBriefPanel";
@@ -327,7 +327,7 @@ export function OperationsApp() {
         {page === "dashboard" && <Dashboard {...props} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
         {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage")) && (
-          <ClientHub mapToken={session.mapboxPublicToken} permissions={session.user.permissions} />
+          <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions} />
         )}{" "}
         {page === "airspace" && <Airspace />}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (

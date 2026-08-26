@@ -10,14 +10,18 @@ const labels: Record<Collection, string> = { businessContacts: "Business contact
 const capabilities = { directory: true, requests: true, delivery: true, viewer: true };
 const canonicalRoot = { sourceId, rootNamespace: "business", kind: "organization", publicId: "42" };
 
-function contact(id: string, name: string, business = false) {
-  return { row_key: `${business ? "business" : "portal"}:${id}`, contact_key: id, record_type: business ? "business_contact" : "portal_principal",
+function contact(id: string, name: string) {
+  return { row_key: `portal:${id}`, contact_key: id, record_type: "portal_principal",
     workspace_id: "workspace-one", public_id: id, display_name: name, email_hint: `${id}@example.test`, status: "active",
-    identity_id: business ? null : "identity-one", has_workspace_access: business ? 0 : 1, blocked: 0, access: [], invitation: null };
+    identity_id: "identity-one", has_workspace_access: 1, blocked: 0, access: [], invitation: null };
+}
+function businessContact(id: string, name: string) {
+  return { row_key: `business:${id}`, contact_key: id, record_type: "business_contact", public_id: id, organization_id: "42",
+    display_name: name, email: `${id}@example.test` as string | null, phone: "+1 (920) 555-0101 ext. 4" as string | null };
 }
 function item(collection: Collection, index: number): Record<string, unknown> {
   const id = `${collection}-${index}`, row_key = `${collection}:account-one:${id}`;
-  if (collection === "businessContacts") return contact(id, `Business contact ${index}`, true);
+  if (collection === "businessContacts") return businessContact(id, `Business contact ${index}`);
   if (collection === "accounts") return { row_key, id, display_name: `Account ${index}`, status: "active" };
   if (collection === "projects") return { row_key, id, account_id: "account-one", project_name: `Shared project ${index}`, client_name: "Acme", active: 1, can_request_service: 1 };
   if (collection === "requests") return { row_key, id, title: `Service request ${index}`, status: "submitted", project_name: "Acme site", created_at: "2026-08-25T12:00:00Z" };
@@ -34,7 +38,7 @@ function detail(revision = 1) {
       root_namespace: "business", pa_public_id: "a".repeat(32), detail_path: canonicalPath, display_name: revision === 1 ? "Acme Construction" : "Acme refreshed",
       status: "active", portal_status: "active", account_count: 1, project_count: 1, request_count: 1, contact_count: 2 },
     contextVersion: `context-${revision}`, pages: Object.fromEntries(collections.map(collection => [collection, metadata(collection, true, 5)])),
-    contacts: [contact("business-one", "Business Bailey", true)],
+    contacts: [businessContact("business-one", "Business Bailey")],
     accounts: [item("accounts", 1)], projects: [item("projects", 1)], requests: [item("requests", 1)],
     deliveryGrants: [item("deliveryGrants", 1)], authenticatedDeliveryGrants: [item("authenticatedDeliveryGrants", 1)], viewerGrants: [item("viewerGrants", 1)],
     portalIdentities: { items: [{ ...contact("portal-one", "Portal Alex"), binding_status: "linked", principalContextVersion: `principal-${revision}`,
@@ -119,6 +123,24 @@ test("overlapping pages deduplicate records without merging distinct account gra
   await expect(region(page, "deliveryGrants").getByText("Delivery link 1", { exact: true })).toHaveCount(2);
   await expect(region(page, "deliveryGrants").getByRole("status")).toHaveText("2 shown");
   expect(errors).toEqual([]);
+});
+
+test("business contact channels display separately from portal logins on initial and continued pages", async ({ page }) => {
+  const first = detail();
+  first.contacts = [businessContact("business-one", "Business Bailey"),
+    { ...businessContact("missing-details", "Missing details"), email: null, phone: null }];
+  const state = await mock(page, (route, collection) => route.fulfill({ json: reply(collection) }), () => first);
+  await open(page);
+  const contacts = region(page, "businessContacts");
+  await expect(contacts).toContainText("Email: business-one@example.test");
+  await expect(contacts).toContainText("Phone: +1 (920) 555-0101 ext. 4");
+  await expect(contacts).toContainText("No contact details provided by Project Alpha");
+  await expect(contacts).toContainText("Contact records do not grant portal access");
+  await expect(contacts.getByRole("button", { name: /block|invite|grant/i })).toHaveCount(0);
+  await loadButton(page, "businessContacts").click();
+  await expect(contacts).toContainText("Email: businessContacts-2@example.test");
+  await expect(page.getByRole("button", { name: "Block portal sign-in" })).toHaveCount(1);
+  expect(state.requests.filter(url => url.pathname.includes("/eligibility-blocks"))).toEqual([]);
 });
 
 test("a transient section failure preserves other pages and retries the same cursor", async ({ page }) => {
@@ -252,8 +274,8 @@ test("unavailable or missing collection metadata never invents continuation", as
 test("populated detail remains readable on mobile, narrow, laptop and ultrawide layouts", async ({ page }, testInfo) => {
   const response = detail();
   response.client.display_name = "Acme Construction Services — Regional Property Management";
-  response.contacts[0]!.email_hint = "long-business-contact-address@construction-services.example.test";
-  response.contacts = [response.contacts[0]!, ...[2, 3, 4, 5].map(index => contact(`business-${index}`, `Business contact ${index}`, true))];
+  response.contacts[0]!.email = "long-business-contact-address@construction-services.example.test";
+  response.contacts = [response.contacts[0]!, ...[2, 3, 4, 5].map(index => businessContact(`business-${index}`, `Business contact ${index}`))];
   for (const collection of collections) {
     response.pages[collection]!.returned = 5;
     if (collection !== "businessContacts") response[collection] = [1, 2, 3, 4, 5].map(index => item(collection, index));

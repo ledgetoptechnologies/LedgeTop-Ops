@@ -1588,6 +1588,7 @@ tbody tr:last-child td { border: 0; }
 .client-hub-collection-error p { margin: 0; color: #a12c2c; }
 .client-hub-business-filter { display: grid; gap: .35rem; margin: .8rem 0; color: var(--muted); font-size: .85rem; }
 .client-hub-business-filter select { min-height: 44px; min-width: 0; max-width: 100%; padding: .6rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
+.client-hub-project-link { display: inline-flex; align-items: center; min-height: 44px; max-width: 100%; text-underline-offset: .15em; }
 @media (max-width: 640px) {
   .client-hub-title { flex-wrap: wrap; }
   .client-hub-collection .simple-rows > div, .client-hub-collection .simple-rows > a { flex-wrap: wrap; }

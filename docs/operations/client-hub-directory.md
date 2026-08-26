@@ -112,6 +112,38 @@ Delivery migration chain, verifies unchanged data and triggers, then checks
 foreign keys/integrity and the actual query plans before and after the upgrade.
 The latest-email-invitation read no longer requires a temporary sorting tree.
 
+### Business contact channels and project workspace (local follow-on)
+
+Business contacts now return explicit nullable `email` and `phone` values from
+the existing Alpha projection. The query selects only bounded JSON text fields;
+malformed, non-scalar, control-bearing and oversized values become unavailable.
+The obsolete login/access placeholders are removed. A contact record still
+cannot grant access, create an invitation, or select a notification recipient.
+
+Business project names link to a dedicated client-scoped project workspace:
+
+`/clients/sources/:sourceId/business/:kind/:clientId/projects/:projectId`
+
+Its read endpoint is the canonical client API base plus
+`/business-projects/:projectId`. It returns a whitelisted project summary and the
+current in-root contact referenced by Alpha's `project.client_id`. That is a
+**linked contact**, not an inferred site, billing or portal role. An out-of-root
+or inactive reference is suppressed. Source, project ownership, assignment and
+shared client context are checked before and after hydration. Optional
+`expectedContextVersion` lets a caller reject a changed client context.
+
+The page preserves directory/project/login filters when returning to the client;
+only approved filter keys are carried, never an arbitrary return URL or token.
+Refresh clears stale data while loading, and cancelled/late results cannot restore
+the prior project. Account/portal aliases are not project-detail routes in this
+increment; existing client-detail aliases remain supported.
+
+This increment is read-only and requires no new migration. It does not implement
+site assignments, field-note editing, copy-forward, or Alpha project creation.
+Their authority and remaining decisions are recorded in
+[the project-memory design](project-memory-design.md). The existing directory
+release prerequisites below still apply; this follow-on is not deployed.
+
 ## Index lifecycle
 
 Migration 0032 creates rebuildable roots, scalar search values, revision
@@ -136,7 +168,7 @@ delivery links, or Viewer data.
 
 ## Release gate
 
-Local acceptance completed August 25, 2026:
+Baseline acceptance at `537310f`, completed August 25, 2026:
 
 - Operations: 796 unit/integration tests across 108 files, zero failures; 290
   desktop/mobile browser tests, zero failures. The final runs were serial.
@@ -147,6 +179,25 @@ Local acceptance completed August 25, 2026:
   at 375, 640, 1280 and 3440 pixels.
 - Repository-level source-layout verification is **not** fully green; the
   pre-existing thumbnail documentation failure is detailed below.
+
+Read-only contact/project follow-on acceptance, August 25, 2026:
+
+- The final serial focused backend run passed **56 tests across three files**
+  in 160.12 seconds: Client Hub routes/contacts (32), business history (10), and
+  project detail (14). Coverage includes actual Hono routing and real local D1
+  ownership, reassignment, permission and malformed-data cases. Domain-write
+  abort triggers verify that project-detail reads do not mutate business data.
+- The final complete browser run passed **322 desktop/mobile tests** in 4.3
+  minutes with one worker, including the final contact-label spacing correction.
+  The preceding focused run passed 78 tests. Production build and TypeScript
+  checking passed; final 375, 640, 1280 and 3440 pixel layouts were visually
+  reviewed, including long names/emails, keyboard controls and error recovery.
+- The 796-case full unit gate above belongs to the baseline, not this follow-on;
+  only the three affected backend suites were rerun on these final sources.
+  Repeat the complete release gate before publication.
+- This increment adds no migration and changes no Viewer or thumbnail runtime.
+  It remains local and unpublished. The earlier directory/index migrations,
+  Alpha publication prerequisite and repository-level failure still apply.
 
 Run local acceptance from `apps/operations` using the committed lockfile:
 

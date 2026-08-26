@@ -63,6 +63,9 @@ does not bypass resource authorization or explicit denies.
 
 ### Gaps and conflicts
 
+These are baseline audit findings. Local corrections and release state are
+recorded by slice below; an implemented local correction is not yet a live fix.
+
 - Client Hub eagerly loads the directory, fails above 500 roots, and expands
   access rows inline. Detail histories fail above 200 rows. Replace those limits
   with bounded server queries and progressive navigation, not larger constants.
@@ -384,7 +387,7 @@ or detail checkpoint has been deployed.
 - Never copy grants, invitations, completion state, invoices, or pending notices
   implicitly. Historical records and attachment provenance remain intact.
 
-Read-only next-slice audit (August 25; not implemented):
+Contacts/project-memory audit and local follow-on (August 25):
 
 - Existing Job Briefs are operation-owned. Reuse their optimistic versions,
   immutable revisions, private-attachment and pinned-SOP patterns; do not rename
@@ -395,20 +398,24 @@ Read-only next-slice audit (August 25; not implemented):
   `project.client_id`, but not every department/project role or organization
   general contact channel. Missing projections are not proof of absent contacts,
   and `project.client_id` must not be relabelled as the site contact.
-- A narrower existing display gap should be corrected first: the business-contact
-  collection currently returns names with an empty email placeholder, although
-  Alpha's existing snapshot supplies email and phone in `pa_clients.payload_json`.
-  Use guarded, bounded JSON text extraction and a business-contact-only DTO;
-  remove obsolete identity/access placeholder fields without inferring a login.
-  No new migration or Alpha export is needed. Cover malformed/non-string/long
-  values, private-field exclusion, exact current ownership and continuation in
-  real backend fixtures. Browser fixtures with example emails alone are not
-  evidence that those fields are populated by the current API.
-- The smallest proposed increment is a staff-only, source-scoped project detail
-  with explicit Ops-owned site roles referencing Alpha contacts, versioned text
-  memory, and selective copying into an **existing** authorized destination.
-  Creating a new Alpha project remains deferred until its authoritative contract
-  exists. Attachment/SOP copying needs separate staging and ownership checks.
+- The existing contact display gap is corrected locally: explicit nullable email
+  and phone now come from guarded, bounded JSON text extraction, replacing empty
+  placeholders and obsolete identity/access fields. Real local D1 fixtures cover
+  initial/continued pages, malformed/non-string/long/control-bearing values,
+  private-field exclusion and current contact ownership. No new migration or
+  Alpha export is needed for these channels.
+- A staff-only, source-scoped **read-only** project workspace is implemented
+  locally. Business project links preserve client filters; the detail reader
+  rechecks live project visibility and root ownership and labels Alpha's
+  `project.client_id` as a linked contact, not a site/billing role. No note-editing
+  permission is inferred from assignment or directory visibility.
+- Explicit Ops-owned site roles, versioned text memory and selective copying
+  into an **existing** authorized destination remain proposed. Creating a new
+  Alpha project requires its authoritative contract. Attachment/SOP copying
+  needs separate staging and ownership checks. See
+  [project-memory-design.md](project-memory-design.md) for existing authority,
+  proposed contracts and unresolved product choices, including the pending
+  question about assigned field-staff contributions.
 - Copy requires source-read and destination-write authority, current contact
   ownership, an expected destination version and replay-safe request identity.
   Destination content is independently editable with source-revision provenance;
@@ -417,6 +424,18 @@ Read-only next-slice audit (August 25; not implemented):
   contacts are needed, cross-client copying and completed-project edit policy.
   Conservative initial proposals are manager-only writes, existing Alpha contacts
   and same-client/same-source copies; these are proposals, not enabled policies.
+
+Read-only follow-on verification is separate from the `537310f` full-unit
+baseline above. Its tests include a real Hono route, exact source/root ownership,
+changed permissions and assignments, out-of-root/inactive contact suppression,
+malformed source fields, browser route/filter history, invalid responses and
+late-request cancellation. No migrations, Alpha writes, Viewer edits or
+thumbnail-runtime changes are included. Final serial verification passed **56
+focused backend tests** and the **322-test complete browser suite**, plus
+TypeScript and the production build. The baseline full unit suite was not rerun
+for this increment. Exact counts, visual acceptance and remaining release
+prerequisites are recorded in the directory runbook. This follow-on remains
+local and unpublished.
 
 ### 3. Predictable client and collaborator access
 
@@ -513,6 +532,8 @@ Test the complete workflow, not only whether a component renders:
 - [x] Release the verified navigation slice and check it in the deployed UI.
 - [x] Integrate bounded portal-login reads and scoped business-project history
       locally; keep authority separate from contact records and access inventory.
+- [x] Add projected business contact channels and a read-only, source-qualified
+      project workspace, with responsive layouts and permission/race regressions.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

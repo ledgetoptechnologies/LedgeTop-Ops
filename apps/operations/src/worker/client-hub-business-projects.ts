@@ -46,7 +46,7 @@ function decode(raw: string): Cursor {
   } catch { throw new HTTPException(400, { message: "Business project cursor is invalid" }); }
 }
 
-async function sourceProof(env: Env, context: ClientHubCollectionContext): Promise<string> {
+export async function clientHubBusinessProjectSourceProof(env: Env, context: ClientHubCollectionContext): Promise<string> {
   const root = context.root;
   if (!validId(root.public_id) || !["organization", "standalone_client"].includes(root.kind))
     throw new HTTPException(404, { message: "Client not found" });
@@ -57,7 +57,7 @@ async function sourceProof(env: Env, context: ClientHubCollectionContext): Promi
     source.pa_public_id, source.mapping_status]));
 }
 
-function ownership(context: ClientHubCollectionContext): SqlFilter {
+export function clientHubBusinessProjectOwnership(context: ClientHubCollectionContext): SqlFilter {
   return context.root.kind === "organization"
     ? { sql: "(p.organization_id=? OR (p.organization_id IS NULL AND owner.organization_id=?))", values: [context.root.public_id, context.root.public_id] }
     : { sql: "p.client_id=? AND owner.id IS NOT NULL AND owner.organization_id IS NULL AND p.organization_id IS NULL", values: [context.root.public_id] };
@@ -96,9 +96,9 @@ export async function listClientHubBusinessProjects(env: Env, principal: StaffPr
   const response: ClientHubCollectionResult = { items: [], canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion,
     page: { available: reason === null, reason, nextCursor: null, hasMore: false, returned: 0, limit } };
   if (reason) return response;
-  const source = await sourceProof(env, context);
+  const source = await clientHubBusinessProjectSourceProof(env, context);
   if (cursor && (cursor.policy !== policy.proof || cursor.source !== source)) changed();
-  const owner = ownership(context);
+  const owner = clientHubBusinessProjectOwnership(context);
   const where = `(${owner.sql}) AND (${policy.filter.sql})${statusFilter(filter)}`;
   const values = [...owner.values, ...policy.filter.values];
   // Nested CASE guards malformed/scalar legacy JSON. Requiring a date prefix
@@ -124,7 +124,7 @@ export async function listClientHubBusinessProjects(env: Env, principal: StaffPr
   const pageRows = rows.slice(0, limit);
 
   const [currentPolicy, currentSource] = await Promise.all([
-    readClientHubBusinessProjectPolicy(env, principal), sourceProof(env, context),
+    readClientHubBusinessProjectPolicy(env, principal), clientHubBusinessProjectSourceProof(env, context),
   ]);
   if (currentPolicy.proof !== policy.proof || currentSource !== source) changed();
   // Assignment and individual project/client ownership can change independently

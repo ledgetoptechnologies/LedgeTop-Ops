@@ -8,6 +8,7 @@ import { resolveClientHubWorkspace, type ClientHubWorkspace } from "./client-hub
 import { CLIENT_HUB_COLLECTIONS, createClientHubCollectionContext, isClientHubCollection, listClientHubCollection,
   type ClientHubCollectionContext, type ClientHubPermissions } from "./client-hub-collections";
 import { listClientHubBusinessProjects, BUSINESS_PROJECT_FILTERS, type BusinessProjectFilter } from "./client-hub-business-projects";
+import { readClientHubBusinessProjectDetail } from "./client-hub-business-project-detail";
 import { isPortalIdentityCollection, listPortalIdentityCollection, listPortalIdentityPage, portalIdentityQuery } from "./client-portal-identity-read";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -225,6 +226,18 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
 }
 
 export function registerClientHubRoutes(app: App): void {
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId", async c => {
+    if (c.req.param("rootNamespace") !== "business" || c.req.param("sourceId") !== "project-alpha:primary")
+      throw new HTTPException(404, { message: "Business project not found" });
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    const result = await readClientHubBusinessProjectDetail(c.env, principal, context, c.req.param("projectId"),
+      { expectedContextVersion: c.req.query("expectedContextVersion") });
+    await verifyContext(c.env, principal, context);
+    return c.json(result);
+  });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/identities", async c => {
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });

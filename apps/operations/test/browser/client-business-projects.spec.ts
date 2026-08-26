@@ -39,7 +39,8 @@ test("business projects remain separate from shared work with bounded pages and 
   await expect(section(page).getByText("Business project initial", { exact: true })).toBeVisible();
   await expect(section(page).getByText("Status not recorded", { exact: true })).toBeVisible();
   await expect(page.getByRole("region", { name: "Shared projects", exact: true }).getByText("Explicitly shared site")).toBeVisible();
-  await expect(section(page).getByRole("link")).toHaveCount(0);
+  await expect(section(page).getByRole("link", { name: "Business project initial" }))
+    .toHaveAttribute("href", `${path}/projects/initial?q=acme&login_q=alex&kind=organization`);
   await expect(section(page).getByText("Project created:", { exact: false })).toBeVisible();
   await expect(section(page).getByText(/Last activity/)).toHaveCount(0);
   await page.getByRole("combobox", { name: "Project status", exact: true }).selectOption("completed");
