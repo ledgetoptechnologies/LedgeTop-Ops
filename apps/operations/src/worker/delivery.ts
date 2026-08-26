@@ -1,5 +1,5 @@
 import { HTTPException } from "hono/http-exception";
-import { isMovedSourceMarker, thumbnailFallbackKindForFile, type DeliveryItem } from "@ltds/shared";
+import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID, PRIMARY_CATALOG_SOURCE, isMovedSourceMarker, thumbnailFallbackKindForFile, type CatalogSourceContext, type DeliveryItem } from "@ltds/shared";
 import { accessCodeMatches, decryptDeliveryToken, encryptDeliveryToken, hashAccessCode, randomToken, sha256 } from "./crypto";
 import { requirePermission, sqlScope } from "./acl";
 import { auditStatement } from "./request-security";
@@ -12,6 +12,7 @@ import {
   latestShareAudienceSnapshot,
   resolveShareAudience,
   resolveProjectAlphaDeliveryPrincipal,
+  projectAlphaDeliveryPrincipalGuard,
   shareAudienceSnapshotStatements,
   shareDirectoryRecipientsEnabled,
   type AudienceType,
@@ -568,18 +569,41 @@ export async function createDeliveryShare(env:Env,request:Request,principal:Staf
 export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
   deliveryId:string;receiptId:string;fingerprint:string;r2Prefix:string;label:string|null;expiresAt:string;
   audience:{type:AudienceType;publicId:string;sourceVersion:string};
-}):Promise<{shareId:string;reused:boolean}>{
+  expectedBinding:{workspaceId:string;folderBindingId:string;bindingSourceVersion:string;directoryGenerationId:string};
+},source:CatalogSourceContext=PRIMARY_CATALOG_SOURCE):Promise<{shareId:string;reused:boolean;receiptId:string}>{
+  source=createCatalogSourceContext(source?.sourceId);
+  const replay=async()=>{
+    const prior=await env.DELIVERY_DB.prepare(`SELECT receipt_id,resource_id,request_fingerprint,access_mode
+      FROM project_alpha_delivery_intent_receipts WHERE project_alpha_source_id=? AND delivery_id=?`)
+      .bind(source.sourceId,input.deliveryId).first<{receipt_id:string;resource_id:string;request_fingerprint:string;access_mode:string}>();
+    if(!prior)return null;
+    if(prior.request_fingerprint!==input.fingerprint||prior.access_mode!=="guest")
+      throw new HTTPException(409,{message:"Delivery ID was already used"});
+    return{shareId:prior.resource_id,reused:true,receiptId:prior.receipt_id};
+  };
+  const prior=await replay();if(prior)return prior;
   const prefix=normalizePrefix(input.r2Prefix),project=await env.DELIVERY_DB.prepare(`SELECT id,division_id,client_name,project_name
-    FROM projects WHERE active=1 AND r2_prefix=? LIMIT 2`).bind(prefix).all<{id:string;division_id:string;client_name:string;project_name:string}>();
+    FROM projects WHERE active=1 AND r2_prefix=? AND (project_alpha_source_id=? OR
+      (?='project-alpha:primary' AND project_alpha_source_id IS NULL)) LIMIT 2`)
+    .bind(prefix,source.sourceId,source.sourceId).all<{id:string;division_id:string;client_name:string;project_name:string}>();
   if(project.results.length!==1)throw new HTTPException(409,{message:"Delivery project is not uniquely live"});
-  const target=project.results[0]!,selected=await resolveProjectAlphaDeliveryPrincipal(env,prefix,input.audience.publicId,input.audience.sourceVersion);
+  const target=project.results[0]!,selected=await resolveProjectAlphaDeliveryPrincipal(env,prefix,input.audience.publicId,input.audience.sourceVersion,source);
+  if(selected.workspaceId!==input.expectedBinding.workspaceId||selected.folderBindingId!==input.expectedBinding.folderBindingId||
+    selected.directoryGenerationId!==input.expectedBinding.directoryGenerationId)
+    throw new HTTPException(409,{message:"Delivery folder authority changed"});
   if(!selected.recipients.length)throw new HTTPException(409,{message:"Delivery audience has no eligible recipients"});
-  await env.DELIVERY_DB.prepare(`UPDATE shares SET revoked_at=datetime('now'),revoked_reason='expired'
-    WHERE revoked_at IS NULL AND expires_at IS NOT NULL AND datetime(expires_at)<=datetime('now')
-      AND COALESCE(r2_prefix,(SELECT r2_prefix FROM projects WHERE id=shares.project_id))=?`).bind(prefix).run();
+  const guard=projectAlphaDeliveryPrincipalGuard({audience:selected,principalSourceVersion:input.audience.sourceVersion,
+    bindingSourceVersion:input.expectedBinding.bindingSourceVersion,prefix,
+    allowUnclaimed:env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==="true",source});
+  const projectGuard=`EXISTS(SELECT 1 FROM projects WHERE id=? AND active=1 AND r2_prefix=?
+    AND (project_alpha_source_id=? OR (?='project-alpha:primary' AND project_alpha_source_id IS NULL)))`;
+  const projectGuardValues=[target.id,prefix,source.sourceId,source.sourceId];
+  // New source IDs are namespaced without changing historical primary actor/keys.
+  const actor=source.sourceId===PRIMARY_ALPHA_SOURCE_ID?input.deliveryId:`${source.sourceId}:${input.deliveryId}`;
   const active=await activeShareForPrefix(env,prefix);
   if(active){
-    const paOwned=active.created_by_type==="integration"&&Boolean(await env.DELIVERY_DB.prepare(`SELECT 1 ok FROM project_alpha_delivery_intent_receipts WHERE access_mode='guest' AND resource_id=? LIMIT 1`).bind(active.id).first("ok"));
+    const paOwned=active.created_by_type==="integration"&&active.project_id===target.id&&Boolean(await env.DELIVERY_DB.prepare(`SELECT 1 ok FROM project_alpha_delivery_intent_receipts WHERE project_alpha_source_id=? AND access_mode='guest' AND resource_id=? LIMIT 1`).bind(source.sourceId,active.id).first("ok"));
+    if(!paOwned)throw new HTTPException(409,{message:"An active share already exists for this delivery"});
     const current=await latestShareAudienceSnapshot(env,active.id),secret=await recoverShareSecret(env,active);
     const authority=paOwned?await env.DELIVERY_DB.prepare(`SELECT workspace_id,folder_binding_id,binding_source_version,directory_generation_id,
       principal_public_id,principal_source_version,label FROM project_alpha_delivery_guest_authority WHERE share_id=? AND status='active'`)
@@ -594,27 +618,55 @@ export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
       current.audiencePublicId===selected.audiencePublicId);
     if(!compatible)throw new HTTPException(409,{message:"An active share already exists for this delivery"});
     const statements:D1PreparedStatement[]=[
-      env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_receipts(receipt_id,delivery_id,request_fingerprint,access_mode,resource_id) VALUES(?,?,?,?,?)`).bind(input.receiptId,input.deliveryId,input.fingerprint,"guest",active.id),
+      env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_receipts(receipt_id,delivery_id,request_fingerprint,access_mode,resource_id,project_alpha_source_id,write_guard)
+        SELECT ?,?,?,'guest',?,?,CASE WHEN (${guard.sql}) AND ${projectGuard} AND EXISTS(
+          SELECT 1 FROM shares s JOIN project_alpha_delivery_guest_authority a ON a.share_id=s.id
+          WHERE s.id=? AND s.project_id=? AND s.share_version=? AND s.revoked_at IS NULL
+            AND COALESCE(s.r2_prefix,(SELECT r2_prefix FROM projects WHERE id=s.project_id))=?
+            AND s.created_by_type='integration' AND s.public_id=? AND s.label IS ?
+            AND s.password_hash IS NULL AND s.image_location_map_enabled=0 AND s.r2_object_key IS NULL
+            AND s.expires_at=? AND datetime(s.expires_at)>datetime('now')
+            AND a.status='active' AND a.workspace_id=? AND a.folder_binding_id=?
+            AND a.binding_source_version=? AND a.directory_generation_id=?
+            AND a.principal_public_id=? AND a.principal_source_version=? AND a.label IS ?
+        ) THEN 1 ELSE 0 END`).bind(input.receiptId,input.deliveryId,input.fingerprint,active.id,source.sourceId,
+          ...guard.bindings,...projectGuardValues,active.id,target.id,active.share_version,prefix,active.public_id,input.label,
+          input.expiresAt,selected.workspaceId,selected.folderBindingId,input.expectedBinding.bindingSourceVersion,
+          selected.directoryGenerationId,selected.audiencePublicId,input.audience.sourceVersion,input.label),
       env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_audit(id,receipt_id,action,actor_id,details_json) VALUES(?,?,'guest.accepted',?,?)`).bind(crypto.randomUUID(),input.receiptId,input.deliveryId,JSON.stringify({reused:true,audienceType:selected.audienceType,audiencePublicId:selected.audiencePublicId})),
       ...selected.recipients.map(member=>notificationStatement(env,{shareId:active.id,kind:"share_created",recipientEmail:member.email,
         dedupeKey:notificationDedupeKey("share_created",active.id,`${input.deliveryId}:${member.principalPublicId}`),
         payload:{shareUrl:shareUrl(env,active.public_id!,secret!),clientName:target.client_name,projectName:target.project_name,r2Prefix:prefix,expiresAt:input.expiresAt}})!),
     ];
-    await env.DELIVERY_DB.batch(statements);return{shareId:active.id,reused:true};
+    try{await env.DELIVERY_DB.batch(statements);}catch{
+      const raced=await replay();if(raced)return raced;
+      throw new HTTPException(409,{message:"Delivery authorization changed concurrently"});
+    }
+    return{shareId:active.id,reused:true,receiptId:input.receiptId};
   }
   const liveBindingSource=await env.DELIVERY_DB.prepare(`SELECT source_version FROM portal_v2_folder_bindings
     WHERE id=? AND workspace_id=? AND status='active' AND revoked_at IS NULL LIMIT 2`)
     .bind(selected.folderBindingId,selected.workspaceId).all<{source_version:string}>();
   if(liveBindingSource.results.length!==1)throw new HTTPException(409,{message:"Delivery folder authority is no longer live"});
   const shareId=crypto.randomUUID(),publicId=randomToken(16),secret=randomToken(32),encrypted=await encryptDeliveryToken(secret,env.DELIVERY_TOKEN_SECRET,shareId);
-  await env.DELIVERY_DB.batch([
+  try{await env.DELIVERY_DB.batch([
+    env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_receipts(receipt_id,delivery_id,request_fingerprint,access_mode,resource_id,project_alpha_source_id,write_guard)
+      SELECT ?,?,?,'guest',?,?,CASE WHEN (${guard.sql}) AND ${projectGuard} THEN 1 ELSE 0 END`)
+      .bind(input.receiptId,input.deliveryId,input.fingerprint,shareId,source.sourceId,...guard.bindings,...projectGuardValues),
+    // Expire only this source's integration-owned folder links in the same
+    // transaction. A colliding staff/other-source link is never modified.
+    env.DELIVERY_DB.prepare(`UPDATE shares SET revoked_at=datetime('now'),revoked_reason='expired'
+      WHERE project_id=? AND r2_prefix=? AND r2_object_key IS NULL AND created_by_type='integration'
+        AND revoked_at IS NULL AND expires_at IS NOT NULL AND datetime(expires_at)<=datetime('now')
+        AND EXISTS(SELECT 1 FROM project_alpha_delivery_intent_receipts r
+          WHERE r.resource_id=shares.id AND r.access_mode='guest' AND r.project_alpha_source_id=?)`)
+      .bind(target.id,prefix,source.sourceId),
     env.DELIVERY_DB.prepare(`INSERT INTO shares(id,project_id,token_hash,public_id,label,expires_at,recipient_email,image_location_map_enabled,
       created_by_type,created_by_id,idempotency_key,share_version,secret_ciphertext,secret_iv,r2_prefix,division_id)
       VALUES(?,?,?,?,?,?,?,0,'integration',?,?,2,?,?,?,?)`).bind(shareId,target.id,await sha256(secret),publicId,input.label,
-      input.expiresAt,selected.recipients[0]?.email??null,input.deliveryId,input.deliveryId,encrypted.ciphertext,encrypted.iv,prefix,target.division_id),
-    ...shareAudienceSnapshotStatements(env,shareId,2,selected,input.deliveryId),
-    env.DELIVERY_DB.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES('integration',?,'share.created','share',?,?)`).bind(input.deliveryId,shareId,JSON.stringify({r2Prefix:prefix,audienceType:selected.audienceType,audiencePublicId:selected.audiencePublicId})),
-    env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_receipts(receipt_id,delivery_id,request_fingerprint,access_mode,resource_id) VALUES(?,?,?,?,?)`).bind(input.receiptId,input.deliveryId,input.fingerprint,"guest",shareId),
+      input.expiresAt,selected.recipients[0]?.email??null,actor,actor,encrypted.ciphertext,encrypted.iv,prefix,target.division_id),
+    ...shareAudienceSnapshotStatements(env,shareId,2,selected,actor),
+    env.DELIVERY_DB.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json) VALUES('integration',?,'share.created','share',?,?)`).bind(actor,shareId,JSON.stringify({r2Prefix:prefix,audienceType:selected.audienceType,audiencePublicId:selected.audiencePublicId,projectAlphaSourceId:source.sourceId})),
     env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_guest_authority(share_id,workspace_id,folder_binding_id,binding_source_version,directory_generation_id,principal_public_id,principal_source_version,label)
       VALUES(?,?,?,(SELECT source_version FROM portal_v2_folder_bindings WHERE id=? AND workspace_id=? AND source_version=?
         AND status='active' AND revoked_at IS NULL),?,?,?,?)`).bind(shareId,selected.workspaceId,selected.folderBindingId,
@@ -623,32 +675,58 @@ export async function createProjectAlphaDeliveryGuestShare(env:Env,input:{
     env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_audit(id,receipt_id,action,actor_id,details_json) VALUES(?,?,'guest.accepted',?,?)`).bind(crypto.randomUUID(),input.receiptId,input.deliveryId,JSON.stringify({reused:false,audienceType:selected.audienceType,audiencePublicId:selected.audiencePublicId})),
     ...selected.recipients.map(member=>notificationStatement(env,{shareId,kind:"share_created",recipientEmail:member.email,
       dedupeKey:notificationDedupeKey("share_created",shareId,`${input.deliveryId}:${member.principalPublicId}`),payload:{shareUrl:shareUrl(env,publicId,secret),clientName:target.client_name,projectName:target.project_name,r2Prefix:prefix,expiresAt:input.expiresAt}})!),
-  ]);
-  return{shareId,reused:false};
+  ]);}catch{
+    const raced=await replay();if(raced)return raced;
+    throw new HTTPException(409,{message:"Delivery authorization changed concurrently"});
+  }
+  return{shareId,reused:false,receiptId:input.receiptId};
 }
 
 export async function revokeProjectAlphaDeliveryGuestShare(env:Env,input:{shareId:string;deliveryId:string;
-  revokeReceiptId:string;originalReceiptId:string;fingerprint:string}):Promise<void>{
-  const share=await env.DELIVERY_DB.prepare(`SELECT s.id,s.r2_prefix,p.client_name,p.project_name FROM shares s
+  revokeReceiptId:string;originalReceiptId:string;fingerprint:string},source:CatalogSourceContext=PRIMARY_CATALOG_SOURCE):Promise<{receiptId:string}>{
+  source=createCatalogSourceContext(source?.sourceId);
+  const replay=async()=>{
+    const prior=await env.DELIVERY_DB.prepare(`SELECT receipt_id,original_receipt_id,request_fingerprint
+      FROM project_alpha_delivery_intent_revocation_receipts WHERE project_alpha_source_id=? AND delivery_id=?`)
+      .bind(source.sourceId,input.deliveryId).first<{receipt_id:string;original_receipt_id:string;request_fingerprint:string}>();
+    if(!prior)return null;
+    if(prior.request_fingerprint!==input.fingerprint||prior.original_receipt_id!==input.originalReceiptId)
+      throw new HTTPException(409,{message:"Delivery ID was already used"});
+    return{receiptId:prior.receipt_id};
+  };
+  const prior=await replay();if(prior)return prior;
+  const share=await env.DELIVERY_DB.prepare(`SELECT s.id,s.share_version,s.r2_prefix,p.client_name,p.project_name FROM shares s
     JOIN projects p ON p.id=s.project_id WHERE s.id=? AND s.created_by_type='integration' AND s.revoked_at IS NULL
-    AND EXISTS(SELECT 1 FROM project_alpha_delivery_intent_receipts r WHERE r.receipt_id=? AND r.access_mode='guest' AND r.resource_id=s.id)`)
-    .bind(input.shareId,input.originalReceiptId).first<{id:string;r2_prefix:string;client_name:string;project_name:string}>();
-  if(!share)throw new HTTPException(409,{message:"Delivery share is not active"});
+    AND EXISTS(SELECT 1 FROM project_alpha_delivery_intent_receipts r WHERE r.receipt_id=?
+      AND r.project_alpha_source_id=? AND r.access_mode='guest' AND r.resource_id=s.id)`)
+    .bind(input.shareId,input.originalReceiptId,source.sourceId).first<{id:string;share_version:number;r2_prefix:string;client_name:string;project_name:string}>();
+  if(!share){const raced=await replay();if(raced)return raced;throw new HTTPException(409,{message:"Delivery share is not active"});}
   const audience=await latestShareAudienceSnapshot(env,share.id);
-  if(!audience)throw new HTTPException(409,{message:"Delivery share audience is unavailable"});
-  const results=await env.DELIVERY_DB.batch([
+  if(!audience){const raced=await replay();if(raced)return raced;throw new HTTPException(409,{message:"Delivery share audience is unavailable"});}
+  try{await env.DELIVERY_DB.batch([
+    env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_revocation_receipts
+      (receipt_id,delivery_id,original_receipt_id,request_fingerprint,project_alpha_source_id,write_guard)
+      SELECT ?,?,?,?,?,CASE WHEN EXISTS(
+        SELECT 1 FROM shares s JOIN project_alpha_delivery_guest_authority a ON a.share_id=s.id
+        JOIN portal_v2_workspaces w ON w.id=a.workspace_id
+        JOIN project_alpha_delivery_intent_receipts r ON r.resource_id=s.id AND r.access_mode='guest'
+        WHERE s.id=? AND s.share_version=? AND s.revoked_at IS NULL AND s.created_by_type='integration'
+          AND a.status='active' AND w.project_alpha_source_id=? AND r.receipt_id=? AND r.project_alpha_source_id=?
+      ) THEN 1 ELSE 0 END`).bind(input.revokeReceiptId,input.deliveryId,input.originalReceiptId,input.fingerprint,
+        source.sourceId,share.id,share.share_version,source.sourceId,input.originalReceiptId,source.sourceId),
     env.DELIVERY_DB.prepare(`UPDATE shares SET revoked_at=datetime('now'),revoked_reason='project_alpha_delivery_revoked',share_version=share_version+1
-      WHERE id=? AND revoked_at IS NULL AND created_by_type='integration'
-        AND EXISTS(SELECT 1 FROM project_alpha_delivery_guest_authority WHERE share_id=shares.id AND status='active')`).bind(share.id),
-    env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_guest_authority SET status='revoked',revoked_at=datetime('now') WHERE share_id=? AND status='active' AND changes()=1`).bind(share.id),
-    env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_revocation_receipts(receipt_id,delivery_id,original_receipt_id,request_fingerprint) SELECT ?,?,?,? WHERE changes()=1`).bind(input.revokeReceiptId,input.deliveryId,input.originalReceiptId,input.fingerprint),
-    env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_audit(id,receipt_id,action,actor_id,details_json) SELECT ?,?,'guest.revoked',?,? WHERE changes()=1`).bind(crypto.randomUUID(),input.originalReceiptId,input.deliveryId,JSON.stringify({reasonCode:"project_alpha_delivery_revoked"})),
+      WHERE id=? AND share_version=? AND revoked_at IS NULL AND created_by_type='integration'`).bind(share.id,share.share_version),
+    env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_guest_authority SET status='revoked',revoked_at=datetime('now') WHERE share_id=? AND status='active'`).bind(share.id),
+    env.DELIVERY_DB.prepare(`INSERT INTO project_alpha_delivery_intent_audit(id,receipt_id,action,actor_id,details_json) VALUES(?,?,'guest.revoked',?,?)`).bind(crypto.randomUUID(),input.originalReceiptId,input.deliveryId,JSON.stringify({reasonCode:"project_alpha_delivery_revoked"})),
     ...audience.recipients.map(member=>env.DELIVERY_DB.prepare(`INSERT OR IGNORE INTO delivery_notifications
-      (id,dedupe_key,share_id,kind,recipient_email,payload_json) SELECT ?,?,?,'share_revoked',?,? WHERE changes()=1`)
+      (id,dedupe_key,share_id,kind,recipient_email,payload_json) VALUES(?,?,?,'share_revoked',?,?)`)
       .bind(crypto.randomUUID(),notificationDedupeKey("share_revoked",share.id,`${input.deliveryId}:${member.principalPublicId}`),
         share.id,member.email,JSON.stringify({clientName:share.client_name,projectName:share.project_name,r2Prefix:share.r2_prefix}))),
-  ]);
-  if(!results[0]?.meta.changes)throw new HTTPException(409,{message:"Delivery share is not active"});
+  ]);}catch{
+    const raced=await replay();if(raced)return raced;
+    throw new HTTPException(409,{message:"Delivery authorization changed concurrently"});
+  }
+  return{receiptId:input.revokeReceiptId};
 }
 
 export interface DeliveryShareHistoryQuery {

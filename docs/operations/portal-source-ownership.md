@@ -57,11 +57,12 @@ the same protection, not just the ordinary sequential-event tests.
 
 ## Rollout and remaining gates
 
-This increment does not make delivery-intent receipts, guest-share idempotency,
-outbound routing or the entire portal multi-source. Those still use the one
-configured authority and must not be enabled for another source. In particular,
-rebuilding intent receipt parents requires preserving dependent grant, audit and
-outbox history; prefix-only guest reuse is not source ownership.
+This increment alone does not make delivery-intent receipts, guest-share
+idempotency, outbound routing or the entire portal multi-source. The subsequent
+[delivery-intent increment](delivery-intent-source-ownership.md) isolates receipt
+and guest ownership while preserving dependent grant, audit and outbox history.
+Public ingress, client authority and outbound routing still use the one configured
+authority and must not be enabled for another source on that basis alone.
 
 Before release, verify populated migration, pending snapshot continuation,
 source collisions, source-map immutability, primary URL/replay compatibility,

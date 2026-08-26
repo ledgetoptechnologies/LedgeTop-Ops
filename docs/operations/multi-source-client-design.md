@@ -7,7 +7,9 @@ projection increment is described in [business source isolation](business-source
 and is verified locally but unpublished. Delivery account/project ownership is
 covered in [Delivery source provenance](delivery-source-provenance.md); native
 workspace ownership and transactional projection replay are covered in
-[native portal source ownership](portal-source-ownership.md). These are separate
+[native portal source ownership](portal-source-ownership.md). The subsequent
+[delivery-intent source boundary](delivery-intent-source-ownership.md) covers
+receipt replay, guest links and notification ownership. These are separate
 local increments, not second-source activation. The
 original gaps below were audited against local Operations checkpoint
 `f055b2c` on August 26, 2026. This document
@@ -28,7 +30,8 @@ incident or an assertion that a second producer is currently connected.
 | Staff authority | The same snapshot rebuilds Project Alpha-managed staff roles/divisions. `apps/ops-sync/src/projection.ts` processes entitlements against the same staff projection. | Preserve the existing authority explicitly. A business-data connection must not gain staff-role, Access-group or identity-management authority. |
 | Delivery legacy mapping | Local `0157` source-qualifies Alpha client, organization and project references while retaining local account/project/grant IDs and URLs. | Release paired schema/consumers safely; source-aware outbound routing remains separate. |
 | Service catalog | The released schema has one checkpoint and global catalog state. Local migration `0156` now source-qualifies the catalog, saved request parents and selections; public ingress remains primary-only. | Verify and deploy the compatible migration/code together before any registry or second-source activation. |
-| Portal projection | Local `0158` reserves source-owned local workspace handles, source-qualifies native roots and replay receipts, and guards authority writes against stale checkpoints. Populated migration and paired primary-consumer checks passed locally. | Release paired schema/code safely; implement the authenticated source registry and remaining delivery-intent/guest receipt boundaries before activation. |
+| Portal projection | Local `0158` reserves source-owned local workspace handles, source-qualifies native roots and replay receipts, and guards authority writes against stale checkpoints. Populated migration and paired primary-consumer checks passed locally. | Release paired schema/code safely; implement the authenticated source registry before activation. |
+| Delivery intents | Local `0159` and paired runtime changes isolate create/revoke receipts, guest reuse and notification ownership. See the increment runbook for verification. | Release paired schema/code safely; secondary HTTP ingress and client/outbound authority remain disabled. |
 | Client Hub | Local migration `0034` and the paired readers/index extend source-qualified business roots; secondary business roots cannot infer a primary portal/account bridge. Source-pinned backend and browser checks passed locally. | Apply the coordinated release and live acceptance gates. Business display is not portal activation. |
 
 ## Identity and authority contract

@@ -49,7 +49,8 @@ async function prepareGuestDeliveryDatabase(db:D1Database):Promise<void>{
   await runSqlStatements(db,`
     CREATE TABLE projects(
       id TEXT PRIMARY KEY,division_id TEXT,client_name TEXT NOT NULL,project_name TEXT NOT NULL,
-      r2_prefix TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT(datetime('now'))
+      r2_prefix TEXT NOT NULL,active INTEGER NOT NULL DEFAULT 1,created_at TEXT NOT NULL DEFAULT(datetime('now')),
+      project_alpha_source_id TEXT
     );
     CREATE TABLE shares(
       id TEXT PRIMARY KEY,project_id TEXT NOT NULL,token_hash TEXT NOT NULL UNIQUE,public_id TEXT UNIQUE,label TEXT,
@@ -61,6 +62,7 @@ async function prepareGuestDeliveryDatabase(db:D1Database):Promise<void>{
     );
     CREATE UNIQUE INDEX idx_shares_one_active_prefix ON shares(r2_prefix) WHERE revoked_at IS NULL AND r2_prefix IS NOT NULL AND r2_object_key IS NULL;
     CREATE UNIQUE INDEX idx_shares_one_active_object ON shares(r2_object_key) WHERE revoked_at IS NULL AND r2_object_key IS NOT NULL;
+    CREATE UNIQUE INDEX idx_shares_idempotency ON shares(created_by_type,created_by_id,idempotency_key) WHERE idempotency_key IS NOT NULL;
     CREATE TABLE audit_log(
       id INTEGER PRIMARY KEY AUTOINCREMENT,actor_type TEXT NOT NULL,actor_id TEXT,action TEXT NOT NULL,
       entity_type TEXT,entity_id TEXT,details_json TEXT,created_at TEXT NOT NULL DEFAULT(datetime('now'))
@@ -119,8 +121,10 @@ async function prepareGuestDeliveryDatabase(db:D1Database):Promise<void>{
       identity_id TEXT,status TEXT,revoked_at TEXT,valid_from TEXT,expires_at TEXT,scope_type TEXT,workspace_id TEXT,scope_public_id TEXT
     );
     CREATE TABLE project_alpha_delivery_intent_receipts(
-      receipt_id TEXT PRIMARY KEY,delivery_id TEXT NOT NULL UNIQUE,request_fingerprint TEXT NOT NULL,
-      access_mode TEXT NOT NULL,resource_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'accepted',created_at TEXT NOT NULL DEFAULT(datetime('now'))
+      receipt_id TEXT PRIMARY KEY,delivery_id TEXT NOT NULL,request_fingerprint TEXT NOT NULL,
+      access_mode TEXT NOT NULL,resource_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'accepted',created_at TEXT NOT NULL DEFAULT(datetime('now')),
+      project_alpha_source_id TEXT NOT NULL,write_guard INTEGER NOT NULL DEFAULT 1 CHECK(write_guard=1),
+      UNIQUE(project_alpha_source_id,delivery_id)
     );
     CREATE TABLE project_alpha_delivery_portal_grants(
       id TEXT PRIMARY KEY,receipt_id TEXT NOT NULL UNIQUE,workspace_id TEXT NOT NULL,folder_binding_id TEXT NOT NULL,
@@ -134,8 +138,10 @@ async function prepareGuestDeliveryDatabase(db:D1Database):Promise<void>{
       actor_id TEXT NOT NULL,details_json TEXT NOT NULL DEFAULT '{}',created_at TEXT NOT NULL DEFAULT(datetime('now'))
     );
     CREATE TABLE project_alpha_delivery_intent_revocation_receipts(
-      receipt_id TEXT PRIMARY KEY,delivery_id TEXT NOT NULL UNIQUE,original_receipt_id TEXT NOT NULL,
-      request_fingerprint TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now'))
+      receipt_id TEXT PRIMARY KEY,delivery_id TEXT NOT NULL,original_receipt_id TEXT NOT NULL,
+      request_fingerprint TEXT NOT NULL,created_at TEXT NOT NULL DEFAULT(datetime('now')),
+      project_alpha_source_id TEXT NOT NULL,write_guard INTEGER NOT NULL DEFAULT 1 CHECK(write_guard=1),
+      UNIQUE(project_alpha_source_id,delivery_id)
     );
     CREATE TABLE project_alpha_delivery_portal_notification_outbox(
       id TEXT PRIMARY KEY,receipt_id TEXT NOT NULL,grant_id TEXT NOT NULL,principal_public_id TEXT NOT NULL,
@@ -180,7 +186,103 @@ async function createGuestHarness(suffix:string){
   return{mf,delivery,env,app,secret};
 }
 
+function beforeNextDeliveryBatch(database:D1Database,interleave:()=>Promise<void>):D1Database{
+  let pending=true;
+  return new Proxy(database,{get(target,key){
+    if(key==="batch")return async (statements:D1PreparedStatement[])=>{
+      if(pending){pending=false;await interleave();}
+      return target.batch(statements);
+    };
+    const value=Reflect.get(target,key,target);
+    return typeof value==="function"?value.bind(target):value;
+  }});
+}
+
+function guestIntent(deliveryId:string){return{
+  schemaVersion:1,applicationKey:"project-alpha",deliveryId,occurredAt:new Date().toISOString(),
+  scope:{type:"project",publicId:"project-one"},audience:{type:"principal",publicId:"principal-one"},
+  accessMode:"guest",expiresAt:new Date(Date.now()+30*86400000).toISOString(),label:null,notify:true,
+};}
+
 describe("Project Alpha delivery-intent boundary", () => {
+  it("collapses concurrent guest creation and revocation retries to one receipt each",async()=>{
+    const {mf,delivery,env,app,secret}=await createGuestHarness("concurrent-replay");
+    try{
+      const path="/api/internal/project-alpha/delivery-intents",intent=guestIntent("guest-raced");
+      const requests=await Promise.all([signedRequest(path,intent,secret),signedRequest(path,intent,secret)]);
+      const responses=await Promise.all(requests.map(request=>app.fetch(request,env)));
+      const bodies=await Promise.all(responses.map(response=>response.text()));
+      expect(responses.map(response=>response.status),JSON.stringify(bodies)).toEqual([202,202]);
+      expect(JSON.parse(bodies[0]!)).toEqual(JSON.parse(bodies[1]!));
+      const original=(JSON.parse(bodies[0]!) as {receiptId:string}).receiptId;
+      expect(await delivery.prepare("SELECT count(*) n FROM shares").first("n")).toBe(1);
+      expect(await delivery.prepare("SELECT count(*) n FROM delivery_notifications").first("n")).toBe(1);
+      const revoke={schemaVersion:1,applicationKey:"project-alpha",deliveryId:"guest-raced-revoke",
+        occurredAt:new Date().toISOString(),receiptId:original,reasonCode:"project_alpha_delivery_revoked"};
+      const revokeRequests=await Promise.all([signedRequest(`${path}/revoke`,revoke,secret),signedRequest(`${path}/revoke`,revoke,secret)]);
+      const revoked=await Promise.all(revokeRequests.map(request=>app.fetch(request,env)));
+      const revokedBodies=await Promise.all(revoked.map(response=>response.text()));
+      expect(revoked.map(response=>response.status),JSON.stringify(revokedBodies)).toEqual([202,202]);
+      expect(JSON.parse(revokedBodies[0]!)).toEqual(JSON.parse(revokedBodies[1]!));
+      expect(await delivery.prepare("SELECT count(*) n FROM project_alpha_delivery_intent_revocation_receipts").first("n")).toBe(1);
+      expect(await delivery.prepare("SELECT count(*) n FROM delivery_notifications WHERE kind='share_revoked'").first("n")).toBe(1);
+    }finally{await mf.dispose();}
+  },20_000);
+
+  it("rolls back guest receipt, share and notifications when eligibility changes before commit",async()=>{
+    const {mf,delivery,env,app,secret}=await createGuestHarness("guest-eligibility-race");
+    try{
+      env.DELIVERY_DB=beforeNextDeliveryBatch(delivery,async()=>{
+        await delivery.prepare(`INSERT INTO portal_v2_identity_eligibility_blocks
+          (id,match_type,normalized_email,status,valid_from) VALUES('raced-block','email','client@example.test','active',datetime('now','-1 hour'))`).run();
+      });
+      const response=await app.fetch(await signedRequest("/api/internal/project-alpha/delivery-intents",guestIntent("guest-blocked-at-commit"),secret),env);
+      expect(response.status,await response.text()).toBe(409);
+      for(const table of ["project_alpha_delivery_intent_receipts","shares","delivery_notifications","project_alpha_delivery_intent_audit"])
+        expect(await delivery.prepare(`SELECT count(*) n FROM ${table}`).first("n"),table).toBe(0);
+    }finally{await mf.dispose();}
+  },20_000);
+
+  it.each(["label","r2_prefix"] as const)("rejects a guest reuse whose %s changes after read without accepting or notifying",async(field)=>{
+    const {mf,delivery,env,app,secret}=await createGuestHarness(`guest-reuse-race-${field}`);
+    try{
+      const path="/api/internal/project-alpha/delivery-intents",intent=guestIntent("guest-reuse-original");
+      expect((await app.fetch(await signedRequest(path,intent,secret),env)).status).toBe(202);
+      env.DELIVERY_DB=beforeNextDeliveryBatch(delivery,async()=>{
+        await delivery.prepare(`UPDATE shares SET ${field}=?`).bind(field==="label"?"Changed by staff":"jobs/other-client/").run();
+      });
+      const response=await app.fetch(await signedRequest(path,{...intent,deliveryId:"guest-reuse-raced"},secret),env);
+      expect(response.status,await response.text()).toBe(409);
+      expect(await delivery.prepare("SELECT count(*) n FROM project_alpha_delivery_intent_receipts").first("n")).toBe(1);
+      expect(await delivery.prepare("SELECT count(*) n FROM delivery_notifications").first("n")).toBe(1);
+      expect(await delivery.prepare(`SELECT ${field} FROM shares`).first(field)).toBe(field==="label"?"Changed by staff":"jobs/other-client/");
+    }finally{await mf.dispose();}
+  },20_000);
+
+  it("does not expire or replace a staff-owned link",async()=>{
+    const {mf,delivery,env,app,secret}=await createGuestHarness("staff-expired-link");
+    try{
+      await delivery.prepare(`INSERT INTO shares(id,project_id,token_hash,created_by_type,created_by_id,r2_prefix,expires_at)
+        VALUES('staff-expired','project-row','staff-token','staff','staff-one','jobs/client-one/project-one/',datetime('now','-1 day'))`).run();
+      const before=await delivery.prepare("SELECT * FROM shares").all();
+      const response=await app.fetch(await signedRequest("/api/internal/project-alpha/delivery-intents",guestIntent("guest-collides-staff"),secret),env);
+      expect(response.status,await response.text()).toBe(409);
+      expect((await delivery.prepare("SELECT * FROM shares").all()).results).toEqual(before.results);
+      expect(await delivery.prepare("SELECT count(*) n FROM project_alpha_delivery_intent_receipts").first("n")).toBe(0);
+      expect(await delivery.prepare("SELECT count(*) n FROM delivery_notifications").first("n")).toBe(0);
+    }finally{await mf.dispose();}
+  },20_000);
+
+  it("never adopts a secondary source project merely because its folder matches",async()=>{
+    const {mf,delivery,env,app,secret}=await createGuestHarness("secondary-project");
+    try{
+      await delivery.prepare("UPDATE projects SET project_alpha_source_id='project-alpha:secondary'").run();
+      const response=await app.fetch(await signedRequest("/api/internal/project-alpha/delivery-intents",guestIntent("guest-wrong-project-source"),secret),env);
+      expect(response.status,await response.text()).toBe(409);
+      expect(await delivery.prepare("SELECT count(*) n FROM shares").first("n")).toBe(0);
+      expect(await delivery.prepare("SELECT count(*) n FROM project_alpha_delivery_intent_receipts").first("n")).toBe(0);
+    }finally{await mf.dispose();}
+  },20_000);
   it("admits only the three exact signed POST paths", () => {
     expect(projectAlphaDeliveryMachineRequest("POST", "/api/internal/project-alpha/delivery-intents")).toBe(true);
     expect(projectAlphaDeliveryMachineRequest("POST", "/api/internal/project-alpha/delivery-intents/preflight")).toBe(true);
@@ -291,11 +393,11 @@ describe("Project Alpha delivery-intent boundary", () => {
         CREATE TABLE portal_v2_workspace_memberships(workspace_id TEXT,identity_id TEXT,status TEXT,revoked_at TEXT,expires_at TEXT);
         CREATE TABLE portal_v2_identity_eligibility_blocks(id TEXT,match_type TEXT,issuer TEXT,subject TEXT,normalized_email TEXT,status TEXT,valid_from TEXT,expires_at TEXT);
         CREATE TABLE portal_v2_identity_denials(identity_id TEXT,status TEXT,revoked_at TEXT,valid_from TEXT,expires_at TEXT,scope_type TEXT,workspace_id TEXT,scope_public_id TEXT);
-        CREATE TABLE project_alpha_delivery_intent_receipts(receipt_id TEXT PRIMARY KEY,delivery_id TEXT UNIQUE,request_fingerprint TEXT,access_mode TEXT,resource_id TEXT,status TEXT DEFAULT 'accepted',created_at TEXT DEFAULT(datetime('now')));
+        CREATE TABLE project_alpha_delivery_intent_receipts(receipt_id TEXT PRIMARY KEY,delivery_id TEXT,request_fingerprint TEXT,access_mode TEXT,resource_id TEXT,status TEXT DEFAULT 'accepted',created_at TEXT DEFAULT(datetime('now')),project_alpha_source_id TEXT NOT NULL,write_guard INTEGER NOT NULL DEFAULT 1 CHECK(write_guard=1),UNIQUE(project_alpha_source_id,delivery_id));
         CREATE TABLE project_alpha_delivery_portal_grants(id TEXT PRIMARY KEY,receipt_id TEXT,workspace_id TEXT,folder_binding_id TEXT,binding_source_version TEXT,audience_type TEXT,audience_public_id TEXT,audience_source_version TEXT,grant_version INTEGER DEFAULT 1,status TEXT DEFAULT 'active',expires_at TEXT,label TEXT,actor_kind TEXT DEFAULT 'project_alpha_delivery',actor_id TEXT,revoked_at TEXT,revoke_reason_code TEXT,created_at TEXT DEFAULT(datetime('now')));
         CREATE TABLE project_alpha_delivery_intent_audit(id TEXT PRIMARY KEY,receipt_id TEXT,action TEXT,actor_kind TEXT DEFAULT 'project_alpha_delivery',actor_id TEXT,details_json TEXT,created_at TEXT DEFAULT(datetime('now')));
         CREATE TABLE project_alpha_delivery_portal_notification_outbox(id TEXT PRIMARY KEY,receipt_id TEXT,grant_id TEXT,principal_public_id TEXT,principal_source_version TEXT,event_type TEXT,status TEXT DEFAULT 'pending',attempt_count INTEGER DEFAULT 0,next_attempt_at TEXT DEFAULT(datetime('now')),lease_expires_at TEXT,last_error TEXT,delivered_at TEXT,created_at TEXT DEFAULT(datetime('now')),updated_at TEXT DEFAULT(datetime('now')));
-        CREATE TABLE project_alpha_delivery_intent_revocation_receipts(receipt_id TEXT PRIMARY KEY,delivery_id TEXT UNIQUE,original_receipt_id TEXT,request_fingerprint TEXT,created_at TEXT DEFAULT(datetime('now')));
+        CREATE TABLE project_alpha_delivery_intent_revocation_receipts(receipt_id TEXT PRIMARY KEY,delivery_id TEXT,original_receipt_id TEXT,request_fingerprint TEXT,created_at TEXT DEFAULT(datetime('now')),project_alpha_source_id TEXT NOT NULL,write_guard INTEGER NOT NULL DEFAULT 1 CHECK(write_guard=1),UNIQUE(project_alpha_source_id,delivery_id));
         INSERT INTO portal_v2_workspaces(id,status) VALUES('workspace-one','active');
         INSERT INTO portal_v2_folder_bindings VALUES('binding-one','workspace-one','project','project-one','client/project/','binding-v1','active',NULL);
         INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-one','generation-one');

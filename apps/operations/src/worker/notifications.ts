@@ -2,6 +2,7 @@ import {
   buildServiceRequestNotificationSnapshot,
   parseServiceRequestNotificationSnapshot,
   PRIMARY_ALPHA_SOURCE_ID,
+  createCatalogSourceContext,
   type ServiceRequestNotificationLifecycle,
   type ServiceRequestNotificationSnapshot,
 } from "@ltds/shared";
@@ -123,11 +124,20 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
     const attempt = row.attempts + 1;
     try {
       const integrationAuthority=await env.DELIVERY_DB.prepare(`SELECT authority.principal_public_id,authority.principal_source_version,
+        authority.workspace_id,authority.folder_binding_id,authority.directory_generation_id,workspace.project_alpha_source_id,
         authority.status authority_status,share.revoked_at,share.expires_at,binding.r2_prefix,
         CASE WHEN binding.id IS NOT NULL AND checkpoint.active_generation_id=authority.directory_generation_id
-          AND generation.id IS NOT NULL THEN 1 ELSE 0 END source_context_live
+          AND generation.id IS NOT NULL AND workspace.status='active'
+          AND EXISTS(SELECT 1 FROM portal_v2_directory_entities owner
+            WHERE owner.workspace_id=authority.workspace_id AND owner.generation_id=generation.id
+              AND owner.entity_type=binding.owner_scope_type AND owner.public_id=binding.owner_public_id
+              AND owner.active=1 AND owner.source_version=binding.source_version)
+          AND EXISTS(SELECT 1 FROM project_alpha_delivery_intent_receipts receipt WHERE receipt.access_mode='guest'
+            AND receipt.resource_id=authority.share_id AND receipt.project_alpha_source_id=workspace.project_alpha_source_id)
+          THEN 1 ELSE 0 END source_context_live
         FROM project_alpha_delivery_guest_authority authority
         JOIN shares share ON share.id=authority.share_id
+        LEFT JOIN portal_v2_workspaces workspace ON workspace.id=authority.workspace_id
         LEFT JOIN portal_v2_folder_bindings binding ON binding.id=authority.folder_binding_id
           AND binding.workspace_id=authority.workspace_id AND binding.source_version=authority.binding_source_version
           AND binding.status='active' AND binding.revoked_at IS NULL
@@ -135,7 +145,8 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
         LEFT JOIN portal_v2_directory_generations generation ON generation.id=authority.directory_generation_id
           AND generation.workspace_id=authority.workspace_id AND generation.status='active' AND generation.complete=1
         WHERE authority.share_id=? LIMIT 2`).bind(row.share_id)
-        .all<{principal_public_id:string;principal_source_version:string;authority_status:"active"|"revoked";revoked_at:string|null;expires_at:string|null;r2_prefix:string|null;source_context_live:number}>();
+        .all<{principal_public_id:string;principal_source_version:string;workspace_id:string;folder_binding_id:string;directory_generation_id:string;
+          project_alpha_source_id:string;authority_status:"active"|"revoked";revoked_at:string|null;expires_at:string|null;r2_prefix:string|null;source_context_live:number}>();
       if(integrationAuthority.results.length>1)throw new HTTPException(409,{message:"Delivery recipient authority is ambiguous"});
       if(integrationAuthority.results.length===1){
         const authority=integrationAuthority.results[0]!,createdLifecycle=row.kind!=="share_revoked";
@@ -147,8 +158,11 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
         if(!createdLifecycle&&(authority.authority_status!=="revoked"||authority.revoked_at===null))
           throw new HTTPException(409,{message:"Delivery revocation is not authoritative"});
         const recipient=await resolveProjectAlphaDeliveryPrincipal(env,
-          authority.r2_prefix,authority.principal_public_id,authority.principal_source_version);
-        if(recipient.recipients.length!==1||recipient.recipients[0]!.email!==row.recipient_email)
+          authority.r2_prefix,authority.principal_public_id,authority.principal_source_version,
+          createCatalogSourceContext(authority.project_alpha_source_id));
+        if(recipient.workspaceId!==authority.workspace_id||recipient.folderBindingId!==authority.folder_binding_id||
+          recipient.directoryGenerationId!==authority.directory_generation_id||
+          recipient.recipients.length!==1||recipient.recipients[0]!.email!==row.recipient_email)
           throw new HTTPException(409,{message:"Delivery recipient is no longer eligible"});
       }
       const rendered = renderNotification(row.kind, JSON.parse(row.payload_json) as NotificationPayload);
@@ -176,36 +190,58 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
 }
 
 export async function processProjectAlphaDeliveryPortalNotifications(env:Env):Promise<number>{
+  const liveOwner=`EXISTS(SELECT 1 FROM portal_v2_directory_checkpoints checkpoint
+    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+      AND generation.workspace_id=checkpoint.workspace_id AND generation.status='active' AND generation.complete=1
+    JOIN portal_v2_directory_entities owner ON owner.workspace_id=checkpoint.workspace_id AND owner.generation_id=generation.id
+      AND owner.entity_type=binding.owner_scope_type AND owner.public_id=binding.owner_public_id
+      AND owner.active=1 AND owner.source_version=binding.source_version
+    WHERE checkpoint.workspace_id=grant_record.workspace_id)`;
   await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='suppressed',
     last_error='authorization-no-longer-live',updated_at=datetime('now') WHERE status IN ('pending','processing') AND
     NOT EXISTS(SELECT 1 FROM project_alpha_delivery_portal_grants grant_record
+      JOIN portal_v2_workspaces workspace ON workspace.id=grant_record.workspace_id AND workspace.status='active'
+        AND workspace.project_alpha_source_id='project-alpha:primary'
+      JOIN project_alpha_delivery_intent_receipts receipt ON receipt.receipt_id=project_alpha_delivery_portal_notification_outbox.receipt_id
+        AND receipt.access_mode='portal' AND receipt.resource_id=grant_record.id
+        AND receipt.project_alpha_source_id=workspace.project_alpha_source_id
       JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id
         AND binding.workspace_id=grant_record.workspace_id AND binding.status='active' AND binding.revoked_at IS NULL
         AND binding.source_version=grant_record.binding_source_version
       WHERE grant_record.id=project_alpha_delivery_portal_notification_outbox.grant_id
+        AND ${liveOwner}
         AND (project_alpha_delivery_portal_notification_outbox.event_type='revoked' OR (grant_record.status='active' AND
           (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now')))))`).run();
   let processed=0;
   for(;processed<25;processed+=1){
     const row=await env.DELIVERY_DB.prepare(`SELECT outbox.id,outbox.event_type,outbox.principal_public_id,
-      outbox.principal_source_version,outbox.attempt_count,binding.r2_prefix
+      outbox.principal_source_version,outbox.attempt_count,binding.r2_prefix,grant_record.workspace_id,grant_record.folder_binding_id
       FROM project_alpha_delivery_portal_notification_outbox outbox
       JOIN project_alpha_delivery_portal_grants grant_record ON grant_record.id=outbox.grant_id
+      JOIN portal_v2_workspaces workspace ON workspace.id=grant_record.workspace_id AND workspace.status='active'
+        AND workspace.project_alpha_source_id='project-alpha:primary'
+      JOIN project_alpha_delivery_intent_receipts receipt ON receipt.receipt_id=outbox.receipt_id
+        AND receipt.access_mode='portal' AND receipt.resource_id=grant_record.id
+        AND receipt.project_alpha_source_id=workspace.project_alpha_source_id
       JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id
         AND binding.workspace_id=grant_record.workspace_id AND binding.status='active' AND binding.revoked_at IS NULL
         AND binding.source_version=grant_record.binding_source_version
       WHERE ((outbox.status='pending' AND datetime(outbox.next_attempt_at)<=datetime('now')) OR
         (outbox.status='processing' AND datetime(outbox.lease_expires_at)<=datetime('now')))
+        AND ${liveOwner}
         AND (outbox.event_type='revoked' OR (grant_record.status='active' AND
           (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))))
       ORDER BY outbox.created_at LIMIT 1`)
-      .first<{id:string;event_type:"granted"|"revoked";principal_public_id:string;principal_source_version:string;attempt_count:number;r2_prefix:string}>();
+      .first<{id:string;event_type:"granted"|"revoked";principal_public_id:string;principal_source_version:string;attempt_count:number;
+        r2_prefix:string;workspace_id:string;folder_binding_id:string}>();
     if(!row)break;
     const claimed=await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='processing',attempt_count=attempt_count+1,lease_expires_at=datetime('now','+15 minutes'),updated_at=datetime('now') WHERE id=? AND
       ((status='pending' AND datetime(next_attempt_at)<=datetime('now')) OR (status='processing' AND datetime(lease_expires_at)<=datetime('now')))` ).bind(row.id).run();
     if(!claimed.meta.changes){processed-=1;continue;}
     try{
       const recipient=await resolveProjectAlphaDeliveryPrincipal(env,row.r2_prefix,row.principal_public_id,row.principal_source_version);
+      if(recipient.workspaceId!==row.workspace_id||recipient.folderBindingId!==row.folder_binding_id)
+        throw new HTTPException(409,{message:"Delivery recipient binding changed"});
       const recipientEmail=recipient.recipients[0]?.email;
       if(!recipientEmail)throw new Error("recipient-unavailable");
       const granted=row.event_type==="granted",url=`${env.DELIVERY_BASE_URL.replace(/\/$/,"")}/portal/deliveries`;

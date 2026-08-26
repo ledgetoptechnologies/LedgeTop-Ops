@@ -658,8 +658,14 @@ Test the complete workflow, not only whether a component renders:
       source-owned projection receipts, transaction-time stale-write guards and
       paired primary-only consumers. See [native portal source ownership](portal-source-ownership.md)
       for populated migration, replay/collision, compatibility and type/build
-      evidence. Secondary ingress, delivery-intent/guest receipt isolation,
-      outbound routing and frozen Viewer adapters remain separate gates.
+      evidence. Secondary ingress, outbound routing and frozen Viewer adapters
+      remain separate gates.
+- [x] Locally implement and verify source-owned delivery-intent/revoke receipts,
+      guest project/link reuse, concurrent retry guards and current-recipient
+      notification suppression. See [delivery-intent source ownership](delivery-intent-source-ownership.md)
+      for populated upgrade and runtime evidence. Public HTTP and Client portal
+      authority remain primary-only; no production mail, migration or deployment
+      was performed.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

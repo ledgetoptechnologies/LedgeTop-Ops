@@ -1,4 +1,5 @@
 import { HTTPException } from "hono/http-exception";
+import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE, type CatalogSourceContext } from "@ltds/shared";
 import type { Env } from "./types";
 
 const SEARCH_LIMIT = 12;
@@ -18,14 +19,18 @@ export function shareDirectoryRecipientsEnabled(env: Pick<Env, "DELIVERY_SHARE_D
   return env.DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED === "true";
 }
 
-async function bindingContext(env: Env, prefix: string): Promise<BindingContext> {
-  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT binding.id folder_binding_id,binding.workspace_id,binding.owner_scope_type,binding.owner_public_id,checkpoint.active_generation_id directory_generation_id,length(binding.r2_prefix) prefix_length
+function bindingCandidatesSql() {
+  return `SELECT binding.id folder_binding_id,binding.workspace_id,binding.owner_scope_type,binding.owner_public_id,checkpoint.active_generation_id directory_generation_id,length(binding.r2_prefix) prefix_length
     FROM portal_v2_folder_bindings binding JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'
-      AND workspace.project_alpha_source_id='project-alpha:primary'
+      AND workspace.project_alpha_source_id=?
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=binding.workspace_id
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id AND generation.workspace_id=binding.workspace_id AND generation.status='active' AND generation.complete=1
     JOIN portal_v2_directory_entities owner ON owner.workspace_id=binding.workspace_id AND owner.generation_id=checkpoint.active_generation_id AND owner.entity_type=binding.owner_scope_type AND owner.public_id=binding.owner_public_id AND owner.active=1
-    WHERE binding.status='active' AND substr(?,1,length(binding.r2_prefix))=binding.r2_prefix ORDER BY length(binding.r2_prefix) DESC,binding.id LIMIT 2`).bind(prefix).all<{
+    WHERE binding.status='active' AND substr(?,1,length(binding.r2_prefix))=binding.r2_prefix ORDER BY length(binding.r2_prefix) DESC,binding.id LIMIT 2`;
+}
+async function bindingContext(env: Env, prefix: string, source: CatalogSourceContext = PRIMARY_CATALOG_SOURCE): Promise<BindingContext> {
+  const { sourceId } = createCatalogSourceContext(source?.sourceId);
+  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(bindingCandidatesSql()).bind(sourceId,prefix).all<{
       folder_binding_id:string;workspace_id:string;owner_scope_type:BindingContext["ownerScopeType"];owner_public_id:string;directory_generation_id:string;prefix_length:number;
     }>();
   const first=rows.results[0];
@@ -78,9 +83,8 @@ export async function resolveShareAudience(env:Env,prefix:string,audienceType:Au
   return{...context,audienceType,audiencePublicId:publicId,audienceDisplayName,recipients};
 }
 
-export async function resolveProjectAlphaDeliveryPrincipal(env:Env,prefix:string,publicIdValue:string,sourceVersion:string):Promise<ShareAudienceSnapshot>{
-  const publicId=publicIdValue.trim();if(!publicId||publicId.length>128)throw new HTTPException(400,{message:"Recipient selection is invalid"});
-  const context=await bindingContext(env,prefix),rows=await env.DELIVERY_DB.withSession("first-primary").prepare(`${ancestryCte()} SELECT DISTINCT
+function principalCandidatesSql(context: BindingContext, publicId: string, sourceVersion: string, allowUnclaimed: boolean) {
+  const sql = `${ancestryCte()}, eligible_linked AS (SELECT DISTINCT
     principal.display_name,identity.id identity_id,identity.issuer,identity.subject,lower(identity.verified_email) verified_email
     FROM pa_portal_principals principal
     JOIN portal_v2_identities identity ON identity.status='active' AND identity.revoked_at IS NULL
@@ -103,25 +107,64 @@ export async function resolveProjectAlphaDeliveryPrincipal(env:Env,prefix:string
         AND (denial.scope_type='global' OR (denial.workspace_id=principal.workspace_id AND
           ((denial.scope_type='workspace' AND denial.scope_public_id=principal.workspace_id)
            OR (denial.scope_type='folder' AND denial.scope_public_id=?)
-           OR EXISTS(SELECT 1 FROM owner_ancestry WHERE entity_type=denial.scope_type AND public_id=denial.scope_public_id))))) LIMIT 2`)
-    .bind(...contextBindings(context),context.workspaceId,publicId,sourceVersion,context.folderBindingId)
-    .all<{display_name:string;identity_id:string;issuer:string;subject:string;verified_email:string}>();
-  let eligible=rows.results;
-  if(!eligible.length&&env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==="true"){
-    const unclaimed=await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT display_name,
+           OR EXISTS(SELECT 1 FROM owner_ancestry WHERE entity_type=denial.scope_type AND public_id=denial.scope_public_id))))) LIMIT 2),
+    eligible_unclaimed AS (SELECT display_name,'' identity_id,'' issuer,'' subject,
       lower(trim(email_hint)) verified_email FROM pa_portal_principals principal
       WHERE workspace_id=? AND public_id=? AND source_version=? AND status='active' AND identity_id IS NULL
+        AND ?=1 AND NOT EXISTS(SELECT 1 FROM eligible_linked)
         AND length(trim(email_hint)) BETWEEN 3 AND 254 AND instr(email_hint,'@')>1
         AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_blocks block WHERE block.match_type='email'
           AND block.normalized_email=lower(trim(principal.email_hint)) AND block.status='active' AND datetime(block.valid_from)<=datetime('now')
-          AND (block.expires_at IS NULL OR datetime(block.expires_at)>datetime('now'))) LIMIT 2`)
-      .bind(context.workspaceId,publicId,sourceVersion).all<{display_name:string;verified_email:string}>();
-    eligible=unclaimed.results.map(row=>({...row,identity_id:"",issuer:"",subject:""}));
-  }
+          AND (block.expires_at IS NULL OR datetime(block.expires_at)>datetime('now'))) LIMIT 2)
+    SELECT * FROM eligible_linked UNION ALL SELECT * FROM eligible_unclaimed`;
+  return { sql, bindings: [...contextBindings(context),context.workspaceId,publicId,sourceVersion,context.folderBindingId,
+    context.workspaceId,publicId,sourceVersion,allowUnclaimed ? 1 : 0] };
+}
+
+/** Internal producer context only; staff recipient searches continue to use primary. */
+export async function resolveProjectAlphaDeliveryPrincipal(env:Env,prefix:string,publicIdValue:string,sourceVersion:string,
+  source: CatalogSourceContext = PRIMARY_CATALOG_SOURCE):Promise<ShareAudienceSnapshot>{
+  const validated = createCatalogSourceContext(source?.sourceId);
+  const publicId=publicIdValue.trim();if(!publicId||publicId.length>128)throw new HTTPException(400,{message:"Recipient selection is invalid"});
+  const context=await bindingContext(env,prefix,validated);
+  const candidates=principalCandidatesSql(context,publicId,sourceVersion,env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==="true");
+  const eligible=(await env.DELIVERY_DB.withSession("first-primary").prepare(candidates.sql).bind(...candidates.bindings)
+    .all<{display_name:string;identity_id:string;issuer:string;subject:string;verified_email:string}>()).results;
   if(eligible.length!==1)throw new HTTPException(409,{message:"Delivery recipient is not uniquely eligible"});
   const recipient=eligible[0]!;
   return{...context,audienceType:"principal",audiencePublicId:publicId,audienceDisplayName:recipient.display_name,
     recipients:[{principalPublicId:publicId,displayName:recipient.display_name,email:recipient.verified_email}]};
+}
+
+/** Embed in the transaction's first fail-closed receipt guard. Selection is a
+ * read snapshot, not authority: reread binding precedence and recipient policy. */
+export function projectAlphaDeliveryPrincipalGuard(input: {
+  audience: ShareAudienceSnapshot; principalSourceVersion: string; bindingSourceVersion: string;
+  prefix: string; allowUnclaimed: boolean; source?: CatalogSourceContext;
+}): { sql: string; bindings: (string | number)[] } {
+  const source = createCatalogSourceContext((input.source === undefined ? PRIMARY_CATALOG_SOURCE : input.source)?.sourceId);
+  const { audience } = input, recipient = audience.recipients[0];
+  if (audience.audienceType !== "principal" || audience.recipients.length !== 1 || !recipient ||
+    recipient.principalPublicId !== audience.audiencePublicId)
+    throw new HTTPException(409,{message:"Delivery recipient selection is invalid"});
+  const candidates = principalCandidatesSql(audience,audience.audiencePublicId,input.principalSourceVersion,input.allowUnclaimed);
+  return {
+    sql: `EXISTS (WITH current_bindings AS (${bindingCandidatesSql()})
+      SELECT 1 FROM current_bindings selected JOIN portal_v2_folder_bindings binding
+        ON binding.id=selected.folder_binding_id AND binding.workspace_id=selected.workspace_id
+      WHERE selected.workspace_id=? AND selected.folder_binding_id=? AND selected.directory_generation_id=?
+        AND selected.owner_scope_type=? AND selected.owner_public_id=?
+        AND binding.source_version=? AND binding.r2_prefix=? AND binding.revoked_at IS NULL
+        AND EXISTS(SELECT 1 FROM portal_v2_directory_entities owner
+          WHERE owner.workspace_id=selected.workspace_id AND owner.generation_id=selected.directory_generation_id
+            AND owner.entity_type=selected.owner_scope_type AND owner.public_id=selected.owner_public_id
+            AND owner.active=1 AND owner.source_version=binding.source_version)
+        AND NOT EXISTS(SELECT 1 FROM current_bindings other
+          WHERE other.folder_binding_id<>selected.folder_binding_id AND other.prefix_length>=selected.prefix_length))
+      AND (SELECT count(*)=1 AND min(verified_email)=? FROM (${candidates.sql}))`,
+    bindings: [source.sourceId,input.prefix,audience.workspaceId,audience.folderBindingId,audience.directoryGenerationId,
+      audience.ownerScopeType,audience.ownerPublicId,input.bindingSourceVersion,input.prefix,recipient.email,...candidates.bindings],
+  };
 }
 
 export async function latestShareAudienceSnapshot(env:Env,shareId:string):Promise<ShareAudienceSnapshot|null>{
