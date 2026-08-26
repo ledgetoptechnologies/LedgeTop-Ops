@@ -532,6 +532,17 @@ staff inbox remain outstanding. See [notifications.md](../notifications.md)
 for adoption, retry/cancellation semantics, provider boundaries and rollout
 requirements. Do not publish or claim production acceptance from local tests.
 
+The next local notification-center increment adds a header bell and a
+refresh-safe **Needs attention** inbox at `/operations/inbox`, with independent
+paged request, open-feedback and pending-folder-notice queues plus authorized
+Project Alpha failure summaries. Requests are not limited to the former first
+200 rows; notification actions open the exact batch instead of searching by a
+possibly duplicated client name. It is read-only until the operator opens an
+existing guarded workflow. Verification and rollout status are recorded in
+[the staff inbox runbook](staff-inbox.md). This does not complete the general
+inbox: access/expiry, uploads, processing, other outboxes and any shared/personal
+acknowledgement contract remain outstanding.
+
 ### 5. Generic feedback and service requests
 
 - One Leave Feedback flow with typed project/folder/asset targets and a shared

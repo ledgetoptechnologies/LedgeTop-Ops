@@ -138,6 +138,7 @@ import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
 import { registerBusinessPartyRoutes } from "./business-party-routes";
 import { registerNotificationCenterRoutes } from "./notification-center";
+import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
 import { reconcileClientHubIndex } from "./client-hub-index";
 import {
   decorateWorkContextsWithSops,
@@ -1429,6 +1430,7 @@ registerTeamAssignedWorkRoutes(app);
 registerClientHubRoutes(app);
 registerBusinessPartyRoutes(app);
 registerNotificationCenterRoutes(app);
+registerStaffInboxRequestRoutes(app);
 registerClientFeedbackRoutes(app);
 registerViewerIntegrationRoutes(app);
 registerViewerProcessingRoutes(app);

@@ -1,5 +1,5 @@
 export type OperationsPage="dashboard"|"operations"|"clients"|"airspace"|"delivery"|"viewer"|"team"|"configurations"|"administration";
-export type OperationsSection="operations"|"projects"|"tasks"|"sops"|"notifications"|"feedback"|"client-requests";
+export type OperationsSection="operations"|"projects"|"tasks"|"sops"|"notifications"|"feedback"|"inbox"|"client-requests";
 export type DeliverySection="delivery"|"incoming"|"links";
 
 export const DATA_PAGE_PERMISSIONS = ["delivery.browse", "delivery.share.audit"] as const;
@@ -17,6 +17,7 @@ export function operationsLandingPath(permissions:readonly string[], feedbackEna
   if(permissions.includes("sops.view"))return"/operations/sops";
   if(permissions.includes("delivery.share.audit"))return"/operations/notifications";
   if(feedbackEnabled)return"/operations/feedback";
+  if(permissions.includes("operations.manage") || permissions.includes("integrations.manage") && permissions.includes("administration.view"))return"/operations/inbox";
   return"/operations";
 }
 
@@ -34,7 +35,7 @@ export function pathPage(pathname:string):OperationsPage{
 export function pathOperationsSection(pathname:string):OperationsSection{
   const parts=pathname.split("/").filter(Boolean);
   const value=parts[0]==="operations"?parts[1]:parts[0];
-  return value==="projects"||value==="tasks"||value==="sops"||value==="notifications"||value==="feedback"||value==="client-requests"?value:"operations";
+  return value==="projects"||value==="tasks"||value==="sops"||value==="notifications"||value==="feedback"||value==="inbox"||value==="client-requests"?value:"operations";
 }
 
 export function operationsSectionPath(section:OperationsSection):string{

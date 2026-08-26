@@ -139,6 +139,29 @@ export async function listDeliveryNotificationBatches(env: Env, principal: Staff
     serverNow: new Date().toISOString(), coverage: "legacy_folder_changes" as const };
 }
 
+/** Exact read, independent of queue pagination and current dispatch status.
+ * History authority is deliberately separate from permission to send again. */
+export async function getDeliveryNotificationBatch(env: Env, principal: StaffPrincipal, id: string) {
+  if (!/^[A-Za-z0-9_-]{1,128}$/.test(id))
+    throw new HTTPException(404, { message: "Notification is unavailable" });
+  const access = await policy(env, principal);
+  await ready(env);
+  const db = env.DELIVERY_DB.withSession("first-primary");
+  const row = await db.prepare(`${selectBatch} WHERE batch.id=?`).bind(id).first<BatchRow>();
+  const scope = row ? await readClientFolderNotificationBatchScope(env, row) : null;
+  if (!row || !scope || !allowed(access.grants, principal, "delivery.share.audit", scope.divisionId))
+    throw new HTTPException(404, { message: "Notification is unavailable" });
+  const eligibility = row.status === "pending" ? await authorizeClientFolderNotificationBatch(env, row) : null;
+  const currentScope = await readClientFolderNotificationBatchScope(env, row);
+  const currentEligibility = row.status === "pending" ? await authorizeClientFolderNotificationBatch(env, row) : null;
+  const currentRow = await env.DELIVERY_DB.withSession("first-primary").prepare(`${selectBatch} WHERE batch.id=?`).bind(id).first<BatchRow>();
+  if (JSON.stringify(currentScope) !== JSON.stringify(scope) || JSON.stringify(currentRow) !== JSON.stringify(row)
+    || JSON.stringify(currentEligibility) !== JSON.stringify(eligibility)
+    || (await policy(env, principal)).proof !== access.proof) changed();
+  return { item: presentation(row, scope, access.grants, principal, Boolean(eligibility)),
+    serverNow: new Date().toISOString(), coverage: "legacy_folder_changes" as const };
+}
+
 async function receipt(env: Env, actor: string, key: string) {
   return env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT batch_id,action,fingerprint,result_revision,result_status
     FROM client_folder_notification_batch_controls WHERE actor_id=? AND mutation_key=?`).bind(actor,key).first<Receipt>();
@@ -224,6 +247,11 @@ async function actionBody(request: Request): Promise<z.infer<typeof actions>> {
 
 export function registerNotificationCenterRoutes(app: App): void {
   app.get("/api/notifications/deliveries", async c => c.json(await listDeliveryNotificationBatches(c.env,c.get("principal"),c.req.query())));
+  app.get("/api/notifications/deliveries/:id", async c => {
+    if (new URL(c.req.url).searchParams.size) throw new HTTPException(400, { message: "Notification detail query is invalid" });
+    c.header("Cache-Control", "no-store");
+    return c.json(await getDeliveryNotificationBatch(c.env, c.get("principal"), c.req.param("id")));
+  });
   app.post("/api/notifications/deliveries/:id/:action", async c => {
     const action = c.req.param("action");
     if (action !== "send-now" && action !== "cancel") throw new HTTPException(404, { message: "Notification action not found" });

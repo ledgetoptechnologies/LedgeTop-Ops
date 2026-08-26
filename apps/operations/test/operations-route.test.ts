@@ -20,6 +20,7 @@ describe("consolidated Operations routes", () => {
     ["/operations/tasks", "tasks"],
     ["/operations/sops", "sops"],
     ["/operations/notifications", "notifications"],
+    ["/operations/inbox", "inbox"],
     ["/operations/feedback", "feedback"],
     ["/operations/feedback/feedback-one", "feedback"],
   ] as const)("resolves %s to the Operations page and %s section", (pathname, section) => {
@@ -61,7 +62,7 @@ describe("consolidated Operations routes", () => {
 
   it("uses only the explicit feedback capability for a feedback-only landing", () => {
     expect(operationsLandingPath([], true)).toBe("/operations/feedback");
-    expect(operationsLandingPath(["operations.manage"], false)).toBe("/operations");
+    expect(operationsLandingPath(["operations.manage"], false)).toBe("/operations/inbox");
     expect(operationsLandingPath(["sops.view"], true)).toBe("/operations/sops");
   });
 

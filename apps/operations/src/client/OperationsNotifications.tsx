@@ -11,7 +11,7 @@ interface NotificationBatch {
   errorCode: string | null; canSendNow: boolean; canCancel: boolean;
 }
 interface NotificationPage { items: NotificationBatch[]; nextCursor: string | null; serverNow: string; coverage: "legacy_folder_changes" }
-type NotificationRoute = { view: "pending" | "history"; q: string };
+type NotificationRoute = { view: "pending" | "history"; q: string; batchId: string | null; invalid: boolean };
 type Mutation = { id: string; label: string; action: BatchAction; revision: number; key: string; busy: boolean; error: string };
 const statuses: BatchStatus[] = ["pending", "processing", "sent", "cancelled", "suppressed", "failed"];
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -19,14 +19,16 @@ const textOrNull = (value: unknown) => value === null || typeof value === "strin
 const isoTime = (value: unknown): value is string => typeof value === "string" && /Z$|[+-]\d{2}:\d{2}$/.test(value) && Number.isFinite(Date.parse(value));
 const readRoute = (): NotificationRoute => {
   const params = new URLSearchParams(location.search);
-  return { view: params.get("view") === "history" ? "history" : "pending", q: (params.get("q") || "").trim().slice(0, 200) };
+  const batchId = params.get("batchId");
+  return { view: params.get("view") === "history" ? "history" : "pending", q: (params.get("q") || "").trim().slice(0, 200), batchId,
+    invalid: params.getAll("batchId").length > 1 || (batchId !== null && !/^[A-Za-z0-9_-]{1,128}$/.test(batchId)) };
 };
-function pageValid(value: unknown, view: NotificationRoute["view"]): value is NotificationPage {
+function pageValid(value: unknown, view: NotificationRoute["view"], exactId?: string | null): value is NotificationPage {
   return record(value) && value.coverage === "legacy_folder_changes" && isoTime(value.serverNow)
     && (value.nextCursor === null || typeof value.nextCursor === "string" && value.nextCursor.length > 0)
     && Array.isArray(value.items) && value.items.every(item => record(item) && typeof item.id === "string" && item.id.length > 0
       && Number.isSafeInteger(item.revision) && Number(item.revision) > 0 && statuses.includes(item.status as BatchStatus)
-      && (view === "pending" ? item.status === "pending" || item.status === "processing" : item.status !== "pending" && item.status !== "processing")
+      && (exactId ? item.id === exactId : view === "pending" ? item.status === "pending" || item.status === "processing" : item.status !== "pending" && item.status !== "processing")
       && typeof item.accountName === "string" && typeof item.folderLabel === "string" && textOrNull(item.recipientEmail)
       && [item.addedCount, item.removedCount].every(count => Number.isSafeInteger(count) && Number(count) >= 0)
       && [item.eligibleAt, item.createdAt, item.updatedAt].every(isoTime) && (item.deliveredAt === null || isoTime(item.deliveredAt))
@@ -69,6 +71,7 @@ export function OperationsNotifications() {
 
   const load = useCallback(async (cursor?: string, quiet = false) => {
     if (quiet && (pending.current || mutationRef.current || document.hidden)) return;
+    if (currentRoute.current.invalid) { clearProtected("This notification link is invalid. Choose Pending or History to browse notifications."); return; }
     pending.current?.abort();
     const controller = new AbortController(), sequence = ++requestSequence.current;
     pending.current = controller;
@@ -80,9 +83,14 @@ export function OperationsNotifications() {
     if (requested.q) params.set("q", requested.q);
     if (cursor) params.set("cursor", cursor);
     try {
-      const result = await api<NotificationPage>(`/api/notifications/deliveries?${params}`, { signal: controller.signal });
+      const value = await api<unknown>(requested.batchId ? `/api/notifications/deliveries/${encodeURIComponent(requested.batchId)}`
+        : `/api/notifications/deliveries?${params}`, { signal: controller.signal });
       if (!valid()) return;
-      if (!pageValid(result, requested.view)) throw new Error("Notification records could not be verified. Refresh to try again.");
+      const result = requested.batchId && record(value) ? { items: [value.item], nextCursor: null, serverNow: value.serverNow, coverage: value.coverage } : value;
+      if (!pageValid(result, requested.view, requested.batchId)) {
+        if (requested.batchId) { clearProtected("This notification could not be verified. Refresh to check its current state."); return; }
+        throw new Error("Notification records could not be verified. Refresh to try again.");
+      }
       // A delayed pre-action read must not resurrect a cancelled or older batch.
       const received = result.items.filter(row => {
         const floor = confirmed.current.get(row.id);
@@ -107,6 +115,8 @@ export function OperationsNotifications() {
         clearProtected(caught.status === 401 ? "Sign in again to view notifications." : "Notification access is no longer available.");
       } else if (caught instanceof ApiError && caught.status === 409) {
         clearProtected("Notifications changed while this page was loading. Refresh the list.");
+      } else if (requested.batchId && caught instanceof ApiError && [404, 410].includes(caught.status)) {
+        clearProtected("This notification is unavailable or your access changed. Choose Pending or History to browse current notifications.");
       } else setError({ message: caught instanceof Error ? caught.message : "Notifications could not be loaded.", cursor });
     } finally {
       if (valid()) { pending.current = null; setLoading(false); setLoadingMore(false); }
@@ -119,7 +129,7 @@ export function OperationsNotifications() {
       if (location.pathname !== "/operations/notifications") return;
       const next = readRoute();
       setDraft(next.q);
-      if (next.view === currentRoute.current.view && next.q === currentRoute.current.q) return;
+      if (next.view === currentRoute.current.view && next.q === currentRoute.current.q && next.batchId === currentRoute.current.batchId && next.invalid === currentRoute.current.invalid) return;
       pending.current?.abort(); pending.current = null; requestSequence.current += 1;
       currentRoute.current = next; setRoute(next);
     };
@@ -133,7 +143,7 @@ export function OperationsNotifications() {
     setRows([]); setNextCursor(null); setPageCount(0); setLastUpdated(null); setLoadingMore(false);
     void load();
     return () => { pending.current?.abort(); pending.current = null; requestSequence.current += 1; };
-  }, [route.view, route.q, load]);
+  }, [route.view, route.q, route.batchId, route.invalid, load]);
   useEffect(() => {
     const timer = window.setInterval(() => {
       const synced = serverClock.current;
@@ -143,20 +153,21 @@ export function OperationsNotifications() {
   }, []);
   useEffect(() => {
     // Do not throw away additional pages the operator explicitly loaded.
-    if (route.view !== "pending" || pageCount !== 1) return;
+    if ((!route.batchId && route.view !== "pending") || route.invalid || pageCount !== 1) return;
     const refresh = () => { void load(undefined, true); };
     const timer = window.setInterval(refresh, 20_000);
     addEventListener("focus", refresh);
     return () => { window.clearInterval(timer); removeEventListener("focus", refresh); };
-  }, [route.view, pageCount, load]);
+  }, [route.view, route.batchId, route.invalid, pageCount, load]);
 
   const navigate = (next: NotificationRoute) => {
     setDraft(next.q);
-    if (next.view === currentRoute.current.view && next.q === currentRoute.current.q) return;
+    if (next.view === currentRoute.current.view && next.q === currentRoute.current.q && next.batchId === currentRoute.current.batchId && next.invalid === currentRoute.current.invalid) return;
     pending.current?.abort(); pending.current = null; requestSequence.current += 1;
     const params = new URLSearchParams();
     if (next.view === "history") params.set("view", "history");
     if (next.q) params.set("q", next.q);
+    if (next.batchId) params.set("batchId", next.batchId);
     history.pushState(null, "", `/operations/notifications${params.size ? `?${params}` : ""}`);
     currentRoute.current = next; setRoute(next);
   };
@@ -203,7 +214,7 @@ export function OperationsNotifications() {
 
   return <section className="page-stack operations-notifications" aria-label="Delivery notification center">
     <div className="page-heading"><div><h2>Notifications</h2>
-      <p>Review pending client-folder notifications and their delivery history.</p></div>
+      <p>{route.batchId ? "Review this exact client-folder notification and its current delivery status." : "Review pending client-folder notifications and their delivery history."}</p></div>
       <button className="button-ghost" type="button" aria-disabled={loading || loadingMore || mutation?.busy} onClick={() => {
         if (!pending.current && !mutationRef.current?.busy) void load();
       }}>Refresh notifications</button></div>
@@ -214,21 +225,22 @@ export function OperationsNotifications() {
         <p>Sent means accepted for delivery, not proof the recipient received or read the notice. Cancellation cannot recall email already accepted or inbox notices already published.</p>
       </details></div>
     <div className="notification-view-switch" role="group" aria-label="Notification views">
-      {(["pending", "history"] as const).map(view => <button key={view} type="button" className={route.view === view ? "button-orange" : "button-ghost"}
-        aria-pressed={route.view === view} onClick={() => navigate({ ...route, view })}>{view === "pending" ? "Pending" : "History"}</button>)}
+      {(["pending", "history"] as const).map(view => <button key={view} type="button" className={!route.batchId && !route.invalid && route.view === view ? "button-orange" : "button-ghost"}
+        aria-pressed={!route.batchId && !route.invalid && route.view === view} onClick={() => navigate(route.batchId || route.invalid ? { view, q: "", batchId: null, invalid: false } : { ...route, view })}>{view === "pending" ? "Pending" : "History"}</button>)}
     </div>
-    <form className="notification-search" role="search" aria-label="Find notifications" onSubmit={search}>
+    {route.batchId && !route.invalid && <p role="status">Showing the selected notification, including any status change since it was opened. Choose Pending or History to return to all notifications.</p>}
+    {!route.batchId && !route.invalid && <form className="notification-search" role="search" aria-label="Find notifications" onSubmit={search}>
       <label>Search notifications<input maxLength={200} value={draft} onChange={event => setDraft(event.target.value)} placeholder="Client or folder" /></label>
       <button type="submit" className="button-orange">Search</button>
       {(draft || route.q) && <button type="button" className="button-ghost" onClick={() => navigate({ ...route, q: "" })}>Clear search</button>}
-    </form>
+    </form>}
     {mutation && <div className="notification-action-status" role={mutation.error ? "alert" : "status"}>
       <strong>{mutation.action === "cancel" ? "Cancel notification" : "Send now"}: {mutation.label}</strong>
       <p>{mutation.busy ? "Checking the action with the server…" : mutation.error}</p>
       {!mutation.busy && <button type="button" className="button-ghost" onClick={() => { if (mutationRef.current) void perform(mutationRef.current); }}>Retry action</button>}
     </div>}
     {message && <p className="notification-action-status" role="status">{message}</p>}
-    <Card title={route.view === "pending" ? "Pending delivery batches" : "Notification history"}>
+    <Card title={route.batchId ? "Selected notification" : route.view === "pending" ? "Pending delivery batches" : "Notification history"}>
       {lastUpdated && <p className="notification-freshness">Updated {shownTime(lastUpdated)}. {rows.length} {rows.length === 1 ? "batch" : "batches"} shown.
         {route.view === "pending" && pageCount > 1 ? " Refresh to check for new changes." : ""}</p>}
       {error && <div className="notification-error" role="alert"><span>{error.message}</span><button type="button" className="button-ghost"
@@ -242,7 +254,7 @@ export function OperationsNotifications() {
             <div><dt>Net changes</dt><dd>{row.addedCount.toLocaleString()} added · {row.removedCount.toLocaleString()} removed</dd></div>
             <div><dt>Created</dt><dd>{shownTime(row.createdAt)}</dd></div>
             <div><dt>{row.deliveredAt ? "Sent" : "Last updated"}</dt><dd>{shownTime(row.deliveredAt || row.updatedAt)}</dd></div></dl>
-          {route.view === "pending" && <p className="notification-countdown" aria-live="off">{eligibility(row, clock)}</p>}
+          {(row.status === "pending" || row.status === "processing") && <p className="notification-countdown" aria-live="off">{eligibility(row, clock)}</p>}
           {row.status === "processing" && <p>Dispatch has started and can no longer be cancelled here.</p>}
           {row.status === "pending" && row.errorCode === "delivery-attempt-failed" && <p>A delivery attempt failed. This batch is waiting for another attempt. An earlier email may already have been accepted, or an inbox notice published; cancellation cannot recall either.</p>}
           {row.status === "suppressed" && <p>Not sent after eligibility checks.</p>}

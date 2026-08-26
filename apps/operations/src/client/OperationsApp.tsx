@@ -34,6 +34,8 @@ import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
 import { OperationsNotifications } from "./OperationsNotifications";
 import { OperationsFeedback } from "./OperationsFeedback";
+import { StaffInbox } from "./StaffInbox";
+import { inboxSources } from "./staff-inbox";
 import { WorkContextSops } from "./WorkContextSops";
 import { TeamAssignedWork } from "./TeamAssignedWork";
 import { ImageLocationMap } from "./ImageLocationMap";
@@ -135,7 +137,7 @@ const NAV: Array<{
   {
     page: "operations",
     label: "Operations",
-    permissions: ["operations.view", "projects.view", "tasks.view", "sops.view", "delivery.share.audit"],
+    permissions: ["operations.view", "projects.view", "tasks.view", "sops.view", "delivery.share.audit", "operations.manage"],
   },
   { page: "clients", label: "Client Hub", href: "/clients", permissions: ["team.view", "operations.manage"] },
   { page: "viewer", label: "Models", href: "/viewer", permissions: ["viewer.view"] },
@@ -155,7 +157,7 @@ function allowed(user: SessionUser, permission: Permission) {
 }
 function navAllowed(user: OperationsUser, item: (typeof NAV)[number], feedbackEnabled=false) {
   return (
-    (item.permissions.some((permission) => allowed(user, permission)) || (item.page === "operations" && feedbackEnabled)) &&
+    (item.permissions.some((permission) => allowed(user, permission)) || (item.page === "operations" && (feedbackEnabled || user.isAdministrator && allowed(user, "integrations.manage") && allowed(user, "administration.view")))) &&
     (!item.administrator || user.isAdministrator)
   );
 }
@@ -314,6 +316,11 @@ export function OperationsApp() {
           </div>}
         </nav>
         <button ref={mobileNavTrigger} className="ops-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="ops-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
+        {!!inboxSources({ permissions: session.user.permissions, isAdministrator: session.user.isAdministrator, feedbackEnabled: session.capabilities?.clientFeedback?.enabled === true }).length && <a
+          className="ops-inbox-link" href="/operations/inbox" aria-label="Open staff inbox" title="Needs attention" aria-current={location.pathname === "/operations/inbox" ? "page" : undefined}
+          onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); navigate("operations", "/operations/inbox"); } }}>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Z" /><path d="M9 20h6" /></svg>
+        </a>}
         <AccountMenu className="profile" displayName={session.user.displayName}
           avatar={session.user.displayName.slice(0, 1).toUpperCase()} details={<>
             <small>
@@ -682,6 +689,7 @@ function SimpleRows({
 }
 
 function OperationsHub({ session }: { session: Session }) {
+  const inboxAccess = { permissions: session.user.permissions, isAdministrator: session.user.isAdministrator, feedbackEnabled: session.capabilities?.clientFeedback?.enabled === true };
   const sections: Array<{
     id: OperationsSection;
     label: string;
@@ -693,9 +701,10 @@ function OperationsHub({ session }: { session: Session }) {
     { id: "sops", label: "SOP Library", permission: "sops.view" },
     { id: "notifications", label: "Notifications", permission: "delivery.share.audit" },
     { id: "feedback", label: "Client feedback", permission: "operations.manage" },
+    { id: "inbox", label: "Inbox", permission: "operations.manage" },
   ];
   const visible = sections.filter((item) =>
-    item.id === "feedback" ? session.capabilities?.clientFeedback?.enabled === true : allowed(session.user, item.permission),
+    item.id === "inbox" ? inboxSources(inboxAccess).length > 0 : item.id === "feedback" ? session.capabilities?.clientFeedback?.enabled === true : allowed(session.user, item.permission),
   );
   const initial = pathOperationsSection(location.pathname);
   const [section, setSection] = useState<OperationsSection>(
@@ -722,7 +731,7 @@ function OperationsHub({ session }: { session: Session }) {
     sync();
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
-  }, [session.user.permissions.join("|"), session.capabilities?.clientFeedback?.enabled]);
+  }, [session.user.permissions.join("|"), session.user.isAdministrator, session.capabilities?.clientFeedback?.enabled]);
   const open = (next: OperationsSection) => {
     if (next === section) return;
     setSection(next);
@@ -758,6 +767,7 @@ function OperationsHub({ session }: { session: Session }) {
       {section === "sops" && allowed(session.user, "sops.view") && <SopLibrary user={session.user} />}
       {section === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}
       {section === "feedback" && session.capabilities?.clientFeedback?.enabled === true && <OperationsFeedback />}
+      {section === "inbox" && inboxSources(inboxAccess).length > 0 && <StaffInbox access={inboxAccess} />}
     </>
   );
 }
@@ -6419,7 +6429,7 @@ function Administration({ session }: { session: Session }) {
   return (
     <>
       <div className="dashboard-grid">
-        {canManageConnections && <ProjectAlphaConnections />}
+        {canManageConnections && <div id="project-alpha-connections"><ProjectAlphaConnections /></div>}
         {!canManageConnections && <Card title="Project Alpha"><p>Connection management requires an administrator with global integration-management permission.</p></Card>}
         <Card title="Security model">
           <p>

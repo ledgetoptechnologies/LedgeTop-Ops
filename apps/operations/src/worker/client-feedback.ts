@@ -11,13 +11,13 @@ import { paProjectFilter } from "./visibility";
 import type { Env, GrantRow, StaffPrincipal } from "./types";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
-type StatusFilter = ClientFeedbackStatus | "all";
+type StatusFilter = ClientFeedbackStatus | "all" | "open";
 interface StaffPolicy { grants: GrantRow[]; administrator: boolean; proof: string }
 interface Scope { accountName: string; divisionId: string; projectId: string; available: boolean; proof: string; guard: FeedbackWriteGuard }
 interface SourceScope { project_id: string; division_id: string; client_id: string | null; organization_id: string | null; assigned: number; owner_id?: string | null; owner_organization_id?: string | null; root_organization_id?: string | null }
 interface Cursor { v: 1; status: StatusFilter; accountId: string; q: string; policy: string; after: [string,string]; expires: number }
 const idSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
-const statusSchema = z.enum(["new", "in_progress", "done", "all"]);
+const statusSchema = z.enum(["new", "in_progress", "done", "all", "open"]);
 const actionSchema = z.object({ expectedRevision: z.number().int().min(1).max(2), status: z.enum(["in_progress", "done"]), note: z.string().max(2000).nullable() }).strict();
 const tables = ["client_feedback", "client_feedback_events", "client_feedback_mutations", "client_feedback_notifications", "client_feedback_notification_outbox"];
 function missing(): never { throw new HTTPException(404, { message: "Feedback is unavailable" }); }
@@ -179,7 +179,8 @@ export async function listStaffFeedback(env: Env, actor: StaffPrincipal, query: 
   await ready(env);
   const cursor = query.cursor ? await decodeCursor(env,actor,query.cursor,status,accountId,q,access.proof) : null;
   const predicates: string[] = [], values: string[] = [];
-  if (status !== "all") { predicates.push("status=?"); values.push(status); }
+  if (status === "open") predicates.push("status IN ('new','in_progress')");
+  else if (status !== "all") { predicates.push("status=?"); values.push(status); }
   if (accountId) { predicates.push("account_id=?"); values.push(accountId); }
   if (cursor) { predicates.push("(created_at,id)>(?,?)"); values.push(...cursor.after); }
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,created_at FROM client_feedback
@@ -189,7 +190,7 @@ export async function listStaffFeedback(env: Env, actor: StaffPrincipal, query: 
   for (const row of rows.results.slice(0,50)) {
     examined++;
     const record = await readFeedbackRecord(env.DELIVERY_DB.withSession("first-primary"),row.id);
-    if (!record || (status !== "all" && record.status !== status)) continue;
+    if (!record || (status === "open" ? record.status === "done" : status !== "all" && record.status !== status)) continue;
     const scope = await readStaffFeedbackScope(env,actor,record,access);
     if (scope && (!q || [scope.accountName,record.message,record.target.label,record.target.projectName ?? ""].some(value => value.normalize("NFC").toLocaleLowerCase("en-US").includes(q)))) shown.push({record,scope});
     if (shown.length === 25) break;

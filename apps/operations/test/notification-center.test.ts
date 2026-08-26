@@ -122,7 +122,18 @@ describe("folder notification center — real D1 authority and control receipts"
     const statements = Array.from({ length: 100 }, (_, index) => batchStatement(`z-${String(index).padStart(3,"0")}`, "b", "processing"));
     statements.push(batchStatement("a-visible")); await db.batch(statements);
     const first = await list(); expect(first.items).toEqual([]); expect(first.nextCursor).toBeTypeOf("string");
-    expect(first.nextCursor).not.toContain("z-");
+    // Ciphertext can coincidentally contain any short base64url substring.
+    // Verify authenticated encryption, not the absence of two random letters.
+    expect(first.nextCursor).toMatch(/^[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]+$/);
+    const [ivPart, bodyPart] = first.nextCursor!.split(".");
+    const decode = (value: string) => Uint8Array.from(atob(value.replaceAll("-", "+").replaceAll("_", "/")), char => char.charCodeAt(0));
+    const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`notification-center:v1:${env.OPERATIONS_SESSION_SECRET}`));
+    const key = await crypto.subtle.importKey("raw", material, "AES-GCM", false, ["decrypt"]);
+    const encryption = { name: "AES-GCM", iv: decode(ivPart!), additionalData: new TextEncoder().encode(staff.id) };
+    const decrypted = await crypto.subtle.decrypt(encryption, key, decode(bodyPart!));
+    expect(JSON.parse(new TextDecoder().decode(decrypted)).after).toEqual(["2026-08-25 12:00:00", "z-000"]);
+    const wrongKey = await crypto.subtle.importKey("raw", new Uint8Array(32), "AES-GCM", false, ["decrypt"]);
+    await expect(crypto.subtle.decrypt(encryption, wrongKey, decode(bodyPart!))).rejects.toThrow();
     const second = await list({ cursor: first.nextCursor! });
     expect(second.items.map(row => row.id)).toEqual(["a-visible"]); expect(second.nextCursor).toBeNull();
   }, 15_000);
