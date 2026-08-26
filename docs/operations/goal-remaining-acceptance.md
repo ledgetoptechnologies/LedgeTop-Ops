@@ -215,3 +215,35 @@ business-workflow acceptance or production rollout.
 - No production source was activated and no migration, deployment or push was
   performed in this checkpoint. See [secondary client portal](secondary-client-portal.md)
   for the current verification and release restrictions.
+
+### Locally verified invitation approval checkpoint
+
+The next local increment replaces the approval-required dead end with an
+immutable client request, staff Inbox review, exact workspace policy controls,
+and a separately published invitation. See
+[invitation approval workflow](invitation-approval-workflow.md) for the authority,
+retry, recovery and rollout contract. This is not peer-admin appointment,
+secondary-source invitation onboarding, completion notices or final business
+acceptance; those remain in the broader goal.
+
+The initial joined gate found a real policy response/fingerprint defect before
+release; that partial run is not passing evidence. After corrections, the final
+joined suite passed 21/21, separate Operations authority/HTTP gates passed 53/53,
+and 62 distinct Client request/workspace/email cases passed across the combined
+run and a 26/26 older-schema correction rerun. The compatibility fix preserves
+authorized legacy project choices without a permissive missing-table fallback.
+
+Both app typechecks, final builds and generated-type checks passed. Operations
+browser coverage has 122 distinct passing cases across the unchanged Hub/Inbox
+84 and corrected invitation 38; Client browser coverage passed 140/140. Fresh
+375px/1280px policy, review and request-history screenshots were inspected. On
+the final bundle the folder counter passed another 5 unit and 10 browser tests,
+with desktop/mobile screenshots inspected. See the workflow runbook for precise
+run boundaries; these are focused local gates, not a whole-repository pass.
+
+The additional source-layout invariant run was 5/7: its unchanged baseline
+route allowlist omits the previously added secondary portal ingress, and a
+thumbnail-runbook exact-text assertion fails. Those remain release follow-ups;
+thumbnail behavior was not changed. This checkpoint performs no production
+migration, email, invitation, source activation, deployment or push. The
+overall goal and coordinated release acceptance remain open.

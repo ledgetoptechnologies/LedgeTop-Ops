@@ -36,6 +36,8 @@ import { SopLibrary } from "./SopLibrary";
 import { OperationsNotifications } from "./OperationsNotifications";
 import { OperationsFeedback } from "./OperationsFeedback";
 import { StaffInbox } from "./StaffInbox";
+import { InvitationApprovals } from "./InvitationApprovals";
+import { loadInvitationAdministrationAccess, type InvitationAdministrationAccess } from "./invitation-administration-api";
 import { inboxSources } from "./staff-inbox";
 import { WorkContextSops } from "./WorkContextSops";
 import { TeamAssignedWork } from "./TeamAssignedWork";
@@ -57,6 +59,7 @@ type OperationsUser = SessionUser & {
   isAdministrator: boolean;
 };
 interface Session {
+  invitationAdministration?: InvitationAdministrationAccess;
   user: OperationsUser;
   csrfToken: string;
   timezone: string;
@@ -156,9 +159,9 @@ const MANAGE_NAV: typeof NAV = [
 function allowed(user: SessionUser, permission: Permission) {
   return user.permissions.includes(permission);
 }
-function navAllowed(user: OperationsUser, item: (typeof NAV)[number], feedbackEnabled=false) {
+function navAllowed(user: OperationsUser, item: (typeof NAV)[number], feedbackEnabled=false, invitationReview=false) {
   return (
-    (item.permissions.some((permission) => allowed(user, permission)) || (item.page === "operations" && (feedbackEnabled || user.isAdministrator && allowed(user, "integrations.manage") && allowed(user, "administration.view")))) &&
+    (item.permissions.some((permission) => allowed(user, permission)) || (item.page === "operations" && (feedbackEnabled || invitationReview || user.isAdministrator && allowed(user, "integrations.manage") && allowed(user, "administration.view")))) &&
     (!item.administrator || user.isAdministrator)
   );
 }
@@ -190,18 +193,20 @@ export function OperationsApp() {
     mobileNavPanel = useRef<HTMLDivElement>(null),
     manageMenu = useRef<HTMLDivElement>(null),
     manageTrigger = useRef<HTMLButtonElement>(null);
-  const routeForPage = (requested: Page, user: OperationsUser, feedbackEnabled=false): { page: Page; href: string } | null => {
+  const routeForPage = (requested: Page, user: OperationsUser, feedbackEnabled=false, invitationReview=false): { page: Page; href: string } | null => {
     const item = [...NAV, ...MANAGE_NAV].find(candidate => candidate.page === requested);
-    return item && navAllowed(user, item, feedbackEnabled)
-      ? { page: item.page, href: item.page === "operations" ? operationsLandingPath(user.permissions, feedbackEnabled) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`) }
+    return item && navAllowed(user, item, feedbackEnabled, invitationReview)
+      ? { page: item.page, href: item.page === "operations" ? operationsLandingPath(user.permissions, feedbackEnabled, invitationReview) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`) }
       : null;
   };
   const normalizeLocation = (value: Session) => {
     const requested = pathPage(location.pathname);
     const feedbackEnabled = value.capabilities?.clientFeedback?.enabled === true;
-    const authorized = routeForPage(requested, value.user, feedbackEnabled);
-    const fallbackItem = [...NAV, ...MANAGE_NAV].find(item => navAllowed(value.user, item, feedbackEnabled));
-    const fallback = fallbackItem ? routeForPage(fallbackItem.page, value.user, feedbackEnabled) : null;
+    const invitationReview = value.invitationAdministration?.enabled === true && value.invitationAdministration.canReview;
+    if (location.pathname === "/operations/invitation-requests" || location.pathname.startsWith("/operations/invitation-requests/")) {setPage("operations"); return;}
+    const authorized = routeForPage(requested, value.user, feedbackEnabled, invitationReview);
+    const fallbackItem = [...NAV, ...MANAGE_NAV].find(item => navAllowed(value.user, item, feedbackEnabled, invitationReview));
+    const fallback = fallbackItem ? routeForPage(fallbackItem.page, value.user, feedbackEnabled, invitationReview) : null;
     const target = authorized || fallback;
     if (!target) return;
     setPage(target.page);
@@ -214,9 +219,16 @@ export function OperationsApp() {
       history.replaceState(null, "", target.href);
   };
   useEffect(() => {
-    api<Session>("/api/session")
-      .then((value) => {
+    const controller = new AbortController();
+    api<Session>("/api/session", {signal: controller.signal})
+      .then(async (value) => {
         setCsrf(value.csrfToken);
+        if (value.capabilities?.clientWorkspaceManagerRecovery?.enabled === true) {
+          try {value.invitationAdministration = await loadInvitationAdministrationAccess(AbortSignal.any([controller.signal, AbortSignal.timeout(10000)]));}
+          catch (caught) {if (controller.signal.aborted) return; if (caught instanceof ApiError && caught.status === 401) throw caught;
+            value.invitationAdministration = {enabled: false, canReview: false, canManagePolicy: false, error: "Invitation administration could not be checked. Reload to retry."};}
+        }
+        if (controller.signal.aborted) return;
         activateDeliveryFolderCache(JSON.stringify({
           userId: value.user.id,
           permissions: [...value.user.permissions].sort(),
@@ -227,7 +239,8 @@ export function OperationsApp() {
         setSession(value);
         normalizeLocation(value);
       })
-      .catch((caught) => setError(caught.message));
+      .catch((caught) => {if (!controller.signal.aborted) setError(caught.message);});
+    return () => controller.abort();
   }, []);
   useEffect(() => {
     const pop = () => { if (session) normalizeLocation(session); };
@@ -294,10 +307,11 @@ export function OperationsApp() {
       </main>
     );
   const props = { session };
-  const primaryNavigation = NAV.filter((item) => navAllowed(session.user, item, session.capabilities?.clientFeedback?.enabled === true));
+  const invitationReview = session.invitationAdministration?.enabled === true && session.invitationAdministration.canReview;
+  const primaryNavigation = NAV.filter((item) => navAllowed(session.user, item, session.capabilities?.clientFeedback?.enabled === true, invitationReview));
   const manageNavigation = MANAGE_NAV.filter((item) => navAllowed(session.user, item));
   const navigationLink = (item: (typeof NAV)[number], mobile = false) => {
-    const href = item.page === "operations" ? operationsLandingPath(session.user.permissions, session.capabilities?.clientFeedback?.enabled === true) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
+    const href = item.page === "operations" ? operationsLandingPath(session.user.permissions, session.capabilities?.clientFeedback?.enabled === true, invitationReview) : item.href || (item.page === "dashboard" ? "/" : `/${item.page}`);
     return <a
       key={`${mobile ? "mobile" : "desktop"}-${item.page}`}
       href={href}
@@ -317,7 +331,7 @@ export function OperationsApp() {
           </div>}
         </nav>
         <button ref={mobileNavTrigger} className="ops-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="ops-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
-        {!!inboxSources({ permissions: session.user.permissions, isAdministrator: session.user.isAdministrator, feedbackEnabled: session.capabilities?.clientFeedback?.enabled === true }).length && <a
+        {!!inboxSources({ permissions: session.user.permissions, isAdministrator: session.user.isAdministrator, feedbackEnabled: session.capabilities?.clientFeedback?.enabled === true, invitationReview }).length && <a
           className="ops-inbox-link" href="/operations/inbox" aria-label="Open staff inbox" title="Needs attention" aria-current={location.pathname === "/operations/inbox" ? "page" : undefined}
           onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey && event.button === 0) { event.preventDefault(); navigate("operations", "/operations/inbox"); } }}>
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9Z" /><path d="M9 20h6" /></svg>
@@ -341,7 +355,7 @@ export function OperationsApp() {
         {page === "dashboard" && <Dashboard {...props} />}{" "}
         {page === "operations" && <OperationsHub {...props} />}{" "}
         {page === "clients" && (allowed(session.user, "team.view") || allowed(session.user, "operations.manage")) && (
-          <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions} feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} />
+          <ClientHubWorkspaceRouter mapToken={session.mapboxPublicToken} permissions={session.user.permissions} feedbackEnabled={session.capabilities?.clientFeedback?.enabled === true} invitationAccess={session.invitationAdministration} />
         )}{" "}
         {page === "airspace" && <Airspace />}{" "}
         {page === "delivery" && canAccessDataPage(session.user.permissions) && (
@@ -690,7 +704,8 @@ function SimpleRows({
 }
 
 function OperationsHub({ session }: { session: Session }) {
-  const inboxAccess = { permissions: session.user.permissions, isAdministrator: session.user.isAdministrator, feedbackEnabled: session.capabilities?.clientFeedback?.enabled === true };
+  const invitationAccess = session.invitationAdministration ?? {enabled: false, canReview: false, canManagePolicy: false};
+  const inboxAccess = { permissions: session.user.permissions, isAdministrator: session.user.isAdministrator, feedbackEnabled: session.capabilities?.clientFeedback?.enabled === true, invitationReview: invitationAccess.enabled && invitationAccess.canReview, invitationError: invitationAccess.error };
   const sections: Array<{
     id: OperationsSection;
     label: string;
@@ -703,13 +718,14 @@ function OperationsHub({ session }: { session: Session }) {
     { id: "notifications", label: "Notifications", permission: "delivery.share.audit" },
     { id: "feedback", label: "Client feedback", permission: "operations.manage" },
     { id: "inbox", label: "Inbox", permission: "operations.manage" },
+    { id: "invitation-requests", label: "Invitation approvals", permission: "team.manage" },
   ];
   const visible = sections.filter((item) =>
-    item.id === "inbox" ? inboxSources(inboxAccess).length > 0 : item.id === "feedback" ? session.capabilities?.clientFeedback?.enabled === true : allowed(session.user, item.permission),
+    item.id === "invitation-requests" ? inboxAccess.invitationReview : item.id === "inbox" ? inboxSources(inboxAccess).length > 0 : item.id === "feedback" ? session.capabilities?.clientFeedback?.enabled === true : allowed(session.user, item.permission),
   );
   const initial = pathOperationsSection(location.pathname);
   const [section, setSection] = useState<OperationsSection>(
-    visible.some((item) => item.id === initial)
+    initial === "invitation-requests" || visible.some((item) => item.id === initial)
       ? initial
       : visible[0]?.id || "operations",
   );
@@ -717,7 +733,7 @@ function OperationsHub({ session }: { session: Session }) {
     const sync = () => {
       if (pathPage(location.pathname) !== "operations") return;
       const requested = pathOperationsSection(location.pathname),
-        next = visible.some((item) => item.id === requested)
+        next = requested === "invitation-requests" || visible.some((item) => item.id === requested)
           ? requested
           : visible[0]?.id || "operations";
       setSection(next);
@@ -726,13 +742,14 @@ function OperationsHub({ session }: { session: Session }) {
         (location.pathname === "/sops" || location.pathname.startsWith("/sops/") ||
           location.pathname === expected || location.pathname.startsWith(`${expected}/`));
       const isFeedbackRoute = next === "feedback" && location.pathname.startsWith(`${expected}/`);
-      if (!isSopRoute && !isFeedbackRoute && location.pathname !== expected)
+      const isInvitationRoute = next === "invitation-requests" && location.pathname.startsWith(`${expected}/`);
+      if (!isSopRoute && !isFeedbackRoute && !isInvitationRoute && location.pathname !== expected)
         history.replaceState(null, "", expected);
     };
     sync();
     addEventListener("popstate", sync);
     return () => removeEventListener("popstate", sync);
-  }, [session.user.permissions.join("|"), session.user.isAdministrator, session.capabilities?.clientFeedback?.enabled]);
+  }, [session.user.permissions.join("|"), session.user.isAdministrator, session.capabilities?.clientFeedback?.enabled, inboxAccess.invitationReview]);
   const open = (next: OperationsSection) => {
     if (next === section) return;
     setSection(next);
@@ -769,6 +786,7 @@ function OperationsHub({ session }: { session: Session }) {
       {section === "notifications" && allowed(session.user, "delivery.share.audit") && <OperationsNotifications />}
       {section === "feedback" && session.capabilities?.clientFeedback?.enabled === true && <OperationsFeedback />}
       {section === "inbox" && inboxSources(inboxAccess).length > 0 && <StaffInbox access={inboxAccess} />}
+      {section === "invitation-requests" && <InvitationApprovals access={invitationAccess} />}
     </>
   );
 }

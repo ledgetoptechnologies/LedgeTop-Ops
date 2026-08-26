@@ -76,6 +76,7 @@ import {
   workspaceMembershipManagementEnabled,
 } from "./workspace-memberships";
 import { invitationEmailDeliveryEnabled } from "./invitation-email";
+import {listOwnWorkspaceInvitationRequests,cancelWorkspaceInvitationRequest} from './workspace-invitation-requests';
 import { portalHierarchyRelationsEnabled } from "./hierarchy-relations";
 import {
   resolveProjectAlphaPricingAuthorizationContext,
@@ -279,6 +280,7 @@ const workspaceInvitationBody = z.object({
   organizationWide: z.boolean().optional(),
   confirmOrganizationWide: z.boolean().optional(),
   accessTerms: projectAccessTermsInputSchema.optional(),
+  expectedInvitationPolicyVersion:z.number().int().nonnegative().optional(),
   capabilities: z.array(z.enum(["workspace.view", "delivery.view", "request.create"])).min(1).max(3),
 }).strict().superRefine((input, context) => {
   if (input.targetScope?.type === "organization" && input.confirmOrganizationWide !== true) {
@@ -711,20 +713,36 @@ export function createClientPortalRouter(
 
   router.post("/v2/workspaces/:workspaceId/invitations", async (c) => {
     if (!workspaceMembershipManagementEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
-    if (!invitationEmailDeliveryEnabled(c.env)) throw new HTTPException(503, { message: "Invitation email is not configured" });
     requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
     const workspaceId = opaqueId.safeParse(c.req.param("workspaceId"));
     const key = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
     const input = workspaceInvitationBody.safeParse(await readBoundedJson(c.req.raw, 4096));
     if (!workspaceId.success || !key.success || !input.success) throw new HTTPException(400, { message: "Invitation is invalid" });
-    const result = await createWorkspaceInvitation(c.env, c.get("clientPrincipal"), workspaceId.data, input.data, key.data);
+    const result = await createWorkspaceInvitation(c.env, c.get("clientPrincipal"), workspaceId.data, input.data, key.data,
+      {emailDeliveryAvailable:invitationEmailDeliveryEnabled(c.env)});
     if (result.outcome === "denied") throw new HTTPException(404, { message: "Workspace not found" });
     if (result.outcome === "invalid") throw new HTTPException(400, { message: "Invitation is invalid" });
     if (result.outcome === "conflict") throw new HTTPException(409, { message: "Idempotency key was already used" });
     if (result.outcome === "rate_limited") throw new HTTPException(429, { message: "Too many invitations. Try again later." });
     if (result.outcome === "policy_disabled") throw new HTTPException(403, { message: "invitation_policy_disabled" });
     if (result.outcome === "approval_required") throw new HTTPException(409, { message: "invitation_approval_required" });
-    return c.json(result, result.outcome === "created" ? 201 : 200);
+    if (result.outcome === 'mail_unavailable') throw new HTTPException(503,{message:'Invitation email is not configured'});
+    return c.json(result, result.outcome === "created" ? 201 : result.outcome==='approval_requested'?202:200);
+  });
+
+  router.get('/v2/workspaces/:workspaceId/invitation-requests',async(c)=>{
+    if(!workspaceMembershipManagementEnabled(c.env))throw new HTTPException(404,{message:'Not found'});
+    const workspaceId=opaqueId.safeParse(c.req.param('workspaceId'));if(!workspaceId.success)throw new HTTPException(404,{message:'Workspace not found'});
+    return c.json(await listOwnWorkspaceInvitationRequests(c.env,c.get('clientPrincipal'),workspaceId.data,c.req.query('cursor')));
+  });
+  router.post('/v2/workspaces/:workspaceId/invitation-requests/:requestId/cancel',async(c)=>{
+    if(!workspaceMembershipManagementEnabled(c.env))throw new HTTPException(404,{message:'Not found'});
+    requireSameRequestOrigin(c.req.raw,configuredPortalOrigin(c.env));
+    const workspaceId=opaqueId.safeParse(c.req.param('workspaceId')),requestId=opaqueId.safeParse(c.req.param('requestId')),
+      key=idempotencyKey.safeParse(c.req.header('Idempotency-Key')),
+      body=z.object({expectedVersion:z.number().int().positive()}).strict().safeParse(await readBoundedJson(c.req.raw,1024));
+    if(!workspaceId.success||!requestId.success||!key.success||!body.success)throw new HTTPException(400,{message:'invitation_request_invalid'});
+    return c.json(await cancelWorkspaceInvitationRequest(c.env,c.get('clientPrincipal'),{workspaceId:workspaceId.data,requestId:requestId.data,expectedVersion:body.data.expectedVersion,idempotencyKey:key.data}));
   });
 
   router.delete("/v2/workspaces/:workspaceId/invitations/:invitationId", async (c) => {

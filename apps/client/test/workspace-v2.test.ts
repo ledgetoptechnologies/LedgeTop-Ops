@@ -624,6 +624,9 @@ describe("client workspace hierarchy v2", () => {
     }, "cross-workspace-denial-0001")).outcome).toBe("denied");
     const access = await listWorkspaceAccess(env, principal, "workspace-account-a");
     expect(access?.invitations.some(invitation => invitation.id === created.invitation.id)).toBe(true);
+    expect(await db.prepare("SELECT COUNT(*) count FROM sqlite_master WHERE name='portal_v2_directory_generation_contracts'").first('count')).toBe(0);
+    expect(access?.inviteScopes).toContainEqual({type:'project',publicId:'pa-project-a',displayName:'North Site',
+      capabilities:['delivery.view','request.create'],projectEndSupported:false});
   }, 30_000);
 
   it("binds acceptance to verified issuer, subject, and exact email and rejects replay by another subject", async () => {

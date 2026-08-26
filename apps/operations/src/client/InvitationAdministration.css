@@ -1,0 +1,16 @@
+.invitation-administration, .invitation-administration-list, .invitation-administration-confirm, .invitation-administration-facts { display: grid; gap: .9rem; min-width: 0; }
+.invitation-administration h2, .invitation-administration h3, .invitation-administration h4, .invitation-administration p { margin: 0; overflow-wrap: anywhere; }
+.invitation-administration label { display: grid; gap: .45rem; min-width: 0; }
+.invitation-administration input, .invitation-administration select, .invitation-administration textarea { min-width: 0; width: 100%; min-height: 44px; box-sizing: border-box; padding: .7rem .8rem; border: 1px solid var(--line, #cbd3da); border-radius: 8px; color: var(--ink, #151b22); background: var(--paper, #fff); }
+.invitation-administration button, .invitation-administration a.button { min-height: 44px; justify-self: start; }
+.invitation-administration > header, .invitation-administration-actions, .invitation-administration-search { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; justify-content: space-between; }
+.invitation-administration > header > div { display: grid; gap: .5rem; }
+.invitation-administration-actions { justify-content: start; }
+.invitation-administration-search { align-items: end; }
+.invitation-administration-search label { flex: 1 1 14rem; }
+.invitation-administration-confirm { border: 1px solid var(--orange, #ee5007); border-radius: 10px; padding: 1rem; }
+.invitation-administration-facts { margin: 0; }
+.invitation-administration-facts > div { display: grid; gap: .3rem; }
+.invitation-administration-facts dt { color: var(--muted, #5d6772); font-size: .8rem; }
+.invitation-administration-facts dd { margin: 0; overflow-wrap: anywhere; }
+@media (max-width: 600px) { .invitation-administration > header { display: grid; } .invitation-administration-actions button { flex: 1 1 auto; } }

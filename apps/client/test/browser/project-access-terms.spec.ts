@@ -3,7 +3,7 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 const workspaces = [{id: "workspace-a", rootType: "organization", rootPublicId: "org-a", displayName: "Acme Construction"}, {id: "workspace-b", rootType: "organization", rootPublicId: "org-b", displayName: "Mountain Engineering"}];
 const terms = {kind: "collaborator", mode: "project_end", expiresAt: null};
 function hierarchy(id = "workspace-a") {return {entries: [{type: "organization", publicId: id === "workspace-a" ? "org-a" : "org-b", parentPublicId: null, displayName: id === "workspace-a" ? "Acme Construction" : "Mountain Engineering", sourceVersion: "1"}, {type: "project", publicId: `project-${id}`, parentPublicId: id === "workspace-a" ? "org-a" : "org-b", displayName: id === "workspace-a" ? "North seawall construction documentation" : "Mountain bridge inspection", sourceVersion: "1"}]};}
-function access(id = "workspace-a", overrides: Record<string, unknown> = {}) {return {members: [{identityId: `manager-${id}`, email: `manager-${id}@example.test`, manager: true, status: "active", source: "project_alpha"}], invitations: [], invitationPolicy: {mode: "allowed", version: 1}, projectAccessTermsSupported: true, projectAccessOptions: [{projectPublicId: `project-${id}`, projectEndSupported: true}], ...overrides};}
+function access(id = "workspace-a", overrides: Record<string, unknown> = {}) {return {sourceId: "project-alpha:primary", sourceName: "Project Alpha", workspaceName: id, canManageMembers: true, invitationRequestsSupported: false, inviteScopes: hierarchy(id).entries.map(entry => ({type: entry.type, publicId: entry.publicId, displayName: entry.displayName, capabilities: ["delivery.view", "request.create"], projectEndSupported: entry.type === "project"})), members: [{identityId: `manager-${id}`, email: `manager-${id}@example.test`, manager: true, status: "active", source: "project_alpha"}], invitations: [], invitationPolicy: {mode: "allowed", version: 1}, projectAccessTermsSupported: true, projectAccessOptions: [{projectPublicId: `project-${id}`, projectEndSupported: true}], ...overrides};}
 type Call = {path: string; method: string; body: any; key?: string};
 async function mock(page: Page, override?: (route: Route, call: Call) => Promise<unknown> | undefined) {
   const calls: Call[] = []; const saved = new Map<string, Record<string, unknown>[]>();
@@ -41,7 +41,7 @@ test("project invitations explicitly review collaborator completion terms separa
   const confirmation = page.getByRole("region", {name: "Review collaborator invitation"});
   await expect(confirmation).toContainText("project completion + 7 days"); await expect(confirmation).toContainText("Reopening does not renew expired access."); await expect(confirmation).toContainText("Invitation link: seven days. Access duration is separate.");
   await page.getByRole("button", {name: "Send invitation", exact: true}).click(); await expect(page.getByRole("status").filter({hasText: "Invitation issued"})).toBeVisible();
-  expect(calls.find(call => call.method === "POST")?.body).toEqual({email: "collaborator@example.test", targetScope: {type: "project", publicId: "project-workspace-a"}, capabilities: ["delivery.view"], accessTerms: terms});
+  expect(calls.find(call => call.method === "POST")?.body).toEqual({email: "collaborator@example.test", targetScope: {type: "project", publicId: "project-workspace-a"}, capabilities: ["delivery.view"], accessTerms: terms, expectedInvitationPolicyVersion: 1});
   await expect(page.getByText("Access awaits verified project completion, then 7 days", {exact: true})).toBeVisible();
 });
 
@@ -62,13 +62,13 @@ test("unsigned project completion offers no guessed default and until-revoked ne
 
 for (const mode of ["disabled", "require_approval"]) test(`organization invitation policy ${mode} cannot be bypassed from the form`, async ({page}) => {
   const calls = await mock(page, (route, call) => call.path.endsWith("/access") ? route.fulfill({json: access("workspace-a", {invitationPolicy: {mode, version: 2}})}) : undefined); await open(page);
-  await expect(page.getByRole("status").filter({hasText: mode === "disabled" ? "Invitations are disabled" : "Staff approval is required"})).toBeVisible();
-  await expect(page.getByLabel("Email address", {exact: true})).toBeDisabled(); await expect(page.getByRole("button", {name: "Review invitation", exact: true})).toBeDisabled(); await expect(page.getByRole("button", {name: "Send invitation", exact: true})).toHaveCount(0); expect(calls.some(call => call.method === "POST")).toBe(false);
+  await expect(page.getByRole("status").filter({hasText: mode === "disabled" ? "Invitations are disabled" : "Administrator approval is required"})).toBeVisible();
+  await expect(page.getByLabel("Email address", {exact: true})).toBeDisabled(); await expect(page.getByRole("button", {name: mode === "disabled" ? "Review invitation" : "Review approval request", exact: true})).toBeDisabled(); await expect(page.getByRole("button", {name: "Send invitation", exact: true})).toHaveCount(0); expect(calls.some(call => call.method === "POST")).toBe(false);
 });
 
 for (const [status, code] of [[403, "invitation_policy_disabled"], [409, "invitation_approval_required"]] as const) test(`a raced invitation policy ${code} clears stale review and never retries silently`, async ({page}) => {
   const calls = await mock(page, (route, call) => call.method === "POST" ? route.fulfill({status, json: {error: code, code}}) : undefined); await open(page); await review(page); await page.getByRole("button", {name: "Send invitation", exact: true}).click();
-  await expect(page.getByRole("alert")).toContainText(code === "invitation_policy_disabled" ? "Invitations are disabled" : "Staff approval is required"); await expect(page.getByRole("region", {name: "Review collaborator invitation"})).toHaveCount(0); await expect(page.getByText("manager-workspace-a@example.test", {exact: true})).toHaveCount(0); expect(calls.filter(call => call.method === "POST")).toHaveLength(1); await expect(page.getByRole("button", {name: "Retry same invitation"})).toHaveCount(0);
+  await expect(page.getByRole("alert")).toContainText(code === "invitation_policy_disabled" ? "Invitations are disabled" : "Administrator approval is required"); await expect(page.getByRole("region", {name: "Review collaborator invitation"})).toHaveCount(0); await expect(page.getByText("manager-workspace-a@example.test", {exact: true})).toHaveCount(0); expect(calls.filter(call => call.method === "POST")).toHaveLength(1); await expect(page.getByRole("button", {name: "Retry same invitation"})).toHaveCount(0);
 });
 
 test("uncertain invitations keep their original target terms and idempotency key through refresh", async ({page}) => {

@@ -3,6 +3,7 @@ import { Card, EmptyState, StatusPill } from "@ltds/ui";
 import type { Permission } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { ClientHub } from "./ClientHub";
+import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 import { ClientBusinessActivity } from "./ClientBusinessActivity";
 import { clientDirectoryReturnPath } from "./ClientDirectory";
 import { businessProjectClientPath, clientWorkspaceFilters, readBusinessProjectRoute, type BusinessProjectRoute } from "./business-project-route";
@@ -121,7 +122,7 @@ function ProjectWorkspace({ route }: { route: BusinessProjectRoute }) {
 }
 
 /** Project routes live inside Client Hub without expanding a client card inline. */
-export function ClientHubWorkspaceRouter({ mapToken, permissions, feedbackEnabled=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean }) {
+export function ClientHubWorkspaceRouter({ mapToken, permissions, feedbackEnabled=false, invitationAccess }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess }) {
   const [, setLocationRevision] = useState(0);
   useEffect(() => {
     const sync = () => setLocationRevision(value => value + 1);
@@ -129,7 +130,7 @@ export function ClientHubWorkspaceRouter({ mapToken, permissions, feedbackEnable
     return () => removeEventListener("popstate", sync);
   }, []);
   const route = readBusinessProjectRoute(location.pathname);
-  if (!route) return <ClientHub mapToken={mapToken} permissions={permissions} feedbackEnabled={feedbackEnabled} />;
+  if (!route) return <ClientHub mapToken={mapToken} permissions={permissions} feedbackEnabled={feedbackEnabled} invitationAccess={invitationAccess} />;
   if ("invalid" in route) return <Card><EmptyState title="Project link unavailable" detail="This project link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
   if (!permissions.includes("team.view")) return <Card><EmptyState title="Project unavailable" detail="Client-directory access is required." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
   return <ProjectWorkspace key={JSON.stringify(route)} route={route} />;

@@ -12,6 +12,7 @@ export type Env = Omit<
   | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
+  | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
   /** Deploy-managed connector credential sets; never returned by registry APIs. */
@@ -40,6 +41,8 @@ export type Env = Omit<
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
   /** Must match the Client deployment before publishing relation-backed grants. */
   CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED?: string;
+  /** Mirror Client before staff can issue an approved named invitation. */
+  CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED?: string;
   OPERATIONS_SESSION_SECRET: string;
   DELIVERY_TOKEN_SECRET: string;
   DELIVERY_PREVIOUS_TOKEN_SECRET?: string;

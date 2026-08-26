@@ -21,6 +21,8 @@ describe("consolidated Operations routes", () => {
     ["/operations/sops", "sops"],
     ["/operations/notifications", "notifications"],
     ["/operations/inbox", "inbox"],
+    ["/operations/invitation-requests", "invitation-requests"],
+    ["/operations/invitation-requests/request-one", "invitation-requests"],
     ["/operations/feedback", "feedback"],
     ["/operations/feedback/feedback-one", "feedback"],
   ] as const)("resolves %s to the Operations page and %s section", (pathname, section) => {
@@ -61,6 +63,8 @@ describe("consolidated Operations routes", () => {
   });
 
   it("uses only the explicit feedback capability for a feedback-only landing", () => {
+    expect(operationsLandingPath([], false, true)).toBe("/operations/inbox");
+    expect(operationsLandingPath(["delivery.share.audit"], false, true)).toBe("/operations/notifications");
     expect(operationsLandingPath([], true)).toBe("/operations/feedback");
     expect(operationsLandingPath(["operations.manage"], false)).toBe("/operations/inbox");
     expect(operationsLandingPath(["sops.view"], true)).toBe("/operations/sops");

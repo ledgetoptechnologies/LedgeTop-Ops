@@ -8,6 +8,8 @@ import { businessProjectHref } from "./business-project-route";
 import { ClientDirectory, clientDirectoryReturnPath, clientPortalStatus, type ClientSummary, type ClientHubCapabilities, type ClientRootNamespace } from "./ClientDirectory";
 import { ClientBusinessParty, SourceBusinessParty, type BusinessPartyReference } from "./ClientBusinessParty";
 import { ClientBusinessActivity } from "./ClientBusinessActivity";
+import { ClientInvitationPolicy } from "./ClientInvitationPolicy";
+import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
@@ -281,7 +283,7 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
   </Card>;
 }
 
-function ClientWorkspace({ route, canReviewFeedback }: { route: ClientRoute; canReviewFeedback: boolean }) {
+function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route: ClientRoute; canReviewFeedback: boolean; invitationAccess?: InvitationAdministrationAccess }) {
   const [revision, setRevision] = useState(0);
   const [invalidated, setInvalidated] = useState("");
   const [portalFeedback, setPortalFeedback] = useState("");
@@ -332,6 +334,7 @@ function ClientWorkspace({ route, canReviewFeedback }: { route: ClientRoute; can
           {items => <ContactList contacts={items} />}
         </ClientCollection>
       </Card>
+      {data.client.workspace_id && data.client.source_id && /^project-alpha:[A-Za-z0-9_-]+$/.test(data.client.source_id) && (invitationAccess?.enabled && invitationAccess.canManagePolicy ? <ClientInvitationPolicy key={`${data.client.source_id}:${data.client.workspace_id}:${revision}`} workspaceId={data.client.workspace_id} sourceId={data.client.source_id} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /> : invitationAccess?.error ? <Card title="Invitation policy"><p role="alert">{invitationAccess.error}</p></Card> : null)}
       {data.portalIdentities ? portalBasePath ? <ClientPortalAccessPanel initialPage={data.portalIdentities} basePath={portalBasePath}
         contextVersion={data.contextVersion || data.portalIdentities.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate}
         feedback={portalFeedback} onChanged={message => { if (!collectionProps.contextSignal.aborted) { setPortalFeedback(message); refresh(); } }} />
@@ -373,7 +376,7 @@ function ClientWorkspace({ route, canReviewFeedback }: { route: ClientRoute; can
   </>;
 }
 
-export function ClientHub({ mapToken, permissions, feedbackEnabled=false }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean }) {
+export function ClientHub({ mapToken, permissions, feedbackEnabled=false, invitationAccess }: { mapToken: string | null; permissions: Permission[]; feedbackEnabled?: boolean; invitationAccess?: InvitationAdministrationAccess }) {
   const [, setLocationRevision] = useState(0);
   useEffect(() => {
     const sync = () => setLocationRevision(value => value + 1);
@@ -393,7 +396,7 @@ export function ClientHub({ mapToken, permissions, feedbackEnabled=false }: { ma
   if (selectedRequest)
     return canReview ? <ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" /> : <Card><EmptyState title="Request unavailable" detail="Request-review access is required." /></Card>;
   if (route && "invalid" in route) return <Card><EmptyState title="Client workspace unavailable" detail="This client link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
-  if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} canReviewFeedback={feedbackEnabled} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
+  if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} canReviewFeedback={feedbackEnabled} invitationAccess={invitationAccess} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
   return <>
     {canReview && <section className="client-hub-queue"><ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" pendingOnly /></section>}
     {canViewDirectory && <section>

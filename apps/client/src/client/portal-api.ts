@@ -418,8 +418,9 @@ export interface PortalWorkspaceMember { identityId: string; email: string | nul
 export interface PortalProjectAccessTermsInput { kind: "customer" | "collaborator"; mode: "specific_date" | "project_end" | "until_revoked"; expiresAt: string | null }
 export interface PortalProjectAccessTerms extends PortalProjectAccessTermsInput { id: string; effectiveExpiresAt: string | null; completionPending: boolean; expired: boolean }
 export interface PortalWorkspaceInvitation { id: string; email: string; status: "pending" | "accepted" | "revoked" | "expired"; scope: { type: PortalHierarchyScopeType | "workspace"; publicId: string | null }; capabilities: string[]; expiresAt: string; accessTerms: PortalProjectAccessTerms | null }
-export interface PortalWorkspaceAccess { members: PortalWorkspaceMember[]; invitations: PortalWorkspaceInvitation[]; invitationPolicy: { mode: "allowed" | "disabled" | "require_approval"; version: number }; projectAccessTermsSupported: boolean; projectAccessOptions: Array<{ projectPublicId: string; projectEndSupported: boolean }> }
-export interface PortalWorkspaceInvitationInput { email: string; projectPublicId?: string; targetScope?: { type: PortalHierarchyScopeType; publicId: string }; organizationWide?: boolean; confirmOrganizationWide?: boolean; capabilities: Array<"delivery.view" | "request.create">; accessTerms?: PortalProjectAccessTermsInput }
+export interface PortalInviteScope { type: PortalHierarchyScopeType; publicId: string; displayName: string; capabilities: Array<"delivery.view" | "request.create">; projectEndSupported: boolean }
+export interface PortalWorkspaceAccess { sourceId: string; sourceName: string; workspaceName: string; members: PortalWorkspaceMember[]; invitations: PortalWorkspaceInvitation[]; invitationPolicy: { mode: "allowed" | "disabled" | "require_approval"; version: number }; projectAccessTermsSupported: boolean; projectAccessOptions: Array<{ projectPublicId: string; projectEndSupported: boolean }>; canManageMembers: boolean; inviteScopes: PortalInviteScope[]; invitationRequestsSupported: boolean }
+export interface PortalWorkspaceInvitationInput { email: string; projectPublicId?: string; targetScope?: { type: PortalHierarchyScopeType; publicId: string }; organizationWide?: boolean; confirmOrganizationWide?: boolean; capabilities: Array<"delivery.view" | "request.create">; accessTerms?: PortalProjectAccessTermsInput; expectedInvitationPolicyVersion?: number }
 export interface PortalDelegatedShareTarget {
   delegationId: string;
   folderTargetId: string;
@@ -466,8 +467,8 @@ export async function loadPortalWorkspaceAccess(workspaceId: string, request: Po
   return signal ? request(url, {signal}) : request(url);
 }
 
-export async function invitePortalWorkspaceMember(workspaceId: string, input: PortalWorkspaceInvitationInput, request: PortalRequest = requestJson, options?: { idempotencyKey: string; signal?: AbortSignal }): Promise<void> {
-  await request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/invitations`, {
+export async function invitePortalWorkspaceMember(workspaceId: string, input: PortalWorkspaceInvitationInput, request: PortalRequest = requestJson, options?: { idempotencyKey: string; signal?: AbortSignal }): Promise<{outcome: "created" | "replayed" | "approval_requested" | "approval_replayed"; request?: unknown; deliveryQueued?: boolean}> {
+  return request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/invitations`, {
     method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": options?.idempotencyKey ?? crypto.randomUUID() }, body: JSON.stringify(input), ...(options?.signal ? {signal: options.signal} : {}),
   });
 }

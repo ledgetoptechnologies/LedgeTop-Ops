@@ -28,7 +28,8 @@ export function StaffInbox({ access }: { access: InboxAccess }) {
       <button className="button-orange" type="submit">Search</button>
       {view.q && <a className="button button-ghost" href="/operations/inbox">Clear search</a>}
     </form>
-    <details className="staff-inbox-coverage"><summary>What is included?</summary><p>Open client requests and feedback, pending folder-change and explicit Project Alpha portal delivery notices, and reported failures from active Project Alpha connections. Queues load independently; shown counts are not unread counts or a combined total.</p>
+    {access.invitationError && !signedOut && <p role="alert">Invitation approvals unavailable: {access.invitationError}</p>}
+    <details className="staff-inbox-coverage"><summary>What is included?</summary><p>Open client requests and feedback, invitation approval requests, pending folder-change and explicit Project Alpha portal delivery notices, and reported failures from active Project Alpha connections. Queues load independently; shown counts are not unread counts or a combined total.</p>
       <p>Staff-created portal grants and uploads without an explicit recipient policy are not included. Opening this page never sends mail, dismisses work, or changes access.</p></details>
     {signedOut ? <div role="alert"><p>Your session expired. Sign in again, then refresh the inbox.</p></div> : view.invalid ? <p role="alert">This inbox search is invalid. Clear the search to try again.</p>
       : sources.length ? <div className="staff-inbox-grid">{sources.map(source => <InboxSection key={`${source}:${permissionKey}:${view.q}:${refresh}`} source={source} q={view.q} onSignedOut={() => setSignedOut(true)} />)}</div>
@@ -43,6 +44,7 @@ function InboxSection({ source, q, onSignedOut }: { source: InboxSource; q: stri
   const label = inboxLabels[source];
   async function load(next: string | null = null) {
     if (pending.current) return;
+    if (source === "invitations" && q.length > 100) {setRows([]); setCursor(null); setLoading(false); setError("Invitation approval searches support up to 100 characters. Shorten this search to include this queue."); return;}
     const controller = new AbortController(), current = ++run.current;
     pending.current = controller; retry.current = next; setLoading(true); setError("");
     if (!next) { setRows([]); setCursor(null); setUpdated(null); setNotice(""); }

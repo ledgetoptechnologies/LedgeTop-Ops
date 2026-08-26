@@ -1,7 +1,9 @@
 import { z } from "zod";
+import { invitationRequestHref, invitationRequestPage } from "./invitation-administration-api";
+import { invitationRequestStatus } from "../../../client/src/client/invitation-request-api";
 
-export type InboxSource = "requests" | "feedback" | "deliveries" | "connections";
-export interface InboxAccess { permissions: readonly string[]; isAdministrator: boolean; feedbackEnabled: boolean }
+export type InboxSource = "requests" | "feedback" | "deliveries" | "connections" | "invitations";
+export interface InboxAccess { permissions: readonly string[]; isAdministrator: boolean; feedbackEnabled: boolean; invitationReview?: boolean; invitationError?: string }
 export interface InboxItem { id: string; title: string; detail: string; status: string; date: string | null; href: string; action: string }
 export interface InboxPage { items: InboxItem[]; nextCursor: string | null; notice?: string }
 
@@ -9,12 +11,14 @@ export function inboxSources(access: InboxAccess): InboxSource[] {
   const sources: InboxSource[] = [];
   if (access.permissions.includes("operations.manage")) sources.push("requests");
   if (access.feedbackEnabled) sources.push("feedback");
+  if (access.invitationReview) sources.push("invitations");
   if (access.permissions.includes("delivery.share.audit")) sources.push("deliveries");
   if (access.isAdministrator && access.permissions.includes("integrations.manage") && access.permissions.includes("administration.view")) sources.push("connections");
   return sources;
 }
 
 export const inboxLabels: Record<InboxSource, { title: string; description: string }> = {
+  invitations: {title: "Invitation approvals", description: "Pending and in-progress approval requests, including requests that need renewed review. A request is not an invitation or membership."},
   requests: { title: "Client requests", description: "Oldest first: submitted, under review, or waiting for Project Alpha linkage." },
   feedback: { title: "Client feedback", description: "Oldest first: new and in-progress project, folder, and file feedback." },
   deliveries: { title: "Pending delivery notices", description: "Newest notices first. Folder changes and explicit Project Alpha portal deliveries; review the exact notice before taking action." },
@@ -24,11 +28,11 @@ export const inboxLabels: Record<InboxSource, { title: string; description: stri
 export function inboxEndpoint(source: InboxSource, q: string, cursor: string | null): string {
   if (source === "connections") return "/api/admin/integrations/project-alpha/connectors";
   const params = new URLSearchParams();
-  if (source === "feedback") params.set("status", "open");
+  if (source === "feedback" || source === "invitations") params.set("status", "open");
   if (source === "deliveries") { params.set("format", "combined"); params.set("view", "pending"); }
   if (q) params.set("q", q);
   if (cursor) params.set("cursor", cursor);
-  const path = source === "requests" ? "/api/operations/inbox/requests" : source === "feedback" ? "/api/operations/feedback" : "/api/notifications/deliveries";
+  const path = source === "requests" ? "/api/operations/inbox/requests" : source === "feedback" ? "/api/operations/feedback" : source === "invitations" ? "/api/client-portal/invitation-requests" : "/api/notifications/deliveries";
   return `${path}${params.size ? `?${params}` : ""}`;
 }
 
@@ -57,6 +61,11 @@ export function inboxDate(value: string): string {
   return /(?:Z|[+-]\d\d:\d\d)$/i.test(iso) ? iso : `${iso}Z`;
 }
 export function parseInboxPage(source: InboxSource, value: unknown, q: string): InboxPage {
+  if (source === "invitations") {
+    const page = invitationRequestPage.parse(value);
+    if (!page.capabilities.canReview || page.page.hasMore !== Boolean(page.page.nextCursor) || page.items.some(row => !["pending", "approving", "stale"].includes(row.status))) throw new Error("Invitation queue context could not be verified.");
+    return {nextCursor: page.page.nextCursor, items: page.items.map(row => ({id: `${row.sourceId}:${row.workspaceId}:${row.id}`, title: row.email, detail: `${row.workspaceName} · ${row.sourceName} · ${row.scope.type} ${row.scope.publicId}`, status: invitationRequestStatus(row.status), date: row.createdAt, href: invitationRequestHref(row), action: "Review invitation request"}))};
+  }
   if (source === "requests") {
     const page = requestPage.parse(value);
     return { nextCursor: page.nextCursor, items: page.items.map(row => ({ id: row.id, title: row.title,

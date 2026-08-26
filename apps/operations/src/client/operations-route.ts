@@ -1,5 +1,5 @@
 export type OperationsPage="dashboard"|"operations"|"clients"|"airspace"|"delivery"|"viewer"|"team"|"configurations"|"administration";
-export type OperationsSection="operations"|"projects"|"tasks"|"sops"|"notifications"|"feedback"|"inbox"|"client-requests";
+export type OperationsSection="operations"|"projects"|"tasks"|"sops"|"notifications"|"feedback"|"inbox"|"client-requests"|"invitation-requests";
 export type DeliverySection="delivery"|"incoming"|"links";
 
 export const DATA_PAGE_PERMISSIONS = ["delivery.browse", "delivery.share.audit"] as const;
@@ -10,14 +10,14 @@ export function canAccessDataPage(permissions:readonly string[]):boolean{
 
 const PAGES:OperationsPage[]=["dashboard","operations","clients","airspace","delivery","viewer","team","configurations","administration"];
 
-export function operationsLandingPath(permissions:readonly string[], feedbackEnabled=false):string{
+export function operationsLandingPath(permissions:readonly string[], feedbackEnabled=false, invitationReview=false):string{
   if(permissions.includes("operations.view"))return"/operations";
   if(permissions.includes("projects.view"))return"/operations/projects";
   if(permissions.includes("tasks.view"))return"/operations/tasks";
   if(permissions.includes("sops.view"))return"/operations/sops";
   if(permissions.includes("delivery.share.audit"))return"/operations/notifications";
   if(feedbackEnabled)return"/operations/feedback";
-  if(permissions.includes("operations.manage") || permissions.includes("integrations.manage") && permissions.includes("administration.view"))return"/operations/inbox";
+  if(invitationReview || permissions.includes("operations.manage") || permissions.includes("integrations.manage") && permissions.includes("administration.view"))return"/operations/inbox";
   return"/operations";
 }
 
@@ -35,7 +35,7 @@ export function pathPage(pathname:string):OperationsPage{
 export function pathOperationsSection(pathname:string):OperationsSection{
   const parts=pathname.split("/").filter(Boolean);
   const value=parts[0]==="operations"?parts[1]:parts[0];
-  return value==="projects"||value==="tasks"||value==="sops"||value==="notifications"||value==="feedback"||value==="inbox"||value==="client-requests"?value:"operations";
+  return value==="projects"||value==="tasks"||value==="sops"||value==="notifications"||value==="feedback"||value==="inbox"||value==="client-requests"||value==="invitation-requests"?value:"operations";
 }
 
 export function operationsSectionPath(section:OperationsSection):string{

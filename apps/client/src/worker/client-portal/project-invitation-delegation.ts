@@ -3,7 +3,7 @@ import {NATIVE_PORTAL_TARGET_SCOPES_SQL,readNativeTargetScopes} from './native-p
 import {projectAccessReadColumns,projectAccessRowAllows,type ProjectAccessReadRow} from './project-access-read';
 import {projectAccessTermsExpirySql,type ProjectAccessTermsView} from './project-access-terms';
 import {projectAccessCapacitySql} from './project-access-capacity';
-import type {PortalAuthorizationEnv,PortalWorkspaceCapability} from './workspace-v2';
+import type {PortalAuthorizationEnv,PortalWorkspaceCapability,PortalWorkspaceTarget} from './workspace-v2';
 
 const replacements=["json_extract((SELECT v FROM delegation_input),'$.targets')","json_extract((SELECT v FROM delegation_input),'$.workspaceId')",
   "(SELECT active_generation_id FROM portal_v2_directory_checkpoints WHERE workspace_id=json_extract((SELECT v FROM delegation_input),'$.workspaceId'))",
@@ -57,32 +57,44 @@ function timestamp(value:string):number{
 function exceeds():never {throw new HTTPException(403,{message:'Requested access exceeds your delegation authority'});}
 export async function captureProjectInvitationDelegation(env:PortalAuthorizationEnv,input:{workspaceId:string;projectId:string;identityId:string;issuer:string;subject:string;email:string},
   capabilities:PortalWorkspaceCapability[],terms:ProjectAccessTermsView){
-  const encoded=JSON.stringify({...input,targets:[{scopeType:'project',publicId:input.projectId}],relations:env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED==='true'?1:0});
+  return captureWorkspaceInvitationDelegation(env,{...input,target:{scopeType:'project',publicId:input.projectId}},capabilities,terms);
+}
+/** Broad invitations have no access terms, so every delegated capability must
+ * have an independent unlimited path. A finite project manager cannot issue a
+ * permanent organization/client invitation. Canonical deny checks remain the
+ * caller's responsibility after this capture and before its atomic fence. */
+export async function captureWorkspaceInvitationDelegation(env:PortalAuthorizationEnv,input:{workspaceId:string;target:PortalWorkspaceTarget;identityId:string;issuer:string;subject:string;email:string},
+  capabilities:PortalWorkspaceCapability[],terms:ProjectAccessTermsView|null){
+  const root=await env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT root_type,COALESCE(pa_organization_public_id,pa_client_public_id) root_id
+    FROM portal_v2_workspaces WHERE id=? AND status='active'`).bind(input.workspaceId).first<{root_type:'organization'|'standalone_client';root_id:string}>();
+  if(!root)exceeds();
+  const targetInput=input.target.scopeType==='workspace'?{scopeType:root.root_type,publicId:root.root_id}:input.target;
+  const encoded=JSON.stringify({...input,targets:[targetInput],relations:env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED==='true'?1:0});
   const proof=await env.DELIVERY_DB.withSession('first-primary').prepare(query).bind(encoded).first<string>('proof');
   if(!proof||new TextEncoder().encode(proof).byteLength>192*1024)exceeds();
   const state=JSON.parse(proof) as {membership:{expiresAt:string|null}|null;workspace:{id:string;rootType:'organization'|'standalone_client';rootPublicId:string;generationId:string}|null;
     entitlements:Entitlement[];denials:unknown[];blocks:unknown[];scopeRows:unknown[]};
   if(!state.workspace||!state.membership||state.entitlements.length>800||state.denials.length>200||state.blocks.length>200)exceeds();
   const target=await readNativeTargetScopes(env,{workspaceId:state.workspace.id,generationId:state.workspace.generationId,rootType:state.workspace.rootType,rootPublicId:state.workspace.rootPublicId},
-    [{scopeType:'project',publicId:input.projectId}],{retention:'structural'});
-  const scope=target.get(`project:${input.projectId}`);if(!scope||JSON.stringify(scope.proofRows)!==JSON.stringify(state.scopeRows))exceeds();
+    [targetInput],{retention:'structural'});
+  const scope=target.get(`${targetInput.scopeType}:${targetInput.publicId}`);if(!scope||JSON.stringify(scope.proofRows)!==JSON.stringify(state.scopeRows))exceeds();
   const expired=scope.proofRows.filter(row=>row.entity_type==='project'&&row.retained<=0).map(row=>row.public_id);
-  const desired=terms.effectiveExpiresAt?timestamp(terms.effectiveExpiresAt):Infinity;
+  const desired=terms?.effectiveExpiresAt?timestamp(terms.effectiveExpiresAt):Infinity;
   const membershipCeiling=state.membership.expiresAt?timestamp(state.membership.expiresAt):Infinity;
   if(!Number.isFinite(membershipCeiling)&&membershipCeiling!==Infinity)exceeds();
   if(desired>membershipCeiling)exceeds();
   for(const capability of new Set<PortalWorkspaceCapability>(['member.manage','workspace.view',...capabilities])){
-    const shell=capability==='workspace.view',scopes=shell?new Set([`workspace:${input.workspaceId}`]):scope.scopes;
+    const shell=capability==='workspace.view',scopes=shell||input.target.scopeType==='workspace'?new Set([`workspace:${input.workspaceId}`]):scope.scopes;
     const allows=state.entitlements.filter(row=>row.capability===capability&&row.effect==='allow'&&row.status==='active'&&!row.revoked_at
       &&row.live===1&&scopes.has(`${row.scope_type}:${row.scope_public_id}`)
       &&projectAccessRowAllows(row,scopes,shell?[]:expired,shell));
     const ceiling=Math.max(-Infinity,...allows.map(row=>Math.min(row.expires_at?timestamp(row.expires_at):Infinity,
       row.terms_expiry?timestamp(row.terms_expiry):row.terms_mode==='project_end'
-        ?terms.mode==='project_end'&&row.terms_project_id===input.projectId?Infinity:-Infinity:Infinity)));
+        ?terms?.mode==='project_end'&&row.terms_project_id===input.target.publicId?Infinity:-Infinity:Infinity)));
     if(desired>ceiling)exceeds();
   }
   // The caller performs the canonical deny-aware per-capability checks AFTER
   // this capture. Its first write then compares the very same bounded facts.
-  return {fence:(id:string)=>env.DELIVERY_DB.prepare(`INSERT INTO portal_project_invitation_fences(id,write_guard)
+  return {proof,fence:(id:string)=>env.DELIVERY_DB.prepare(`INSERT INTO portal_project_invitation_fences(id,write_guard)
     VALUES(?,CASE WHEN (${query})=? THEN 1 ELSE 0 END)`).bind(id,encoded,proof)};
 }

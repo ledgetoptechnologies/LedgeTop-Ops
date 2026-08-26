@@ -1,0 +1,7 @@
+.portal-invitation-requests, .portal-invitation-request-list, .portal-invitation-request-list article { display: grid; gap: .8rem; min-width: 0; }
+.portal-invitation-requests { margin-top: 1.5rem; border-top: 1px solid #dbe1e5; padding-top: 1.2rem; }
+.portal-invitation-requests header { display: flex; gap: .75rem; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+.portal-invitation-requests h3, .portal-invitation-requests h4, .portal-invitation-requests p { margin: 0; overflow-wrap: anywhere; }
+.portal-invitation-request-list article { border: 1px solid #dbe1e5; border-radius: 10px; padding: 1rem; }
+.portal-invitation-requests button { min-height: 44px; justify-self: start; }
+.portal-invitation-requests small { color: #5d6772; }

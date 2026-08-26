@@ -142,6 +142,7 @@ import { registerBusinessPartyRoutes } from "./business-party-routes";
 import { registerNotificationCenterRoutes } from "./notification-center";
 import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
 import { registerNativeDeliveryBindingRoutes } from "./native-delivery-binding-routes";
+import { registerInvitationReviewRoutes } from "./invitation-review-routes";
 import { reconcileClientHubIndex } from "./client-hub-index";
 import {
   decorateWorkContextsWithSops,
@@ -1442,6 +1443,7 @@ registerBusinessPartyRoutes(app);
 registerNotificationCenterRoutes(app);
 registerStaffInboxRequestRoutes(app);
 registerNativeDeliveryBindingRoutes(app);
+registerInvitationReviewRoutes(app);
 registerClientFeedbackRoutes(app);
 registerViewerIntegrationRoutes(app);
 registerViewerProcessingRoutes(app);

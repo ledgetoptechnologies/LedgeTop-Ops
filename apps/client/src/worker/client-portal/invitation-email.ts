@@ -1,5 +1,7 @@
 import type { Env } from "../types";
 import { workspaceMembershipManagementEnabled } from "./workspace-memberships";
+import {invitationRequestsReady,invitationPublicationSql} from './invitation-approval-policy';
+import {reconcileExpiredWorkspaceInvitationApprovals} from './workspace-invitation-requests';
 
 const DEFAULT_BATCH_SIZE = 10;
 const MAX_BATCH_SIZE = 25;
@@ -94,6 +96,7 @@ function isPermanentEmailError(code: string): boolean {
 
 async function claimRows(env: Env, now: Date, limit: number): Promise<InvitationEmailRow[]> {
   const database = env.DELIVERY_DB;
+  const publication=await invitationRequestsReady(database)?invitationPublicationSql('invitation'):'1';
   const nowIso = now.toISOString();
   const lease = new Date(now.getTime() + LEASE_MS).toISOString();
   const candidates = await database.prepare(`SELECT outbox.id FROM portal_v2_invitation_email_outbox outbox
@@ -102,7 +105,7 @@ async function claimRows(env: Env, now: Date, limit: number): Promise<Invitation
       ON receipt.invitation_id=invitation.id AND receipt.workspace_id=invitation.workspace_id
       AND receipt.invited_email_hash=outbox.recipient_email_hash
       AND receipt.invitation_token_hash=invitation.token_hash
-    WHERE outbox.attempts<? AND datetime(outbox.next_attempt_at)<=datetime(?)
+    WHERE ${publication} AND outbox.attempts<? AND datetime(outbox.next_attempt_at)<=datetime(?)
       AND (outbox.status IN ('pending','failed') OR (outbox.status='processing' AND datetime(outbox.lease_expires_at)<=datetime(?)))
       AND invitation.status='pending' AND invitation.revoked_at IS NULL AND datetime(invitation.expires_at)>datetime(?)
       AND receipt.revoked_at IS NULL AND datetime(receipt.enrolled_at)<=datetime(?) AND datetime(receipt.expires_at)>datetime(?)
@@ -119,7 +122,7 @@ async function claimRows(env: Env, now: Date, limit: number): Promise<Invitation
             ON receipt.invitation_id=invitation.id AND receipt.workspace_id=invitation.workspace_id
             AND receipt.invited_email_hash=portal_v2_invitation_email_outbox.recipient_email_hash
             AND receipt.invitation_token_hash=invitation.token_hash
-          WHERE invitation.id=portal_v2_invitation_email_outbox.invitation_id
+          WHERE ${publication} AND invitation.id=portal_v2_invitation_email_outbox.invitation_id
             AND invitation.status='pending' AND invitation.revoked_at IS NULL AND datetime(invitation.expires_at)>datetime(?)
             AND receipt.revoked_at IS NULL AND datetime(receipt.enrolled_at)<=datetime(?) AND datetime(receipt.expires_at)>datetime(?))`)
       .bind(lease, nowIso, candidate.id, MAX_ATTEMPTS, nowIso, nowIso, nowIso, nowIso, nowIso).run();
@@ -151,13 +154,14 @@ async function cancelInvalidRows(env: Env, now: Date): Promise<void> {
 }
 
 async function invitationStillSendable(env: Env, row: InvitationEmailRow, nowIso: string): Promise<boolean> {
+  const publication=await invitationRequestsReady(env.DELIVERY_DB)?invitationPublicationSql('invitation'):'1';
   return (await env.DELIVERY_DB.prepare(`SELECT 1 ok FROM portal_v2_invitation_email_outbox outbox
     JOIN portal_v2_invitations invitation ON invitation.id=outbox.invitation_id
     JOIN portal_v2_invitation_access_enrollment_receipts receipt
       ON receipt.invitation_id=invitation.id AND receipt.workspace_id=invitation.workspace_id
       AND receipt.invited_email_hash=outbox.recipient_email_hash
       AND receipt.invitation_token_hash=invitation.token_hash
-    WHERE outbox.id=? AND outbox.status='processing' AND outbox.lease_expires_at=?
+    WHERE ${publication} AND outbox.id=? AND outbox.status='processing' AND outbox.lease_expires_at=?
       AND lower(outbox.recipient_email)=lower(invitation.invited_email)
       AND invitation.status='pending' AND invitation.revoked_at IS NULL AND datetime(invitation.expires_at)>datetime(?)
       AND receipt.revoked_at IS NULL AND datetime(receipt.enrolled_at)<=datetime(?) AND datetime(receipt.expires_at)>datetime(?)`)
@@ -189,6 +193,9 @@ export async function processInvitationEmailBatch(
   options: { now?: Date; limit?: number } = {},
 ): Promise<InvitationEmailBatchResult> {
   const result: InvitationEmailBatchResult = { claimed: 0, sent: 0, retried: 0, failed: 0, cancelled: 0 };
+  // Existing scheduled maintenance also recovers expired unsendable stages,
+  // even when no mail provider is enabled. This grants or sends nothing.
+  await reconcileExpiredWorkspaceInvitationApprovals(env.DELIVERY_DB);
   if (!invitationEmailDeliveryEnabled(env)) return result;
   const now = options.now ?? new Date();
   const nowIso = now.toISOString();
