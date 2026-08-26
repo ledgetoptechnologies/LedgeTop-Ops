@@ -44,6 +44,49 @@ const SNAPSHOT_TIMEOUT_MS = 10_000;
 const SNAPSHOT_FETCH_ATTEMPTS = 3;
 const PROJECTION_LEASE_DURATION = "+10 minutes";
 
+/** Scheduled-only accounting. Two attempts reserve at most 900 D1 statements,
+ * leaving 100 for scheduler claims/configuration/finalization. Manual callers
+ * have no wrapper or changed limits. This is not a query cache. */
+class RecoveryBudget {
+  queries=0; bytes=0; cleaning=false;
+  constructor(readonly deadlineAt:number){}
+  check(){
+    // Cleanup is not unlimited wall time: check before each new DB execution.
+    // An already-running D1 call remains awaited and has its platform timeout.
+    if(Date.now()>=this.deadlineAt+(this.cleaning?60_000:0))throw new Error("project-alpha-recovery-time-budget");
+  }
+  charge(count:number){
+    this.check();
+    if(this.queries+count>(this.cleaning?450:400))throw new Error("project-alpha-recovery-query-budget");
+    this.queries+=count;
+  }
+  preflight(count:number){this.check();if(this.queries+count>400)throw new Error("project-alpha-recovery-query-budget");}
+  consumeBytes(count:number){this.check();this.bytes+=count;if(this.bytes>16*1024*1024)throw new Error("project-alpha-recovery-byte-budget");}
+  timeout(){this.check();return Math.max(1,Math.min(SNAPSHOT_TIMEOUT_MS,this.deadlineAt-Date.now()));}
+}
+function recoveryDatabase(db:D1Database,budget:RecoveryBudget):D1Database{
+  const rawStatements=new WeakMap<D1PreparedStatement,D1PreparedStatement>();
+  const wrapStatement=(raw:D1PreparedStatement):D1PreparedStatement=>{
+    const wrapped=new Proxy(raw,{get(target,key){
+      if(key==="bind")return(...values:unknown[])=>wrapStatement(target.bind(...values));
+      const value=Reflect.get(target,key,target);
+      if(typeof value!=="function")return value;
+      return(...args:unknown[])=>{budget.charge(1);return Reflect.apply(value,target,args);};
+    }});
+    rawStatements.set(wrapped,raw);return wrapped;
+  };
+  const wrap=<T extends Pick<D1Database,"prepare"|"batch">>(raw:T):T=>new Proxy(raw,{get(target,key){
+    if(key==="prepare")return(sql:string)=>wrapStatement(target.prepare(sql));
+    if(key==="batch")return(statements:D1PreparedStatement[])=>{
+      budget.charge(statements.length);return target.batch(statements.map(statement=>rawStatements.get(statement)??statement));
+    };
+    if(key==="withSession")return(constraint?:D1SessionConstraint|D1SessionBookmark)=>wrap(db.withSession(constraint));
+    if(key==="exec")return()=>{throw new Error("project-alpha-recovery-query-budget");};
+    const value=Reflect.get(target,key,target);return typeof value==="function"?value.bind(target):value;
+  }});
+  return wrap(db);
+}
+
 function text(value: unknown): string | null {
   return value === null || value === undefined ? null : String(value);
 }
@@ -180,17 +223,24 @@ function validatePage(value: unknown): Snapshot {
 
 function retryableSnapshotResponse(response: Response): boolean { return response.status === 429 || response.status >= 500; }
 async function retryDelay(milliseconds: number): Promise<void> { await new Promise((resolve) => setTimeout(resolve,milliseconds)); }
+async function cancelSnapshotBody(response:Response,budget?:RecoveryBudget):Promise<void>{
+  if(!budget){await response.body?.cancel();return;}
+  let timer:ReturnType<typeof setTimeout>|undefined;
+  await Promise.race([response.body?.cancel().catch(()=>undefined),new Promise<void>(resolve=>{timer=setTimeout(resolve,50);})]);
+  if(timer!==undefined)clearTimeout(timer);
+}
 
-async function fetchSnapshotPage(url: URL, connection: ProjectAlphaSourceConnection, beforeAttempt?:()=>Promise<void>): Promise<Response> {
+async function fetchSnapshotPage(url: URL, connection: ProjectAlphaSourceConnection, beforeAttempt?:()=>Promise<void>, budget?:RecoveryBudget): Promise<Response> {
   let lastError: unknown;
   for(let attempt=1;attempt<=SNAPSHOT_FETCH_ATTEMPTS;attempt+=1){
     try {
       await beforeAttempt?.();
-      const response=await fetch(url,{headers:{Authorization:`Bearer ${connection.apiKey}`,Accept:"application/json"},signal:AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),redirect:"error"});
+      const response=await fetch(url,{headers:{Authorization:`Bearer ${connection.apiKey}`,Accept:"application/json"},signal:AbortSignal.timeout(budget?.timeout()??SNAPSHOT_TIMEOUT_MS),redirect:"error"});
       if(!retryableSnapshotResponse(response)||attempt===SNAPSHOT_FETCH_ATTEMPTS)return response;
       lastError=new Error(`project-alpha-http-${response.status}`);
-      await response.body?.cancel();
+      await cancelSnapshotBody(response,budget);
     } catch(error) {
+      if(budget){budget.check();if(error instanceof Error&&error.message.startsWith("project-alpha-recovery-"))throw error;}
       lastError=error;
       if(attempt===SNAPSHOT_FETCH_ATTEMPTS)break;
     }
@@ -200,19 +250,20 @@ async function fetchSnapshotPage(url: URL, connection: ProjectAlphaSourceConnect
     ? "project-alpha-network-timeout" : "project-alpha-network-error");
 }
 
-async function readSnapshotPage(response: Response): Promise<unknown> {
+async function readSnapshotPage(response: Response,budget?:RecoveryBudget): Promise<unknown> {
   const declaredBytes=Number(response.headers.get("content-length")??0);
   if(declaredBytes>SNAPSHOT_MAX_PAGE_BYTES){
-    await response.body?.cancel();
+    await cancelSnapshotBody(response,budget);
     throw new Error("project-alpha-page-too-large");
   }
   if(!response.body)throw new Error("project-alpha-empty-page");
   const reader=response.body.getReader();
   const chunks:Uint8Array[]=[];
   let length=0;
-  const deadline=Date.now()+SNAPSHOT_TIMEOUT_MS;
+  const deadline=Math.min(Date.now()+SNAPSHOT_TIMEOUT_MS,budget?.deadlineAt??Infinity);
   try {
     while(true){
+      budget?.check();
       let timer:ReturnType<typeof setTimeout>|undefined;
       const next=await Promise.race([
         reader.read(),
@@ -220,6 +271,7 @@ async function readSnapshotPage(response: Response): Promise<unknown> {
       ]).finally(()=>{if(timer!==undefined)clearTimeout(timer);});
       if(next.done)break;
       length+=next.value.byteLength;
+      budget?.consumeBytes(next.value.byteLength);
       if(length>SNAPSHOT_MAX_PAGE_BYTES)throw new Error("project-alpha-page-too-large");
       if(next.value.byteLength)chunks.push(next.value);
     }
@@ -238,7 +290,7 @@ async function readSnapshotPage(response: Response): Promise<unknown> {
   } finally { reader.releaseLock(); }
 }
 
-async function fetchCompleteSnapshot(connection: ProjectAlphaSourceConnection, beforeAttempt?:()=>Promise<void>): Promise<{data:SnapshotCollections;generatedAt:string}> {
+async function fetchCompleteSnapshot(connection: ProjectAlphaSourceConnection, beforeAttempt?:()=>Promise<void>,budget?:RecoveryBudget): Promise<{data:SnapshotCollections;generatedAt:string}> {
   const result = emptyCollections();
   const baseUrl = snapshotBaseUrl(connection.baseUrl);
   let pageNumber = 1;
@@ -249,9 +301,9 @@ async function fetchCompleteSnapshot(connection: ProjectAlphaSourceConnection, b
     const url = new URL(`${baseUrl.pathname.replace(/\/$/, "")}/api/v1/ops/snapshot`, baseUrl.origin);
     url.searchParams.set("page", String(pageNumber));
     url.searchParams.set("limit", "500");
-    const response = await fetchSnapshotPage(url,connection,beforeAttempt);
-    if (!response.ok) { await response.body?.cancel(); throw new Error(`project-alpha-http-${response.status}`); }
-    const page = validatePage(await readSnapshotPage(response));
+    const response = await fetchSnapshotPage(url,connection,beforeAttempt,budget);
+    if (!response.ok) { await cancelSnapshotBody(response,budget); throw new Error(`project-alpha-http-${response.status}`); }
+    const page = validatePage(await readSnapshotPage(response,budget));
     const pageGeneratedAt=Date.parse(page.generated_at);
     if(pageGeneratedAt>generatedAtTimestamp){generatedAtTimestamp=pageGeneratedAt;generatedAt=page.generated_at;}
     for (const key of SNAPSHOT_COLLECTIONS) {
@@ -686,6 +738,8 @@ export async function syncRegisteredProjectAlpha(env: Env, sourceId: string): Pr
 export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaSourceContext,
   connection: ProjectAlphaSourceConnection, proof?:ProjectAlphaConnectorProof): Promise<ProjectAlphaSyncResult> {
   const source = createProjectAlphaSourceContext(context.sourceId);
+  const budget=proof?.scheduledRecovery?new RecoveryBudget(proof.scheduledRecovery.deadlineAt):undefined;
+  if(budget)env={...env,OPS_DB:recoveryDatabase(env.OPS_DB,budget)};
   if(proof){
     if(proof.sourceId!==source.sourceId)throw new Error("connector-source-mismatch");
     await assertProjectAlphaConnectorProof(env,proof);
@@ -714,14 +768,14 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     leaseClaimed=true;
     // Fetch and validate every page before touching projection data. A failed or partial
     // snapshot therefore leaves the last known good projection entirely intact.
-    const refreshLease=()=>refreshSnapshotLease(env.OPS_DB,leaseOwner,source,proof);
-    const snapshot = await fetchCompleteSnapshot(connection,refreshLease);
+    const refreshLease=()=>{budget?.check();return refreshSnapshotLease(env.OPS_DB,leaseOwner,source,proof);};
+    const snapshot = await fetchCompleteSnapshot(connection,refreshLease,budget);
     await refreshLease();
     // Project Alpha uses OFFSET pagination and assigns generated_at per page.
     // Require two complete, byte-bounded passes to produce identical logical
     // collection fingerprints before any projection or deactivation is allowed.
     const firstFingerprints=await collectionFingerprints(snapshot.data);
-    const stableSnapshot=await fetchCompleteSnapshot(connection,refreshLease);
+    const stableSnapshot=await fetchCompleteSnapshot(connection,refreshLease,budget);
     await refreshLease();
     const stableFingerprints=await collectionFingerprints(stableSnapshot.data);
     if(SNAPSHOT_COLLECTIONS.some((collection)=>firstFingerprints[collection]!==stableFingerprints[collection]))throw new Error("project-alpha-snapshot-unstable");
@@ -738,6 +792,21 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     const data=await preserveNewerIncrementalRows(env.OPS_DB,fetchedData,generatedAt,source);
     const refs = SNAPSHOT_COLLECTIONS.filter(collection => source.staffAuthority || collection !== "application_entitlements")
       .flatMap(collection => data[collection].flatMap(row => projectAlphaSourceReferences(collection,snapshotMappingRow(collection,row))));
+    if(budget){
+      // Upper bounds for this business-only path: one projection per changed
+      // row, one version per versioned row, one observation per business root,
+      // plus reconciliation/fingerprints, map reads/reservation/reread and fences.
+      // Count map chunks conservatively by BOTH byte and entry bound. No map or
+      // business row has been written at this preflight boundary.
+      const projected=SNAPSHOT_COLLECTIONS.filter(key=>key!=="application_entitlements"&&changed.has(key))
+        .reduce((sum,key)=>sum+data[key].length,0);
+      const versions=VERSIONED_COLLECTIONS.filter(([key])=>changed.has(key)).reduce((sum,[key])=>sum+data[key].length,0);
+      const observations=(["clients","organizations","projects"] as const).filter(key=>changed.has(key)).reduce((sum,key)=>sum+data[key].length,0);
+      const referenceBytes=refs.reduce((sum,ref)=>sum+new TextEncoder().encode(JSON.stringify([ref.kind,ref.externalId])).byteLength+1,2);
+      const mapChunks=Math.ceil(refs.length/500)+Math.ceil(referenceBytes/(128*1024));
+      const statements=projected+versions+observations+2*changed.size;
+      budget.preflight(statements+mapChunks*4+3*(Math.ceil(projected/75)+Math.ceil(versions/75)+Math.ceil(observations/75)+4)+20);
+    }
     await refreshLease();
     const mappingDb = proof ? {
       prepare: (sql:string)=>env.OPS_DB.prepare(sql),
@@ -776,6 +845,7 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     ]);
     return { status: "success", records, changedCollections: [...changed] };
   } catch (error) {
+    if(budget)budget.cleaning=true;
     const code = error instanceof Error && /^[a-z][a-z0-9-]{0,119}$/.test(error.message)
       ? error.message : "project-alpha-sync-failed";
     await env.OPS_DB.prepare("UPDATE sync_runs SET status='failed',completed_at=datetime('now'),error_code=? WHERE id=? AND projection_source_id=?").bind(code, runId,source.sourceId).run();
@@ -789,6 +859,7 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     ]); } catch { /* A stale connector proof cannot update source health. */ }
     throw error;
   } finally {
+    if(budget)budget.cleaning=true;
     if(leaseClaimed)await releaseSnapshotLease(env.OPS_DB,leaseOwner,source);
   }
 }

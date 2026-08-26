@@ -65,7 +65,8 @@ function beforeBatch(match:string,change:()=>Promise<void>):D1Database {
   }});
 }
 
-describe("authenticated connector business ingress",()=>{
+// Sequential real-D1 projections can exceed five seconds and must finish before the next case.
+describe("authenticated connector business ingress",{timeout:30_000},()=>{
   beforeAll(async()=>{
     runtime=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await runtime.getD1Database("OPS_DB") as D1Database;

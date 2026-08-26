@@ -9,7 +9,9 @@ type Connector = {
   readVisible: boolean; activeRevision: number; version: number;
 };
 type Health = { sourceId: string; status: string; lastAttemptAt: string | null; lastSuccessAt: string | null; lastErrorCode: string | null };
-type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean };
+type Recovery = { sourceId: string; lastAttemptAt: string | null; lastSuccessAt: string | null; nextAttemptAt: string | null;
+  status: "never" | "running" | "success" | "failed" | "deferred"; errorCode: string | null; failureCount: number };
+type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null };
 const PRIMARY = "project-alpha:primary";
 const field = (form: FormData, name: string) => String(form.get(name) ?? "").trim();
 function revision(form: FormData, path: string) {
@@ -109,6 +111,9 @@ export function ProjectAlphaConnections() {
         <p><strong>{connector.state}</strong> · {connector.profile === "primary_legacy" ? "Primary staff authority" : "Business data only"} · {connector.readVisible ? "Business records visible" : "Business records hidden"}</p>
         {connector.sourceId === PRIMARY && connector.state === "pending" && <p className="notice">Primary synchronization is paused until this connection is activated. Existing business records and client grants are retained.</p>}
         <SyncHealth health={data.health.find(row => row.sourceId === connector.sourceId)} />
+        {connector.sourceId !== PRIMARY && connector.profile === "business_data" && <ScheduledRecovery
+          connector={connector} primaryActive={data.connectors.some(row => row.sourceId === PRIMARY && row.state === "active")}
+          recovery={data.recovery?.find(row => row.sourceId === connector.sourceId)} />}
         <div className="alpha-connection-actions">
           <button type="button" disabled={busy || connector.state !== "active"} onClick={() => void submit(`/${encodeURIComponent(connector.sourceId)}/sync`, "POST", {}, `${connector.displayName} synchronization finished.`)}>Sync now</button>
           {connector.state !== "retired" && <button type="button" disabled={busy} onClick={() => change(connector, connector.state === "active" ? "suspended" : "active")}>{connector.state === "active" ? "Suspend sync" : "Activate connection"}</button>}
@@ -158,4 +163,27 @@ export function ProjectAlphaConnections() {
 function SyncHealth({ health }: { health?: Health }) {
   return <p>Sync: {health?.status ?? "Not yet run"}<br />Last attempt: {date(health?.lastAttemptAt ?? null)} · Last success: {date(health?.lastSuccessAt ?? null)}
     {health?.lastErrorCode && <><br />Last error: {health.lastErrorCode}</>}</p>;
+}
+
+function RecoveryTime({ value }: { value: string | null }) {
+  if (!value) return <>Not recorded</>;
+  const iso = value.replace(" ", "T"), normalized = /(?:Z|[+-]\d\d:\d\d)$/i.test(iso) ? iso : `${iso}Z`, parsed = new Date(normalized);
+  return Number.isFinite(parsed.getTime()) ? <time dateTime={normalized}>{parsed.toLocaleString()}</time> : <>Unavailable</>;
+}
+function ScheduledRecovery({ connector, primaryActive, recovery }: { connector: Connector; primaryActive: boolean; recovery?: Recovery }) {
+  const eligible = primaryActive && connector.state === "active";
+  const eligibility = eligible ? "Eligible by connection state" : !primaryActive && connector.state !== "active"
+    ? "Paused: primary and this connection are not active" : !primaryActive
+    ? "Paused: primary connection is not active" : `Paused: this connection is ${connector.state}`;
+  const labels: Record<Recovery["status"], string> = { never: "Not attempted", running: "Running", success: "Succeeded", failed: "Failed", deferred: "Deferred" };
+  return <div className="alpha-recovery" role="group" aria-label="Scheduled recovery">
+    <p><strong>Scheduled recovery</strong> · {eligibility}<br />
+      {recovery ? <>Last attempt: {labels[recovery.status]}{recovery.lastAttemptAt && <> · <RecoveryTime value={recovery.lastAttemptAt} /></>}<br />
+        Last success: <RecoveryTime value={recovery.lastSuccessAt} />{eligible && recovery.nextAttemptAt && <><br />Next attempt not before: <RecoveryTime value={recovery.nextAttemptAt} /></>}
+        {recovery.errorCode && <><br />Last recovery error: {recovery.errorCode}</>}
+        {recovery.failureCount > 0 && <> · Failure count: {recovery.failureCount}</>}
+      </> : <>Recovery status unavailable. Refresh connection status to check again.</>}
+    </p>
+    <details><summary>Recovery schedule</summary><p>Checked hourly, with at most two connections processed one at a time. After success, at least 24 hours pass before another scheduled attempt. Earliest times are not guaranteed start times. Pending, suspended, and retired connections are skipped.</p></details>
+  </div>;
 }

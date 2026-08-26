@@ -655,7 +655,9 @@ desktop/mobile browser tests passed, with screenshots inspected. A pre-existing
 thumbnail-runbook source-layout invariant remains a separate documented failure;
 this is not a whole-monorepo green claim. The increment is not deployed, and
 no secondary source, production migration, credential change, or deployment has
-been performed. Automatic secondary scheduling remains separate. The subsequent
+been performed. Automatic secondary scheduling is covered by the subsequent
+[bounded snapshot recovery increment](project-alpha-snapshot-recovery.md), with
+its own migration, execution limits and verification status. The subsequent
 local increment implements [reviewed business-party linking](business-party-linking.md)
 with explicit preview/confirmation, independent source workspaces, audited
 unlink/repair and stale-context cancellation. Its own final gate passed **114
@@ -729,6 +731,10 @@ a new whole-monorepo claim. No real customers were linked or granted access.
       workspaces, bounded repair/unlink, audit and stale-context protections.
       See [business-party linking](business-party-linking.md) for exact results
       and the paired migration/release order. No production deployment included.
+- [x] Implement and locally verify isolated secondary snapshot recovery, durable
+      attempt accounting, version/lease guards, bounded work and visible source
+      status. See [snapshot recovery](project-alpha-snapshot-recovery.md); it does
+      not activate producers or expand staff/client authority.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [x] Locally verify the implemented recent-first Client Hub and source-record update
       history increment. See [business activity](client-business-activity.md).

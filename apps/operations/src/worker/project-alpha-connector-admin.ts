@@ -5,6 +5,7 @@ import { sqlScope } from "./acl";
 import { rebuildOperationAirspaceMatches } from "./airspace";
 import { auditStatement } from "./request-security";
 import { syncRegisteredProjectAlpha } from "./project-alpha";
+import { getProjectAlphaSnapshotRecoveryStatus } from "./project-alpha-snapshot-recovery";
 import {
   listProjectAlphaConnectors, ProjectAlphaConnectorError, registerProjectAlphaConnector,
   reviseProjectAlphaConnector, setProjectAlphaConnectorState,
@@ -87,7 +88,8 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
       .bind(...ids).all<Record<string, unknown>>();
     const safeHealth = health.results.map(row => ({ ...row, lastErrorCode: row.lastErrorCode == null ? null
       : typeof row.lastErrorCode === "string" && /^[a-z][a-z0-9-]{0,119}$/.test(row.lastErrorCode) ? row.lastErrorCode : "project-alpha-sync-failed" }));
-    return c.json({ connectors, health: safeHealth, legacyPrimary: !connectors.some(row => row.sourceId === "project-alpha:primary") });
+    const recovery = await getProjectAlphaSnapshotRecoveryStatus(c.env.OPS_DB);
+    return c.json({ connectors, health: safeHealth, recovery, legacyPrimary: !connectors.some(row => row.sourceId === "project-alpha:primary") });
   });
   app.post(ROOT, async c => c.json({ connector: await registerProjectAlphaConnector(c.env,
     await json(c.req.raw, registration), c.get("principal").id) }, 201));

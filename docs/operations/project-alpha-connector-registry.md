@@ -80,10 +80,12 @@ credential set is validated for a request: malformed credentials for B must not
 disable a correctly configured A. The envelope itself remains strict and bounded
 to 256 KiB. References are not additional producer identities.
 
-The primary keeps its existing daily reconciliation. Secondary sources use
-explicit manual snapshots and authenticated events in this increment. Automatic
-secondary recovery needs a separately tested bounded/fair schedule and durable
-attempt accounting so one invalid source cannot starve others.
+The original registry increment kept primary daily reconciliation and secondary
+manual snapshots/authenticated events. The subsequent
+[secondary snapshot recovery increment](project-alpha-snapshot-recovery.md)
+adds an isolated hourly schedule and durable source/attempt accounting. See its
+own verification and migration status; the registry gate below predates it and
+must not be treated as evidence for its new runtime.
 
 ## Verification and release gates
 

@@ -57,6 +57,7 @@ import {
 } from "./delivery";
 import { searchShareRecipients, shareDirectoryRecipientsEnabled } from "./share-recipients";
 import { syncProjectAlpha } from "./project-alpha";
+import { runProjectAlphaSnapshotRecovery } from "./project-alpha-snapshot-recovery";
 import { registerProjectAlphaConnectorAdminRoutes } from "./project-alpha-connector-admin";
 import { ProjectAlphaConnectorError } from "./project-alpha-connectors";
 import { ClientHubSourcesChangedError } from "./client-hub-directory";
@@ -3057,12 +3058,25 @@ app.onError((error, c) => {
 const CONSOLIDATED_CRON = "*/15 * * * *";
 const CLIENT_REQUEST_NOTIFICATION_CRON = "*/5 * * * *";
 const CLIENT_HUB_INDEX_CRON = "2-57/5 * * * *";
+const PROJECT_ALPHA_RECOVERY_CRON = "17 * * * *";
 
 async function scheduled(
   event: ScheduledController,
   env: Env,
   ctx: ExecutionContext,
 ) {
+  if (event.cron === PROJECT_ALPHA_RECOVERY_CRON) {
+    // Secondary snapshots have their own bounded, awaited invocation. A slow
+    // producer must not consume the thumbnail, notification or primary budget.
+    try {
+      const result = await runProjectAlphaSnapshotRecovery(env, event.scheduledTime);
+      console.log(JSON.stringify({ event: "project_alpha.recovery.tick", ...result }));
+    } catch {
+      console.error(JSON.stringify({ event: "project_alpha.recovery.error" }));
+      throw new Error("Project Alpha snapshot recovery failed");
+    }
+    return;
+  }
   if (event.cron === CLIENT_HUB_INDEX_CRON) {
     // A separate invocation keeps directory backfill out of the existing
     // thumbnail/notification budget. Source and access tables remain read-only.

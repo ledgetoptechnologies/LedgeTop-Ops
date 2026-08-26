@@ -12,7 +12,7 @@ describe("isolated Client Hub schedule", () => {
   const event = { cron: "2-57/5 * * * *", scheduledTime: 1787702520000, noRetry() {} };
   it("awaits only the directory job and preserves the existing notification schedules", async () => {
     const config = readFileSync(new URL("../wrangler.jsonc", import.meta.url), "utf8");
-    expect(config).toContain('"crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *"]');
+    expect(config).toContain('"crons": ["*/15 * * * *", "*/5 * * * *", "2-57/5 * * * *", "17 * * * *"]');
     const env = new Proxy({} as Env, { get() { throw new Error("Unrelated job touched an environment binding"); } });
     const waitUntil = vi.fn(() => { throw new Error("Unexpected shared background work"); });
     const ctx = { waitUntil, passThroughOnException() {} } as unknown as ExecutionContext;

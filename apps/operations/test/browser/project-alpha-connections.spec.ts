@@ -10,6 +10,8 @@ interface Connector {
 interface Directory {
   connectors: Connector[]; legacyPrimary: boolean;
   health: Array<{ sourceId: string; status: string; lastAttemptAt: string | null; lastSuccessAt: string | null; lastErrorCode: string | null }>;
+  recovery?: Array<{ sourceId: string; lastAttemptAt: string | null; lastSuccessAt: string | null; nextAttemptAt: string | null;
+    status: "never" | "running" | "success" | "failed" | "deferred"; errorCode: string | null; failureCount: number }> | null;
 }
 function connector(sourceId = secondary, state: Connector["state"] = "active"): Connector {
   return { sourceId, displayName: sourceId === primary ? "Primary company" : "Business B", producerBindingId: sourceId === primary ? "producer-primary" : "producer-business-b",
@@ -18,6 +20,9 @@ function connector(sourceId = secondary, state: Connector["state"] = "active"): 
     readVisible: true, activeRevision: 1, version: 3 };
 }
 const directory = (connectors = [connector()]): Directory => ({ connectors, health: [], legacyPrimary: false });
+type Recovery = NonNullable<Directory["recovery"]>[number];
+const recovery = (overrides: Partial<Recovery> = {}): Recovery => ({ sourceId: secondary, lastAttemptAt: "2026-08-26T12:00:00Z",
+  lastSuccessAt: "2026-08-26T12:00:00Z", nextAttemptAt: "2026-08-27T12:00:00Z", status: "success", errorCode: null, failureCount: 0, ...overrides });
 type Handler = (route: Route, path: string) => Promise<boolean>;
 async function fixture(page: Page, data: Directory, handler?: Handler, manage = true) {
   const requests: Array<{ path: string; method: string; body: Record<string, unknown> | null; csrf: string | undefined }> = [];
@@ -257,6 +262,123 @@ test("connection forms and actions remain readable and keyboard accessible acros
     await page.evaluate(() => window.scrollTo({ top: 0, left: 0, behavior: "instant" }));
     await page.screenshot({ path: testInfo.outputPath(`project-alpha-connections-${width}.png`) });
     await page.screenshot({ path: testInfo.outputPath(`project-alpha-connections-${width}-full.png`), fullPage: true });
+  }
+  expect(errors).toEqual([]);
+});
+
+for (const availability of ["null", "omitted", "missing-source-row"] as const) test(`scheduled recovery ${availability} is unavailable, never fabricated healthy or unattempted`, async ({ page }) => {
+  const data = directory([connector(primary), connector()]);
+  if (availability === "null") data.recovery = null;
+  if (availability === "missing-source-row") data.recovery = [recovery({ sourceId: "project-alpha:another", errorCode: "other_source_private_error" })];
+  const requests = await fixture(page, data);
+  await page.goto("/administration");
+  const card = page.getByRole("region", { name: "Business B connection" }), status = card.getByRole("group", { name: "Scheduled recovery" });
+  await expect(status).toContainText("Eligible by connection state");
+  await expect(status).toContainText("Recovery status unavailable");
+  await expect(status).not.toContainText(/Succeeded|Not attempted|other_source_private_error|Next attempt not before/);
+  await expect(page.getByRole("region", { name: "Primary company connection" }).getByRole("group", { name: "Scheduled recovery" })).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Sync now", exact: true })).toBeEnabled();
+  expect(requests.every(row => row.method === "GET")).toBe(true);
+});
+
+test("successful secondary recovery shows an earliest time, not a promised next run", async ({ page }) => {
+  await fixture(page, { ...directory([connector(primary), connector()]), recovery: [recovery()] });
+  await page.goto("/administration");
+  const status = page.getByRole("region", { name: "Business B connection" }).getByRole("group", { name: "Scheduled recovery" });
+  await expect(status).toContainText("Last attempt: Succeeded");
+  await expect(status).toContainText("Last success:");
+  await expect(status).toContainText("Next attempt not before:");
+  await expect(status.locator('time[datetime="2026-08-27T12:00:00Z"]')).toBeVisible();
+  await expect(status).not.toContainText(/Failure count|Last recovery error/);
+  await status.getByText("Recovery schedule", { exact: true }).click();
+  await expect(status).toContainText("Checked hourly, with at most two connections processed one at a time.");
+  await expect(status).toContainText("After success, at least 24 hours pass before another scheduled attempt.");
+  await expect(status).toContainText("Earliest times are not guaranteed start times.");
+});
+
+test("primary suspension pauses secondary eligibility without rewriting its previous failed attempt", async ({ page }) => {
+  const data = { ...directory([connector(primary, "suspended"), connector()]), recovery: [recovery({ status: "failed", errorCode: "snapshot_unavailable", failureCount: 3 })] };
+  await fixture(page, data);
+  await page.goto("/administration");
+  const card = page.getByRole("region", { name: "Business B connection" }), status = card.getByRole("group", { name: "Scheduled recovery" });
+  await expect(status).toContainText("Paused: primary connection is not active");
+  await expect(status).toContainText("Last attempt: Failed");
+  await expect(status).toContainText("Last recovery error: snapshot_unavailable");
+  await expect(status).toContainText("Failure count: 3");
+  await expect(status).toContainText("Last success:");
+  await expect(status).not.toContainText("Next attempt not before:");
+  await expect(card.getByRole("button", { name: "Suspend sync", exact: true })).toBeEnabled();
+  await expect(card.getByRole("button", { name: "Hide business records", exact: true })).toBeEnabled();
+});
+
+test("pending, suspended, and retired secondaries stay paused independently of prior recovery success", async ({ page }) => {
+  const data: Directory = { ...directory([connector(primary), connector(secondary, "pending")]), recovery: [recovery()] };
+  await fixture(page, data);
+  await page.goto("/administration");
+  const card = page.getByRole("region", { name: "Business B connection" }), status = card.getByRole("group", { name: "Scheduled recovery" });
+  for (const state of ["pending", "suspended", "retired"] as const) {
+    if (state !== "pending") {
+      data.connectors[1]!.state = state;
+      await page.getByRole("button", { name: "Refresh connection status", exact: true }).click();
+    }
+    await expect(status).toContainText(`Paused: this connection is ${state}`);
+    await expect(status).toContainText("Last attempt: Succeeded");
+    await expect(status).not.toContainText("Next attempt not before:");
+    await expect(card.getByRole("button", { name: "Sync now", exact: true })).toBeDisabled();
+  }
+  await expect(card.getByRole("button", { name: "Activate connection", exact: true })).toHaveCount(0);
+});
+
+for (const state of ["never", "running", "deferred"] as const) test(`scheduled recovery reports ${state} without implying a successful synchronization`, async ({ page }) => {
+  const labels = { never: "Not attempted", running: "Running", deferred: "Deferred" };
+  await fixture(page, { ...directory([connector(primary), connector()]), recovery: [recovery({ status: state,
+    lastAttemptAt: state === "never" ? null : "2026-08-26T12:00:00Z", lastSuccessAt: null, nextAttemptAt: null })] });
+  await page.goto("/administration");
+  const status = page.getByRole("region", { name: "Business B connection" }).getByRole("group", { name: "Scheduled recovery" });
+  await expect(status).toContainText(`Last attempt: ${labels[state]}`);
+  await expect(status).toContainText("Last success: Not recorded");
+  await expect(status).not.toContainText(/Succeeded|Next attempt not before|Invalid Date/);
+});
+
+test("recovery metadata never changes the manual source control or invents success after a manual sync", async ({ page }) => {
+  const data: Directory = { ...directory([connector(primary), connector()]), recovery: [recovery({ status: "failed", errorCode: "snapshot_unavailable", failureCount: 1 })] };
+  const requests = await fixture(page, data);
+  await page.goto("/administration");
+  const card = page.getByRole("region", { name: "Business B connection" }), status = card.getByRole("group", { name: "Scheduled recovery" });
+  await expect(status).toContainText("Last attempt: Failed");
+  await card.getByRole("button", { name: "Sync now", exact: true }).click();
+  await expect(page.getByRole("status").filter({ hasText: "Business B synchronization finished." })).toBeVisible();
+  await expect(status).toContainText("Last attempt: Failed");
+  await expect(card.getByRole("button", { name: "Sync now", exact: true })).toBeEnabled();
+  expect(requests.filter(row => row.method !== "GET")).toEqual([{ path: `${endpoint}/project-alpha%3Abusiness-b/sync`, method: "POST", body: {}, csrf: "csrf-fixture" }]);
+});
+
+test("scheduled recovery status wraps without overlapping connection controls at all supported widths", async ({ page }, testInfo) => {
+  const data: Directory = { ...directory([connector(primary), { ...connector(), displayName: "Business B regional surveying and environmental documentation company" }]),
+    recovery: [recovery({ status: "failed", errorCode: "connector_configuration_unavailable_for_scheduled_business_data_recovery", failureCount: 3 })] };
+  const errors: string[] = []; page.on("pageerror", error => errors.push(error.message));
+  await fixture(page, data);
+  await page.goto("/administration");
+  const card = page.getByRole("region", { name: "Business B regional surveying and environmental documentation company connection" });
+  const status = card.getByRole("group", { name: "Scheduled recovery" });
+  await expect(status).toContainText("Last attempt: Failed");
+  for (const width of [375, 640, 1280, 3440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await status.getByText("Recovery schedule", { exact: true }).focus();
+    await expect(status.getByText("Recovery schedule", { exact: true })).toBeFocused();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    const box = (await status.boundingBox())!, actions = (await card.locator(".alpha-connection-actions").boundingBox())!;
+    expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(width);
+    expect(actions.y - (box.y + box.height)).toBeGreaterThanOrEqual(8);
+    for (const button of await card.locator(".alpha-connection-actions button").all()) {
+      const buttonBox = (await button.boundingBox())!;
+      expect(buttonBox.x + buttonBox.width).toBeLessThanOrEqual(width);
+      if (width <= 640) expect(buttonBox.height).toBeGreaterThanOrEqual(44);
+    }
+    await card.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`project-alpha-recovery-${width}-viewport.png`) });
+    await page.evaluate(() => scrollTo(0, 0));
+    await page.screenshot({ path: testInfo.outputPath(`project-alpha-recovery-${width}-full.png`), fullPage: true });
   }
   expect(errors).toEqual([]);
 });

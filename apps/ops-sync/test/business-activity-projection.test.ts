@@ -30,7 +30,8 @@ beforeAll(async()=>{
 afterEach(()=>vi.unstubAllGlobals());
 afterAll(async()=>{await runtime?.dispose();});
 
-describe("business activity at actual authenticated-projection producer seam",()=>{
+// Sequential real-D1 projections can exceed five seconds and must finish before the next case.
+describe("business activity at actual authenticated-projection producer seam",{timeout:30_000},()=>{
   it("appends one minimal same-batch record for applied source events and never an invented actor",async()=>{
     const root=event("organization",id(),{name:"Event organization",updated_at:at,user_id:"not-an-actor",billing_secret:"private"});
     expect(await applyProjectionEventForSource(environment(),source,root,"payload")).toBe("applied");

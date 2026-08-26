@@ -25,6 +25,11 @@ export interface ProjectAlphaConnectorProof {
   readonly revision: number;
   readonly version: number;
   readonly profile: ProjectAlphaConnectorProfile;
+  /** Internal scheduler claim only; never a wire/header/body credential. */
+  readonly scheduledRecovery?: {
+    readonly attemptId:string; readonly schedulerToken:string; readonly leaseToken:string;
+    readonly primaryRevision:number; readonly primaryVersion:number; readonly deadlineAt:number;
+  };
 }
 export interface ConnectorSigningKey {
   readonly keyId: string;
@@ -198,15 +203,37 @@ function validProof(value: ProjectAlphaConnectorProof): void {
     || !Number.isSafeInteger(value.revision) || !Number.isSafeInteger(value.version)
     || (value.mode === "registry" ? value.revision < 1 || value.version < 1
       : value.sourceId !== PRIMARY_ALPHA_SOURCE_ID || value.revision !== 0 || value.version !== 0)) fail("invalid", "Connector proof is invalid");
+  const scheduled=value.scheduledRecovery;
+  if(scheduled && (value.mode!=="registry" || value.profile!=="business_data"
+    || ![scheduled.attemptId,scheduled.schedulerToken,scheduled.leaseToken].every(id=>typeof id==="string"&&/^[a-zA-Z0-9_-]{1,128}$/.test(id))
+    || ![scheduled.primaryRevision,scheduled.primaryVersion,scheduled.deadlineAt].every(number=>Number.isSafeInteger(number)&&number>0)))
+    fail("invalid","Scheduled connector proof is invalid");
 }
 export function connectorFenceSql(value: ProjectAlphaConnectorProof): { sql: string; bindings: (string | number)[] } {
   validProof(value);
   if (value.mode === "legacy_primary") return { sql: "NOT EXISTS(SELECT 1 FROM pa_connectors WHERE source_id=?)", bindings: [PRIMARY_ALPHA_SOURCE_ID] };
-  return { sql: `EXISTS(SELECT 1 FROM pa_connectors connector WHERE connector.source_id=? AND connector.state='active'
+  const result = { sql: `EXISTS(SELECT 1 FROM pa_connectors connector WHERE connector.source_id=? AND connector.state='active'
     AND connector.active_revision=? AND connector.version=? AND connector.profile=?
     AND (connector.source_id='project-alpha:primary' OR EXISTS(SELECT 1 FROM pa_connectors primary_source
       WHERE primary_source.source_id='project-alpha:primary' AND primary_source.state='active')))`,
-  bindings: [value.sourceId, value.revision, value.version, value.profile] };
+  bindings: [value.sourceId, value.revision, value.version, value.profile] as (string|number)[] };
+  const scheduled=value.scheduledRecovery;
+  if(scheduled){
+    result.sql+=` AND EXISTS(SELECT 1 FROM pa_connectors primary_source WHERE source_id='project-alpha:primary'
+      AND state='active' AND active_revision=? AND version=?)
+      AND EXISTS(SELECT 1 FROM pa_snapshot_recovery_scheduler WHERE id='secondary' AND lease_token=? AND lease_until>unixepoch('now')*1000)
+      AND EXISTS(SELECT 1 FROM pa_snapshot_recovery_sources source JOIN pa_snapshot_recovery_attempts attempt
+        ON attempt.id=source.attempt_id AND attempt.source_id=source.source_id
+        WHERE source.source_id=? AND source.status='running' AND source.attempt_id=? AND source.lease_token=?
+          AND source.lease_until>unixepoch('now')*1000 AND attempt.status='running'
+          AND attempt.scheduler_token=? AND attempt.source_revision=? AND attempt.source_version=?
+          AND attempt.primary_revision=? AND attempt.primary_version=? AND attempt.deadline_at=?
+          AND attempt.deadline_at>unixepoch('now')*1000)`;
+    result.bindings.push(scheduled.primaryRevision,scheduled.primaryVersion,scheduled.schedulerToken,value.sourceId,
+      scheduled.attemptId,scheduled.leaseToken,scheduled.schedulerToken,value.revision,value.version,
+      scheduled.primaryRevision,scheduled.primaryVersion,scheduled.deadlineAt);
+  }
+  return result;
 }
 function fence(db: RegistryDatabase, id: string, sql: string, bindings: (string | number)[]): D1PreparedStatement {
   return db.prepare(`INSERT INTO pa_connector_write_fences(source_id,write_guard)

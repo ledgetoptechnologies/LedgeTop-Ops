@@ -46,7 +46,7 @@ describe("Project Alpha connector administration HTTP boundary",()=>{
     runtime=new Miniflare({modules:true,compatibilityDate:"2026-07-22",script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await runtime.getD1Database("OPS_DB") as D1Database;
     const directory=new URL("../migrations/",import.meta.url);
-    for(const name of readdirSync(directory).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0035").sort()){
+    for(const name of readdirSync(directory).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0038").sort()){
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,directory),"utf8")).map(sql=>db.prepare(sql)));
     }
     await db.batch([
@@ -135,6 +135,34 @@ describe("Project Alpha connector administration HTTP boundary",()=>{
     const text=await response.text();expect(text).toContain("project-alpha:primary");
     for(const privateValue of ["private-primary-snapshot-key","private-secondary-snapshot-key",publicKey(1),"credentialRef","accessSubject","current_key_fingerprint"])
       expect(text).not.toContain(privateValue);
+  });
+  it("reports recovery independently from connection health without scheduling or enabling a pending source",async()=>{
+    const value=await registerPending();
+    const auditBefore=await rows("pa_connector_audit");
+    const response=await send(ROOT);expect(response.status).toBe(200);
+    const body=await response.json() as {recovery:Array<Record<string,unknown>>};
+    expect(body.recovery.find(row=>row.sourceId===value.sourceId)).toEqual({
+      sourceId:value.sourceId,status:"never",lastAttemptAt:null,lastSuccessAt:null,nextAttemptAt:null,errorCode:null,failureCount:0,
+    });
+    expect(body.recovery.some(row=>row.sourceId==="project-alpha:primary")).toBe(false);
+    expect(await db.prepare("SELECT state,read_visible FROM pa_connectors WHERE source_id=?").bind(value.sourceId).first())
+      .toEqual({state:"pending",read_visible:0});
+    expect(await db.prepare("SELECT count(*) total FROM pa_snapshot_recovery_attempts").first("total")).toBe(0);
+    expect(await rows("pa_connector_audit")).toBe(auditBefore);
+  });
+  it("does not expose unknown stored recovery diagnostics or internal lease fields",async()=>{
+    const value=await registerPending();
+    await db.prepare(`UPDATE pa_snapshot_recovery_sources SET status='failed',last_attempt_at=1787745600000,
+      next_attempt_at=1787749200000,failure_count=2,error_code='project-alpha-private-diagnostic-fixture' WHERE source_id=?`)
+      .bind(value.sourceId).run();
+    const response=await send(ROOT);expect(response.status).toBe(200);
+    const body=await response.json() as {recovery:Array<Record<string,unknown>>};
+    expect(body.recovery.find(row=>row.sourceId===value.sourceId)).toEqual({
+      sourceId:value.sourceId,status:"failed",lastAttemptAt:new Date(1787745600000).toISOString(),lastSuccessAt:null,
+      nextAttemptAt:new Date(1787749200000).toISOString(),errorCode:"project-alpha-recovery-failed",failureCount:2,
+    });
+    expect(JSON.stringify(body)).not.toContain("project-alpha-private-diagnostic-fixture");
+    expect(JSON.stringify(body)).not.toMatch(/scheduler_token|lease_token|attempt_id|deadline_at/);
   });
   it("rejects an oversized actual JSON body even with a smaller declared length",async()=>{
     const value={...input(),displayName:"x".repeat(17*1024)},before=await rows("pa_connectors");
