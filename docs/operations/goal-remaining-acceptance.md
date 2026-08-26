@@ -247,3 +247,26 @@ thumbnail-runbook exact-text assertion fails. Those remain release follow-ups;
 thumbnail behavior was not changed. This checkpoint performs no production
 migration, email, invitation, source activation, deployment or push. The
 overall goal and coordinated release acceptance remain open.
+
+### Locally verified organization address-book checkpoint
+
+The Client portal now has a default-off organization workspace address book for
+reusable descriptive contact cards. It is deliberately separate from Project
+Alpha contacts, portal identities, memberships, billing roles, notification
+recipients and project/site assignments. Current organization managers may
+create, search, edit and permanently scrub a card, and may copy its current
+email into the existing invitation workflow. Invitation policy, scope, approval,
+publication and identity binding remain authoritative.
+
+The additive migrated-D1 gate passed 8/8 cases, existing invitation compatibility
+passed 21/21, and workspace authorization compatibility passed 26/26 with a
+realistic 15-second Miniflare test budget. Client type checking and production
+build passed. The responsive address-book browser gate passed 30/30 cases, and
+375px/1280px management and picker screenshots were inspected without overflow.
+
+This checkpoint remains local and default-off. Production activation requires
+the dedicated stable fingerprint secret and an approved PII backup/export/
+erasure procedure. Project/site roles, crew observations, recurring-project
+copy rules and completed-project amendments remain product decisions; this
+checkpoint does not infer them. No migration, deployment, mail or push was
+performed.

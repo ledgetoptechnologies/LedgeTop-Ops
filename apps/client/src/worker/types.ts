@@ -58,6 +58,9 @@ export interface Env {
   CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED?: string;
   /** Client invitation/member mutations. Independent from read-only hierarchy rollout. */
   CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED?: string;
+  /** Client-local reusable contacts. Default-off; records never grant portal access. */
+  CLIENT_PORTAL_ADDRESS_BOOK_ENABLED?: string;
+  CLIENT_PORTAL_ADDRESS_BOOK_FINGERPRINT_SECRET?: string;
   /** Native Cloudflare Email Service delivery for the invitation outbox. Default-off. */
   CLIENT_PORTAL_INVITATION_EMAIL_ENABLED?: string;
   /**

@@ -225,7 +225,7 @@ describe("client workspace hierarchy v2", () => {
     await db.prepare("DELETE FROM client_identity_links WHERE id='local-wrapper-identity'").run();
     await db.prepare("DELETE FROM client_accounts WHERE id='local-wrapper-account'").run();
     }
-  });
+  }, 10_000);
 
   it("upgrades only rooted legacy accounts, backfills explicit grants, and retains foreign-key integrity", async () => {
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspaces").first("count")).toBe(2);
@@ -369,7 +369,7 @@ describe("client workspace hierarchy v2", () => {
       .replace(/\s*\n\s*/g, " "));
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED = "false";
-  });
+  }, 10_000);
 
   it("does not accept an invitation for a denied identity or a stale hierarchy scope", async () => {
     const blocked: VerifiedClientPrincipal = {

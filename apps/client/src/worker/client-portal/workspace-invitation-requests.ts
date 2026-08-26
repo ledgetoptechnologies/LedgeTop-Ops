@@ -6,6 +6,7 @@ import {captureWorkspaceInvitationDelegation} from './project-invitation-delegat
 import {prepareProjectAccessTerms,readProjectAccessTerms,projectAccessTermsSql,type ProjectAccessTermsInput,type ProjectAccessTermsView} from './project-access-terms';
 import {invitationRecipientEmailHash} from './access-enrollment-receipts';
 import {invitationRequestsReady} from './invitation-approval-policy';
+import {prepareAddressBookContactSelection,type AddressBookContactSelection} from './workspace-address-book';
 export {invitationRequestsReady} from './invitation-approval-policy';
 
 export type WorkspaceInvitationPolicy='allowed'|'disabled'|'require_approval';
@@ -181,7 +182,7 @@ function requestFence(db:InvitationApprovalDatabase,r:RequestRow){return fence(d
  AND ${projectAccessTermsSql({termsId:'r.access_terms_id',workspaceId:'r.workspace_id',projectId:'r.scope_public_id',legacyRetained:'1'})})`,[r.id,r.version,r.status]);}
 
 export async function submitWorkspaceInvitationRequest(env:PortalAuthorizationEnv,principal:VerifiedClientPrincipal,input:{workspaceId:string;requesterIdentityId:string;
- email:string;target:PortalWorkspaceTarget;capabilities:PortalWorkspaceCapability[];accessTerms?:ProjectAccessTermsInput;requestHash:string;idempotencyKey:string}){
+ email:string;target:PortalWorkspaceTarget;capabilities:PortalWorkspaceCapability[];accessTerms?:ProjectAccessTermsInput;addressContact?:AddressBookContactSelection;requestHash:string;idempotencyKey:string}){
  const db=env.DELIVERY_DB;await ready(db);
  const saved=await command(db,input.workspaceId,input.requesterIdentityId,input.idempotencyKey,'submit',input.requestHash);
  const coordinates={sourceId:PRIMARY_PROJECT_ALPHA_SOURCE_ID,workspaceId:input.workspaceId};
@@ -200,7 +201,8 @@ export async function submitWorkspaceInvitationRequest(env:PortalAuthorizationEn
  for(const capability of new Set<PortalWorkspaceCapability>(['member.manage','workspace.view',...input.capabilities])){
   if(!await authorizePortalWorkspaceCapability(env,principal,input.workspaceId,capability,capability==='workspace.view'?{scopeType:'workspace',publicId:input.workspaceId}:input.target))fail(403,'invitation_requester_authority_changed');
  }
- try{await db.batch([proof.fence(`request-${id}`),
+ const selectedContact=input.addressContact?await prepareAddressBookContactSelection(env,input.workspaceId,input.addressContact,input.email):null;
+ try{await db.batch([proof.fence(`request-${id}`),...(selectedContact?[selectedContact.fence(`request-contact-${id}`)]:[]),
   fence(db,`NOT EXISTS(SELECT 1 FROM portal_v2_invitation_rate_limits WHERE workspace_id=? AND actor_identity_id=? AND datetime(window_started_at,'+1 hour')>datetime('now') AND request_count>=10)`,[input.workspaceId,input.requesterIdentityId]),
   ...(terms?[terms.statement,fence(db,`EXISTS(SELECT 1 FROM portal_project_access_terms submitted_term WHERE submitted_term.id=?
     AND ${projectAccessTermsSql({termsId:'submitted_term.id',workspaceId:'submitted_term.workspace_id',projectId:'submitted_term.project_public_id',legacyRetained:'0'})})`,[terms.id])]:[]),db.prepare(`INSERT INTO portal_workspace_invitation_requests(id,workspace_id,source_id,requester_identity_id,recipient_email,scope_type,scope_public_id,capabilities_json,access_terms_id,request_hash,policy_version)

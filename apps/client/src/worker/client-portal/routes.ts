@@ -85,6 +85,8 @@ import {
 import { clientPortalNotificationsAvailable } from "./schema-readiness";
 import { readClientRequestReadiness } from "./request-readiness";
 import { createNativePortalWorkspaceRouter } from "./native-portal-resources";
+import {createWorkspaceAddressContact,deleteWorkspaceAddressContact,listWorkspaceAddressContacts,readWorkspaceAddressContact,
+  updateWorkspaceAddressContact,workspaceAddressBookAvailable} from './workspace-address-book';
 
 interface ClientPortalDependencies {
   resolvePrincipal?: ResolveClientPrincipal;
@@ -270,8 +272,15 @@ const attachmentCompleteBody = z.object({ parts: z.array(z.object({
 const workspaceInvitationAcceptanceBody = z.object({
   token: z.string().min(32).max(256).regex(/^[A-Za-z0-9_-]+$/),
 }).strict();
+const addressContactFields=z.object({displayName:z.string().trim().min(1).max(160),email:z.string().trim().email().max(320),
+ phone:z.string().trim().min(3).max(64).nullable(),company:z.string().trim().min(1).max(160).nullable(),
+ roleOrTrade:z.string().trim().min(1).max(160).nullable()}).strict();
+const addressContactUpdate=addressContactFields.extend({expectedVersion:z.number().int().positive()}).strict();
+const addressContactDelete=z.object({expectedVersion:z.number().int().positive()}).strict();
+const addressContactSearch=z.object({q:z.string().max(100),cursor:z.string().max(4096).nullable()}).strict();
 const workspaceInvitationBody = z.object({
   email: z.string().trim().email().max(320),
+  addressContact:z.object({id:opaqueId,expectedVersion:z.number().int().positive()}).strict().optional(),
   projectPublicId: opaqueId.optional(),
   targetScope: z.object({
     type: z.enum(["organization", "department", "client", "project"]),
@@ -728,6 +737,40 @@ export function createClientPortalRouter(
     if (result.outcome === "approval_required") throw new HTTPException(409, { message: "invitation_approval_required" });
     if (result.outcome === 'mail_unavailable') throw new HTTPException(503,{message:'Invitation email is not configured'});
     return c.json(result, result.outcome === "created" ? 201 : result.outcome==='approval_requested'?202:200);
+  });
+
+  router.post('/v2/workspaces/:workspaceId/address-book/contacts/search',async(c)=>{
+    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,configuredPortalOrigin(c.env));
+    const workspaceId=opaqueId.safeParse(c.req.param('workspaceId')),body=addressContactSearch.safeParse(await readBoundedJson(c.req.raw,8192));
+    if(!workspaceId.success||!body.success)throw new HTTPException(400,{message:'address_book_query_invalid'});
+    return c.json(await listWorkspaceAddressContacts(c.env,c.get('clientPrincipal'),workspaceId.data,{q:body.data.q,cursor:body.data.cursor??undefined}));
+  });
+  router.get('/v2/workspaces/:workspaceId/address-book/contacts/:contactId',async(c)=>{
+    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});
+    const workspaceId=opaqueId.safeParse(c.req.param('workspaceId')),contactId=opaqueId.safeParse(c.req.param('contactId'));
+    if(!workspaceId.success||!contactId.success)throw new HTTPException(404,{message:'Address contact not found'});
+    return c.json(await readWorkspaceAddressContact(c.env,c.get('clientPrincipal'),workspaceId.data,contactId.data));
+  });
+  router.post('/v2/workspaces/:workspaceId/address-book/contacts',async(c)=>{
+    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,configuredPortalOrigin(c.env));
+    const workspaceId=opaqueId.safeParse(c.req.param('workspaceId')),key=idempotencyKey.safeParse(c.req.header('Idempotency-Key')),
+      body=addressContactFields.safeParse(await readBoundedJson(c.req.raw,4096));
+    if(!workspaceId.success||!key.success||!body.success)throw new HTTPException(400,{message:'address_contact_invalid'});
+    const result=await createWorkspaceAddressContact(c.env,c.get('clientPrincipal'),workspaceId.data,body.data,key.data);return c.json(result,result.replayed?200:201);
+  });
+  router.patch('/v2/workspaces/:workspaceId/address-book/contacts/:contactId',async(c)=>{
+    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,configuredPortalOrigin(c.env));
+    const workspaceId=opaqueId.safeParse(c.req.param('workspaceId')),contactId=opaqueId.safeParse(c.req.param('contactId')),
+      key=idempotencyKey.safeParse(c.req.header('Idempotency-Key')),body=addressContactUpdate.safeParse(await readBoundedJson(c.req.raw,4096));
+    if(!workspaceId.success||!contactId.success||!key.success||!body.success)throw new HTTPException(400,{message:'address_contact_invalid'});
+    return c.json(await updateWorkspaceAddressContact(c.env,c.get('clientPrincipal'),workspaceId.data,contactId.data,body.data,key.data));
+  });
+  router.delete('/v2/workspaces/:workspaceId/address-book/contacts/:contactId',async(c)=>{
+    if(!await workspaceAddressBookAvailable(c.env))throw new HTTPException(404,{message:'Not found'});requireSameRequestOrigin(c.req.raw,configuredPortalOrigin(c.env));
+    const workspaceId=opaqueId.safeParse(c.req.param('workspaceId')),contactId=opaqueId.safeParse(c.req.param('contactId')),
+      key=idempotencyKey.safeParse(c.req.header('Idempotency-Key')),body=addressContactDelete.safeParse(await readBoundedJson(c.req.raw,1024));
+    if(!workspaceId.success||!contactId.success||!key.success||!body.success)throw new HTTPException(400,{message:'address_contact_invalid'});
+    return c.json(await deleteWorkspaceAddressContact(c.env,c.get('clientPrincipal'),workspaceId.data,contactId.data,body.data.expectedVersion,key.data));
   });
 
   router.get('/v2/workspaces/:workspaceId/invitation-requests',async(c)=>{

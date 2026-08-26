@@ -1,4 +1,5 @@
 import type { PortalAuthorizationEnv as Env } from './workspace-v2';
+import type {Env as ClientEnv} from '../types';
 import { invitationRecipientEmailHash } from "./access-enrollment-receipts";
 import type { VerifiedClientPrincipal } from "./types";
 import {
@@ -16,6 +17,10 @@ import { captureProjectInvitationDelegation } from './project-invitation-delegat
 import {invitationRequestsReady,submitWorkspaceInvitationRequest,replaySubmittedWorkspaceInvitationRequest,type WorkspaceInvitationRequestView} from './workspace-invitation-requests';
 import {PRIMARY_ALPHA_SOURCE_ID} from '@ltds/shared';
 import {HTTPException} from 'hono/http-exception';
+import {canManageWorkspaceAddressBook,workspaceAddressBookAvailableFor} from './workspace-address-book';
+import {prepareAddressBookContactSelection,type AddressBookContactSelection} from './workspace-address-book';
+
+type AddressBookAccessEnv=Env&Partial<Pick<ClientEnv,'CLIENT_PORTAL_ADDRESS_BOOK_ENABLED'|'CLIENT_PORTAL_ADDRESS_BOOK_FINGERPRINT_SECRET'|'DELIVERY_SESSION_SECRET'|'DELIVERY_PREVIOUS_SESSION_SECRET'>>;
 
 const INVITABLE_CAPABILITIES = new Set<PortalWorkspaceCapability>([
   "workspace.view", "delivery.view", "request.create",
@@ -24,6 +29,7 @@ const INVITE_LIFETIME_MS = 7 * 24 * 60 * 60 * 1000;
 
 export interface WorkspaceInvitationInput {
   email: string;
+  addressContact?:AddressBookContactSelection;
   projectPublicId?: string;
   targetScope?: { type: "organization" | "department" | "client" | "project"; publicId: string };
   organizationWide?: boolean;
@@ -168,6 +174,7 @@ export async function createWorkspaceInvitation(
   const accessTerms=input.accessTerms===undefined?undefined:parseProjectAccessTerms(input.accessTerms);
   if(accessTerms&&(accessTerms.kind!=='collaborator'||selectedTarget.scopeType!=='project'))return {outcome:'invalid'};
   const canonical = JSON.stringify({ email, capabilities, scopeType: selectedTarget.scopeType, scopePublicId: selectedTarget.publicId,
+    ...(input.addressContact?{addressContact:input.addressContact}:{}),
     ...(accessTerms?{accessTerms}:{}),...(input.expectedInvitationPolicyVersion!==undefined?{policyVersion:input.expectedInvitationPolicyVersion}:{}) });
   const requestHash = await digest(canonical);
   const requestsReady=await invitationRequestsReady(db(env));
@@ -178,10 +185,11 @@ export async function createWorkspaceInvitation(
   const replay = await replayedInvitation(env, workspaceId, actor.id, idempotencyKey, requestHash);
   if (replay === "conflict") return { outcome: "conflict" };
   if (replay) return { outcome: "replayed", invitation: replay, deliveryQueued: true };
+  const selectedContact=input.addressContact?await prepareAddressBookContactSelection(env,workspaceId,input.addressContact,email):null;
   if(policy.mode==='require_approval'){
     if(!requestsReady)return {outcome:'approval_required'};
     try{const result=await submitWorkspaceInvitationRequest(env,principal,{workspaceId,requesterIdentityId:actor.id,email,target:selectedTarget,
-        capabilities,accessTerms,requestHash,idempotencyKey});
+        capabilities,accessTerms,addressContact:input.addressContact,requestHash,idempotencyKey});
       return {outcome:result.replayed?'approval_replayed':'approval_requested',request:result.request,deliveryQueued:false};
     }catch(error){const winner=await replayedInvitation(env,workspaceId,actor.id,idempotencyKey,requestHash);
       if(winner&&winner!=='conflict')return {outcome:'replayed',invitation:winner,deliveryQueued:true};throw error;}
@@ -222,6 +230,7 @@ export async function createWorkspaceInvitation(
           AND COALESCE((SELECT policy FROM portal_workspace_invitation_policies WHERE workspace_id=?),'allowed')='allowed' THEN 1 ELSE 0 END)`)
         .bind(`issue-policy-${invitationId}`,workspaceId,policy.version,workspaceId)]:[]),
       ...(delegation?[delegation.fence(invitationId)]:[]),
+      ...(selectedContact?[selectedContact.fence(`invitation-contact-${invitationId}`)]:[]),
       ...(preparedTerms?[preparedTerms.statement]:[]),
       database.prepare(`INSERT INTO portal_v2_invitations
         (id,workspace_id,token_hash,invited_email,invited_by_identity_id,expires_at)
@@ -248,23 +257,27 @@ export async function createWorkspaceInvitation(
   } catch {
     if(requestsReady){const requested=await replaySubmittedWorkspaceInvitationRequest(database,{workspaceId,actorId:actor.id,idempotencyKey,requestHash});
       if(requested)return {outcome:'approval_replayed',request:requested,deliveryQueued:false};}
-    if(termsReady){const current=await readWorkspaceInvitationPolicy(database,workspaceId);
-      if(current.mode!=='allowed')return {outcome:current.mode==='disabled'?'policy_disabled':'approval_required'};}
     const raced = await replayedInvitation(env, workspaceId, actor.id, idempotencyKey, requestHash);
     if (raced && raced !== "conflict") return { outcome: "replayed", invitation: raced, deliveryQueued: true };
-    return { outcome: raced === "conflict" ? "conflict" : "invalid" };
+    if (raced === "conflict") return { outcome: "conflict" };
+    if(termsReady){const current=await readWorkspaceInvitationPolicy(database,workspaceId);
+      if(current.mode!=='allowed')return {outcome:current.mode==='disabled'?'policy_disabled':'approval_required'};}
+    if(input.addressContact)await prepareAddressBookContactSelection(env,workspaceId,input.addressContact,email);
+    return { outcome: "invalid" };
   }
   return { outcome: "created", invitation: (await getInvitation(env, workspaceId, invitationId))!, deliveryQueued: true };
 }
 
 export interface WorkspaceInviteScope {type:'organization'|'department'|'client'|'project';publicId:string;displayName:string;
  capabilities:Array<'delivery.view'|'request.create'>;projectEndSupported:boolean}
-export async function listWorkspaceAccess(env: Env, principal: VerifiedClientPrincipal, workspaceId: string): Promise<{ members: WorkspaceMemberView[]; invitations: WorkspaceInvitationView[];
+export async function listWorkspaceAccess(env: AddressBookAccessEnv, principal: VerifiedClientPrincipal, workspaceId: string): Promise<{ members: WorkspaceMemberView[]; invitations: WorkspaceInvitationView[];
   sourceId:string;sourceName:string;workspaceName:string;canManageMembers:boolean;invitationRequestsSupported:boolean;inviteScopes:WorkspaceInviteScope[];
+  addressBookAvailable:boolean;canManageAddressBook:boolean;
   projectAccessTermsSupported:boolean;invitationPolicy:{mode:'allowed'|'disabled'|'require_approval';version:number};projectAccessOptions:Array<{projectPublicId:string;projectEndSupported:boolean}> } | null> {
   if(!await authorizePortalWorkspaceCapability(env,principal,workspaceId,'workspace.view',{scopeType:'workspace',publicId:workspaceId}))return null;
   const canManageMembers=await authorizePortalWorkspaceCapability(env, principal, workspaceId, "member.manage", { scopeType: "workspace", publicId: workspaceId });
   const termsReady=await projectAccessTermsReady(db(env)),requestsReady=await invitationRequestsReady(db(env));
+  const addressBookAvailable=await workspaceAddressBookAvailableFor(env,workspaceId);
   const workspace=await db(env).prepare('SELECT display_name,project_alpha_source_id FROM portal_v2_workspaces WHERE id=? AND status=\'active\'').bind(workspaceId)
     .first<{display_name:string;project_alpha_source_id:string}>();
   if(!workspace||workspace.project_alpha_source_id!==PRIMARY_ALPHA_SOURCE_ID)return null;
@@ -315,8 +328,10 @@ export async function listWorkspaceAccess(env: Env, principal: VerifiedClientPri
   const invitationPolicy=termsReady?await readWorkspaceInvitationPolicy(db(env),workspaceId):{mode:'allowed' as const,version:0};
   if(!await authorizePortalWorkspaceCapability(env,principal,workspaceId,'workspace.view',{scopeType:'workspace',publicId:workspaceId}))return null;
   if(canManageMembers&&!await authorizePortalWorkspaceCapability(env,principal,workspaceId,'member.manage',{scopeType:'workspace',publicId:workspaceId}))return null;
+  const canManageAddressBook=addressBookAvailable&&await canManageWorkspaceAddressBook(env,principal,workspaceId);
   return {sourceId:workspace.project_alpha_source_id,sourceName:'Project Alpha',workspaceName:workspace.display_name,
     canManageMembers,invitationRequestsSupported:requestsReady,inviteScopes,
+    addressBookAvailable,canManageAddressBook,
     projectAccessTermsSupported:termsReady,invitationPolicy,projectAccessOptions:inviteScopes.filter(scope=>scope.type==='project')
     .map(scope=>({projectPublicId:scope.publicId,projectEndSupported:scope.projectEndSupported})),
     members: members.results.map(row => ({ identityId: row.identity_id, email: row.verified_email, status: row.status, manager: row.manager === 1, source: row.source_type })),
