@@ -12,7 +12,11 @@ export interface PortalIdentityPageMetadata {
   reason: "workspace_unavailable" | "identity_unlinked" | "identity_conflict" | null;
   nextCursor: string | null; hasMore: boolean; returned: number; limit: number;
 }
-export interface PortalIdentityCapabilities { canManagePortal: boolean; canManageEligibilityBlocks: boolean }
+export interface PortalIdentityCapabilities {
+  canManagePortal: boolean;
+  canManageEligibilityBlocks: boolean;
+  canReviewIdentityDetails: boolean;
+}
 export interface PortalIdentitySummary {
   workspace_id: string; public_id: string; workspace_name: string; display_name: string; email_hint: string;
   status: string; identity_id: string | null; binding_status: "linked" | "unlinked" | "conflict";
@@ -158,8 +162,10 @@ async function policy(env: Env, actor: StaffPrincipal, scope: PortalIdentityScop
   const access = await sqlScope(env, actor, "team.view");
   if (!access.global || access.deniedGlobal) throw new HTTPException(403, { message: "Global team.view permission required" });
   const administrator = await isAdministrator(env, actor);
-  const capabilities = { canManagePortal: administrator && portalOperationsManagementEnabled(env),
-    canManageEligibilityBlocks: administrator && eligibilityBlockManagementEnabled(env) };
+  const primaryClientScope = scope.kind === "global" || scope.context.root.source_id === "project-alpha:primary";
+  const capabilities = { canManagePortal: primaryClientScope && administrator && portalOperationsManagementEnabled(env),
+    canManageEligibilityBlocks: primaryClientScope && administrator && eligibilityBlockManagementEnabled(env),
+    canReviewIdentityDetails: primaryClientScope };
   const hash = await sha256(JSON.stringify([actor.id, access.global, access.deniedGlobal, administrator, capabilities,
     scope.kind === "global" ? "global" : [scope.context.canonicalRoot, scope.context.root.workspace_id, scope.context.contextVersion]]));
   return { hash, contextVersion: scope.kind === "client" ? scope.context.contextVersion : hash, capabilities };
@@ -184,12 +190,12 @@ async function summary(fact: Fact, current: Policy): Promise<PortalIdentitySumma
     hasExplicitAccess: Boolean(fact.has_rules), accessLoaded: false,
     effectiveEmailBlockCount: fact.email_block_count, effectiveSubjectBlock: Boolean(fact.subject_block),
     removableEmailBlockId: current.capabilities.canManageEligibilityBlocks && fact.email_block_count === 1 ? fact.email_block_id : null,
-    invitation: fact.invitation_id ? { id: fact.invitation_id, status: fact.invitation_status!, expires_at: fact.invitation_expires_at!,
+    invitation: current.capabilities.canReviewIdentityDetails && fact.invitation_id ? { id: fact.invitation_id, status: fact.invitation_status!, expires_at: fact.invitation_expires_at!,
       email_status: fact.email_status, attempts: fact.attempts, last_error_code: fact.last_error_code } : null,
     actions: { canRetryInvitation: current.capabilities.canManagePortal && Boolean(fact.invitation_retryable),
       canCreateEmailBlock: current.capabilities.canManageEligibilityBlocks && fact.email_block_count === 0
         && email.length <= 254 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email),
-      canReviewEligibilityBlocks: true },
+      canReviewEligibilityBlocks: current.capabilities.canReviewIdentityDetails },
   };
 }
 

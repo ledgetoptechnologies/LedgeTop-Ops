@@ -334,7 +334,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
           {items => <ContactList contacts={items} />}
         </ClientCollection>
       </Card>
-      {data.client.workspace_id && data.client.source_id && /^project-alpha:[A-Za-z0-9_-]+$/.test(data.client.source_id) && (invitationAccess?.enabled && invitationAccess.canManagePolicy ? <ClientInvitationPolicy key={`${data.client.source_id}:${data.client.workspace_id}:${revision}`} workspaceId={data.client.workspace_id} sourceId={data.client.source_id} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /> : invitationAccess?.error ? <Card title="Invitation policy"><p role="alert">{invitationAccess.error}</p></Card> : null)}
+      {data.client.workspace_id && data.client.source_id === "project-alpha:primary" && (invitationAccess?.enabled && invitationAccess.canManagePolicy ? <ClientInvitationPolicy key={`${data.client.source_id}:${data.client.workspace_id}:${revision}`} workspaceId={data.client.workspace_id} sourceId={data.client.source_id} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /> : invitationAccess?.error ? <Card title="Invitation policy"><p role="alert">{invitationAccess.error}</p></Card> : null)}
       {data.portalIdentities ? portalBasePath ? <ClientPortalAccessPanel initialPage={data.portalIdentities} basePath={portalBasePath}
         contextVersion={data.contextVersion || data.portalIdentities.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate}
         feedback={portalFeedback} onChanged={message => { if (!collectionProps.contextSignal.aborted) { setPortalFeedback(message); refresh(); } }} />

@@ -4,7 +4,8 @@ import { resolveClientHubWorkspace, resolveClientHubWorkspaces, type ClientHubWo
 import type { Env } from "../src/worker/types";
 
 const publicId = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const lookup: ClientHubWorkspaceLookup = { key: "101", kind: "organization", business_id: "101", pa_public_id: publicId, workspace_id: null };
+const lookup: ClientHubWorkspaceLookup = { key: "101", source_id: "project-alpha:primary", kind: "organization",
+  business_id: "101", pa_public_id: publicId, workspace_id: null };
 
 describe("explicit Client Hub workspace provenance", () => {
   let runtime: Miniflare;
@@ -22,10 +23,14 @@ describe("explicit Client Hub workspace provenance", () => {
       CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT,source_generation TEXT,source_sequence INTEGER,status TEXT,complete INTEGER);
       CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT,source_sequence INTEGER);
       CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,parent_public_id TEXT,active INTEGER,source_version TEXT);
+      CREATE TABLE pa_portal_workspace_sources(workspace_id TEXT PRIMARY KEY,projection_source_id TEXT,source_workspace_id TEXT);
+      CREATE TABLE pa_portal_source_authorities(source_id TEXT PRIMARY KEY,state TEXT,active_revision INTEGER);
+      CREATE TABLE pa_portal_source_authority_revisions(source_id TEXT,revision INTEGER);
     `.replace(/\s*\n\s*/g, " "));
   });
   beforeEach(async () => {
-    await db.batch(["portal_v2_directory_entities", "portal_v2_directory_checkpoints", "portal_v2_directory_generations", "portal_v2_workspaces", "client_accounts"]
+    await db.batch(["portal_v2_directory_entities", "portal_v2_directory_checkpoints", "portal_v2_directory_generations",
+      "portal_v2_workspaces", "client_accounts", "pa_portal_workspace_sources", "pa_portal_source_authority_revisions", "pa_portal_source_authorities"]
       .map(table => db.prepare(`DELETE FROM ${table}`)));
   });
   afterAll(async () => runtime.dispose());
@@ -64,6 +69,39 @@ describe("explicit Client Hub workspace provenance", () => {
     expect(await resolveClientHubWorkspace(env, { ...lookup, workspace_id: "secondary" })).toEqual({ status: "missing", workspace: null });
     await workspace("primary", publicId);
     expect(await resolveClientHubWorkspace(env, lookup)).toMatchObject({ status: "mapped", workspace: { id: "primary" } });
+  });
+
+  it("maps a secondary native workspace only with exact ownership and active source authority", async () => {
+    const secondary = { ...lookup, source_id: "project-alpha:secondary" };
+    await workspace("secondary", publicId, false, true, secondary.source_id);
+    expect(await resolveClientHubWorkspace(env, secondary)).toEqual({ status: "missing", workspace: null });
+    await db.prepare("INSERT INTO pa_portal_workspace_sources VALUES('secondary','project-alpha:secondary','source-workspace')").run();
+    expect(await resolveClientHubWorkspace(env, secondary)).toEqual({ status: "missing", workspace: null });
+    await db.batch([
+      db.prepare("INSERT INTO pa_portal_source_authorities VALUES('project-alpha:secondary','active',1)"),
+      db.prepare("INSERT INTO pa_portal_source_authority_revisions VALUES('project-alpha:secondary',1)"),
+    ]);
+    expect(await resolveClientHubWorkspace(env, secondary)).toMatchObject({ status: "mapped",
+      workspace: { id: "secondary", project_alpha_source_id: "project-alpha:secondary", legacy_account_id: null } });
+    await db.prepare("UPDATE pa_portal_source_authorities SET state='suspended'").run();
+    expect(await resolveClientHubWorkspace(env, secondary)).toEqual({ status: "missing", workspace: null });
+  });
+
+  it("never crosses sources when public IDs collide or accepts a secondary legacy bridge", async () => {
+    await workspace("primary", publicId);
+    await workspace("secondary", publicId, false, true, "project-alpha:secondary");
+    await db.batch([
+      db.prepare("INSERT INTO pa_portal_workspace_sources VALUES('secondary','project-alpha:secondary','source-workspace')"),
+      db.prepare("INSERT INTO pa_portal_source_authorities VALUES('project-alpha:secondary','active',1)"),
+      db.prepare("INSERT INTO pa_portal_source_authority_revisions VALUES('project-alpha:secondary',1)"),
+    ]);
+    expect(await resolveClientHubWorkspace(env, lookup)).toMatchObject({ workspace: { id: "primary" } });
+    expect(await resolveClientHubWorkspace(env, { ...lookup, source_id: "project-alpha:secondary" }))
+      .toMatchObject({ workspace: { id: "secondary" } });
+    await db.prepare("UPDATE portal_v2_workspaces SET legacy_account_id='account-secondary' WHERE id='secondary'").run();
+    await db.prepare("INSERT INTO client_accounts VALUES('account-secondary','active','101',NULL,'project-alpha:secondary')").run();
+    expect(await resolveClientHubWorkspace(env, { ...lookup, source_id: "project-alpha:secondary" }))
+      .toEqual({ status: "missing", workspace: null });
   });
 
   it("recognizes a legacy workspace only with its current account bridge and selected legacy proof", async () => {

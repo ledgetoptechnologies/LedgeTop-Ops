@@ -20,6 +20,7 @@ async function fixture() {
   `);
   await execute(ops, readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8"));
   await ops.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0034_client_hub_projection_sources.sql", import.meta.url), "utf8")).map(statement => ops.prepare(statement)));
+  await ops.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0042_client_hub_secondary_portal_visibility.sql", import.meta.url), "utf8")).map(statement => ops.prepare(statement)));
   await execute(delivery, `
     CREATE TABLE client_accounts(id TEXT PRIMARY KEY,display_name TEXT,status TEXT,project_alpha_client_id TEXT,project_alpha_organization_id TEXT,project_alpha_source_id TEXT);
     CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT,pa_organization_public_id TEXT,pa_client_public_id TEXT,display_name TEXT,status TEXT,legacy_account_id TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
@@ -30,6 +31,9 @@ async function fixture() {
     CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT,source_generation TEXT,source_sequence INTEGER,status TEXT,complete INTEGER);
     CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT,source_sequence INTEGER);
     CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,parent_public_id TEXT,active INTEGER,source_version TEXT);
+    CREATE TABLE pa_portal_workspace_sources(workspace_id TEXT PRIMARY KEY,projection_source_id TEXT,source_workspace_id TEXT);
+    CREATE TABLE pa_portal_source_authorities(source_id TEXT PRIMARY KEY,state TEXT,active_revision INTEGER);
+    CREATE TABLE pa_portal_source_authority_revisions(source_id TEXT,revision INTEGER);
     INSERT INTO portal_v2_workspace_memberships VALUES('membership','workspace','identity');
   `);
   return { ops, delivery, env: { OPS_DB: ops, DELIVERY_DB: delivery } };
@@ -72,7 +76,7 @@ async function projectWorkspace(delivery: D1Database, workspace: string, kind: s
 }
 
 describe("resumable Client Hub index", { timeout: 60_000 }, () => {
-  it("indexes secondary business roots without borrowing primary portal, account or principal associations", async () => {
+  it("indexes an exactly authorized secondary portal without borrowing primary account associations", async () => {
     const { ops, delivery, env } = await fixture(), publicId = "a".repeat(32);
     await ops.prepare(`INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id)
       VALUES('primary-org','Primary',1,?,'project-alpha:primary'),('secondary-org','Secondary',1,?,'project-alpha:secondary')`)
@@ -90,14 +94,20 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
       VALUES('secondary-workspace','organization',?,'Secondary portal','active','project-alpha:secondary')`).bind(publicId).run();
     await projectWorkspace(delivery, "secondary-workspace", "organization", publicId);
     await delivery.prepare("INSERT INTO pa_portal_principals VALUES('secondary-workspace','person','Other source person','other-source@example.test','active')").run();
+    await delivery.batch([
+      delivery.prepare("INSERT INTO pa_portal_workspace_sources VALUES('secondary-workspace','project-alpha:secondary','source-secondary-workspace')"),
+      delivery.prepare("INSERT INTO pa_portal_source_authorities VALUES('project-alpha:secondary','active',1)"),
+      delivery.prepare("INSERT INTO pa_portal_source_authority_revisions VALUES('project-alpha:secondary',1)"),
+    ]);
     await finish(env);
     expect(await ops.prepare("SELECT source_id,pa_public_id,mapping_status,workspace_id,account_count,contact_count,portal_status FROM client_hub_roots WHERE public_id='secondary-org'").first())
-      .toEqual({ source_id: "project-alpha:secondary", pa_public_id: publicId, mapping_status: "mapped", workspace_id: null, account_count: 0, contact_count: 1, portal_status: "not_supported" });
+      .toEqual({ source_id: "project-alpha:secondary", pa_public_id: publicId, mapping_status: "mapped", workspace_id: "secondary-workspace", account_count: 0, contact_count: 2, portal_status: "active" });
     expect(await ops.prepare("SELECT source_id,root_public_id FROM client_hub_search_values WHERE normalized_value='secondary@example.test'").first())
       .toEqual({ source_id: "project-alpha:secondary", root_public_id: "secondary-org" });
     expect(await ops.prepare("SELECT workspace_id,account_count,project_count FROM client_hub_roots WHERE public_id='primary-org'").first()).toEqual({ workspace_id: "workspace", account_count: 1, project_count: 0 });
     expect(await ops.prepare("SELECT count(*) count FROM client_hub_roots WHERE root_namespace='portal' AND public_id='secondary-workspace'").first("count")).toBe(0);
-    expect(await ops.prepare("SELECT count(*) count FROM client_hub_search_values WHERE normalized_value='other-source@example.test'").first("count")).toBe(0);
+    expect(await ops.prepare("SELECT source_id,root_public_id FROM client_hub_search_values WHERE normalized_value='other-source@example.test'").first())
+      .toEqual({ source_id: "project-alpha:secondary", root_public_id: "secondary-org" });
   });
   it("backfills more than 500 roots with bounded pages and resumes from its persisted checkpoint", async () => {
     const { ops, env } = await fixture();

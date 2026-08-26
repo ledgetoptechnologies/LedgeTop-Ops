@@ -15,7 +15,7 @@ A client key is `(source_id, root_namespace, kind, public_id)`:
 
 | Namespace | Meaning of `public_id` | Source |
 | --- | --- | --- |
-| `business` | Internal Alpha organization or standalone-client ID | `project-alpha:primary` |
+| `business` | Internal Alpha organization or standalone-client ID | Exact registered `project-alpha:*` producer |
 | `portal` | Exact portal workspace ID | `project-alpha:primary` |
 | `account` | Unlinked local delivery account ID | `delivery:local` |
 
@@ -29,8 +29,9 @@ ID and a selected, complete native workspace generation/root.
 An ambiguous or incomplete association must not select an arbitrary workspace.
 Unmapped portal workspaces remain separately addressable; retained portal URLs
 can resolve a business alias only through the current verified association.
-The existing connector still supports one Alpha producer. The source field does
-not enable a second producer or authorize business-record linking.
+Each registered producer remains independent. A source field identifies one
+producer; it does not authorize business-record linking or combine memberships,
+identities, grants, denials, accounts, or staff authority.
 
 ## Directory and detail reads
 
@@ -138,11 +139,38 @@ Refresh clears stale data while loading, and cancelled/late results cannot resto
 the prior project. Account/portal aliases are not project-detail routes in this
 increment; existing client-detail aliases remain supported.
 
-This increment is read-only and requires no new migration. It does not implement
+This business-project increment is read-only. It does not implement
 site assignments, field-note editing, copy-forward, or Alpha project creation.
 Their authority and remaining decisions are recorded in
 [the project-memory design](project-memory-design.md). The existing directory
 release prerequisites below still apply; this follow-on is not deployed.
+
+### Secondary portal visibility (local follow-on, not deployed)
+
+An exact secondary business root may now display its source-owned native portal
+workspace and current portal principals in Client Hub. Resolution requires all
+of the following: the same source ID on the business projection and workspace,
+the exported unambiguous Alpha public ID, the selected complete native root
+generation, the immutable `pa_portal_workspace_sources` reservation, and an
+active portal-purpose authority with its selected revision. A missing,
+suspended, retired, stale or conflicting proof leaves the workspace unavailable.
+
+This visibility does not use a legacy account bridge and does not expose
+secondary invitation, sign-in-block, nested identity-history, finance, service,
+mail, feedback, Viewer, or delivery-management actions. The same verified
+global `(issuer, subject)` may be visible in two workspaces, but each membership,
+entitlement and denial remains independently scoped. Business-party links remain
+presentation-only and never union access.
+
+Operations migration `0042_client_hub_secondary_portal_visibility.sql` rebuilds
+only the disposable directory cache tables so a secondary root can retain its
+exact `workspace_id`. It preserves every existing root/search row, indexes and
+revision trigger. The constraint continues to require secondary
+`legacy_account_id IS NULL` and zero account, project and request counts; portal
+namespaces remain primary-only. A populated upgrade test verifies preservation,
+foreign keys, integrity, allowed workspace storage and rejected legacy/count
+writes. The migration resets the bounded reconciliation cursor; it creates no
+identity, membership, grant, invitation or source authority.
 
 ## Index lifecycle
 
@@ -224,8 +252,9 @@ a local test-server failure.
 3. Run the pinned Operations dependency, generated-type, build, unit, migration,
    and browser gates. Include the populated upgrade test, not only empty schema
    creation or mocked UI responses.
-4. With migration/deployment authority, apply the additive Operations migration
-   0032 and Delivery read-index migration 0152 before releasing their consumer.
+4. With migration/deployment authority, apply the Operations migrations through
+   0042 and Delivery migrations through the corresponding portal-authority and
+   read-index revisions before releasing their consumers.
    Do not bypass another pending migration or
    assume an application deploy has applied database changes.
 5. Confirm the isolated cron runs and the initial index reaches `ready=1`.
@@ -265,8 +294,12 @@ lease expiry, and whether the phase/cursor advances. For a mapping problem,
 inspect the exact source-qualified root and its current source/projection
 provenance; do not repair it by matching names or replacing IDs manually.
 
-Rollback restores the previously released application code while retaining the
-additive index schema for recovery. It must not roll back authoritative source
-or access records. Do not drop/recreate production tables or clear leases merely
-because one invocation has not finished. If repair is needed, inspect the exact
-state and obtain approval for the bounded repair operation.
+Before migration 0042, take the normal D1 recovery point and record the current
+directory state. Rollback restores the previously released application code
+while retaining the forward-compatible cache schema. If a migration-time copy
+or integrity check fails, stop the deployment and restore the whole Operations
+database from that recovery point; never reconstruct authoritative rows by hand.
+After a committed migration, prefer a forward fix or bounded index rebuild.
+It must not roll back authoritative source or access records. Do not drop or
+recreate production tables, clear leases, or remove source ownership/authority
+records merely because one invocation has not finished.

@@ -8,7 +8,11 @@ const workspaces = [
 ];
 function workspace(id: string) { return workspaces.find(item => item.id === id)!; }
 function envelope(id = "workspace-b") { return {workspaceId: id, sourceId: workspace(id).sourceId, contextVersion: `context-${id}`}; }
-function context(id = "workspace-b") { return {workspace: workspace(id), contextVersion: `context-${id}`, capabilities: {directoryRead: true, deliveryView: true, requestV2: false, requestAttachments: false, feedback: false, manageTeam: false, workspaceMembershipManagement: false, delegatedShares: false, viewer: false, viewerShares: false, viewBilling: false}}; }
+function features() { return {directory: {state: "available", reason: "authorized_capability"}, deliveries: {state: "available", reason: "resource_authorization_required"},
+  serviceRequests: {state: "not_supported", reason: "source_not_supported"}, feedback: {state: "not_supported", reason: "source_not_supported"},
+  models: {state: "not_supported", reason: "source_not_supported"}, team: {state: "not_supported", reason: "source_not_supported"},
+  billing: {state: "not_supported", reason: "source_not_supported"}}; }
+function context(id = "workspace-b") { return {workspace: workspace(id), contextVersion: `context-${id}`, features: features(), capabilities: {directoryRead: true, deliveryView: true, requestV2: false, requestAttachments: false, feedback: false, manageTeam: false, workspaceMembershipManagement: false, delegatedShares: false, viewer: false, viewerShares: false, viewBilling: false}}; }
 function hierarchy(id = "workspace-b") { return {...envelope(id), page: {nextCursor: null}, entries: [
   {type: "organization", publicId: "org-shared", parentType: null, parentPublicId: null, displayName: workspace(id).displayName, sourceVersion: "1"},
   {type: "department", publicId: "department-one", parentType: "organization", parentPublicId: "org-shared", displayName: "Engineering and field survey services", sourceVersion: "1"},
@@ -227,14 +231,33 @@ test("Back reauthorizes an earlier native workspace before its exact file reques
 
 for (const path of ["/portal/requests", "/portal/requests/new", "/portal/feedback", "/portal/account", "/portal/projects/project-shared?tab=models", "/portal/projects/project-shared?tab=requests"]) test(`native unsupported feature ${path} is explicit without legacy or Viewer probes`, async ({page}) => {
   const calls = await mock(page); await page.goto(`${path}${path.includes("?") ? "&" : "?"}workspace=workspace-b`);
-  await expect(page.getByText("Service requests, billing, member management, feedback, and 3D models are not available for this connected workspace.")).toBeVisible();
+  await expect(page.getByRole("heading", {name: "Workspace features"})).toBeVisible();
+  await expect(page.getByText("They are not services purchased or assigned to your organization.", {exact: false})).toBeVisible();
   nativeCallsOnly(calls); await expect(page.getByRole("button", {name: /New request|Leave Feedback|Invite/i})).toHaveCount(0);
 });
 
 test("capabilities absent from native context do not produce optimistic directory or delivery probes", async ({page}) => {
-  const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/context") ? route.fulfill({json: {...context(), capabilities: {...context().capabilities, directoryRead: false, deliveryView: false}}}) : undefined);
+  const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/context") ? route.fulfill({json: {...context(), features: {...features(), directory: {state: "not_in_access", reason: "capability_not_granted"}, deliveries: {state: "temporarily_unavailable", reason: "backend_unavailable"}}, capabilities: {...context().capabilities, directoryRead: false, deliveryView: false}}}) : undefined);
   await page.goto("/portal?workspace=workspace-b"); await expect(page.getByText("The directory is not included in your current workspace access.")).toBeVisible();
+  await expect(page.getByText("Not in access", {exact: true})).toBeVisible();
   await page.goto("/portal/deliveries?workspace=workspace-b"); await expect(page.getByText("Delivery viewing is not included in your current workspace access.")).toBeVisible();
+  expect(calls.some(call => /\/(hierarchy|deliveries)$/.test(call.path))).toBe(false);
+});
+
+test("native feature readiness is operational status, not purchased services or optimistic secondary features", async ({page}) => {
+  const calls = await mock(page); await page.goto("/portal?workspace=workspace-b");
+  const surface = page.locator(".ltds-card").filter({has: page.getByRole("heading", {name: "Workspace features"})});
+  await expect(surface).toContainText("Ready");
+  await expect(surface).toContainText("Not connected");
+  await expect(surface).toContainText("Existing authorized request history remains unchanged.");
+  await expect(surface).toContainText("not services purchased or assigned");
+  nativeCallsOnly(calls);
+});
+
+test("a context capability and readiness mismatch fails closed before protected probes", async ({page}) => {
+  const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/context") ? route.fulfill({json: {...context(), features: {...features(), directory: {state: "not_in_access", reason: "capability_not_granted"}}}}) : undefined);
+  await page.goto("/portal?workspace=workspace-b");
+  await expect(page.getByRole("button", {name: "Retry portal"})).toBeVisible();
   expect(calls.some(call => /\/(hierarchy|deliveries)$/.test(call.path))).toBe(false);
 });
 

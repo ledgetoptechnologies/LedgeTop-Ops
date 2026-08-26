@@ -57,13 +57,25 @@ export async function createClientHubCollectionContext(env: Env, principal: Staf
     WHERE ${scope.where} ORDER BY account.id LIMIT 2`).bind(...scope.values).all<Record<string, unknown>>();
   if (accountProof.results.length > 1)
     throw new HTTPException(409, { message: "This client's account association is ambiguous and needs review" });
+  const secondaryProofSelect = root.source_id === "project-alpha:primary" ? "" : `,
+    owner.projection_source_id owner_source_id,owner.source_workspace_id,
+    authority.state authority_state,authority.active_revision authority_revision,authority.version authority_version,
+    authority.connector_revision,authority.connector_version`;
+  const secondaryProofJoins = root.source_id === "project-alpha:primary" ? "" : `
+    JOIN pa_portal_workspace_sources owner ON owner.workspace_id=workspace.id
+      AND owner.projection_source_id=workspace.project_alpha_source_id
+    JOIN pa_portal_source_authorities authority ON authority.source_id=workspace.project_alpha_source_id
+      AND authority.state='active'
+    JOIN pa_portal_source_authority_revisions authority_revision ON authority_revision.source_id=authority.source_id
+      AND authority_revision.revision=authority.active_revision`;
   const proof = root.workspace_id ? await env.DELIVERY_DB.withSession("first-primary").prepare(`
     SELECT workspace.id,workspace.root_type,workspace.status,workspace.legacy_account_id,
-      workspace.pa_organization_public_id,workspace.pa_client_public_id,
+      workspace.pa_organization_public_id,workspace.pa_client_public_id,workspace.project_alpha_source_id,
       checkpoint.active_generation_id,checkpoint.source_sequence,
       generation.source_generation,generation.status generation_status,generation.complete,
-      entity.public_id entity_public_id,entity.source_version,entity.active entity_active
+      entity.public_id entity_public_id,entity.source_version,entity.active entity_active${secondaryProofSelect}
     FROM portal_v2_workspaces workspace
+    ${secondaryProofJoins}
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
       AND generation.workspace_id=workspace.id AND generation.source_sequence=checkpoint.source_sequence
@@ -71,7 +83,9 @@ export async function createClientHubCollectionContext(env: Env, principal: Staf
       AND entity.generation_id=generation.id AND entity.entity_type=workspace.root_type
       AND entity.parent_public_id IS NULL
       AND entity.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id)
-    WHERE workspace.id=? ORDER BY entity.public_id LIMIT 2`).bind(root.workspace_id).all<Record<string, unknown>>() : null;
+    WHERE workspace.id=? AND workspace.project_alpha_source_id=?
+      ${root.source_id === "project-alpha:primary" ? "" : "AND workspace.legacy_account_id IS NULL"}
+    ORDER BY entity.public_id LIMIT 2`).bind(root.workspace_id, root.source_id).all<Record<string, unknown>>() : null;
   const canonicalRoot = { sourceId: root.source_id, rootNamespace: root.root_namespace, kind: root.kind, publicId: root.public_id };
   const businessProjectPolicy = await readClientHubBusinessProjectPolicy(env, principal);
   const contextVersion = await sha256(JSON.stringify([canonicalRoot, principal.id, access, visibility.read_revision, root.source_name,

@@ -219,14 +219,18 @@ describe("client portal browser API boundary", () => {
     const values = new Map<string, string>();
     vi.stubGlobal("window", {sessionStorage: {getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key)}});
     const workspace = {id: "workspace-b", sourceId: "project-alpha:secondary", resourceMode: "native", rootType: "organization", rootPublicId: "org-b", displayName: "Secondary"};
+    const features = {directory: {state: "available", reason: "authorized_capability"}, deliveries: {state: "available", reason: "resource_authorization_required"},
+      serviceRequests: {state: "not_supported", reason: "source_not_supported"}, feedback: {state: "not_supported", reason: "source_not_supported"},
+      models: {state: "not_supported", reason: "source_not_supported"}, team: {state: "not_supported", reason: "source_not_supported"},
+      billing: {state: "not_supported", reason: "source_not_supported"}};
     const request = vi.fn(async <T>(url: string): Promise<T> => {
       if (url === "/api/client/session") return {account: {id: "", displayName: "Client portal"}, capabilities: {workspaceHierarchyV2: true}} as T;
       if (url === "/api/client/v2/workspaces") return {workspaces: [workspace]} as T;
-      if (url === "/api/client/v2/workspaces/workspace-b/context") return {workspace, contextVersion: "version-b", capabilities: {directoryRead: true, deliveryView: true}} as T;
+      if (url === "/api/client/v2/workspaces/workspace-b/context") return {workspace, contextVersion: "version-b", capabilities: {directoryRead: true, deliveryView: true}, features} as T;
       throw new Error(`Unexpected legacy call: ${url}`);
     }) as PortalRequest;
     const result = await loadPortalBootstrap(request, "workspace-b");
-    expect(result).toMatchObject({resourceMode: "native", workspace, capabilities: {requestV2: false, feedback: false, viewer: false}});
+    expect(result).toMatchObject({resourceMode: "native", workspace, capabilities: {requestV2: false, feedback: false, viewer: false}, features});
     expect(result).not.toHaveProperty("account"); expect(result).not.toHaveProperty("projects");
     expect(request).toHaveBeenCalledTimes(3);
   });

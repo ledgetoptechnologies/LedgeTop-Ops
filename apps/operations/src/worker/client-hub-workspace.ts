@@ -3,6 +3,7 @@ import type { Env } from "./types";
 
 export interface ClientHubWorkspaceLookup {
   key: string;
+  source_id: string;
   kind: ClientHubKind;
   business_id: string | null;
   pa_public_id: string | null;
@@ -16,6 +17,7 @@ export interface ClientHubWorkspace {
   legacy_account_id: string | null;
   pa_organization_public_id: string | null;
   pa_client_public_id: string | null;
+  project_alpha_source_id: string;
 }
 export interface ClientHubWorkspaceResolution {
   workspace: ClientHubWorkspace | null;
@@ -40,7 +42,7 @@ const businessCandidate = `wanted.business_id IS NOT NULL AND EXISTS (
           AND workspace.pa_client_public_id IS NULL)
         OR (wanted.kind='standalone_client' AND workspace.pa_client_public_id=wanted.pa_public_id
           AND workspace.pa_organization_public_id IS NULL)))
-    OR (generation.source_generation='legacy-backfill' AND generation.source_sequence=0
+    OR (wanted.source_id='project-alpha:primary' AND generation.source_generation='legacy-backfill' AND generation.source_sequence=0
       AND entity.source_version='legacy-backfill' AND entity.public_id=wanted.business_id
       AND EXISTS (SELECT 1 FROM client_accounts account WHERE account.id=workspace.legacy_account_id
         AND account.status='active' AND account.project_alpha_source_id='project-alpha:primary' AND (
@@ -54,13 +56,25 @@ const potentialBusinessCandidate = `wanted.business_id IS NOT NULL AND (
   (wanted.pa_public_id IS NOT NULL AND (
     (wanted.kind='organization' AND workspace.pa_organization_public_id=wanted.pa_public_id)
     OR (wanted.kind='standalone_client' AND workspace.pa_client_public_id=wanted.pa_public_id)))
-  OR EXISTS (SELECT 1 FROM client_accounts account WHERE account.id=workspace.legacy_account_id
+  OR (wanted.source_id='project-alpha:primary' AND EXISTS (SELECT 1 FROM client_accounts account WHERE account.id=workspace.legacy_account_id
     AND account.status='active' AND account.project_alpha_source_id='project-alpha:primary' AND (
       (wanted.kind='organization' AND account.project_alpha_organization_id=wanted.business_id
         AND workspace.pa_organization_public_id=wanted.business_id AND workspace.pa_client_public_id IS NULL)
       OR (wanted.kind='standalone_client' AND account.project_alpha_client_id=wanted.business_id
         AND account.project_alpha_organization_id IS NULL AND workspace.pa_client_public_id=wanted.business_id
-        AND workspace.pa_organization_public_id IS NULL))))`;
+        AND workspace.pa_organization_public_id IS NULL)))))`;
+
+// Secondary visibility requires both the immutable producer reservation and a
+// currently active portal-purpose authority. This proves source availability,
+// not membership or permission. Primary retains its legacy compatibility path.
+const sourceAuthority = `(wanted.source_id='project-alpha:primary' OR (
+  workspace.legacy_account_id IS NULL
+  AND EXISTS (SELECT 1 FROM pa_portal_workspace_sources owner
+    WHERE owner.workspace_id=workspace.id AND owner.projection_source_id=wanted.source_id)
+  AND EXISTS (SELECT 1 FROM pa_portal_source_authorities authority
+    JOIN pa_portal_source_authority_revisions revision ON revision.source_id=authority.source_id
+      AND revision.revision=authority.active_revision
+    WHERE authority.source_id=wanted.source_id AND authority.state='active')))`;
 
 const selectedPortalGeneration = `EXISTS (SELECT 1 FROM portal_v2_directory_checkpoints checkpoint
   JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
@@ -84,24 +98,26 @@ export async function resolveClientHubWorkspaces(
     result.set(lookup.key, { workspace: null, status: "missing" });
   }
   const db = env.DELIVERY_DB.withSession("first-primary");
-  for (let start = 0; start < lookups.length; start += 20) {
-    const page = lookups.slice(start, start + 20);
-    const rows = await db.prepare(`WITH wanted(lookup_key,kind,business_id,pa_public_id,workspace_id) AS (
-      VALUES ${page.map(() => "(?,?,?,?,?)").join(",")}
+  // Six bindings per lookup must remain below D1's 100-variable ceiling.
+  for (let start = 0; start < lookups.length; start += 16) {
+    const page = lookups.slice(start, start + 16);
+    const rows = await db.prepare(`WITH wanted(lookup_key,source_id,kind,business_id,pa_public_id,workspace_id) AS (
+      VALUES ${page.map(() => "(?,?,?,?,?,?)").join(",")}
     ), candidates AS (
       SELECT wanted.lookup_key,workspace.id,workspace.root_type,workspace.display_name,workspace.status,
         workspace.legacy_account_id,workspace.pa_organization_public_id,workspace.pa_client_public_id,
+        workspace.project_alpha_source_id,
         CASE WHEN wanted.workspace_id IS NOT NULL THEN ${selectedPortalGeneration}
           ELSE (${businessCandidate}) END verified,
         ROW_NUMBER() OVER(PARTITION BY wanted.lookup_key ORDER BY workspace.id) candidate_number
       FROM wanted JOIN portal_v2_workspaces workspace ON workspace.root_type=wanted.kind AND workspace.status<>'closed'
-        AND workspace.project_alpha_source_id='project-alpha:primary'
-        AND (workspace.legacy_account_id IS NULL OR EXISTS (SELECT 1 FROM client_accounts account
+        AND workspace.project_alpha_source_id=wanted.source_id AND ${sourceAuthority}
+        AND (wanted.source_id<>'project-alpha:primary' OR workspace.legacy_account_id IS NULL OR EXISTS (SELECT 1 FROM client_accounts account
           WHERE account.id=workspace.legacy_account_id AND (account.project_alpha_source_id IS NULL OR account.project_alpha_source_id='project-alpha:primary')))
       WHERE (wanted.workspace_id IS NOT NULL AND workspace.id=wanted.workspace_id)
         OR (wanted.workspace_id IS NULL AND ${potentialBusinessCandidate})
     ) SELECT * FROM candidates WHERE candidate_number<=2 ORDER BY lookup_key,candidate_number`)
-      .bind(...page.flatMap(row => [row.key, row.kind, row.business_id, row.pa_public_id, row.workspace_id]))
+      .bind(...page.flatMap(row => [row.key, row.source_id, row.kind, row.business_id, row.pa_public_id, row.workspace_id]))
       .all<ClientHubWorkspace & { lookup_key: string; candidate_number: number; verified: number }>();
     for (const row of rows.results) {
       if (row.candidate_number > 1) result.set(row.lookup_key, { workspace: null, status: "conflict" });

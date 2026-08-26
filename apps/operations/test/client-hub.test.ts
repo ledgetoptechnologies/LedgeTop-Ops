@@ -21,7 +21,9 @@ const identityReads = vi.hoisted(() => ({
       page: { available: Boolean(workspaceId), reason: workspaceId ? null : "workspace_unavailable", nextCursor: null,
         hasMore: false, returned: workspaceId ? 1 : 0, limit: 5 },
       contextVersion: scope.context.contextVersion, refreshedAt: "2026-08-25T00:00:00Z",
-      capabilities: { canManagePortal: true, canManageEligibilityBlocks: true },
+      capabilities: { canManagePortal: scope.context.root.source_id === "project-alpha:primary",
+        canManageEligibilityBlocks: scope.context.root.source_id === "project-alpha:primary",
+        canReviewIdentityDetails: scope.context.root.source_id === "project-alpha:primary" },
     };
   }),
   listPortalIdentityCollection: vi.fn(async (_env: unknown, _actor: unknown, scope: { kind: "client"; context: import("../src/worker/client-hub-collections").ClientHubCollectionContext },
@@ -76,12 +78,43 @@ async function fixture() {
   await applySql(ops, `
     CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_projects(id TEXT PRIMARY KEY,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('pa-org','Organization One',1,'{"public_id":"${organizationUuid}"}');
     INSERT INTO pa_clients(id,name,organization_id,active) VALUES('pa-child-login','Login Contact','pa-org',1);
     INSERT INTO pa_clients(id,name,organization_id,active) VALUES('pa-child-no-login','No Login Contact','pa-org',1);
     INSERT INTO pa_clients(id,name,organization_id,active,payload_json) VALUES('pa-standalone','Standalone One',NULL,1,'{"public_id":"${standaloneUuid}"}');
   `);
   await applySql(ops, readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8").replace(/^\s*--.*$/gm, ""));
+  // The production directory cursor binds the business-activity revision from
+  // migration 0037. This focused fixture builds only the tables it exercises,
+  // so keep that required revision source present as well.
+  await applySql(ops, `
+    CREATE TABLE client_business_activity_state(
+      singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+      revision INTEGER NOT NULL DEFAULT 0 CHECK(revision>=0)
+    );
+    INSERT INTO client_business_activity_state(singleton) VALUES(1);
+    CREATE TABLE client_business_activity(
+      sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+      projection_source_id TEXT NOT NULL,
+      event_key TEXT NOT NULL,
+      origin TEXT NOT NULL,
+      record_kind TEXT NOT NULL,
+      record_id TEXT NOT NULL,
+      root_kind TEXT NOT NULL,
+      root_id TEXT NOT NULL,
+      root_record_kind TEXT NOT NULL,
+      action TEXT NOT NULL,
+      occurred_at TEXT NOT NULL,
+      source_updated_at TEXT NOT NULL,
+      observed_at TEXT NOT NULL
+    );
+    CREATE VIEW client_business_activity_records AS
+      SELECT CAST(NULL AS TEXT) projection_source_id,CAST(NULL AS TEXT) record_kind,
+        CAST(NULL AS TEXT) record_id,CAST(NULL AS TEXT) record_name,
+        CAST(NULL AS TEXT) root_kind,CAST(NULL AS TEXT) root_id,0 readable
+      WHERE 0;
+  `);
   await applyBusinessPartySchema(ops);
   await applySql(ops, `
     INSERT INTO client_hub_roots(source_id,kind,public_id,display_name,sort_name,status,portal_status,workspace_id,legacy_account_id,account_count,project_count,request_count,contact_count)
@@ -103,6 +136,10 @@ async function fixture() {
     CREATE TABLE portal_v2_directory_checkpoints(workspace_id TEXT PRIMARY KEY,active_generation_id TEXT,source_sequence INTEGER);
     CREATE TABLE portal_v2_directory_entities(workspace_id TEXT,generation_id TEXT,entity_type TEXT,public_id TEXT,
       parent_public_id TEXT,active INTEGER,source_version TEXT);
+    CREATE TABLE pa_portal_workspace_sources(workspace_id TEXT PRIMARY KEY,projection_source_id TEXT,source_workspace_id TEXT);
+    CREATE TABLE pa_portal_source_authorities(source_id TEXT PRIMARY KEY,state TEXT,active_revision INTEGER,version INTEGER,
+      connector_revision INTEGER,connector_version INTEGER);
+    CREATE TABLE pa_portal_source_authority_revisions(source_id TEXT,revision INTEGER);
     CREATE TABLE client_project_grants(account_id TEXT,project_id TEXT,can_request_service INTEGER,granted_at TEXT,revoked_at TEXT);
     CREATE TABLE projects(id TEXT PRIMARY KEY,project_name TEXT,client_name TEXT,r2_prefix TEXT,active INTEGER,
       project_alpha_project_id TEXT,project_alpha_source_id TEXT);
@@ -214,7 +251,7 @@ describe("Client Hub bounded detail collections", () => {
   }, 30_000);
 
   it("hydrates an unindexed secondary business root without borrowing a matching primary portal identity or grant", async () => {
-    const { app, env, ops } = await fixture();
+    const { app, env, ops, delivery } = await fixture();
     await ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,projection_source_id) VALUES('secondary-org','Secondary Organization',1,?,'project-alpha:secondary')")
       .bind(JSON.stringify({ public_id: organizationUuid })).run();
     for (let index = 0; index < 7; index++) await ops.prepare(`INSERT INTO pa_clients(id,name,organization_id,active,payload_json,projection_source_id)
@@ -240,6 +277,32 @@ describe("Client Hub bounded detail collections", () => {
     expect((await app.request(`${organizationPath}/collections/businessContacts?cursor=${encodeURIComponent(contactsPage.nextCursor!)}`, {}, env)).status).toBe(400);
     expect((await app.request(path.replace("project-alpha%3Asecondary", "project-alpha%3Aprimary"), {}, env)).status).toBe(404);
     expect((await app.request(path + "/identities/pa-child-login/access", {}, env)).status).toBe(404);
+    await delivery.batch([
+      delivery.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,pa_client_public_id,
+        display_name,status,legacy_account_id,project_alpha_source_id)
+        VALUES('workspace-secondary','organization',?,NULL,'Secondary portal','active',NULL,'project-alpha:secondary')`).bind(organizationUuid),
+      delivery.prepare("INSERT INTO portal_v2_directory_generations VALUES('generation-secondary','workspace-secondary','native-secondary',2,'active',1)"),
+      delivery.prepare("INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-secondary','generation-secondary',2)"),
+      delivery.prepare("INSERT INTO portal_v2_directory_entities VALUES('workspace-secondary','generation-secondary','organization',?,NULL,1,'secondary-version')").bind(organizationUuid),
+      delivery.prepare("INSERT INTO pa_portal_workspace_sources VALUES('workspace-secondary','project-alpha:secondary','source-workspace-secondary')"),
+      delivery.prepare("INSERT INTO pa_portal_source_authorities VALUES('project-alpha:secondary','active',1,1,1,1)"),
+      delivery.prepare("INSERT INTO pa_portal_source_authority_revisions VALUES('project-alpha:secondary',1)"),
+    ]);
+    const mapped = await app.request(path, {}, env);
+    expect(mapped.status).toBe(200);
+    await expect(mapped.json()).resolves.toMatchObject({
+      client: { source_id: "project-alpha:secondary", workspace_id: "workspace-secondary", legacy_account_id: null,
+        portal_status: "active" },
+      portalIdentities: { page: { available: true }, items: [{ workspace_id: "workspace-secondary" }] },
+      accounts: [], projects: [], requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [],
+      pages: { accounts: { reason: "not_applicable" }, authenticatedDeliveryGrants: { reason: "not_applicable" } },
+    });
+    expect((await app.request(path + "/identities/pa-child-login/access", {}, env)).status).toBe(404);
+    await delivery.prepare("UPDATE pa_portal_source_authorities SET state='suspended' WHERE source_id='project-alpha:secondary'").run();
+    const suspended = await app.request(path, {}, env);
+    expect(suspended.status).toBe(200);
+    await expect(suspended.json()).resolves.toMatchObject({ client: { workspace_id: null, portal_status: "not_supported" },
+      portalIdentities: { page: { available: false } } });
     await ops.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id='project-alpha:secondary'").run();
     expect((await app.request(path, {}, env)).status).toBe(404);
     expect((await app.request(path + "/collections/businessContacts", {}, env)).status).toBe(404);
@@ -317,7 +380,7 @@ describe("Client Hub bounded detail collections", () => {
       await delivery.prepare("UPDATE client_accounts SET project_alpha_organization_id='reassigned' WHERE id='account-org'").run();
       return { items: [], page: { available: false, reason: "workspace_unavailable", nextCursor: null, hasMore: false, returned: 0, limit: 5 },
         contextVersion: args[2].context.contextVersion, refreshedAt: "2026-08-25T00:00:00Z",
-        capabilities: { canManagePortal: true, canManageEligibilityBlocks: true } };
+        capabilities: { canManagePortal: true, canManageEligibilityBlocks: true, canReviewIdentityDetails: true } };
     });
     expect((await app.request(organizationPath + "/identities", {}, env)).status).toBe(409);
   }, 30_000);

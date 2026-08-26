@@ -30,7 +30,7 @@ interface PortalPage<T> {
   principalContextVersion?: string;
 }
 export interface PortalIdentityPage extends PortalPage<PortalIdentitySummary> {
-  capabilities: { canManagePortal: boolean; canManageEligibilityBlocks: boolean };
+  capabilities: { canManagePortal: boolean; canManageEligibilityBlocks: boolean; canReviewIdentityDetails?: boolean };
 }
 interface AccessRule extends PortalRecord {
   id: string; capability: string; effect: "allow" | "deny"; scope_type: string; scope_public_id: string;
@@ -177,11 +177,11 @@ function IdentityRow({ identity, basePath, contextVersion, contextSignal, capabi
       {identity.status !== "active" && <small>Login record status: {identity.status}</small>}</div><StatusPill tone={status.tone}>{status.text}</StatusPill></header>
     {identity.effectiveSubjectBlock && <p>A global identity rule blocks sign-in. Email changes alone will not remove that rule.</p>}
     {identity.invitation && <p className="portal-access-summary">Latest invitation: {identity.invitation.status} · Email delivery: {identity.invitation.email_status || "not reported"}</p>}
-    <div className="portal-access-tools">
+    {capabilities.canReviewIdentityDetails !== false && <div className="portal-access-tools">
       <button type="button" className="button-ghost" aria-expanded={opened.access} aria-controls={`${id}-access`} onClick={() => setOpened(value => ({ ...value, access: !value.access }))}>{opened.access ? "Hide access" : "Show access"}</button>
       {identity.email_hint && <button type="button" className="button-ghost" aria-expanded={opened.invitations} aria-controls={`${id}-invitations`} onClick={() => setOpened(value => ({ ...value, invitations: !value.invitations }))}>Invitations to this email</button>}
       {identity.actions.canReviewEligibilityBlocks && <button type="button" className="button-ghost" aria-expanded={opened.blocks} aria-controls={`${id}-blocks`} onClick={() => setOpened(value => ({ ...value, blocks: !value.blocks }))}>Sign-in blocks</button>}
-    </div>
+    </div>}
     {opened.access && <div id={`${id}-access`}><p>These are explicit access rules, not a guarantee of effective access. Membership, restrictions, and current permissions still apply.</p>
       <IdentityRecords<AccessRule> {...props} path={path("access")} label="Access rules">{items => <ul>{items.map(rule => <li key={recordKey(rule)}>
         <strong>{rule.scope_label || rule.scope_public_id}</strong><span>{rule.effect === "deny" ? "Deny rule" : "Allow rule"} · {rule.capability.replaceAll("_", " ")}</span>

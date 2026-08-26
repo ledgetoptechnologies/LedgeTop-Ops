@@ -52,7 +52,8 @@ test("matching business IDs from two producers retain source labels, contacts an
   page.on("console", message => { if (message.type() === "error" && /same key/i.test(message.text())) errors.push(message.text()); });
   const roots = [client("42", "Primary business"), client("42", "Secondary business", "organization", "project-alpha:secondary")]
     .map(row => ({ ...row, pa_public_id: "a".repeat(32), account_count: 0, project_count: 0, request_count: 0,
-      contact_count: 1, portal_status: row.source_id === "project-alpha:primary" ? "not_provisioned" : "not_supported" }));
+      contact_count: 1, portal_status: row.source_id === "project-alpha:primary" ? "not_provisioned" : "active",
+      workspace_id: row.source_id === "project-alpha:secondary" ? "workspace-secondary" : null }));
   await mock(page, route => route.fulfill({ json: { clients: roots, nextCursor: null, capabilities } }));
   await page.route("**/api/client-hub/sources/**", route => {
     const url = new URL(route.request().url()); reads.push(url);
@@ -71,11 +72,21 @@ test("matching business IDs from two producers retain source labels, contacts an
       project, linkedContact: contact,
       availability: { linkedContact: "available", siteContacts: "not_projected", billingContacts: "not_projected", projectMemory: "not_projected" },
     } });
+    const secondaryPortal = source === "project-alpha:secondary";
     return route.fulfill({ json: { client: root, contacts: [contact], businessProjects: [project],
       accounts: [], projects: [], requests: [], deliveryGrants: [], authenticatedDeliveryGrants: [], viewerGrants: [],
       pages: { businessProjects: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 } },
-      portalIdentities: { items: [], page: { available: false, reason: "workspace_unavailable", nextCursor: null, hasMore: false, returned: 0, limit: 5 },
-        contextVersion: source, refreshedAt: "2026-08-25T12:00:00Z", capabilities: { canManagePortal: false, canManageEligibilityBlocks: false } },
+      portalIdentities: { items: secondaryPortal ? [{ workspace_id: "workspace-secondary", public_id: "secondary-login",
+        display_name: "Secondary portal login", email_hint: "secondary-login@example.test", status: "active",
+        identity_id: "global-login", has_workspace_access: 1, blocked: 0, binding_status: "linked",
+        principalContextVersion: "secondary-principal", hasExplicitAccess: true, accessLoaded: false, invitation: null,
+        effectiveEmailBlockCount: 0, effectiveSubjectBlock: false, removableEmailBlockId: null,
+        row_key: "workspace-secondary:secondary-login", contact_key: "principal:workspace-secondary:secondary-login",
+        actions: { canRetryInvitation: false, canCreateEmailBlock: false, canReviewEligibilityBlocks: false } }] : [],
+        page: { available: secondaryPortal, reason: secondaryPortal ? null : "workspace_unavailable", nextCursor: null,
+          hasMore: false, returned: secondaryPortal ? 1 : 0, limit: 5 },
+        contextVersion: source, refreshedAt: "2026-08-25T12:00:00Z", capabilities: { canManagePortal: false,
+          canManageEligibilityBlocks: false, canReviewIdentityDetails: !secondaryPortal } },
       contextVersion: source, capabilities,
     } });
   });
@@ -83,15 +94,18 @@ test("matching business IDs from two producers retain source labels, contacts an
   await expect(page.locator(".client-directory-card")).toHaveCount(2);
   await expect(page.getByRole("link", { name: "Open Primary business client workspace" })).toContainText("Project Alpha");
   await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("project-alpha:secondary");
-  await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("Portal unavailable for this source");
+  await expect(page.getByRole("link", { name: "Open Secondary business client workspace" })).toContainText("active");
   await page.getByRole("link", { name: "Open Primary business client workspace" }).click();
   await expect(page.getByText("Primary contact", { exact: true })).toBeVisible();
   await expect(page.getByRole("link", { name: "Primary project", exact: true })).toHaveAttribute("href", roots[0]!.detail_path + "/projects/9");
   await page.goBack();
   await page.getByRole("link", { name: "Open Secondary business client workspace" }).click();
   await expect(page.getByText("Secondary contact", { exact: true })).toBeVisible();
+  await expect(page.getByText("Secondary portal login", { exact: true })).toBeVisible();
+  await expect(page.getByText("secondary-login@example.test", { exact: true })).toBeVisible();
   await expect(page.getByText("Primary contact", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /Block portal sign-in|Invite|Grant access/ })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /Show access|Invitations to this email|Sign-in blocks/ })).toHaveCount(0);
   await page.reload();
   await expect(page.getByText("Secondary contact", { exact: true })).toBeVisible();
   const link = page.getByRole("link", { name: "Secondary project", exact: true });

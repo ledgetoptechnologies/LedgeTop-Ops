@@ -9,6 +9,7 @@ import { nativePortalScopesAllowed, resolveNativePortalWorkspaceReadContext, nat
 import { readNativeAuthenticatedDeliveryGrants, readNativeAuthenticatedDeliveryPage, nativeDeliveryResourcesReady } from './authenticated-delivery-grants';
 import { encodeNativePortalHandle, decodeNativePortalHandle, type NativePortalHandle } from './native-portal-handles';
 import { readNativeTargetScopes } from './native-portal-scopes';
+import { nativeDirectoryAuthorizationAvailable, nativeWorkspaceFeatureReadiness } from './native-workspace-readiness';
 
 type Bindings = {Bindings:Env;Variables:{clientPrincipal:VerifiedClientPrincipal}};
 type Ctx = Context<Bindings>;
@@ -87,13 +88,14 @@ export function createNativePortalWorkspaceRouter():Hono<Bindings> {
   router.use('*',async(c,next)=>{c.header('Cache-Control','private, no-store');await next();});
   router.get('/:workspaceId/context',async c=>{
     const context=await contextFor(c);
-    const directoryRead=context.grants.some(g=>g.capability==='directory.read'&&g.effect==='allow');
+    const directoryRead=await nativeDirectoryAuthorizationAvailable(c.env,context);
     // Capability means this read surface is ready, not a promise of files.
     // Listing every grant just to render the shell was unbounded N+1 work.
     const deliveryView=await nativeDeliveryResourcesReady(c.env);
+    const features=nativeWorkspaceFeatureReadiness({directoryAuthorized:directoryRead,deliveryBackendReady:deliveryView});
     await recheck(c,context);
     return c.json({workspace:{id:context.workspaceId,sourceId:context.sourceId,displayName:clean(context.displayName),rootType:context.rootType,
-      rootPublicId:context.rootPublicId,resourceMode:'native' as const},contextVersion:context.contextVersion,capabilities:{directoryRead,deliveryView,
+      rootPublicId:context.rootPublicId,resourceMode:'native' as const},contextVersion:context.contextVersion,features,capabilities:{directoryRead,deliveryView,
       requestV2:false,requestAttachments:false,feedback:false,manageTeam:false,workspaceMembershipManagement:false,delegatedShares:false,
       viewer:false,viewerShares:false,viewBilling:false}});
   });

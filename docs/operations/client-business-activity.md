@@ -195,7 +195,9 @@ A safe independent UI increment can report current workspace feature readiness
 using existing grants, denies and deployment support, without calling it a
 purchased-service assignment. Preserve authorized history when creation is
 unavailable, and preserve project-only access when root-level permission is
-absent. Every action must still authorize its current exact target.
+absent. Every action must still authorize its current exact target. The bounded
+wire contract, state meanings and verification are recorded in
+[connected workspace feature readiness](workspace-feature-readiness.md).
 
 Secondary catalog/portal activation requires its own authenticated connector
 capability and current source proof; the business-data registry profile alone

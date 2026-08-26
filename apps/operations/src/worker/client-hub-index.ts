@@ -62,8 +62,8 @@ function contactFields(payload: string): { email?: string; phone?: string } {
 async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
   if (!roots.length) return [];
   const key = (root: Pick<Root, "source_id" | "root_namespace" | "kind" | "public_id">) => JSON.stringify([root.source_id, root.root_namespace, root.kind, root.public_id]);
-  const linked = await resolveClientHubWorkspaces(env, roots.filter(root => root.source_id === PA && root.root_namespace !== "account").map(root => ({
-    key: key(root), kind: root.kind, business_id: root.root_namespace === "business" ? root.public_id : null,
+  const linked = await resolveClientHubWorkspaces(env, roots.filter(root => root.root_namespace !== "account").map(root => ({
+    key: key(root), source_id: root.source_id, kind: root.kind, business_id: root.root_namespace === "business" ? root.public_id : null,
     pa_public_id: root.pa_public_id, workspace_id: root.root_namespace === "portal" ? root.public_id : null,
   })));
   const values = roots.flatMap(root => [root.source_id, root.root_namespace, root.kind, root.public_id, linked.get(key(root))?.workspace?.id ?? null]);
@@ -87,9 +87,11 @@ async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
   return counts.map(fact => {
     const link = linked.get(key(fact));
     const root = roots.find(root => key(root) === key(fact))!;
-    return { ...fact, legacy_account_id: root.root_namespace === "account" ? root.public_id : link?.workspace?.legacy_account_id ?? null,
-      portal_status: root.source_id !== PA && root.root_namespace === "business" ? "not_supported" : link?.workspace?.status ?? (link?.status === "conflict" ? "mapping_conflict" : link?.status === "pending" ? "projection_pending"
-        : root.root_namespace === "business" && root.mapping_status !== "mapped" ? "mapping_unavailable" : "not_provisioned") };
+    return { ...fact, legacy_account_id: root.root_namespace === "account" ? root.public_id
+      : root.source_id === PA ? link?.workspace?.legacy_account_id ?? null : null,
+      portal_status: link?.workspace?.status ?? (link?.status === "conflict" ? "mapping_conflict" : link?.status === "pending" ? "projection_pending"
+        : root.root_namespace === "business" && root.mapping_status !== "mapped" ? "mapping_unavailable"
+          : root.source_id === PA ? "not_provisioned" : "not_supported") };
   });
 }
 
@@ -213,27 +215,26 @@ async function searchPage(env: IndexEnv, phase: Phase, cursor: string, generatio
   } else if (phase === "principals") {
     const key = cursor ? JSON.parse(cursor) as [string, string] : ["", ""];
     const rows = (await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT principal.workspace_id,principal.public_id,
-      principal.display_name,principal.email_hint,workspace.root_type kind
+      principal.display_name,principal.email_hint,workspace.root_type kind,workspace.project_alpha_source_id source_id
       FROM pa_portal_principals principal JOIN portal_v2_workspaces workspace ON workspace.id=principal.workspace_id
-        AND workspace.project_alpha_source_id='project-alpha:primary'
       WHERE principal.status='active' AND workspace.status<>'closed' AND (principal.workspace_id,principal.public_id)>(?,?)
       ORDER BY principal.workspace_id COLLATE BINARY,principal.public_id COLLATE BINARY LIMIT ?`)
-      .bind(key[0], key[1], PAGE_SIZE).all<{ workspace_id: string; public_id: string; display_name: string; email_hint: string; kind: Kind }>()).results;
+      .bind(key[0], key[1], PAGE_SIZE).all<{ workspace_id: string; public_id: string; display_name: string; email_hint: string; kind: Kind; source_id: string }>()).results;
     count = rows.length;
     if (rows.length) next = JSON.stringify([rows.at(-1)!.workspace_id, rows.at(-1)!.public_id]);
     const roots = rows.length ? (await env.OPS_DB.withSession("first-primary").prepare(`
-      SELECT root_namespace,kind,public_id,workspace_id FROM client_hub_roots
-      WHERE source_id=? AND status='active' AND scan_generation=?
-        AND workspace_id IN (${rows.map(() => "?").join(",")})`)
-      .bind(PA, generation, ...rows.map(row => row.workspace_id))
-      .all<{ root_namespace: Namespace; kind: Kind; public_id: string; workspace_id: string }>()).results : [];
+      SELECT source_id,root_namespace,kind,public_id,workspace_id FROM client_hub_roots
+      WHERE status='active' AND scan_generation=?
+        AND (${rows.map(() => "(source_id=? AND workspace_id=?)").join(" OR ")})`)
+      .bind(generation, ...rows.flatMap(row => [row.source_id, row.workspace_id]))
+      .all<{ source_id: string; root_namespace: Namespace; kind: Kind; public_id: string; workspace_id: string }>()).results : [];
     for (const row of rows) {
-      const matches = roots.filter(root => root.workspace_id === row.workspace_id && root.kind === row.kind);
+      const matches = roots.filter(root => root.source_id === row.source_id && root.workspace_id === row.workspace_id && root.kind === row.kind);
       // No principals from pending/ambiguous projection mappings enter search.
       if (matches.length !== 1) continue;
       const root = matches[0];
       if (!root) continue;
-      const base = { namespace: root.root_namespace, kind: root.kind, root: root.public_id,
+      const base = { source: root.source_id, namespace: root.root_namespace, kind: root.kind, root: root.public_id,
         type: "portal_principal", id: JSON.stringify([row.workspace_id, row.public_id]) };
       values.push({ ...base, field: "contact", value: row.display_name });
       if (row.email_hint) values.push({ ...base, field: "email", value: row.email_hint });

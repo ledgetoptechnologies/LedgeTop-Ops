@@ -56,15 +56,16 @@ async function fixture() {
         ('workspace-two','principal-one','person@example.test','Person Two','v1','active');`);
   return { db, env };
 }
-function clientScope(workspaceId: string | null, version = "root-version-one"): PortalIdentityScope {
+function clientScope(workspaceId: string | null, version = "root-version-one",
+  sourceId: "project-alpha:primary" | "project-alpha:secondary" = "project-alpha:primary"): PortalIdentityScope {
   return { kind: "client", context: { root: {
-    source_id: "project-alpha:primary", root_namespace: "business", kind: "organization", public_id: "101",
+    source_id: sourceId, root_namespace: "business", kind: "organization", public_id: "101",
     pa_public_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", mapping_status: "mapped", display_name: "One", sort_name: "one",
     status: "active", portal_status: "active", workspace_id: workspaceId, legacy_account_id: null,
     account_count: 0, project_count: 0, request_count: 0, contact_count: 0, meaningful_activity_at: null,
     source_version: null, indexed_at: "", scan_generation: 0,
   }, contextVersion: version, access: { directory: true, delivery: true, viewer: true, requests: true },
-  canonicalRoot: { sourceId: "project-alpha:primary", rootNamespace: "business", kind: "organization", publicId: "101" } } };
+  canonicalRoot: { sourceId, rootNamespace: "business", kind: "organization", publicId: "101" } } };
 }
 async function link(db: D1Database, id = "identity-one", workspace = "workspace-one", explicit = true, version = "v1") {
   await db.prepare("INSERT OR IGNORE INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES(?,'issuer',?,'PERSON@example.test')").bind(id, id).run();
@@ -92,13 +93,34 @@ describe("bounded portal identity reads", () => {
     const disabled = await listPortalIdentityPage({ ...env, CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "false",
       CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED: "false" }, actor, clientScope("workspace-one"));
     expect(disabled.items).toHaveLength(1);
-    expect(disabled.capabilities).toEqual({ canManagePortal: false, canManageEligibilityBlocks: false });
+    expect(disabled.capabilities).toEqual({ canManagePortal: false, canManageEligibilityBlocks: false,
+      canReviewIdentityDetails: true });
     expect(disabled.items[0]!.actions.canCreateEmailBlock).toBe(false);
     acl.isAdministrator.mockResolvedValue(false);
     expect((await listPortalIdentityPage(env, actor, clientScope("workspace-one"))).capabilities)
-      .toEqual({ canManagePortal: false, canManageEligibilityBlocks: false });
+      .toEqual({ canManagePortal: false, canManageEligibilityBlocks: false, canReviewIdentityDetails: true });
     acl.sqlScope.mockResolvedValue({ global: false, deniedGlobal: false });
     await expect(listPortalIdentityPage(env, actor, globalScope)).rejects.toMatchObject({ status: 403 });
+  }, 30_000);
+
+  it("shows a shared global login independently in a secondary workspace without enabling primary-only actions", async () => {
+    const { db, env } = await fixture();
+    await link(db, "identity-one", "workspace-one");
+    await link(db, "identity-one", "workspace-two");
+    await db.prepare(`INSERT INTO portal_v2_invitations(id,workspace_id,token_hash,invited_email,invited_by_identity_id,expires_at)
+      VALUES('secondary-invitation','workspace-two',?,'person@example.test','identity-one','2099-01-01')`).bind("a".repeat(43)).run();
+    const primary = await listPortalIdentityPage(env, actor, clientScope("workspace-one"));
+    const secondary = await listPortalIdentityPage(env, actor,
+      clientScope("workspace-two", "secondary-root", "project-alpha:secondary"));
+    expect(primary.items[0]).toMatchObject({ identity_id: "identity-one", binding_status: "linked", has_workspace_access: 1 });
+    expect(secondary.items[0]).toMatchObject({ workspace_id: "workspace-two", identity_id: "identity-one",
+      binding_status: "linked", has_workspace_access: 1,
+      invitation: null,
+      actions: { canRetryInvitation: false, canCreateEmailBlock: false, canReviewEligibilityBlocks: false } });
+    expect(secondary.capabilities).toEqual({ canManagePortal: false, canManageEligibilityBlocks: false,
+      canReviewIdentityDetails: false });
+    expect(await db.prepare("SELECT count(*) n FROM portal_v2_identities").first("n")).toBe(1);
+    expect(await db.prepare("SELECT count(*) n FROM portal_v2_workspace_memberships").first("n")).toBe(2);
   }, 30_000);
 
   it("rejects inactive workspace, identity and membership state without creating new authority", async () => {

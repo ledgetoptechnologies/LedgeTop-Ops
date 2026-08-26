@@ -4,7 +4,7 @@ import type { RequestError } from "./bulk-download";
 import type { PortalFile, PortalFilePage } from "./portal-api";
 import type { ClientPortalPage } from "./portal-route";
 import { clientProjectPath } from "./portal-route";
-import { loadNativeDeliveries, loadNativeFile, loadNativeFolder, loadNativeHierarchy, type NativeDeliveryTarget, type NativeHierarchy, type NativePortalBootstrap } from "./native-portal-api";
+import { loadNativeDeliveries, loadNativeFile, loadNativeFolder, loadNativeHierarchy, type NativeDeliveryTarget, type NativeHierarchy, type NativePortalBootstrap, type NativeWorkspaceFeatureKey, type NativeWorkspaceFeatureReadiness, type NativeWorkspaceFeatureState } from "./native-portal-api";
 import "./NativeWorkspaceContent.css";
 
 export interface NativeFileBrowserOptions {
@@ -14,10 +14,40 @@ export interface NativeFileBrowserOptions {
   onFolderChange: (folderId: string | null) => void;
   onLinkedFileChange: () => void;
 }
-const unsupported = "Service requests, billing, member management, feedback, and 3D models are not available for this connected workspace.";
 const contextError = (caught: unknown) => [401, 403, 404, 409, 410].includes((caught as RequestError).status ?? 0);
 function workspacePath(path: string, workspaceId: string): string {
   const url = new URL(path, location.origin); url.searchParams.set("workspace", workspaceId); return `${url.pathname}${url.search}`;
+}
+const featureOrder: NativeWorkspaceFeatureKey[] = ["directory", "deliveries", "serviceRequests", "feedback", "models", "team", "billing"];
+const featureLabels: Record<NativeWorkspaceFeatureKey, string> = {
+  directory: "Projects and directory", deliveries: "Delivery files", serviceRequests: "Service requests", feedback: "Feedback",
+  models: "3D models", team: "Workspace members", billing: "Billing",
+};
+const stateLabels: Record<NativeWorkspaceFeatureState, string> = {
+  available: "Ready", not_in_access: "Not in access", not_supported: "Not connected", temporarily_unavailable: "Temporarily unavailable",
+};
+function featureDetail(key: NativeWorkspaceFeatureKey, readiness: NativeWorkspaceFeatureReadiness): string {
+  const status = readiness[key];
+  if (key === "directory") return status.state === "available"
+    ? "Authorized directory and project records can be browsed. Every record is checked against current access before it is shown."
+    : "Directory viewing is not included in this workspace's current access.";
+  if (key === "deliveries") return status.state === "available"
+    ? "Shared delivery folders are ready. Each folder and file is authorized again when it is opened."
+    : "The delivery backend is not ready for this workspace. Existing shares and files have not been removed.";
+  if (key === "serviceRequests") return "New service requests are not connected for this Project Alpha source. Existing authorized request history remains unchanged.";
+  if (key === "feedback") return "Feedback authoring is not connected for this Project Alpha source. Existing authorized feedback history remains unchanged.";
+  if (key === "models") return "3D model viewing is not connected for this Project Alpha source.";
+  if (key === "team") return "Workspace member management is not connected for this Project Alpha source.";
+  return "Billing is managed by the source system and is not connected in this workspace.";
+}
+function FeatureReadiness({features}: {features: NativeWorkspaceFeatureReadiness}) {
+  return <Card title="Workspace features">
+    <p>These statuses show what this connected workspace can operate right now. They are not services purchased or assigned to your organization.</p>
+    <ul className="native-feature-list">{featureOrder.map(key => <li key={key}>
+      <div><strong>{featureLabels[key]}</strong><small>{featureDetail(key, features)}</small></div>
+      <span className={`native-feature-status native-feature-status-${features[key].state}`}>{stateLabels[features[key].state]}</span>
+    </li>)}</ul>
+  </Card>;
 }
 
 export function NativeWorkspaceContent({ context, page, projectId, onInvalid, renderFiles, openProject }: {
@@ -92,10 +122,12 @@ export function NativeWorkspaceContent({ context, page, projectId, onInvalid, re
   const parentLabel = (entry: NativeHierarchy["entries"][number]) => entry.parentType && entry.parentPublicId ? entryLabels.get(`${entry.parentType}:${entry.parentPublicId}`) : undefined;
   const unsupportedRoute = page === "requests" || page === "request-new" || page === "feedback" ||
     (page === "project" && ["requests", "models"].includes(params.get("tab") ?? ""));
+  const unavailableFeature: NativeWorkspaceFeatureKey = page === "feedback" ? "feedback"
+    : page === "project" && params.get("tab") === "models" ? "models" : "serviceRequests";
 
   return <section className="native-workspace" aria-label="Connected client workspace">
     <header className="portal-welcome"><span className="eyebrow">Connected workspace</span><h1>{context.workspace.displayName}</h1><p className="native-workspace-source">Source: {context.workspace.sourceId}</p></header>
-    {unsupportedRoute ? <Card title="Feature unavailable"><p>{unsupported}</p></Card> : page === "account" ? <Card title="Workspace access"><p>You are viewing the directory and deliveries shared with your signed-in identity in this workspace.</p><p>{unsupported}</p></Card> : page === "not-found" ? <Card title="Page unavailable"><p>This page is not available in this workspace.</p><p>{unsupported}</p></Card> : relevantHierarchy ? <>
+    {unsupportedRoute ? <><Card title="Feature unavailable"><p>{featureDetail(unavailableFeature, context.features)}</p></Card><FeatureReadiness features={context.features} /></> : page === "account" ? <><Card title="Workspace access"><p>You are viewing resources shared with your signed-in identity in this workspace. Access is evaluated from the current Project Alpha source and workspace authorization.</p></Card><FeatureReadiness features={context.features} /></> : page === "not-found" ? <Card title="Page unavailable"><p>This page is not available in this workspace.</p></Card> : relevantHierarchy ? <>
       <Card title={page === "dashboard" ? "Workspace directory" : page === "project" ? "Project" : "Projects"}>
         {!context.capabilities.directoryRead ? <p>The directory is not included in your current workspace access.</p> : <>
           {hierarchyError && <div role="alert"><p>{hierarchyError}</p><button className="button-ghost" onClick={() => hierarchyCursor ? void fetchHierarchy(hierarchyCursor) : setHierarchyRetry(value => value + 1)}>Retry directory</button></div>}
@@ -106,7 +138,7 @@ export function NativeWorkspaceContent({ context, page, projectId, onInvalid, re
         </>}
         {context.capabilities.deliveryView && <a className="button button-orange" href={workspacePath("/portal/deliveries", context.workspace.id)}>Browse workspace deliveries</a>}
       </Card>
-      <details className="native-workspace-availability"><summary>Available features</summary><p>{unsupported}</p><p>Directory records and delivery folders retain their original source. Access is checked separately for each item.</p></details>
+      {page === "dashboard" && <FeatureReadiness features={context.features} />}
     </> : page === "deliveries" ? !context.capabilities.deliveryView ? <Card title="Deliveries unavailable"><p>Delivery viewing is not included in your current workspace access.</p></Card> : <>
       {(folderId || linkedFile) && <Card title="Delivery files"><button className="button-ghost" onClick={() => navigateFolder(null)}>All delivery folders</button>{renderFiles({ folderId, load: filesLoad, loadExactFile: exactLoad, onFolderChange: navigateFolder, onLinkedFileChange: syncLinkedFile })}</Card>}
       {!folderId && !linkedFile && <Card title="Shared delivery folders">

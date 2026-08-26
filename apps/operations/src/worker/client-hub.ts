@@ -63,7 +63,7 @@ function routeKind(value: string): ClientKind | null {
 
 async function readPortalRoot(env: Env, kind: ClientKind, workspaceId: string): Promise<ClientHubWorkspace | null> {
   return database(env).prepare(`SELECT id,root_type,display_name,status,legacy_account_id,
-    pa_organization_public_id,pa_client_public_id FROM portal_v2_workspaces
+    pa_organization_public_id,pa_client_public_id,project_alpha_source_id FROM portal_v2_workspaces
     WHERE id=? AND root_type=? AND project_alpha_source_id='project-alpha:primary' AND status<>'closed'`).bind(workspaceId, kind).first<ClientHubWorkspace>();
 }
 
@@ -100,7 +100,7 @@ async function businessAlias(env: Env, root: WorkspaceRow, portal: ClientHubWork
   for (const internalId of candidates) {
     const source = await resolveClientHubSourceRoot(env, root.kind, internalId);
     if (!source?.active || (root.kind === "standalone_client" && source.organization_id !== null)) continue;
-    const resolved = await resolveClientHubWorkspace(env, { key: internalId, kind: root.kind,
+    const resolved = await resolveClientHubWorkspace(env, { key: internalId, source_id: "project-alpha:primary", kind: root.kind,
       business_id: internalId, pa_public_id: source.pa_public_id, workspace_id: null });
     if (resolved.status === "conflict") throw new HTTPException(409, { message: "This portal's business link needs review" });
     if (resolved.workspace?.id === portal.id) matches.push({ ...root, root_namespace: "business", public_id: source.id,
@@ -128,7 +128,7 @@ async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRo
     if (root.source_id !== "project-alpha:primary") throw new HTTPException(404, { message: "Client not found" });
     const portal = await readPortalRoot(env, root.kind, root.public_id);
     if (!portal) throw new HTTPException(404, { message: "Client not found" });
-    const resolved = await resolveClientHubWorkspace(env, { key: root.public_id, kind: root.kind,
+    const resolved = await resolveClientHubWorkspace(env, { key: root.public_id, source_id: "project-alpha:primary", kind: root.kind,
       workspace_id: portal.id, business_id: null, pa_public_id: null });
     if (resolved.workspace) {
       const alias = await businessAlias(env, root, portal);
@@ -145,22 +145,19 @@ async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRo
   const source = await resolveClientHubSourceRoot(env, root.kind, root.public_id, root.source_id);
   if (!source || !source.active || (root.kind === "standalone_client" && source.organization_id !== null))
     throw new HTTPException(404, { message: "Client not found" });
-  // Business provenance is not a portal grant. Until a separately authenticated
-  // source/workspace contract exists, no secondary root may resolve a primary
-  // workspace even when both producers export the same public ID.
-  if (root.source_id !== "project-alpha:primary") return { ...root, display_name: source.display_name, status: "active",
-    pa_public_id: source.pa_public_id, mapping_status: source.mapping_status, workspace_id: null,
-    legacy_account_id: null, portal_status: "not_supported", account_count: 0, project_count: 0, request_count: 0 };
-  const resolved = await resolveClientHubWorkspace(env, { key: root.public_id, kind: root.kind,
+  // Business provenance is not a portal grant. Resolve only a same-source,
+  // source-owned workspace; secondary sources can never use legacy bridges.
+  const resolved = await resolveClientHubWorkspace(env, { key: root.public_id, source_id: root.source_id, kind: root.kind,
     workspace_id: null, business_id: source.id, pa_public_id: source.pa_public_id });
   const workspace = resolved.workspace;
   // The directory is eventually consistent. Never use its cached workspace or
   // account association to hydrate access after the live source was reassigned.
   return { ...root, display_name: source.display_name, status: "active",
     pa_public_id: source.pa_public_id, mapping_status: source.mapping_status,
-    workspace_id: workspace?.id ?? null, legacy_account_id: workspace?.legacy_account_id ?? null,
+    workspace_id: workspace?.id ?? null, legacy_account_id: root.source_id === "project-alpha:primary" ? workspace?.legacy_account_id ?? null : null,
     portal_status: workspace?.status ?? (resolved.status === "conflict" ? "mapping_conflict"
-      : resolved.status === "pending" ? "projection_pending" : source.mapping_status !== "mapped" ? "mapping_unavailable" : "not_provisioned") };
+      : resolved.status === "pending" ? "projection_pending" : source.mapping_status !== "mapped" ? "mapping_unavailable"
+        : root.source_id === "project-alpha:primary" ? "not_provisioned" : "not_supported") };
 }
 async function resolveDetailContext(env: Env, principal: StaffPrincipal, kind: ClientKind, publicId: string,
   sourceId?: string, rootNamespace?: string): Promise<ClientHubCollectionContext> {
@@ -311,6 +308,8 @@ export function registerClientHubRoutes(app: App): void {
     if (!isPortalIdentityCollection(collection)) throw new HTTPException(400, { message: "Portal identity collection is invalid" });
     const principal = c.get("principal");
     const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    if (context.root.source_id !== "project-alpha:primary")
+      throw new HTTPException(404, { message: "Portal identity details are unavailable for this source" });
     if (!context.root.workspace_id) throw new HTTPException(404, { message: "Client portal workspace is unavailable" });
     const query = portalIdentityQuery(new URL(c.req.url).searchParams);
     const result = await listPortalIdentityCollection(c.env, principal, { kind: "client", context },
