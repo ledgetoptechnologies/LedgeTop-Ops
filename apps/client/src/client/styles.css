@@ -1471,6 +1471,7 @@
 .portal-wide-access { border-top: 1px solid var(--line); padding-top: .85rem; }
 .portal-danger-disclosure { padding: .9rem; border: 1px solid #d98b70; border-radius: .75rem; background: #fff4ef; color: #75290e; }
 .portal-danger-disclosure p { margin: .25rem 0 .7rem; }
+.portal-danger-disclosure .actions, .portal-team-row .actions { display: flex; flex-wrap: wrap; gap: .6rem; }
 .portal-team-lists { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; }
 .portal-team-row { display: flex; align-items: center; justify-content: space-between; gap: .75rem; padding: .75rem 0; border-top: 1px solid var(--line); }
 .portal-team-row span { min-width: 0; display: grid; gap: .2rem; overflow-wrap: anywhere; }
@@ -1863,7 +1864,8 @@
   .portal-hierarchy-treeitem { grid-template-columns: auto minmax(0, 1fr); padding-right: .5rem; }
   .portal-scope-state { grid-column: 2; }
   .portal-team-row { align-items: flex-start; flex-direction: column; }
-  .portal-team-row button { min-height: 42px; }
+  .portal-team-row .actions { width: 100%; }
+  .portal-team-row button { min-height: 42px; flex: 1 1 10rem; }
   .portal-delegated-share-form { grid-template-columns: 1fr; }
   .portal-share-created > div { align-items: stretch; flex-direction: column; }
 }

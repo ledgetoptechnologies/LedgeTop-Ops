@@ -69,11 +69,13 @@ import {
   verifyAndRecordClientDelegatedShareSignerResult,
 } from "./delegated-shares";
 import {
+  changeWorkspacePeerAdministrator,
   createWorkspaceInvitation,
   listWorkspaceAccess,
   revokeWorkspaceInvitation,
   suspendWorkspaceMember,
   workspaceMembershipManagementEnabled,
+  workspacePeerAdminEnabled,
 } from "./workspace-memberships";
 import { invitationEmailDeliveryEnabled } from "./invitation-email";
 import {listOwnWorkspaceInvitationRequests,cancelWorkspaceInvitationRequest} from './workspace-invitation-requests';
@@ -809,6 +811,25 @@ export function createClientPortalRouter(
     if (outcome === "managed_source") throw new HTTPException(409, { message: "This member is managed in Project Alpha and must be removed there" });
     if (outcome !== "suspended") throw new HTTPException(404, { message: "Member not found" });
     return c.body(null, 204);
+  });
+
+  router.put("/v2/workspaces/:workspaceId/members/:identityId/manager", async (c) => {
+    if (!workspacePeerAdminEnabled(c.env)) throw new HTTPException(404, { message: "Not found" });
+    requireSameRequestOrigin(c.req.raw, configuredPortalOrigin(c.env));
+    const workspaceId=opaqueId.safeParse(c.req.param("workspaceId")),identityId=opaqueId.safeParse(c.req.param("identityId"));
+    const key=idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    const body=z.object({manager:z.boolean(),expectedVersion:z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)}).strict()
+      .safeParse(await readBoundedJson(c.req.raw,1024));
+    if(!workspaceId.success||!identityId.success||!key.success||!body.success)
+      throw new HTTPException(400,{message:"Peer administrator change is invalid"});
+    const result=await changeWorkspacePeerAdministrator(c.env,c.get("clientPrincipal"),workspaceId.data,identityId.data,body.data,key.data);
+    if(result.outcome==='disabled'||result.outcome==='not_found'||result.outcome==='denied')throw new HTTPException(404,{message:"Workspace member not found"});
+    if(result.outcome==='invalid')throw new HTTPException(400,{message:"Peer administrator change is invalid"});
+    if(result.outcome==='managed_source')throw new HTTPException(409,{message:"This administrator is managed in Project Alpha and must be changed there"});
+    if(result.outcome==='last_manager')throw new HTTPException(409,{message:"Appoint another administrator before removing the last administrator"});
+    if(result.outcome==='ineligible')throw new HTTPException(409,{message:"This person is not eligible for organization administrator access"});
+    if(result.outcome==='changed'||result.outcome==='conflict')throw new HTTPException(409,{message:"Team access changed. Refresh before trying again"});
+    return c.json(result);
   });
 
   router.post("/v2/invitations/accept", async (c) => {

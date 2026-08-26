@@ -5,6 +5,7 @@ import type { VerifiedClientPrincipal } from "./types";
 import {
   authorizePortalWorkspaceCapability,
   portalHierarchyV2Enabled,
+  portalIdentityDenylistEnabled,
   type PortalWorkspaceCapability,
   type PortalWorkspaceTarget,
   authorizePrimaryPortalTargetBatch,
@@ -19,8 +20,10 @@ import {PRIMARY_ALPHA_SOURCE_ID} from '@ltds/shared';
 import {HTTPException} from 'hono/http-exception';
 import {canManageWorkspaceAddressBook,workspaceAddressBookAvailableFor} from './workspace-address-book';
 import {prepareAddressBookContactSelection,type AddressBookContactSelection} from './workspace-address-book';
+import {primaryWorkspaceAccount} from './project-alpha-source';
+import {projectAccessCapacitySql} from './project-access-capacity';
 
-type AddressBookAccessEnv=Env&Partial<Pick<ClientEnv,'CLIENT_PORTAL_ADDRESS_BOOK_ENABLED'|'CLIENT_PORTAL_ADDRESS_BOOK_FINGERPRINT_SECRET'|'DELIVERY_SESSION_SECRET'|'DELIVERY_PREVIOUS_SESSION_SECRET'>>;
+type AddressBookAccessEnv=Env&Partial<Pick<ClientEnv,'CLIENT_PORTAL_ADDRESS_BOOK_ENABLED'|'CLIENT_PORTAL_ADDRESS_BOOK_FINGERPRINT_SECRET'|'DELIVERY_SESSION_SECRET'|'DELIVERY_PREVIOUS_SESSION_SECRET'|'CLIENT_PORTAL_PEER_ADMIN_ENABLED'>>;
 
 const INVITABLE_CAPABILITIES = new Set<PortalWorkspaceCapability>([
   "workspace.view", "delivery.view", "request.create",
@@ -55,6 +58,8 @@ export interface WorkspaceMemberView {
   status: "active" | "suspended" | "revoked";
   manager: boolean;
   source: string;
+  managerVersion: number;
+  canChangeManager: boolean;
 }
 
 type Identity = { id: string };
@@ -63,6 +68,10 @@ function db(env: Env): D1Database { return env.DELIVERY_DB; }
 
 export function workspaceMembershipManagementEnabled(env: Env): boolean {
   return portalHierarchyV2Enabled(env) && env.CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED === "true";
+}
+
+export function workspacePeerAdminEnabled(env: AddressBookAccessEnv): boolean {
+  return workspaceMembershipManagementEnabled(env) && env.CLIENT_PORTAL_PEER_ADMIN_ENABLED === "true";
 }
 
 function normalizeEmail(email: string): string | null {
@@ -83,6 +92,79 @@ async function digest(value: string): Promise<string> {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+}
+
+function unlimitedWorkspaceCapabilitySql(capability: "workspace.view" | "member.manage", termsReady: boolean,
+  principalsReady=false,identityDenialsEnabled=false,workspaceReference="?",identityReference="?"): string {
+  return `EXISTS(SELECT 1 FROM portal_v2_workspace_memberships effective_membership
+    JOIN portal_v2_identities effective_identity ON effective_identity.id=effective_membership.identity_id
+      AND effective_identity.status='active' AND effective_identity.revoked_at IS NULL
+    JOIN portal_v2_workspaces effective_workspace ON effective_workspace.id=effective_membership.workspace_id
+      AND effective_workspace.status='active' AND effective_workspace.root_type='organization'
+      AND ${primaryWorkspaceAccount('effective_workspace')}
+    JOIN portal_v2_directory_checkpoints effective_checkpoint ON effective_checkpoint.workspace_id=effective_workspace.id
+    JOIN portal_v2_directory_generations effective_generation ON effective_generation.id=effective_checkpoint.active_generation_id
+      AND effective_generation.workspace_id=effective_checkpoint.workspace_id
+      AND effective_generation.status='active' AND effective_generation.complete=1
+    JOIN portal_v2_directory_entities effective_root ON effective_root.workspace_id=effective_workspace.id
+      AND effective_root.generation_id=effective_checkpoint.active_generation_id
+      AND effective_root.entity_type='organization' AND effective_root.public_id=effective_workspace.pa_organization_public_id
+      AND effective_root.active=1
+    JOIN portal_v2_entitlements effective_allow ON effective_allow.workspace_id=effective_membership.workspace_id
+      AND effective_allow.identity_id=effective_membership.identity_id
+    WHERE effective_membership.workspace_id=${workspaceReference} AND effective_membership.identity_id=${identityReference}
+      AND effective_membership.status='active' AND effective_membership.revoked_at IS NULL
+      AND effective_membership.expires_at IS NULL
+      ${principalsReady?`AND (effective_membership.source_type<>'project_alpha' OR EXISTS(SELECT 1 FROM pa_portal_principals current_principal
+        WHERE current_principal.workspace_id=effective_membership.workspace_id AND current_principal.identity_id=effective_membership.identity_id
+          AND current_principal.status='active' AND current_principal.source_version=effective_membership.source_version))`:''}
+      AND effective_allow.capability='${capability}' AND effective_allow.effect='allow'
+      AND effective_allow.scope_type='workspace' AND effective_allow.scope_public_id=effective_membership.workspace_id
+      AND effective_allow.status='active' AND effective_allow.revoked_at IS NULL
+      AND datetime(effective_allow.valid_from)<=datetime('now') AND effective_allow.expires_at IS NULL
+      ${termsReady ? "AND effective_allow.access_terms_id IS NULL" : ""}
+      AND (effective_allow.source_type<>'project_alpha' OR (effective_membership.source_type='project_alpha'
+        AND effective_allow.source_version=effective_membership.source_version))
+      ${identityDenialsEnabled?`AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_denials effective_identity_deny
+        WHERE effective_identity_deny.identity_id=effective_membership.identity_id
+          AND effective_identity_deny.status='active' AND effective_identity_deny.revoked_at IS NULL
+          AND datetime(effective_identity_deny.valid_from)<=datetime('now')
+          AND (effective_identity_deny.expires_at IS NULL OR datetime(effective_identity_deny.expires_at)>datetime('now'))
+          AND (effective_identity_deny.scope_type='global' OR (effective_identity_deny.workspace_id=effective_membership.workspace_id
+            AND effective_identity_deny.scope_type='workspace'
+            AND effective_identity_deny.scope_public_id=effective_membership.workspace_id)))
+        AND NOT EXISTS(SELECT 1 FROM (SELECT capacity_deny.id FROM portal_v2_identity_denials capacity_deny
+          WHERE capacity_deny.identity_id=effective_membership.identity_id
+            AND capacity_deny.status='active' AND capacity_deny.revoked_at IS NULL
+            AND datetime(capacity_deny.valid_from)<=datetime('now')
+            AND (capacity_deny.expires_at IS NULL OR datetime(capacity_deny.expires_at)>datetime('now'))
+            AND (capacity_deny.scope_type='global' OR capacity_deny.workspace_id=effective_membership.workspace_id)
+          ORDER BY capacity_deny.id LIMIT 1 OFFSET 200))`:''}
+      AND NOT EXISTS(SELECT 1 FROM (SELECT capacity_entitlement.id FROM portal_v2_entitlements capacity_entitlement
+        WHERE capacity_entitlement.workspace_id=effective_membership.workspace_id
+          AND capacity_entitlement.identity_id=effective_membership.identity_id
+          AND capacity_entitlement.capability='${capability}'
+          AND capacity_entitlement.status='active' AND capacity_entitlement.revoked_at IS NULL
+          AND datetime(capacity_entitlement.valid_from)<=datetime('now')
+          AND (capacity_entitlement.expires_at IS NULL OR datetime(capacity_entitlement.expires_at)>datetime('now'))
+          AND ${projectAccessCapacitySql('capacity_entitlement',termsReady)}
+        ORDER BY capacity_entitlement.entitlement_version DESC,capacity_entitlement.id LIMIT 1 OFFSET 200))
+      AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements effective_deny
+        WHERE effective_deny.workspace_id=effective_allow.workspace_id
+          AND effective_deny.identity_id=effective_allow.identity_id
+          AND effective_deny.capability=effective_allow.capability AND effective_deny.effect='deny'
+          AND effective_deny.scope_type='workspace' AND effective_deny.scope_public_id=effective_allow.scope_public_id
+          AND effective_deny.status='active' AND effective_deny.revoked_at IS NULL
+          AND datetime(effective_deny.valid_from)<=datetime('now')
+          AND (effective_deny.expires_at IS NULL OR datetime(effective_deny.expires_at)>datetime('now'))))`;
+}
+
+async function hasUnlimitedWorkspaceAuthority(database: D1Database, workspaceId: string, identityId: string, termsReady: boolean,
+  principalsReady:boolean,identityDenialsEnabled:boolean): Promise<boolean> {
+  const row=await database.prepare(`SELECT (${unlimitedWorkspaceCapabilitySql("workspace.view",termsReady,principalsReady,identityDenialsEnabled)}
+    AND ${unlimitedWorkspaceCapabilitySql("member.manage",termsReady,principalsReady,identityDenialsEnabled)}) authorized`)
+    .bind(workspaceId,identityId,workspaceId,identityId).first<number>('authorized');
+  return row===1;
 }
 
 async function actorIdentity(env: Env, principal: VerifiedClientPrincipal): Promise<Identity | null> {
@@ -273,13 +355,15 @@ export interface WorkspaceInviteScope {type:'organization'|'department'|'client'
 export async function listWorkspaceAccess(env: AddressBookAccessEnv, principal: VerifiedClientPrincipal, workspaceId: string): Promise<{ members: WorkspaceMemberView[]; invitations: WorkspaceInvitationView[];
   sourceId:string;sourceName:string;workspaceName:string;canManageMembers:boolean;invitationRequestsSupported:boolean;inviteScopes:WorkspaceInviteScope[];
   addressBookAvailable:boolean;canManageAddressBook:boolean;
+  peerAdminManagement:boolean;
   projectAccessTermsSupported:boolean;invitationPolicy:{mode:'allowed'|'disabled'|'require_approval';version:number};projectAccessOptions:Array<{projectPublicId:string;projectEndSupported:boolean}> } | null> {
   if(!await authorizePortalWorkspaceCapability(env,principal,workspaceId,'workspace.view',{scopeType:'workspace',publicId:workspaceId}))return null;
   const canManageMembers=await authorizePortalWorkspaceCapability(env, principal, workspaceId, "member.manage", { scopeType: "workspace", publicId: workspaceId });
   const termsReady=await projectAccessTermsReady(db(env)),requestsReady=await invitationRequestsReady(db(env));
+  const principalsReady=await portalPrincipalsReady(db(env)),identityDenialsEnabled=portalIdentityDenylistEnabled(env);
   const addressBookAvailable=await workspaceAddressBookAvailableFor(env,workspaceId);
-  const workspace=await db(env).prepare('SELECT display_name,project_alpha_source_id FROM portal_v2_workspaces WHERE id=? AND status=\'active\'').bind(workspaceId)
-    .first<{display_name:string;project_alpha_source_id:string}>();
+  const workspace=await db(env).prepare('SELECT display_name,project_alpha_source_id,root_type FROM portal_v2_workspaces WHERE id=? AND status=\'active\'').bind(workspaceId)
+    .first<{display_name:string;project_alpha_source_id:string;root_type:string}>();
   if(!workspace||workspace.project_alpha_source_id!==PRIMARY_ALPHA_SOURCE_ID)return null;
   const scopeRows=(await db(env).prepare(`SELECT e.entity_type type,e.public_id,e.display_name,${termsReady?`EXISTS(SELECT 1 FROM portal_project_access_current_lifecycle l WHERE l.workspace_id=e.workspace_id AND l.project_public_id=e.public_id)`:'0'} supported
     FROM portal_v2_directory_checkpoints cp JOIN portal_v2_directory_generations g ON g.id=cp.active_generation_id AND g.workspace_id=cp.workspace_id AND g.status='active' AND g.complete=1
@@ -309,19 +393,25 @@ export async function listWorkspaceAccess(env: AddressBookAccessEnv, principal: 
     if(capabilities.length)inviteScopes.push({type:scope.type,publicId:scope.public_id,displayName:scope.display_name.slice(0,500),capabilities,projectEndSupported:scope.supported===1});
   }
   if(!canManageMembers&&!inviteScopes.length)return null;
+  const actor=canManageMembers?await actorIdentity(env,principal):null;
   const members = canManageMembers?await db(env).prepare(`SELECT m.identity_id,i.verified_email,m.status,m.source_type,
-    EXISTS(SELECT 1 FROM portal_v2_entitlements e WHERE e.workspace_id=m.workspace_id AND e.identity_id=m.identity_id
-      AND e.capability='member.manage' AND e.effect='allow' AND e.status='active' AND e.revoked_at IS NULL
-      AND e.scope_type='workspace' AND e.scope_public_id=m.workspace_id
-      AND datetime(e.valid_from)<=datetime('now') AND (e.expires_at IS NULL OR datetime(e.expires_at)>datetime('now'))
-      AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements denied WHERE denied.workspace_id=e.workspace_id
-        AND denied.identity_id=e.identity_id AND denied.capability='member.manage' AND denied.effect='deny'
-        AND denied.status='active' AND denied.revoked_at IS NULL AND denied.scope_type='workspace'
-        AND denied.scope_public_id=e.workspace_id AND datetime(denied.valid_from)<=datetime('now')
-        AND (denied.expires_at IS NULL OR datetime(denied.expires_at)>datetime('now')))) manager
+    ${unlimitedWorkspaceCapabilitySql('member.manage',termsReady,principalsReady,identityDenialsEnabled,'m.workspace_id','m.identity_id')} manager,
+    COALESCE((SELECT MAX(versioned.entitlement_version) FROM portal_v2_entitlements versioned
+      WHERE versioned.workspace_id=m.workspace_id AND versioned.identity_id=m.identity_id
+        AND versioned.capability='member.manage' AND versioned.effect='allow'
+        AND versioned.scope_type='workspace' AND versioned.scope_public_id=m.workspace_id),0) manager_version,
+    EXISTS(SELECT 1 FROM portal_v2_entitlements local_manager WHERE local_manager.workspace_id=m.workspace_id
+      AND local_manager.identity_id=m.identity_id AND local_manager.capability='member.manage'
+      AND local_manager.effect='allow' AND local_manager.scope_type='workspace'
+      AND local_manager.scope_public_id=m.workspace_id AND local_manager.source_type='operations'
+      AND local_manager.status='active' AND local_manager.revoked_at IS NULL
+      AND datetime(local_manager.valid_from)<=datetime('now') AND local_manager.expires_at IS NULL
+      ${termsReady?'AND local_manager.access_terms_id IS NULL':''}) local_manager,
+    (m.source_type<>'project_alpha' AND
+      ${unlimitedWorkspaceCapabilitySql('workspace.view',termsReady,principalsReady,identityDenialsEnabled,'m.workspace_id','m.identity_id')}) peer_eligible
     FROM portal_v2_workspace_memberships m JOIN portal_v2_identities i ON i.id=m.identity_id
     WHERE m.workspace_id=? AND m.status<>'revoked' ORDER BY lower(i.verified_email),m.identity_id LIMIT 201`)
-    .bind(workspaceId).all<{ identity_id: string; verified_email: string | null; status: WorkspaceMemberView["status"]; source_type: string; manager: number }>():{results:[]};
+    .bind(workspaceId).all<{ identity_id: string; verified_email: string | null; status: WorkspaceMemberView["status"]; source_type: string; manager: number;manager_version:number;local_manager:number;peer_eligible:number }>():{results:[]};
   if (members.results.length > 200) return null;
   const invitationRows = canManageMembers?await db(env).prepare(`SELECT id FROM portal_v2_invitations WHERE workspace_id=? ORDER BY created_at DESC,id DESC LIMIT 101`).bind(workspaceId).all<{ id: string }>():{results:[]};
   if (invitationRows.results.length > 100) return null;
@@ -329,14 +419,168 @@ export async function listWorkspaceAccess(env: AddressBookAccessEnv, principal: 
   if(!await authorizePortalWorkspaceCapability(env,principal,workspaceId,'workspace.view',{scopeType:'workspace',publicId:workspaceId}))return null;
   if(canManageMembers&&!await authorizePortalWorkspaceCapability(env,principal,workspaceId,'member.manage',{scopeType:'workspace',publicId:workspaceId}))return null;
   const canManageAddressBook=addressBookAvailable&&await canManageWorkspaceAddressBook(env,principal,workspaceId);
+  const peerAdminManagement=workspacePeerAdminEnabled(env)&&canManageMembers&&Boolean(actor)&&workspace.root_type==='organization'
+    &&workspace.project_alpha_source_id===PRIMARY_ALPHA_SOURCE_ID&&await peerAdminSchemaReady(db(env))
+    &&await hasUnlimitedWorkspaceAuthority(db(env),workspaceId,actor!.id,termsReady,principalsReady,identityDenialsEnabled);
+  const managerCount=members.results.filter(row=>row.manager===1).length;
   return {sourceId:workspace.project_alpha_source_id,sourceName:'Project Alpha',workspaceName:workspace.display_name,
     canManageMembers,invitationRequestsSupported:requestsReady,inviteScopes,
     addressBookAvailable,canManageAddressBook,
+    peerAdminManagement,
     projectAccessTermsSupported:termsReady,invitationPolicy,projectAccessOptions:inviteScopes.filter(scope=>scope.type==='project')
     .map(scope=>({projectPublicId:scope.publicId,projectEndSupported:scope.projectEndSupported})),
-    members: members.results.map(row => ({ identityId: row.identity_id, email: row.verified_email, status: row.status, manager: row.manager === 1, source: row.source_type })),
+    members: members.results.map(row => ({ identityId: row.identity_id, email: row.verified_email, status: row.status,
+      manager: row.manager === 1, source: row.source_type,managerVersion:row.manager_version,
+      canChangeManager:peerAdminManagement&&row.peer_eligible===1&&(row.manager===0
+        ?row.identity_id!==actor?.id:row.local_manager===1&&managerCount>1) })),
     invitations: (await Promise.all(invitationRows.results.map(row => getInvitation(env, workspaceId, row.id)))).filter((value): value is WorkspaceInvitationView => value !== null),
   };
+}
+
+async function peerAdminSchemaReady(database:D1Database):Promise<boolean>{
+  return await database.prepare("SELECT 1 ok FROM sqlite_master WHERE type='table' AND name='portal_workspace_peer_admin_commands'")
+    .first<number>('ok')===1;
+}
+async function portalPrincipalsReady(database:D1Database):Promise<boolean>{
+  return await database.prepare("SELECT 1 ok FROM sqlite_master WHERE type='table' AND name='pa_portal_principals'").first<number>('ok')===1;
+}
+
+type PeerAdminTargetState={status:string;source:string;expiresAt:string|null;manager:boolean;localManager:boolean;managerVersion:number;eligible:boolean};
+async function peerAdminTargetState(database:D1Database,workspaceId:string,identityId:string,termsReady:boolean,
+  principalsReady:boolean,identityDenialsEnabled:boolean):Promise<PeerAdminTargetState|null>{
+  const row=await database.prepare(`SELECT membership.status,membership.source_type,membership.expires_at,
+    COALESCE((SELECT MAX(versioned.entitlement_version) FROM portal_v2_entitlements versioned
+      WHERE versioned.workspace_id=membership.workspace_id AND versioned.identity_id=membership.identity_id
+        AND versioned.capability='member.manage' AND versioned.effect='allow'
+        AND versioned.scope_type='workspace' AND versioned.scope_public_id=membership.workspace_id),0) manager_version,
+    ${unlimitedWorkspaceCapabilitySql('member.manage',termsReady,principalsReady,identityDenialsEnabled)} manager,
+    EXISTS(SELECT 1 FROM portal_v2_entitlements local_manager WHERE local_manager.workspace_id=membership.workspace_id
+      AND local_manager.identity_id=membership.identity_id AND local_manager.capability='member.manage'
+      AND local_manager.effect='allow' AND local_manager.scope_type='workspace'
+      AND local_manager.scope_public_id=membership.workspace_id AND local_manager.source_type='operations'
+      AND local_manager.status='active' AND local_manager.revoked_at IS NULL
+      AND datetime(local_manager.valid_from)<=datetime('now') AND local_manager.expires_at IS NULL
+      ${termsReady?'AND local_manager.access_terms_id IS NULL':''}) local_manager,
+    ${unlimitedWorkspaceCapabilitySql('workspace.view',termsReady,principalsReady,identityDenialsEnabled)} eligible
+    FROM portal_v2_workspaces workspace
+    JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id
+    JOIN portal_v2_identities identity ON identity.id=membership.identity_id
+    WHERE workspace.id=? AND workspace.status='active' AND workspace.root_type='organization'
+      AND workspace.project_alpha_source_id=? AND membership.identity_id=?
+      AND identity.status='active' AND identity.revoked_at IS NULL`)
+    .bind(workspaceId,identityId,workspaceId,identityId,workspaceId,PRIMARY_ALPHA_SOURCE_ID,identityId)
+    .first<{status:string;source_type:string;expires_at:string|null;manager_version:number;manager:number;local_manager:number;eligible:number}>();
+  return row?{status:row.status,source:row.source_type,expiresAt:row.expires_at,manager:row.manager===1,
+    localManager:row.local_manager===1,managerVersion:row.manager_version,eligible:row.eligible===1}:null;
+}
+
+export type PeerAdminChangeResult=
+  |{outcome:'created'|'replayed';manager:boolean;version:number}
+  |{outcome:'disabled'|'denied'|'not_found'|'managed_source'|'ineligible'|'last_manager'|'changed'|'conflict'|'invalid'};
+
+async function replayPeerAdminCommand(database:D1Database,workspaceId:string,actorId:string,key:string,hash:string):Promise<PeerAdminChangeResult|null>{
+  const row=await database.prepare(`SELECT request_hash,desired_manager,result_version FROM portal_workspace_peer_admin_commands
+    WHERE workspace_id=? AND actor_identity_id=? AND idempotency_key=?`).bind(workspaceId,actorId,key)
+    .first<{request_hash:string;desired_manager:number;result_version:number}>();
+  if(!row)return null;
+  return row.request_hash===hash?{outcome:'replayed',manager:row.desired_manager===1,version:row.result_version}:{outcome:'conflict'};
+}
+
+export async function changeWorkspacePeerAdministrator(env:AddressBookAccessEnv,principal:VerifiedClientPrincipal,workspaceId:string,
+  identityId:string,input:{manager:boolean;expectedVersion:number},idempotencyKey:string):Promise<PeerAdminChangeResult>{
+  if(!workspacePeerAdminEnabled(env))return {outcome:'disabled'};
+  if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceId)||!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(identityId)
+    ||!/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(idempotencyKey)||!Number.isSafeInteger(input.expectedVersion)||input.expectedVersion<0)
+    return {outcome:'invalid'};
+  const database=db(env),actor=await actorIdentity(env,principal);
+  if(!actor)return {outcome:'denied'};
+  const hash=await digest(JSON.stringify({workspaceId,identityId,manager:input.manager,expectedVersion:input.expectedVersion}));
+  if(!await peerAdminSchemaReady(database))return {outcome:'disabled'};
+  const replay=await replayPeerAdminCommand(database,workspaceId,actor.id,idempotencyKey,hash);if(replay)return replay;
+  const termsReady=await projectAccessTermsReady(database),principalsReady=await portalPrincipalsReady(database);
+  const identityDenialsEnabled=portalIdentityDenylistEnabled(env);
+  const target=await peerAdminTargetState(database,workspaceId,identityId,termsReady,principalsReady,identityDenialsEnabled);
+  if(!target)return {outcome:'not_found'};
+  if(target.source==='project_alpha')return {outcome:'managed_source'};
+  if(target.status!=='active'||target.expiresAt!==null||!target.eligible)return {outcome:'ineligible'};
+  if(target.managerVersion!==input.expectedVersion)return {outcome:'changed'};
+  if(input.manager===target.manager)return {outcome:'changed'};
+  if(!input.manager&&!target.localManager)return {outcome:'managed_source'};
+  if(!await authorizePortalWorkspaceCapability(env,principal,workspaceId,'workspace.view',{scopeType:'workspace',publicId:workspaceId})
+    ||!await authorizePortalWorkspaceCapability(env,principal,workspaceId,'member.manage',{scopeType:'workspace',publicId:workspaceId})
+    ||!await hasUnlimitedWorkspaceAuthority(database,workspaceId,actor.id,termsReady,principalsReady,identityDenialsEnabled))return {outcome:'denied'};
+
+  const guard:Array<{sql:string;values:unknown[]}>=[];
+  guard.push({sql:unlimitedWorkspaceCapabilitySql('workspace.view',termsReady,principalsReady,identityDenialsEnabled),values:[workspaceId,actor.id]});
+  guard.push({sql:unlimitedWorkspaceCapabilitySql('member.manage',termsReady,principalsReady,identityDenialsEnabled),values:[workspaceId,actor.id]});
+  guard.push({sql:`EXISTS(SELECT 1 FROM portal_v2_workspaces guarded_workspace
+    JOIN portal_v2_workspace_memberships guarded_member ON guarded_member.workspace_id=guarded_workspace.id
+    JOIN portal_v2_identities guarded_identity ON guarded_identity.id=guarded_member.identity_id
+    WHERE guarded_workspace.id=? AND guarded_workspace.status='active' AND guarded_workspace.root_type='organization'
+      AND guarded_workspace.project_alpha_source_id=? AND guarded_member.identity_id=?
+      AND guarded_member.source_type<>'project_alpha' AND guarded_member.status='active'
+      AND guarded_member.revoked_at IS NULL AND guarded_member.expires_at IS NULL
+      AND guarded_identity.status='active' AND guarded_identity.revoked_at IS NULL
+      AND ${unlimitedWorkspaceCapabilitySql('workspace.view',termsReady,principalsReady,identityDenialsEnabled)})`,values:[workspaceId,PRIMARY_ALPHA_SOURCE_ID,identityId,workspaceId,identityId]});
+  guard.push({sql:`COALESCE((SELECT MAX(versioned.entitlement_version) FROM portal_v2_entitlements versioned
+    WHERE versioned.workspace_id=? AND versioned.identity_id=? AND versioned.capability='member.manage'
+      AND versioned.effect='allow' AND versioned.scope_type='workspace' AND versioned.scope_public_id=?),0)=?`,
+    values:[workspaceId,identityId,workspaceId,input.expectedVersion]});
+  if(input.manager){
+    guard.push({sql:`NOT EXISTS(SELECT 1 FROM portal_v2_entitlements existing_manager
+      WHERE existing_manager.workspace_id=? AND existing_manager.identity_id=?
+        AND existing_manager.capability='member.manage' AND existing_manager.effect='allow'
+        AND existing_manager.scope_type='workspace' AND existing_manager.scope_public_id=?
+        AND existing_manager.status='active' AND existing_manager.revoked_at IS NULL
+        AND datetime(existing_manager.valid_from)<=datetime('now') AND existing_manager.expires_at IS NULL
+        ${termsReady?'AND existing_manager.access_terms_id IS NULL':''})`,values:[workspaceId,identityId,workspaceId]});
+    guard.push({sql:`NOT EXISTS(SELECT 1 FROM portal_v2_entitlements manager_deny WHERE manager_deny.workspace_id=?
+      AND manager_deny.identity_id=? AND manager_deny.capability='member.manage' AND manager_deny.effect='deny'
+      AND manager_deny.scope_type='workspace' AND manager_deny.scope_public_id=? AND manager_deny.status='active'
+      AND manager_deny.revoked_at IS NULL AND datetime(manager_deny.valid_from)<=datetime('now')
+      AND (manager_deny.expires_at IS NULL OR datetime(manager_deny.expires_at)>datetime('now')))`,values:[workspaceId,identityId,workspaceId]});
+  }else{
+    guard.push({sql:unlimitedWorkspaceCapabilitySql('member.manage',termsReady,principalsReady,identityDenialsEnabled),values:[workspaceId,identityId]});
+    guard.push({sql:`EXISTS(SELECT 1 FROM portal_v2_entitlements local_manager WHERE local_manager.workspace_id=?
+      AND local_manager.identity_id=? AND local_manager.capability='member.manage' AND local_manager.effect='allow'
+      AND local_manager.scope_type='workspace' AND local_manager.scope_public_id=? AND local_manager.source_type='operations'
+      AND local_manager.status='active' AND local_manager.revoked_at IS NULL AND local_manager.expires_at IS NULL
+      ${termsReady?'AND local_manager.access_terms_id IS NULL':''})`,values:[workspaceId,identityId,workspaceId]});
+    guard.push({sql:`EXISTS(SELECT 1 FROM portal_v2_workspace_memberships other_member
+      WHERE other_member.workspace_id=? AND other_member.identity_id<>?
+        AND ${unlimitedWorkspaceCapabilitySql('workspace.view',termsReady,principalsReady,identityDenialsEnabled,'other_member.workspace_id','other_member.identity_id')}
+        AND ${unlimitedWorkspaceCapabilitySql('member.manage',termsReady,principalsReady,identityDenialsEnabled,'other_member.workspace_id','other_member.identity_id')})`,values:[workspaceId,identityId]});
+  }
+  const nextVersion=input.expectedVersion+1,entitlementId=crypto.randomUUID(),fenceId=crypto.randomUUID(),auditId=crypto.randomUUID();
+  const statements:D1PreparedStatement[]=[database.prepare(`INSERT INTO portal_workspace_peer_admin_fences(id,write_guard)
+    VALUES(?,CASE WHEN ${guard.map(part=>`(${part.sql})`).join(' AND ')} THEN 1 ELSE 0 END)`).bind(fenceId,...guard.flatMap(part=>part.values))];
+  if(!input.manager)statements.push(database.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+    WHERE workspace_id=? AND identity_id=? AND capability='member.manage' AND effect='allow' AND scope_type='workspace'
+      AND scope_public_id=? AND source_type='operations' AND status='active' AND revoked_at IS NULL`)
+    .bind(workspaceId,identityId,workspaceId));
+  statements.push(database.prepare(`INSERT INTO portal_v2_entitlements
+    (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,source_type,status,revoked_at)
+    VALUES(?,?,?,'member.manage','allow','workspace',?,?,'operations',?,?)`)
+    .bind(entitlementId,workspaceId,identityId,workspaceId,nextVersion,input.manager?'active':'revoked',input.manager?null:new Date().toISOString()));
+  statements.push(database.prepare(`INSERT INTO portal_workspace_peer_admin_commands
+    (workspace_id,actor_identity_id,idempotency_key,request_hash,target_identity_id,desired_manager,result_version)
+    VALUES(?,?,?,?,?,?,?)`).bind(workspaceId,actor.id,idempotencyKey,hash,identityId,input.manager?1:0,nextVersion));
+  statements.push(database.prepare(`INSERT INTO portal_workspace_peer_admin_audit
+    (id,workspace_id,actor_identity_id,target_identity_id,action,target_version,details_json)
+    VALUES(?,?,?,?,?,?,?)`).bind(auditId,workspaceId,actor.id,identityId,input.manager?'manager.promoted':'manager.demoted',nextVersion,
+      JSON.stringify({authority:'client_peer_admin',membershipPreserved:true})));
+  try{await database.batch(statements);}catch{
+    const raced=await replayPeerAdminCommand(database,workspaceId,actor.id,idempotencyKey,hash);if(raced)return raced;
+    const current=await peerAdminTargetState(database,workspaceId,identityId,termsReady,principalsReady,identityDenialsEnabled);
+    if(!current)return {outcome:'not_found'};if(current.source==='project_alpha')return {outcome:'managed_source'};
+    if(current.managerVersion!==input.expectedVersion)return {outcome:'changed'};
+    if(!await hasUnlimitedWorkspaceAuthority(database,workspaceId,actor.id,termsReady,principalsReady,identityDenialsEnabled))return {outcome:'denied'};
+    if(current.status!=='active'||current.expiresAt!==null||!current.eligible)return {outcome:'ineligible'};
+    if(!input.manager&&current.manager&&current.localManager)return {outcome:'last_manager'};
+    return {outcome:'ineligible'};
+  }
+  const saved=await replayPeerAdminCommand(database,workspaceId,actor.id,idempotencyKey,hash);
+  return saved&&saved.outcome==='replayed'?{...saved,outcome:'created'}:{outcome:'changed'};
 }
 
 export async function revokeWorkspaceInvitation(env: Env, principal: VerifiedClientPrincipal, workspaceId: string, invitationId: string): Promise<boolean> {

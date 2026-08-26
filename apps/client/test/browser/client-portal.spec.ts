@@ -798,6 +798,68 @@ for (const width of [1280, 390, 320]) {
   });
 }
 
+test("peer administrators use a reviewed responsive workflow and preserve ordinary access",async({page})=>{
+  await mockAuthorizedPortal(page);let targetManager=false,targetVersion=0;const writes:Array<{body:any;key:string|null}>=[];
+  await page.route("**/api/client/**",async route=>{const request=route.request(),path=new URL(request.url()).pathname;
+    if(path==="/api/client/session")return route.fulfill({json:{account,capabilities:{manageTeam:true,workspaceHierarchyV2:true,workspaceMembershipManagement:true,hierarchyScopedInvitations:true,invitationEmailDelivery:true,viewBilling:false,requestV2:true,requestAttachments:false}}});
+    if(path==="/api/client/v2/workspaces")return route.fulfill({json:{workspaces:[{id:"workspace-a",rootType:"organization",rootPublicId:"org-a",displayName:"Acme"}]}});
+    if(path==="/api/client/v2/workspaces/workspace-a/access")return route.fulfill({json:{sourceId:"project-alpha:primary",sourceName:"Project Alpha",workspaceName:"Acme",canManageMembers:true,peerAdminManagement:true,invitationRequestsSupported:false,inviteScopes:[],members:[
+      {identityId:"manager-a",email:"owner@example.test",status:"active",manager:true,source:"project_alpha",managerVersion:1,canChangeManager:false},
+      {identityId:"member-b",email:"peer@example.test",status:"active",manager:targetManager,source:"client_invitation",managerVersion:targetVersion,canChangeManager:true}],
+      invitations:[],invitationPolicy:{mode:"allowed",version:1},projectAccessTermsSupported:true,projectAccessOptions:[]}});
+    if(path==="/api/client/v2/workspaces/workspace-a/members/member-b/manager"&&request.method()==="PUT"){
+      const body=request.postDataJSON() as {manager:boolean;expectedVersion:number};writes.push({body,key:request.headers()["idempotency-key"]??null});
+      expect(body.expectedVersion).toBe(targetVersion);targetManager=body.manager;targetVersion++;
+      return route.fulfill({json:{outcome:"created",manager:targetManager,version:targetVersion}});
+    }
+    return route.fallback();
+  });
+  await page.setViewportSize({width:390,height:844});await page.goto("/portal/account");
+  const peerRow=page.locator(".portal-team-row",{hasText:"peer@example.test"});
+  const rowButtons=peerRow.locator(".actions button"),rowFirst=await rowButtons.nth(0).boundingBox(),rowSecond=await rowButtons.nth(1).boundingBox();
+  expect(rowFirst&&rowSecond&&(rowSecond.x-rowFirst.x-rowFirst.width>=4||rowSecond.y-rowFirst.y-rowFirst.height>=4)).toBeTruthy();
+  await peerRow.getByRole("button",{name:"Make administrator"}).click();
+  const review=page.getByRole("region",{name:"Review administrator access change"});
+  await expect(review).toContainText("invite, suspend, promote, and demote");
+  const reviewButtons=review.locator(".actions button"),reviewFirst=await reviewButtons.nth(0).boundingBox(),reviewSecond=await reviewButtons.nth(1).boundingBox();
+  expect(reviewFirst&&reviewSecond&&(reviewSecond.x-reviewFirst.x-reviewFirst.width>=4||reviewSecond.y-reviewFirst.y-reviewFirst.height>=4)).toBeTruthy();
+  await review.getByRole("button",{name:"Add administrator"}).click();
+  await expect(peerRow).toContainText("Administrator · active");expect(writes).toHaveLength(1);expect(writes[0]!.key).toMatch(/^[A-Za-z0-9-]{16,}$/);
+  await peerRow.getByRole("button",{name:"Remove administrator"}).click();
+  await expect(review).toContainText("ordinary workspace and delivery access stays in place");
+  await review.getByRole("button",{name:"Remove administrator"}).click();
+  await expect(peerRow).toContainText("Member · active");await expect(peerRow.getByRole("button",{name:"Suspend"})).toBeVisible();
+  expect(writes.map(write=>write.body.manager)).toEqual([true,false]);
+  expect(await page.evaluate(()=>document.documentElement.scrollWidth<=window.innerWidth+1)).toBe(true);
+});
+
+test("an ambiguous peer administrator response retries the identical operation",async({page})=>{
+  await mockAuthorizedPortal(page);let targetManager=false,targetVersion=0,attempts=0;
+  const writes:Array<{body:{manager:boolean;expectedVersion:number};key:string|null}>=[];
+  await page.route("**/api/client/**",async route=>{const request=route.request(),path=new URL(request.url()).pathname;
+    if(path==="/api/client/session")return route.fulfill({json:{account,capabilities:{manageTeam:true,workspaceHierarchyV2:true,workspaceMembershipManagement:true,hierarchyScopedInvitations:true,invitationEmailDelivery:true,viewBilling:false,requestV2:true,requestAttachments:false}}});
+    if(path==="/api/client/v2/workspaces")return route.fulfill({json:{workspaces:[{id:"workspace-a",rootType:"organization",rootPublicId:"org-a",displayName:"Acme"}]}});
+    if(path==="/api/client/v2/workspaces/workspace-a/access")return route.fulfill({json:{sourceId:"project-alpha:primary",sourceName:"Project Alpha",workspaceName:"Acme",canManageMembers:true,peerAdminManagement:true,invitationRequestsSupported:false,inviteScopes:[],members:[
+      {identityId:"manager-a",email:"owner@example.test",status:"active",manager:true,source:"project_alpha",managerVersion:1,canChangeManager:false},
+      {identityId:"member-b",email:"peer@example.test",status:"active",manager:targetManager,source:"client_invitation",managerVersion:targetVersion,canChangeManager:true}],
+      invitations:[],invitationPolicy:{mode:"allowed",version:1},projectAccessTermsSupported:true,projectAccessOptions:[]}});
+    if(path==="/api/client/v2/workspaces/workspace-a/members/member-b/manager"&&request.method()==="PUT"){
+      const body=request.postDataJSON() as {manager:boolean;expectedVersion:number},key=request.headers()["idempotency-key"]??null;
+      writes.push({body,key});attempts++;
+      if(attempts===1){targetManager=true;targetVersion=1;return route.abort("failed");}
+      expect(key).toBe(writes[0]!.key);expect(body).toEqual(writes[0]!.body);
+      return route.fulfill({json:{outcome:"replayed",manager:true,version:1}});
+    }
+    return route.fallback();
+  });
+  await page.goto("/portal/account");
+  const peerRow=page.locator(".portal-team-row",{hasText:"peer@example.test"});
+  await peerRow.getByRole("button",{name:"Make administrator"}).click();
+  await page.getByRole("region",{name:"Review administrator access change"}).getByRole("button",{name:"Add administrator"}).click();
+  const retry=page.getByRole("button",{name:"Retry same administrator change"});await expect(retry).toBeVisible();await retry.click();
+  await expect(peerRow).toContainText("Administrator · active");expect(writes).toHaveLength(2);expect(writes[0]!.key).toMatch(/^[A-Za-z0-9-]{16,}$/);
+});
+
 for (const width of [320, 390, 768]) {
   test(`portal mobile drawer is accessible without overflow at ${width}px`, async ({ page }) => {
     await mockAuthorizedPortal(page);

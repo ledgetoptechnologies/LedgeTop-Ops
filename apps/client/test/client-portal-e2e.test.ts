@@ -230,12 +230,18 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       .rejects.toThrow(/immutable/);
     await expect(db.prepare("DELETE FROM client_service_request_area_revisions WHERE id='migration-area-revision'").run())
       .rejects.toThrow(/immutable/);
+    await db.prepare(`INSERT INTO request_pa_draft_quote_commands
+      (id,request_id,request_revision,area_revision,source_id,command_endpoint,application_key,editor_origin,
+       destination_fingerprint,idempotency_key,payload_hash,payload_json,created_by)
+      VALUES('migration-pa-command','migration-request',1,0,'project-alpha:primary','/api/integrations/operations/v1/request-artifacts',
+       'migration-app','https://alpha.example.test',?,'migration-pa-receipt-key-0001',?,'{}','staff-test')`)
+      .bind("c".repeat(64),"b".repeat(64)).run();
     await db.prepare(`INSERT INTO request_pa_draft_quote_receipts
       (id,request_id,request_revision,area_revision,idempotency_key,payload_hash,
        project_alpha_receipt_id,project_alpha_artifact_public_id,artifact_status,
-       artifact_version,editor_path,created_by)
+       artifact_version,editor_path,created_by,source_id,command_id)
       VALUES ('migration-pa-receipt','migration-request',1,0,'migration-pa-receipt-key-0001',?,
-        'pa-receipt-public','pa-artifact-public','draft',1,'/drafts/pa-artifact-public','staff-test')`)
+        'pa-receipt-public','pa-artifact-public','draft',1,'/drafts/pa-artifact-public','staff-test','project-alpha:primary','migration-pa-command')`)
       .bind("b".repeat(64)).run();
     await expect(db.prepare("UPDATE request_pa_draft_quote_receipts SET editor_path='/changed' WHERE id='migration-pa-receipt'").run())
       .rejects.toThrow(/immutable/);

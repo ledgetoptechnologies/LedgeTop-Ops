@@ -36,6 +36,7 @@ import {
   loadPortalDelegatedShares,
   loadPortalDelegatedShareTargets,
   createPortalDelegatedShare,
+  changePortalWorkspacePeerAdministrator,
   revokePortalDelegatedShare,
   invitePortalWorkspaceMember,
   revokePortalWorkspaceInvitation,
@@ -2280,16 +2281,19 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
   const [policy, setPolicy] = useState<PortalWorkspaceAccess["invitationPolicy"] | null>(null), [accessOptions, setAccessOptions] = useState<PortalWorkspaceAccess["projectAccessOptions"]>([]);
   const [termsSupported, setTermsSupported] = useState(false);
   const [canManageMembers, setCanManageMembers] = useState(false), [inviteScopes, setInviteScopes] = useState<PortalWorkspaceAccess["inviteScopes"]>([]);
+  const [peerAdminManagement,setPeerAdminManagement]=useState(false);
   const [requestsSupported, setRequestsSupported] = useState(false), [historyLocked, setHistoryLocked] = useState(false), [historyRevision, setHistoryRevision] = useState(0);
   const [addressBookAvailable, setAddressBookAvailable] = useState(false), [canManageAddressBook, setCanManageAddressBook] = useState(false), [addressBookLocked, setAddressBookLocked] = useState(false);
   const [addressContact, setAddressContact] = useState<AddressBookContact | null>(null);
   const [accessSource, setAccessSource] = useState<string | null>(null);
   const [accessMode, setAccessMode] = useState<PortalProjectAccessTermsInput["mode"] | "">(""), [accessExpires, setAccessExpires] = useState("");
   const [reviewed, setReviewed] = useState<PortalWorkspaceInvitationInput | null>(null), [uncertain, setUncertain] = useState(false);
+  const [reviewedManager,setReviewedManager]=useState<{member:PortalWorkspaceMember;manager:boolean}|null>(null);
   const lifetime = useRef(0), readController = useRef<AbortController | null>(null), mutationController = useRef<AbortController | null>(null), mutationBusy = useRef(false);
   const pendingInvite = useRef<{workspaceId: string; input: PortalWorkspaceInvitationInput; key: string; policyMode: "allowed" | "require_approval"} | null>(null);
+  const pendingManager=useRef<{workspaceId:string;identityId:string;manager:boolean;expectedVersion:number;key:string}|null>(null);
   const clearReview = () => { setReviewed(null); setMessage(""); setError(""); };
-  const clearProtected = () => { setReady(false); setPolicy(null); setTermsSupported(false); setHierarchy([]); setMembers([]); setInvitations([]); setAccessOptions([]); setSelectedScope(null); setReviewed(null); setCanManageMembers(false); setInviteScopes([]); setRequestsSupported(false); setAccessSource(null); setAddressBookAvailable(false); setCanManageAddressBook(false); setAddressContact(null); };
+  const clearProtected = () => { setReady(false); setPolicy(null); setTermsSupported(false); setHierarchy([]); setMembers([]); setInvitations([]); setAccessOptions([]); setSelectedScope(null); setReviewed(null); setReviewedManager(null); setCanManageMembers(false); setPeerAdminManagement(false); setInviteScopes([]); setRequestsSupported(false); setAccessSource(null); setAddressBookAvailable(false); setCanManageAddressBook(false); setAddressContact(null); };
   const invitationError = (caught: unknown) => {
     const value = caught as RequestError, bodyCode = value.body?.code ?? (typeof value.body?.error === "object" ? value.body.error.code : value.body?.error), code = bodyCode || value.message;
     if (code === "invitation_approval_required") return "Administrator approval is required. Refresh team access and review an approval request; no invitation was issued.";
@@ -2310,7 +2314,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     const access = await loadPortalWorkspaceAccess(id, undefined, controller.signal);
     if (controller.signal.aborted || generation !== lifetime.current) return;
     if (!/^project-alpha:[A-Za-z0-9_-]+$/.test(access.sourceId) || typeof access.sourceName !== "string" || typeof access.workspaceName !== "string") throw new Error("Invitation workspace source could not be verified.");
-    if (!Array.isArray(access.members) || !Array.isArray(access.invitations) || !access.invitationPolicy || !["allowed", "disabled", "require_approval"].includes(access.invitationPolicy.mode) || !Number.isSafeInteger(access.invitationPolicy.version) || typeof access.projectAccessTermsSupported !== "boolean" || typeof access.canManageMembers !== "boolean" || typeof access.invitationRequestsSupported !== "boolean" || access.addressBookAvailable !== undefined && typeof access.addressBookAvailable !== "boolean" || access.canManageAddressBook !== undefined && typeof access.canManageAddressBook !== "boolean" || access.canManageAddressBook === true && access.addressBookAvailable !== true || !Array.isArray(access.inviteScopes) || access.inviteScopes.some(scope => !["organization", "department", "client", "project"].includes(scope.type) || typeof scope.publicId !== "string" || typeof scope.displayName !== "string" || typeof scope.projectEndSupported !== "boolean" || !Array.isArray(scope.capabilities) || scope.capabilities.some(capability => !["delivery.view", "request.create"].includes(capability))) || !Array.isArray(access.projectAccessOptions) || access.projectAccessOptions.some(option => typeof option.projectPublicId !== "string" || typeof option.projectEndSupported !== "boolean") || !access.canManageMembers && (access.members.length > 0 || access.invitations.length > 0)) throw new Error("Invitation settings could not be verified. Refresh team access before continuing.");
+    if (!Array.isArray(access.members) || access.members.some(member=>member.managerVersion!==undefined&&(!Number.isSafeInteger(member.managerVersion)||member.managerVersion<0)||member.canChangeManager!==undefined&&typeof member.canChangeManager!=="boolean") || !Array.isArray(access.invitations) || !access.invitationPolicy || !["allowed", "disabled", "require_approval"].includes(access.invitationPolicy.mode) || !Number.isSafeInteger(access.invitationPolicy.version) || typeof access.projectAccessTermsSupported !== "boolean" || typeof access.canManageMembers !== "boolean" || typeof access.invitationRequestsSupported !== "boolean" || access.peerAdminManagement!==undefined&&typeof access.peerAdminManagement!=="boolean" || access.peerAdminManagement===true&&!access.canManageMembers || access.addressBookAvailable !== undefined && typeof access.addressBookAvailable !== "boolean" || access.canManageAddressBook !== undefined && typeof access.canManageAddressBook !== "boolean" || access.canManageAddressBook === true && access.addressBookAvailable !== true || !Array.isArray(access.inviteScopes) || access.inviteScopes.some(scope => !["organization", "department", "client", "project"].includes(scope.type) || typeof scope.publicId !== "string" || typeof scope.displayName !== "string" || typeof scope.projectEndSupported !== "boolean" || !Array.isArray(scope.capabilities) || scope.capabilities.some(capability => !["delivery.view", "request.create"].includes(capability))) || !Array.isArray(access.projectAccessOptions) || access.projectAccessOptions.some(option => typeof option.projectPublicId !== "string" || typeof option.projectEndSupported !== "boolean") || !access.canManageMembers && (access.members.length > 0 || access.invitations.length > 0)) throw new Error("Invitation settings could not be verified. Refresh team access before continuing.");
     const entries: PortalWorkspaceEntry[] = access.inviteScopes.filter(scope => scope.capabilities.length > 0).map(scope => ({...scope, parentPublicId: null, sourceVersion: ""}));
     const availableScopes = entries.filter((entry): entry is PortalWorkspaceEntry & { type: PortalHierarchyScopeType } =>
       invitationScopeTypes.has(entry.type) && (entry.type === "project" || hierarchyScopedInvitations));
@@ -2321,7 +2325,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     setMembers(access.members);
     setInvitations(access.invitations);
     setPolicy(access.invitationPolicy); setTermsSupported(access.projectAccessTermsSupported); setAccessOptions(access.projectAccessOptions); setReady(true);
-    setCanManageMembers(access.canManageMembers); setInviteScopes(access.inviteScopes); setRequestsSupported(access.invitationRequestsSupported);
+    setCanManageMembers(access.canManageMembers); setPeerAdminManagement(access.peerAdminManagement===true); setInviteScopes(access.inviteScopes); setRequestsSupported(access.invitationRequestsSupported);
     setAddressBookAvailable(access.addressBookAvailable === true); setCanManageAddressBook(access.canManageAddressBook === true);
     if (access.addressBookAvailable !== true || access.canManageAddressBook !== true) setAddressContact(null);
     const fallbackCapabilities = access.inviteScopes.find(scope => scope.type === fallback?.type && scope.publicId === fallback?.publicId)?.capabilities ?? [];
@@ -2345,7 +2349,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
 
   const selectWorkspace = async (id: string) => {
     if (mutationBusy.current || uncertain || historyLocked || addressBookLocked) return;
-    lifetime.current++; readController.current?.abort(); setWorkspaceId(id); setError(""); setEmail(""); setAddressContact(null); setOrganizationWide(false); setWideConfirmed(false); setCanRequest(false); clearReview(); await refreshAccess(id);
+    lifetime.current++; readController.current?.abort(); setWorkspaceId(id); setError(""); setEmail(""); setAddressContact(null); setOrganizationWide(false); setWideConfirmed(false); setCanRequest(false); setReviewedManager(null); pendingManager.current=null; clearReview(); await refreshAccess(id);
   };
 
   const invite = async (event: FormEvent) => {
@@ -2409,6 +2413,25 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     } catch (caught) { if (!controller.signal.aborted && generation === lifetime.current) { if ([401, 403, 404, 409].includes((caught as RequestError).status ?? 0)) clearProtected(); setError(invitationError(caught)); } }
     finally { mutationBusy.current = false; if (!controller.signal.aborted && generation === lifetime.current) setBusy(false); }
   };
+  const saveManagerChange=async()=>{
+    if(mutationBusy.current||historyLocked||addressBookLocked||!ready||!peerAdminManagement)return;
+    const reviewedChange=reviewedManager;
+    const operation=pendingManager.current??(reviewedChange&&Number.isSafeInteger(reviewedChange.member.managerVersion)
+      ?{workspaceId,identityId:reviewedChange.member.identityId,manager:reviewedChange.manager,expectedVersion:reviewedChange.member.managerVersion!,key:crypto.randomUUID()}:null);
+    if(!operation||operation.workspaceId!==workspaceId)return;
+    pendingManager.current=operation;mutationBusy.current=true;readController.current?.abort();const controller=new AbortController(),generation=lifetime.current;mutationController.current=controller;
+    setBusy(true);setError("");setUncertain(false);
+    try{const result=await changePortalWorkspacePeerAdministrator(operation.workspaceId,operation.identityId,{manager:operation.manager,expectedVersion:operation.expectedVersion},undefined,{idempotencyKey:operation.key,signal:controller.signal});
+      if(controller.signal.aborted||generation!==lifetime.current)return;
+      if(result.manager!==operation.manager||result.version!==operation.expectedVersion+1)throw new Error("The administrator change could not be confirmed.");
+      pendingManager.current=null;setReviewedManager(null);setMessage(operation.manager?"Administrator access added. This person can now manage organization access.":"Administrator access removed. The person's ordinary workspace access is unchanged.");
+      await refreshAccess(operation.workspaceId);
+    }catch(caught){if(controller.signal.aborted||generation!==lifetime.current)return;const status=(caught as RequestError).status;
+      if(status&&[401,403,404].includes(status)){pendingManager.current=null;clearProtected();setError(invitationError(caught));}
+      else if(status===409){pendingManager.current=null;setReviewedManager(null);setError((caught as RequestError).message||"Team access changed. Refresh before trying again.");await refreshAccess(operation.workspaceId);}
+      else{setUncertain(true);setError("The administrator change is not confirmed. Retry the same change safely before making another team change.");}}
+    finally{mutationBusy.current=false;if(!controller.signal.aborted&&generation===lifetime.current)setBusy(false);}
+  };
 
   const rows = hierarchyBrowserRows(hierarchy);
   const normalizedSearch = scopeSearch.trim().toLocaleLowerCase();
@@ -2426,7 +2449,8 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     ? "Give access across this entire organization workspace"
     : "Give access across this entire client workspace";
   const approvalRequired = policy?.mode === "require_approval";
-  const formDisabled = !ready || policy?.mode === "disabled" || !(approvalRequired ? requestsSupported : invitationEmailDelivery) || busy || uncertain || historyLocked || addressBookLocked;
+  const formDisabled = !ready || policy?.mode === "disabled" || !(approvalRequired ? requestsSupported : invitationEmailDelivery) || busy || uncertain || historyLocked || addressBookLocked || reviewedManager !== null;
+  const managerActionDisabled = busy || uncertain || historyLocked || addressBookLocked || !ready || !peerAdminManagement;
   const projectScope = !organizationWide && selectedScope?.type === "project";
   const projectEndSupported = projectScope && accessOptions.some(option => option.projectPublicId === selectedScope?.publicId && option.projectEndSupported);
   const termDescription = (terms: PortalProjectAccessTermsInput | undefined | null) => !terms ? "Existing access — unclassified" : terms.kind === "customer" ? "Customer — until revoked" : terms.mode === "project_end" ? "Collaborator — project completion + 7 days" : terms.mode === "specific_date" ? `Collaborator — until ${formatDate(terms.expiresAt!)}` : "Collaborator — until revoked";
@@ -2441,7 +2465,7 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
     {approvalRequired && <p className="portal-info-notice" role="status">Administrator approval is required. Submit the exact recipient, scope, and duration for review. A request does not issue an invitation or grant access.</p>}
     {ready && !canManageMembers && <p className="portal-copy">Only scopes you can delegate and your own invitation requests are shown. Workspace member records are not available with this access.</p>}
     {error && <p className="portal-form-error" role="alert">{error}</p>}{message && <p role="status">{message}</p>}
-    {uncertain && <button className="button-primary" disabled={busy || loading || !ready || policy?.mode === "disabled" || !!pendingInvite.current?.input.accessTerms && !termsSupported} onClick={() => void sendInvitation()}>Retry same invitation</button>}
+    {uncertain && <button className="button-primary" disabled={busy || loading || !ready || (pendingManager.current ? !peerAdminManagement : policy?.mode === "disabled" || !!pendingInvite.current?.input.accessTerms && !termsSupported)} onClick={() => pendingManager.current ? void saveManagerChange() : void sendInvitation()}>{pendingManager.current ? "Retry same administrator change" : "Retry same invitation"}</button>}
     {ready && currentWorkspace?.rootType === "organization" && addressBookAvailable && canManageAddressBook && accessSource && <PortalAddressBook key={`${workspaceId}:${accessSource}`} workspaceId={workspaceId} sourceId={accessSource} locked={busy || uncertain || historyLocked} onLock={setAddressBookLocked} onContactsChanged={() => setAddressContact(null)} onInvalidated={message => {setAddressContact(null); clearProtected(); setError(message);}} />}
     <form onSubmit={invite} className="portal-team-invite-form">
       <h3>Invite a collaborator</h3>
@@ -2480,8 +2504,9 @@ function WorkspaceTeamPanel({ invitationEmailDelivery, hierarchyScopedInvitation
       {reviewed && <section className="portal-info-notice" aria-label={approvalRequired ? "Review approval request" : "Review collaborator invitation"}><h4>{approvalRequired ? "Review approval request" : "Review invitation"}</h4><p><strong>{reviewed.email}</strong> · {reviewedScopeName || "Selected authorized scope"}</p>{reviewed.addressContact && addressContact?.id === reviewed.addressContact.id && <p>Copied from {addressContact.displayName} in this workspace address book. The invitation remains an independent access record.</p>}<p>{invitationCapabilitiesLabel(reviewed.capabilities)}</p><p>{reviewed.accessTerms ? termDescription(reviewed.accessTerms) : "Selected hierarchy scope — existing access rules apply"}</p>{reviewed.accessTerms?.mode === "project_end" && <p>Reopening does not renew expired access.</p>}{approvalRequired ? <p>This submits an administrator approval request only. It sends no invitation email and grants no access. If approved later, the invitation link lasts seven days separately from access duration.</p> : <p>Invitation link: seven days. Access duration is separate.</p>}<div className="actions"><button type="button" className="button-primary" disabled={formDisabled} onClick={() => void sendInvitation()}>{busy ? "Saving..." : approvalRequired ? "Request approval" : "Send invitation"}</button><button type="button" className="button-ghost" disabled={busy || uncertain} onClick={() => setReviewed(null)}>Cancel review</button></div></section>}
     </form>
     {ready && accessSource && <PortalInvitationRequests key={`${workspaceId}:${historyRevision}`} workspaceId={workspaceId} sourceId={accessSource} supported={requestsSupported} locked={busy || uncertain || addressBookLocked} onLock={setHistoryLocked} onInvalidated={message => { clearProtected(); setError(message); }} />}
+    {reviewedManager&&<section className="portal-danger-disclosure" aria-label="Review administrator access change"><h4>{reviewedManager.manager?"Add organization administrator?":"Remove organization administrator?"}</h4><p><strong>{reviewedManager.member.email??"Verified portal user"}</strong></p><p>{reviewedManager.manager?"This person will be able to invite, suspend, promote, and demote eligible people across this organization workspace.":"This removes team-management authority only. The person's ordinary workspace and delivery access stays in place."}</p><div className="actions"><button type="button" className="button-primary" disabled={managerActionDisabled} onClick={()=>void saveManagerChange()}>{busy?"Saving…":reviewedManager.manager?"Add administrator":"Remove administrator"}</button><button type="button" className="button-ghost" disabled={busy||uncertain||historyLocked||addressBookLocked} onClick={()=>setReviewedManager(null)}>Cancel</button></div></section>}
     {canManageMembers && <div className="portal-team-lists">
-      <section><h3>People</h3>{members.map(member => <div className="portal-team-row" key={member.identityId}><span><strong>{member.email ?? "Verified portal user"}</strong><small>{member.manager ? "Manager" : "Member"} · {member.status}</small></span>{member.status === "active" && <button className="button-ghost button-small" disabled={busy || uncertain || addressBookLocked || !ready} onClick={() => void removeAccess("member", member.identityId)}>Suspend</button>}</div>)}</section>
+      <section><h3>People</h3>{members.map(member => <div className="portal-team-row" key={member.identityId}><span><strong>{member.email ?? "Verified portal user"}</strong><small>{member.manager ? "Administrator" : "Member"} · {member.status}</small>{member.manager&&member.source==="project_alpha"&&<small>Administrator authority is managed in Project Alpha.</small>}</span><div className="actions">{peerAdminManagement&&member.status==="active"&&member.canChangeManager===true&&<button className="button-ghost button-small" disabled={managerActionDisabled||reviewed!==null} onClick={()=>{setReviewed(null);setReviewedManager({member,manager:!member.manager});setMessage("");setError("");}}>{member.manager?"Remove administrator":"Make administrator"}</button>}{member.status === "active" && <button className="button-ghost button-small" disabled={busy || uncertain || historyLocked || addressBookLocked || !ready || reviewedManager !== null} onClick={() => void removeAccess("member", member.identityId)}>Suspend</button>}</div></div>)}</section>
       <section><h3>Invitations</h3>{ready && invitations.length === 0 ? <p className="portal-copy">No invitations yet.</p> : invitations.map(invitation => {
         const scopedEntry = invitation.scope.publicId ? hierarchy.find(entry => entry.type === invitation.scope.type && entry.publicId === invitation.scope.publicId) : null;
         return <div className="portal-team-row" key={invitation.id}><span><strong>{invitation.email}</strong><small>{scopedEntry ? `${scopedEntry.displayName} - ` : ""}{hierarchyScopeLabel(invitation.scope.type)} - {invitation.status}</small><small>{termDescription(invitation.accessTerms)}</small><small>Invitation link expires {formatDate(invitation.expiresAt)}</small>{invitation.accessTerms && <small>{invitation.accessTerms.expired ? "Access expired" : invitation.accessTerms.effectiveExpiresAt ? `Access expires ${formatDate(invitation.accessTerms.effectiveExpiresAt)}` : invitation.accessTerms.completionPending ? "Access awaits verified project completion, then 7 days" : "Access remains until revoked"}</small>}</span>{invitation.status === "pending" && <button className="button-ghost button-small" disabled={busy || uncertain || addressBookLocked || !ready} onClick={() => void removeAccess("invitation", invitation.id)}>Revoke</button>}</div>;

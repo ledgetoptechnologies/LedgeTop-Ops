@@ -414,12 +414,12 @@ export async function loadPortalPastDeliveryLocations(
 export interface PortalWorkspace { id: string; rootType: "organization" | "standalone_client"; rootPublicId: string; displayName: string; resourceMode?: "native"; sourceId?: string }
 export type PortalHierarchyScopeType = "organization" | "department" | "client" | "project";
 export interface PortalWorkspaceEntry { type: PortalHierarchyScopeType | "standalone_client" | "contact"; publicId: string; parentPublicId: string | null; displayName: string; sourceVersion: string }
-export interface PortalWorkspaceMember { identityId: string; email: string | null; status: "active" | "suspended" | "revoked"; manager: boolean; source: string }
+export interface PortalWorkspaceMember { identityId: string; email: string | null; status: "active" | "suspended" | "revoked"; manager: boolean; source: string; managerVersion?: number; canChangeManager?: boolean }
 export interface PortalProjectAccessTermsInput { kind: "customer" | "collaborator"; mode: "specific_date" | "project_end" | "until_revoked"; expiresAt: string | null }
 export interface PortalProjectAccessTerms extends PortalProjectAccessTermsInput { id: string; effectiveExpiresAt: string | null; completionPending: boolean; expired: boolean }
 export interface PortalWorkspaceInvitation { id: string; email: string; status: "pending" | "accepted" | "revoked" | "expired"; scope: { type: PortalHierarchyScopeType | "workspace"; publicId: string | null }; capabilities: string[]; expiresAt: string; accessTerms: PortalProjectAccessTerms | null }
 export interface PortalInviteScope { type: PortalHierarchyScopeType; publicId: string; displayName: string; capabilities: Array<"delivery.view" | "request.create">; projectEndSupported: boolean }
-export interface PortalWorkspaceAccess { sourceId: string; sourceName: string; workspaceName: string; members: PortalWorkspaceMember[]; invitations: PortalWorkspaceInvitation[]; invitationPolicy: { mode: "allowed" | "disabled" | "require_approval"; version: number }; projectAccessTermsSupported: boolean; projectAccessOptions: Array<{ projectPublicId: string; projectEndSupported: boolean }>; canManageMembers: boolean; inviteScopes: PortalInviteScope[]; invitationRequestsSupported: boolean; addressBookAvailable?: boolean; canManageAddressBook?: boolean }
+export interface PortalWorkspaceAccess { sourceId: string; sourceName: string; workspaceName: string; members: PortalWorkspaceMember[]; invitations: PortalWorkspaceInvitation[]; invitationPolicy: { mode: "allowed" | "disabled" | "require_approval"; version: number }; projectAccessTermsSupported: boolean; projectAccessOptions: Array<{ projectPublicId: string; projectEndSupported: boolean }>; canManageMembers: boolean; inviteScopes: PortalInviteScope[]; invitationRequestsSupported: boolean; addressBookAvailable?: boolean; canManageAddressBook?: boolean; peerAdminManagement?: boolean }
 export interface PortalWorkspaceInvitationInput { email: string; projectPublicId?: string; targetScope?: { type: PortalHierarchyScopeType; publicId: string }; organizationWide?: boolean; confirmOrganizationWide?: boolean; capabilities: Array<"delivery.view" | "request.create">; accessTerms?: PortalProjectAccessTermsInput; expectedInvitationPolicyVersion?: number; addressContact?: {id: string; expectedVersion: number} }
 export interface PortalDelegatedShareTarget {
   delegationId: string;
@@ -523,6 +523,14 @@ export interface PortalServiceCatalogItem {
   displayOrder: number;
   geometryRequirement: "none" | "optional" | "required";
   questions: PortalServiceQuestion[];
+}
+
+export async function changePortalWorkspacePeerAdministrator(workspaceId:string,identityId:string,input:{manager:boolean;expectedVersion:number},
+  request:PortalRequest=requestJson,options?:{idempotencyKey:string;signal?:AbortSignal}):Promise<{outcome:"created"|"replayed";manager:boolean;version:number}>{
+  return request(`/api/client/v2/workspaces/${encodeURIComponent(workspaceId)}/members/${encodeURIComponent(identityId)}/manager`,{
+    method:"PUT",headers:{"Content-Type":"application/json","Idempotency-Key":options?.idempotencyKey??crypto.randomUUID()},body:JSON.stringify(input),
+    ...(options?.signal?{signal:options.signal}:{})
+  });
 }
 
 export type PortalRequestReadinessReason = "ready" | "legacy_access_unavailable" | "request_not_permitted" | "project_unavailable" | "catalog_unavailable" | "request_unavailable";

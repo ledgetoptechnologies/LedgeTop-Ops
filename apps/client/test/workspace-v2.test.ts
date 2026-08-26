@@ -6,6 +6,7 @@ import legacyBridgeMigration from "../migrations/0132_portal_v2_legacy_member_br
 import accessReceiptMigration from "../migrations/0133_portal_invitation_access_enrollment_receipts.sql?raw";
 import securityFollowupsMigration from "../migrations/0135_security_scan_followups.sql?raw";
 import identityDenialMigration from "../migrations/0136_portal_v2_identity_denials.sql?raw";
+import peerAdminMigration from "../migrations/0167_workspace_peer_administrators.sql?raw";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { d1ClientPortalRepository } from "../src/worker/client-portal/repository";
 import type { VerifiedClientPrincipal } from "../src/worker/client-portal/types";
@@ -24,6 +25,7 @@ import {
   resolveEffectivePortalWorkspaceContext,
 } from "../src/worker/client-portal/workspace-v2";
 import {
+  changeWorkspacePeerAdministrator,
   createWorkspaceInvitation,
   listWorkspaceAccess,
   revokeWorkspaceInvitation,
@@ -132,6 +134,10 @@ describe("client workspace hierarchy v2", () => {
       .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
       .replace(/\s*\n\s*/g, " "));
     await db.exec(identityDenialMigration
+      .replace(/^\s*--.*$/gm, "")
+      .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
+      .replace(/\s*\n\s*/g, " "));
+    await db.exec(peerAdminMigration
       .replace(/^\s*--.*$/gm, "")
       .replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "")
       .replace(/\s*\n\s*/g, " "));
@@ -902,6 +908,146 @@ describe("client workspace hierarchy v2", () => {
     expect(await db.prepare("SELECT status FROM portal_v2_workspace_memberships WHERE workspace_id='workspace-account-a' AND identity_id='identity-one'").first("status")).toBe("active");
     await db.prepare("UPDATE portal_v2_workspace_memberships SET source_type='legacy' WHERE workspace_id='workspace-account-a' AND identity_id='identity-one'").run();
   });
+
+  it("promotes and demotes only eligible local peers with CAS, replay, audit, and last-manager protection", async () => {
+    const peerEnv={...env,CLIENT_PORTAL_PEER_ADMIN_ENABLED:"true",CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:"true"};
+    const actor={issuer,subject:"peer-admin-actor",email:"peer-admin-actor@example.test"};
+    const target={issuer,subject:"peer-admin-target",email:"peer-admin-target@example.test"};
+    await db.batch([
+      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_organization_id,project_alpha_source_id) VALUES('peer-account','Peer Org','active','peer-org','project-alpha:primary')"),
+      db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('peer-legacy-actor','peer-account',?,?,?)").bind(actor.issuer,actor.subject,actor.email),
+      db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('peer-legacy-target','peer-account',?,?,?)").bind(target.issuer,target.subject,target.email),
+      db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('peer-account','peer-legacy-actor','manager')"),
+      db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('peer-account','peer-legacy-target','member')"),
+      db.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES('peer-actor',?,?,?)").bind(actor.issuer,actor.subject,actor.email),
+      db.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES('peer-target',?,?,?)").bind(target.issuer,target.subject,target.email),
+      db.prepare("INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,legacy_account_id,project_alpha_source_id,display_name,status) VALUES('peer-workspace','organization','peer-org','peer-account','project-alpha:primary','Peer Org','active')"),
+      db.prepare("INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status) VALUES('peer-actor-membership','peer-workspace','peer-actor','operations','active')"),
+      db.prepare("INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status) VALUES('peer-target-membership','peer-workspace','peer-target','client_invitation','active')"),
+      db.prepare("INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete) VALUES('peer-generation','peer-workspace','peer-generation',1,'active',1)"),
+      db.prepare("INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,display_name,source_version) VALUES('peer-workspace','peer-generation','organization','peer-org','Peer Org','1')"),
+      db.prepare("INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES('peer-workspace','peer-generation',1)"),
+      db.prepare("INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status) VALUES('peer-actor-view','peer-workspace','peer-actor','workspace.view','allow','workspace','peer-workspace','operations','active')"),
+      db.prepare("INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status) VALUES('peer-actor-manage','peer-workspace','peer-actor','member.manage','allow','workspace','peer-workspace','operations','active')"),
+      db.prepare("INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status) VALUES('peer-target-view','peer-workspace','peer-target','workspace.view','allow','workspace','peer-workspace','client_invitation','active')"),
+    ]);
+    const initialAccess=await listWorkspaceAccess(peerEnv,actor,"peer-workspace");
+    expect(initialAccess?.peerAdminManagement).toBe(true);
+    expect(initialAccess?.members.find(member=>member.identityId==="peer-target")).toMatchObject({manager:false,managerVersion:0,canChangeManager:true});
+    const peerRouter=createClientPortalRouter({resolvePrincipal:async()=>actor,repository:d1ClientPortalRepository});
+    const routeBody={method:"PUT",headers:{Origin:"https://client.test","Content-Type":"application/json","Idempotency-Key":"peer-admin-route-000001"},body:JSON.stringify({manager:true,expectedVersion:0})};
+    expect((await peerRouter.request("https://client.test/v2/workspaces/peer-workspace/members/peer-target/manager",routeBody,{...peerEnv,CLIENT_PORTAL_PEER_ADMIN_ENABLED:"false"})).status).toBe(404);
+    expect((await peerRouter.request("https://client.test/v2/workspaces/peer-workspace/members/peer-target/manager",{...routeBody,headers:{...routeBody.headers,Origin:"https://evil.test"}},peerEnv)).status).toBe(403);
+    const promoted=await changeWorkspacePeerAdministrator(peerEnv,actor,"peer-workspace","peer-target",{manager:true,expectedVersion:0},"peer-admin-promote-0001");
+    expect(promoted).toEqual({outcome:"created",manager:true,version:1});
+    expect(await db.prepare("SELECT status FROM portal_v2_entitlements WHERE workspace_id='peer-workspace' AND identity_id='peer-target' AND capability='member.manage' AND entitlement_version=1").first("status")).toBe("active");
+    expect(await changeWorkspacePeerAdministrator(peerEnv,actor,"peer-workspace","peer-target",{manager:true,expectedVersion:0},"peer-admin-promote-0001"))
+      .toEqual({outcome:"replayed",manager:true,version:1});
+    expect(await changeWorkspacePeerAdministrator(peerEnv,actor,"peer-workspace","peer-target",{manager:false,expectedVersion:1},"peer-admin-promote-0001"))
+      .toEqual({outcome:"conflict"});
+    expect(await changeWorkspacePeerAdministrator(peerEnv,actor,"peer-workspace","peer-target",{manager:false,expectedVersion:0},"peer-admin-demote-stale-0001"))
+      .toEqual({outcome:"changed"});
+    const demoted=await changeWorkspacePeerAdministrator(peerEnv,actor,"peer-workspace","peer-target",{manager:false,expectedVersion:1},"peer-admin-demote-000001");
+    expect(demoted).toEqual({outcome:"created",manager:false,version:2});
+    expect(await db.prepare("SELECT status FROM portal_v2_entitlements WHERE workspace_id='peer-workspace' AND identity_id='peer-target' AND capability='member.manage' AND entitlement_version=2").first("status")).toBe("revoked");
+    expect(await db.prepare("SELECT status FROM portal_v2_entitlements WHERE id='peer-target-view'").first("status")).toBe("active");
+    expect(await db.prepare("SELECT status FROM portal_v2_workspace_memberships WHERE workspace_id='peer-workspace' AND identity_id='peer-target'").first("status")).toBe("active");
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_workspace_peer_admin_audit WHERE workspace_id='peer-workspace'").first("count")).toBe(2);
+
+    expect(await changeWorkspacePeerAdministrator({...peerEnv,CLIENT_PORTAL_PEER_ADMIN_ENABLED:"false"},actor,"peer-workspace","peer-target",{manager:true,expectedVersion:2},"peer-admin-disabled-0001"))
+      .toEqual({outcome:"disabled"});
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET source_type='project_alpha' WHERE workspace_id='peer-workspace' AND identity_id='peer-target'").run();
+    expect(await changeWorkspacePeerAdministrator(peerEnv,actor,"peer-workspace","peer-target",{manager:true,expectedVersion:2},"peer-admin-source-000001"))
+      .toEqual({outcome:"managed_source"});
+    await db.prepare("UPDATE portal_v2_workspace_memberships SET source_type='client_invitation' WHERE workspace_id='peer-workspace' AND identity_id='peer-target'").run();
+
+    await db.prepare("INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status) VALUES('peer-target-manager-deny','peer-workspace','peer-target','member.manage','deny','workspace','peer-workspace','operations','active')").run();
+    expect(await changeWorkspacePeerAdministrator(peerEnv,actor,"peer-workspace","peer-target",{manager:true,expectedVersion:2},"peer-admin-denied-00001"))
+      .toEqual({outcome:"ineligible"});
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='peer-target-manager-deny'").run();
+
+    await db.prepare(`INSERT INTO portal_v2_identity_denials
+      (id,identity_id,scope_type,reason_code,created_by_actor_type,created_by_actor_id)
+      VALUES('peer-target-global-deny','peer-target','global','security-review','system','test')`).run();
+    expect(await changeWorkspacePeerAdministrator(peerEnv,actor,"peer-workspace","peer-target",{manager:true,expectedVersion:2},"peer-admin-identity-deny"))
+      .toEqual({outcome:"ineligible"});
+    await db.prepare(`UPDATE portal_v2_identity_denials SET status='revoked',revoked_at=datetime('now'),
+      revoked_by_actor_type='system',revoked_by_actor_id='test' WHERE id='peer-target-global-deny'`).run();
+
+    await db.prepare(`WITH RECURSIVE sequence(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM sequence WHERE n<201)
+      INSERT INTO portal_v2_identity_denials
+        (id,identity_id,workspace_id,scope_type,scope_public_id,reason_code,created_by_actor_type,created_by_actor_id)
+      SELECT 'peer-capacity-'||printf('%03d',n),'peer-target','peer-workspace','project','unrelated-'||n,
+        'capacity-test','system','test' FROM sequence`).run();
+    expect(await changeWorkspacePeerAdministrator(peerEnv,actor,"peer-workspace","peer-target",{manager:true,expectedVersion:2},"peer-admin-capacity-001"))
+      .toEqual({outcome:"ineligible"});
+    await db.prepare(`UPDATE portal_v2_identity_denials SET status='revoked',revoked_at=datetime('now'),
+      revoked_by_actor_type='system',revoked_by_actor_id='test' WHERE id LIKE 'peer-capacity-%'`).run();
+
+    let injectActorDeny=true;
+    const racingDatabase={
+      prepare:db.prepare.bind(db),
+      batch:async(statements:D1PreparedStatement[])=>{
+        if(injectActorDeny){injectActorDeny=false;await db.prepare(`INSERT INTO portal_v2_identity_denials
+          (id,identity_id,workspace_id,scope_type,scope_public_id,reason_code,created_by_actor_type,created_by_actor_id)
+          VALUES('peer-actor-race-deny','peer-actor','peer-workspace','workspace','peer-workspace','race-test','system','test')`).run();}
+        return db.batch(statements);
+      },
+    } as unknown as D1Database;
+    expect(await changeWorkspacePeerAdministrator({...peerEnv,DELIVERY_DB:racingDatabase},actor,"peer-workspace","peer-target",
+      {manager:true,expectedVersion:2},"peer-admin-race-deny-01")).toEqual({outcome:"denied"});
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_workspace_peer_admin_commands WHERE idempotency_key='peer-admin-race-deny-01'").first("count")).toBe(0);
+    await db.prepare(`UPDATE portal_v2_identity_denials SET status='revoked',revoked_at=datetime('now'),
+      revoked_by_actor_type='system',revoked_by_actor_id='test' WHERE id='peer-actor-race-deny'`).run();
+
+    let rebindSource=true;
+    const sourceRacingDatabase={
+      prepare:db.prepare.bind(db),
+      batch:async(statements:D1PreparedStatement[])=>{
+        if(rebindSource){rebindSource=false;await db.prepare("UPDATE client_accounts SET project_alpha_source_id='project-alpha:secondary' WHERE id='peer-account'").run();}
+        return db.batch(statements);
+      },
+    } as unknown as D1Database;
+    expect(await changeWorkspacePeerAdministrator({...peerEnv,DELIVERY_DB:sourceRacingDatabase},actor,"peer-workspace","peer-target",
+      {manager:true,expectedVersion:2},"peer-admin-source-race-01")).toEqual({outcome:"denied"});
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_workspace_peer_admin_commands WHERE idempotency_key='peer-admin-source-race-01'").first("count")).toBe(0);
+    await db.prepare("UPDATE client_accounts SET project_alpha_source_id='project-alpha:primary' WHERE id='peer-account'").run();
+
+    let overflowActorPolicy=true;
+    const capacityRacingDatabase={
+      prepare:db.prepare.bind(db),
+      batch:async(statements:D1PreparedStatement[])=>{
+        if(overflowActorPolicy){overflowActorPolicy=false;await db.prepare(`WITH RECURSIVE sequence(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM sequence WHERE n<201)
+          INSERT INTO portal_v2_entitlements
+            (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status)
+          SELECT 'peer-actor-capacity-'||printf('%03d',n),'peer-workspace','peer-actor','member.manage','allow','project',
+            'unrelated-'||n,'operations','active' FROM sequence`).run();}
+        return db.batch(statements);
+      },
+    } as unknown as D1Database;
+    expect(await changeWorkspacePeerAdministrator({...peerEnv,DELIVERY_DB:capacityRacingDatabase},actor,"peer-workspace","peer-target",
+      {manager:true,expectedVersion:2},"peer-admin-rule-capacity" )).toEqual({outcome:"denied"});
+    expect(await db.prepare("SELECT COUNT(*) count FROM portal_workspace_peer_admin_commands WHERE idempotency_key='peer-admin-rule-capacity'").first("count")).toBe(0);
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id LIKE 'peer-actor-capacity-%'").run();
+
+    expect(await changeWorkspacePeerAdministrator(peerEnv,actor,"peer-workspace","peer-target",{manager:true,expectedVersion:2},"peer-admin-promote-0002"))
+      .toEqual({outcome:"created",manager:true,version:3});
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='peer-actor-manage'").run();
+    await db.batch([
+      db.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES('peer-future',?,'peer-admin-future','future@example.test')").bind(issuer),
+      db.prepare("INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type,status) VALUES('peer-future-membership','peer-workspace','peer-future','operations','active')"),
+      db.prepare("INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status) VALUES('peer-future-view','peer-workspace','peer-future','workspace.view','allow','workspace','peer-workspace','operations','active')"),
+      db.prepare(`INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status,valid_from)
+        VALUES('peer-future-manage','peer-workspace','peer-future','member.manage','allow','workspace','peer-workspace','operations','active',datetime('now','+1 day'))`),
+    ]);
+    expect(await changeWorkspacePeerAdministrator(peerEnv,target,"peer-workspace","peer-target",{manager:false,expectedVersion:3},"peer-admin-last-0000001"))
+      .toEqual({outcome:"last_manager"});
+    await db.prepare("UPDATE portal_v2_entitlements SET valid_from=datetime('now') WHERE id='peer-future-manage'").run();
+    await db.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='peer-future-view'").run();
+    expect(await changeWorkspacePeerAdministrator(peerEnv,target,"peer-workspace","peer-target",{manager:false,expectedVersion:3},"peer-admin-last-no-view"))
+      .toEqual({outcome:"last_manager"});
+    expect(await db.prepare("SELECT status FROM portal_v2_entitlements WHERE workspace_id='peer-workspace' AND identity_id='peer-target' AND capability='member.manage' AND entitlement_version=3").first("status")).toBe("active");
+  },40_000);
 
   it("enforces same-origin and workspace authorization on membership HTTP routes", async () => {
     const router = createClientPortalRouter({ resolvePrincipal: async () => principal, repository: d1ClientPortalRepository });

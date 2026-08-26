@@ -270,3 +270,32 @@ erasure procedure. Project/site roles, crew observations, recurring-project
 copy rules and completed-project amendments remain product decisions; this
 checkpoint does not infer them. No migration, deployment, mail or push was
 performed.
+
+### Locally implemented peer-administrator checkpoint
+
+The Client Portal now has a default-off peer-administrator workflow for existing
+local organization members. Promotion and demotion preserve the membership and
+all ordinary capabilities; only the local `member.manage` overlay changes.
+
+The mutation requires current unlimited root authority, exact organization and
+source ownership, an expected manager version, an idempotency key, and
+transaction-time fences. Project Alpha-managed authority, finite/project-only
+members, stale versions, explicit denies, cross-workspace targets, and
+last-manager removal fail closed. The responsive UI adds a deliberate review
+step, operation-specific retry after an ambiguous response, separated mobile
+actions, and keeps suspension separate from role removal. See
+[peer administrator workflow](peer-administrator-workflow.md).
+
+Verification passed the 27-case workspace authorization suite, the 10-case
+full migration-chain Client Portal suite, four responsive peer-administrator
+browser cases, Client type checking, production build and generated-binding
+drift check. Regression coverage changes actor authority inside the D1 batch,
+including identity denial, source rebinding and excessive policy rows, and
+proves no command commits. Independent security and UX re-reviews found no
+release blocker.
+
+This closes the client-side multiple-administrator lifecycle locally. Identity
+reconciliation, authoritative per-customer service assignments, legacy grant
+reclassification, expiry notices, project memory, copy-forward and a unified
+audit timeline remain open. No production migration, flag change, deployment
+or push is included in this checkpoint.
