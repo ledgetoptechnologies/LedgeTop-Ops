@@ -7,6 +7,7 @@ import { ClientPortalAccessPanel, type PortalIdentityPage } from "./ClientPortal
 import { businessProjectHref } from "./business-project-route";
 import { ClientDirectory, clientDirectoryReturnPath, clientPortalStatus, type ClientSummary, type ClientHubCapabilities, type ClientRootNamespace } from "./ClientDirectory";
 import { ClientBusinessParty, SourceBusinessParty, type BusinessPartyReference } from "./ClientBusinessParty";
+import { ClientBusinessActivity } from "./ClientBusinessActivity";
 
 interface CollectionItem { row_key?: string }
 interface ClientContact extends CollectionItem {
@@ -341,6 +342,9 @@ function ClientWorkspace({ route, canReviewFeedback }: { route: ClientRoute; can
         {items => <div className="simple-rows">{items.map(account => <div key={collectionKey("accounts", account)}><div><strong>{account.display_name}</strong><small>Explicit account record</small>{canReviewFeedback && <a href={`/operations/feedback?accountId=${encodeURIComponent(account.id)}`}>View client feedback</a>}</div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div>}
       </ClientCollection></Card>
       {data.businessProjects && <BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects} />}
+      {data.client.root_namespace === "business" && data.client.source_id && data.contextVersion && <ClientBusinessActivity
+        root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: data.client.kind, publicId: data.client.public_id }}
+        contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
       <Card title="Shared projects"><ClientCollection {...collectionProps} collection="projects" label="Shared projects" initial={data.projects} page={data.pages?.projects}
         emptyTitle="No project access" emptyDetail="Projects remain unavailable until explicitly granted.">
         {items => <div className="simple-rows">{items.map(project => <div key={collectionKey("projects", project)}><div><strong>{project.project_name}</strong><small>{project.client_name} · {project.can_request_service ? "Requests allowed" : "View access only"}</small></div><StatusPill tone={project.active ? "success" : "neutral"}>{project.active ? "active" : "inactive"}</StatusPill></div>)}</div>}

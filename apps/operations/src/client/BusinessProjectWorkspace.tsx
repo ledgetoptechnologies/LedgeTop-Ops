@@ -3,6 +3,7 @@ import { Card, EmptyState, StatusPill } from "@ltds/ui";
 import type { Permission } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { ClientHub } from "./ClientHub";
+import { ClientBusinessActivity } from "./ClientBusinessActivity";
 import { clientDirectoryReturnPath } from "./ClientDirectory";
 import { businessProjectClientPath, clientWorkspaceFilters, readBusinessProjectRoute, type BusinessProjectRoute } from "./business-project-route";
 import "./BusinessProjectWorkspace.css";
@@ -72,6 +73,10 @@ function ProjectWorkspace({ route }: { route: BusinessProjectRoute }) {
     setState({ data: null, error: "", status: null, busy: true });
     setRevision(value => value + 1);
   };
+  const invalidate = (message: string, status = 409) => {
+    pending.current?.abort(); sequence.current += 1; refreshing.current = false;
+    setState({ data: null, error: message, status, busy: false });
+  };
   const detail = state.data, project = detail?.project;
   return <section className="business-project-workspace" aria-label="Business project workspace" aria-busy={state.busy}>
     <nav className="business-project-breadcrumbs" aria-label="Project breadcrumbs">
@@ -107,6 +112,8 @@ function ProjectWorkspace({ route }: { route: BusinessProjectRoute }) {
             : "A linked-contact reference was not included in the synchronized project record."}</p>}
         </Card>
       </div>
+      <ClientBusinessActivity key={revision} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
+        contextSignal={pending.current!.signal} onInvalidated={invalidate} />
       <p className="business-project-availability">Site/billing contact assignments and project notes are not provided by this connection yet.</p>
       <p className="business-project-refreshed">Project records refreshed {displayDate(detail.refreshedAt)}. A record refresh does not indicate project activity.</p>
     </>}

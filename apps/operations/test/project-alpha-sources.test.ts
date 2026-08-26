@@ -56,6 +56,44 @@ async function databaseFixture() {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("source-isolated business snapshots", () => {
+  it("captures first-load dated client/org/project observations after owner projection and does not turn replay clocks into activity", async () => {
+    const { runtime, ops, env } = await databaseFixture();
+    try {
+      const payload = snapshot("Dated");
+      for (const [collection, updatedAt] of [
+        ["organizations", "2026-01-01 01:02:03"],
+        ["clients", "2026-01-02 01:02:03"],
+        ["projects", "2026-01-03 01:02:03"],
+      ] as const) {
+        for (const row of payload[collection] as Array<Record<string, unknown>>) row.updated_at = updatedAt;
+      }
+      expect(await ops.prepare("SELECT count(*) n FROM pa_organizations").first("n")).toBe(0);
+      expect(await ops.prepare("SELECT count(*) n FROM pa_clients").first("n")).toBe(0);
+      vi.stubGlobal("fetch", vi.fn(async () => Response.json(payload)));
+      // The real writer projects clients before organizations. The client
+      // observation therefore requires the post-all-rows owner-resolution hook.
+      await syncProjectAlpha(env);
+      const before = (await ops.prepare("SELECT * FROM client_business_activity ORDER BY record_kind").all()).results;
+      expect(before).toHaveLength(3);
+      expect(before).toMatchObject([
+        { projection_source_id: PRIMARY_PROJECT_ALPHA_SOURCE.sourceId, record_kind: "client", record_id: "4",
+          root_kind: "organization", root_id: "3", origin: "source_observation", action: "source_record_updated",
+          occurred_at: "2026-01-02T01:02:03.000Z", source_updated_at: "2026-01-02T01:02:03.000Z" },
+        { projection_source_id: PRIMARY_PROJECT_ALPHA_SOURCE.sourceId, record_kind: "organization", record_id: "3",
+          root_kind: "organization", root_id: "3", origin: "source_observation", action: "source_record_updated",
+          occurred_at: "2026-01-01T01:02:03.000Z", source_updated_at: "2026-01-01T01:02:03.000Z" },
+        { projection_source_id: PRIMARY_PROJECT_ALPHA_SOURCE.sourceId, record_kind: "project", record_id: "5",
+          root_kind: "organization", root_id: "3", origin: "source_observation", action: "source_record_updated",
+          occurred_at: "2026-01-03T01:02:03.000Z", source_updated_at: "2026-01-03T01:02:03.000Z" },
+      ]);
+      payload.generated_at = "2026-08-27T00:00:00Z";
+      await syncProjectAlpha(env);
+      expect((await ops.prepare("SELECT * FROM client_business_activity ORDER BY record_kind").all()).results).toEqual(before);
+      expect(await ops.prepare("SELECT count(*) n FROM client_business_activity WHERE record_kind NOT IN ('client','organization','project') OR occurred_at>=?")
+        .bind(at).first("n")).toBe(0);
+    } finally { await runtime.dispose(); }
+  }, 60_000);
+
   it("preserves primary IDs and all typed relationships while secondary IDs, payloads, health and fingerprints stay independent", async () => {
     const { runtime, ops, delivery, env } = await databaseFixture();
     try {

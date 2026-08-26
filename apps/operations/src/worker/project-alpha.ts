@@ -1,4 +1,5 @@
 import type { Env } from "./types";
+import { businessActivityObservationStatement } from "./client-business-activity";
 import { assertProjectAlphaConnectorProof, connectorFenceStatement, resolveProjectAlphaConnector,
   type ProjectAlphaConnectorProof } from "./project-alpha-connectors";
 import { PRIMARY_PROJECT_ALPHA_SOURCE, createProjectAlphaSourceContext, mapProjectAlphaSourceRow,
@@ -747,6 +748,17 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     const ids = await prepareProjectAlphaSourceRecords(mappingDb,source,refs);
     await runBatches(env.OPS_DB, projectionStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt,source,ids),refreshLease,proof);
     await runBatches(env.OPS_DB, reconciliationStatements(env.OPS_DB, data, syncId, changed, applicationKey,generatedAt,source),refreshLease,proof);
+    // Clients are written before organizations. Resolve their observation owner
+    // only after all source rows exist; this never uses generated_at or sync time.
+    const activityStatements:D1PreparedStatement[]=[];
+    for(const [collection,kind] of [["clients","client"],["organizations","organization"],["projects","project"]] as const){
+      if(!changed.has(collection))continue;
+      for(const row of data[collection]){
+        const id=text(row.id);
+        if(id)activityStatements.push(businessActivityObservationStatement(env.OPS_DB,source.sourceId,kind,ids.get(kind,id)));
+      }
+    }
+    await runBatches(env.OPS_DB,activityStatements,refreshLease,proof);
     await refreshLease();
     // Legacy Delivery references are still primary-owned. A business source
     // cannot update account eligibility, project grants or delivery mappings.

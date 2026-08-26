@@ -70,7 +70,7 @@ describe("authenticated connector business ingress",()=>{
     runtime=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await runtime.getD1Database("OPS_DB") as D1Database;
     const path=resolve(import.meta.dirname,"../../operations/migrations");
-    for(const name of (await readdir(path)).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0035").sort()){
+    for(const name of (await readdir(path)).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0037").sort()){
       const statements=unstable_splitSqlQuery((await readFile(resolve(path,name),"utf8")).replace(/\r\n/g,"\n"))
         .map(sql=>sql.trim()).filter(sql=>sql&&!/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/i.test(sql));
       if(statements.length)await db.batch(statements.map(sql=>db.prepare(sql)));

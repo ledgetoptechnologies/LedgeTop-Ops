@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
+import { listClientBusinessActivity } from "./client-business-activity";
 import { sqlScope } from "./acl";
 import { clientHubDetailPath, clientHubRouteKind, findClientHubRoot, listClientHubRoots,
   isClientHubRootNamespace, isClientHubSource, type ClientHubKind, type ClientHubRoot } from "./client-hub-directory";
@@ -247,6 +248,25 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
 }
 
 export function registerClientHubRoutes(app: App): void {
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/activity", async c => {
+    if (c.req.param("rootNamespace") !== "business" || !isBusinessProjectionSource(c.req.param("sourceId")))
+      throw new HTTPException(404, { message: "Business activity is unavailable for this source" });
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const expected = c.req.query("expectedContextVersion");
+    if (expected !== undefined && expected !== context.contextVersion)
+      throw new HTTPException(409, { message: "Client context changed. Refresh the workspace to continue" });
+    const limit = c.req.query("limit");
+    const result = await listClientBusinessActivity(c.env, principal, context, {
+      projectId: c.req.query("projectId"), cursor: c.req.query("cursor"),
+      limit: limit === undefined ? 5 : /^\d+$/.test(limit) ? Number(limit) : Number.NaN,
+    });
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId", async c => {
     if (c.req.param("rootNamespace") !== "business" || !isBusinessProjectionSource(c.req.param("sourceId")))
       throw new HTTPException(404, { message: "Business project not found" });
@@ -306,7 +326,7 @@ export function registerClientHubRoutes(app: App): void {
     requireHubAccess(access);
     const limit = c.req.query("limit");
     const result = access.directory ? await listClientHubRoots(c.env, c.get("principal"), {
-      q: c.req.query("q"), kind: c.req.query("kind"), source: c.req.query("source"), cursor: c.req.query("cursor"), grouping: c.req.query("grouping"),
+      q: c.req.query("q"), kind: c.req.query("kind"), source: c.req.query("source"), cursor: c.req.query("cursor"), grouping: c.req.query("grouping"), sort: c.req.query("sort"),
       limit: limit === undefined ? undefined : /^\d+$/.test(limit) ? Number(limit) : Number.NaN,
     }) : { clients: [], nextCursor: null };
     return c.json({ ...result, capabilities: access });

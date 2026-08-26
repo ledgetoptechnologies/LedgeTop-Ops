@@ -49,7 +49,7 @@ describe("entitlement projection",()=>{
     miniflare=new Miniflare({modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
     db=await miniflare.getD1Database("OPS_DB") as D1Database;
     const migrationsPath=resolve(import.meta.dirname,"../../operations/migrations");
-    for(const migration of (await readdir(migrationsPath)).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0035").sort()){
+    for(const migration of (await readdir(migrationsPath)).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0037").sort()){
       const sql=await readFile(resolve(migrationsPath,migration),"utf8");
       const statements=unstable_splitSqlQuery(sql.replace(/\r\n/g,"\n")).map(part=>part.trim()).filter(part=>part&&!/^PRAGMA\s+foreign_keys\s*=\s*ON\s*;?$/i.test(part));
       if(statements.length)await db.batch(statements.map(statement=>db.prepare(statement)));

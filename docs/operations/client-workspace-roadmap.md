@@ -719,6 +719,12 @@ a new whole-monorepo claim. No real customers were linked or granted access.
       See [business-party linking](business-party-linking.md) for exact results
       and the paired migration/release order. No production deployment included.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
+- [x] Locally verify the implemented recent-first Client Hub and source-record update
+      history increment. See [business activity](client-business-activity.md).
+      This uses authorized organization/client/project source changes only;
+      synchronization and page views do not count. It is not the complete
+      project-memory, service-assignment, delivery or audit timeline. No production
+      deployment or migration is included in this checkpoint.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with
       production acceptance or claim the whole roadmap is complete prematurely.

@@ -118,9 +118,9 @@ test("reviewed linking collapses records into one directory identity without mer
 
 test("source workspaces, party links and directory filters survive refresh and browser history", async ({ page }) => {
   await fixture(page, { linked: 2 });
-  await page.goto("/clients?q=Acme&kind=organization&source=project-alpha%3Abusiness_b");
+  await page.goto("/clients?q=Acme&kind=organization&source=project-alpha%3Abusiness_b&sort=name");
   await page.getByRole("link", { name: "Open Acme combined customer client workspace" }).click();
-  await expect(page).toHaveURL(`/clients/parties/${partyId}?q=Acme&kind=organization&source=project-alpha%3Abusiness_b`);
+  await expect(page).toHaveURL(`/clients/parties/${partyId}?q=Acme&kind=organization&source=project-alpha%3Abusiness_b&sort=name`);
   await page.reload(); await page.getByRole("link", { name: "Open Technologies workspace" }).click();
   await expect(page.getByRole("heading", { name: "Acme technology customer", exact: true })).toBeVisible();
   const manageLink = page.getByRole("link", { name: "Manage customer links" });
@@ -129,10 +129,11 @@ test("source workspaces, party links and directory filters survive refresh and b
   await expect(manageLink).toHaveCSS("display", "flex");
   await expect(manageLink).toHaveCSS("justify-content", "center");
   expect((await manageLink.boundingBox())!.height).toBeGreaterThanOrEqual(44);
-  await expect(page.getByRole("link", { name: "Acme combined customer", exact: true })).toHaveAttribute("href", `/clients/parties/${partyId}?q=Acme&kind=organization&source=project-alpha%3Abusiness_b`);
+  await expect(page.getByRole("link", { name: "Acme combined customer", exact: true })).toHaveAttribute("href", `/clients/parties/${partyId}?q=Acme&kind=organization&source=project-alpha%3Abusiness_b&sort=name`);
   await page.reload(); await page.goBack();
   await expect(page.getByRole("region", { name: "Linked customer workspace" })).toBeVisible();
   await page.goBack(); await expect(page.getByRole("searchbox", { name: "Search clients" })).toHaveValue("Acme");
+  await expect(page.getByRole("combobox", { name: "Sort clients" })).toHaveValue("name");
   await page.goForward(); await expect(page.getByRole("heading", { name: "Acme combined customer", exact: true })).toBeVisible();
 });
 

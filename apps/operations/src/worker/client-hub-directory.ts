@@ -6,6 +6,7 @@ import { isBusinessProjectionSource, validatedUniquePublicIdExpression, type Cli
 import type { Env, StaffPrincipal } from "./types";
 import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import { readableBusinessPartySql } from "./business-parties";
+import { businessActivityRecencyCte } from "./client-business-activity";
 
 export const CLIENT_HUB_SOURCES = ["project-alpha:primary", "delivery:local"] as const;
 export type ClientHubSource = `project-alpha:${string}` | "delivery:local";
@@ -47,9 +48,16 @@ export interface ClientHubDirectoryState {
   lease_until: string | null;
   next_run_at: string | null;
 }
-export interface ClientHubDirectoryQuery { q?: string; kind?: string; source?: string; cursor?: string; limit?: number; grouping?: string }
-type Position = [string, ClientHubSource, ClientHubRootNamespace, ClientHubKind, string];
-interface Cursor { v: 4; revision: number; visibility: number; source: ClientHubSource | null; q: string; kind: ClientHubKind | null; grouping: "customers" | "records"; policy: string; after: Position }
+export interface ClientHubDirectoryQuery { q?: string; kind?: string; source?: string; cursor?: string; limit?: number; grouping?: string; sort?: string }
+type Position = [string, string, ClientHubSource, ClientHubRootNamespace, ClientHubKind, string];
+interface Cursor { v: 5; revision: number; activityRevision: number; asOf: string; sort: "recent" | "name";
+  visibility: number; source: ClientHubSource | null; q: string; kind: ClientHubKind | null; grouping: "customers" | "records"; policy: string; after: Position }
+
+function canonicalTime(value: unknown): value is string {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+  const time = Date.parse(value);
+  return Number.isFinite(time) && new Date(time).toISOString() === value;
+}
 
 export function normalizeClientHubText(value: string): string {
   return value.normalize("NFC").trim().toLocaleLowerCase("en-US");
@@ -115,14 +123,17 @@ function decodeCursor(value: string): Cursor {
     const parsed: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
     if (!parsed || typeof parsed !== "object") throw new Error();
     const cursor = parsed as Partial<Cursor>;
-    if (cursor.v !== 4 || !["customers", "records"].includes(cursor.grouping ?? "") || !Number.isSafeInteger(cursor.revision) || cursor.revision! < 0 ||
+    if (cursor.v !== 5 || !["customers", "records"].includes(cursor.grouping ?? "") || !Number.isSafeInteger(cursor.revision) || cursor.revision! < 0 ||
+      !Number.isSafeInteger(cursor.activityRevision) || cursor.activityRevision! < 0 || !canonicalTime(cursor.asOf) || Date.parse(cursor.asOf) > Date.now() ||
+      !["recent", "name"].includes(cursor.sort ?? "") ||
       !Number.isSafeInteger(cursor.visibility) || cursor.visibility! < 1 ||
       (cursor.source !== null && (typeof cursor.source !== "string" || !isClientHubSource(cursor.source))) ||
       typeof cursor.q !== "string" || typeof cursor.policy !== "string" ||
       (cursor.kind !== null && (typeof cursor.kind !== "string" || !isClientHubKind(cursor.kind))) ||
-      !Array.isArray(cursor.after) || cursor.after.length !== 5 ||
-      !cursor.after.every(item => typeof item === "string") ||
-      !isClientHubSource(cursor.after[1]) || !isClientHubRootNamespace(cursor.after[2]) || !isClientHubKind(cursor.after[3])) throw new Error();
+      !Array.isArray(cursor.after) || cursor.after.length !== 6 ||
+      !cursor.after.every(item => typeof item === "string" && item.length <= 512) ||
+      (cursor.after[0] !== "" && (!canonicalTime(cursor.after[0]) || cursor.after[0] > cursor.asOf)) ||
+      !isClientHubSource(cursor.after[2]) || !isClientHubRootNamespace(cursor.after[3]) || !isClientHubKind(cursor.after[4])) throw new Error();
     return cursor as Cursor;
   } catch { throw new HTTPException(400, { message: "Client directory cursor is invalid" }); }
 }
@@ -159,9 +170,13 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   const grouping = options.grouping ?? "customers";
   if (grouping !== "customers" && grouping !== "records")
     throw new HTTPException(400, { message: "Client directory grouping is invalid" });
+  const sort = options.sort ?? "recent";
+  if (sort !== "recent" && sort !== "name")
+    throw new HTTPException(400, { message: "Client directory sort is invalid" });
   const cursor = options.cursor === undefined ? null : decodeCursor(options.cursor);
+  const asOf = cursor?.asOf ?? new Date().toISOString();
   const { filter, policy } = await projectSearchAccess(env, principal);
-  if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.grouping !== grouping || cursor.policy !== policy))
+  if (cursor && (cursor.q !== q || cursor.kind !== (kind ?? null) || cursor.source !== (source ?? null) || cursor.grouping !== grouping || cursor.sort !== sort || cursor.policy !== policy))
     throw new HTTPException(400, { message: "Client directory cursor does not match this search" });
   const clauses = [visibleRoot, visibleSource, liveBusinessRoot], values: unknown[] = [];
   if (kind) { clauses.push("root.kind=?"); values.push(kind); }
@@ -195,26 +210,39 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   // Match and authorize individual records first, then collapse the matching
   // records into customers before LIMIT/cursor application. Browser-only
   // deduplication would skip customers or repeat a party across pages.
-  const pageAfter = cursor ? "AND (root.display_sort_name,root.source_id,root.root_namespace,root.kind,root.public_id)>(?,?,?,?,?)" : "";
-  const pageValues = [...values, ...(cursor?.after ?? []), limit + 1];
+  const afterName = "(root.display_sort_name,root.source_id,root.root_namespace,root.kind,root.public_id)>(?,?,?,?,?)";
+  const pageAfter = !cursor ? "" : sort === "name" ? `AND ${afterName}`
+    : `AND (COALESCE(root.live_activity_at,'')<? OR (COALESCE(root.live_activity_at,'')=? AND ${afterName}))`;
+  const activity = businessActivityRecencyCte(filter, asOf);
+  const pageValues = [...activity.values, ...values,
+    ...(cursor ? [...(sort === "recent" ? [cursor.after[0], cursor.after[0]] : []), ...cursor.after.slice(1)] : []), limit + 1];
   const db = env.OPS_DB.withSession("first-primary");
   // State and page share one transaction. The writer advances revision only
   // alongside effective root/search changes, so mutable names cannot skip rows.
-  type Snapshot = Pick<ClientHubDirectoryState, "revision" | "ready" | "last_success_at"> & { source_read_revision: number | null };
+  type Snapshot = Pick<ClientHubDirectoryState, "revision" | "ready" | "last_success_at"> & { source_read_revision: number | null; activity_revision: number | null };
   type LiveRoot = ClientHubRoot & { live_pa_public_id: string | null; business_party_id: string | null;
-    business_party_name: string | null; business_party_member_count: number | null; display_sort_name: string; party_rank: number };
+    business_party_name: string | null; business_party_member_count: number | null; display_sort_name: string; party_rank: number; live_activity_at: string | null };
   type SourceSummary = { source_id: ClientHubSource; display_name: string };
   const results = await db.batch<LiveRoot | Snapshot | SourceSummary>([
     db.prepare(`SELECT revision,ready,last_success_at,
+      (SELECT revision FROM client_business_activity_state WHERE singleton=1) activity_revision,
       (SELECT read_revision FROM pa_connector_directory_state WHERE id='directory') source_read_revision
       FROM client_hub_directory_state WHERE id='directory'`),
-    db.prepare(`WITH matching AS (
+    db.prepare(`WITH ${activity.sql}, matching AS (
       SELECT root.*,${currentMapping} live_pa_public_id,
         party.id business_party_id,party.display_name business_party_name,
+        CASE WHEN ${grouping === "customers" ? "party.id IS NOT NULL" : "0=1"} THEN (
+          SELECT max(member_activity.meaningful_activity_at) FROM business_party_links member
+          JOIN business_activity_roots member_activity ON member_activity.source_id=member.source_id
+            AND member_activity.root_id=member.record_id AND member_activity.root_kind=CASE member.record_kind WHEN 'organization' THEN 'organization' ELSE 'standalone_client' END
+          WHERE member.party_id=party.id AND member.unlinked_at IS NULL
+        ) ELSE activity.meaningful_activity_at END live_activity_at,
         ${grouping === "customers" ? "COALESCE(party.sort_name,root.sort_name)" : "root.sort_name"} display_sort_name,
         CASE WHEN party.id IS NOT NULL THEN (SELECT count(*) FROM business_party_links members
           WHERE members.party_id=party.id AND members.unlinked_at IS NULL) END business_party_member_count
       FROM client_hub_roots root
+      LEFT JOIN business_activity_roots activity ON root.root_namespace='business'
+        AND activity.source_id=root.source_id AND activity.root_kind=root.kind AND activity.root_id=root.public_id
       LEFT JOIN business_party_links membership ON root.root_namespace='business'
         AND membership.source_id=root.source_id AND membership.record_id=root.public_id
         AND membership.record_kind=CASE root.kind WHEN 'organization' THEN 'organization' ELSE 'client' END
@@ -229,7 +257,7 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
         ORDER BY sort_name,source_id,root_namespace,kind,public_id
       ) party_rank FROM matching
     ) SELECT root.* FROM ranked root WHERE party_rank=1 ${pageAfter}
-      ORDER BY root.display_sort_name,root.source_id,root.root_namespace,root.kind,root.public_id LIMIT ?`).bind(...pageValues),
+      ORDER BY ${sort === "recent" ? "COALESCE(root.live_activity_at,'') DESC," : ""}root.display_sort_name,root.source_id,root.root_namespace,root.kind,root.public_id LIMIT ?`).bind(...pageValues),
     db.prepare(`SELECT source_id,display_name FROM pa_connectors WHERE read_visible=1
       UNION ALL SELECT 'project-alpha:primary','Project Alpha' WHERE NOT EXISTS (
         SELECT 1 FROM pa_connectors WHERE source_id='project-alpha:primary')
@@ -239,17 +267,34 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
   const state = results[0]!.results.find((row): row is Snapshot => "revision" in row);
   if (!state?.ready) unavailable();
   if (!Number.isSafeInteger(state.source_read_revision) || state.source_read_revision! < 1) unavailable();
+  if (!Number.isSafeInteger(state.activity_revision) || state.activity_revision! < 0) unavailable();
   if (cursor && cursor.visibility !== state.source_read_revision) sourcesChanged();
   const sources = results[2]!.results.filter((row): row is SourceSummary => "source_id" in row && "display_name" in row);
   if (sources.length > 34) unavailable();
   if (source && !sources.some(item => item.source_id === source))
     throw new HTTPException(404, { message: "Client source is unavailable" });
   if (cursor && cursor.revision !== state.revision) changed();
+  if (cursor && cursor.activityRevision !== state.activity_revision) changed();
+  // Permissions are read before the SQL batch. Recheck them and the effective
+  // source/ownership epoch before releasing names or permission-scoped recency.
+  // No claim of a cross-request snapshot: a changed context requires a reload.
+  const [currentScope, currentProjectAccess, currentState] = await Promise.all([
+    sqlScope(env, principal, "team.view"), projectSearchAccess(env, principal),
+    env.OPS_DB.withSession("first-primary").prepare(`SELECT revision,
+      (SELECT revision FROM client_business_activity_state WHERE singleton=1) activity_revision,
+      (SELECT read_revision FROM pa_connector_directory_state WHERE id='directory') source_read_revision
+      FROM client_hub_directory_state WHERE id='directory'`).first<Snapshot>(),
+  ]);
+  if (!currentScope.global || currentScope.deniedGlobal)
+    throw new HTTPException(403, { message: "Global team.view permission required" });
+  if (currentState?.source_read_revision !== state.source_read_revision) sourcesChanged();
+  if (currentProjectAccess.policy !== policy || currentState?.revision !== state.revision || currentState?.activity_revision !== state.activity_revision) changed();
   const roots = results[1]!.results.filter((row): row is LiveRoot => "root_namespace" in row);
   const page = roots.slice(0, limit);
   const last = page.at(-1);
   return {
-    clients: page.map(({ live_pa_public_id, party_rank: _rank, display_sort_name: _displaySort, business_party_id, business_party_name, business_party_member_count, ...root }) => ({ ...root,
+    clients: page.map(({ live_pa_public_id, party_rank: _rank, display_sort_name: _displaySort, live_activity_at, business_party_id, business_party_name, business_party_member_count, ...root }) => ({ ...root,
+      meaningful_activity_at: live_activity_at,
       ...(root.root_namespace === "business" && root.pa_public_id !== live_pa_public_id ? {
         pa_public_id: live_pa_public_id, mapping_status: live_pa_public_id ? "mapped" : "missing",
         workspace_id: null, portal_status: "mapping_unavailable",
@@ -259,11 +304,14 @@ export async function listClientHubRoots(env: Env, principal: StaffPrincipal, op
       route_kind: clientHubRouteKind(root.kind), detail_path: business_party_id && grouping === "customers"
         ? `/clients/parties/${encodeURIComponent(business_party_id)}` : clientHubDetailPath(root) })),
     indexUpdatedAt: state.last_success_at,
+    activityAsOf: asOf,
+    activityCoverage: "project_alpha_business_records" as const,
+    sort,
     sources,
     searchCapabilities: { businessContacts: true, portalContacts: false },
-    nextCursor: roots.length > limit && last ? encodeCursor({ v: 4, revision: state.revision, visibility: state.source_read_revision!,
+    nextCursor: roots.length > limit && last ? encodeCursor({ v: 5, revision: state.revision, activityRevision: state.activity_revision!, asOf, sort, visibility: state.source_read_revision!,
       source: source ?? null, q, kind: kind ?? null, grouping, policy,
-      after: [last.display_sort_name, last.source_id, last.root_namespace, last.kind, last.public_id] }) : null,
+      after: [last.live_activity_at ?? "", last.display_sort_name, last.source_id, last.root_namespace, last.kind, last.public_id] }) : null,
   };
 }
 

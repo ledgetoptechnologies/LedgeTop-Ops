@@ -33,7 +33,7 @@ export function clientWorkspaceFilters(search: string): string {
   }
   const source = incoming.get("source");
   if (source && (source === "delivery:local" || /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source))) result.set("source", source);
-  const enums: Record<string, string[]> = { kind: ["organization", "standalone_client"], business_status: ["current", "completed", "cancelled"],
+  const enums: Record<string, string[]> = { kind: ["organization", "standalone_client"], sort: ["name"], business_status: ["current", "completed", "cancelled"],
     login_link: ["linked", "unlinked", "conflict"], login_blocked: ["yes", "no"], login_status: ["suspended", "revoked", "all"] };
   for (const [key, options] of Object.entries(enums)) {
     const value = incoming.get(key);

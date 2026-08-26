@@ -134,7 +134,7 @@ test("directory loads bounded direct-link cards and appends pages without losing
   expect(metadataBounds!.y).toBeGreaterThan(titleBounds!.y + titleBounds!.height);
   await expect(page.getByRole("button", { name: "All", exact: true })).toHaveAttribute("aria-pressed", "true");
   await expect(page.locator(".client-directory-card")).toHaveCount(4);
-  await expect(page.locator(".client-directory-workspace time")).toHaveAttribute("datetime", "2026-08-25T12:00:00.000Z");
+  await expect(page.locator(".client-directory-freshness time")).toHaveAttribute("datetime", "2026-08-25T12:00:00.000Z");
   await expect(page.getByText("This reflects directory synchronization, not client activity.", { exact: false })).toBeVisible();
   await expect(page.locator(".client-directory-workspace details")).toHaveCount(0);
   await expect(page.getByText("Shared projects", { exact: true })).toHaveCount(4);

@@ -27,9 +27,9 @@ describe("source-qualified Client Hub directory", () => {
       CREATE TABLE local_staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT);
       CREATE TABLE staff_permission_overrides(staff_id TEXT,permission_key TEXT,effect TEXT,scope TEXT,division_id TEXT);
       INSERT INTO role_permissions VALUES('directory','team.view'),('projects','projects.view');
-      CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
-      CREATE TABLE pa_clients(id TEXT PRIMARY KEY,active INTEGER,organization_id TEXT,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
-      CREATE TABLE pa_projects(id TEXT PRIMARY KEY,active INTEGER,manager_user_id TEXT,client_id TEXT,organization_id TEXT,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',last_sync_id TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',last_sync_id TEXT,active INTEGER,organization_id TEXT,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+      CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT NOT NULL DEFAULT '',last_sync_id TEXT,business_unit_id TEXT,active INTEGER,manager_user_id TEXT,client_id TEXT,organization_id TEXT,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE pa_project_assignments(project_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE pa_operations(id TEXT,project_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE pa_operation_assignments(operation_id TEXT,user_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
@@ -40,6 +40,7 @@ describe("source-qualified Client Hub directory", () => {
     await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0034_client_hub_projection_sources.sql", import.meta.url), "utf8")).map(statement => db.prepare(statement)));
     await applyConnectorSchema(db);
     await applyBusinessPartySchema(db);
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0037_client_business_activity.sql", import.meta.url), "utf8")).map(statement => db.prepare(statement)));
   });
   beforeEach(async () => {
     await db.batch([
@@ -82,6 +83,169 @@ describe("source-qualified Client Hub directory", () => {
       }),
     ]);
   }
+
+  async function activity(rootId: string, at: string, options: { kind?: ClientHubKind; source?: ClientHubSource; projectId?: string } = {}) {
+    const source = options.source ?? "project-alpha:primary", rootKind = options.kind ?? "standalone_client";
+    const rootRecordKind = rootKind === "organization" ? "organization" : "client";
+    const recordKind = options.projectId ? "project" : rootRecordKind, recordId = options.projectId ?? rootId;
+    for (const [kind, id] of [[rootRecordKind, rootId], [recordKind, recordId]]) {
+      await db.prepare(`INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id)
+        SELECT ?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM pa_projection_record_ids WHERE projection_source_id=? AND record_kind=? AND local_id=?)`)
+        .bind(source, kind, id, id, source, kind, id).run();
+    }
+    await db.prepare(`INSERT INTO client_business_activity(projection_source_id,event_key,origin,record_kind,record_id,
+      root_kind,root_id,root_record_kind,action,occurred_at,source_updated_at) VALUES(?,?,'projection_event',?,?,?,?,?,'upsert',?,?)`)
+      .bind(source, `event-${crypto.randomUUID()}`, recordKind, recordId, rootKind, rootId, rootRecordKind, at, at).run();
+  }
+
+  it("defaults to meaningful recent updates with stable names for ties and unknown dates last", async () => {
+    await roots([{ id: "recent-z", name: "Z Recent" }, { id: "recent-a", name: "A Older" },
+      { id: "recent-b", name: "B Recent" }, { id: "recent-none", name: "A Unknown" }]);
+    await activity("recent-z", "2026-08-20T12:00:00.000Z");
+    await activity("recent-b", "2026-08-20T12:00:00.000Z");
+    await activity("recent-a", "2026-08-19T12:00:00.000Z");
+    let cursor: string | undefined; const names: string[] = [];
+    do {
+      const page = await listClientHubRoots(env, staff, { limit: 1, cursor });
+      names.push(...page.clients.map(row => row.display_name));
+      expect(page).toMatchObject({ sort: "recent", activityCoverage: "project_alpha_business_records" });
+      cursor = page.nextCursor ?? undefined;
+    } while (cursor);
+    expect(names).toEqual(["B Recent", "Z Recent", "A Older", "A Unknown"]);
+    const alphabetical = await listClientHubRoots(env, staff, { sort: "name" });
+    expect(alphabetical.clients.map(row => row.display_name)).toEqual(["A Older", "A Unknown", "B Recent", "Z Recent"]);
+    expect(alphabetical.clients.find(row => row.public_id === "recent-none")?.meaningful_activity_at).toBeNull();
+  });
+
+  it("ignores cached/global activity, future events, synchronization, and page visits", async () => {
+    await roots([{ id: "honest-a" }, { id: "honest-z" }]);
+    await db.prepare("UPDATE client_hub_roots SET meaningful_activity_at='2099-01-01T00:00:00.000Z'").run();
+    await activity("honest-z", "2099-01-01T00:00:00.000Z");
+    const before = await db.prepare("SELECT revision FROM client_business_activity_state").first("revision");
+    const first = await listClientHubRoots(env, staff, { limit: 1 });
+    await db.prepare("UPDATE pa_clients SET last_sync_id='new-snapshot'").run();
+    const second = await listClientHubRoots(env, staff, { cursor: first.nextCursor!, limit: 1 });
+    expect([...first.clients, ...second.clients].map(row => row.meaningful_activity_at)).toEqual([null, null]);
+    expect(await db.prepare("SELECT revision FROM client_business_activity_state").first("revision")).toBe(before);
+  });
+
+  it("filters project authority before deriving activity or ordering", async () => {
+    await roots([{ id: "scope-a" }, { id: "scope-z" }]);
+    await db.batch([
+      db.prepare("INSERT INTO pa_projects(id,active,manager_user_id,client_id) VALUES('scope-hidden',1,'other','scope-a'),('scope-visible',1,'pa-user-a','scope-z')"),
+      db.prepare("INSERT INTO staff_role_assignments VALUES('staff-a','projects','global',NULL)"),
+    ]);
+    await activity("scope-a", "2026-08-25T00:00:00.000Z", { projectId: "scope-hidden" });
+    await activity("scope-z", "2026-08-20T00:00:00.000Z", { projectId: "scope-visible" });
+    const visible = await listClientHubRoots(env, staff);
+    expect(visible.clients.map(row => [row.public_id, row.meaningful_activity_at])).toEqual([
+      ["scope-z", "2026-08-20T00:00:00.000Z"], ["scope-a", null],
+    ]);
+    await db.prepare("INSERT INTO staff_permission_overrides VALUES('staff-a','projects.view','deny','global',NULL)").run();
+    expect((await listClientHubRoots(env, staff)).clients.every(row => row.meaningful_activity_at === null)).toBe(true);
+  });
+
+  it("invalidates activity cursors when live assignments change without another event", async () => {
+    await roots([{ id: "assign-a" }, { id: "assign-z" }]);
+    await db.batch([
+      db.prepare("INSERT INTO pa_projects(id,active,client_id) VALUES('assign-project',1,'assign-z')"),
+      db.prepare("INSERT INTO pa_project_assignments(project_id,user_id,active) VALUES('assign-project','pa-user-a',1)"),
+      db.prepare("INSERT INTO staff_role_assignments VALUES('staff-a','projects','global',NULL)"),
+    ]);
+    await activity("assign-z", "2026-08-20T00:00:00.000Z", { projectId: "assign-project" });
+    const first = await listClientHubRoots(env, staff, { limit: 1 });
+    expect(first.clients[0]?.public_id).toBe("assign-z");
+    await db.prepare("UPDATE pa_project_assignments SET active=0 WHERE project_id='assign-project'").run();
+    await expect(listClientHubRoots(env, staff, { cursor: first.nextCursor! })).rejects.toMatchObject({ status: 409 });
+    expect((await listClientHubRoots(env, staff)).clients.map(row => row.public_id)).toEqual(["assign-a", "assign-z"]);
+  });
+
+  it("does not transfer historical project activity to a new owner or retain it for the former owner", async () => {
+    await roots([{ id: "move-a" }, { id: "move-b" }]);
+    await db.batch([
+      db.prepare("INSERT INTO pa_projects(id,active,manager_user_id,client_id) VALUES('move-project',1,'pa-user-a','move-a')"),
+      db.prepare("INSERT INTO staff_role_assignments VALUES('staff-a','projects','global',NULL)"),
+    ]);
+    await activity("move-a", "2026-08-20T00:00:00.000Z", { projectId: "move-project" });
+    await db.prepare("UPDATE pa_projects SET client_id='move-b' WHERE id='move-project'").run();
+    expect((await listClientHubRoots(env, staff)).clients.every(row => row.meaningful_activity_at === null)).toBe(true);
+  });
+
+  it("rolls linked customer activity across all visible records before grouping, search and pagination", async () => {
+    await linkedParty("party-activity", "Z Unified Recent", ["activity-party-a", "activity-party-b"]);
+    await roots([{ id: "activity-unlinked", name: "A Older Customer" }]);
+    await activity("activity-party-b", "2026-08-22T00:00:00.000Z", { kind: "organization", source: "project-alpha:secondary" });
+    await activity("activity-unlinked", "2026-08-20T00:00:00.000Z");
+    const first = await listClientHubRoots(env, staff, { limit: 1 });
+    expect(first.clients[0]).toMatchObject({ business_party_id: "party-activity", meaningful_activity_at: "2026-08-22T00:00:00.000Z" });
+    expect((await listClientHubRoots(env, staff, { cursor: first.nextCursor!, limit: 1 })).clients[0]?.public_id).toBe("activity-unlinked");
+    for (const selection of [{ q: "A Trading" }, { source: "project-alpha:primary" }]) {
+      expect((await listClientHubRoots(env, staff, selection)).clients.find(row => row.business_party_id === "party-activity")?.meaningful_activity_at)
+        .toBe("2026-08-22T00:00:00.000Z");
+    }
+    expect((await listClientHubRoots(env, staff, { grouping: "records", source: "project-alpha:primary", q: "A Trading" })).clients[0]?.meaningful_activity_at).toBeNull();
+    await db.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id='project-alpha:secondary'").run();
+    const hidden = await listClientHubRoots(env, staff);
+    expect(hidden.clients.every(row => !("business_party_id" in row))).toBe(true);
+    expect(hidden.clients.find(row => row.public_id === "activity-party-a")?.meaningful_activity_at).toBeNull();
+  });
+
+  it("binds sort and activity revision to pagination and rejects invalid sort and forged future cutoffs", async () => {
+    await roots([{ id: "cursor-activity-a" }, { id: "cursor-activity-b" }]);
+    const first = await listClientHubRoots(env, staff, { limit: 1 });
+    await expect(listClientHubRoots(env, staff, { cursor: first.nextCursor!, sort: "name" })).rejects.toMatchObject({ status: 400 });
+    await expect(listClientHubRoots(env, staff, { sort: "newest-updated-or-other-sql" })).rejects.toMatchObject({ status: 400 });
+    const forged = JSON.parse(atob(first.nextCursor!.replaceAll("-", "+").replaceAll("_", "/"))) as Record<string, unknown>;
+    forged.asOf = "2099-01-01T00:00:00.000Z";
+    const cursor = btoa(JSON.stringify(forged)).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+    await expect(listClientHubRoots(env, staff, { cursor })).rejects.toMatchObject({ status: 400 });
+    await activity("cursor-activity-b", "2026-08-20T00:00:00.000Z");
+    await expect(listClientHubRoots(env, staff, { cursor: first.nextCursor! })).rejects.toMatchObject({ status: 409 });
+  });
+
+  it.each(["directory", "assignment", "source"] as const)("discards a hydrated page after a concurrent %s authority change", async change => {
+    const id = `race-activity-${change}`;
+    const source = change === "source" ? "project-alpha:secondary" : "project-alpha:primary";
+    if (change === "source") await registerVisibleTestSource(db, source);
+    await roots([{ id, source }]);
+    await db.batch([
+      db.prepare("INSERT INTO pa_projects(id,active,manager_user_id,client_id,projection_source_id) VALUES(?,1,'pa-user-a',?,?)").bind(`${id}-project`, id, source),
+      db.prepare("INSERT INTO staff_role_assignments VALUES('staff-a','projects','global',NULL)"),
+    ]);
+    await activity(id, "2026-08-20T00:00:00.000Z", { projectId: `${id}-project`, source });
+    let fired = false;
+    let hydrationSession: unknown, authorityRecheckSession: unknown;
+    const racing = new Proxy(db, { get(target, key) {
+      if (key === "withSession") return (...args: Parameters<D1Database["withSession"]>) => {
+        const session = target.withSession(...args);
+        return new Proxy(session, { get(current, property) {
+          if (property === "prepare") return (sql: string) => {
+            if (sql.includes("SELECT revision,") && !sql.includes("last_success_at")) authorityRecheckSession = current;
+            return current.prepare(sql);
+          };
+          if (property === "batch") return async <T>(statements: D1PreparedStatement[]) => {
+            hydrationSession = current;
+            const result = await current.batch<T>(statements);
+            if (!fired) {
+              fired = true;
+              if (change === "directory") await db.prepare("INSERT INTO staff_permission_overrides VALUES('staff-a','team.view','deny','global',NULL)").run();
+              if (change === "assignment") await db.prepare("UPDATE pa_projects SET manager_user_id='someone-else' WHERE id=?").bind(`${id}-project`).run();
+              if (change === "source") await db.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id=?").bind(source).run();
+            }
+            return result;
+          };
+          const value = Reflect.get(current, property, current);
+          return typeof value === "function" ? value.bind(current) : value;
+        } });
+      };
+      const value = Reflect.get(target, key, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
+    await expect(listClientHubRoots({ ...env, OPS_DB: racing }, staff)).rejects.toMatchObject({ status: change === "directory" ? 403 : 409 });
+    expect(fired).toBe(true);
+    expect(authorityRecheckSession).toBeDefined();
+    expect(authorityRecheckSession).not.toBe(hydrationSession);
+  });
 
   it("collapses linked records before pagination and sorts by the displayed customer name", async () => {
     await linkedParty("party-page", "Z Unified Customer", ["group-page-a", "group-page-b"]);

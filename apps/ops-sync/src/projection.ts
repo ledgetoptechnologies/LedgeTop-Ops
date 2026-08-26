@@ -8,6 +8,7 @@ import {
   type ProjectAlphaSourceContext,
 } from "../../operations/src/worker/project-alpha-source";
 import { assertProjectAlphaConnectorProof, connectorFenceStatement, type ProjectAlphaConnectorProof } from "../../operations/src/worker/project-alpha-connectors";
+import { businessActivityProjectionStatement } from "../../operations/src/worker/client-business-activity";
 
 export type ProjectionResult = "applied" | "duplicate" | "ignored";
 
@@ -306,6 +307,12 @@ async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceCo
     statements.push(env.OPS_DB.prepare(`INSERT INTO pa_task_assignments (projection_source_id,task_id,user_id,assigned_by_user_id,assigned_at,payload_json,last_sync_id,active) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(task_id,user_id) DO UPDATE SET assigned_by_user_id=excluded.assigned_by_user_id,assigned_at=excluded.assigned_at,payload_json=excluded.payload_json,last_sync_id=excluded.last_sync_id,active=excluded.active WHERE pa_task_assignments.projection_source_id=excluded.projection_source_id`).bind(source.sourceId,requiredValue(data,"task_id"),requiredValue(data,"user_id"),value(data,"assigned_by"),value(data,"assigned_at"),rawJson,marker,active));
     }
     await refreshProjectionEntityLease(env,source,event);
+    if (event.projection.entity_type==="client" || event.projection.entity_type==="organization" || event.projection.entity_type==="project") {
+      const activity=businessActivityProjectionStatement(env.OPS_DB,{sourceId:source.sourceId,eventId:event.event_id,
+        recordKind:event.projection.entity_type,recordId:localId,action:event.projection.action,occurredAt:event.occurred_at,
+        sourceUpdatedAt:event.projection.source_updated_at});
+      if(activity)statements.push(activity);
+    }
     if(statements.length)await fencedBatch(env,proof,statements);
     // Keep a failed portal write retryable: the source version is advanced only
     // after DELIVERY_DB has accepted its idempotent projection.

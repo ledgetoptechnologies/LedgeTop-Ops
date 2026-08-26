@@ -1526,6 +1526,13 @@ tbody tr:last-child td { border: 0; }
 .client-directory-workspace { display: grid; gap: 1rem; min-width: 0; }
 .client-directory-source { display: grid; gap: .45rem; width: min(100%, 30rem); min-width: 0; font-weight: 800; }
 .client-directory-source select { width: 100%; min-width: 0; min-height: 44px; border: 1px solid var(--line); border-radius: 10px; padding: .65rem; font: inherit; background: #fff; color: var(--ink); }
+.client-directory-selectors { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem; min-width: 0; }
+.client-directory-selectors > label { flex: 1 1 16rem; }
+.client-directory-sort { display: grid; gap: .45rem; width: min(100%, 22rem); max-width: 30rem; min-width: 0; font-weight: 800; }
+.client-directory-sort select { width: 100%; min-width: 0; min-height: 44px; border: 1px solid var(--line); border-radius: 10px; padding: .65rem; font: inherit; background: var(--paper); color: var(--ink); }
+.client-directory-update { display: grid; gap: .15rem; margin: 0; font-size: .8rem; }
+.client-directory-update dt { color: var(--muted); }
+.client-directory-update dd { margin: 0; font-weight: 600; }
 .client-directory-search { display: grid; gap: .45rem; min-width: 0; }
 .client-directory-search > label { font-size: .9rem; font-weight: 800; }
 .client-directory-search > div { display: flex; flex-wrap: wrap; gap: .5rem; min-width: 0; }

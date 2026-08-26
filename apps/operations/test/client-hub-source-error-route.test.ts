@@ -11,6 +11,7 @@ vi.mock("../src/worker/auth", () => ({ authenticateStaff: mocks.authenticateStaf
 import worker from "../src/worker/index";
 import { createProjectAlphaSourceContext, prepareProjectAlphaSourceRecords } from "../src/worker/project-alpha-source";
 import type { Env, StaffPrincipal } from "../src/worker/types";
+import type { ClientBusinessActivityPage } from "../src/worker/client-business-activity";
 
 const sourceId = "project-alpha:source-error-test";
 const actor: StaffPrincipal = { id: "source-error-admin", email: "admin@example.test", displayName: "Admin", accessSubject: "verified-subject", projectAlphaUserId: null };
@@ -19,16 +20,46 @@ let runtime: Miniflare, db: D1Database, env: Env;
 async function request(query = "") {
   return worker.fetch(new Request(`https://ops.example/api/client-hub${query}`), env, execution);
 }
+async function activityRequest(id: string, query = "", namespace = "business") {
+  return worker.fetch(new Request(`https://ops.example/api/client-hub/sources/${encodeURIComponent(sourceId)}/${namespace}/standalone/${encodeURIComponent(id)}/activity${query}`), env, execution);
+}
+async function activityClient(times = ["2025-04-01T12:00:00.000Z", "2025-04-02T12:00:00.000Z"]) {
+  const externalId = `activity-http-${crypto.randomUUID()}`;
+  const mapping = await prepareProjectAlphaSourceRecords(db, createProjectAlphaSourceContext(sourceId), [{ kind: "client", externalId }]);
+  const id = mapping.get("client", externalId), name = `Activity customer ${externalId}`;
+  await db.prepare(`INSERT INTO pa_clients(id,name,organization_id,active,payload_json,last_sync_id,projection_source_id)
+    VALUES(?,?,NULL,1,?,'snapshot-http-fixture',?)`).bind(id, name,
+    JSON.stringify({ updated_at: times[0], actor: "untrusted-actor-must-not-leak", private_note: "private-payload-must-not-leak" }), sourceId).run();
+  for (const time of times.slice(1)) await db.prepare("UPDATE pa_clients SET payload_json=? WHERE id=?")
+    .bind(JSON.stringify({ updated_at: time }), id).run();
+  await db.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,display_name,sort_name,status)
+    VALUES(?,'business','standalone_client',?,?,?,'active')`).bind(sourceId, id, name, name.toLowerCase()).run();
+  return { id, name };
+}
 
 describe("Client Hub source visibility errors through the Operations entrypoint", () => {
   beforeAll(async () => {
     runtime = new Miniflare({ compatibilityDate: "2026-08-06", modules: true,
-      script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB"] });
+      script: "export default {fetch(){return new Response('ok')}}", d1Databases: ["OPS_DB", "DELIVERY_DB"] });
     db = await runtime.getD1Database("OPS_DB") as D1Database;
+    const delivery = await runtime.getD1Database("DELIVERY_DB") as D1Database;
     const directory = new URL("../migrations/", import.meta.url);
-    for (const file of readdirSync(directory).filter(file => /^\d{4}_.*\.sql$/.test(file) && file.slice(0, 4) <= "0036").sort()) {
+    for (const file of readdirSync(directory).filter(file => /^\d{4}_.*\.sql$/.test(file) && file.slice(0, 4) <= "0037").sort()) {
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(file, directory), "utf8")).map(sql => db.prepare(sql)));
     }
+    // The source-specific activity route rechecks the shared, empty account
+    // association. Use the actual account definition and provenance column;
+    // no portal records or permissions are synthesized for secondary sources.
+    const foundation = splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0096_client_portal_foundation.sql", import.meta.url), "utf8"));
+    const workspace = splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0103_client_portal_workspace.sql", import.meta.url), "utf8"));
+    const provenance = splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0157_delivery_source_provenance.sql", import.meta.url), "utf8"));
+    const accounts = foundation.filter(sql => /CREATE TABLE IF NOT EXISTS client_accounts\s*\(/.test(sql));
+    const references = workspace.filter(sql => /ALTER TABLE client_accounts ADD COLUMN project_alpha_(?:client|organization)_id\b/.test(sql));
+    const sourceColumn = provenance.filter(sql => /ALTER TABLE client_accounts ADD COLUMN project_alpha_source_id\b/.test(sql));
+    expect(accounts).toHaveLength(1);
+    expect(references).toHaveLength(2);
+    expect(sourceColumn).toHaveLength(1);
+    await delivery.batch([...accounts, ...references, ...sourceColumn].map(sql => delivery.prepare(sql)));
     await db.batch([
       db.prepare("INSERT INTO staff_users(id,email,display_name,status) VALUES(?,?,?,'active')").bind(actor.id, actor.email, actor.displayName),
       db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key) VALUES('source-error-role',?,'role-admin','global','global')").bind(actor.id),
@@ -45,11 +76,15 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
       ]);
     }
     await db.prepare("UPDATE client_hub_directory_state SET ready=1").run();
-    // This read needs no Delivery, media, queue, or external-network bindings.
-    env = { OPS_DB: db, ENVIRONMENT: "development", EXPECTED_HOST: "ops.example", INCOMING_EXPECTED_HOST: "incoming.example",
+    // Directory reads are Operations-only; activity uses only the empty
+    // Delivery account proof above, never media, queues or external networking.
+    env = { OPS_DB: db, DELIVERY_DB: delivery, ENVIRONMENT: "development", EXPECTED_HOST: "ops.example", INCOMING_EXPECTED_HOST: "incoming.example",
       PUBLIC_BASE_URL: "https://ops.example" } as Env;
   }, 60_000);
-  beforeEach(() => { mocks.authenticateStaff.mockReset().mockResolvedValue(actor); });
+  beforeEach(async () => {
+    mocks.authenticateStaff.mockReset().mockResolvedValue(actor);
+    await registerVisibleTestSource(db, sourceId, "Private secondary source");
+  });
   afterAll(async () => { await runtime?.dispose(); });
 
   it("preserves the source-change code and safe message so the browser can discard previously loaded rows", async () => {
@@ -85,5 +120,101 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
     const response = await request(`?limit=1&cursor=${encodeURIComponent(page.nextCursor)}`);
     expect(response.status).toBe(409);
     expect(await response.json()).toEqual({ error: "The client directory changed. Refresh the results to continue" });
+  });
+
+  it("returns only source-owned activity DTOs with real pagination and no read-side writes", async () => {
+    const client = await activityClient();
+    const before = await db.prepare("SELECT count(*) count FROM client_business_activity").first<number>("count");
+    const first = await activityRequest(client.id, "?limit=1");
+    expect(first.status).toBe(200);
+    expect(first.headers.get("Cache-Control")).toContain("no-store");
+    const page = await first.json() as ClientBusinessActivityPage;
+    expect(page).toMatchObject({ coverage: "source_records_only", canonicalRoot: { sourceId, rootNamespace: "business", publicId: client.id },
+      page: { available: true, hasMore: true, returned: 1, limit: 1 } });
+    expect(page.items[0]).toMatchObject({ sourceId, recordId: client.id, recordKind: "client", recordName: client.name,
+      origin: "source_observation", action: "source_record_updated", occurredAt: "2025-04-02T12:00:00.000Z" });
+    expect(page.items[0]).not.toHaveProperty("actor");
+    expect(JSON.stringify(page)).not.toMatch(/untrusted-actor|private-payload|payload_json|event_key/);
+    const next = await activityRequest(client.id, `?limit=1&expectedContextVersion=${encodeURIComponent(page.contextVersion)}&cursor=${encodeURIComponent(page.page.nextCursor!)}`);
+    expect(next.status).toBe(200);
+    const second = await next.json() as ClientBusinessActivityPage;
+    expect(second.asOf).toBe(page.asOf);
+    expect(second.page).toMatchObject({ hasMore: false, nextCursor: null, returned: 1 });
+    expect(second.items[0]?.occurredAt).toBe("2025-04-01T12:00:00.000Z");
+    expect(second.items[0]?.id).not.toBe(page.items[0]?.id);
+    expect(await db.prepare("SELECT count(*) count FROM client_business_activity").first<number>("count")).toBe(before);
+    expect(await env.DELIVERY_DB.prepare("SELECT count(*) count FROM client_accounts").first<number>("count")).toBe(0);
+  }, 30_000);
+
+  it("rejects stale expected workspace context before returning activity", async () => {
+    const client = await activityClient();
+    const first = await activityRequest(client.id);
+    expect(first.status).toBe(200);
+    const page = await first.json() as ClientBusinessActivityPage;
+    // A source visibility epoch change invalidates the shared detail context.
+    await registerVisibleTestSource(db, sourceId, "Renamed source");
+    const response = await activityRequest(client.id, `?expectedContextVersion=${encodeURIComponent(page.contextVersion)}`);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "Client context changed. Refresh the workspace to continue" });
+  }, 30_000);
+
+  it("rejects stale activity continuation when a new applied observation changes ordering", async () => {
+    const client = await activityClient();
+    const page = await (await activityRequest(client.id, "?limit=1")).json() as ClientBusinessActivityPage;
+    await db.prepare("UPDATE pa_clients SET payload_json=? WHERE id=?")
+      .bind(JSON.stringify({ updated_at: "2025-04-03T12:00:00.000Z" }), client.id).run();
+    const response = await activityRequest(client.id, `?cursor=${encodeURIComponent(page.page.nextCursor!)}`);
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "Business activity or access changed. Refresh the client workspace to continue" });
+  }, 30_000);
+
+  it("rejects an activity cursor reused for another source root", async () => {
+    const firstClient = await activityClient(), secondClient = await activityClient();
+    const response = await activityRequest(firstClient.id, "?limit=1");
+    expect(response.status).toBe(200);
+    const page = await response.json() as ClientBusinessActivityPage;
+    const wrong = await activityRequest(secondClient.id, `?cursor=${encodeURIComponent(page.page.nextCursor!)}`);
+    expect(wrong.status).toBe(400);
+    expect(await wrong.json()).toEqual({ error: "Business activity cursor does not match this resource" });
+  }, 30_000);
+
+  it("denies activity after source hiding without returning old data or cursor", async () => {
+    const client = await activityClient();
+    const page = await (await activityRequest(client.id, "?limit=1")).json() as ClientBusinessActivityPage;
+    await db.prepare("UPDATE pa_connectors SET read_visible=0,version=version+1 WHERE source_id=?").bind(sourceId).run();
+    const response = await activityRequest(client.id, `?cursor=${encodeURIComponent(page.page.nextCursor!)}`);
+    expect(response.status).toBe(404);
+    const body = await response.text();
+    expect(body).not.toContain(client.name);
+    expect(body).not.toContain("items");
+  }, 30_000);
+
+  it("requires actual global directory authority and authenticated entry for activity", async () => {
+    const client = await activityClient();
+    mocks.authenticateStaff.mockRejectedValueOnce(new HTTPException(401, { message: "Authentication required" }));
+    expect((await activityRequest(client.id)).status).toBe(401);
+    await db.prepare(`INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,scope_key,created_by)
+      VALUES('activity-http-deny',?,'team.view','deny','global','global',?)`).bind(actor.id, actor.id).run();
+    try {
+      const response = await activityRequest(client.id);
+      expect(response.status).toBe(403);
+      expect(await response.text()).not.toContain(client.name);
+    } finally {
+      await db.prepare("DELETE FROM staff_permission_overrides WHERE id='activity-http-deny'").run();
+    }
+  }, 30_000);
+
+  it.each(["?limit=0", "?limit=101", "?limit=no", "?cursor=invalid!", "?projectId="])("rejects malformed activity options %s", async query => {
+    const client = await activityClient();
+    const response = await activityRequest(client.id, query);
+    expect(response.status).toBe(400);
+    expect(await response.text()).not.toMatch(/SELECT|SQLITE|D1_ERROR|payload_json/);
+  }, 30_000);
+
+  it("does not reinterpret portal namespace activity as business history", async () => {
+    const client = await activityClient();
+    const response = await activityRequest(client.id, "", "portal");
+    expect(response.status).toBe(404);
+    expect(await response.text()).not.toContain(client.name);
   });
 });

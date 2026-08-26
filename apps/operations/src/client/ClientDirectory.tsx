@@ -25,6 +25,7 @@ export interface ClientSummary {
   business_party_id?: string | null;
   business_party_name?: string | null;
   business_party_member_count?: number;
+  meaningful_activity_at?: string | null;
 }
 export interface ClientHubCapabilities {
   directory: boolean;
@@ -37,10 +38,12 @@ interface DirectoryResponse {
   sources?: Array<{ source_id: string; display_name: string }>;
   nextCursor?: string | null;
   indexUpdatedAt?: string | null;
+  activityAsOf?: string;
+  activityCoverage?: "project_alpha_business_records";
   searchCapabilities?: { businessContacts: boolean; portalContacts: boolean };
   capabilities: ClientHubCapabilities;
 }
-interface DirectoryQuery { q: string; kind: ClientKind | "all"; source: string }
+interface DirectoryQuery { q: string; kind: ClientKind | "all"; source: string; sort: "recent" | "name" }
 const FILTERS: Array<{ kind: DirectoryQuery["kind"]; label: string }> = [
   { kind: "all", label: "All" },
   { kind: "organization", label: "Organizations" },
@@ -50,7 +53,8 @@ const FILTERS: Array<{ kind: DirectoryQuery["kind"]; label: string }> = [
 function readQuery(search = location.search): DirectoryQuery {
   const parameters = new URLSearchParams(search), kind = parameters.get("kind");
   return { q: (parameters.get("q") || "").trim(),
-    kind: kind === "organization" || kind === "standalone_client" ? kind : "all", source: parameters.get("source") || "" };
+    kind: kind === "organization" || kind === "standalone_client" ? kind : "all", source: parameters.get("source") || "",
+    sort: parameters.get("sort") === "name" ? "name" : "recent" };
 }
 
 function queryString(query: DirectoryQuery): string {
@@ -58,6 +62,7 @@ function queryString(query: DirectoryQuery): string {
   if (query.q) parameters.set("q", query.q);
   if (query.kind !== "all") parameters.set("kind", query.kind);
   if (query.source) parameters.set("source", query.source);
+  if (query.sort === "name") parameters.set("sort", query.sort);
   const value = parameters.toString();
   return value ? `?${value}` : "";
 }
@@ -98,6 +103,26 @@ function refreshedTime(value: string | null | undefined): string | null {
   return Number.isFinite(date.getTime()) ? date.toISOString() : null;
 }
 
+/** Accept explicit ISO instants or database UTC timestamps, never guessed locale dates. */
+export function businessTimestamp(value: string | null | undefined): string | null {
+  if (typeof value !== "string") return null;
+  const sql = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,3})?$/.test(value);
+  const normalized = sql ? `${value.replace(" ", "T")}Z` : value;
+  const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d{1,3})?(Z|[+-]\d{2}:\d{2})$/.exec(normalized);
+  if (!match || match[0] !== normalized || Number(match[4]) > 23 || Number(match[5]) > 59 || Number(match[6]) > 59) return null;
+  const calendar = new Date(`${match[1]}-${match[2]}-${match[3]}T00:00:00Z`);
+  if (!Number.isFinite(calendar.valueOf()) || calendar.toISOString().slice(0, 10) !== `${match[1]}-${match[2]}-${match[3]}`) return null;
+  const date = new Date(normalized);
+  return Number.isFinite(date.valueOf()) ? date.toISOString() : null;
+}
+function ClientBusinessUpdate({ value, asOf }: { value?: string | null; asOf: string | null }) {
+  const timestamp = businessTimestamp(value), observedAt = businessTimestamp(asOf);
+  const verified = timestamp && (asOf === null || (observedAt && timestamp <= observedAt)) ? timestamp : null;
+  return <dl className="client-directory-update"><dt>Last business update</dt><dd>{verified
+    ? <time dateTime={verified}>{new Date(verified).toLocaleString([], { dateStyle: "medium", timeStyle: "short" })}</time>
+    : value === null || value === undefined ? "No business update recorded" : "Business update unavailable"}</dd></dl>;
+}
+
 function statusTone(status: string): "neutral" | "success" | "warning" | "danger" {
   return status === "active" ? "success" : ["blocked", "revoked", "closed"].includes(status)
     ? "danger" : status === "suspended" ? "warning" : "neutral";
@@ -121,6 +146,7 @@ export function ClientDirectory() {
   const [sources, setSources] = useState<NonNullable<DirectoryResponse["sources"]>>([]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [indexUpdatedAt, setIndexUpdatedAt] = useState<string | null>(null);
+  const [activityAsOf, setActivityAsOf] = useState<string | null>(null);
   const [searchCapabilities, setSearchCapabilities] = useState({ businessContacts: true, portalContacts: false });
   const [loaded, setLoaded] = useState(false);
   const [loading, setLoading] = useState<"initial" | "more" | null>("initial");
@@ -138,9 +164,10 @@ export function ClientDirectory() {
     setLoading(cursor ? "more" : "initial");
     setError("");
     setStaleCursor(false);
-    if (!cursor) { setClients([]); setNextCursor(null); setIndexUpdatedAt(null); setLoaded(false); }
+    if (!cursor) { setClients([]); setNextCursor(null); setIndexUpdatedAt(null); setActivityAsOf(null); setLoaded(false); }
     const parameters = new URLSearchParams(queryString(selection));
     parameters.set("limit", "24");
+    parameters.set("sort", selection.sort);
     if (cursor) parameters.set("cursor", cursor);
     try {
       const result = await api<DirectoryResponse>(`/api/client-hub?${parameters}`, { signal: abort.signal });
@@ -154,6 +181,7 @@ export function ClientDirectory() {
       setNextCursor(result.nextCursor || null);
       setSources(result.sources || []);
       setIndexUpdatedAt(refreshedTime(result.indexUpdatedAt));
+      setActivityAsOf(result.activityAsOf ?? null);
       setSearchCapabilities({ businessContacts: result.searchCapabilities?.businessContacts ?? true,
         portalContacts: result.searchCapabilities?.portalContacts === true });
       setLoaded(true);
@@ -162,7 +190,7 @@ export function ClientDirectory() {
       if (abort.signal.aborted || request !== requestNumber.current) return;
       const contextChanged = caught instanceof ApiError && caught.status === 409;
       if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) {
-        setClients([]); setSources([]); setNextCursor(null); setIndexUpdatedAt(null); setLoaded(false);
+        setClients([]); setSources([]); setNextCursor(null); setIndexUpdatedAt(null); setActivityAsOf(null); setLoaded(false);
         cursor = null;
       }
       const stale = contextChanged;
@@ -177,7 +205,7 @@ export function ClientDirectory() {
   useEffect(() => {
     void load(query, null);
     return () => { controller.current?.abort(); requestNumber.current += 1; };
-  }, [query.q, query.kind, query.source, load]);
+  }, [query.q, query.kind, query.source, query.sort, load]);
   useEffect(() => {
     const restore = () => {
       const restored = readQuery();
@@ -217,7 +245,7 @@ export function ClientDirectory() {
         {searchCapabilities.portalContacts ? " Portal contact records are also searchable." : " Portal-only contact and login search is not available."}
       </small>
     </form>
-    {(sources.length > 0 || query.source) && <label className="client-directory-source" htmlFor="client-directory-source">
+    <div className="client-directory-selectors">{(sources.length > 0 || query.source) && <label className="client-directory-source" htmlFor="client-directory-source">
       Client source
       <select id="client-directory-source" value={query.source}
         onChange={event => changeQuery({ ...query, source: event.target.value })}>
@@ -226,6 +254,13 @@ export function ClientDirectory() {
         {sources.map(source => <option key={source.source_id} value={source.source_id}>{source.display_name}</option>)}
       </select>
     </label>}
+      <label className="client-directory-sort" htmlFor="client-directory-sort">Sort clients
+        <select id="client-directory-sort" value={query.sort} onChange={event => changeQuery({ ...query, sort: event.target.value === "name" ? "name" : "recent" })}>
+          <option value="recent">Recent business updates</option><option value="name">Name (A–Z)</option>
+        </select>
+      </label>
+    </div>
+    <p className="client-directory-status">Recent order uses business record updates you can access; synchronization and page views do not count.</p>
     <div className="client-directory-filters" role="group" aria-label="Client type">
       {FILTERS.map(filter => <button key={filter.kind} type="button" className="button-ghost"
         aria-pressed={query.kind === filter.kind}
@@ -236,7 +271,7 @@ export function ClientDirectory() {
         ? `${number(clients.length)} client${clients.length === 1 ? "" : "s"} shown${query.q ? ` matching “${query.q}”` : ""}${loading === "more" ? " · Loading more…" : ""}`
         : "Client directory could not be loaded."}
     </p>
-    {loaded && <p className="client-directory-status">
+    {loaded && <p className="client-directory-status client-directory-freshness">
       {indexUpdatedAt ? <>Directory refreshed <time dateTime={indexUpdatedAt}>{new Date(indexUpdatedAt).toLocaleString()}</time>.</>
         : "Directory refreshed periodically."} This reflects directory synchronization, not client activity.
     </p>}
@@ -254,6 +289,7 @@ export function ClientDirectory() {
           <p className="client-directory-status">Open each source workspace for its contacts, history and access.</p></>
           : client.source_name && <small>{client.source_name}</small>}
         {!client.business_party_id && client.root_namespace === "portal" && <small>Portal workspace · business link pending</small>}
+        <ClientBusinessUpdate value={client.meaningful_activity_at} asOf={activityAsOf} />
         {!client.business_party_id && <dl className="client-directory-card-counts">
           <div><dt>Shared projects</dt><dd>{number(client.project_count)}</dd></div>
           <div><dt>Contact records</dt><dd>{number(client.contact_count ?? client.contacts?.length ?? 0)}</dd></div>
@@ -266,7 +302,7 @@ export function ClientDirectory() {
       <EmptyState title={query.q || query.kind !== "all" || query.source ? "No matching clients" : "No clients yet"}
         detail={query.q || query.kind !== "all" || query.source ? "Try another search, client type, or source." : "Clients will appear after they have synchronized."} />
       {(query.q || query.kind !== "all" || query.source) && <button type="button" className="button-ghost"
-        onClick={() => changeQuery({ q: "", kind: "all", source: "" })}>Reset filters</button>}
+        onClick={() => changeQuery({ q: "", kind: "all", source: "", sort: query.sort })}>Reset filters</button>}
     </Card>}
     {nextCursor && !error && <div className="client-directory-more"><button type="button" className="button-ghost"
       disabled={Boolean(loading)} onClick={() => void load(query, nextCursor)}>{loading === "more" ? "Loading more…" : "Load more clients"}</button></div>}
