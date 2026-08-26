@@ -11,7 +11,7 @@ export interface PortalWorkspaceSource {
 }
 
 /** Mapping may be reserved while staging, never inferred during activation/events. */
-export async function resolvePortalWorkspaceSource(db: D1Database, source: PortalProjectionSource, sourceWorkspaceId: string, reserve: boolean): Promise<PortalWorkspaceSource> {
+export async function resolvePortalWorkspaceSource(db: Pick<D1Database, "prepare" | "batch">, source: PortalProjectionSource, sourceWorkspaceId: string, reserve: boolean): Promise<PortalWorkspaceSource> {
   const { sourceId } = createCatalogSourceContext(source?.sourceId);
   if (typeof sourceWorkspaceId !== "string" || sourceWorkspaceId !== sourceWorkspaceId.trim()
     || !/^(?=.{1,128}$)(?=.*[A-Za-z])[A-Za-z0-9][A-Za-z0-9_-]*$/.test(sourceWorkspaceId)) throw new Error("portal-workspace-id-invalid");
@@ -21,8 +21,8 @@ export async function resolvePortalWorkspaceSource(db: D1Database, source: Porta
   if (!row && reserve) {
     const workspaceId = sourceId === PRIMARY_ALPHA_SOURCE_ID ? sourceWorkspaceId : `portal-source-${crypto.randomUUID()}`;
     try {
-      await db.prepare("INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id) VALUES(?,?,?) ON CONFLICT(projection_source_id,source_workspace_id) DO NOTHING")
-        .bind(workspaceId, sourceId, sourceWorkspaceId).run();
+      await db.batch([db.prepare("INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id) VALUES(?,?,?) ON CONFLICT(projection_source_id,source_workspace_id) DO NOTHING")
+        .bind(workspaceId, sourceId, sourceWorkspaceId)]);
     } catch (error) {
       // The immutable-map trigger can reject a concurrent reservation before
       // ON CONFLICT executes. Reuse only the exact source/external-ID winner.

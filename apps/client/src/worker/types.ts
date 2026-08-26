@@ -36,6 +36,8 @@ export interface Env {
   PROJECT_ALPHA_PORTAL_HMAC_SECRET?: string;
   PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_KEY_ID?: string;
   PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET?: string;
+  /** Deploy-managed existing-connector credential envelope; portal keys only. */
+  PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   /** Default-off, read-only Project Alpha planning guidance integration. */
   PROJECT_ALPHA_PRICING_HINTS_ENABLED?: string;
   PROJECT_ALPHA_PRICING_HINT_URL?: string;

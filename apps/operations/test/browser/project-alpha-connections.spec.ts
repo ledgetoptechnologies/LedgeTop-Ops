@@ -12,6 +12,8 @@ interface Directory {
   health: Array<{ sourceId: string; status: string; lastAttemptAt: string | null; lastSuccessAt: string | null; lastErrorCode: string | null }>;
   recovery?: Array<{ sourceId: string; lastAttemptAt: string | null; lastSuccessAt: string | null; nextAttemptAt: string | null;
     status: "never" | "running" | "success" | "failed" | "deferred"; errorCode: string | null; failureCount: number }> | null;
+  portal?: { available: boolean; authorities: Array<{ sourceId: string; state: Connector["state"]; version: number; activeRevision: number; connectorRevision: number }>;
+    recovery: { version: number; sourceId: string; action: string; startedAt: string } | null };
 }
 function connector(sourceId = secondary, state: Connector["state"] = "active"): Connector {
   return { sourceId, displayName: sourceId === primary ? "Primary company" : "Business B", producerBindingId: sourceId === primary ? "producer-primary" : "producer-business-b",
@@ -381,4 +383,119 @@ test("scheduled recovery status wraps without overlapping connection controls at
     await page.screenshot({ path: testInfo.outputPath(`project-alpha-recovery-${width}-full.png`), fullPage: true });
   }
   expect(errors).toEqual([]);
+});
+
+test("portal configuration reuses the selected connection and activation is a separate confirmed action", async ({ page }, testInfo) => {
+  const data: Directory = { ...directory([connector(primary), connector()]), portal: { available: true, authorities: [], recovery: null } };
+  const requests = await fixture(page, data, async route => {
+    if (!new URL(route.request().url()).pathname.endsWith("/portal")) return false;
+    const body = route.request().postDataJSON();
+    const old = data.portal!.authorities[0];
+    expect(body).toEqual({ expectedVersion: 3, expectedPortalVersion: old?.version ?? null, action: body.action });
+    const updated = { sourceId: secondary, state: body.action === "activate" ? "active" as const : body.action === "suspend" ? "suspended" as const : "pending" as const,
+      version: (old?.version ?? 0) + 1, activeRevision: 1, connectorRevision: 1 };
+    data.portal!.authorities = [updated];
+    await route.fulfill({ json: { authority: updated } }); return true;
+  });
+  await page.goto("/administration");
+  const card = page.getByRole("region", { name: "Business B connection" });
+  const portal = card.getByRole("group", { name: "Client portal connection" });
+  await expect(portal).toContainText("Not configured");
+  await expect(portal.locator("input")).toHaveCount(0);
+  await confirmation(page, () => portal.getByRole("button", { name: "Configure client portal" }).click(), /current deployed signing credentials/, false);
+  expect(requests.filter(row => row.method !== "GET")).toHaveLength(0);
+  await confirmation(page, () => portal.getByRole("button", { name: "Configure client portal" }).click(), /explicitly activate/, true);
+  await expect(portal).toContainText("pending");
+  expect(requests.filter(row => row.method === "POST")).toHaveLength(1);
+  await confirmation(page, () => portal.getByRole("button", { name: "Activate client portal" }).click(), /does not merge customer permissions/, true);
+  await expect(portal.getByRole("button", { name: "Pause client portal" })).toBeVisible();
+  await confirmation(page, () => portal.getByRole("button", { name: "Pause client portal" }).click(), /records and grants are retained/, true);
+  await expect(portal.getByRole("button", { name: "Activate client portal" })).toBeEnabled();
+  expect(requests.filter(row => row.method === "POST").map(row => row.body?.action)).toEqual(["configure", "activate", "suspend"]);
+  expect(requests.filter(row => row.method === "POST").every(row => row.csrf === "csrf-fixture")).toBe(true);
+  for (const width of [375, 640, 1280, 3440]) {
+    await page.setViewportSize({ width, height: 1000 });
+    await portal.scrollIntoViewIfNeeded();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1)).toBe(true);
+    for (const button of await portal.getByRole("button").all()) {
+      const box = (await button.boundingBox())!;
+      expect(box.x).toBeGreaterThanOrEqual(0); expect(box.x + box.width).toBeLessThanOrEqual(width + 1);
+    }
+    await page.screenshot({ path: testInfo.outputPath(`portal-purpose-${width}.png`) });
+  }
+});
+
+test("portal activation stays unavailable for suspended sources, paused primary or outdated credentials", async ({ page }) => {
+  const data: Directory = { ...directory([connector(primary, "suspended"), connector()]), portal: { available: true,
+    authorities: [{ sourceId: secondary, state: "pending", version: 1, activeRevision: 1, connectorRevision: 1 }], recovery: null } };
+  const requests = await fixture(page, data);
+  await page.goto("/administration");
+  const portal = page.getByRole("region", { name: "Business B connection" }).getByRole("group", { name: "Client portal connection" });
+  await expect(portal.getByRole("button", { name: "Activate client portal" })).toBeDisabled();
+  data.connectors[0]!.state = "active"; data.connectors[1]!.state = "suspended";
+  await page.getByRole("button", { name: "Refresh connection status" }).click();
+  await expect(portal.getByRole("button", { name: "Activate client portal" })).toBeDisabled();
+  data.connectors[1]!.state = "active"; data.connectors[1]!.activeRevision = 2;
+  await page.getByRole("button", { name: "Refresh connection status" }).click();
+  await expect(portal).toContainText("Configure the portal using the current connection revision");
+  await expect(portal.getByRole("button", { name: "Activate client portal" })).toBeDisabled();
+  expect(requests.filter(row => row.method !== "GET")).toHaveLength(0);
+});
+
+test("uncertain portal updates block mutations and offer explicit recovery without automatic reactivation", async ({ page }) => {
+  const data: Directory = { ...directory([connector(primary), connector()]), portal: { available: true,
+    authorities: [{ sourceId: secondary, state: "pending", version: 1, activeRevision: 1, connectorRevision: 1 }], recovery: null } };
+  const requests = await fixture(page, data, async (route, path) => {
+    if (route.request().method() !== "POST") return false;
+    if (path.endsWith("/portal")) {
+      data.portal!.recovery = { version: 9, sourceId: secondary, action: "activate", startedAt: "2026-08-26T14:00:00Z" };
+      await route.fulfill({ status: 503, json: { error: "The update could not be confirmed. Recover the unfinished update." } }); return true;
+    }
+    if (path.endsWith("/recover-portal-update")) {
+      expect(route.request().postDataJSON()).toEqual({ expectedVersion: 9 });
+      data.portal!.recovery = null; data.portal!.authorities[0]!.state = "suspended"; data.portal!.authorities[0]!.version = 2;
+      await route.fulfill({ json: { recovered: true } }); return true;
+    }
+    return false;
+  });
+  await page.goto("/administration");
+  const card = page.getByRole("region", { name: "Business B connection" });
+  await confirmation(page, () => card.getByRole("button", { name: "Activate client portal" }).click(), /independently authorized/, true);
+  const recover = page.getByRole("button", { name: "Recover unfinished connection update" });
+  await expect(recover).toBeEnabled();
+  await expect(card.getByRole("button", { name: "Activate client portal" })).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Suspend sync" })).toBeDisabled();
+  await expect(card.getByRole("button", { name: "Sync now", exact: true })).toBeDisabled();
+  await confirmation(page, () => recover.click(), /pause all registered secondary client portals/, false);
+  expect(requests.filter(row => row.method === "POST")).toHaveLength(1);
+  await confirmation(page, () => recover.click(), /review and reactivate each portal afterward/, true);
+  await expect(recover).toHaveCount(0);
+  await expect(card.getByRole("button", { name: "Activate client portal" })).toBeEnabled();
+  expect(requests.filter(row => row.method === "POST")).toHaveLength(2);
+});
+
+test("a stale portal version reloads state but never retries activation automatically", async ({ page }) => {
+  const data: Directory = { ...directory([connector(primary), connector()]), portal: { available: true,
+    authorities: [{ sourceId: secondary, state: "pending", version: 1, activeRevision: 1, connectorRevision: 1 }], recovery: null } };
+  const requests = await fixture(page, data, async route => {
+    if (!new URL(route.request().url()).pathname.endsWith("/portal")) return false;
+    const expected = route.request().postDataJSON().expectedPortalVersion;
+    if (expected === 1) {
+      data.portal!.authorities[0]!.version = 2;
+      await route.fulfill({ status: 409, json: { error: "Portal connection changed. Refresh its status before continuing" } });
+    } else {
+      expect(expected).toBe(2); data.portal!.authorities[0]!.state = "active"; data.portal!.authorities[0]!.version = 3;
+      await route.fulfill({ json: { authority: data.portal!.authorities[0] } });
+    }
+    return true;
+  });
+  await page.goto("/administration");
+  const activate = page.getByRole("button", { name: "Activate client portal" });
+  await confirmation(page, () => activate.click(), /independently authorized/, true);
+  await expect(page.getByRole("alert")).toContainText("Portal connection changed");
+  await expect(activate).toBeEnabled();
+  expect(requests.filter(row => row.method === "POST")).toHaveLength(1);
+  await confirmation(page, () => activate.click(), /independently authorized/, true);
+  await expect(page.getByRole("button", { name: "Pause client portal" })).toBeVisible();
+  expect(requests.filter(row => row.method === "POST").map(row => row.body?.expectedPortalVersion)).toEqual([1, 2]);
 });

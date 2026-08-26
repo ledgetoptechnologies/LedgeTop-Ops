@@ -70,7 +70,9 @@ const MAX_CREDENTIAL_REFERENCES = MAX_CONNECTORS * 2;
 const safeId = z.string().min(1).max(128).regex(/^[A-Za-z0-9_-]+$/);
 const scalar = (max: number) => z.string().min(1).max(max).regex(/^[^\u0000-\u001f\u007f]+$/);
 const signingSchema = z.object({ keyId: safeId, algorithm: z.enum(["ed25519", "hmac-sha256"]), value: scalar(8192) }).strict();
-const credentialSchema = z.object({ snapshotApiKey: scalar(8192), eventCurrent: signingSchema, eventPrevious: signingSchema.optional() }).strict();
+// Portal keys are validated only by the separately enabled portal purpose.
+const credentialSchema = z.object({ snapshotApiKey: scalar(8192), eventCurrent: signingSchema, eventPrevious: signingSchema.optional(),
+  portalCurrent: z.unknown().optional(), portalPrevious: z.unknown().optional() }).strict();
 const credentialsSchema = z.object({ version: z.literal(1), sets: z.record(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), z.unknown()) }).strict();
 type KeyInput = z.infer<typeof signingSchema>;
 const revisionSchema = z.object({ credentialRef: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/), snapshotBasePath: scalar(1024),
@@ -369,13 +371,14 @@ export async function registerProjectAlphaConnector(env: ProjectAlphaConnectorEn
   return summary(saved);
 }
 export async function reviseProjectAlphaConnector(env: ProjectAlphaConnectorEnvironment, requestedSource: string, expectedVersion: number,
-  input: ProjectAlphaConnectorRevisionInput, actorId: string): Promise<ProjectAlphaConnectorSummary> {
+  input: ProjectAlphaConnectorRevisionInput, actorId: string, administrationFence?: D1PreparedStatement): Promise<ProjectAlphaConnectorSummary> {
   const id = sourceId(requestedSource), author = actor(actorId), value = parseRevision(input), db = database(env), row = await read(db, id);
   if (!row) return fail("unavailable", "Connector is not registered");
   if (row.state === "retired" || row.snapshot_base_path !== value.snapshotBasePath) return fail("conflict", "Connector destination ownership cannot change");
   const keys = await configuredKeys(env, value.credentialRef, row.profile), revision = row.active_revision + 1;
   try {
     await db.batch([
+      ...(administrationFence ? [administrationFence] : []),
       mutationFence(db, id, expectedVersion), ...await keyReservations(env, id, keys.current, keys.previous),
       revisionStatement(db, id, revision, value, keys.current, keys.previous, author),
       db.prepare("UPDATE pa_connectors SET active_revision=?,version=version+1,updated_at=datetime('now') WHERE source_id=? AND version=?")
@@ -387,7 +390,8 @@ export async function reviseProjectAlphaConnector(env: ProjectAlphaConnectorEnvi
   return summary(saved);
 }
 export async function setProjectAlphaConnectorState(env: ProjectAlphaConnectorEnvironment, requestedSource: string,
-  input: { expectedVersion: number; state: ProjectAlphaConnectorState; readVisible?: boolean; displayName?: string }, actorId: string): Promise<ProjectAlphaConnectorSummary> {
+  input: { expectedVersion: number; state: ProjectAlphaConnectorState; readVisible?: boolean; displayName?: string }, actorId: string,
+  administrationFence?: D1PreparedStatement): Promise<ProjectAlphaConnectorSummary> {
   const parsed = z.object({ expectedVersion: z.number().int().positive(), state: z.enum(["pending", "active", "suspended", "retired"]),
     readVisible: z.boolean().optional(), displayName: scalar(160).refine(value => value.trim() === value).optional() }).strict().safeParse(input);
   if (!parsed.success) return fail("invalid", "Connector state change is invalid");
@@ -397,6 +401,7 @@ export async function setProjectAlphaConnectorState(env: ProjectAlphaConnectorEn
   if (value.state === "active") await verifiedConfiguration(env, row);
   try {
     await db.batch([
+      ...(administrationFence ? [administrationFence] : []),
       mutationFence(db, id, value.expectedVersion),
       db.prepare(`UPDATE pa_connectors SET state=?,read_visible=?,display_name=?,version=version+1,updated_at=datetime('now') WHERE source_id=? AND version=?`)
         .bind(value.state, value.readVisible === undefined ? row.read_visible : Number(value.readVisible), value.displayName ?? row.display_name, id, value.expectedVersion),

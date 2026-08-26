@@ -46,7 +46,8 @@ describe("authenticated delivery grant live authorization", () => {
         principal_public_id TEXT NOT NULL,principal_source_version TEXT NOT NULL,verified_email TEXT NOT NULL);
       CREATE TABLE project_alpha_delivery_portal_grants(id TEXT PRIMARY KEY,workspace_id TEXT NOT NULL,folder_binding_id TEXT NOT NULL,
         binding_source_version TEXT NOT NULL,audience_type TEXT NOT NULL,audience_public_id TEXT NOT NULL,
-        audience_source_version TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',expires_at TEXT);
+        audience_source_version TEXT NOT NULL,grant_version INTEGER NOT NULL DEFAULT 1 CHECK(grant_version>=1),
+        status TEXT NOT NULL DEFAULT 'active',expires_at TEXT);
     `));
     await db.exec(executable(denialMigration));
     await db.exec(executable(grantMigration));

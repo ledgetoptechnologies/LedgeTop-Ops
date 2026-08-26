@@ -82,6 +82,7 @@ import {
 } from "./project-alpha-pricing-hint";
 import { clientPortalNotificationsAvailable } from "./schema-readiness";
 import { readClientRequestReadiness } from "./request-readiness";
+import { createNativePortalWorkspaceRouter } from "./native-portal-resources";
 
 interface ClientPortalDependencies {
   resolvePrincipal?: ResolveClientPrincipal;
@@ -448,6 +449,10 @@ export function createClientPortalRouter(
     c.set("clientWorkspace", workspace);
     await next();
   });
+
+  // Native resources use the verified global principal and their own exact
+  // workspace context. They must never manufacture a legacy account session.
+  router.route("/v2/workspaces", createNativePortalWorkspaceRouter());
 
   router.get("/session", async (c) => {
     const session = c.get("clientSession");

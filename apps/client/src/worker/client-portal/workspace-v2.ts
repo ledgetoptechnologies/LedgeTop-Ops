@@ -1,4 +1,8 @@
 import type { Env as ClientEnv } from "../types";
+import { readPortalSourceAuthorityProof, portalSourceAuthoritiesReady, type PortalSourceAuthorityProof } from "../project-alpha-portal-authority";
+import { readNativeTargetScopes } from "./native-portal-scopes";
+import { d1TablesPresent } from "../schema-readiness";
+import { bindNativePortalEligibility } from "./native-portal-eligibility";
 import { localOrPrimaryAlphaReference, primaryAlphaReference, primaryWorkspaceAccount } from "./project-alpha-source";
 export type PortalAuthorizationEnv = Pick<ClientEnv, "DELIVERY_DB" | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED" |
   "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED" | "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED" |
@@ -46,6 +50,8 @@ export interface PortalWorkspaceSummary {
   rootType: "organization" | "standalone_client";
   rootPublicId: string;
   displayName: string;
+  resourceMode?: "native";
+  sourceId?: string;
 }
 
 export interface PortalDirectoryEntry {
@@ -64,6 +70,7 @@ interface WorkspaceRow {
   pa_client_public_id: string | null;
   display_name: string;
   legacy_account_id?: string | null;
+  project_alpha_source_id?: string;
 }
 interface EntitlementRow {
   effect: "allow" | "deny";
@@ -196,9 +203,11 @@ function isPreLegacyBridgeDatabase(error: unknown): boolean {
 async function resolveGlobalIdentity(
   env: Env,
   principal: VerifiedClientPrincipal,
+  allowEligibilityRepair = true,
 ): Promise<IdentityRow | null> {
   if (!validPrincipalPart(principal.issuer) || !validPrincipalPart(principal.subject)) return null;
-  let identity = await portalDb(env)
+  const identityDatabase = allowEligibilityRepair ? portalDb(env) : env.DELIVERY_DB.withSession('first-primary');
+  let identity = await identityDatabase
     .prepare(`SELECT id FROM portal_v2_identities
       WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL`)
     .bind(principal.issuer, principal.subject)
@@ -206,7 +215,7 @@ async function resolveGlobalIdentity(
   const email = canonicalPrincipalEmail(principal.email);
   if (identity) {
     try {
-      const blocked = await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_identity_eligibility_blocks
+      const blocked = await identityDatabase.prepare(`SELECT 1 ok FROM portal_v2_identity_eligibility_blocks
         WHERE status='active' AND datetime(valid_from)<=datetime('now')
           AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
           AND ((match_type='issuer_subject' AND issuer=? AND subject=?)
@@ -217,7 +226,7 @@ async function resolveGlobalIdentity(
       if (!/no such table:\s*(?:main\.)?portal_v2_identity_eligibility_blocks\b/i.test(error instanceof Error ? error.message : String(error))) throw error;
     }
   }
-  if (email && env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED === "true") {
+  if (allowEligibilityRepair && email && env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED === "true") {
     try {
       const blocked = await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_identity_eligibility_blocks
         WHERE status='active' AND datetime(valid_from)<=datetime('now')
@@ -226,6 +235,10 @@ async function resolveGlobalIdentity(
             OR (match_type='email' AND normalized_email=?)) LIMIT 1`)
         .bind(principal.issuer, principal.subject, email).first("ok");
       if (blocked !== null) return null;
+      await bindNativePortalEligibility(env, principal, email);
+      identity = await portalDb(env).prepare(`SELECT id FROM portal_v2_identities
+        WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?`)
+        .bind(principal.issuer, principal.subject, email).first<IdentityRow>();
       const authorityTablesReady = (await portalDb(env).prepare(`SELECT COUNT(*) count FROM sqlite_master
         WHERE type='table' AND name IN ('pa_portal_entitlement_intents','portal_v2_directory_checkpoints','portal_v2_directory_generations')`)
         .first<number>("count")) === 3;
@@ -343,7 +356,7 @@ async function resolveGlobalIdentity(
   }
   if (!identity) return null;
   if (portalIdentityDenylistEnabled(env)) {
-    const denied = await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_identity_denials
+    const denied = await (allowEligibilityRepair ? portalDb(env) : identityDatabase).prepare(`SELECT 1 ok FROM portal_v2_identity_denials
       WHERE identity_id=? AND scope_type='global' AND status='active' AND revoked_at IS NULL
         AND datetime(valid_from)<=datetime('now') AND (expires_at IS NULL OR datetime(expires_at)>datetime('now')) LIMIT 1`)
       .bind(identity.id).first("ok");
@@ -372,7 +385,7 @@ async function activeWorkspace(
     .first<WorkspaceRow>();
 }
 
-function eligiblePortalShellQuery(requireBridge: boolean, workspaceReference = "?", identityReference = "?"): string {
+export function eligiblePortalShellQuery(requireBridge: boolean, workspaceReference = "?", identityReference = "?"): string {
   const bridge = requireBridge ? `JOIN portal_v2_identity_eligibility_legacy_bridges bridge
       ON bridge.workspace_id=eligibility.workspace_id AND bridge.identity_id=eligibility.identity_id
       AND bridge.status='active' AND bridge.revoked_at IS NULL` : "";
@@ -723,6 +736,123 @@ export async function authorizePortalWorkspaceCapability(
   return allowedByEntitlementRows(result.results, scopes);
 }
 
+export type NativePortalReadCapability = "workspace.view" | "directory.read" | "delivery.view";
+export interface NativePortalReadContext {
+  workspaceId: string;
+  sourceId: string;
+  identityId: string;
+  displayName: string;
+  rootType: WorkspaceRow["root_type"];
+  rootPublicId: string;
+  generationId: string;
+  contextVersion: string;
+  authority: PortalSourceAuthorityProof;
+  /** Internal, current authorization facts. Never serialize this structure. */
+  workspace: WorkspaceRow;
+  grants: Array<EntitlementRow & { capability: NativePortalReadCapability }>;
+  denials: IdentityDenialRow[];
+}
+
+export async function nativePortalSourceSchemaAvailable(env: Env): Promise<boolean> {
+  return await portalSourceAuthoritiesReady(env.DELIVERY_DB)
+    && await d1TablesPresent(env.DELIVERY_DB, ["pa_portal_workspace_sources"]);
+}
+
+/** A separate read adapter. It cannot manufacture a legacy account or authorize
+ * request, billing, invitation, delegation or Viewer capabilities. */
+export async function resolveNativePortalWorkspaceReadContext(
+  env: Env, principal: VerifiedClientPrincipal, workspaceId: string,
+): Promise<NativePortalReadContext | null> {
+  if (!portalHierarchyV2Enabled(env) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceId)
+    || !await nativePortalSourceSchemaAvailable(env)) return null;
+  const identity = await resolveGlobalIdentity(env, principal, false);
+  if (!identity) return null;
+  const database = env.DELIVERY_DB.withSession("first-primary");
+  const workspace = await database.prepare(`SELECT workspace.*,membership.id membership_id,
+      membership.status membership_status,membership.source_type membership_source_type,
+      membership.source_version membership_source_version,membership.expires_at membership_expires_at,
+      checkpoint.active_generation_id generation_id,checkpoint.source_sequence,
+      root.source_version root_version,root.display_name root_name,
+      person.issuer person_issuer,person.subject person_subject,person.verified_email person_email
+    FROM portal_v2_workspaces workspace
+    JOIN pa_portal_workspace_sources source ON source.workspace_id=workspace.id AND source.projection_source_id=workspace.project_alpha_source_id
+    JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id AND membership.identity_id=?
+      AND membership.status='active' AND membership.revoked_at IS NULL
+      AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
+    JOIN portal_v2_identities person ON person.id=membership.identity_id AND person.status='active' AND person.revoked_at IS NULL
+    JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+      AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
+    JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id AND root.generation_id=generation.id
+      AND root.entity_type=workspace.root_type AND root.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) AND root.active=1
+    WHERE workspace.id=? AND workspace.status='active' AND workspace.legacy_account_id IS NULL
+      AND workspace.project_alpha_source_id<>'project-alpha:primary' AND lower(person.verified_email)=?
+      AND (membership.source_type<>'project_alpha' OR EXISTS(SELECT 1 FROM pa_portal_principals current_principal
+        WHERE current_principal.workspace_id=workspace.id AND current_principal.identity_id=person.id
+          AND current_principal.status='active' AND current_principal.source_version=membership.source_version
+          AND lower(current_principal.email_hint)=lower(person.verified_email)))`)
+    .bind(identity.id, workspaceId,canonicalPrincipalEmail(principal.email)??'').first<WorkspaceRow & { project_alpha_source_id: string; generation_id: string }>();
+  if (!workspace) return null;
+  const authority = await readPortalSourceAuthorityProof(database, workspace.project_alpha_source_id);
+  if (!authority) return null;
+  const grants = await database.prepare(`SELECT id,capability,effect,scope_type,scope_public_id,entitlement_version,
+      source_type,source_version,valid_from,expires_at FROM portal_v2_entitlements
+    WHERE workspace_id=? AND identity_id=? AND capability IN ('workspace.view','directory.read','delivery.view')
+      AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
+      AND (expires_at IS NULL OR datetime(expires_at)>datetime('now')) ORDER BY id LIMIT 201`)
+    .bind(workspaceId, identity.id).all<NativePortalReadContext["grants"][number]>();
+  const denials = portalIdentityDenylistEnabled(env) ? (await database.prepare(`SELECT id,workspace_id,scope_type,scope_public_id,valid_from,expires_at
+    FROM portal_v2_identity_denials WHERE identity_id=? AND status='active' AND revoked_at IS NULL
+      AND datetime(valid_from)<=datetime('now') AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+      AND (scope_type='global' OR workspace_id=?) ORDER BY id LIMIT 201`).bind(identity.id, workspaceId).all<IdentityDenialRow>()).results : [];
+  if (grants.results.length > 200 || denials.length > 200 || deniedByIdentityRows(denials, workspaceId, new Set([`workspace:${workspaceId}`]))) return null;
+  const principals = (await database.prepare(`SELECT p.public_id,p.source_version,p.identity_id,p.email_hint,
+      eligibility.identity_id eligible_identity,eligibility.principal_source_version eligible_version,eligibility.verified_email eligible_email
+    FROM pa_portal_principals p LEFT JOIN portal_v2_identity_eligibility_bindings eligibility
+      ON eligibility.workspace_id=p.workspace_id AND eligibility.principal_public_id=p.public_id AND eligibility.identity_id=?
+    WHERE p.workspace_id=? AND p.status='active' AND (p.identity_id=? OR eligibility.identity_id=?) ORDER BY p.public_id LIMIT 201`)
+    .bind(identity.id, workspaceId, identity.id, identity.id).all()).results;
+  if (principals.length > 200) return null;
+  const shellAllowed = allowedByEntitlementRows(grants.results.filter(g => g.capability === "workspace.view"), new Set([`workspace:${workspaceId}`]));
+  if (!shellAllowed && !await eligiblePortalShell(env, identity.id, workspaceId)) return null;
+  // Eligibility cannot override an explicit workspace.view deny.
+  if (grants.results.some(g => g.capability === "workspace.view" && g.effect === "deny" && g.scope_type === "workspace" && g.scope_public_id === workspaceId)) return null;
+  const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([
+    authority, identity.id, workspace, grants.results, denials, principals,
+    env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED, env.CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED,
+  ]))));
+  return { workspaceId, sourceId: authority.sourceId, identityId: identity.id,
+    displayName: workspace.display_name, rootType: workspace.root_type,
+    rootPublicId: workspace.pa_organization_public_id ?? workspace.pa_client_public_id!,
+    generationId: workspace.generation_id, authority, workspace, grants: grants.results, denials,
+    contextVersion: Array.from(digest, value => value.toString(16).padStart(2, "0")).join("") };
+}
+
+/** Evaluate only read capabilities against a freshly resolved native context. */
+export async function authorizeNativePortalReadTarget(
+  env: Env, context: NativePortalReadContext, capability: NativePortalReadCapability, target: PortalWorkspaceTarget,
+): Promise<boolean> {
+  if (!["workspace.view", "directory.read", "delivery.view"].includes(capability)) return false;
+  const scopes = (await readNativeTargetScopes(env,context,[target])).get(`${target.scopeType}:${target.publicId}`)?.scopes;
+  return Boolean(scopes && nativePortalScopesAllowed(context,capability,scopes));
+}
+
+/** Same deny precedence as the primary adapter, evaluated once per bounded
+ * native target batch. The context and target generation are rechecked by the caller. */
+export function nativePortalScopesAllowed(context:NativePortalReadContext,capability:NativePortalReadCapability,scopes:ReadonlySet<string>,requireAllow=true):boolean {
+  if(deniedByIdentityRows(context.denials,context.workspaceId,scopes))return false;
+  const rules=context.grants.filter(g=>g.capability===capability);
+  return requireAllow?allowedByEntitlementRows(rules,scopes)
+    :!rules.some(g=>g.effect==='deny'&&scopes.has(`${g.scope_type}:${g.scope_public_id}`));
+}
+
+export async function nativePortalTargetPassesDenials(
+  env: Env, context: NativePortalReadContext, capability: NativePortalReadCapability, target: PortalWorkspaceTarget,
+): Promise<boolean> {
+  const scopes=(await readNativeTargetScopes(env,context,[target])).get(`${target.scopeType}:${target.publicId}`)?.scopes;
+  return Boolean(scopes&&nativePortalScopesAllowed(context,capability,scopes,false));
+}
+
 export interface EffectiveWorkspaceRequestProof {
   workspace: EffectivePortalWorkspaceContext;
   local: {
@@ -940,6 +1070,21 @@ export async function listPortalWorkspaces(
       rootPublicId: workspace.pa_organization_public_id ?? workspace.pa_client_public_id!,
       displayName: workspace.display_name,
     });
+  }
+  if (await nativePortalSourceSchemaAvailable(env)) {
+    const native = await env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT w.id
+      FROM portal_v2_workspace_memberships m JOIN portal_v2_workspaces w ON w.id=m.workspace_id
+      JOIN pa_portal_source_authorities a ON a.source_id=w.project_alpha_source_id AND a.state='active'
+      WHERE m.identity_id=? AND m.status='active' AND m.revoked_at IS NULL
+        AND (m.expires_at IS NULL OR datetime(m.expires_at)>datetime('now'))
+        AND w.status='active' AND w.legacy_account_id IS NULL ORDER BY w.id LIMIT 33`)
+      .bind(identity.id).all<{id:string}>();
+    if (native.results.length > 32) return [];
+    for (const row of native.results) {
+      const context = await resolveNativePortalWorkspaceReadContext(env, principal, row.id);
+      if (context) authorized.push({id:context.workspaceId,rootType:context.rootType,rootPublicId:context.rootPublicId,
+        displayName:context.displayName,resourceMode:'native',sourceId:context.sourceId});
+    }
   }
   return authorized;
 }

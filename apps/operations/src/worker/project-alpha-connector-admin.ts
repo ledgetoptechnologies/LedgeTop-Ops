@@ -8,12 +8,27 @@ import { syncRegisteredProjectAlpha } from "./project-alpha";
 import { getProjectAlphaSnapshotRecoveryStatus } from "./project-alpha-snapshot-recovery";
 import {
   listProjectAlphaConnectors, ProjectAlphaConnectorError, registerProjectAlphaConnector,
-  reviseProjectAlphaConnector, setProjectAlphaConnectorState,
 } from "./project-alpha-connectors";
+import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
+import {
+  getConnectorPortalStatus, configureConnectorPortal, changeConnectorPortal, recoverConnectorPortalCoordination,
+  reviseCoordinatedProjectAlphaConnector, setCoordinatedProjectAlphaConnectorState,
+} from "./project-alpha-portal-coordination";
 import type { Env, StaffPrincipal } from "./types";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
 const ROOT = "/api/admin/integrations/project-alpha/connectors";
+export function portalAuthorityErrorResponse(error: PortalSourceAuthorityError): { status: 400 | 409 | 503; error: string; code: string } {
+  return {
+    status: error.code === "invalid" ? 400 : error.code === "conflict" || error.code === "changed" ? 409 : 503,
+    error: error.code === "credentials_unavailable"
+      ? "Deploy this connection's portal signing credentials to Operations and Client before configuring client access"
+      : error.code === "invalid" ? "Portal connection request is invalid"
+      : error.code === "conflict" || error.code === "changed" ? "Portal connection changed. Refresh its status before continuing"
+      : "Portal connection is unavailable. Refresh status and recover any unfinished connection update",
+    code: `PROJECT_ALPHA_PORTAL_${error.code.toUpperCase()}`,
+  };
+}
 const revision = z.object({ credentialRef: z.string().min(1).max(64), snapshotBasePath: z.string().min(1).max(1024),
   accessIssuer: z.string().min(1).max(2048), accessAudience: z.string().min(1).max(512), accessSubject: z.string().min(1).max(512) }).strict();
 const registration = z.object({ sourceId: z.string().min(1).max(78), producerBindingId: z.string().min(1).max(128),
@@ -76,6 +91,10 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
         error.code === "invalid" ? 400 : error.code === "changed" || error.code === "conflict" || error.code === "capacity" ? 409 : 503,
         { message: error.message },
       );
+      if (error instanceof PortalSourceAuthorityError) {
+        const response = portalAuthorityErrorResponse(error);
+        throw new HTTPException(response.status, { message: response.error });
+      }
       throw error;
     }
   });
@@ -89,16 +108,35 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     const safeHealth = health.results.map(row => ({ ...row, lastErrorCode: row.lastErrorCode == null ? null
       : typeof row.lastErrorCode === "string" && /^[a-z][a-z0-9-]{0,119}$/.test(row.lastErrorCode) ? row.lastErrorCode : "project-alpha-sync-failed" }));
     const recovery = await getProjectAlphaSnapshotRecoveryStatus(c.env.OPS_DB);
-    return c.json({ connectors, health: safeHealth, recovery, legacyPrimary: !connectors.some(row => row.sourceId === "project-alpha:primary") });
+    const portal = await getConnectorPortalStatus(c.env);
+    return c.json({ connectors, health: safeHealth, recovery, portal, legacyPrimary: !connectors.some(row => row.sourceId === "project-alpha:primary") });
   });
   app.post(ROOT, async c => c.json({ connector: await registerProjectAlphaConnector(c.env,
     await json(c.req.raw, registration), c.get("principal").id) }, 201));
   app.post(`${ROOT}/:sourceId/revisions`, async c => {
     const value = await json(c.req.raw, z.object({ expectedVersion: z.number().int().positive(), revision }).strict());
-    return c.json({ connector: await reviseProjectAlphaConnector(c.env, c.req.param("sourceId"), value.expectedVersion, value.revision, c.get("principal").id) });
+    return c.json({ connector: await reviseCoordinatedProjectAlphaConnector(c.env, c.req.param("sourceId"), value.expectedVersion, value.revision, c.get("principal").id) });
   });
-  app.patch(`${ROOT}/:sourceId`, async c => c.json({ connector: await setProjectAlphaConnectorState(c.env,
+  app.patch(`${ROOT}/:sourceId`, async c => c.json({ connector: await setCoordinatedProjectAlphaConnectorState(c.env,
     c.req.param("sourceId"), await json(c.req.raw, state), c.get("principal").id) }));
+  app.post(`${ROOT}/:sourceId/portal`, async c => {
+    const value = await json(c.req.raw, z.object({
+      expectedVersion: z.number().int().positive(), expectedPortalVersion: z.number().int().positive().nullable(),
+      action: z.enum(["configure", "activate", "suspend"]),
+    }).strict());
+    if (value.action !== "configure" && value.expectedPortalVersion === null)
+      throw new HTTPException(400, { message: "Configure this connection's client portal before changing its state" });
+    const authority = value.action === "configure"
+      ? await configureConnectorPortal(c.env, c.req.param("sourceId"), value.expectedVersion, value.expectedPortalVersion, c.get("principal").id)
+      : await changeConnectorPortal(c.env, c.req.param("sourceId"), value.expectedVersion, value.expectedPortalVersion!,
+        value.action === "activate" ? "active" : "suspended", c.get("principal").id);
+    return c.json({ authority });
+  });
+  app.post(`${ROOT}/recover-portal-update`, async c => {
+    const value = await json(c.req.raw, z.object({ expectedVersion: z.number().int().positive() }).strict());
+    await recoverConnectorPortalCoordination(c.env, value.expectedVersion, c.get("principal").id);
+    return c.json({ recovered: true });
+  });
   app.post(`${ROOT}/:sourceId/sync`, async c => {
     await json(c.req.raw, z.object({}).strict());
     const sourceId = c.req.param("sourceId");

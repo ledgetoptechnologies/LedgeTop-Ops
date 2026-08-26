@@ -3,12 +3,18 @@ import { primaryWorkspaceAccount } from "./project-alpha-source";
 import type { PortalAuthorizationEnv } from "./workspace-v2";
 type Env = PortalAuthorizationEnv & Pick<ClientEnv, "AUTHENTICATED_DELIVERY_GRANTS_ENABLED">;
 import type { VerifiedClientPrincipal } from "./types";
-import { authorizePortalWorkspaceCapability, portalHierarchyV2Enabled } from "./workspace-v2";
+import { authorizePortalWorkspaceCapability, portalHierarchyV2Enabled, nativePortalScopesAllowed, type NativePortalReadContext } from "./workspace-v2";
+import { readNativeTargetScopes } from './native-portal-scopes';
+import { d1TablesPresent } from '../schema-readiness';
+import { HTTPException } from 'hono/http-exception';
 
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const AUTHORIZED_BINDING_LIMIT = 100;
 
 interface GrantCandidate {
+  grant_id: string;
+  grant_version: number;
+  binding_source_version: string;
   source: "staff" | "project_alpha_delivery";
   folder_binding_id: string;
   r2_prefix: string;
@@ -33,8 +39,15 @@ async function candidates(
   principal: VerifiedClientPrincipal,
   workspaceId: string,
   folderBindingId?: string,
+  native?: NativePortalReadContext,
+  selection?: {bindingIds?:string[];grantId?:string},
 ): Promise<GrantCandidate[] | null> {
+  const workspaceSource = native ? `workspace.project_alpha_source_id=? AND workspace.legacy_account_id IS NULL
+    AND EXISTS(SELECT 1 FROM pa_portal_workspace_sources map WHERE map.workspace_id=workspace.id
+      AND map.projection_source_id=workspace.project_alpha_source_id)` : primaryWorkspaceAccount('workspace');
+  const sourceBindings = native ? [native.sourceId] : [];
   const rows = await portalDb(env).prepare(`SELECT DISTINCT 'staff' source,binding.id folder_binding_id,binding.r2_prefix,
+      grant_record.id grant_id,grant_record.grant_version,binding.source_version binding_source_version,
       binding.owner_scope_type,binding.owner_public_id,grant_record.audience_type,
       grant_record.audience_public_id,grant_record.audience_source_version
     FROM portal_v2_identities identity
@@ -60,14 +73,25 @@ async function candidates(
       AND principal_record.source_version=recipient.principal_source_version
     WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
       AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
-        AND workspace.status='active' AND ${primaryWorkspaceAccount("workspace")})
+        AND workspace.status='active' AND ${workspaceSource})
       AND (grant_record.audience_type<>'principal' OR principal_record.public_id IS NOT NULL)
+      ${native ? `AND (grant_record.audience_type<>'principal' OR (recipient.principal_public_id=grant_record.audience_public_id
+        AND recipient.principal_source_version=grant_record.audience_source_version))
+        AND EXISTS(SELECT 1 FROM portal_native_staff_grants publication JOIN portal_native_staff_bindings ownership
+          ON ownership.binding_id=publication.binding_id AND ownership.source_id=publication.source_id
+          WHERE publication.grant_id=grant_record.id AND publication.binding_id=binding.id AND publication.state='active'
+            AND publication.source_id=? AND ownership.workspace_id=grant_record.workspace_id
+            AND ownership.r2_prefix=binding.r2_prefix AND ownership.project_public_id=binding.owner_public_id AND binding.owner_scope_type='project')
+        AND (? IS NULL OR binding.id IN (SELECT value FROM json_each(?))) AND (? IS NULL OR grant_record.id=?)` : ''}
       AND (? IS NULL OR binding.id=?)
     ORDER BY binding.id LIMIT ?`)
     .bind(workspaceId, principal.issuer, principal.subject,
-      folderBindingId ?? null, folderBindingId ?? null, AUTHORIZED_BINDING_LIMIT + 1)
+      ...sourceBindings,
+      ...(native?[native.sourceId,selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.grantId??null,selection?.grantId??null]:[]),
+      folderBindingId ?? null, folderBindingId ?? null, native?201:AUTHORIZED_BINDING_LIMIT + 1)
     .all<GrantCandidate>();
   const integration = await portalDb(env).prepare(`SELECT DISTINCT 'project_alpha_delivery' source,binding.id folder_binding_id,binding.r2_prefix,
+      grant_record.id grant_id,grant_record.grant_version,binding.source_version binding_source_version,
       binding.owner_scope_type,binding.owner_public_id,grant_record.audience_type,
       grant_record.audience_public_id,grant_record.audience_source_version
     FROM portal_v2_identities identity
@@ -95,14 +119,65 @@ async function candidates(
       AND eligibility.verified_email=identity.verified_email
     WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
       AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
-        AND workspace.status='active' AND ${primaryWorkspaceAccount("workspace")})
+        AND workspace.status='active' AND ${workspaceSource}
+        ${native ? `AND EXISTS(SELECT 1 FROM project_alpha_delivery_intent_receipts receipt
+          WHERE receipt.receipt_id=grant_record.receipt_id AND receipt.project_alpha_source_id=workspace.project_alpha_source_id
+            AND receipt.access_mode='portal' AND receipt.resource_id=grant_record.id AND receipt.status='accepted')` : ''})
       AND principal_record.public_id IS NOT NULL
       AND (principal_record.identity_id=identity.id OR eligibility.identity_id=identity.id)
+      ${native?`AND (? IS NULL OR binding.id IN (SELECT value FROM json_each(?))) AND (? IS NULL OR grant_record.id=?)`:''}
       AND (? IS NULL OR binding.id=?) ORDER BY binding.id LIMIT ?`)
-    .bind(workspaceId,principal.issuer,principal.subject,folderBindingId??null,folderBindingId??null,
-      AUTHORIZED_BINDING_LIMIT+1).all<GrantCandidate>();
+    .bind(workspaceId,principal.issuer,principal.subject,...sourceBindings,
+      ...(native?[selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.bindingIds?JSON.stringify(selection.bindingIds):null,selection?.grantId??null,selection?.grantId??null]:[]),
+      folderBindingId??null,folderBindingId??null,native?201:AUTHORIZED_BINDING_LIMIT+1).all<GrantCandidate>();
   const combined=[...rows.results,...integration.results];
-  return combined.length > AUTHORIZED_BINDING_LIMIT ? null : combined;
+  return combined.length > (native?200:AUTHORIZED_BINDING_LIMIT) ? null : combined;
+}
+
+export async function nativeDeliveryResourcesReady(env:Env):Promise<boolean>{
+  return authenticatedDeliveryGrantsEnabled(env)&&await d1TablesPresent(env.DELIVERY_DB,
+    ['portal_native_staff_bindings','portal_native_staff_grants','portal_native_staff_grant_events','portal_native_staff_write_fences']);
+}
+
+/** Native-only adapter. The same audience, deny and versioned grant policy is
+ * reused; callers must fence the supplied context again before returning data. */
+export async function readNativeAuthenticatedDeliveryGrants(
+  env: Env, principal: VerifiedClientPrincipal, context: NativePortalReadContext, bindingId?: string,
+  selection?:{bindingIds?:string[];grantId?:string},
+): Promise<Array<GrantCandidate & {owner_name:string;binding_fingerprint:string}>> {
+  if (!await nativeDeliveryResourcesReady(env))throw new HTTPException(503,{message:'Native deliveries are not ready. Contact support.'});
+  const rows = await candidates(env,principal,context.workspaceId,bindingId,context,selection);
+  if (!rows) throw new HTTPException(503,{message:'This delivery selection has too many active grants. Contact support.'});
+  const scopes=await readNativeTargetScopes(env,context,[...new Set(rows.map(r=>r.folder_binding_id))].map(publicId=>({scopeType:'folder',publicId})));
+  const result:Array<GrantCandidate & {owner_name:string;binding_fingerprint:string}> = [];
+  for (const row of rows) {
+    const owner=scopes.get(`folder:${row.folder_binding_id}`);
+    if(!owner||owner.bindingVersion!==row.binding_source_version||!nativePortalScopesAllowed(context,'delivery.view',owner.scopes,row.source==='staff'))continue;
+    if(row.audience_type!=='principal'&&owner.versions.get(`${row.audience_type}:${row.audience_public_id}`)!==row.audience_source_version)continue;
+    {
+      const fingerprint = new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify([
+        context.sourceId,context.workspaceId,row.folder_binding_id,row.binding_source_version,row.r2_prefix,
+        row.owner_scope_type,row.owner_public_id,row.source,row.grant_id,row.grant_version,
+        row.audience_type,row.audience_public_id,row.audience_source_version,
+      ]))));
+      result.push({...row,owner_name:owner.name,binding_fingerprint:[...fingerprint].map(n=>n.toString(16).padStart(2,'0')).join('')});
+    }
+  }
+  return result;
+}
+
+/** Seek raw bindings before authorization. Empty intermediate pages retain a
+ * continuation, so denied or ungranted bindings cannot hide later deliveries. */
+export async function readNativeAuthenticatedDeliveryPage(env:Env,principal:VerifiedClientPrincipal,context:NativePortalReadContext,after=''){
+  if(!await nativeDeliveryResourcesReady(env))throw new HTTPException(503,{message:'Native deliveries are not ready. Contact support.'});
+  const bindings=await portalDb(env).prepare(`SELECT id FROM portal_v2_folder_bindings
+    WHERE workspace_id=? AND id>? AND status='active' AND revoked_at IS NULL ORDER BY id LIMIT 26`)
+    .bind(context.workspaceId,after).all<{id:string}>();
+  const scanned=bindings.results.slice(0,25);
+  const grants=scanned.length?await readNativeAuthenticatedDeliveryGrants(env,principal,context,undefined,{bindingIds:scanned.map(b=>b.id)}):[];
+  const unique=[...new Map(grants.sort((a,b)=>a.grant_id.localeCompare(b.grant_id)).map(g=>[g.folder_binding_id,g])).values()]
+    .sort((a,b)=>a.folder_binding_id<b.folder_binding_id?-1:a.folder_binding_id>b.folder_binding_id?1:0);
+  return {grants:unique,after:bindings.results.length>25?scanned.at(-1)!.id:null};
 }
 
 async function integrationDenied(env:Env,principal:VerifiedClientPrincipal,workspaceId:string,row:GrantCandidate):Promise<boolean>{

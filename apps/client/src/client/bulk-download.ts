@@ -51,13 +51,17 @@ function requestErrorMessage(body: RequestErrorBody): string {
   return body.message || "Request failed";
 }
 
-export async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
-  const headers = new Headers(init?.headers);
-  const workspaceId = url.startsWith("/api/client/") && !url.startsWith("/api/client/v2/")
+export type ClientRequestInit = RequestInit & { omitWorkspace?: boolean };
+
+export async function requestJson<T>(url: string, init?: ClientRequestInit): Promise<T> {
+  const { omitWorkspace, ...fetchInit } = init ?? {};
+  const headers = new Headers(fetchInit.headers);
+  if (omitWorkspace) headers.delete("X-LTDS-Workspace-Id");
+  const workspaceId = !omitWorkspace && url.startsWith("/api/client/") && !url.startsWith("/api/client/v2/")
     ? selectedClientWorkspaceId()
     : null;
   if (workspaceId) headers.set("X-LTDS-Workspace-Id", workspaceId);
-  const response = await fetch(url, { credentials: "same-origin", ...init, headers });
+  const response = await fetch(url, { credentials: "same-origin", ...fetchInit, headers });
   const body = await response.json().catch(() => ({})) as RequestErrorBody & T;
   if (!response.ok) {
     throw Object.assign(new Error(requestErrorMessage(body)), {

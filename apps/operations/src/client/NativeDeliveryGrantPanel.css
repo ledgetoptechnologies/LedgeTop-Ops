@@ -1,0 +1,15 @@
+.native-grant-panel { display: grid; gap: .85rem; min-width: 0; }
+.native-grant-panel h3, .native-grant-panel h4, .native-grant-panel p { margin: 0; overflow-wrap: anywhere; }
+.native-grant-panel form { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .65rem; align-items: end; }
+.native-grant-panel input { min-width: 0; }
+.native-grant-panel input:not([type="radio"]), .native-grant-connection select { min-height: 44px; }
+.native-grant-panel > button { justify-self: start; }
+.native-grant-panel .native-grant-choice { display: flex; align-items: center; gap: .6rem; min-height: 44px; padding: .35rem; }
+.native-grant-choice > span { display: grid; gap: .25rem; min-width: 0; overflow-wrap: anywhere; }
+.native-grant-choice small { color: var(--muted); }
+.native-grant-panel .native-grant-choice input { width: auto; flex-shrink: 0; }
+.native-grant-review { display: grid; gap: .85rem; padding: .85rem; border: 1px solid var(--line); border-radius: 8px; background: white; }
+.native-grant-review dl { display: grid; gap: .6rem; margin: 0; }
+.native-grant-review dt { color: var(--muted); }
+.native-grant-review dd { margin: .15rem 0 0; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .native-grant-panel form { grid-template-columns: minmax(0, 1fr); } .native-grant-panel button { min-height: 44px; white-space: normal; } }

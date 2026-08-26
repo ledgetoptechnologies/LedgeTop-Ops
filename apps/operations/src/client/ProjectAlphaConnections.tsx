@@ -11,7 +11,10 @@ type Connector = {
 type Health = { sourceId: string; status: string; lastAttemptAt: string | null; lastSuccessAt: string | null; lastErrorCode: string | null };
 type Recovery = { sourceId: string; lastAttemptAt: string | null; lastSuccessAt: string | null; nextAttemptAt: string | null;
   status: "never" | "running" | "success" | "failed" | "deferred"; errorCode: string | null; failureCount: number };
-type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null };
+type PortalAuthority = { sourceId: string; state: Connector["state"]; version: number; activeRevision: number; connectorRevision: number };
+type PortalStatus = { available: boolean; authorities: PortalAuthority[];
+  recovery: { version: number; sourceId: string; action: string; startedAt: string } | null };
+type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null; portal?: PortalStatus };
 const PRIMARY = "project-alpha:primary";
 const field = (form: FormData, name: string) => String(form.get(name) ?? "").trim();
 function revision(form: FormData, path: string) {
@@ -35,6 +38,7 @@ export function ProjectAlphaConnections() {
   const [mutating, setMutating] = useState(false);
   const [loading, setLoading] = useState(true);
   const busy = mutating || loading;
+  const controlsBusy = busy || Boolean(data?.portal?.recovery);
   const live = useRef(true);
   const mutation = useRef<AbortController | null>(null);
   const [revisionToken, setRevisionToken] = useState(0);
@@ -51,7 +55,7 @@ export function ProjectAlphaConnections() {
   }, [revisionToken]);
 
   async function submit(path: string, method: string, body: object, success: string) {
-    if (busy || mutation.current) return;
+    if (busy || mutation.current || (data?.portal?.recovery && path !== "/recover-portal-update")) return;
     const controller = new AbortController();
     mutation.current = controller;
     setMutating(true); setError(""); setMessage("");
@@ -71,6 +75,8 @@ export function ProjectAlphaConnections() {
   function change(connector: Connector, state: Connector["state"], readVisible = connector.readVisible) {
     if (busy) return;
     const primary = connector.sourceId === PRIMARY;
+    const pausesPortal = Boolean(data?.portal?.authorities.some(authority =>
+      authority.state === "active" && (primary || authority.sourceId === connector.sourceId)));
     const warning = state === "retired" ? (primary
       ? "Retiring the primary permanently stops synchronization for all connections. It cannot be reactivated or replaced here. Existing business records and client grants are retained."
       : "Retirement is permanent; this producer identity cannot be reused.")
@@ -79,7 +85,9 @@ export function ProjectAlphaConnections() {
         : "This stops new synchronization. Existing business records and client grants are retained.")
       : state === "active" ? (primary ? "This enables synchronization from the existing primary staff-authority source." : "This enables business-data synchronization only; it grants no staff or client access.")
       : "This changes staff business-record visibility only, not client grants or shared links.";
-    if (!window.confirm(`${connector.displayName}: ${warning}\nContinue?`)) return;
+    const portalWarning = pausesPortal && (state === "suspended" || state === "retired")
+      ? " Registered secondary client-portal access will also be paused. Reactivating synchronization does not automatically restore portal access." : "";
+    if (!window.confirm(`${connector.displayName}: ${warning}${portalWarning}\nContinue?`)) return;
     void submit(`/${encodeURIComponent(connector.sourceId)}`, "PATCH", { expectedVersion: connector.version, state, readVisible }, "Connection updated.");
   }
   function register(event: FormEvent<HTMLFormElement>) {
@@ -100,11 +108,18 @@ export function ProjectAlphaConnections() {
       {message && <p role="status" className="notice">{message}</p>}
       {!data && !error && <p role="status">Loading connections…</p>}
       <button type="button" className="button-ghost button-small" disabled={busy} onClick={() => { setError(""); setLoading(true); setRevisionToken(value => value + 1); }}>Refresh connection status</button>
+      {data?.portal?.recovery && <div role="status" className="notice">
+        <p>A connection update is unfinished. Recovery cancels the uncertain update and pauses all registered secondary client portals. It does not delete records or change the primary portal.</p>
+        <button type="button" disabled={busy} onClick={() => {
+          if (window.confirm("Cancel the unfinished connection update and pause all registered secondary client portals? You can review and reactivate each portal afterward."))
+            void submit("/recover-portal-update", "POST", { expectedVersion: data.portal!.recovery!.version }, "Connection update recovered. Secondary client portals remain paused; review each before activation.");
+        }}>Recover unfinished connection update</button>
+      </div>}
       {data?.legacyPrimary && <section className="alpha-connection">
         <h3>Primary connection</h3>
         <p>Using the existing deployment configuration. Signed events and daily reconciliation remain enabled when configured.</p>
         <SyncHealth health={data.health.find(row => row.sourceId === PRIMARY)} />
-        <button type="button" disabled={busy} onClick={() => void submit(`/${encodeURIComponent(PRIMARY)}/sync`, "POST", {}, "Primary synchronization finished.")}>Sync primary now</button>
+        <button type="button" disabled={controlsBusy} onClick={() => void submit(`/${encodeURIComponent(PRIMARY)}/sync`, "POST", {}, "Primary synchronization finished.")}>Sync primary now</button>
       </section>}
       {data?.connectors.map(connector => <section key={connector.sourceId} className="alpha-connection" aria-label={`${connector.displayName} connection`}>
         <h3>{connector.displayName}</h3>
@@ -115,13 +130,24 @@ export function ProjectAlphaConnections() {
           connector={connector} primaryActive={data.connectors.some(row => row.sourceId === PRIMARY && row.state === "active")}
           recovery={data.recovery?.find(row => row.sourceId === connector.sourceId)} />}
         <div className="alpha-connection-actions">
-          <button type="button" disabled={busy || connector.state !== "active"} onClick={() => void submit(`/${encodeURIComponent(connector.sourceId)}/sync`, "POST", {}, `${connector.displayName} synchronization finished.`)}>Sync now</button>
-          {connector.state !== "retired" && <button type="button" disabled={busy} onClick={() => change(connector, connector.state === "active" ? "suspended" : "active")}>{connector.state === "active" ? "Suspend sync" : "Activate connection"}</button>}
-          {connector.sourceId !== PRIMARY && <button type="button" disabled={busy} onClick={() => {
+          <button type="button" disabled={controlsBusy || connector.state !== "active"} onClick={() => void submit(`/${encodeURIComponent(connector.sourceId)}/sync`, "POST", {}, `${connector.displayName} synchronization finished.`)}>Sync now</button>
+          {connector.state !== "retired" && <button type="button" disabled={controlsBusy} onClick={() => change(connector, connector.state === "active" ? "suspended" : "active")}>{connector.state === "active" ? "Suspend sync" : "Activate connection"}</button>}
+          {connector.sourceId !== PRIMARY && <button type="button" disabled={controlsBusy} onClick={() => {
             if (window.confirm(`${connector.readVisible ? "Hide" : "Show"} this source's staff business records? This does not change client access or shared links.`))
               void submit(`/${encodeURIComponent(connector.sourceId)}`, "PATCH", { expectedVersion: connector.version, state: connector.state, readVisible: !connector.readVisible }, "Business visibility updated.");
           }}>{connector.readVisible ? "Hide business records" : "Show business records"}</button>}
         </div>
+        {connector.profile === "business_data" && <PortalPurpose connector={connector} status={data.portal}
+          primaryActive={data.connectors.some(row => row.sourceId === PRIMARY && row.state === "active")}
+          disabled={controlsBusy} onAction={action => {
+            const authority = data.portal?.authorities.find(row => row.sourceId === connector.sourceId);
+            const warning = action === "configure" ? "Use this connection's current deployed signing credentials and Access authentication for its client portal? This stages the configuration and pauses any currently enabled portal access until you explicitly activate it."
+              : action === "activate" ? "Enable this connection's client portal? Only independently authorized workspaces and delivery resources become available; this does not merge customer permissions or enable finance, requests or model access."
+                : "Pause this connection's client portal? Its records and grants are retained, but clients cannot read its resources until you explicitly reactivate it.";
+            if (window.confirm(warning)) void submit(`/${encodeURIComponent(connector.sourceId)}/portal`, "POST",
+              { expectedVersion: connector.version, expectedPortalVersion: authority?.version ?? null, action },
+              action === "configure" ? "Client portal configuration staged. Review and activate when ready." : action === "activate" ? "Client portal enabled for independently authorized workspaces." : "Client portal paused.");
+          }} />}
         <details><summary>Connection details</summary>
           <dl><dt>Source</dt><dd>{connector.sourceId}</dd><dt>Producer</dt><dd>{connector.producerBindingId}</dd>
             <dt>Destination</dt><dd>{connector.snapshotOrigin}{connector.snapshotBasePath}</dd><dt>Application</dt><dd>{connector.applicationKey}</dd>
@@ -131,17 +157,17 @@ export function ProjectAlphaConnections() {
             <form className="alpha-connection-form" onSubmit={event => { event.preventDefault(); const form = new FormData(event.currentTarget);
               void submit(`/${encodeURIComponent(connector.sourceId)}`, "PATCH", { expectedVersion: connector.version, state: connector.state, displayName: field(form, "displayName") }, "Connection label updated."); }}>
               <label>Connection label<input name="displayName" required maxLength={160} defaultValue={connector.displayName} key={connector.version} /></label>
-              <button disabled={busy} type="submit">Save label</button>
+              <button disabled={controlsBusy} type="submit">Save label</button>
             </form>
             <details><summary>Rotate credentials and producer authentication</summary>
-              <p>Deploy the new credential set to Operations and the event receiver first. This creates an audited revision, without changing the source destination.</p>
+              <p>Deploy the new credential set to Operations and the event receiver first, and to Client when this source has a client portal. This creates an audited revision without changing the source destination. Registered secondary portals are paused; configure and activate them again after rotation.</p>
               <form className="alpha-connection-form" onSubmit={event => { event.preventDefault(); const form = new FormData(event.currentTarget);
                 if (window.confirm("Apply a new connection revision? In-flight old-revision syncs will stop before further writes."))
                   void submit(`/${encodeURIComponent(connector.sourceId)}/revisions`, "POST", { expectedVersion: connector.version, revision: revision(form, connector.snapshotBasePath) }, "Connection revision updated."); }}>
-                <CredentialFields /><button disabled={busy} type="submit">Apply new revision</button>
+                <CredentialFields /><button disabled={controlsBusy} type="submit">Apply new revision</button>
               </form>
             </details>
-            <button type="button" className="button-danger button-small" disabled={busy} onClick={() => change(connector, "retired")}>Retire connection</button>
+            <button type="button" className="button-danger button-small" disabled={controlsBusy} onClick={() => change(connector, "retired")}>Retire connection</button>
           </>}
         </details>
       </section>)}
@@ -154,11 +180,34 @@ export function ProjectAlphaConnections() {
           <label>Snapshot origin<input name="snapshotOrigin" type="url" required maxLength={2048} placeholder="https://alpha.example.com" /></label>
           <label>Base path<input name="snapshotBasePath" required defaultValue="/" maxLength={1024} /></label>
           <label>Application key<input name="applicationKey" required maxLength={64} /></label>
-          <CredentialFields /><button type="submit" disabled={busy}>Register pending connection</button>
+          <CredentialFields /><button type="submit" disabled={controlsBusy}>Register pending connection</button>
         </form>
       </details>}
     </div>
   </Card>;
+}
+function PortalPurpose({ connector, status, primaryActive, disabled, onAction }: {
+  connector: Connector; status: PortalStatus | undefined; primaryActive: boolean; disabled: boolean;
+  onAction: (action: "configure" | "activate" | "suspend") => void;
+}) {
+  const authority = status?.authorities.find(row => row.sourceId === connector.sourceId);
+  const current = authority?.connectorRevision === connector.activeRevision;
+  const canActivate = connector.state === "active" && primaryActive && current;
+  return <div role="group" aria-label="Client portal connection">
+    <p><strong>Client portal</strong> · {!status?.available ? "Requires coordinated database upgrade" : authority?.state ?? "Not configured"}</p>
+    {status?.available && <>
+      <p>Uses this connection's authentication. Workspaces and delivery access stay independently authorized; business grouping never merges permissions.</p>
+      {authority && !current && <p className="notice">Configure the portal using the current connection revision before activating it.</p>}
+      {(!primaryActive || connector.state !== "active") && <p>Both this connection and the primary must be active before portal activation.</p>}
+      <div className="alpha-connection-actions">
+        <button type="button" disabled={disabled || connector.state === "retired" || authority?.state === "retired"}
+          onClick={() => onAction("configure")}>{authority ? "Refresh portal configuration" : "Configure client portal"}</button>
+        {authority && authority.state !== "retired" && <button type="button"
+          disabled={disabled || (authority.state !== "active" && !canActivate)}
+          onClick={() => onAction(authority.state === "active" ? "suspend" : "activate")}>{authority.state === "active" ? "Pause client portal" : "Activate client portal"}</button>}
+      </div>
+    </>}
+  </div>;
 }
 function SyncHealth({ health }: { health?: Health }) {
   return <p>Sync: {health?.status ?? "Not yet run"}<br />Last attempt: {date(health?.lastAttemptAt ?? null)} · Last success: {date(health?.lastSuccessAt ?? null)}

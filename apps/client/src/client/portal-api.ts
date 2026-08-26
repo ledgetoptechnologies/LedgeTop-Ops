@@ -1,5 +1,6 @@
 import { requestJson, selectClientWorkspaceId, selectedClientWorkspaceId } from "./bulk-download";
 import type { DeliveryLocationCollection, ViewerPublicShareCreation, ViewerPublicShareSummary } from "@ltds/shared";
+import { loadNativePortalContext, type NativePortalBootstrap } from "./native-portal-api";
 
 export interface PortalCapabilities {
   manageTeam: boolean;
@@ -141,6 +142,7 @@ export interface PortalServiceRequest {
 }
 
 export interface PortalBootstrap {
+  resourceMode?: "legacy";
   account: PortalAccount;
   capabilities: PortalCapabilities;
   projects: PortalProject[];
@@ -193,14 +195,15 @@ export async function loadPortalBootstrap(
   requestApi: PortalRequest = requestJson,
   requestedWorkspaceId?: string | null,
   signal?: AbortSignal,
-): Promise<PortalBootstrap> {
+): Promise<PortalBootstrap | NativePortalBootstrap> {
   const request: PortalRequest = (url, init) => requestApi(url, signal ? {...init, signal} : init);
   if (requestedWorkspaceId !== undefined && requestedWorkspaceId !== null && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(requestedWorkspaceId)) throw Object.assign(new Error("Invalid workspace link"), {status: 403});
-  const session = await request<{
+  type PortalSession = {
     account: PortalAccount;
     capabilities?: Partial<PortalCapabilities>;
     viewerDisplayUnits?: "imperial" | "metric";
-  }>("/api/client/session");
+  };
+  let session = await request<PortalSession>("/api/client/session", { omitWorkspace: true });
   let workspaces: PortalWorkspace[] = [];
   let selectedWorkspaceId: string | null = null;
   if (session.capabilities?.workspaceHierarchyV2 === true) {
@@ -217,6 +220,23 @@ export async function loadPortalBootstrap(
     if (requestedWorkspaceId) throw Object.assign(new Error("This workspace is not available to your account"), {status: 403});
     selectClientWorkspaceId(null);
   }
+  const selected = workspaces.find(workspace => workspace.id === selectedWorkspaceId);
+  if (selected?.sourceId && selected.sourceId !== "project-alpha:primary" && selected.resourceMode !== "native") throw Object.assign(new Error("This connected workspace is not available in this portal mode"), {status: 403});
+  if (selected?.resourceMode === "native") {
+    const context = await loadNativePortalContext(selected, request, signal);
+    if (signal?.aborted) throw new DOMException("Aborted", "AbortError");
+    return {
+      ...context, resourceMode: "native", workspaces, selectedWorkspaceId: selected.id,
+      capabilities: {
+        directoryRead: context.capabilities.directoryRead, deliveryView: context.capabilities.deliveryView,
+        workspaceHierarchyV2: true, manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false,
+        workspaceMembershipManagement: false, hierarchyScopedInvitations: false, invitationEmailDelivery: false,
+        delegatedShares: false, viewer: false, viewerShares: false, feedback: false,
+      },
+    };
+  }
+  // Discovery is identity-only. Legacy resources still need their selected account's session.
+  if (selectedWorkspaceId) session = await request<PortalSession>("/api/client/session");
   const [projects, requests, mapConfig] = await Promise.all([
     request<{ projects: PortalProject[] }>("/api/client/projects"),
     request<{ requests: PortalServiceRequest[] }>(
@@ -391,7 +411,7 @@ export async function loadPortalPastDeliveryLocations(
   return request<DeliveryLocationCollection>("/api/client/past-delivery-locations");
 }
 
-export interface PortalWorkspace { id: string; rootType: "organization" | "standalone_client"; rootPublicId: string; displayName: string }
+export interface PortalWorkspace { id: string; rootType: "organization" | "standalone_client"; rootPublicId: string; displayName: string; resourceMode?: "native"; sourceId?: string }
 export type PortalHierarchyScopeType = "organization" | "department" | "client" | "project";
 export interface PortalWorkspaceEntry { type: PortalHierarchyScopeType | "standalone_client" | "contact"; publicId: string; parentPublicId: string | null; displayName: string; sourceVersion: string }
 export interface PortalWorkspaceMember { identityId: string; email: string | null; status: "active" | "suspended" | "revoked"; manager: boolean; source: string }

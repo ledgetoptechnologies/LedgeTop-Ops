@@ -24,6 +24,7 @@ import { neutralMapLocation } from "../src/client/MapAreaSelector";
 import { clientPortalPath, clientProjectPath, clientRequestNewPath, parseClientPortalRoute } from "../src/client/portal-route";
 import { isSafeViewerSessionUrl } from "@ltds/ui";
 import { safeFeedbackTargetPath } from "../src/client/feedback-api";
+import { requestJson } from "../src/client/bulk-download";
 
 describe("Viewer session navigation", () => {
   it.each([
@@ -200,7 +201,34 @@ describe("client portal browser API boundary", () => {
     }) as PortalRequest;
     await expect(loadPortalBootstrap(request)).resolves.toMatchObject({ selectedWorkspaceId: "workspace-a", workspaces: [{ id: "workspace-a" }] });
     expect(storage.getItem("ltds.client.workspace.v2")).toBe("workspace-a");
-    expect(calls).toEqual(["/api/client/session", "/api/client/v2/workspaces", "/api/client/projects", "/api/client/service-requests", "/api/client/map-config"]);
+    expect(calls).toEqual(["/api/client/session", "/api/client/v2/workspaces", "/api/client/session", "/api/client/projects", "/api/client/service-requests", "/api/client/map-config"]);
+  });
+
+  it("omits only the discovery workspace header without changing the stored selection", async () => {
+    const storage = {getItem: () => "workspace-b"};
+    vi.stubGlobal("window", {sessionStorage: storage});
+    const fetch = vi.fn(async (_url: string, _init?: RequestInit) => new Response("{}", {headers: {"Content-Type": "application/json"}})); vi.stubGlobal("fetch", fetch);
+    await requestJson("/api/client/session", {omitWorkspace: true, headers: {"X-LTDS-Workspace-Id": "workspace-b"}});
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).has("X-LTDS-Workspace-Id")).toBe(false);
+    await requestJson("/api/client/projects");
+    expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get("X-LTDS-Workspace-Id")).toBe("workspace-b");
+    expect(fetch.mock.calls[0]?.[1]).not.toHaveProperty("omitWorkspace");
+  });
+
+  it("returns native context without a fabricated account or legacy API fallback", async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", {sessionStorage: {getItem: (key: string) => values.get(key) ?? null, setItem: (key: string, value: string) => values.set(key, value), removeItem: (key: string) => values.delete(key)}});
+    const workspace = {id: "workspace-b", sourceId: "project-alpha:secondary", resourceMode: "native", rootType: "organization", rootPublicId: "org-b", displayName: "Secondary"};
+    const request = vi.fn(async <T>(url: string): Promise<T> => {
+      if (url === "/api/client/session") return {account: {id: "", displayName: "Client portal"}, capabilities: {workspaceHierarchyV2: true}} as T;
+      if (url === "/api/client/v2/workspaces") return {workspaces: [workspace]} as T;
+      if (url === "/api/client/v2/workspaces/workspace-b/context") return {workspace, contextVersion: "version-b", capabilities: {directoryRead: true, deliveryView: true}} as T;
+      throw new Error(`Unexpected legacy call: ${url}`);
+    }) as PortalRequest;
+    const result = await loadPortalBootstrap(request, "workspace-b");
+    expect(result).toMatchObject({resourceMode: "native", workspace, capabilities: {requestV2: false, feedback: false, viewer: false}});
+    expect(result).not.toHaveProperty("account"); expect(result).not.toHaveProperty("projects");
+    expect(request).toHaveBeenCalledTimes(3);
   });
 
   it("uses versioned, idempotent draft writes and submission without browser pricing fields", async () => {

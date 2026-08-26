@@ -8,6 +8,7 @@ import { matchesEtag } from "./prepared-images";
 import { serveAuthorizedThumbnail, thumbnailFieldsForObject, type ThumbnailJobRow } from "./thumbnails";
 import { recordFirstAccessNotification } from "./notifications";
 import { handleProjectAlphaPortalProjectionRequest } from "./project-alpha-portal";
+import { handleRegisteredProjectAlphaPortalRequest } from "./project-alpha-portal-ingress";
 import { friendlyBulkFailure } from "./bulk-download-errors";
 import type { Env, ShareRow } from "./types";
 export { BulkDownloadWorkflow } from "./workflow";
@@ -896,6 +897,7 @@ app.post("/api/internal/client-request-attachments/:attachmentId/scanned", async
 // Project Alpha Access audience plus a timestamped signature over exact bytes.
 app.post("/api/internal/project-alpha/catalog-v2", c => handleProjectAlphaCatalogRequest(c.req.raw, c.env));
 app.post("/api/internal/project-alpha/portal-v2", c => handleProjectAlphaPortalProjectionRequest(c.req.raw, c.env));
+app.post("/api/internal/project-alpha/sources/:sourceId/portal-v2", c => handleRegisteredProjectAlphaPortalRequest(c.req.raw, c.env, c.req.param("sourceId")));
 
 app.route("/api/client", createClientPortalRouter({ pricingHintProvider: projectAlphaPricingHintProvider }));
 app.get("/", c => c.redirect("/portal", 302));

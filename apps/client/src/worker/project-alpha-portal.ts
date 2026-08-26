@@ -1,6 +1,7 @@
 import { createRemoteJWKSet, jwtVerify, type JWTVerifyGetKey } from "jose";
 import type { Env } from "./types";
 import { PRIMARY_PORTAL_PROJECTION_SOURCE, resolvePortalWorkspaceSource, type PortalProjectionSource, type PortalWorkspaceSource } from "./project-alpha-portal-source";
+import { assertPortalProjectionSourceProof, portalProjectionSourceFence, reservePrimaryPortalSigningKeys, PortalSourceAuthorityError, type PortalProjectionWriteProof, type PortalAuthorityDatabase } from "./project-alpha-portal-authority";
 
 const MAX_BODY_BYTES = 256 * 1024;
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
@@ -154,7 +155,7 @@ function json(status: number, body: Record<string, unknown>): Response {
   return Response.json(body, { status, headers: { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff" } });
 }
 
-async function readBoundedRequestBody(request: Request, maximumBytes: number): Promise<Uint8Array> {
+export async function readBoundedRequestBody(request: Request, maximumBytes: number): Promise<Uint8Array> {
   const declared = request.headers.get("content-length");
   if (declared !== null) {
     const parsed = Number(declared);
@@ -193,12 +194,12 @@ function database(env: Env): D1Database {
   return typeof candidate.withSession === "function" ? candidate.withSession("first-primary") : env.DELIVERY_DB;
 }
 
-async function directoryContractTablePresent(db: D1Database): Promise<boolean> {
+async function directoryContractTablePresent(db: PortalAuthorityDatabase): Promise<boolean> {
   return (await db.prepare(`SELECT 1 present FROM sqlite_master
     WHERE type='table' AND name='portal_v2_directory_generation_contracts'`).first<number>("present")) === 1;
 }
 
-async function activeDirectoryContract(db: D1Database, workspaceId: string): Promise<{ schemaVersion: 2 | 3; tablePresent: boolean }> {
+async function activeDirectoryContract(db: PortalAuthorityDatabase, workspaceId: string): Promise<{ schemaVersion: 2 | 3; tablePresent: boolean }> {
   const tablePresent = await directoryContractTablePresent(db);
   if (!tablePresent) return { schemaVersion: 2, tablePresent: false };
   const schemaVersion = await db.prepare(`SELECT contract.schema_version FROM portal_v2_directory_checkpoints checkpoint
@@ -362,11 +363,11 @@ async function sha256Hex(value: Uint8Array): Promise<string> {
   return [...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, "0")).join("");
 }
 
-async function verifyHmac(rawBody: Uint8Array, timestamp: string, keyId: string, deliveryId: string, suppliedHeader: string | null, secret: string | undefined): Promise<void> {
+export async function verifyHmac(rawBody: Uint8Array, timestamp: string, keyId: string, deliveryId: string, suppliedHeader: string | null, secret: string | undefined, signedPath = SIGNED_PATH): Promise<void> {
   if (!secret || secret.length < 32 || !suppliedHeader?.startsWith("sha256=")) throw new Error("portal-signature-required");
   const suppliedHex = suppliedHeader.slice(7).toLowerCase();
   if (!SHA256_HEX.test(suppliedHex)) throw new Error("portal-signature-invalid");
-  const prefix = new TextEncoder().encode(`${timestamp}\nPOST\n${SIGNED_PATH}\n${keyId}\n${deliveryId}\n`);
+  const prefix = new TextEncoder().encode(`${timestamp}\nPOST\n${signedPath}\n${keyId}\n${deliveryId}\n`);
   const message = new Uint8Array(prefix.length + rawBody.length);
   message.set(prefix);
   message.set(rawBody, prefix.length);
@@ -398,7 +399,7 @@ interface ProjectionCheckpoint { source_generation: string; source_sequence: num
 interface ProjectionWriteGuard { checkpoint: ProjectionCheckpoint | null; generationId?: string; generationStatus?: string; directoryGenerationId?: string }
 
 /** This must be the FIRST statement in every authority-changing batch. */
-function receiptStatement(db: D1Database, delivery: PortalProjectionDelivery, source: PortalWorkspaceSource, payloadHash: string, kind: "snapshot_page" | "snapshot_activate" | "event", guard: ProjectionWriteGuard, status: "completed" | "ignored" = "completed"): D1PreparedStatement {
+function receiptStatement(db: PortalAuthorityDatabase, delivery: PortalProjectionDelivery, source: PortalWorkspaceSource, payloadHash: string, kind: "snapshot_page" | "snapshot_activate" | "event", guard: ProjectionWriteGuard, status: "completed" | "ignored" = "completed"): D1PreparedStatement {
   const predicates = ["EXISTS(SELECT 1 FROM pa_portal_workspace_sources WHERE workspace_id=? AND projection_source_id=? AND source_workspace_id=?)"];
   const args: (string | number)[] = [source.workspaceId, source.sourceId, source.sourceWorkspaceId];
   if (guard.checkpoint) {
@@ -421,29 +422,28 @@ function receiptStatement(db: D1Database, delivery: PortalProjectionDelivery, so
     .bind(source.sourceId, delivery.deliveryId, delivery.workspaceId, kind, payloadHash, delivery.sourceSequence, status, ...args);
 }
 
-function auditStatement(db: D1Database, delivery: PortalProjectionDelivery, action: string, details: Record<string, unknown>): D1PreparedStatement {
+function auditStatement(db: PortalAuthorityDatabase, delivery: PortalProjectionDelivery, action: string, details: Record<string, unknown>): D1PreparedStatement {
   return db.prepare("INSERT INTO pa_portal_projection_audit(id,workspace_id,action,delivery_id,source_generation,source_sequence,details_json) VALUES(?,?,?,?,?,?,?)")
     .bind(crypto.randomUUID(), delivery.workspaceId, action, delivery.deliveryId, delivery.sourceGeneration, delivery.sourceSequence, JSON.stringify(details));
 }
 
-async function existingReceipt(db: D1Database, source: PortalWorkspaceSource, deliveryId: string, payloadHash: string): Promise<"duplicate" | null> {
+async function existingReceipt(db: PortalAuthorityDatabase, source: PortalWorkspaceSource, deliveryId: string, payloadHash: string): Promise<"duplicate" | null> {
   const row = await db.prepare("SELECT payload_hash,workspace_id FROM pa_portal_projection_receipts WHERE projection_source_id=? AND delivery_id=?").bind(source.sourceId, deliveryId).first<{ payload_hash: string; workspace_id: string }>();
   if (!row) return null;
   if (row.payload_hash !== payloadHash || row.workspace_id !== source.workspaceId) throw new Error("portal-delivery-id-conflict");
   return "duplicate";
 }
 
-async function stageSnapshotPage(env: Env, delivery: SnapshotPageDelivery, payloadHash: string, source: PortalWorkspaceSource): Promise<"completed" | "ignored"> {
-  const db = database(env);
+async function stageSnapshotPage(env: Env, delivery: SnapshotPageDelivery, payloadHash: string, source: PortalWorkspaceSource, db: PortalAuthorityDatabase): Promise<"completed" | "ignored"> {
   const checkpoint = await db.prepare("SELECT source_generation,source_sequence,snapshot_generation_id FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(delivery.workspaceId).first<ProjectionCheckpoint>();
   if (checkpoint && delivery.sourceSequence <= checkpoint.source_sequence) throw new Error("portal-snapshot-stale");
   let generation = await db.prepare("SELECT * FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation=?").bind(delivery.workspaceId, delivery.sourceGeneration).first<ProjectionGenerationRow>();
   if (!generation) {
     try {
-      await db.prepare(`INSERT OR IGNORE INTO pa_portal_projection_generations
+      await db.batch([db.prepare(`INSERT OR IGNORE INTO pa_portal_projection_generations
       (id,workspace_id,source_generation,source_sequence,snapshot_hash,page_count,record_count,workspace_root_type,workspace_root_public_id,workspace_display_name,workspace_source_version,workspace_active,status,projection_source_id)
       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'staging',?)`)
-      .bind(crypto.randomUUID(), delivery.workspaceId, delivery.sourceGeneration, delivery.sourceSequence, delivery.snapshotHash, delivery.pageCount, delivery.recordCount, delivery.workspace.rootType, delivery.workspace.rootPublicId, delivery.workspace.displayName, delivery.workspace.sourceVersion, delivery.workspace.active ? 1 : 0, source.sourceId).run();
+      .bind(crypto.randomUUID(), delivery.workspaceId, delivery.sourceGeneration, delivery.sourceSequence, delivery.snapshotHash, delivery.pageCount, delivery.recordCount, delivery.workspace.rootType, delivery.workspace.rootPublicId, delivery.workspace.displayName, delivery.workspace.sourceVersion, delivery.workspace.active ? 1 : 0, source.sourceId)]);
     } catch (error) {
       generation = await db.prepare("SELECT * FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation=?").bind(delivery.workspaceId, delivery.sourceGeneration).first<ProjectionGenerationRow>();
       if (!generation) throw error;
@@ -452,7 +452,7 @@ async function stageSnapshotPage(env: Env, delivery: SnapshotPageDelivery, paylo
   }
   if (!generation || generation.status !== "staging" || generation.source_sequence !== delivery.sourceSequence || generation.snapshot_hash !== delivery.snapshotHash || generation.page_count !== delivery.pageCount || generation.record_count !== delivery.recordCount || generation.workspace_root_type !== delivery.workspace.rootType || generation.workspace_root_public_id !== delivery.workspace.rootPublicId || generation.workspace_display_name !== delivery.workspace.displayName || generation.workspace_source_version !== delivery.workspace.sourceVersion || generation.workspace_active !== (delivery.workspace.active ? 1 : 0)) throw new Error("portal-generation-conflict");
   if (env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true") {
-    await db.prepare("INSERT OR IGNORE INTO pa_portal_projection_generation_contracts(generation_id,schema_version) VALUES (?,?)").bind(generation.id, delivery.schemaVersion).run();
+    await db.batch([db.prepare("INSERT OR IGNORE INTO pa_portal_projection_generation_contracts(generation_id,schema_version) VALUES (?,?)").bind(generation.id, delivery.schemaVersion)]);
     const contract = await db.prepare("SELECT schema_version FROM pa_portal_projection_generation_contracts WHERE generation_id=?").bind(generation.id).first<number>("schema_version");
     if (contract !== delivery.schemaVersion) throw new Error("portal-generation-contract-conflict");
   }
@@ -578,7 +578,7 @@ function validateRelationsAndLifecycle(
   }
 }
 
-async function stagedResources(db: D1Database, generationId: string, relationsEnabled: boolean): Promise<{ entities: EntityResource[]; principals: PrincipalResource[]; entitlements: EntitlementResource[]; relations: RelationResource[]; projectLifecycles: ProjectLifecycleResource[] }> {
+async function stagedResources(db: PortalAuthorityDatabase, generationId: string, relationsEnabled: boolean): Promise<{ entities: EntityResource[]; principals: PrincipalResource[]; entitlements: EntitlementResource[]; relations: RelationResource[]; projectLifecycles: ProjectLifecycleResource[] }> {
   const entityRows = await db.prepare("SELECT entity_type,public_id,parent_public_id,display_name,source_version,active,primary_contact FROM pa_portal_projection_entities WHERE generation_id=?").bind(generationId).all<{ entity_type: EntityType; public_id: string; parent_public_id: string | null; display_name: string; source_version: string; active: number; primary_contact: number }>();
   const principalRows = await db.prepare("SELECT public_id,email_hint,display_name,source_version,active FROM pa_portal_projection_principals WHERE generation_id=?").bind(generationId).all<{ public_id: string; email_hint: string; display_name: string; source_version: string; active: number }>();
   const entitlementRows = await db.prepare("SELECT public_id,principal_public_id,capability,effect,scope_type,scope_public_id,source_version,active,valid_from,expires_at FROM pa_portal_projection_entitlements WHERE generation_id=?").bind(generationId).all<{ public_id: string; principal_public_id: string; capability: Capability; effect: "allow" | "deny"; scope_type: ScopeType; scope_public_id: string; source_version: string; active: number; valid_from: string; expires_at: string | null }>();
@@ -593,7 +593,7 @@ async function stagedResources(db: D1Database, generationId: string, relationsEn
   };
 }
 
-function authorizationRefreshStatements(db: D1Database, workspaceId: string, sourceSequence: number): D1PreparedStatement[] {
+function authorizationRefreshStatements(db: PortalAuthorityDatabase, workspaceId: string, sourceSequence: number): D1PreparedStatement[] {
   return [
     db.prepare(`UPDATE portal_v2_identity_eligibility_bindings AS eligibility
       SET principal_source_version=(SELECT principal.source_version FROM pa_portal_principals principal
@@ -626,8 +626,7 @@ function authorizationRefreshStatements(db: D1Database, workspaceId: string, sou
   ];
 }
 
-async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, payloadHash: string, source: PortalWorkspaceSource): Promise<"completed" | "ignored"> {
-  const db = database(env);
+async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, payloadHash: string, source: PortalWorkspaceSource, db: PortalAuthorityDatabase): Promise<"completed" | "ignored"> {
   const contractTablePresent = await directoryContractTablePresent(db);
   const generation = await db.prepare("SELECT * FROM pa_portal_projection_generations WHERE workspace_id=? AND source_generation=?").bind(delivery.workspaceId, delivery.sourceGeneration).first<ProjectionGenerationRow>();
   if (!generation || generation.source_sequence !== delivery.sourceSequence || generation.snapshot_hash !== delivery.snapshotHash || generation.page_count !== delivery.pageCount || generation.record_count !== delivery.recordCount) throw new Error("portal-generation-incomplete");
@@ -701,7 +700,7 @@ async function activateSnapshot(env: Env, delivery: SnapshotActivateDelivery, pa
   return "completed";
 }
 
-async function loadActiveResources(db: D1Database, workspaceId: string, relationsEnabled: boolean): Promise<{ workspace: WorkspaceResource; entities: EntityResource[]; principals: PrincipalResource[]; entitlements: EntitlementResource[]; relations: RelationResource[]; projectLifecycles: ProjectLifecycleResource[]; directoryGenerationId: string }> {
+async function loadActiveResources(db: PortalAuthorityDatabase, workspaceId: string, relationsEnabled: boolean): Promise<{ workspace: WorkspaceResource; entities: EntityResource[]; principals: PrincipalResource[]; entitlements: EntitlementResource[]; relations: RelationResource[]; projectLifecycles: ProjectLifecycleResource[]; directoryGenerationId: string }> {
   const workspace = await db.prepare("SELECT root_type,pa_organization_public_id,pa_client_public_id,display_name,status FROM portal_v2_workspaces WHERE id=?").bind(workspaceId).first<{ root_type: WorkspaceResource["rootType"]; pa_organization_public_id: string | null; pa_client_public_id: string | null; display_name: string; status: string }>();
   const checkpoint = await db.prepare("SELECT active_generation_id FROM portal_v2_directory_checkpoints WHERE workspace_id=?").bind(workspaceId).first<{ active_generation_id: string }>();
   if (!workspace || !checkpoint) throw new Error("portal-event-baseline-missing");
@@ -823,8 +822,7 @@ function closeRelationStateForTombstone(
   return closure;
 }
 
-async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string, source: PortalWorkspaceSource): Promise<"completed"> {
-  const db = database(env);
+async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string, source: PortalWorkspaceSource, db: PortalAuthorityDatabase): Promise<"completed"> {
   const checkpoint = await db.prepare("SELECT source_generation,source_sequence,snapshot_generation_id FROM pa_portal_projection_checkpoints WHERE workspace_id=?").bind(delivery.workspaceId).first<ProjectionCheckpoint>();
   if (!checkpoint || checkpoint.source_generation !== delivery.sourceGeneration) throw new Error("portal-event-generation-mismatch");
   if (delivery.sourceSequence !== checkpoint.source_sequence + 1) throw new Error("portal-event-sequence-gap");
@@ -988,14 +986,13 @@ async function applyEvent(env: Env, delivery: EventDelivery, payloadHash: string
   return "completed";
 }
 
-async function processDelivery(env: Env, delivery: PortalProjectionDelivery, payloadHash: string, source: PortalWorkspaceSource): Promise<"completed" | "ignored" | "duplicate"> {
-  const db = database(env);
+async function processDelivery(env: Env, delivery: PortalProjectionDelivery, payloadHash: string, source: PortalWorkspaceSource, db: PortalAuthorityDatabase): Promise<"completed" | "ignored" | "duplicate"> {
   const duplicate = await existingReceipt(db, source, delivery.deliveryId, payloadHash);
   if (duplicate) return duplicate;
   try {
-    if (delivery.kind === "snapshot.page") return await stageSnapshotPage(env, delivery, payloadHash, source);
-    if (delivery.kind === "snapshot.activate") return await activateSnapshot(env, delivery, payloadHash, source);
-    return await applyEvent(env, delivery, payloadHash, source);
+    if (delivery.kind === "snapshot.page") return await stageSnapshotPage(env, delivery, payloadHash, source, db);
+    if (delivery.kind === "snapshot.activate") return await activateSnapshot(env, delivery, payloadHash, source, db);
+    return await applyEvent(env, delivery, payloadHash, source, db);
   } catch (error) {
     const raced = await existingReceipt(db, source, delivery.deliveryId, payloadHash);
     if (raced) return raced;
@@ -1005,8 +1002,17 @@ async function processDelivery(env: Env, delivery: PortalProjectionDelivery, pay
 }
 
 /** Trusted server ingestion seam. Public HTTP callers cannot select this source. */
-export async function applyPortalProjectionDelivery(env: Env, delivery: PortalProjectionDelivery, payloadHash: string, sourceContext: PortalProjectionSource): Promise<"completed" | "ignored" | "duplicate"> {
+export async function applyPortalProjectionDelivery(env: Env, delivery: PortalProjectionDelivery, payloadHash: string, sourceContext: PortalProjectionSource, authorityProof?: PortalProjectionWriteProof): Promise<"completed" | "ignored" | "duplicate"> {
   if (!SHA256_HEX.test(payloadHash)) throw new Error("portal-body-digest-invalid");
+  const session = database(env);
+  if (authorityProof && authorityProof.sourceId !== sourceContext.sourceId) throw new PortalSourceAuthorityError("invalid");
+  if (authorityProof) await assertPortalProjectionSourceProof(session, authorityProof);
+  // Every write, including map/staging reservations, passes this same-session
+  // fence. Read helpers cannot accidentally open a new unfenced connection.
+  const db: PortalAuthorityDatabase = authorityProof ? { prepare: sql => session.prepare(sql),
+    batch: async <T>(statements: D1PreparedStatement[]) => (await session.batch<T>([
+      portalProjectionSourceFence(session, authorityProof), ...statements,
+    ])).slice(1) } : session;
   const validateWireEntitlement = (value: EntitlementResource) => {
     if (value.scopeType === "workspace" && value.scopePublicId !== delivery.workspaceId) throw new Error("portal-entitlement-scope-invalid");
   };
@@ -1018,7 +1024,7 @@ export async function applyPortalProjectionDelivery(env: Env, delivery: PortalPr
     if (event.resource === "workspace" && (event.action === "upsert" ? event.workspace.publicId : event.publicId) !== delivery.workspaceId) throw new Error("portal-workspace-id-invalid");
     if (event.resource === "entitlement" && event.action === "upsert") validateWireEntitlement(event.entitlement);
   }
-  const source = await resolvePortalWorkspaceSource(database(env), sourceContext, delivery.workspaceId, delivery.kind === "snapshot.page");
+  const source = await resolvePortalWorkspaceSource(db, sourceContext, delivery.workspaceId, delivery.kind === "snapshot.page");
   const entitlement = (value: EntitlementResource): EntitlementResource => value.scopeType === "workspace" && value.scopePublicId === source.sourceWorkspaceId
     ? { ...value, scopePublicId: source.workspaceId } : value;
   let mapped: PortalProjectionDelivery = { ...delivery, workspaceId: source.workspaceId };
@@ -1032,10 +1038,18 @@ export async function applyPortalProjectionDelivery(env: Env, delivery: PortalPr
     } else if (event.resource === "entitlement" && event.action === "upsert") event = { ...event, entitlement: entitlement(event.entitlement) };
     mapped = { ...delivery, workspaceId: source.workspaceId, event };
   }
-  return processDelivery(env, mapped, payloadHash, source);
+  try {
+    const result = await processDelivery(env, mapped, payloadHash, source, db);
+    if (authorityProof) await assertPortalProjectionSourceProof(session, authorityProof);
+    return result;
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("pa_portal_source_write_guard")) throw new PortalSourceAuthorityError("changed");
+    throw error;
+  }
 }
 
 function statusForError(error: unknown): number {
+  if (error instanceof PortalSourceAuthorityError) return error.code === "conflict" || error.code === "changed" ? 409 : 503;
   const message = error instanceof Error ? error.message : "portal-internal-error";
   if (message.includes("access") || message.includes("signature") || message.includes("signing-key") || message.includes("timestamp")) return 401;
   if (message.includes("conflict") || message.includes("stale") || message.includes("sequence") || message.includes("generation") || message.includes("reparent")) return 409;
@@ -1090,7 +1104,8 @@ export async function handleProjectAlphaPortalProjectionRequest(request: Request
       env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true",
     );
     if (deliveryId !== parsed.deliveryId) throw new Error("portal-delivery-id-mismatch");
-    const status = await applyPortalProjectionDelivery(env, parsed, await sha256Hex(rawBody), PRIMARY_PORTAL_PROJECTION_SOURCE);
+    const keyProof = await reservePrimaryPortalSigningKeys(env);
+    const status = await applyPortalProjectionDelivery(env, parsed, await sha256Hex(rawBody), PRIMARY_PORTAL_PROJECTION_SOURCE, keyProof ?? undefined);
     return json(200, { ok: true, deliveryId: parsed.deliveryId, status });
   } catch (error) {
     const message = error instanceof SyntaxError ? "portal-json-invalid" : error instanceof Error ? error.message : "portal-internal-error";

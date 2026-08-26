@@ -1,0 +1,122 @@
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Card, EmptyState, Loading } from "@ltds/ui";
+import type { RequestError } from "./bulk-download";
+import type { PortalFile, PortalFilePage } from "./portal-api";
+import type { ClientPortalPage } from "./portal-route";
+import { clientProjectPath } from "./portal-route";
+import { loadNativeDeliveries, loadNativeFile, loadNativeFolder, loadNativeHierarchy, type NativeDeliveryTarget, type NativeHierarchy, type NativePortalBootstrap } from "./native-portal-api";
+import "./NativeWorkspaceContent.css";
+
+export interface NativeFileBrowserOptions {
+  folderId: string | null;
+  load: (folderId: string | null, cursor: string | null, signal: AbortSignal) => Promise<PortalFilePage>;
+  loadExactFile: (fileId: string, signal: AbortSignal) => Promise<PortalFile>;
+  onFolderChange: (folderId: string | null) => void;
+  onLinkedFileChange: () => void;
+}
+const unsupported = "Service requests, billing, member management, feedback, and 3D models are not available for this connected workspace.";
+const contextError = (caught: unknown) => [401, 403, 404, 409, 410].includes((caught as RequestError).status ?? 0);
+function workspacePath(path: string, workspaceId: string): string {
+  const url = new URL(path, location.origin); url.searchParams.set("workspace", workspaceId); return `${url.pathname}${url.search}`;
+}
+
+export function NativeWorkspaceContent({ context, page, projectId, onInvalid, renderFiles, openProject }: {
+  context: NativePortalBootstrap; page: ClientPortalPage; projectId: string | null;
+  onInvalid: (caught: unknown) => void; renderFiles: (options: NativeFileBrowserOptions) => ReactNode; openProject: (id: string) => void;
+}) {
+  const [locationSearch, setLocationSearch] = useState(location.search);
+  const [hierarchy, setHierarchy] = useState<NativeHierarchy["entries"]>([]);
+  const [hierarchyCursor, setHierarchyCursor] = useState<string | null>(null);
+  const [targets, setTargets] = useState<NativeDeliveryTarget[]>([]), [cursor, setCursor] = useState<string | null>(null);
+  const [hierarchyLoading, setHierarchyLoading] = useState(false), [deliveryLoading, setDeliveryLoading] = useState(false);
+  const [hierarchyError, setHierarchyError] = useState(""), [deliveryError, setDeliveryError] = useState("");
+  const [hierarchyRetry, setHierarchyRetry] = useState(0), [deliveryRetry, setDeliveryRetry] = useState(0);
+  const invalid = useRef(onInvalid); invalid.current = onInvalid;
+  const contextController = useRef(new AbortController());
+  const deliveryController = useRef<AbortController | null>(null), deliverySequence = useRef(0);
+  const hierarchyController = useRef<AbortController | null>(null), hierarchySequence = useRef(0);
+  const params = new URLSearchParams(locationSearch), folderId = params.get("folder"), linkedFile = params.get("file");
+  const relevantHierarchy = ["dashboard", "projects", "project"].includes(page);
+  const relevantDeliveries = page === "deliveries" && !folderId && !linkedFile;
+  useEffect(() => { const controller = new AbortController(); contextController.current = controller; return () => { controller.abort(); deliveryController.current?.abort(); hierarchyController.current?.abort(); }; }, [context]);
+  useEffect(() => { setLocationSearch(location.search); const sync = () => setLocationSearch(location.search); addEventListener("popstate", sync); return () => removeEventListener("popstate", sync); }, [page, projectId]);
+  const fail = useCallback((caught: unknown) => {
+    if (contextError(caught) && !contextController.current.signal.aborted) { contextController.current.abort(); deliveryController.current?.abort(); hierarchyController.current?.abort(); setHierarchy([]); setHierarchyCursor(null); setTargets([]); setCursor(null); invalid.current(caught); }
+  }, []);
+  const fetchHierarchy = useCallback(async (next: string | null) => {
+    if (hierarchyController.current || contextController.current.signal.aborted) return;
+    const controller = new AbortController(), sequence = ++hierarchySequence.current; hierarchyController.current = controller;
+    setHierarchyError(""); setHierarchyLoading(true);
+    try {
+      const result = await loadNativeHierarchy(context, controller.signal, next);
+      if (controller.signal.aborted || contextController.current.signal.aborted || sequence !== hierarchySequence.current) return;
+      setHierarchy(current => { const keys = new Set(next ? current.map(entry => `${entry.type}:${entry.publicId}`) : []); return [...(next ? current : []), ...result.entries.filter(entry => !keys.has(`${entry.type}:${entry.publicId}`))]; }); setHierarchyCursor(result.page.nextCursor);
+    } catch (caught) { if (!controller.signal.aborted && !contextController.current.signal.aborted) { fail(caught); setHierarchyError("The workspace directory could not be loaded. Try again."); } }
+    finally { if (sequence === hierarchySequence.current) { hierarchyController.current = null; if (!controller.signal.aborted) setHierarchyLoading(false); } }
+  }, [context, fail]);
+  useEffect(() => {
+    if (!relevantHierarchy || !context.capabilities.directoryRead) return;
+    setHierarchy([]); setHierarchyCursor(null); void fetchHierarchy(null);
+    return () => { hierarchySequence.current++; hierarchyController.current?.abort(); hierarchyController.current = null; };
+  }, [context.capabilities.directoryRead, relevantHierarchy, hierarchyRetry, fetchHierarchy]);
+  const fetchDeliveries = useCallback(async (next: string | null) => {
+    if (deliveryController.current || contextController.current.signal.aborted) return;
+    const controller = new AbortController(), sequence = ++deliverySequence.current; deliveryController.current = controller;
+    setDeliveryLoading(true); setDeliveryError("");
+    try {
+      const result = await loadNativeDeliveries(context, next, controller.signal);
+      if (controller.signal.aborted || contextController.current.signal.aborted || sequence !== deliverySequence.current) return;
+      setTargets(current => { const ids = new Set(next ? current.map(item => item.id) : []); return [...(next ? current : []), ...result.items.filter(item => !ids.has(item.id))]; }); setCursor(result.page.nextCursor);
+    } catch (caught) { if (!controller.signal.aborted && !contextController.current.signal.aborted) { fail(caught); setDeliveryError("Delivery folders could not be loaded. Try again."); } }
+    finally { if (sequence === deliverySequence.current) { deliveryController.current = null; if (!controller.signal.aborted) setDeliveryLoading(false); } }
+  }, [context, fail]);
+  useEffect(() => {
+    if (!relevantDeliveries || !context.capabilities.deliveryView) return;
+    setTargets([]); setCursor(null); void fetchDeliveries(null);
+    return () => { deliverySequence.current++; deliveryController.current?.abort(); deliveryController.current = null; };
+  }, [relevantDeliveries, context.capabilities.deliveryView, fetchDeliveries, deliveryRetry]);
+  const navigateFolder = (id: string | null) => {
+    const url = new URL("/portal/deliveries", location.origin); url.searchParams.set("workspace", context.workspace.id); if (id) url.searchParams.set("folder", id);
+    history.pushState(null, "", `${url.pathname}${url.search}`); setLocationSearch(url.search);
+  };
+  const syncLinkedFile = useCallback(() => setLocationSearch(location.search), []);
+  const filesLoad = useCallback(async (folder: string | null, next: string | null, signal: AbortSignal) => {
+    if (!folder) return { files: [], folders: [], breadcrumbs: [], folderId: null, prefix: "", cursor: null };
+    try { return await loadNativeFolder(context, folder, next, signal); } catch (caught) { if (!signal.aborted) fail(caught); throw caught; }
+  }, [context, fail]);
+  const exactLoad = useCallback(async (fileId: string, signal: AbortSignal) => {
+    try { return await loadNativeFile(context, fileId, signal); } catch (caught) { if (!signal.aborted) fail(caught); throw caught; }
+  }, [context, fail]);
+  const entries = page === "projects" ? hierarchy.filter(entry => entry.type === "project") : page === "project" ? hierarchy.filter(entry => entry.type === "project" && entry.publicId === projectId) : hierarchy;
+  const entryLabels = new Map(hierarchy.map(entry => [`${entry.type}:${entry.publicId}`, entry.displayName]));
+  const parentLabel = (entry: NativeHierarchy["entries"][number]) => entry.parentType && entry.parentPublicId ? entryLabels.get(`${entry.parentType}:${entry.parentPublicId}`) : undefined;
+  const unsupportedRoute = page === "requests" || page === "request-new" || page === "feedback" ||
+    (page === "project" && ["requests", "models"].includes(params.get("tab") ?? ""));
+
+  return <section className="native-workspace" aria-label="Connected client workspace">
+    <header className="portal-welcome"><span className="eyebrow">Connected workspace</span><h1>{context.workspace.displayName}</h1><p className="native-workspace-source">Source: {context.workspace.sourceId}</p></header>
+    {unsupportedRoute ? <Card title="Feature unavailable"><p>{unsupported}</p></Card> : page === "account" ? <Card title="Workspace access"><p>You are viewing the directory and deliveries shared with your signed-in identity in this workspace.</p><p>{unsupported}</p></Card> : page === "not-found" ? <Card title="Page unavailable"><p>This page is not available in this workspace.</p><p>{unsupported}</p></Card> : relevantHierarchy ? <>
+      <Card title={page === "dashboard" ? "Workspace directory" : page === "project" ? "Project" : "Projects"}>
+        {!context.capabilities.directoryRead ? <p>The directory is not included in your current workspace access.</p> : <>
+          {hierarchyError && <div role="alert"><p>{hierarchyError}</p><button className="button-ghost" onClick={() => hierarchyCursor ? void fetchHierarchy(hierarchyCursor) : setHierarchyRetry(value => value + 1)}>Retry directory</button></div>}
+          {entries.length > 0 && <ul className="native-workspace-list">{entries.map(entry => <li key={`${entry.type}:${entry.publicId}`}><div><strong>{entry.displayName}</strong><small>{entry.type.replaceAll("_", " ")}{parentLabel(entry) ? ` · ${parentLabel(entry)}` : ""}</small></div>{entry.type === "project" && page !== "project" && <a className="button button-ghost" href={workspacePath(clientProjectPath(entry.publicId), context.workspace.id)} onClick={event => { if (!event.ctrlKey && !event.metaKey && !event.shiftKey && event.button === 0) { event.preventDefault(); openProject(entry.publicId); } }}>Open project<span className="visually-hidden">: {entry.displayName}</span></a>}</li>)}</ul>}
+          {hierarchyLoading && <Loading />}
+          {!hierarchyLoading && !hierarchyError && entries.length === 0 && <EmptyState title={hierarchyCursor ? "No matching records loaded yet" : page === "project" ? "Project unavailable" : "No directory entries shared"} detail={hierarchyCursor ? "Continue through the accessible directory pages to check more records." : "Only records included in your current access are shown."} />}
+          {hierarchyCursor && <><p>Showing loaded records only. More accessible directory pages are available.</p><button className="button-ghost" disabled={hierarchyLoading} onClick={() => void fetchHierarchy(hierarchyCursor)}>Load more directory records</button></>}
+        </>}
+        {context.capabilities.deliveryView && <a className="button button-orange" href={workspacePath("/portal/deliveries", context.workspace.id)}>Browse workspace deliveries</a>}
+      </Card>
+      <details className="native-workspace-availability"><summary>Available features</summary><p>{unsupported}</p><p>Directory records and delivery folders retain their original source. Access is checked separately for each item.</p></details>
+    </> : page === "deliveries" ? !context.capabilities.deliveryView ? <Card title="Deliveries unavailable"><p>Delivery viewing is not included in your current workspace access.</p></Card> : <>
+      {(folderId || linkedFile) && <Card title="Delivery files"><button className="button-ghost" onClick={() => navigateFolder(null)}>All delivery folders</button>{renderFiles({ folderId, load: filesLoad, loadExactFile: exactLoad, onFolderChange: navigateFolder, onLinkedFileChange: syncLinkedFile })}</Card>}
+      {!folderId && !linkedFile && <Card title="Shared delivery folders">
+        <p>Folders explicitly shared with you in this workspace.</p>
+        {deliveryError && <div role="alert"><p>{deliveryError}</p><button className="button-ghost" onClick={() => cursor ? void fetchDeliveries(cursor) : setDeliveryRetry(value => value + 1)}>Retry delivery folders</button></div>}
+        {targets.length > 0 && <ul className="native-workspace-list">{targets.map(target => <li key={target.id}><div><strong>{target.displayName}</strong><small>{target.owner.type.replaceAll("_", " ")}</small></div><button className="button-orange" onClick={() => navigateFolder(target.id)}>Open folder<span className="visually-hidden">: {target.displayName}</span></button></li>)}</ul>}
+        {deliveryLoading && <Loading />}
+        {!deliveryLoading && !deliveryError && targets.length === 0 && <p>{cursor ? "No folders on this page. Continue to check the remaining shared folders." : "No delivery folders are currently shared with you."}</p>}
+        {cursor && <button className="button-ghost" disabled={deliveryLoading} onClick={() => void fetchDeliveries(cursor)}>Load more delivery folders</button>}
+      </Card>}
+    </> : null}
+  </section>;
+}

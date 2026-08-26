@@ -4,6 +4,11 @@ Status: approved direction; implementation in progress. Audited against Operatio
 main on August 25, 2026. This is a delivery plan, not a claim that the features
 below are already enabled or complete.
 
+For the cross-workflow gaps still open at checkpoint `ccba9c0`, see
+[remaining goal acceptance](goal-remaining-acceptance.md). That inventory
+separates verified local increments from missing implementation, authority
+decisions and release gates.
+
 The source handoff is the August 24 Project Alpha / Operations & Client Portal
 development handoff. Its final external-collaboration workflow ends mid-list;
 the preceding requirements are retained here without inventing a missing ending.
@@ -742,7 +747,12 @@ a new whole-monorepo claim. No real customers were linked or granted access.
       for exact backend/browser/build evidence and retained direct-lane behavior.
       Paired Alpha public-ID export approval and live rollout remain gates; no
       production migration, email or deployment is included in this checkpoint.
-- [ ] Implement slice 1 and verify its backend-to-browser workflow.
+- [x] Locally implement and verify registered secondary portal ingress, coordinated
+      administration, explicit staff-to-client folder sharing and native resource
+      navigation. See [secondary client portal](secondary-client-portal.md) for
+      exact backend/browser evidence, paired upgrade order and unsupported native
+      features. No production activation, migration, mail or deployment included.
+- [ ] Implement slice 1 and verify its complete business workflow.
 - [x] Locally verify the implemented recent-first Client Hub and source-record update
       history increment. See [business activity](client-business-activity.md).
       This uses authorized organization/client/project source changes only;

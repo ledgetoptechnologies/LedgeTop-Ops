@@ -97,6 +97,8 @@ import { RequestScopeBoundary } from "./RequestScopeBoundary";
 import { LeaveFeedback, PortalFeedback } from "./PortalFeedback";
 import { PortalNotifications } from "./PortalNotifications";
 import { loadFeedbackFile, withPortalWorkspace } from "./feedback-api";
+import { NativeWorkspaceContent } from "./NativeWorkspaceContent";
+import type { NativePortalBootstrap } from "./native-portal-api";
 
 const PORTAL_FILE_RENDER_WINDOW = 450;
 const PORTAL_FILE_RENDER_STEP = 150;
@@ -106,7 +108,7 @@ type WorkspaceTab = "overview" | "files" | "models" | "requests";
 type PortalGate =
   | { status: "loading" }
   | { status: "blocked"; title: string; detail: string }
-  | { status: "ready"; data: PortalBootstrap };
+  | { status: "ready"; data: PortalBootstrap | NativePortalBootstrap };
 
 const navigation: Array<{ page: TopPage; label: string }> = [
   { page: "dashboard", label: "Home" },
@@ -144,7 +146,7 @@ function blockedPortal(
       status: "blocked",
       title: "Access not provisioned",
       detail:
-        "Your verified identity is not linked to an active client account. Contact your LTDS representative.",
+        "This workspace is not available to your verified identity. Contact your LTDS representative.",
     };
   if (error.status === 503)
     return {
@@ -232,9 +234,13 @@ function FileBrowser({
   feedback = false,
   projectId = null,
   workspaceId = null,
+  loadExactFile,
+  onLinkedFileChange,
 }: {
   load: (folderId: string | null, cursor: string | null, signal: AbortSignal) => Promise<PortalFilePage>;
-  loadLocations: () => Promise<DeliveryLocationCollection>;
+  loadLocations?: () => Promise<DeliveryLocationCollection>;
+  loadExactFile?: (fileId: string, signal: AbortSignal) => Promise<PortalFile>;
+  onLinkedFileChange?: () => void;
   folderId?: string | null;
   onFolderChange?: (folderId: string | null) => void;
   mapToken: string | null;
@@ -258,32 +264,33 @@ function FileBrowser({
   const [locations, setLocations] = useState<DeliveryLocationCollection | null>(null);
   const [locationError, setLocationError] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ file: PortalFile; trigger: HTMLElement | null } | null>(null);
+  const [previewMediaError, setPreviewMediaError] = useState(false);
   const [linkedFileId, setLinkedFileId] = useState(() => new URLSearchParams(location.search).get("file"));
   const [linkedFileError, setLinkedFileError] = useState(""), [linkedFileLoading, setLinkedFileLoading] = useState(false), [fileRetry, setFileRetry] = useState(0);
   const previewTrigger = useRef<HTMLElement | null>(null);
   const closePreview = () => {
     setPreview(null);
-    if (feedback && new URLSearchParams(location.search).has("file")) {
-      const url = new URL(location.href); url.searchParams.delete("file"); history.pushState(null, "", `${url.pathname}${url.search}`); setLinkedFileId(null);
+    if ((feedback || loadExactFile) && new URLSearchParams(location.search).has("file")) {
+      const url = new URL(location.href); url.searchParams.delete("file"); history.pushState(null, "", `${url.pathname}${url.search}`); setLinkedFileId(null); onLinkedFileChange?.();
     }
   };
   const openPreview = (file: PortalFile, trigger: HTMLElement) => {
-    if (!feedback) { setPreview({ file, trigger }); return; }
+    if (!feedback && !loadExactFile) { setPreview({ file, trigger }); return; }
     previewTrigger.current = trigger;
     const url = new URL(withPortalWorkspace(`${location.pathname}${location.search}`), location.origin);
-    url.searchParams.set("file", file.id); history.pushState(null, "", `${url.pathname}${url.search}`); setLinkedFileId(file.id);
+    url.searchParams.set("file", file.id); history.pushState(null, "", `${url.pathname}${url.search}`); setLinkedFileId(file.id); onLinkedFileChange?.();
   };
   useEffect(() => { const sync = () => setLinkedFileId(new URLSearchParams(location.search).get("file")); sync(); addEventListener("popstate", sync); return () => removeEventListener("popstate", sync); }, [folderId]);
   useEffect(() => {
     setPreview(null); setLinkedFileError(""); setLinkedFileLoading(false);
-    if (!feedback || !linkedFileId) return;
+    if ((!feedback && !loadExactFile) || !linkedFileId) return;
     const controller = new AbortController(); setLinkedFileLoading(true);
-    void loadFeedbackFile(linkedFileId, projectId, workspaceId, controller.signal).then(file => {
+    void (loadExactFile ? loadExactFile(linkedFileId, controller.signal) : loadFeedbackFile(linkedFileId, projectId, workspaceId, controller.signal)).then(file => {
       if (!controller.signal.aborted) setPreview({ file, trigger: previewTrigger.current });
     }).catch(() => { if (!controller.signal.aborted) setLinkedFileError("This file could not be opened. It may have changed or no longer be shared with you."); })
       .finally(() => { if (!controller.signal.aborted) setLinkedFileLoading(false); });
     return () => controller.abort();
-  }, [feedback, linkedFileId, projectId, workspaceId, fileRetry]);
+  }, [feedback, loadExactFile, linkedFileId, projectId, workspaceId, fileRetry]);
   const previewDialog = useRef<HTMLElement>(null);
   const pageRequest = useRef<{
     folderId: string | null;
@@ -350,13 +357,14 @@ function FileBrowser({
     let active = true;
     setLocations(null);
     setLocationError(null);
-    loadLocations()
+    loadLocations?.()
       .then((result) => { if (active) setLocations(result); })
       .catch(() => { if (active) setLocationError("Image locations could not be loaded."); });
     return () => { active = false; };
   }, [loadLocations]);
   useEffect(() => {
     if (!preview) return;
+    setPreviewMediaError(false);
     const priorOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     previewDialog.current?.focus();
@@ -481,7 +489,7 @@ function FileBrowser({
   const visibleFiles = files.slice(visibleFileStart, visibleFileStart + PORTAL_FILE_RENDER_WINDOW - visibleFolders.length);
   return (
     <div>
-      <ImageLocationMap token={mapToken} locations={locations} scopeLabel={locationScopeLabel} />
+      {loadLocations && <ImageLocationMap token={mapToken} locations={locations} scopeLabel={locationScopeLabel} />}
       {linkedFileLoading && <p role="status">Opening linked file…</p>}
       {linkedFileError && <div role="alert"><p>{linkedFileError}</p><button className="button-ghost" onClick={() => setFileRetry(value => value + 1)}>Retry linked file</button></div>}
       {feedback && !loading && !error && projectId && continuationFolderId && <LeaveFeedback key={continuationFolderId} target={{ kind: "folder", projectId, folderId: continuationFolderId }} label={breadcrumbs.at(-1)?.name || "Current folder"} />}
@@ -529,7 +537,7 @@ function FileBrowser({
                 </button>
               )}
               <a
-                className="button-orange button-small"
+                className="button button-orange button-small"
                 href={file.downloadPath}
               >
                 Download
@@ -573,19 +581,20 @@ function FileBrowser({
             <header>
               <div><strong>{preview.file.name}</strong><span>{formatBytes(preview.file.size)}</span></div>
               <div className="portal-file-preview-actions">
-                <a className="button-orange button-small" href={preview.file.downloadPath}>Download</a>
+                <a className="button button-orange button-small" href={preview.file.downloadPath}>Download</a>
                 <button type="button" className="button-ghost button-small" onClick={closePreview} aria-label="Close preview">Close</button>
               </div>
             </header>
             {feedback && <LeaveFeedback key={preview.file.id} target={{ kind: "file", projectId, fileId: preview.file.id }} label={preview.file.name} />}
             <div className="portal-file-preview-stage">
-              {preview.file.kind === "image" && <img src={preview.file.previewPath!} alt={preview.file.name} />}
-              {preview.file.kind === "video" && <video src={preview.file.previewPath!} controls playsInline preload="metadata" />}
-              {preview.file.kind === "audio" && <audio src={preview.file.previewPath!} controls preload="metadata" />}
+              {loadExactFile && previewMediaError && <div role="alert"><p>The preview could not be loaded. The file or your access may have changed.</p><button className="button-ghost" onClick={() => setFileRetry(value => value + 1)}>Retry preview</button></div>}
+              {preview.file.kind === "image" && <img src={preview.file.previewPath!} alt={preview.file.name} onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
+              {preview.file.kind === "video" && <video src={preview.file.previewPath!} controls playsInline preload="metadata" onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
+              {preview.file.kind === "audio" && <audio src={preview.file.previewPath!} controls preload="metadata" onError={loadExactFile ? () => setPreviewMediaError(true) : undefined} />}
               {(preview.file.kind === "pdf" || preview.file.kind === "text") && (
                 <iframe src={preview.file.previewPath!} title={`Preview ${preview.file.name}`} />
               )}
-              {!preview.file.previewPath && <p>No browser preview is available for this file. You can download it or leave feedback.</p>}
+              {!preview.file.previewPath && <p>No browser preview is available for this file. You can download it{feedback ? " or leave feedback" : ""}.</p>}
             </div>
           </section>
         </div>
@@ -2402,7 +2411,7 @@ export function ClientPortalApp({
   const [bootstrapRevision, setBootstrapRevision] = useState(0);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null);
   const mobileNavPanel = useRef<HTMLDivElement>(null);
-  const requestContextKey = gate.status === "ready" ? `${gate.data.account.id}:${gate.data.selectedWorkspaceId ?? "legacy"}` : null;
+  const requestContextKey = gate.status === "ready" && gate.data.resourceMode !== "native" ? `${gate.data.account.id}:${gate.data.selectedWorkspaceId ?? "legacy"}` : null;
   const requestAvailability = useRequestAvailability(switchingWorkspace ? null : requestContextKey, gate.status === "ready" ? gate.data.selectedWorkspaceId ?? null : null);
   const pastDeliveryLoader = useMemo(
     () => (_folderId: string | null, cursor: string | null, signal: AbortSignal) => loadPortalPastDeliveries(cursor, undefined, signal),
@@ -2420,7 +2429,7 @@ export function ClientPortalApp({
       .then((data) => {
         if (active && !controller.signal.aborted) {
           history.replaceState(null, "", withPortalWorkspace(`${location.pathname}${location.search}`));
-          setRequests(data.requests);
+          setRequests(data.resourceMode === "native" ? [] : data.requests);
           setGate({ status: "ready", data });
         }
       })
@@ -2546,7 +2555,12 @@ export function ClientPortalApp({
       </PortalBoundary>
     );
 
-  const { account, projects, mapboxPublicToken, capabilities } = gate.data;
+  const { capabilities } = gate.data;
+  const native = gate.data.resourceMode === "native" ? gate.data : null;
+  const account = gate.data.resourceMode === "native" ? null : gate.data.account;
+  const projects = gate.data.resourceMode === "native" ? [] : gate.data.projects;
+  const mapboxPublicToken = gate.data.resourceMode === "native" ? null : gate.data.mapboxPublicToken;
+  const shellDisplayName = native ? native.workspace.displayName : account!.displayName;
   const workspaces = gate.data.workspaces ?? [];
   const selectedWorkspaceId = gate.data.selectedWorkspaceId ?? null;
   const switchWorkspace = async (workspaceId: string) => {
@@ -2557,7 +2571,7 @@ export function ClientPortalApp({
     try {
       const data = await loadPortalBootstrap(undefined, workspaceId, controller.signal);
       if (controller.signal.aborted || bootstrapController.current !== controller) return;
-      setRequests(data.requests);
+      setRequests(data.resourceMode === "native" ? [] : data.requests);
       setProjectId(null);
       setPage("dashboard");
       setRequestDraftId(null);
@@ -2614,7 +2628,11 @@ export function ClientPortalApp({
   const selectedProject = projects.find((project) => project.id === projectId);
   let content: ReactNode;
 
-  if (page === "project")
+  if (native)
+    content = <NativeWorkspaceContent key={`${native.workspace.sourceId}:${native.workspace.id}:${native.contextVersion}`} context={native} page={page} projectId={projectId} openProject={openProject}
+      onInvalid={caught => { bootstrapController.current?.abort(); const status = (caught as RequestError).status; setGate(status === 409 ? {status: "blocked", title: "Workspace changed", detail: "Your workspace changed. Refresh the portal before continuing."} : status === 404 || status === 410 ? {status: "blocked", title: "Shared item unavailable", detail: "This shared item or its access has changed. Refresh the portal to check your current workspace."} : blockedPortal(caught)); }}
+      renderFiles={options => <FileBrowser key={options.folderId ?? "linked-file"} {...options} workspaceId={native.workspace.id} mapToken={null} locationScopeLabel="" emptyTitle="No files shown" emptyDetail={options.folderId ? "This shared folder has no files on this page." : "Open a delivery folder to browse its files."} />} />;
+  else if (page === "project")
     content = selectedProject ? (
       <ProjectWorkspace
         key={`${requestContextKey}:${selectedProject.id}`}
@@ -2628,7 +2646,7 @@ export function ClientPortalApp({
         requestWorkspaceId={selectedWorkspaceId}
         feedback={capabilities.feedback}
         viewer={capabilities.viewer}
-        viewerDisplayUnits={gate.data.viewerDisplayUnits}
+        viewerDisplayUnits={gate.data.resourceMode === "native" ? "imperial" : gate.data.viewerDisplayUnits}
         onSaved={onSaved}
         onBack={() => navigate("projects")}
       />
@@ -2656,7 +2674,7 @@ export function ClientPortalApp({
       <>
         <section className="portal-welcome">
           <span className="eyebrow">Client portal</span>
-          <h1>Welcome, {account.displayName}</h1>
+          <h1>Welcome, {account!.displayName}</h1>
           <p>
             Project progress, files, and service requests—all in one secure
             workspace.
@@ -2924,12 +2942,12 @@ export function ClientPortalApp({
         <div className="portal-account-grid">
           <Card title="Client account" className="portal-account-card">
             <div className="portal-avatar" aria-hidden="true">
-              {account.displayName.slice(0, 2).toUpperCase()}
+              {account!.displayName.slice(0, 2).toUpperCase()}
             </div>
             <div>
-              <strong>{account.displayName}</strong>
-              {account.email && <p>{account.email}</p>}
-              {account.phone && <p>{account.phone}</p>}
+              <strong>{account!.displayName}</strong>
+              {account!.email && <p>{account!.email}</p>}
+              {account!.phone && <p>{account!.phone}</p>}
             </div>
           </Card>
           <Card title="Access & security">
@@ -2963,15 +2981,15 @@ export function ClientPortalApp({
               disabled={switchingWorkspace}
               onChange={event => void switchWorkspace(event.target.value)}
             >
-              {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.displayName}</option>)}
+              {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.displayName}{workspace.resourceMode === "native" ? ` — ${workspace.sourceId}` : ""}</option>)}
             </select>
           </label>
         )}
         <nav className="client-portal-top-nav" aria-label="Client portal">
-          {navigation.filter(item => item.page !== "feedback" || capabilities.feedback).map((item) => (
+          {navigation.filter(item => (item.page !== "feedback" || capabilities.feedback) && (!native || item.page !== "requests")).map((item) => (
             <a
               key={item.page}
-              href={clientPortalPath(item.page)}
+              href={withPortalWorkspace(clientPortalPath(item.page))}
               aria-current={
                 page === item.page ||
                 (item.page === "projects" && page === "project") ||
@@ -2988,17 +3006,17 @@ export function ClientPortalApp({
             </a>
           ))}
         </nav>
-        {!switchingWorkspace && <PortalNotifications key={requestContextKey} feedbackEnabled={capabilities.feedback} />}
+        {!switchingWorkspace && !native && <PortalNotifications key={requestContextKey} feedbackEnabled={capabilities.feedback} />}
         <button ref={mobileNavTrigger} className="portal-nav-trigger" type="button" aria-label="Open navigation" aria-expanded={mobileNavOpen} aria-controls="portal-mobile-navigation" onClick={() => setMobileNavOpen(true)}><span className="nav-hamburger" aria-hidden="true"><i /><i /><i /></span></button>
-        <AccountMenu className="portal-account-menu" displayName={account.displayName}
-          avatar={account.displayName.slice(0, 2).toUpperCase()} accountHref={clientPortalPath("account")}
+        <AccountMenu className="portal-account-menu" displayName={shellDisplayName}
+          avatar={shellDisplayName.slice(0, 2).toUpperCase()} accountHref={withPortalWorkspace(clientPortalPath("account"))}
           onAccount={() => navigate("account")} />
       </header>
       {mobileNavOpen && <div className="portal-mobile-nav-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); } }}>
         <div ref={mobileNavPanel} id="portal-mobile-navigation" className="portal-mobile-nav" role="dialog" aria-modal="true" aria-label="Navigation">
           <header><strong>Navigation</strong><button type="button" aria-label="Close navigation" onClick={() => { setMobileNavOpen(false); mobileNavTrigger.current?.focus(); }}>Close</button></header>
           <nav aria-label="Mobile client portal navigation">
-            {[...navigation.filter(item => item.page !== "feedback" || capabilities.feedback), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={clientPortalPath(item.page)} aria-current={page === item.page || (item.page === "projects" && page === "project") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
+            {[...navigation.filter(item => (item.page !== "feedback" || capabilities.feedback) && (!native || item.page !== "requests")), { page: "account" as const, label: "Account" }].map((item) => <a key={item.page} href={withPortalWorkspace(clientPortalPath(item.page))} aria-current={page === item.page || (item.page === "projects" && page === "project") || (item.page === "requests" && page === "request-new") ? "page" : undefined} onClick={(event) => { event.preventDefault(); navigate(item.page); }}>{item.label}</a>)}
           </nav>
         </div>
       </div>}

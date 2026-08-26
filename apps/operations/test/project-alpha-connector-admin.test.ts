@@ -17,7 +17,7 @@ const principal:StaffPrincipal={id:"registry-route-admin",email:"registry-admin@
 // This route never uses the platform-only execution context members.
 const executionCtx={waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext;
 const publicKey=(seed:number)=>btoa(String.fromCharCode(...new Uint8Array(32).fill(seed))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/g,"");
-let runtime:Miniflare,db:D1Database,env:Env,sequence=0;
+let runtime:Miniflare,db:D1Database,env:Env,sequence=0,portalUpgraded=false;
 const revision={credentialRef:"secondary",snapshotBasePath:"/",accessIssuer:"https://access.example.test",accessAudience:"receiver-audience",accessSubject:"producer-service-token"};
 
 function input():RegisterProjectAlphaConnectorInput {
@@ -25,7 +25,8 @@ function input():RegisterProjectAlphaConnectorInput {
   // Each new fixture connector has its own signing identity; no key reuse.
   env.PROJECT_ALPHA_CONNECTOR_CREDENTIALS=JSON.stringify({version:1,sets:{
     primary:{snapshotApiKey:"private-primary-snapshot-key",eventCurrent:{keyId:"primary",algorithm:"ed25519",value:publicKey(1)}},
-    secondary:{snapshotApiKey:"private-secondary-snapshot-key",eventCurrent:{keyId:"secondary",algorithm:"ed25519",value:publicKey(sequence+10)}},
+    secondary:{snapshotApiKey:"private-secondary-snapshot-key",eventCurrent:{keyId:"secondary",algorithm:"ed25519",value:publicKey(sequence+10)},
+      portalCurrent:{keyId:`portal-${sequence}`,value:`private-secondary-portal-key-${sequence}-longer-than-thirty-two-characters`}},
   }});
   return {sourceId:`project-alpha:${suffix}`,producerBindingId:suffix,snapshotOrigin:`https://${suffix}.example.test`,applicationKey:"ltds_ops",
     profile:"business_data",displayName:"Business connection",revision};
@@ -40,10 +41,19 @@ async function rows(table:"pa_connectors"|"pa_connector_audit"|"pa_connector_rev
 async function registerPending(){
   const value=input();const response=await send(ROOT,"POST",value);expect(response.status).toBe(201);return value;
 }
+async function upgradePortal(){
+  if(portalUpgraded)return;
+  const delivery=await runtime.getD1Database("DELIVERY_DB") as D1Database;
+  await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0039_portal_connector_coordination.sql",import.meta.url),"utf8")).map(sql=>db.prepare(sql)));
+  await delivery.batch(splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0162_portal_source_authorities.sql",import.meta.url),"utf8")).map(sql=>delivery.prepare(sql)));
+  env.DELIVERY_DB=delivery;
+  env.PROJECT_ALPHA_PORTAL_HMAC_SECRET="primary-portal-fixture-signing-key-at-least-thirty-two-characters";
+  portalUpgraded=true;
+}
 
-describe("Project Alpha connector administration HTTP boundary",()=>{
+describe("Project Alpha connector administration HTTP boundary",{timeout:60_000,concurrent:false},()=>{
   beforeAll(async()=>{
-    runtime=new Miniflare({modules:true,compatibilityDate:"2026-07-22",script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB"]});
+    runtime=new Miniflare({modules:true,compatibilityDate:"2026-07-22",script:"export default {fetch(){return new Response('ok')}}",d1Databases:["OPS_DB","DELIVERY_DB"]});
     db=await runtime.getD1Database("OPS_DB") as D1Database;
     const directory=new URL("../migrations/",import.meta.url);
     for(const name of readdirSync(directory).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0038").sort()){
@@ -71,8 +81,8 @@ describe("Project Alpha connector administration HTTP boundary",()=>{
       db.prepare("INSERT OR IGNORE INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key) VALUES('registry-route-admin-role',?,'role-admin','global','global')").bind(principal.id),
       db.prepare("INSERT OR IGNORE INTO role_permissions(role_id,permission_key) VALUES('role-admin','integrations.manage')"),
     ]);
-  });
-  afterAll(async()=>{await runtime?.dispose();});
+  },60_000);
+  afterAll(async()=>{await runtime?.dispose();},60_000);
 
   it("rejects an unauthenticated caller before reading or changing the registry",async()=>{
     mocks.authenticateStaff.mockRejectedValue(new HTTPException(401,{message:"Authentication required"}));
@@ -98,7 +108,9 @@ describe("Project Alpha connector administration HTTP boundary",()=>{
     await db.prepare("INSERT INTO staff_permission_overrides(id,staff_id,permission_key,effect,scope,scope_key,created_by) VALUES('registry-deny',?,'integrations.manage','deny','global','global',?)").bind(principal.id,principal.id).run();
     const before=await rows("pa_connector_audit");
     for(const [path,method,body] of [[ROOT,"GET",undefined],[ROOT,"POST",input()],[`${ROOT}/project-alpha:primary`,"PATCH",{expectedVersion:2,state:"suspended"}],
-      [`${ROOT}/project-alpha:primary/revisions`,"POST",{expectedVersion:2,revision}],[`${ROOT}/project-alpha:primary/sync`,"POST",{}]] as const){
+      [`${ROOT}/project-alpha:primary/revisions`,"POST",{expectedVersion:2,revision}],[`${ROOT}/project-alpha:primary/sync`,"POST",{}],
+      [`${ROOT}/project-alpha:secondary/portal`,"POST",{expectedVersion:1,expectedPortalVersion:null,action:"configure"}],
+      [`${ROOT}/recover-portal-update`,"POST",{expectedVersion:1}]] as const){
       expect((await send(path,method,body)).status).toBe(403);
     }
     expect(await rows("pa_connector_audit")).toBe(before);
@@ -106,6 +118,8 @@ describe("Project Alpha connector administration HTTP boundary",()=>{
   it.each<Record<string,string>>([{Origin:"https://evil.example"},{"X-CSRF-Token":""}])("enforces the real origin and CSRF checks: %j",async(headers)=>{
     const before=await rows("pa_connectors");
     expect((await send(ROOT,"POST",input(),headers)).status).toBe(403);expect(await rows("pa_connectors")).toBe(before);
+    expect((await send(`${ROOT}/project-alpha:secondary/portal`,"POST",{expectedVersion:1,expectedPortalVersion:null,action:"configure"},headers)).status).toBe(403);
+    expect((await send(`${ROOT}/recover-portal-update`,"POST",{expectedVersion:1},headers)).status).toBe(403);
   });
   it("records only the authenticated actor and rejects actor/secret fields in strict JSON",async()=>{
     const value=input(),before=await rows("pa_connectors");
@@ -168,5 +182,45 @@ describe("Project Alpha connector administration HTTP boundary",()=>{
     const value={...input(),displayName:"x".repeat(17*1024)},before=await rows("pa_connectors");
     expect((await send(ROOT,"POST",value,{"Content-Length":"2"})).status).toBe(413);
     expect(await rows("pa_connectors")).toBe(before);
+  });
+  it("rejects browser-supplied portal authentication and actor fields",async()=>{
+    const body={expectedVersion:1,expectedPortalVersion:null,action:"configure"};
+    for(const extra of [{actorId:"spoofed"},{credentialRef:"other"},{accessAudience:"other"},{portalCurrent:{keyId:"fake",value:"secret"}}])
+      expect((await send(`${ROOT}/project-alpha:secondary/portal`,"POST",{...body,...extra})).status).toBe(400);
+    expect((await send(`${ROOT}/recover-portal-update`,"POST",{expectedVersion:1,actorId:"spoofed"})).status).toBe(400);
+  });
+  it("stages and activates the same connection's client portal with explicit versions and the authenticated actor",async()=>{
+    await upgradePortal();
+    const value=await registerPending();
+    expect((await send(`${ROOT}/${value.sourceId}`,"PATCH",{expectedVersion:1,state:"active"})).status).toBe(200);
+    const path=`${ROOT}/${value.sourceId}/portal`;
+    const staged=await send(path,"POST",{expectedVersion:2,expectedPortalVersion:null,action:"configure"});
+    expect(staged.status).toBe(200);
+    expect((await staged.json() as {authority:{state:string;version:number}}).authority).toMatchObject({state:"pending",version:1});
+    const active=await send(path,"POST",{expectedVersion:2,expectedPortalVersion:1,action:"activate"});
+    expect(active.status).toBe(200);
+    expect((await active.json() as {authority:{state:string}}).authority.state).toBe("active");
+    expect((await send(`${ROOT}/${value.sourceId}`,"PATCH",{expectedVersion:2,state:"suspended"})).status).toBe(200);
+    expect(await env.DELIVERY_DB.prepare("SELECT state FROM pa_portal_source_authorities WHERE source_id=?").bind(value.sourceId).first("state")).toBe("suspended");
+    const actors=await env.DELIVERY_DB.prepare("SELECT DISTINCT actor_id FROM pa_portal_source_authority_audit WHERE source_id=?").bind(value.sourceId).all<{actor_id:string}>();
+    expect(actors.results).toEqual([{actor_id:principal.id}]);
+    const summary=await send(ROOT);expect(summary.status).toBe(200);
+    const text=await summary.text();expect(text).not.toContain("private-secondary-portal-key");expect(text).not.toContain("access_subject");
+  });
+  it("returns actionable credential errors and exposes explicit recovery instead of a generic 500",async()=>{
+    await upgradePortal();
+    const value=await registerPending();
+    const credentials=JSON.parse(env.PROJECT_ALPHA_CONNECTOR_CREDENTIALS!);
+    delete credentials.sets.secondary.portalCurrent;
+    env.PROJECT_ALPHA_CONNECTOR_CREDENTIALS=JSON.stringify(credentials);
+    const response=await send(`${ROOT}/${value.sourceId}/portal`,"POST",{expectedVersion:1,expectedPortalVersion:null,action:"configure"});
+    expect(response.status).toBe(503);
+    const body=await response.json() as {error:string;code:string};
+    expect(body.code).toBe("PROJECT_ALPHA_PORTAL_CREDENTIALS_UNAVAILABLE");
+    expect(body.error).toContain("Deploy this connection's portal signing credentials");
+    const status=await (await send(ROOT)).json() as {portal:{recovery:{version:number;sourceId:string}}};
+    expect(status.portal.recovery.sourceId).toBe(value.sourceId);
+    expect((await send(`${ROOT}/recover-portal-update`,"POST",{expectedVersion:status.portal.recovery.version})).status).toBe(200);
+    expect((await (await send(ROOT)).json() as {portal:{recovery:null}}).portal.recovery).toBeNull();
   });
 });

@@ -58,7 +58,8 @@ import {
 import { searchShareRecipients, shareDirectoryRecipientsEnabled } from "./share-recipients";
 import { syncProjectAlpha } from "./project-alpha";
 import { runProjectAlphaSnapshotRecovery } from "./project-alpha-snapshot-recovery";
-import { registerProjectAlphaConnectorAdminRoutes } from "./project-alpha-connector-admin";
+import { registerProjectAlphaConnectorAdminRoutes, portalAuthorityErrorResponse } from "./project-alpha-connector-admin";
+import { PortalSourceAuthorityError } from "../../../client/src/worker/project-alpha-portal-authority";
 import { ProjectAlphaConnectorError } from "./project-alpha-connectors";
 import { ClientHubSourcesChangedError } from "./client-hub-directory";
 import { buildConnectionSummaries, projectAlphaHealthIsStale } from "./integration-health";
@@ -140,6 +141,7 @@ import { registerClientHubRoutes } from "./client-hub";
 import { registerBusinessPartyRoutes } from "./business-party-routes";
 import { registerNotificationCenterRoutes } from "./notification-center";
 import { registerStaffInboxRequestRoutes } from "./staff-inbox-requests";
+import { registerNativeDeliveryBindingRoutes } from "./native-delivery-binding-routes";
 import { reconcileClientHubIndex } from "./client-hub-index";
 import {
   decorateWorkContextsWithSops,
@@ -1432,6 +1434,7 @@ registerClientHubRoutes(app);
 registerBusinessPartyRoutes(app);
 registerNotificationCenterRoutes(app);
 registerStaffInboxRequestRoutes(app);
+registerNativeDeliveryBindingRoutes(app);
 registerClientFeedbackRoutes(app);
 registerViewerIntegrationRoutes(app);
 registerViewerProcessingRoutes(app);
@@ -3024,6 +3027,10 @@ app.post("/api/admin/integrations/project-alpha/sync", async (c) => {
 
 app.notFound((c) => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {
+  if (error instanceof PortalSourceAuthorityError) {
+    const { status, ...response } = portalAuthorityErrorResponse(error);
+    return c.json(response, status);
+  }
   if (error instanceof ClientHubSourcesChangedError)
     return c.json({ error: error.message, code: error.code }, 409);
   if (error instanceof Error && error.message.includes("pa_connector_active_revision_guard"))

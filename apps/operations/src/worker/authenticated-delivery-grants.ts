@@ -80,6 +80,7 @@ async function bindingContext(env: Env, bindingId: string): Promise<BindingConte
       binding.owner_public_id,binding.r2_prefix,binding.source_version,checkpoint.active_generation_id
     FROM portal_v2_folder_bindings binding
     JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'
+      AND workspace.project_alpha_source_id='project-alpha:primary'
       AND (workspace.legacy_account_id IS NULL OR EXISTS (SELECT 1 FROM client_accounts account
         WHERE account.id=workspace.legacy_account_id AND (account.project_alpha_source_id IS NULL OR account.project_alpha_source_id='project-alpha:primary')))
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=binding.workspace_id
@@ -114,10 +115,11 @@ async function bindingContext(env: Env, bindingId: string): Promise<BindingConte
 
 async function bindingIdForFolderKey(env: Env, folderKey: string): Promise<string> {
   const prefix = normalizePrefix(folderKey);
-  const rows = await deliveryDb(env).prepare(`SELECT id,r2_prefix
-    FROM portal_v2_folder_bindings
-    WHERE status='active' AND revoked_at IS NULL AND r2_prefix IN (?,?)
-    ORDER BY updated_at DESC,id LIMIT 2`).bind(prefix, prefix.slice(0, -1)).all<{ id: string; r2_prefix: string }>();
+  const rows = await deliveryDb(env).prepare(`SELECT binding.id,binding.r2_prefix
+    FROM portal_v2_folder_bindings binding JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
+    WHERE binding.status='active' AND binding.revoked_at IS NULL AND binding.r2_prefix IN (?,?)
+      AND workspace.project_alpha_source_id='project-alpha:primary'
+    ORDER BY binding.updated_at DESC,binding.id LIMIT 2`).bind(prefix, prefix.slice(0, -1)).all<{ id: string; r2_prefix: string }>();
   const matches = rows.results.filter(row => normalizePrefix(row.r2_prefix) === prefix);
   if (matches.length !== 1) throw new HTTPException(404, { message: "This folder is not bound to a client workspace" });
   return matches[0]!.id;

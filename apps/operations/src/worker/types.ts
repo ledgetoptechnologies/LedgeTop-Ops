@@ -11,6 +11,7 @@ export type Env = Omit<
   | "DELIVERY_SHARE_DIRECTORY_RECIPIENTS_ENABLED"
   | "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
+  | "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
   /** Deploy-managed connector credential sets; never returned by registry APIs. */
@@ -37,6 +38,8 @@ export type Env = Omit<
   CLIENT_DELEGATED_SHARE_SIGNER_ENABLED?: string;
   /** Enables staff recovery for the additive client workspace hierarchy. */
   CLIENT_PORTAL_HIERARCHY_V2_ENABLED?: string;
+  /** Must match the Client deployment before publishing relation-backed grants. */
+  CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED?: string;
   OPERATIONS_SESSION_SECRET: string;
   DELIVERY_TOKEN_SECRET: string;
   DELIVERY_PREVIOUS_TOKEN_SECRET?: string;

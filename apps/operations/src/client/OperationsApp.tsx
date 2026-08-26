@@ -29,6 +29,7 @@ import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
 import { ProjectAlphaConnections } from "./ProjectAlphaConnections";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
+import { NativeDeliveryGrantPanel } from "./NativeDeliveryGrantPanel";
 import { deliveryViewCountText } from "./delivery-view-count";
 import { JobBriefPanel } from "./JobBriefPanel";
 import { SopLibrary } from "./SopLibrary";
@@ -4574,6 +4575,19 @@ type AuthenticatedGrant = {
 
 function AuthenticatedDeliveryGrantPanel({ folder }: { folder: { id: string } }) {
   const [expanded, setExpanded] = useState(false);
+  const [mode, setMode] = useState<"primary" | "native">("primary");
+  const [nativeBusy, setNativeBusy] = useState(false);
+  return <section className="client-workspace-grant authenticated-grant-panel">
+    <button type="button" className="button-ghost button-small" aria-expanded={expanded} disabled={nativeBusy} onClick={() => setExpanded(value => !value)}>{expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}</button>
+    {expanded && <div className="client-workspace-grant-panel">
+      <div className="form-grid native-grant-connection"><label className="full">Portal connection<select value={mode} disabled={nativeBusy} onChange={event => setMode(event.target.value as "primary" | "native")}><option value="primary">Primary portal</option><option value="native">Connected workspace</option></select></label></div>
+      {mode === "native" ? <NativeDeliveryGrantPanel key={folder.id} folder={folder} onBusyChange={setNativeBusy} /> : <PrimaryAuthenticatedDeliveryGrantPanel key={folder.id} folder={folder} />}
+    </div>}
+  </section>;
+}
+
+function PrimaryAuthenticatedDeliveryGrantPanel({ folder }: { folder: { id: string } }) {
+  const expanded = true;
   const [folderBindingId, setFolderBindingId] = useState("");
   const [grants, setGrants] = useState<AuthenticatedGrant[]>([]);
   const [query, setQuery] = useState("");
@@ -4659,12 +4673,7 @@ function AuthenticatedDeliveryGrantPanel({ folder }: { folder: { id: string } })
 
   const latestVersions = new Map<string, number>();
   for (const grant of grants) latestVersions.set(grant.grantId, Math.max(latestVersions.get(grant.grantId) ?? 0, grant.version));
-  return <section className="client-workspace-grant authenticated-grant-panel">
-    <button type="button" className="button-ghost button-small" aria-expanded={expanded}
-      onClick={() => setExpanded(value => !value)}>
-      {expanded ? "Close authenticated portal grants" : "Grant to Client Portal"}
-    </button>
-    {expanded && <div className="client-workspace-grant-panel">
+  return <div className="client-workspace-grant-panel">
       <strong>Authenticated Client Portal access</strong>
       <small>This permission is checked against current verified identity, workspace membership, hierarchy, deny policy, and folder source version. It never creates a bearer link.</small>
       {busy && !folderBindingId ? <Loading /> : <>
@@ -4705,8 +4714,7 @@ function AuthenticatedDeliveryGrantPanel({ folder }: { folder: { id: string } })
           </section>;
         })}
       </div>}
-    </div>}
-  </section>;
+    </div>;
 }
 function ShareDialog({
   folder,

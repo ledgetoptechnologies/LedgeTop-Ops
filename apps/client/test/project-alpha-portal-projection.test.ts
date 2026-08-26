@@ -334,26 +334,41 @@ describe("Project Alpha portal hierarchy projection", () => {
     const pageOne = { ...snapshot.page, pageCount: 2, pageNumber: 1, principals: [], entitlements: [] };
     const pageTwo = { ...snapshot.page, deliveryId: "second-concurrent-page", pageCount: 2, pageNumber: 2, entities: [] };
     let injected = false;
+    let winningGenerationId: string | null = null;
     let proxy: D1Database;
-    const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => new Proxy(statement, { get(target, property) {
-      if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values), sql);
-      if (property === "run" && sql.includes("INSERT OR IGNORE INTO pa_portal_projection_generations")) return async () => {
-        if (!injected) { injected = true; await applyFrom(source, pageTwo); }
-        return target.run();
-      };
-      const value = target[property as keyof D1PreparedStatement];
-      return typeof value === "function" ? value.bind(target) : value;
-    } });
+    const statementSql = new WeakMap<D1PreparedStatement, string>();
+    const wrap = (statement: D1PreparedStatement, sql: string): D1PreparedStatement => {
+      const wrapped = new Proxy(statement, { get(target, property) {
+        if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values), sql);
+        const value = target[property as keyof D1PreparedStatement];
+        return typeof value === "function" ? value.bind(target) : value;
+      } });
+      statementSql.set(wrapped, sql);
+      return wrapped;
+    };
     proxy = new Proxy(db, { get(target, property) {
       if (property === "withSession") return () => proxy;
       if (property === "prepare") return (sql: string) => wrap(target.prepare(sql), sql);
+      if (property === "batch") return async (statements: D1PreparedStatement[]) => {
+        if (!injected && statements.some(statement => statementSql.get(statement)?.includes("INSERT OR IGNORE INTO pa_portal_projection_generations"))) {
+          injected = true;
+          await applyFrom(source, pageTwo);
+          winningGenerationId = await db.prepare("SELECT id FROM pa_portal_projection_generations WHERE projection_source_id=? AND source_generation=?")
+            .bind(source, snapshot.page.sourceGeneration).first<string>("id");
+        }
+        return target.batch(statements);
+      };
       const value = target[property as keyof D1Database];
       return typeof value === "function" ? value.bind(target) : value;
     } });
     expect(await applyFrom(source, pageOne, { ...env, DELIVERY_DB: proxy })).toBe("completed");
+    expect(injected).toBe(true);
+    expect(winningGenerationId).toBeTruthy();
     expect(await applyFrom(source, { ...snapshot.activate, pageCount: 2 })).toBe("completed");
     expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_generations WHERE projection_source_id=?").bind(source).first("count")).toBe(1);
     expect(await db.prepare("SELECT COUNT(*) count FROM pa_portal_projection_pages page JOIN pa_portal_projection_generations generation ON generation.id=page.generation_id WHERE generation.projection_source_id=?").bind(source).first("count")).toBe(2);
+    expect((await db.prepare("SELECT page.page_number,page.generation_id FROM pa_portal_projection_pages page JOIN pa_portal_projection_generations generation ON generation.id=page.generation_id WHERE generation.projection_source_id=? ORDER BY page.page_number")
+      .bind(source).all()).results).toEqual([{page_number:1,generation_id:winningGenerationId},{page_number:2,generation_id:winningGenerationId}]);
   }, 20_000);
 
   it("is migration-idempotent and keeps referential integrity", async () => {
