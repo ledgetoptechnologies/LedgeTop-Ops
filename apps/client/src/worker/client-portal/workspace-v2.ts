@@ -97,13 +97,14 @@ function deniedByIdentityRows(rows: IdentityDenialRow[], workspaceId: string, sc
   ));
 }
 
-function allowedByEntitlementRows(rows: EntitlementRow[], scopes: ReadonlySet<string>, expiredProjects:readonly string[]=[], shell=false): boolean {
+function allowedByEntitlementRows(rows: EntitlementRow[], scopes: ReadonlySet<string>, expiredProjects:readonly string[]=[], shell=false,
+  preserveOrdinaryHistory=false): boolean {
   if (rows.length > 200) return false;
   let allowed = false;
   for (const entitlement of rows) {
     if (!scopes.has(`${entitlement.scope_type}:${entitlement.scope_public_id}`)) continue;
     if (entitlement.effect === "deny") return false;
-    if(projectAccessRowAllows(entitlement,scopes,expiredProjects,shell))allowed = true;
+    if(projectAccessRowAllows(entitlement,scopes,expiredProjects,shell,{preserveOrdinaryHistory}))allowed = true;
   }
   return allowed;
 }
@@ -731,7 +732,7 @@ export async function authorizePortalWorkspaceCapability(
   if (await identityDeniedForScopes(env, identity.id, workspaceId, scopes)) return false;
 
   const result = await portalDb(env).prepare(`
-    SELECT effect,scope_type,scope_public_id,${projectAccessReadColumns('entitlement',termsReady)}
+    SELECT effect,scope_type,scope_public_id,${termsReady?'source_type':'NULL source_type'},${projectAccessReadColumns('entitlement',termsReady)}
     FROM portal_v2_entitlements entitlement
     WHERE workspace_id=? AND identity_id=? AND capability=?
       AND status='active' AND revoked_at IS NULL
@@ -746,7 +747,8 @@ export async function authorizePortalWorkspaceCapability(
   // to guess which row should win.
   const expired=termsReady?await readExpiredScopeProjects(portalDb(env),workspaceId,scopes,portalHierarchyRelationsEnabled(env)):[];
   return allowedByEntitlementRows(result.results, scopes,expired.filter(id=>id!==options?.retainedProjectId),
-    capability==='workspace.view'&&target.scopeType==='workspace');
+    capability==='workspace.view'&&target.scopeType==='workspace',
+    capability==='delivery.view'||(capability==='directory.read'&&target.scopeType==='project'));
 }
 
 /** Internal batching of the same primary capability policy, for independently
@@ -763,7 +765,7 @@ export async function authorizePrimaryPortalTargetBatch(env:Env,principal:Verifi
   const scopes=await readNativeTargetScopes(env,{workspaceId,generationId:generation,rootType:workspace.root_type,
     rootPublicId:workspace.pa_organization_public_id??workspace.pa_client_public_id!},targets.map(t=>t.target),{retention:'structural'});
   const ready=await projectAccessTermsReady(db);
-  const rules=(await db.prepare(`SELECT effect,scope_type,scope_public_id,${projectAccessReadColumns('entitlement',ready)}
+  const rules=(await db.prepare(`SELECT effect,scope_type,scope_public_id,${ready?'source_type':'NULL source_type'},${projectAccessReadColumns('entitlement',ready)}
     FROM portal_v2_entitlements entitlement WHERE workspace_id=? AND identity_id=? AND capability=?
       AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
       AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
@@ -775,7 +777,9 @@ export async function authorizePrimaryPortalTargetBatch(env:Env,principal:Verifi
     .bind(identity.id,workspaceId).all<IdentityDenialRow>()).results:[];
   for(const item of targets){const key=`${item.target.scopeType}:${item.target.publicId}`,scope=scopes.get(key);if(!scope)continue;
     const expired=scope.proofRows.filter(r=>r.entity_type==='project'&&r.retained===0&&r.public_id!==item.retainedProjectId).map(r=>r.public_id);
-    if(!deniedByIdentityRows(denials,workspaceId,scope.scopes)&&allowedByEntitlementRows(rules,scope.scopes,expired))result.set(key,scope);
+    if(!deniedByIdentityRows(denials,workspaceId,scope.scopes)
+      &&allowedByEntitlementRows(rules,scope.scopes,expired,false,capability==='delivery.view'
+        ||(capability==='directory.read'&&item.target.scopeType==='project')))result.set(key,scope);
   }
   return result;
 }
@@ -935,7 +939,9 @@ export function nativePortalScopesAllowed(context:NativePortalReadContext,capabi
   if(deniedByIdentityRows(context.denials,context.workspaceId,scopes))return false;
   const rules=context.grants.filter(g=>g.capability===capability);
   const expired=target?.proofRows.filter(row=>row.entity_type==='project'&&row.retained===0&&row.public_id!==retainedProjectId).map(row=>row.public_id)??[];
-  return requireAllow?allowedByEntitlementRows(rules,scopes,expired,capability==='workspace.view')
+  const targetType=target?.proofRows[0]?.target_type;
+  return requireAllow?allowedByEntitlementRows(rules,scopes,expired,capability==='workspace.view',
+    capability==='delivery.view'||(capability==='directory.read'&&targetType==='project'))
     :!rules.some(g=>g.effect==='deny'&&scopes.has(`${g.scope_type}:${g.scope_public_id}`));
 }
 

@@ -22,7 +22,7 @@ that newer local fixes are missing, or that those fixes are deployed.
 | 3, 4: client/project workspace and contacts | Read-only source-qualified business-project detail and factual linked-contact channels. | Organization/project role assignments, multiple site contacts, preferences/arrival instructions and authorized editing. The single projected `client_id` is not a role list. |
 | 5: project memory and field use | Operation-owned Job Briefs, private attachments, revisions and existing crew read access. | Project-owned plans/outcomes/observations, approved contribution permissions, field-friendly access and project attachments. An operation brief is not project memory. |
 | 6: recurrence and selective copy | Existing immutable brief revisions and source/project visibility checks are reusable. | Actual selective copy/preview/provenance and destination authorization; authoritative next-project creation or approved Alpha navigation. Never copy access, billing state or notice recipients implicitly. |
-| 7: ordinary client history | Staff business-project history is separate from portal grants. | Ordinary authenticated client history must survive project completion. Current hierarchy authorization still applies a global completion-plus-30-days cutoff. |
+| 7: ordinary client history | Staff business-project history is separate from portal grants. Completed-project Client reads now preserve established Project Alpha and migrated legacy project access, while explicit collaborator terms still expire. | Coordinated release and joined live acceptance remain pending. Ambiguous Operations and old invitation grants intentionally retain the legacy cutoff until reviewed. |
 | 8: native delivery | Existing authenticated delivery, scoped grants and Alpha delivery intents. | Complete staff client-to-destination-to-recipient workflow, including secondary sources; verify fresh uploads, grant changes, revocation and exact deep links together. |
 | 9: staged delivery notices | Local legacy folder-change batching plus new exact-principal Alpha delivery-intent batching, five-minute quiet period, Send Now/Cancel and bounded retries. | Native general-upload subscriptions and explicit recipient/group/contact policy. New native batches do not automatically cover staff-created grants or all uploads. |
 | 10: staff notification center | Local inbox for authorized requests, feedback, pending delivery notices and reported Alpha connection failures. | Wire additional meaningful operational events when their producers exist; this is not a universal event/audit log. |
@@ -116,13 +116,12 @@ were inspected, including recipient suggestions and invitation review. This is
 focused local evidence, not release evidence, and does not mark sections 7, 11
 or 14 complete. The broader workflows and coordinated rollout remain open.
 
-The initial August 26 read-only trace confirmed that changing the global 30-day cutoff
-to seven days would be incorrect. Relation-mode hierarchy, native scope queries
-and feedback target proofs currently apply identity-independent retention;
-legacy ancestry does not consistently apply that same cutoff. Invitation tokens
-expire after seven days, but acceptance does not give the resulting access that
-expiration. Neither invitation provenance nor membership `source_type` reliably
-identifies an external collaborator.
+The initial August 26 read-only trace confirmed that changing the global 30-day
+cutoff to seven days would be incorrect. The completed-history correction now
+removes that cutoff only for read capabilities backed by existing Project Alpha
+authority or a migrated legacy project grant. Ambiguous Operations rules and
+unclassified invitation grants keep the old behavior. Feedback authoring,
+service requests and Viewer-share creation do not inherit read-only history.
 
 Implement explicit, versioned access terms on the exact project delegation,
 not on the global person or their workspace membership. One person may be a
@@ -139,8 +138,9 @@ and clear it on reopening. Do not fabricate a completion date for an older
 source without that contract. The remaining decisions concern classification
 of existing unclassified grants and reopening behavior; safe proposals are to
 preserve existing grants until reviewed and require explicit renewal after
-expiry. The local implementation now preserves unclassified historical grants
-and latches the first authoritative completion for new explicit terms;
+expiry. The local implementation now preserves established Project Alpha and
+migrated legacy project history without reclassifying ambiguous grants, and
+latches the first authoritative completion for new explicit terms;
 reopening does not renew those terms. This is not approval to rewrite existing
 access. Test exact time boundaries, separate invitation/access expiry,
 independent projects/sources, missing lifecycle support and concurrent changes.
@@ -152,6 +152,10 @@ independent projects/sources, missing lifecycle support and concurrent changes.
   evidence of deployed behavior. The counter shows the current listing's folder
   and file count, not descendant totals; partial listings say **loaded** and
   search/loading/error states are explicit.
+- The completed-history read correction is local and migration-free. It keeps
+  the pre-terms 30-day fallback for rolling compatibility, applies identically
+  to primary and secondary/native Project Alpha sources, and preserves deny,
+  revocation, exact source/workspace and local project-grant fences.
 - Latest local notification checkpoint `ccba9c0` passed its focused backend,
   migration, typecheck, build and 158-test browser gate. No tests were rerun for
   this read-only audit; no whole-monorepo or production success is claimed.

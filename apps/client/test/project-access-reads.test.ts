@@ -2,7 +2,8 @@ import { readFileSync,readdirSync } from 'node:fs';
 import { Miniflare } from 'miniflare';
 import { afterAll,beforeAll,describe,expect,it } from 'vitest';
 import { splitD1MigrationStatements } from './helpers/d1-migrations';
-import { authorizePortalWorkspaceCapability,listPortalWorkspaceHierarchy,type PortalAuthorizationEnv } from '../src/worker/client-portal/workspace-v2';
+import { authorizeNativePortalReadTarget,authorizePortalWorkspaceCapability,listPortalWorkspaceHierarchy,
+  type NativePortalReadContext,type PortalAuthorizationEnv } from '../src/worker/client-portal/workspace-v2';
 import { authorizeAuthenticatedDeliveryGrant,listAuthorizedAuthenticatedDeliveryPrefixes } from '../src/worker/client-portal/authenticated-delivery-grants';
 import { prepareProjectAccessTerms,projectAccessTermsSql,type ProjectAccessTermsInput } from '../src/worker/client-portal/project-access-terms';
 import { readNativeTargetScopes } from '../src/worker/client-portal/native-portal-scopes';
@@ -48,10 +49,10 @@ describe('per-grant project terms on current authorization reads',{timeout:60_00
     const prepared=await prepareProjectAccessTerms(db,{workspaceId:f.id,sourceId:'project-alpha:primary',projectPublicId:project},input,{type:'staff',id:'fixture-staff'});
     await prepared.statement.run();return prepared.id;
   }
-  async function allow(f:Fixture,termsId:string|null,capability='delivery.view',effect='allow',project='same-project'){
+  async function allow(f:Fixture,termsId:string|null,capability='delivery.view',effect='allow',project='same-project',source='operations'){
     const id=crypto.randomUUID();
     await db.prepare(`INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status,entitlement_version,access_terms_id)
-      VALUES(?,?,'terms-person',?,?,'project',?,'operations','active',?,?)`).bind(id,f.id,capability,effect,project,++counter,termsId).run();return id;
+      VALUES(?,?,'terms-person',?,?,'project',?,?,'active',?,?)`).bind(id,f.id,capability,effect,project,source,++counter,termsId).run();return id;
   }
   async function complete(f:Fixture,days:number,project='same-project'){
     await db.prepare(`UPDATE portal_v2_project_lifecycle SET lifecycle_status='completed',completed_at=datetime('now',?),source_version='completed-v1'
@@ -66,6 +67,37 @@ describe('per-grant project terms on current authorization reads',{timeout:60_00
     expect((await readNativeTargetScopes(env,context,target,{retention:'structural'})).get('project:same-project')?.proofRows.find(r=>r.entity_type==='project')?.retained).toBe(0);
     await db.prepare(`DELETE FROM portal_v2_project_lifecycle WHERE workspace_id=? AND project_public_id='same-project'`).bind(f.id).run();
     expect((await readNativeTargetScopes(env,context,target,{retention:'structural'})).size).toBe(0);
+  });
+  it.each(['project_alpha','legacy'])('preserves ordinary %s project history without extending mutation authority',async source=>{
+    const f=await fixture();
+    await allow(f,null,'delivery.view','allow','same-project',source);
+    await allow(f,null,'directory.read','allow','same-project',source);
+    await allow(f,null,'request.create','allow','same-project',source);
+    await complete(f,40);
+    expect(await can(f)).toBe(true);
+    expect(await can(f,'directory.read')).toBe(true);
+    expect(await authorizePortalWorkspaceCapability(env,principal,f.id,'request.create',{scopeType:'project',publicId:'same-project'})).toBe(false);
+    expect((await listPortalWorkspaceHierarchy(env,principal,f.id,null))?.map(row=>row.publicId)).toEqual(['same-project']);
+  });
+  it('preserves the same ordinary Project Alpha history for a native source adapter',async()=>{
+    const f=await fixture();await complete(f,40);
+    const base={workspaceId:f.id,sourceId:'project-alpha:secondary',identityId:'terms-person',displayName:'Terms',
+      rootType:'organization',rootPublicId:f.root,generationId:f.generation,contextVersion:'fixture',authority:{},workspace:{},
+      denials:[],projectAccessTermsAvailable:true};
+    const rule=(capability:'delivery.view'|'directory.read',source_type='project_alpha')=>({capability,effect:'allow' as const,
+      scope_type:'project' as const,scope_public_id:'same-project',source_type,access_terms_id:null,terms_project_id:null,
+      terms_kind:null,terms_live:1});
+    const target={scopeType:'project' as const,publicId:'same-project'};
+    for(const capability of ['delivery.view','directory.read'] as const){
+      const context={...base,grants:[rule(capability)]} as unknown as NativePortalReadContext;
+      expect(await authorizeNativePortalReadTarget(env,context,capability,target)).toBe(true);
+      const ambiguous={...base,grants:[rule(capability,'operations')]} as unknown as NativePortalReadContext;
+      expect(await authorizeNativePortalReadTarget(env,ambiguous,capability,target)).toBe(false);
+    }
+  });
+  it('does not infer permanent history from an unclassified client invitation',async()=>{
+    const f=await fixture();await allow(f,null,'delivery.view','allow','same-project','client_invitation');await complete(f,40);
+    expect(await can(f)).toBe(false);
   });
   it('retains only the explicit customer project in direct and batched hierarchy reads',async()=>{
     const f=await fixture(),id=await terms(f,{kind:'customer',mode:'until_revoked',expiresAt:null});

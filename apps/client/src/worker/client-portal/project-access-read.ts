@@ -6,6 +6,19 @@ export interface ProjectAccessReadRow {
   terms_project_id?: string | null;
   terms_live?: number;
   terms_kind?: 'customer'|'collaborator'|null;
+  source_type?: string | null;
+  scope_type?: string | null;
+}
+
+export interface ProjectAccessReadOptions {
+  /** Preserve completed-project history only for an already-authoritative
+   * ordinary client read. This never turns an unclassified invitation or a
+   * staff-created Operations rule into customer access. */
+  preserveOrdinaryHistory?: boolean;
+}
+
+function isOrdinaryHistoryGrant(row:ProjectAccessReadRow):boolean {
+  return row.source_type==='project_alpha'||(row.source_type==='legacy'&&row.scope_type==='project');
 }
 
 export function projectAccessReadColumns(alias:string,ready:boolean):string {
@@ -22,8 +35,9 @@ export function projectAccessReadColumns(alias:string,ready:boolean):string {
  * A shell allow may refer to its own project without exposing that project's
  * data. Every resource allow must intersect the exact project in its ancestry. */
 export function projectAccessRowAllows(row:ProjectAccessReadRow,scopes:ReadonlySet<string>,
-  expiredProjects:readonly string[]=[],shell=false):boolean {
-  if(!row.access_terms_id)return expiredProjects.length===0;
+  expiredProjects:readonly string[]=[],shell=false,options?:ProjectAccessReadOptions):boolean {
+  if(!row.access_terms_id)return expiredProjects.length===0
+    ||Boolean(options?.preserveOrdinaryHistory&&isOrdinaryHistoryGrant(row));
   return row.terms_live===1&&typeof row.terms_project_id==='string'
     &&(shell||scopes.has(`project:${row.terms_project_id}`))
     &&expiredProjects.every(id=>id===row.terms_project_id);

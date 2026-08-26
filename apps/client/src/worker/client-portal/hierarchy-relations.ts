@@ -197,7 +197,9 @@ export async function resolvePortalRelationAuthorizedTargets(
           LEFT JOIN portal_v2_project_lifecycle current_lifecycle ON current_lifecycle.workspace_id=active_generation.workspace_id
             AND current_lifecycle.generation_id=active_generation.generation_id AND current_lifecycle.project_public_id=project_scope.public_id
           WHERE project_scope.target_type=target.target_type AND project_scope.target_public_id=target.target_public_id
-            AND project_scope.entity_type='project' AND NOT ${projectAccessTermsSql({termsId:'entitlement.access_terms_id',workspaceId:'entitlement.workspace_id',projectId:'project_scope.public_id',legacyRetained:"(current_lifecycle.lifecycle_status='active' OR datetime(current_lifecycle.completed_at,'+30 days')>datetime('now') OR (target.target_type='project' AND target.target_public_id=project_scope.public_id AND project_scope.public_id IN(SELECT value FROM json_each(?))))"})})
+            AND project_scope.entity_type='project' AND NOT ${projectAccessTermsSql({termsId:'entitlement.access_terms_id',workspaceId:'entitlement.workspace_id',projectId:'project_scope.public_id',legacyRetained:`(current_lifecycle.lifecycle_status='active' OR datetime(current_lifecycle.completed_at,'+30 days')>datetime('now')
+              OR (${capability==='directory.read'?"target.target_type='project' AND (entitlement.source_type='project_alpha' OR (entitlement.source_type='legacy' AND entitlement.scope_type='project'))":"0"})
+              OR (target.target_type='project' AND target.target_public_id=project_scope.public_id AND project_scope.public_id IN(SELECT value FROM json_each(?))))`})})
       ))`:''}
     )
     SELECT target_type,target_public_id FROM matching
