@@ -1,9 +1,10 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Card, EmptyState, Loading, StatusPill } from "@ltds/ui";
 import type { Permission } from "@ltds/shared";
-import { api } from "./api";
+import { api, ApiError } from "./api";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
 import { ClientIdentityAccess, type ClientAccessManagementState, type ClientIdentityContact } from "./ClientIdentityAccess";
+import { ClientDirectory, clientDirectoryReturnPath, clientPortalStatus, type ClientSummary, type ClientHubCapabilities, type ClientRootNamespace } from "./ClientDirectory";
 
 interface ContactAccess {
   capability: string;
@@ -12,7 +13,10 @@ interface ContactAccess {
   scope_public_id: string;
   scope_label: string;
 }
-interface ClientContact extends ClientIdentityContact {
+interface CollectionItem { row_key?: string }
+interface ClientContact extends ClientIdentityContact, CollectionItem {
+  contact_key?: string;
+  record_type?: "business_contact" | "portal_principal";
   workspace_id: string;
   public_id: string;
   display_name: string;
@@ -23,35 +27,30 @@ interface ClientContact extends ClientIdentityContact {
   blocked: number;
   access: ContactAccess[];
 }
-interface ClientSummary {
-  workspace_id: string;
-  kind: "organization" | "standalone_client";
-  route_kind: "organizations" | "standalone";
-  public_id: string;
-  display_name: string;
-  status: string;
-  portal_status: string;
-  account_count: number;
-  project_count: number;
-  request_count: number;
-  contacts: ClientContact[];
-}
-interface HubResponse {
-  clients: ClientSummary[];
-  capabilities: { directory: boolean; requests: boolean; delivery: boolean; viewer: boolean };
-}
 interface ClientDetailResponse {
   client: ClientSummary;
   contacts: ClientContact[];
-  accounts: Array<{ id: string; display_name: string; status: string }>;
-  projects: Array<{ id: string; project_name: string; client_name: string; active: number; can_request_service: number }>;
-  requests: Array<{ id: string; title: string; status: string; project_name: string | null; created_at: string }>;
-  deliveryGrants: Array<{ share_id: string; label: string | null; r2_prefix: string; project_name: string; revoked_at: string | null; expires_at: string | null }>;
-  authenticatedDeliveryGrants: Array<{ id: string; status: string; r2_prefix: string; audience_type: string; expires_at: string | null }>;
-  viewerGrants: Array<{ id: string; status: string; scope_type: string; project_name: string; model_title: string | null; authorization_expires_at: string | null }>;
+  accounts: Array<CollectionItem & { id: string; display_name: string; status: string }>;
+  projects: Array<CollectionItem & { id: string; account_id?: string; project_name: string; client_name: string; active: number; can_request_service: number }>;
+  requests: Array<CollectionItem & { id: string; title: string; status: string; project_name: string | null; created_at: string }>;
+  deliveryGrants: Array<CollectionItem & { share_id: string; account_id?: string; label: string | null; r2_prefix: string; project_name: string; revoked_at: string | null; expires_at: string | null }>;
+  authenticatedDeliveryGrants: Array<CollectionItem & { id: string; status: string; r2_prefix: string; audience_type: string; expires_at: string | null }>;
+  viewerGrants: Array<CollectionItem & { id: string; status: string; scope_type: string; project_name: string; model_title: string | null; authorization_expires_at: string | null }>;
   accessManagement: ClientAccessManagementState;
-  capabilities: HubResponse["capabilities"];
+  capabilities: ClientHubCapabilities;
+  contextVersion?: string;
+  pages?: Partial<Record<ClientCollectionName, ClientCollectionPage>>;
 }
+type ClientCollectionName = "businessContacts" | "accounts" | "projects" | "requests" | "deliveryGrants" | "authenticatedDeliveryGrants" | "viewerGrants";
+interface ClientCollectionPage {
+  available: boolean;
+  reason: null | "permission_required" | "workspace_unavailable" | "not_applicable";
+  nextCursor: string | null;
+  hasMore: boolean;
+  returned: number;
+  limit: number;
+}
+interface CanonicalClientRoot { sourceId: string; rootNamespace: ClientRootNamespace; kind: ClientSummary["kind"]; publicId: string }
 
 function date(value?: string | null): string {
   if (!value) return "No expiry";
@@ -70,102 +69,237 @@ function tone(status: string): "neutral" | "success" | "warning" | "danger" {
 }
 
 function useClientHub<T>(path: string | null) {
-  const [data, setData] = useState<T | null>(null);
-  const [error, setError] = useState("");
+  const [state, setState] = useState<{ path: string | null; data: T | null; error: string }>({ path: null, data: null, error: "" });
   useEffect(() => {
     let active = true;
-    setData(null);
-    setError("");
+    const controller = new AbortController();
+    setState({ path, data: null, error: "" });
     if (!path) return () => { active = false; };
-    void api<T>(path).then(value => { if (active) setData(value); })
-      .catch(caught => { if (active) setError(caught instanceof Error ? caught.message : "Client Hub could not be loaded"); });
-    return () => { active = false; };
+    void api<T>(path, { signal: controller.signal }).then(value => { if (active) setState({ path, data: value, error: "" }); })
+      .catch(caught => { if (active) setState({ path, data: null, error: caught instanceof Error ? caught.message : "Client Hub could not be loaded" }); });
+    return () => { active = false; controller.abort(); };
   }, [path]);
-  return { data, error };
+  return state.path === path ? state : { data: null, error: "" };
 }
 
-function clientRoute(): { kind: "organizations" | "standalone"; publicId: string } | null {
+interface ClientRoute { kind: "organizations" | "standalone"; publicId: string; sourceId?: string; rootNamespace?: ClientRootNamespace }
+function clientRoute(): ClientRoute | { invalid: true } | null {
   const parts = location.pathname.split("/").filter(Boolean);
-  if (parts[0] !== "clients" || !["organizations", "standalone"].includes(parts[1] || "") || !parts[2]) return null;
-  return { kind: parts[1] as "organizations" | "standalone", publicId: parts[2] };
+  if (parts[0] !== "clients") return null;
+  const sourced = parts[1] === "sources", namespaced = sourced && parts.length === 6;
+  const kindIndex = sourced ? namespaced ? 4 : 3 : 1, kind = parts[kindIndex];
+  if (!sourced && !["organizations", "standalone"].includes(kind || "")) return null;
+  if (parts.length !== (sourced ? namespaced ? 6 : 5 : 3) || !["organizations", "standalone"].includes(kind || "")
+    || (namespaced && !["business", "portal", "account"].includes(parts[3] || ""))) return { invalid: true };
+  try {
+    return { kind: kind as ClientRoute["kind"], publicId: decodeURIComponent(parts[kindIndex + 1]!),
+      ...(namespaced ? { rootNamespace: parts[3] as ClientRootNamespace } : {}),
+      ...(sourced ? { sourceId: decodeURIComponent(parts[2]!) } : {}) };
+  } catch { return { invalid: true }; }
+}
+
+function collectionKey(collection: ClientCollectionName, item: CollectionItem): string {
+  if (item.row_key) return item.row_key;
+  const row = item as Record<string, unknown>;
+  return JSON.stringify([collection, row.account_id || "", row.workspace_id || "", row.contact_key || row.id || row.share_id || row.public_id]);
+}
+
+function rootIdentity(root: CanonicalClientRoot): string {
+  return JSON.stringify([root.sourceId, root.rootNamespace, root.kind, root.publicId]);
+}
+
+function ClientCollection<T extends CollectionItem>({ collection, label, initial, page: initialPage, client, contextVersion,
+  contextSignal, onInvalidated, emptyTitle, emptyDetail, children }: {
+  collection: ClientCollectionName; label: string; initial: T[]; page?: ClientCollectionPage; client: ClientSummary;
+  contextVersion?: string; contextSignal: AbortSignal; onInvalidated: (message: string) => void; emptyTitle: string; emptyDetail: string;
+  children: (items: T[]) => ReactNode;
+}) {
+  const [items, setItems] = useState(initial);
+  const [page, setPage] = useState(initialPage);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [continued, setContinued] = useState(false);
+  const controller = useRef<AbortController | null>(null);
+  const sequence = useRef(0);
+  const active = useRef(true);
+  useEffect(() => {
+    active.current = true;
+    const abort = () => { sequence.current += 1; controller.current?.abort(); };
+    contextSignal.addEventListener("abort", abort);
+    return () => { active.current = false; abort(); contextSignal.removeEventListener("abort", abort); };
+  }, [contextSignal]);
+  const load = async () => {
+    if (contextSignal.aborted || controller.current || !page?.available || !page.nextCursor || !client.source_id || !client.root_namespace || !contextVersion) return;
+    const expectedRoot: CanonicalClientRoot = { sourceId: client.source_id, rootNamespace: client.root_namespace, kind: client.kind, publicId: client.public_id };
+    const abort = new AbortController(), request = ++sequence.current;
+    controller.current = abort;
+    setBusy(true); setError("");
+    try {
+      const parameters = new URLSearchParams({ limit: "25", cursor: page.nextCursor });
+      const path = `/api/client-hub/sources/${encodeURIComponent(client.source_id)}/${client.root_namespace}/${client.route_kind}/${encodeURIComponent(client.public_id)}/collections/${collection}?${parameters}`;
+      const result = await api<{ items: T[]; page: ClientCollectionPage; canonicalRoot: CanonicalClientRoot; contextVersion: string }>(path, { signal: abort.signal });
+      if (!active.current || contextSignal.aborted || abort.signal.aborted || sequence.current !== request) return;
+      if (!result.canonicalRoot || rootIdentity(result.canonicalRoot) !== rootIdentity(expectedRoot) || result.contextVersion !== contextVersion)
+        throw new ApiError("The client context changed. Refresh this workspace before continuing.", 409, {});
+      if (!result.page?.available) throw new ApiError("Access to this section changed. Refresh this workspace.", 403, {});
+      if (!Array.isArray(result.items) || (result.page.hasMore && (!result.page.nextCursor || result.page.nextCursor === page.nextCursor)))
+        throw new ApiError("This page could not be continued safely. Refresh the client workspace.", 409, {});
+      setItems(previous => {
+        const combined = new Map(previous.map(item => [collectionKey(collection, item), item]));
+        for (const item of result.items) combined.set(collectionKey(collection, item), item);
+        return [...combined.values()];
+      });
+      setPage(result.page);
+      setContinued(true);
+    } catch (caught) {
+      if (!active.current || contextSignal.aborted || abort.signal.aborted || sequence.current !== request) return;
+      const message = caught instanceof Error ? caught.message : "These records could not be loaded.";
+      if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) {
+        setItems([]); setPage(undefined);
+        onInvalidated(message);
+      } else setError(message);
+    } finally {
+      if (active.current && !contextSignal.aborted && !abort.signal.aborted && sequence.current === request) {
+        controller.current = null; setBusy(false);
+      }
+    }
+  };
+  if (page?.available === false) return <section className="client-hub-collection" aria-label={label}>
+    <p className="muted">{page.reason === "permission_required" ? "Permission is required to view these records."
+      : page.reason === "workspace_unavailable" ? "A verified portal workspace is required for these records."
+        : "This collection does not apply to this client record."}</p>
+  </section>;
+  const canContinue = Boolean(page?.hasMore && page.nextCursor && client.source_id && client.root_namespace && contextVersion);
+  return <section className="client-hub-collection" aria-label={label} aria-busy={busy}>
+    {items.length ? children(items) : <EmptyState title={emptyTitle} detail={emptyDetail} />}
+    <p className="client-hub-collection-status" role="status">{items.length.toLocaleString()} shown{busy ? " · Loading more…" : ""}</p>
+    {error && <div className="client-hub-collection-error" role="alert"><p>{error}</p></div>}
+    {(error || canContinue || continued) && <button type="button" className="button-ghost" aria-disabled={busy || !canContinue} onClick={() => { if (!busy && canContinue) void load(); }}>
+      {busy ? `Loading ${label.toLowerCase()}…` : error ? `Retry ${label.toLowerCase()}` : canContinue ? `Load more ${label.toLowerCase()}` : `All ${label.toLowerCase()} loaded`}</button>}
+    {page?.hasMore && !canContinue && <p className="muted">More records are available. Refresh the client workspace to continue.</p>}
+  </section>;
 }
 
 function ContactList({ contacts }: { contacts: ClientContact[] }) {
   if (!contacts.length) return <EmptyState title="No client logins" detail="Eligible contacts and verified logins will appear here after synchronization." />;
   return <div className="client-hub-contact-list">{contacts.map(contact => {
-    const status = contact.blocked ? "blocked" : contact.identity_id && contact.has_workspace_access ? "active" : "eligible";
-    return <article key={contact.public_id}>
+    const businessContact = contact.record_type === "business_contact";
+    const status = businessContact ? "contact" : contact.blocked ? "blocked" : contact.identity_id && contact.has_workspace_access ? "active" : "eligible";
+    return <article key={collectionKey("businessContacts", contact)}>
       <div>
         <strong>{contact.display_name}</strong>
-        <small>{contact.email_hint || "No portal login yet"}</small>
+        <small>{contact.email_hint || (businessContact ? "Business contact · no portal login" : "No portal login yet")}</small>
       </div>
       <StatusPill tone={tone(status)}>{status}</StatusPill>
       <small>{contact.access.length
         ? contact.access.map(item => `${item.effect === "deny" ? "Denied" : "Allowed"}: ${item.scope_label} (${item.capability})`).join(" · ")
-        : "No project or content access explicitly granted"}</small>
+        : businessContact ? "Contact records do not grant portal access" : "No project or content access explicitly granted"}</small>
     </article>;
   })}</div>;
 }
 
-function ClientDirectory({ clients }: { clients: ClientSummary[] }) {
-  const organizations = clients.filter(client => client.kind === "organization");
-  const standalone = clients.filter(client => client.kind === "standalone_client");
-  const group = (title: string, values: ClientSummary[]) => <Card title={`${title} (${values.length})`}>
-    {values.length ? <div className="client-hub-directory">{values.map(client => <details key={client.workspace_id}>
-      <summary>
-        <span><strong>{client.display_name}</strong><small>{client.project_count} projects · {client.request_count} requests · {client.contacts.length} contacts</small></span>
-        <StatusPill tone={tone(client.portal_status)}>{client.portal_status.replaceAll("_", " ")}</StatusPill>
-      </summary>
-      <ContactList contacts={client.contacts} />
-      <a className="button-orange button-small" href={`/clients/${client.route_kind}/${encodeURIComponent(client.public_id)}`}>Open client workspace</a>
-    </details>)}</div> : <EmptyState title={`No ${title.toLowerCase()}`} detail="Synchronized client records will appear here." />}
-  </Card>;
-  return <div className="client-hub-groups">{group("Organizations", organizations)}{group("Standalone clients", standalone)}</div>;
-}
-
-function ClientWorkspace({ route }: { route: NonNullable<ReturnType<typeof clientRoute>> }) {
+function ClientWorkspace({ route }: { route: ClientRoute }) {
   const [revision, setRevision] = useState(0);
-  const state = useClientHub<ClientDetailResponse>(`/api/client-hub/${route.kind}/${encodeURIComponent(route.publicId)}?revision=${revision}`);
+  const [invalidated, setInvalidated] = useState("");
+  const contextController = useRef<AbortController | null>(null);
+  if (!contextController.current) contextController.current = new AbortController();
+  const refresh = () => {
+    contextController.current?.abort();
+    contextController.current = new AbortController();
+    setInvalidated("");
+    setRevision(value => value + 1);
+  };
+  const invalidate = (message: string) => {
+    // Invalidate every in-flight section immediately, before React removes the old workspace.
+    contextController.current?.abort();
+    setInvalidated(message);
+  };
+  const sourcePath = route.sourceId ? `sources/${encodeURIComponent(route.sourceId)}/${route.rootNamespace ? `${route.rootNamespace}/` : ""}` : "";
+  const state = useClientHub<ClientDetailResponse>(invalidated ? null : `/api/client-hub/${sourcePath}${route.kind}/${encodeURIComponent(route.publicId)}?revision=${revision}`);
+  if (invalidated) return <Card><div role="alert"><EmptyState title="Client workspace needs refreshing" detail={invalidated} /></div>
+    <button type="button" className="button-orange" onClick={refresh}>Refresh client workspace</button>
+    <a className="button-ghost" href={clientDirectoryReturnPath()}>Back to Client Hub</a>
+  </Card>;
   if (!state.data && !state.error) return <Loading />;
-  if (!state.data) return <Card><EmptyState title="Client workspace unavailable" detail={state.error} /></Card>;
+  if (!state.data) return <Card><EmptyState title="Client workspace unavailable" detail={state.error} />
+    <button type="button" className="button-orange" onClick={refresh}>Retry client workspace</button>
+    <a className="button-ghost" href={clientDirectoryReturnPath()}>Back to Client Hub</a>
+  </Card>;
   const data = state.data;
+  const collectionProps = { client: data.client, contextVersion: data.contextVersion, contextSignal: contextController.current.signal, onInvalidated: invalidate };
+  const portalContacts = data.contacts.filter(contact => contact.record_type !== "business_contact");
   return <>
-    <a className="button-ghost button-small client-hub-back" href="/clients">← Client Hub</a>
+    <a className="button-ghost button-small client-hub-back" href={clientDirectoryReturnPath()}>← Client Hub</a>
     <div className="client-hub-title">
-      <div><small>{data.client.kind === "organization" ? "Organization" : "Standalone client"}</small><h2>{data.client.display_name}</h2></div>
-      <StatusPill tone={tone(data.client.portal_status)}>{data.client.portal_status.replaceAll("_", " ")}</StatusPill>
+      <div><small>{data.client.kind === "organization" ? "Organization" : "Standalone client"}</small><h2>{data.client.display_name}</h2>
+        {data.client.root_namespace === "portal" && <p>Portal workspace · business link pending</p>}</div>
+      <StatusPill tone={clientPortalStatus(data.client).tone}>{clientPortalStatus(data.client).label}</StatusPill>
     </div>
-    <div className="dashboard-grid client-hub-detail-grid">
-      <Card title="Contacts and logins"><ContactList contacts={data.contacts} /></Card>
-      <ClientIdentityAccess contacts={data.contacts} management={data.accessManagement}
-        onChanged={() => setRevision(value => value + 1)} />
-      <Card title="Accounts">{data.accounts.length ? <div className="simple-rows">{data.accounts.map(account => <div key={account.id}><div><strong>{account.display_name}</strong><small>Explicit account record</small></div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div> : <EmptyState title="No accounts" detail="No linked portal account is active." />}</Card>
-      <Card title="Projects and access">{data.projects.length ? <div className="simple-rows">{data.projects.map(project => <div key={`${project.id}:${project.project_name}`}><div><strong>{project.project_name}</strong><small>{project.client_name} · {project.can_request_service ? "Requests allowed" : "View access only"}</small></div><StatusPill tone={project.active ? "success" : "neutral"}>{project.active ? "active" : "inactive"}</StatusPill></div>)}</div> : <EmptyState title="No project access" detail="Projects remain unavailable until explicitly granted." />}</Card>
-      {data.capabilities.delivery && <Card title="Delivery access">{data.deliveryGrants.length || data.authenticatedDeliveryGrants.length ? <div className="simple-rows">
-        {data.deliveryGrants.map(grant => <div key={grant.share_id}><div><strong>{grant.label || grant.project_name}</strong><small>{grant.r2_prefix} · {date(grant.expires_at)}</small></div><StatusPill tone={tone(grant.revoked_at ? "revoked" : "active")}>{grant.revoked_at ? "revoked" : "active"}</StatusPill></div>)}
-        {data.authenticatedDeliveryGrants.map(grant => <div key={grant.id}><div><strong>{grant.r2_prefix}</strong><small>{grant.audience_type} audience · {date(grant.expires_at)}</small></div><StatusPill tone={tone(grant.status)}>{grant.status}</StatusPill></div>)}
-      </div> : <EmptyState title="No delivery access" detail="Folders and files remain unavailable until explicitly shared." />}</Card>}
-      {data.capabilities.viewer && <Card title="3D Viewer access">{data.viewerGrants.length ? <div className="simple-rows">{data.viewerGrants.map(grant => <div key={grant.id}><div><strong>{grant.model_title || grant.project_name}</strong><small>{grant.scope_type} access · {date(grant.authorization_expires_at)}</small></div><StatusPill tone={tone(grant.status)}>{grant.status}</StatusPill></div>)}</div> : <EmptyState title="No Viewer access" detail="Models remain unavailable until explicitly granted." />}</Card>}
-      {data.capabilities.requests && <Card title="Request history">{data.requests.length ? <div className="simple-rows">{data.requests.map(request => <a key={request.id} href={`/clients/requests/${encodeURIComponent(request.id)}`}><div><strong>{request.title}</strong><small>{request.project_name || "Account request"} · {date(request.created_at)}</small></div><StatusPill tone={tone(request.status)}>{request.status.replaceAll("_", " ")}</StatusPill></a>)}</div> : <EmptyState title="No requests" detail="This client has not submitted a service request." />}</Card>}
+    <p className="client-hub-inventory-note">These sections show work shared with this client. Full business project history is separate.</p>
+    <div className="dashboard-grid client-hub-detail-grid" key={revision}>
+      <Card title="Contacts and logins">
+        <h3 className="client-hub-subheading">Business contacts</h3>
+        <ClientCollection {...collectionProps} collection="businessContacts" label="Business contacts" initial={data.contacts.filter(contact => contact.record_type === "business_contact")} page={data.pages?.businessContacts}
+          emptyTitle="No business contacts" emptyDetail="Synchronized business contact records will appear here. They do not grant login access.">
+          {items => <ContactList contacts={items} />}
+        </ClientCollection>
+        <h3 className="client-hub-subheading">Portal logins</h3>
+        <p className="muted">Business contacts do not grant portal login or file access.</p>
+        <ContactList contacts={portalContacts} />
+      </Card>
+      <ClientIdentityAccess contacts={portalContacts} management={data.accessManagement} onChanged={() => { if (!collectionProps.contextSignal.aborted) refresh(); }} />
+      <Card title="Accounts"><ClientCollection {...collectionProps} collection="accounts" label="Accounts" initial={data.accounts} page={data.pages?.accounts}
+        emptyTitle="No accounts" emptyDetail="No linked portal account is active.">
+        {items => <div className="simple-rows">{items.map(account => <div key={collectionKey("accounts", account)}><div><strong>{account.display_name}</strong><small>Explicit account record</small></div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div>}
+      </ClientCollection></Card>
+      <Card title="Shared projects"><ClientCollection {...collectionProps} collection="projects" label="Shared projects" initial={data.projects} page={data.pages?.projects}
+        emptyTitle="No project access" emptyDetail="Projects remain unavailable until explicitly granted.">
+        {items => <div className="simple-rows">{items.map(project => <div key={collectionKey("projects", project)}><div><strong>{project.project_name}</strong><small>{project.client_name} · {project.can_request_service ? "Requests allowed" : "View access only"}</small></div><StatusPill tone={project.active ? "success" : "neutral"}>{project.active ? "active" : "inactive"}</StatusPill></div>)}</div>}
+      </ClientCollection></Card>
+      {data.capabilities.delivery && <Card title="Delivery access">
+        <h3 className="client-hub-subheading">Delivery links</h3>
+        <ClientCollection {...collectionProps} collection="deliveryGrants" label="Delivery links" initial={data.deliveryGrants} page={data.pages?.deliveryGrants}
+          emptyTitle="No delivery links" emptyDetail="Folders and files remain unavailable until explicitly shared.">
+          {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("deliveryGrants", grant)}><div><strong>{grant.label || grant.project_name}</strong><small>{grant.r2_prefix} · {date(grant.expires_at)}</small></div><StatusPill tone={tone(grant.revoked_at ? "revoked" : "active")}>{grant.revoked_at ? "revoked" : "active"}</StatusPill></div>)}</div>}
+        </ClientCollection>
+        <h3 className="client-hub-subheading">Client portal deliveries</h3>
+        <ClientCollection {...collectionProps} collection="authenticatedDeliveryGrants" label="Client portal deliveries" initial={data.authenticatedDeliveryGrants} page={data.pages?.authenticatedDeliveryGrants}
+          emptyTitle="No client portal deliveries" emptyDetail="No delivery content has been shared through this client's portal.">
+          {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("authenticatedDeliveryGrants", grant)}><div><strong>{grant.r2_prefix}</strong><small>{grant.audience_type} audience · {date(grant.expires_at)}</small></div><StatusPill tone={tone(grant.status)}>{grant.status}</StatusPill></div>)}</div>}
+        </ClientCollection>
+      </Card>}
+      {data.capabilities.viewer && <Card title="Shared models"><ClientCollection {...collectionProps} collection="viewerGrants" label="Shared models" initial={data.viewerGrants} page={data.pages?.viewerGrants}
+        emptyTitle="No Viewer access" emptyDetail="Models remain unavailable until explicitly granted.">
+        {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("viewerGrants", grant)}><div><strong>{grant.model_title || grant.project_name}</strong><small>{grant.scope_type} access · {date(grant.authorization_expires_at)}</small></div><StatusPill tone={tone(grant.status)}>{grant.status}</StatusPill></div>)}</div>}
+      </ClientCollection></Card>}
+      {data.capabilities.requests && <Card title="Request history"><ClientCollection {...collectionProps} collection="requests" label="Requests" initial={data.requests} page={data.pages?.requests}
+        emptyTitle="No requests" emptyDetail="This client has not submitted a service request.">
+        {items => <div className="simple-rows">{items.map(request => <a key={collectionKey("requests", request)} href={`/clients/requests/${encodeURIComponent(request.id)}`}><div><strong>{request.title}</strong><small>{request.project_name || "Account request"} · {date(request.created_at)}</small></div><StatusPill tone={tone(request.status)}>{request.status.replaceAll("_", " ")}</StatusPill></a>)}</div>}
+      </ClientCollection></Card>}
     </div>
   </>;
 }
 
 export function ClientHub({ mapToken, permissions }: { mapToken: string | null; permissions: Permission[] }) {
+  const [, setLocationRevision] = useState(0);
+  useEffect(() => {
+    const sync = () => setLocationRevision(value => value + 1);
+    addEventListener("popstate", sync);
+    return () => removeEventListener("popstate", sync);
+  }, []);
   const selectedRequest = location.pathname.startsWith("/clients/requests/") || location.pathname.startsWith("/operations/client-requests/");
   const route = clientRoute();
   const canReview = permissions.includes("operations.manage");
   const canViewDirectory = permissions.includes("team.view");
-  const state = useClientHub<HubResponse>(!route && !selectedRequest && canViewDirectory ? "/api/client-hub" : null);
-  const clients = useMemo(() => state.data?.clients || [], [state.data]);
   if (selectedRequest)
     return canReview ? <ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" /> : <Card><EmptyState title="Request unavailable" detail="Request-review access is required." /></Card>;
-  if (route) return canViewDirectory ? <ClientWorkspace route={route} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
+  if (route && "invalid" in route) return <Card><EmptyState title="Client workspace unavailable" detail="This client link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
+  if (route) return canViewDirectory ? <ClientWorkspace key={JSON.stringify([route.sourceId || "", route.rootNamespace || "", route.kind, route.publicId])} route={route} /> : <Card><EmptyState title="Client unavailable" detail="Client-directory access is required." /></Card>;
   return <>
     {canReview && <section className="client-hub-queue"><ClientRequestWorkflow mapToken={mapToken} basePath="/clients/requests" pendingOnly /></section>}
     {canViewDirectory && <section>
       <div className="client-hub-section-heading"><div><h2>Clients</h2><p>Organizations and standalone clients with their contacts, access, and shared work.</p></div></div>
-      {state.error ? <Card><EmptyState title="Client directory unavailable" detail={state.error} /></Card> : !state.data ? <Loading /> : <ClientDirectory clients={clients} />}
+      <ClientDirectory />
     </section>}
   </>;
 }

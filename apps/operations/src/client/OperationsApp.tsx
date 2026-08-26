@@ -266,7 +266,7 @@ export function OperationsApp() {
   function navigate(next: Page, href?: string) {
     setPage(next);
     history.pushState(null, "", href || (next === "dashboard" ? "/" : `/${next}`));
-    if (next === "operations" || next === "delivery")
+    if (next === "operations" || next === "delivery" || next === "clients")
       dispatchEvent(new PopStateEvent("popstate"));
     setMobileNavOpen(false);
     setManageOpen(false);

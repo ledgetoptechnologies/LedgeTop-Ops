@@ -1,7 +1,13 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { sqlScope } from "./acl";
-import { listClientIdentityEligibility } from "./client-identity-eligibility";
+import { isAdministrator, sqlScope } from "./acl";
+import { eligibilityBlockManagementEnabled, listClientIdentityEligibility, portalOperationsManagementEnabled } from "./client-identity-eligibility";
+import { clientHubDetailPath, clientHubRouteKind, findClientHubRoot, listClientHubRoots,
+  isClientHubRootNamespace, isClientHubSource, type ClientHubKind, type ClientHubRoot } from "./client-hub-directory";
+import { isAlphaPublicId, resolveClientHubSourceRoot, validatedUniquePublicIdExpression } from "./client-hub-source";
+import { resolveClientHubWorkspace, type ClientHubWorkspace } from "./client-hub-workspace";
+import { CLIENT_HUB_COLLECTIONS, createClientHubCollectionContext, isClientHubCollection, listClientHubCollection,
+  type ClientHubCollectionContext, type ClientHubPermissions } from "./client-hub-collections";
 import type { Env, StaffPrincipal } from "./types";
 
 type AppEnv = {
@@ -9,33 +15,9 @@ type AppEnv = {
   Variables: { principal: StaffPrincipal; administrator: boolean };
 };
 type App = Hono<AppEnv>;
-type ClientKind = "organization" | "standalone_client";
+type ClientKind = ClientHubKind;
 
-interface ClientHubPermissions {
-  directory: boolean;
-  requests: boolean;
-  delivery: boolean;
-  viewer: boolean;
-}
-
-interface WorkspaceRow {
-  workspace_id: string | null;
-  kind: ClientKind;
-  public_id: string;
-  display_name: string;
-  status: string;
-  portal_status: string;
-  legacy_account_id: string | null;
-  account_count: number;
-  project_count: number;
-  request_count: number;
-}
-
-interface ProjectAlphaClientRow {
-  public_id: string;
-  organization_id: string | null;
-  display_name: string;
-}
+type WorkspaceRow = ClientHubRoot;
 
 function database(env: Env) {
   return env.DELIVERY_DB.withSession("first-primary");
@@ -72,263 +54,228 @@ function routeKind(value: string): ClientKind | null {
       : null;
 }
 
-function accountWhere(kind: ClientKind): string {
-  return kind === "organization"
-    ? "(account.id=? OR account.project_alpha_organization_id=?)"
-    : "(account.id=? OR (account.project_alpha_client_id=? AND account.project_alpha_organization_id IS NULL))";
+async function readPortalRoot(env: Env, kind: ClientKind, workspaceId: string): Promise<ClientHubWorkspace | null> {
+  return database(env).prepare(`SELECT id,root_type,display_name,status,legacy_account_id,
+    pa_organization_public_id,pa_client_public_id FROM portal_v2_workspaces
+    WHERE id=? AND root_type=? AND status<>'closed'`).bind(workspaceId, kind).first<ClientHubWorkspace>();
 }
 
-function accountBindings(workspace: WorkspaceRow): [string, string] {
-  return [workspace.legacy_account_id || "", workspace.public_id];
+function portalDirectoryRoot(portal: ClientHubWorkspace): WorkspaceRow {
+  return { source_id: "project-alpha:primary", root_namespace: "portal", kind: portal.root_type,
+    public_id: portal.id, pa_public_id: null, mapping_status: "missing", display_name: portal.display_name,
+    sort_name: portal.display_name, status: portal.status, portal_status: portal.status,
+    workspace_id: portal.id, legacy_account_id: null, account_count: 0, project_count: 0,
+    request_count: 0, contact_count: 0, meaningful_activity_at: null, source_version: null,
+    indexed_at: "", scan_generation: 0 };
 }
 
-async function workspaceRows(env: Env): Promise<WorkspaceRow[]> {
-  const result = await database(env).prepare(`SELECT workspace.id workspace_id,workspace.root_type kind,
-      CASE workspace.root_type WHEN 'organization' THEN workspace.pa_organization_public_id ELSE workspace.pa_client_public_id END public_id,
-      workspace.display_name,workspace.status,workspace.status portal_status,workspace.legacy_account_id,
-      (SELECT COUNT(*) FROM client_accounts account
-        WHERE account.id=workspace.legacy_account_id
-          OR (workspace.root_type='organization' AND account.project_alpha_organization_id=workspace.pa_organization_public_id)
-          OR (workspace.root_type='standalone_client' AND account.project_alpha_client_id=workspace.pa_client_public_id
-            AND account.project_alpha_organization_id IS NULL)) account_count,
-      (SELECT COUNT(DISTINCT project_grant.project_id) FROM client_project_grants project_grant
-        JOIN client_accounts account ON account.id=project_grant.account_id
-        WHERE project_grant.revoked_at IS NULL AND (account.id=workspace.legacy_account_id
-          OR (workspace.root_type='organization' AND account.project_alpha_organization_id=workspace.pa_organization_public_id)
-          OR (workspace.root_type='standalone_client' AND account.project_alpha_client_id=workspace.pa_client_public_id
-            AND account.project_alpha_organization_id IS NULL))) project_count,
-      (SELECT COUNT(*) FROM client_service_requests request
-        JOIN client_accounts account ON account.id=request.account_id
-        WHERE account.id=workspace.legacy_account_id
-          OR (workspace.root_type='organization' AND account.project_alpha_organization_id=workspace.pa_organization_public_id)
-          OR (workspace.root_type='standalone_client' AND account.project_alpha_client_id=workspace.pa_client_public_id
-            AND account.project_alpha_organization_id IS NULL)) request_count
-    FROM portal_v2_workspaces workspace
-    WHERE workspace.status<>'closed'
-    ORDER BY workspace.display_name COLLATE NOCASE,workspace.id LIMIT 501`).all<WorkspaceRow>();
-  if (result.results.length > 500)
-    throw new HTTPException(503, { message: "The client directory is too large" });
-  return result.results;
-}
-
-async function clientRoots(env: Env): Promise<WorkspaceRow[]> {
-  const [organizations, standaloneClients, workspaces, unlinkedAccounts, linkedAccountSummaries] = await Promise.all([
-    env.OPS_DB.withSession("first-primary").prepare(
-      "SELECT id public_id,name display_name FROM pa_organizations WHERE active=1 ORDER BY name COLLATE NOCASE,id",
-    ).all<{ public_id: string; display_name: string }>(),
-    env.OPS_DB.withSession("first-primary").prepare(
-      "SELECT id public_id,name display_name FROM pa_clients WHERE active=1 AND organization_id IS NULL ORDER BY name COLLATE NOCASE,id",
-    ).all<{ public_id: string; display_name: string }>(),
-    workspaceRows(env),
-    database(env).prepare(`SELECT account.id public_id,account.display_name,account.status,
-      COUNT(DISTINCT project_grant.project_id) project_count,COUNT(DISTINCT request.id) request_count
-      FROM client_accounts account
-      LEFT JOIN client_project_grants project_grant ON project_grant.account_id=account.id AND project_grant.revoked_at IS NULL
-      LEFT JOIN client_service_requests request ON request.account_id=account.id
-      WHERE account.project_alpha_client_id IS NULL AND account.project_alpha_organization_id IS NULL AND account.status<>'closed'
-      GROUP BY account.id ORDER BY account.display_name COLLATE NOCASE,account.id LIMIT 501`)
-      .all<{ public_id: string; display_name: string; status: string; project_count: number; request_count: number }>(),
-    database(env).prepare(`SELECT
-      CASE WHEN account.project_alpha_organization_id IS NOT NULL THEN 'organization' ELSE 'standalone_client' END kind,
-      COALESCE(account.project_alpha_organization_id,account.project_alpha_client_id) public_id,
-      COUNT(DISTINCT account.id) account_count,COUNT(DISTINCT project_grant.project_id) project_count,
-      COUNT(DISTINCT request.id) request_count
-      FROM client_accounts account
-      LEFT JOIN client_project_grants project_grant ON project_grant.account_id=account.id AND project_grant.revoked_at IS NULL
-      LEFT JOIN client_service_requests request ON request.account_id=account.id
-      WHERE account.project_alpha_organization_id IS NOT NULL OR account.project_alpha_client_id IS NOT NULL
-      GROUP BY kind,public_id`).all<{ kind: ClientKind; public_id: string; account_count: number; project_count: number; request_count: number }>(),
-  ]);
-  if (unlinkedAccounts.results.length > 500)
-    throw new HTTPException(503, { message: "The delivery-only client directory is too large" });
-  const byRoot = new Map(workspaces.map(workspace => `${workspace.kind}\u0000${workspace.public_id}`).map((key, index) => [key, workspaces[index]!]));
-  const summaries = new Map(linkedAccountSummaries.results.map(summary => [`${summary.kind}\u0000${summary.public_id}`, summary]));
-  const roots: WorkspaceRow[] = [];
-  for (const source of organizations.results) {
-    const workspace = byRoot.get(`organization\u0000${source.public_id}`);
-    const summary = summaries.get(`organization\u0000${source.public_id}`);
-    roots.push(workspace ? { ...workspace, ...summary, display_name: source.display_name, status: "active" } : {
-      workspace_id: null, kind: "organization", public_id: source.public_id, display_name: source.display_name,
-      status: "active", portal_status: "not_provisioned", legacy_account_id: null,
-      account_count: summary?.account_count || 0, project_count: summary?.project_count || 0,
-      request_count: summary?.request_count || 0,
-    });
+/** A retained portal URL can acquire a business alias only from current source
+ * mapping/legacy provenance and the same exact verified workspace resolver. */
+async function businessAlias(env: Env, root: WorkspaceRow, portal: ClientHubWorkspace): Promise<WorkspaceRow | null> {
+  const candidates = new Set<string>();
+  const publicId = portal.root_type === "organization" ? portal.pa_organization_public_id : portal.pa_client_public_id;
+  if (isAlphaPublicId(publicId)) {
+    const table = portal.root_type === "organization" ? "pa_organizations" : "pa_clients";
+    const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT source.id FROM ${table} source
+      WHERE source.active=1 ${portal.root_type === "standalone_client" ? "AND source.organization_id IS NULL" : ""}
+        AND ${validatedUniquePublicIdExpression(table, "source")}=? LIMIT 2`).bind(publicId).all<{ id: string }>();
+    for (const row of rows.results) candidates.add(row.id);
   }
-  for (const source of standaloneClients.results) {
-    const workspace = byRoot.get(`standalone_client\u0000${source.public_id}`);
-    const summary = summaries.get(`standalone_client\u0000${source.public_id}`);
-    roots.push(workspace ? { ...workspace, ...summary, display_name: source.display_name, status: "active" } : {
-      workspace_id: null, kind: "standalone_client", public_id: source.public_id, display_name: source.display_name,
-      status: "active", portal_status: "not_provisioned", legacy_account_id: null,
-      account_count: summary?.account_count || 0, project_count: summary?.project_count || 0,
-      request_count: summary?.request_count || 0,
-    });
+  if (portal.legacy_account_id) {
+    const account = await database(env).prepare(`SELECT project_alpha_client_id,project_alpha_organization_id
+      FROM client_accounts WHERE id=? AND status='active'`).bind(portal.legacy_account_id)
+      .first<{ project_alpha_client_id: string | null; project_alpha_organization_id: string | null }>();
+    const internalId = portal.root_type === "organization" ? account?.project_alpha_organization_id
+      : account?.project_alpha_organization_id === null ? account.project_alpha_client_id : null;
+    if (internalId) candidates.add(internalId);
   }
-  const known = new Set(roots.map(root => `${root.kind}\u0000${root.public_id}`));
-  for (const workspace of workspaces) {
-    const key = `${workspace.kind}\u0000${workspace.public_id}`;
-    if (!known.has(key)) roots.push(workspace);
+  const matches: WorkspaceRow[] = [];
+  for (const internalId of candidates) {
+    const source = await resolveClientHubSourceRoot(env, root.kind, internalId);
+    if (!source?.active || (root.kind === "standalone_client" && source.organization_id !== null)) continue;
+    const resolved = await resolveClientHubWorkspace(env, { key: internalId, kind: root.kind,
+      business_id: internalId, pa_public_id: source.pa_public_id, workspace_id: null });
+    if (resolved.status === "conflict") throw new HTTPException(409, { message: "This portal's business link needs review" });
+    if (resolved.workspace?.id === portal.id) matches.push({ ...root, root_namespace: "business", public_id: source.id,
+      pa_public_id: source.pa_public_id, mapping_status: source.mapping_status, display_name: source.display_name,
+      status: "active", workspace_id: portal.id, legacy_account_id: portal.legacy_account_id, portal_status: portal.status });
   }
-  for (const account of unlinkedAccounts.results) roots.push({
-    workspace_id: null, kind: "standalone_client", public_id: account.public_id,
-    display_name: account.display_name, status: account.status, portal_status: "not_provisioned",
-    legacy_account_id: account.public_id, account_count: 1, project_count: account.project_count,
-    request_count: account.request_count,
-  });
-  if (roots.length > 500) throw new HTTPException(503, { message: "The client directory is too large" });
-  return roots.sort((left, right) => left.display_name.localeCompare(right.display_name) || left.public_id.localeCompare(right.public_id));
+  if (matches.length > 1) throw new HTTPException(409, { message: "This portal's business link is ambiguous" });
+  return matches[0] ?? null;
 }
 
-async function selectedWorkspace(env: Env, kind: ClientKind, publicId: string): Promise<WorkspaceRow> {
-  const rows = await clientRoots(env);
-  const workspace = rows.find(row => row.kind === kind && row.public_id === publicId);
-  if (!workspace) throw new HTTPException(404, { message: "Client not found" });
-  return workspace;
+async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRow> {
+  const db = database(env);
+  if (root.root_namespace === "account" && root.source_id === "delivery:local") {
+    const account = await db.prepare(`SELECT id,display_name,status FROM client_accounts WHERE id=?
+      AND project_alpha_client_id IS NULL AND project_alpha_organization_id IS NULL AND status<>'closed'`)
+      .bind(root.public_id).first<{ id: string; display_name: string; status: string }>();
+    if (!account) throw new HTTPException(404, { message: "Client not found" });
+    return { ...root, display_name: account.display_name, status: account.status, workspace_id: null,
+      legacy_account_id: account.id, portal_status: "not_provisioned", pa_public_id: null, mapping_status: "not_applicable" };
+  }
+  if (root.source_id !== "project-alpha:primary") throw new HTTPException(404, { message: "Client not found" });
+  if (root.root_namespace === "portal") {
+    const portal = await readPortalRoot(env, root.kind, root.public_id);
+    if (!portal) throw new HTTPException(404, { message: "Client not found" });
+    const resolved = await resolveClientHubWorkspace(env, { key: root.public_id, kind: root.kind,
+      workspace_id: portal.id, business_id: null, pa_public_id: null });
+    if (resolved.workspace) {
+      const alias = await businessAlias(env, root, portal);
+      if (alias) return alias;
+    }
+    // The portal namespace identifies the workspace itself, not a business ID.
+    // Its legacy account bridge is never enough to invent business ownership.
+    return { ...root, display_name: portal.display_name, status: portal.status,
+      pa_public_id: null, mapping_status: "missing", legacy_account_id: null,
+      workspace_id: resolved.workspace?.id ?? null,
+      portal_status: resolved.status === "mapped" ? portal.status : "projection_pending" };
+  }
+  if (root.root_namespace !== "business") throw new HTTPException(404, { message: "Client not found" });
+  const source = await resolveClientHubSourceRoot(env, root.kind, root.public_id);
+  if (!source || !source.active || (root.kind === "standalone_client" && source.organization_id !== null))
+    throw new HTTPException(404, { message: "Client not found" });
+  const resolved = await resolveClientHubWorkspace(env, { key: root.public_id, kind: root.kind,
+    workspace_id: null, business_id: source.id, pa_public_id: source.pa_public_id });
+  const workspace = resolved.workspace;
+  // The directory is eventually consistent. Never use its cached workspace or
+  // account association to hydrate access after the live source was reassigned.
+  return { ...root, display_name: source.display_name, status: "active",
+    pa_public_id: source.pa_public_id, mapping_status: source.mapping_status,
+    workspace_id: workspace?.id ?? null, legacy_account_id: workspace?.legacy_account_id ?? null,
+    portal_status: workspace?.status ?? (resolved.status === "conflict" ? "mapping_conflict"
+      : resolved.status === "pending" ? "projection_pending" : source.mapping_status !== "mapped" ? "mapping_unavailable" : "not_provisioned") };
 }
-
-async function projectAlphaClients(env: Env): Promise<ProjectAlphaClientRow[]> {
-  const rows = await env.OPS_DB.withSession("first-primary").prepare(
-    "SELECT id public_id,organization_id,name display_name FROM pa_clients WHERE active=1 ORDER BY name COLLATE NOCASE,id",
-  ).all<ProjectAlphaClientRow>();
-  return rows.results;
-}
-
 function contactsForRoot(
   root: WorkspaceRow,
-  sourceClients: ProjectAlphaClientRow[],
+  sourceClients: Array<Record<string, unknown>>,
   projected: Array<Record<string, unknown>>,
 ): Array<Record<string, unknown>> {
-  const projectedContacts = root.workspace_id
-    ? projected.filter(contact => contact.workspace_id === root.workspace_id)
+  const projectedContacts: Array<Record<string, unknown>> = root.workspace_id
+    ? projected.filter(contact => contact.workspace_id === root.workspace_id).map(contact => ({ ...contact,
+      contact_key: `principal:${root.workspace_id}:${String(contact.public_id)}`, record_type: "portal_principal" }))
     : [];
-  const byPublicId = new Map(projectedContacts.map(contact => [String(contact.public_id), contact]));
-  const sourceContacts = sourceClients.filter(client => root.kind === "organization"
-    ? client.organization_id === root.public_id
-    : client.organization_id === null && client.public_id === root.public_id);
-  for (const client of sourceContacts) {
-    if (byPublicId.has(client.public_id)) continue;
-    projectedContacts.push({
-      workspace_id: root.workspace_id,
-      public_id: client.public_id,
-      display_name: client.display_name,
-      email_hint: "",
-      status: "active",
-      identity_id: null,
-      has_workspace_access: 0,
-      blocked: 0,
-      access: [],
-      invitation: null,
-    });
-  }
+  // Only the independently paged business contacts are appended. They never
+  // acquire a portal identity by equal raw IDs, names, or email addresses.
+  projectedContacts.push(...sourceClients);
   return projectedContacts.sort((left, right) => String(left.display_name).localeCompare(String(right.display_name)));
 }
 
-async function clientHubDirectory(env: Env, principal: StaffPrincipal, access: ClientHubPermissions) {
-  if (!access.directory) return [];
-  const [workspaces, identities, sourceClients] = await Promise.all([
-    clientRoots(env),
-    listClientIdentityEligibility(env, principal),
-    projectAlphaClients(env),
-  ]);
-  return workspaces.map(workspace => ({
-    ...workspace,
-    route_kind: workspace.kind === "organization" ? "organizations" : "standalone",
-    contacts: contactsForRoot(workspace, sourceClients, identities.clients as Array<Record<string, unknown>>),
-  }));
-}
-
-async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: ClientKind, publicId: string) {
+async function resolveDetailContext(env: Env, principal: StaffPrincipal, kind: ClientKind, publicId: string,
+  sourceId?: string, rootNamespace?: string): Promise<ClientHubCollectionContext> {
+  // Validate before either the portal alias or live-source fallback can bypass
+  // the indexed lookup. Keep the exact-ID contract identical on every route.
+  if (!publicId || publicId.length > 512 || /[\0-\x1f\x7f]/.test(publicId)
+    || (sourceId !== undefined && !isClientHubSource(sourceId))
+    || (rootNamespace !== undefined && !isClientHubRootNamespace(rootNamespace)))
+    throw new HTTPException(404, { message: "Client not found" });
   const access = await permissions(env, principal);
   requireHubAccess(access);
   if (!access.directory)
     throw new HTTPException(403, { message: "Global team.view permission required" });
-  const [workspace, identityDirectory, sourceClients] = await Promise.all([
-    selectedWorkspace(env, kind, publicId),
-    listClientIdentityEligibility(env, principal),
-    projectAlphaClients(env),
+  // Portal aliases outlive index folding into a business root. Resolve their
+  // exact live workspace even after the old materialized portal row is swept.
+  const portal = sourceId === "project-alpha:primary" && rootNamespace === "portal"
+    ? await readPortalRoot(env, kind, publicId) : null;
+  let indexed: WorkspaceRow;
+  try {
+    indexed = portal ? portalDirectoryRoot(portal) : await findClientHubRoot(env, kind, publicId, sourceId, rootNamespace);
+  } catch (error) {
+    // A verified portal alias may point at a canonical business route before the
+    // next directory reconciliation. Exact live source identity, never an ID
+    // guess or cached portal association, can hydrate that route in the meantime.
+    if (!(error instanceof HTTPException) || !(error.status === 404 || (error.status === 503
+      && error.message === "The client directory is being prepared; please retry shortly"))
+      || sourceId !== "project-alpha:primary" || rootNamespace !== "business") throw error;
+    const source = await resolveClientHubSourceRoot(env, kind, publicId);
+    if (!source?.active || (kind === "standalone_client" && source.organization_id !== null)) throw error;
+    indexed = { source_id: sourceId, root_namespace: "business", kind, public_id: source.id,
+      pa_public_id: source.pa_public_id, mapping_status: source.mapping_status, display_name: source.display_name,
+      sort_name: source.display_name, status: "active", portal_status: "not_provisioned", workspace_id: null,
+      legacy_account_id: null, account_count: 0, project_count: 0, request_count: 0, contact_count: 0,
+      meaningful_activity_at: null, source_version: null, indexed_at: "", scan_generation: 0 };
+  }
+  const workspace = await liveDetailRoot(env, indexed);
+  return createClientHubCollectionContext(env, principal, workspace, access);
+}
+
+async function verifyContext(env: Env, principal: StaffPrincipal, context: ClientHubCollectionContext): Promise<void> {
+  // Recheck live authority after hydration as well. Cross-D1 reads cannot form
+  // one atomic snapshot; this closes observed mapping/permission changes without
+  // claiming that an opaque cursor freezes grants or source ownership.
+  const root = await liveDetailRoot(env, context.root);
+  const current = await createClientHubCollectionContext(env, principal, root, await permissions(env, principal));
+  if (current.contextVersion !== context.contextVersion)
+    throw new HTTPException(409, { message: "Client mapping or permissions changed. Refresh the client workspace to continue" });
+}
+
+async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: ClientKind, publicId: string, sourceId?: string, rootNamespace?: string) {
+  const context = await resolveDetailContext(env, principal, kind, publicId, sourceId, rootNamespace);
+  const workspace = context.root, access = context.access;
+  const administrator = await isAdministrator(env, principal);
+  const [identityDirectory, collections] = await Promise.all([
+    workspace.workspace_id ? listClientIdentityEligibility(env, principal, { workspaceId: workspace.workspace_id }) : Promise.resolve({
+      clients: [], blocks: [], canManageEligibilityBlocks: eligibilityBlockManagementEnabled(env) && administrator,
+      canManagePortal: portalOperationsManagementEnabled(env) && administrator,
+    }),
+    Promise.all(CLIENT_HUB_COLLECTIONS.map(async collection => ({ collection,
+      result: await listClientHubCollection(env, context, collection, { initial: true, limit: 5 }) }))),
   ]);
-  const bindings = accountBindings(workspace);
-  const where = accountWhere(workspace.kind);
-  const db = database(env);
-  const [accounts, projects, requests, deliveryGrants, authenticatedGrants, viewerGrants] = await Promise.all([
-    db.prepare(`SELECT account.id,account.display_name,account.status,account.project_alpha_client_id,
-      account.project_alpha_organization_id,account.created_at,account.updated_at
-      FROM client_accounts account WHERE ${where} ORDER BY account.display_name COLLATE NOCASE,account.id`)
-      .bind(...bindings).all<Record<string, unknown>>(),
-    db.prepare(`SELECT project.id,project.project_name,project.client_name,project.r2_prefix,project.active,
-      project.project_alpha_project_id,project_grant.account_id,project_grant.can_request_service,
-      project_grant.granted_at
-      FROM client_project_grants project_grant JOIN client_accounts account ON account.id=project_grant.account_id
-      JOIN projects project ON project.id=project_grant.project_id
-      WHERE ${where} AND project_grant.revoked_at IS NULL
-      ORDER BY project.active DESC,project.project_name COLLATE NOCASE,project.id`)
-      .bind(...bindings).all<Record<string, unknown>>(),
-    access.requests
-      ? db.prepare(`SELECT request.id,request.account_id,request.project_id,request.request_type,request.title,
-          request.status,request.created_at,request.updated_at,project.project_name
-          FROM client_service_requests request JOIN client_accounts account ON account.id=request.account_id
-          LEFT JOIN projects project ON project.id=request.project_id WHERE ${where}
-          ORDER BY request.created_at DESC,request.id DESC LIMIT 201`)
-        .bind(...bindings).all<Record<string, unknown>>()
-      : Promise.resolve({ results: [] as Record<string, unknown>[] }),
-    access.delivery
-      ? db.prepare(`SELECT delivery.account_id,delivery.project_id,delivery.share_id,delivery.granted_at,
-          delivery.expires_at,delivery.revoked_at,share.label,share.r2_prefix,share.created_at,
-          project.project_name
-          FROM client_delivery_grants delivery JOIN client_accounts account ON account.id=delivery.account_id
-          JOIN shares share ON share.id=delivery.share_id JOIN projects project ON project.id=delivery.project_id
-          WHERE ${where} ORDER BY delivery.granted_at DESC,delivery.share_id DESC LIMIT 201`)
-        .bind(...bindings).all<Record<string, unknown>>()
-      : Promise.resolve({ results: [] as Record<string, unknown>[] }),
-    access.delivery && workspace.workspace_id
-      ? db.prepare(`SELECT grant_record.id,grant_record.audience_type,grant_record.audience_public_id,
-          grant_record.status,grant_record.expires_at,grant_record.created_at,grant_record.updated_at,
-          binding.r2_prefix,binding.owner_scope_type,binding.owner_public_id
-          FROM portal_v2_authenticated_delivery_grants grant_record
-          JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id
-          WHERE grant_record.workspace_id=? ORDER BY grant_record.updated_at DESC,grant_record.id DESC LIMIT 201`)
-        .bind(workspace.workspace_id).all<Record<string, unknown>>()
-      : Promise.resolve({ results: [] as Record<string, unknown>[] }),
-    access.viewer
-      ? db.prepare(`SELECT grant_record.id,grant_record.account_id,grant_record.project_id,grant_record.scope_type,
-          grant_record.association_id,grant_record.include_future_published,grant_record.can_measure,
-          grant_record.can_view_cameras,grant_record.can_download,grant_record.authorization_expires_at,
-          grant_record.status,grant_record.created_at,grant_record.updated_at,project.project_name,
-          association.model_title
-          FROM viewer_client_grants grant_record JOIN client_accounts account ON account.id=grant_record.account_id
-          JOIN projects project ON project.id=grant_record.project_id
-          LEFT JOIN viewer_model_associations association ON association.id=grant_record.association_id
-          WHERE ${where} ORDER BY grant_record.updated_at DESC,grant_record.id DESC LIMIT 201`)
-        .bind(...bindings).all<Record<string, unknown>>()
-      : Promise.resolve({ results: [] as Record<string, unknown>[] }),
-  ]);
-  const bounded = (rows: Record<string, unknown>[], label: string) => {
-    if (rows.length > 200) throw new HTTPException(503, { message: `${label} history is too large` });
-    return rows;
-  };
+  const items = (collection: typeof CLIENT_HUB_COLLECTIONS[number]) => collections.find(page => page.collection === collection)!.result.items;
+  await verifyContext(env, principal, context);
   return {
-    client: workspace,
-    contacts: contactsForRoot(workspace, sourceClients, identityDirectory.clients as Array<Record<string, unknown>>),
+    client: { ...workspace, route_kind: clientHubRouteKind(workspace.kind), detail_path: clientHubDetailPath(workspace) },
+    contacts: contactsForRoot(workspace, items("businessContacts"), identityDirectory.clients as Array<Record<string, unknown>>),
     accessManagement: {
       blocks: identityDirectory.blocks,
       canManageEligibilityBlocks: identityDirectory.canManageEligibilityBlocks,
       canManagePortal: identityDirectory.canManagePortal,
     },
-    accounts: accounts.results,
-    projects: projects.results,
-    requests: bounded(requests.results, "Client request"),
-    deliveryGrants: bounded(deliveryGrants.results, "Delivery grant"),
-    authenticatedDeliveryGrants: bounded(authenticatedGrants.results, "Authenticated delivery grant"),
-    viewerGrants: bounded(viewerGrants.results, "Viewer grant"),
+    accounts: items("accounts"),
+    projects: items("projects"),
+    requests: items("requests"),
+    deliveryGrants: items("deliveryGrants"),
+    authenticatedDeliveryGrants: items("authenticatedDeliveryGrants"),
+    viewerGrants: items("viewerGrants"),
+    pages: Object.fromEntries(collections.map(({ collection, result }) => [collection, result.page])),
+    contextVersion: context.contextVersion,
     capabilities: access,
   };
 }
 
 export function registerClientHubRoutes(app: App): void {
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/collections/:collection", async c => {
+    const kind = routeKind(c.req.param("kind")), collection = c.req.param("collection");
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    if (!isClientHubCollection(collection)) throw new HTTPException(400, { message: "Client collection is invalid" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    const rawLimit = c.req.query("limit");
+    const result = await listClientHubCollection(c.env, context, collection, {
+      cursor: c.req.query("cursor"), limit: rawLimit === undefined ? undefined : /^\d+$/.test(rawLimit) ? Number(rawLimit) : Number.NaN,
+    });
+    await verifyContext(c.env, principal, context);
+    return c.json(result);
+  });
   app.get("/api/client-hub", async c => {
     const access = await permissions(c.env, c.get("principal"));
     requireHubAccess(access);
-    return c.json({ clients: await clientHubDirectory(c.env, c.get("principal"), access), capabilities: access });
+    const limit = c.req.query("limit");
+    const result = access.directory ? await listClientHubRoots(c.env, c.get("principal"), {
+      q: c.req.query("q"), kind: c.req.query("kind"), cursor: c.req.query("cursor"),
+      limit: limit === undefined ? undefined : /^\d+$/.test(limit) ? Number(limit) : Number.NaN,
+    }) : { clients: [], nextCursor: null };
+    return c.json({ ...result, capabilities: access });
+  });
+  app.get("/api/client-hub/sources/:sourceId/:kind/:publicId", async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    return c.json(await clientHubDetail(c.env, c.get("principal"), kind, c.req.param("publicId"), c.req.param("sourceId")));
+  });
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId", async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    return c.json(await clientHubDetail(c.env, c.get("principal"), kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace")));
   });
   app.get("/api/client-hub/:kind/:publicId", async c => {
     const kind = routeKind(c.req.param("kind"));

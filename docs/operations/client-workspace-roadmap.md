@@ -137,8 +137,152 @@ Local verification on August 25, 2026:
   that transport failure; no forced clicks or weakened assertions were used.
 - Desktop/mobile screenshots were visually reviewed for navigation, search
   controls, folder scope, and the gap between recent links and Trash.
-- This is a local implementation checkpoint, not a production release. No push,
-  deployment, production migration, or live-data mutation was performed.
+- Released on main as `28827c4` (`feat(operations): simplify navigation and scope
+  client link history`). All three Cloudflare builds (`ltds-ops`, `ltds-clients`,
+  and `ltds-ops-sync`) completed successfully.
+- Read-only checks in the deployed application verified the navigation order,
+  nested SOP Library, standalone Models overview, recent links changing from
+  the client root to one selected client, and folder-scoped searchable history.
+  No production migration, client-access change, or content mutation was needed.
+
+### Unreleased directory checkpoint (August 25)
+
+The next directory slice remains local and is **not ready to deploy**. It adds
+server-side bounded search, stable continuation cursors, source-qualified direct
+detail links, responsive cards, and a resumable rebuildable index. The initial
+five index integration tests passed, including 620 roots and restart checkpoints;
+34 focused directory/detail/eligibility tests passed before the contract review.
+Those synthetic tests do not establish compatibility with the real Alpha export.
+
+The subsequent local checkpoint passes type checking, the production build,
+six index integration tests (including the query-budget and moved-account
+guards), and 18 desktop/mobile directory browser tests. Mobile, laptop, and
+ultrawide screenshots were inspected; request title/metadata spacing was corrected.
+The final focused directory/detail/eligibility gate passes all 42 tests, including
+long literal searches, moved/inactive source ownership, and fail-closed portal
+principal search while the explicit ID mapping is unavailable.
+These UI browser tests use synthetic API responses. They are not evidence that
+the new directory is deployed or that the unresolved producer mapping works.
+
+Explicit source-mapping implementation checkpoint (not deployed):
+
+- Native Alpha public identifiers are 32 lowercase hexadecimal characters, not
+  hyphenated UUIDs. The separate Alpha branch adds the existing stored public ID
+  to v1 organization/client/project snapshots without changing numeric IDs or
+  relationships. Focused v1 plus unchanged v2 tests pass (13 tests, 185 assertions).
+- V2 public-ID export is deliberately deferred: upgrading existing fingerprints
+  would write versioned events, and its unfinished event sequence does not yet
+  guarantee commit order across concurrent transactions. Keep v2 disabled; this
+  directory uses the existing v1 connector. The Alpha documentation records the
+  required three-connection MySQL convergence proof before enabling v2.
+- Directory identity now includes source, namespace (`business`, `portal`, or
+  `account`), kind, and ID. Business IDs stay internal IDs; portal-only IDs are
+  exact workspace IDs. Names/email/equal-looking raw IDs never link these roots.
+- Native workspace association requires the explicit source mapping plus a
+  selected complete portal generation/root. Legacy workspaces require their
+  current account bridge and selected legacy-backfill provenance; historic
+  internal IDs in `pa_*_public_id` columns are never treated as native IDs.
+- Unmapped portal workspaces remain visible separately. Once verified, they fold
+  into the business card; retained portal URLs resolve through fresh, unique
+  mapping proof. Missing, pending, and conflicting links are distinct states.
+- Seven index tests pass, including 620-root restart/query-budget coverage and
+  native mapping arrival after a portal-only import. Sixty source/workspace/
+  directory/detail/eligibility tests pass with the real identifier shapes.
+  The isolated scheduler's two tests, type checking, and production build pass.
+  The updated directory browser gate passed 24 cases, with mobile/laptop/
+  ultrawide screenshots inspected. A subsequent generated-type check exposed
+  local dependency drift (installed Wrangler 4.125 versus lockfile 4.118).
+  The provisional full unit run was stopped and `npm ci` restored the existing
+  lockfile without modifying dependencies. Final typegen, unit, build and browser
+  gates must now be rerun against these exact versions. Source-public-ID lookup
+  expression indexes and a query-plan regression were added after the earlier
+  focused runs and are also awaiting this final gate.
+- Locked-dependency follow-up: generated Worker types, TypeScript, production
+  build, all 755 unit tests across 103 files, and the full 216-test browser suite
+  passed with Wrangler 4.118.0 and Vitest 4.1.10. The newly added populated
+  migration test passed separately. This is the directory baseline, before the
+  subsequent detail-pagination gate; do not count the earlier stopped run as
+  verification. No package manifest/lockfile change was needed.
+- A populated upgrade regression applies actual Operations migrations through
+  0031, seeds valid/missing/malformed/duplicate public-ID payloads, then applies
+  0032. It passed with payload preservation, both mapping-index query plans,
+  initial readiness, revision behavior, cascading search cleanup, and database
+  integrity checked. An organization/active/client index also prevents contact
+  counts from scanning every unrelated client for each organization card.
+- Search covers root names, current-owned business contacts and their scalar
+  email/phone fields, and authorized projects. Portal-only login/contact search
+  is explicitly unsupported in this slice (`portalContacts: false`); arbitrary
+  cross-database principal matches cannot be safely filtered after pagination.
+  Search freshness is labeled, and source moves/deactivation are checked live.
+- Index maintenance has its own offset cron invocation, with bounded pages,
+  time, and D1 statements. It does not run within thumbnail/notification work.
+  Production migration, initial backfill, release and read-only live acceptance
+  remain pending. No permissions, memberships, or source records are written.
+- Alpha prerequisite is committed locally as `38dc6c81` on
+  `codex/client-source-public-ids` in the isolated Alpha worktree. Its broader
+  local gate passed 536 PHP tests (86 skipped) and 29 frontend tests. The push
+  was explicitly rejected by the permission reviewer: no remote branch, PR,
+  merge, or image publication occurred. Obtain explicit user approval before
+  publishing the three reviewed files to `ledgetoptechnologies/Project-Alpha`
+  and opening a PR against main; do not bypass or retry the rejected push.
+
+Release gates and remaining follow-up:
+
+- Alpha's `OpsSnapshotService` and `OpsSnapshotV2Service` export internal numeric
+  client/organization/project IDs. `PortalProjectionService` uses public IDs.
+  Released v1 producers do not yet export `public_id`. Release the additive v1
+  producer change and verify the normal sync retains it before claiming native
+  business-to-portal mapping in production. V2 remains unchanged and disabled.
+- Do not activate migration 0032 or the new directory until final gates pass.
+  Apply the additive index migration before deploying its consumer, confirm the
+  isolated schedule runs, and wait for `ready=1` before live workflow acceptance.
+  During initial preparation the directory returns a retryable 503, not an empty
+  client list. Roll back application code if needed; keep additive index tables
+  for recovery, and never roll back authoritative client/access/source data.
+- Reconciliation must have its own bounded invocation budget, not consume the
+  existing thumbnail/notification cron's subrequests. The draft reserves at most
+  800 D1 statements per invocation as well as page/time limits; activation still
+  needs migration/backfill/rollback verification. Cloudflare
+  documents a 1,000-query paid invocation ceiling, including statements within
+  batches: [D1 limits](https://developers.cloudflare.com/d1/platform/limits/).
+- Periodic search state needs honest freshness and live ownership checks for
+  moved/deactivated contacts and projects. Successful local tests must include
+  those cases, not only unchanged synthetic source IDs.
+- Portal identity/access-list limits and missing meaningful activity rollups
+  remain separate unfinished work. The seven non-identity detail collections
+  are now paged as described below. This slice does not enable a second Alpha
+  producer, merge business records, grant access, or complete the roadmap.
+
+Detail pagination is implemented locally: seven non-identity collections start
+with five records and have independent continuation routes (25 by default, 100
+maximum). Business contacts remain distinct from portal principals.
+Account/project and delivery rows use composite keys; mapping, account
+ownership, and permission context is checked before and after collection reads.
+Changed context clears all visible sections and cancels other pending reads.
+Ordinary transient errors retain the affected section's data and offer Retry.
+Suspended/disabled portal aliases retain their portal status without falsely
+invalidating an unchanged business root.
+
+The focused backend gate passed 70 cases before the alias correction, followed
+by all 26 affected Client Hub cases including the two new alias regressions.
+Type checking and the production build passed. All 246 desktop/mobile browser
+tests passed in the final single-worker run (including 30 new pagination cases),
+with layouts visually reviewed at 375, 640, 1280, and 3440 pixels. Coverage
+includes independent continuation, duplicate clicks, keyboard focus, composite
+keys, legacy links, refresh after access changes, and late-response cancellation.
+
+The subsequent full unit run exercised 766 cases across 104 files: 764 passed,
+and two failed with Windows loopback `EADDRINUSE` errors in the local Miniflare
+transport. A serial isolated rerun of both affected suites passed all 32 cases.
+The two alias regressions were added during that run and passed separately in
+the 26-case affected suite above. These are complete coverage results across a
+full run and explicit retries, not a claim of one clean final full-suite pass.
+Repeat the serial full gate from the runbook before publication/merge.
+
+Portal identity/entitlement/block/invitation pagination and full scoped business
+project history remain unfinished. Rollout and recovery steps are recorded in
+[the directory runbook](client-hub-directory.md). No part of this new directory
+or detail checkpoint has been deployed.
 
 ### 1. Client foundation and find/open workflow
 
@@ -273,7 +417,7 @@ Test the complete workflow, not only whether a component renders:
 - [x] Create an active goal and phased plan with UI/workflow acceptance.
 - [x] Correct the existing cross-workspace eligibility display defect and regress it.
 - [x] Implement and locally verify navigation and scoped delivery-link cleanup.
-- [ ] Release the verified navigation slice and check it in the deployed UI.
+- [x] Release the verified navigation slice and check it in the deployed UI.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

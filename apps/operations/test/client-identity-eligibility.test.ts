@@ -67,6 +67,23 @@ async function fixture() {
 afterEach(async () => { vi.clearAllMocks(); await Promise.all(active.splice(0).map(item => item.dispose())); });
 
 describe("client identity eligibility administration", () => {
+  it("scopes detail to one workspace even when the global identity directory exceeds 500", async () => {
+    const { database, env } = await fixture();
+    await applySql(database, `WITH RECURSIVE ids(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM ids WHERE n<509)
+      INSERT INTO portal_v2_workspaces(id,display_name) SELECT 'other-'||n,'Other '||n FROM ids;
+      WITH RECURSIVE ids(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM ids WHERE n<509)
+      INSERT INTO pa_portal_principals SELECT 'other-'||n,'principal-'||n,'Other '||n,'other-'||n||'@example.test','v1','active' FROM ids;`);
+    await applySql(database, `INSERT INTO portal_v2_identity_eligibility_blocks(id,match_type,normalized_email,reason_code,created_by_actor_type,created_by_actor_id)
+      VALUES('target-block','email','client@example.test','test','staff','staff-admin'),
+        ('unrelated-block','email','other-1@example.test','test','staff','staff-admin');`);
+    await expect(listClientIdentityEligibility(env, principal)).rejects.toMatchObject({ status: 503 });
+    const result = await listClientIdentityEligibility(env, principal, { workspaceId: "workspace-one" });
+    expect(result.clients).toEqual([expect.objectContaining({ workspace_id: "workspace-one", public_id: "principal-one", blocked: 1 })]);
+    expect(result.blocks).toEqual([expect.objectContaining({ id: "target-block" })]);
+    expect(await database.prepare("SELECT COUNT(*) count FROM portal_v2_workspace_memberships").first("count")).toBe(0);
+    expect(await database.prepare("SELECT COUNT(*) count FROM portal_v2_entitlements").first("count")).toBe(0);
+  }, 30_000);
+
   it("shows access only for the exact principal workspace when an identity belongs to two workspaces", async () => {
     const { database, env } = await fixture();
     await applySql(database, `

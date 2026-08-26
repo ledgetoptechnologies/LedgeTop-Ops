@@ -129,6 +129,7 @@ import {
 import { registerProjectAlphaDraftQuoteRoutes } from "./project-alpha-draft-quote";
 import { registerTeamAssignedWorkRoutes } from "./team-assigned-work";
 import { registerClientHubRoutes } from "./client-hub";
+import { reconcileClientHubIndex } from "./client-hub-index";
 import {
   decorateWorkContextsWithSops,
   registerWorkContextSopRoutes,
@@ -3004,12 +3005,26 @@ app.onError((error, c) => {
 
 const CONSOLIDATED_CRON = "*/15 * * * *";
 const CLIENT_REQUEST_NOTIFICATION_CRON = "*/5 * * * *";
+const CLIENT_HUB_INDEX_CRON = "2-57/5 * * * *";
 
 async function scheduled(
   event: ScheduledController,
   env: Env,
   ctx: ExecutionContext,
 ) {
+  if (event.cron === CLIENT_HUB_INDEX_CRON) {
+    // A separate invocation keeps directory backfill out of the existing
+    // thumbnail/notification budget. Source and access tables remain read-only.
+    try {
+      const result = await reconcileClientHubIndex(env);
+      console.log(JSON.stringify({ event: "client_hub.index.tick", ...result }));
+    } catch {
+      // Do not put contact data, SQL payloads, or connector secrets in logs.
+      console.error(JSON.stringify({ event: "client_hub.index.error" }));
+      throw new Error("Client Hub directory reconciliation failed");
+    }
+    return;
+  }
   if (event.cron === CLIENT_REQUEST_NOTIFICATION_CRON) {
     ctx.waitUntil(drainViewerSessionRevocations(env));
     ctx.waitUntil(processThumbnailBackfills(env));

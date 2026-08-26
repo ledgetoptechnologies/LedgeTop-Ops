@@ -27,9 +27,10 @@ function email(value: string): string | null {
 }
 function validKey(value: string): boolean { return /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(value); }
 
-export async function listClientIdentityEligibility(env: Env, principal: StaffPrincipal) {
+export async function listClientIdentityEligibility(env: Env, principal: StaffPrincipal, options: { workspaceId?: string } = {}) {
   const scope = await sqlScope(env, principal, "team.view");
   if (!scope.global || scope.deniedGlobal) throw new HTTPException(403, { message: "Global team.view permission required" });
+  const workspaceValues = options.workspaceId === undefined ? [] : [options.workspaceId];
   const [principals, blocks, accessRows, invitationRows] = await Promise.all([
     db(env).prepare(`SELECT pa.workspace_id,workspace.display_name workspace_name,pa.public_id,pa.display_name,pa.email_hint,pa.source_version,
       pa.status,eligibility.identity_id,identity.issuer,identity.subject,
@@ -47,11 +48,18 @@ export async function listClientIdentityEligibility(env: Env, principal: StaffPr
       LEFT JOIN portal_v2_identity_eligibility_bindings eligibility
         ON eligibility.workspace_id=pa.workspace_id AND eligibility.principal_public_id=pa.public_id
       LEFT JOIN portal_v2_identities identity ON identity.id=eligibility.identity_id
-      WHERE pa.status='active' ORDER BY pa.display_name COLLATE NOCASE,pa.email_hint,pa.workspace_id LIMIT 501`)
+      WHERE pa.status='active' ${options.workspaceId === undefined ? "" : "AND pa.workspace_id=?"}
+      ORDER BY pa.display_name COLLATE NOCASE,pa.email_hint,pa.workspace_id LIMIT 501`).bind(...workspaceValues)
       .all<Record<string, unknown>>(),
     db(env).prepare(`SELECT id,match_type,issuer,subject,normalized_email,reason_code,status,valid_from,expires_at,
-      created_by_actor_id,created_at,updated_at,revoked_at FROM portal_v2_identity_eligibility_blocks
-      ORDER BY status,created_at DESC,id LIMIT 501`).all<Record<string, unknown>>(),
+      created_by_actor_id,created_at,updated_at,revoked_at FROM portal_v2_identity_eligibility_blocks block
+      ${options.workspaceId === undefined ? "" : `WHERE EXISTS (SELECT 1 FROM pa_portal_principals scoped
+        LEFT JOIN portal_v2_identity_eligibility_bindings binding
+          ON binding.workspace_id=scoped.workspace_id AND binding.principal_public_id=scoped.public_id
+        LEFT JOIN portal_v2_identities identity ON identity.id=binding.identity_id
+        WHERE scoped.workspace_id=? AND ((block.match_type='email' AND block.normalized_email=lower(scoped.email_hint))
+          OR (block.match_type='issuer_subject' AND block.issuer=identity.issuer AND block.subject=identity.subject)))`}
+      ORDER BY status,created_at DESC,id LIMIT 501`).bind(...workspaceValues).all<Record<string, unknown>>(),
     db(env).prepare(`SELECT projected.workspace_id,projected.public_id,entitlement.capability,entitlement.effect,
         entitlement.scope_type,entitlement.scope_public_id,COALESCE(entity.display_name,entitlement.scope_public_id) scope_label
       FROM pa_portal_principals projected
@@ -65,9 +73,9 @@ export async function listClientIdentityEligibility(env: Env, principal: StaffPr
       LEFT JOIN portal_v2_directory_entities entity ON entity.workspace_id=entitlement.workspace_id
         AND entity.generation_id=checkpoint.active_generation_id AND entity.entity_type=entitlement.scope_type
         AND entity.public_id=entitlement.scope_public_id
-      WHERE projected.status='active'
+      WHERE projected.status='active' ${options.workspaceId === undefined ? "" : "AND projected.workspace_id=?"}
       ORDER BY projected.workspace_id,projected.public_id,entitlement.capability,entitlement.scope_type,entitlement.scope_public_id
-      LIMIT 5001`).all<Record<string, unknown>>(),
+      LIMIT 5001`).bind(...workspaceValues).all<Record<string, unknown>>(),
     db(env).prepare(`SELECT projected.workspace_id,projected.public_id,invitation.id,invitation.status,
         invitation.expires_at,outbox.status email_status,outbox.attempts,outbox.last_error_code
       FROM pa_portal_principals projected
@@ -77,7 +85,8 @@ export async function listClientIdentityEligibility(env: Env, principal: StaffPr
       WHERE projected.status='active' AND invitation.id=(SELECT latest.id FROM portal_v2_invitations latest
         WHERE latest.workspace_id=projected.workspace_id AND lower(latest.invited_email)=lower(projected.email_hint)
         ORDER BY latest.created_at DESC,latest.id DESC LIMIT 1)
-      ORDER BY projected.workspace_id,projected.public_id LIMIT 501`).all<Record<string, unknown>>(),
+      ${options.workspaceId === undefined ? "" : "AND projected.workspace_id=?"}
+      ORDER BY projected.workspace_id,projected.public_id LIMIT 501`).bind(...workspaceValues).all<Record<string, unknown>>(),
   ]);
   if (principals.results.length > 500 || blocks.results.length > 500 || accessRows.results.length > 5000 || invitationRows.results.length > 500)
     throw new HTTPException(503, { message: "Client identity directory is too large" });

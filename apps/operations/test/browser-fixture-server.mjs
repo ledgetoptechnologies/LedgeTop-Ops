@@ -22,7 +22,12 @@ export function createBrowserFixtureServer() {
     response.writeHead(204).end();
     return;
   }
-  const requested = resolve(root, `.${decodeURIComponent(url.pathname)}`);
+  let requested = resolve(root, "index.html");
+  try {
+    requested = resolve(root, `.${decodeURIComponent(url.pathname)}`);
+  } catch {
+    // Serve the SPA so its route parser can explain malformed deep links.
+  }
   let file = requested.startsWith(`${root}${sep}`) ? requested : resolve(root, "index.html");
   try {
     await access(file);
