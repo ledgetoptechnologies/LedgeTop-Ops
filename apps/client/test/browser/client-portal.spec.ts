@@ -62,6 +62,11 @@ async function mockAuthorizedPortal(
       await route.fulfill({ json: { requests: fixtureRequests } });
     } else if (request.method() === "GET" && path === "/api/client/service-catalog") {
       await route.fulfill({ json: { services: serviceCatalog } });
+    } else if (request.method() === "GET" && path === "/api/client/service-catalog/page") {
+      await route.fulfill({ json: { services: serviceCatalog, nextCursor: null, complete: true, source: { generation: "catalog-test", sequence: 1 } } });
+    } else if (request.method() === "GET" && path === "/api/client/request-readiness") {
+      const projectId = requestUrl.searchParams.get("projectId");
+      await route.fulfill({ json: { mode: requestV2 ? "catalog" : "legacy", workspaceId: null, target: { kind: projectId ? "project" : "root", projectId }, canStartRequest: true, reason: "ready", root: { canStartRequest: true, reason: "ready" }, projectRequestsSupported: true, refreshedAt: "2026-08-25T12:00:00.000Z" } });
     } else if (request.method() === "GET" && path === "/api/client/service-request-drafts") {
       await route.fulfill({ json: { drafts: [] } });
     } else if (request.method() === "POST" && path === "/api/client/service-request-drafts") {
@@ -74,6 +79,10 @@ async function mockAuthorizedPortal(
       draftBody = request.postDataJSON();
       draftVersion += 1;
       await route.fulfill({ json: { draft: { ...draftBody, id: "draft-a", state: "draft", version: draftVersion, areaSquareMeters: draftBody?.areaGeoJson ? 50585.7 : null, areaAcres: draftBody?.areaGeoJson ? 12.5 : null, services: serviceCatalog.filter(service => (draftBody?.services as Array<{ publicId: string }> | undefined)?.some(selected => selected.publicId === service.publicId)).map(service => ({ ...service, answers: (draftBody?.services as Array<{ publicId: string; answers: Record<string, unknown> }>).find(selected => selected.publicId === service.publicId)?.answers ?? {} })), submittedRequestId: null, createdAt: "2026-08-13T12:00:00.000Z", updatedAt: "2026-08-13T12:01:00.000Z" } } });
+    } else if (request.method() === "GET" && path === "/api/client/service-request-drafts/draft-a" && draftBody) {
+      await route.fulfill({ json: { draft: { ...draftBody, id: "draft-a", state: "draft", version: draftVersion, areaSquareMeters: draftBody.areaGeoJson ? 50585.7 : null, areaAcres: draftBody.areaGeoJson ? 12.5 : null,
+        services: serviceCatalog.filter(service => (draftBody!.services as Array<{ publicId: string }>).some(selected => selected.publicId === service.publicId)).map(service => ({ ...service, answers: (draftBody!.services as Array<{ publicId: string; answers: Record<string, unknown> }>).find(selected => selected.publicId === service.publicId)?.answers ?? {} })),
+        submittedRequestId: null, createdAt: "2026-08-13T12:00:00.000Z", updatedAt: "2026-08-13T12:01:00.000Z" } } });
     } else if (request.method() === "GET" && path === "/api/client/service-request-drafts/draft-a/pricing-hint") {
       await route.fulfill({ json: { available: false, hint: null } });
     } else if (request.method() === "POST" && path === "/api/client/service-request-drafts/draft-a/submit") {
@@ -136,7 +145,14 @@ async function mockAuthorizedPortal(
   });
 }
 
-async function openRequestWorkArea(page: Page) {
+async function startNewRequest(page: Page, context = "general") {
+  await page.getByLabel("Request context", { exact: true }).selectOption(context);
+  await page.getByRole("button", { name: "Start request", exact: true }).click();
+}
+
+async function openRequestWorkArea(page: Page, context = "general") {
+  await startNewRequest(page, context);
+  await page.getByRole("button", { name: "Mapping 1 service", exact: true }).click();
   await page.getByRole("checkbox", { name: /2D Mapping/ }).check();
   await page.getByLabel("Preferred resolution").selectOption("standard");
   await page.getByRole("button", { name: "Continue" }).click();
@@ -336,9 +352,8 @@ test("authorized portal supports project, delivery, and request workflows", asyn
   await expect(page.getByLabel("Service request title")).toHaveCount(0);
   await page.getByRole("button", { name: "Submit new request" }).click();
   await expect(page).toHaveURL(/\/portal\/requests\/new$/);
-  await openRequestWorkArea(page);
+  await openRequestWorkArea(page, "project:project-a");
   await page.getByRole("button", { name: "Continue" }).click();
-  await page.getByLabel("Project context").selectOption("project-a");
   await page.getByLabel("Service request title").fill("North Site spring imagery");
   await page.getByLabel("What do you need?").fill("Capture the latest grading progress.");
   await page.getByRole("button", { name: "Continue" }).click();
@@ -504,7 +519,7 @@ test("catalog refresh preserves the saved service version until the client expli
   };
   let catalogChanged = false;
   let selectedCurrent = false;
-  await page.route("**/api/client/service-catalog", route => route.fulfill({ json: { services: catalogChanged ? [currentService] : serviceCatalog } }));
+  await page.route("**/api/client/service-catalog/page", route => route.fulfill({ json: { services: catalogChanged ? [currentService] : serviceCatalog, nextCursor: null, complete: true, source: { generation: "catalog-test", sequence: catalogChanged ? 2 : 1 } } }));
   await page.route("**/api/client/service-request-drafts/draft-a", async route => {
     if (route.request().method() !== "PUT" || !catalogChanged) return route.fallback();
     const body = route.request().postDataJSON();
@@ -650,13 +665,12 @@ test("leaving a folder aborts a continuation and ignores its stale result", asyn
 
 test("catalog geometry contract is visible and blocks progress until a required work area is drawn", async ({ page }) => {
   await mockAuthorizedPortal(page);
-  await page.route("**/api/client/service-catalog", route => route.fulfill({
-    json: { services: [{ ...serviceCatalog[0], geometryRequirement: "required" }] },
+  await page.route("**/api/client/service-catalog/page", route => route.fulfill({
+    json: { services: [{ ...serviceCatalog[0], geometryRequirement: "required" }], nextCursor: null, complete: true, source: { generation: "catalog-test", sequence: 1 } },
   }));
   await page.goto("/portal/requests/new");
-  await expect(page.getByText("Mapping", { exact: true })).toBeVisible();
-  await expect(page.getByText("Work area required", { exact: true })).toBeVisible();
   await openRequestWorkArea(page);
+  await expect(page.getByText(/One or more selected services require a drawn work area/)).toBeVisible();
   await page.getByRole("button", { name: "Continue" }).click();
   await expect(page.getByText("Draw the required work area on the map before continuing.")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Scope and timing" })).toHaveCount(0);
@@ -868,6 +882,7 @@ test("client shell contains very long account text and reflows at a 200% zoom eq
 test("request v2 is fail-closed and preserves legacy creation when the server capability is off", async ({ page }) => {
   await mockAuthorizedPortal(page, null, requests, undefined, undefined, false);
   await page.goto("/portal/requests/new");
+  await startNewRequest(page);
   await expect(page.getByLabel("Service request title")).toBeVisible();
   await expect(page.getByRole("heading", { name: "What services do you need?" })).toHaveCount(0);
   await expect(page.getByRole("navigation", { name: "Service request progress" })).toHaveCount(0);
@@ -1070,7 +1085,7 @@ test("client Viewer sharing is opt-in, owner-scoped, and responsive at 390 and 3
       id: "share-one", modelId: "model-one", versionPolicy: "latest", modelVersionId: null, hasPassword: true,
       permissions: { view: true, measure: true, cameras: true, download: false }, label: "Engineer review",
       createdBy: "identity-one", createdAt: "2026-08-17T03:00:00.000Z", updatedAt: "2026-08-17T03:00:00.000Z",
-      expiresAt: "2026-08-24T03:00:00.000Z", revokedAt: null, revokedBy: null, revokeReason: null,
+      expiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString(), revokedAt: null, revokedBy: null, revokeReason: null,
       accessCount: 0, lastAccessedAt: null, shareClass: "client",
       sourceAuthorization: { type: "client_grant", id: "source-one", version: 1, subject: "subject-one", expiresAt: null },
     }] : []), {

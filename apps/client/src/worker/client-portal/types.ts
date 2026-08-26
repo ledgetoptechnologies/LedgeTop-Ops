@@ -147,6 +147,18 @@ export interface ClientServiceCatalogItem {
   questions: ClientServiceQuestion[];
 }
 
+export interface ClientServiceCatalogPage {
+  services: ClientServiceCatalogItem[];
+  nextCursor: string | null;
+  complete: boolean;
+  source: { generation: string; sequence: number };
+}
+
+export interface ClientServiceCatalogPageInput {
+  cursor?: string;
+  limit?: number;
+}
+
 export interface ClientServiceDraftSelectionInput {
   publicId: string;
   /** The exact catalog version the client reviewed for this selection. */
@@ -350,6 +362,7 @@ export interface ClientPortalRepository {
   updateServiceRequest(env: Env, session: ClientPortalSession, requestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequest | null>;
   createChangeRequest(env: Env, session: ClientPortalSession, parentRequestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;
   listServiceCatalog?(env: Env, session: ClientPortalSession): Promise<ClientServiceCatalogItem[]>;
+  listServiceCatalogPage?(env: Env, session: ClientPortalSession, input: ClientServiceCatalogPageInput): Promise<ClientServiceCatalogPage>;
   listServiceRequestDrafts?(env: Env, session: ClientPortalSession): Promise<ClientServiceRequestDraftSummary[]>;
   getServiceRequestDraft?(env: Env, session: ClientPortalSession, draftId: string): Promise<ClientServiceRequestDraft | null>;
   createServiceRequestDraft?(env: Env, session: ClientPortalSession, input: ClientServiceRequestDraftInput, mutationKey: string): Promise<ClientServiceDraftMutationResult | null>;

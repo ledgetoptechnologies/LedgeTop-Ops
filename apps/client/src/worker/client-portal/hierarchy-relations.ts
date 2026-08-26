@@ -21,7 +21,7 @@ export function portalHierarchyRelationsEnabled(env: Env): boolean {
  * inactive endpoint fails closed.
  */
 export async function resolvePortalRelationTargetScopes(
-  env: Env,
+  env: { DELIVERY_DB: Pick<D1Database, "prepare"> },
   workspace: RelationWorkspace,
   target: RelationTarget,
 ): Promise<Set<string> | null> {

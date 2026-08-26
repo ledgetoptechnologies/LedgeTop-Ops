@@ -71,6 +71,24 @@ interface IdentityDenialRow {
   scope_public_id: string | null;
 }
 
+function deniedByIdentityRows(rows: IdentityDenialRow[], workspaceId: string, scopes: ReadonlySet<string>): boolean {
+  return rows.length > 200 || rows.some(denial => denial.scope_type === "global" || (
+    denial.workspace_id === workspaceId && denial.scope_public_id !== null &&
+    scopes.has(`${denial.scope_type}:${denial.scope_public_id}`)
+  ));
+}
+
+function allowedByEntitlementRows(rows: EntitlementRow[], scopes: ReadonlySet<string>): boolean {
+  if (rows.length > 200) return false;
+  let allowed = false;
+  for (const entitlement of rows) {
+    if (!scopes.has(`${entitlement.scope_type}:${entitlement.scope_public_id}`)) continue;
+    if (entitlement.effect === "deny") return false;
+    allowed = true;
+  }
+  return allowed;
+}
+
 function isPreRelationContractDatabase(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /no such table:\s*(?:main\.)?portal_v2_directory_generation_contracts\b/i.test(message);
@@ -109,11 +127,7 @@ async function identityDeniedForScopes(
       AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
       AND (scope_type='global' OR workspace_id=?)
     ORDER BY id LIMIT 201`).bind(identityId, workspaceId).all<IdentityDenialRow>();
-  if (result.results.length > 200) return true;
-  return result.results.some(denial => denial.scope_type === "global" || (
-    denial.workspace_id === workspaceId && denial.scope_public_id !== null &&
-    scopes.has(`${denial.scope_type}:${denial.scope_public_id}`)
-  ));
+  return deniedByIdentityRows(result.results, workspaceId, scopes);
 }
 
 async function invitationAcceptanceScopes(
@@ -349,19 +363,23 @@ async function activeWorkspace(
     .first<WorkspaceRow>();
 }
 
-async function eligiblePortalShell(env: Env, identityId: string, workspaceId: string, requireBridge = false): Promise<boolean> {
-  try {
-    const bridge = requireBridge ? `JOIN portal_v2_identity_eligibility_legacy_bridges bridge
+function eligiblePortalShellQuery(requireBridge: boolean, workspaceReference = "?", identityReference = "?"): string {
+  const bridge = requireBridge ? `JOIN portal_v2_identity_eligibility_legacy_bridges bridge
       ON bridge.workspace_id=eligibility.workspace_id AND bridge.identity_id=eligibility.identity_id
       AND bridge.status='active' AND bridge.revoked_at IS NULL` : "";
-    return await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_identity_eligibility_bindings eligibility
+  return `SELECT 1 ok FROM portal_v2_identity_eligibility_bindings eligibility
       JOIN pa_portal_principals principal ON principal.workspace_id=eligibility.workspace_id
         AND principal.public_id=eligibility.principal_public_id AND principal.status='active'
         AND principal.source_version=eligibility.principal_source_version
         AND lower(principal.email_hint)=lower(eligibility.verified_email)
       JOIN portal_v2_identities identity ON identity.id=eligibility.identity_id AND identity.status='active'
         AND identity.revoked_at IS NULL AND lower(identity.verified_email)=lower(eligibility.verified_email)
-      ${bridge} WHERE eligibility.workspace_id=? AND eligibility.identity_id=? LIMIT 1`)
+      ${bridge} WHERE eligibility.workspace_id=${workspaceReference} AND eligibility.identity_id=${identityReference} LIMIT 1`;
+}
+
+async function eligiblePortalShell(env: Env, identityId: string, workspaceId: string, requireBridge = false): Promise<boolean> {
+  try {
+    return await portalDb(env).prepare(eligiblePortalShellQuery(requireBridge))
       .bind(workspaceId, identityId).first("ok") !== null;
   } catch (error) {
     if (/no such table:\s*(?:main\.)?portal_v2_identity_eligibility_(?:bindings|legacy_bridges)\b/i.test(error instanceof Error ? error.message : String(error))) return false;
@@ -571,34 +589,41 @@ async function activeRootExists(env: Env, workspace: WorkspaceRow): Promise<bool
   return row !== null;
 }
 
-async function targetScopes(
-  env: Env,
-  workspace: WorkspaceRow,
-  target: PortalWorkspaceTarget,
-): Promise<Set<string> | null> {
-  if (portalHierarchyRelationsEnabled(env)) {
-    return resolvePortalRelationTargetScopes(env, {
-      id: workspace.id,
-      rootType: workspace.root_type,
-      rootPublicId: workspace.pa_organization_public_id ?? workspace.pa_client_public_id!,
-    }, target);
-  }
+async function legacyTargetContractAvailable(database: Pick<D1Database, "prepare">, workspaceId: string): Promise<boolean> {
   // A schema-v3 generation must never be reinterpreted as the legacy
   // single-parent tree during a flag rollback. Older installations do not
   // have the additive contract table; only those pre-v3 databases may safely
   // fall through to legacy behavior.
   try {
-    const contract = await portalDb(env).prepare(`SELECT contract.schema_version
+    const contract = await database.prepare(`SELECT contract.schema_version
       FROM portal_v2_directory_checkpoints checkpoint
       JOIN portal_v2_directory_generation_contracts contract
         ON contract.generation_id=checkpoint.active_generation_id AND contract.workspace_id=checkpoint.workspace_id
-      WHERE checkpoint.workspace_id=?`).bind(workspace.id).first<number>("schema_version");
-    if (contract === 3) return null;
+      WHERE checkpoint.workspace_id=?`).bind(workspaceId).first<number>("schema_version");
+    if (contract === 3) return false;
   } catch (error) {
     // Only the explicit pre-0129 missing-table state is compatible. Permission,
     // availability, corruption, and all other lookup errors fail closed.
-    if (!isPreRelationContractDatabase(error)) return null;
+    if (!isPreRelationContractDatabase(error)) return false;
   }
+  return true;
+}
+
+async function targetScopes(
+  env: Env,
+  workspace: WorkspaceRow,
+  target: PortalWorkspaceTarget,
+  database: Pick<D1Database, "prepare"> = portalDb(env),
+  legacyContractVerified = false,
+): Promise<Set<string> | null> {
+  if (portalHierarchyRelationsEnabled(env)) {
+    return resolvePortalRelationTargetScopes({ DELIVERY_DB: database }, {
+      id: workspace.id,
+      rootType: workspace.root_type,
+      rootPublicId: workspace.pa_organization_public_id ?? workspace.pa_client_public_id!,
+    }, target);
+  }
+  if (!legacyContractVerified && !(await legacyTargetContractAvailable(database, workspace.id))) return null;
   const scopes = new Set<string>([["workspace", workspace.id].join(":")]);
   const rootId = workspace.pa_organization_public_id ?? workspace.pa_client_public_id;
   if (target.scopeType === "workspace") return target.publicId === workspace.id ? scopes : null;
@@ -606,7 +631,7 @@ async function targetScopes(
   let targetType = target.scopeType;
   let targetPublicId = target.publicId;
   if (target.scopeType === "folder") {
-    const binding = await portalDb(env).prepare(`
+    const binding = await database.prepare(`
       SELECT owner_scope_type,owner_public_id
       FROM portal_v2_folder_bindings
       WHERE id=? AND workspace_id=? AND status='active' AND revoked_at IS NULL`)
@@ -618,7 +643,7 @@ async function targetScopes(
     targetPublicId = binding.owner_public_id;
   }
 
-  const rows = await portalDb(env).prepare(`
+  const rows = await database.prepare(`
     WITH RECURSIVE lineage(entity_type,public_id,parent_public_id,depth) AS (
       SELECT entity.entity_type,entity.public_id,entity.parent_public_id,0
       FROM portal_v2_directory_checkpoints checkpoint
@@ -682,14 +707,191 @@ export async function authorizePortalWorkspaceCapability(
     .all<EntitlementRow>();
   // An unexpectedly unbounded grant set is a configuration error, not a reason
   // to guess which row should win.
-  if (result.results.length > 200) return false;
-  let allowed = false;
-  for (const entitlement of result.results) {
-    if (!scopes.has(`${entitlement.scope_type}:${entitlement.scope_public_id}`)) continue;
-    if (entitlement.effect === "deny") return false;
-    allowed = true;
+  return allowedByEntitlementRows(result.results, scopes);
+}
+
+export interface EffectiveWorkspaceRequestProof {
+  workspace: EffectivePortalWorkspaceContext;
+  local: {
+    role: "manager" | "member";
+    can_view_billing: number;
+    issuer: string;
+    subject: string;
+    project_allowed: number;
+    project_public_id: string | null;
+    bridge_priority: number;
+  };
+  rootAllowed: boolean;
+  projectAllowed: boolean;
+  /** Server-only selected-generation proof, not an authorization token. */
+  authorityProof: string;
+}
+
+/**
+ * Read-only, exact-workspace request proof. Unlike the login resolver, this
+ * never provisions or repairs eligibility. It shares the existing target,
+ * deny and entitlement evaluators, but loads common authority facts once.
+ * Callers must obtain a second fresh proof before returning readiness.
+ */
+export async function readEffectiveWorkspaceRequestProof(
+  env: Env,
+  principal: VerifiedClientPrincipal,
+  workspaceId: string,
+  localProjectId: string | null,
+): Promise<EffectiveWorkspaceRequestProof | null> {
+  if (!portalHierarchyV2Enabled(env) || !validPrincipalPart(principal.issuer) ||
+    !validPrincipalPart(principal.subject) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceId)) return null;
+  const database = env.DELIVERY_DB.withSession("first-primary");
+  let compatibilityTables: Set<string> | null = null;
+  const hasTable = (name: string) => compatibilityTables === null || compatibilityTables.has(name);
+  async function inspectOptionalTables() {
+    if (compatibilityTables !== null) return;
+    const tables = await database.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN (
+      'portal_v2_identity_eligibility_bindings','portal_v2_identity_eligibility_blocks',
+      'portal_v2_identity_eligibility_legacy_bridges','portal_v2_legacy_member_bridges'
+    )`).all<{ name: string }>();
+    compatibilityTables = new Set(tables.results.map(table => table.name));
   }
-  return allowed;
+  // These are the same identity/block, membership and selected complete-root
+  // predicates used by resolveGlobalIdentity/activeWorkspace/activeRootExists.
+  // Combining them avoids repeatedly resolving the same actor for each target.
+  const readState = () => database.prepare(`SELECT workspace.id,workspace.root_type,
+      workspace.pa_organization_public_id,workspace.pa_client_public_id,
+      workspace.display_name,workspace.legacy_account_id,portal_identity.id identity_id,
+      checkpoint.active_generation_id,generation.source_sequence,root.source_version root_source_version,
+      membership.source_version membership_source_version,
+      ${hasTable("portal_v2_identity_eligibility_bindings") && hasTable("portal_v2_identity_eligibility_legacy_bridges")
+        ? `EXISTS(${eligiblePortalShellQuery(true, "workspace.id", "portal_identity.id")})` : "0"} shell_eligible
+    FROM portal_v2_identities portal_identity
+    JOIN portal_v2_workspace_memberships membership ON membership.identity_id=portal_identity.id
+      AND membership.workspace_id=? AND membership.status='active' AND membership.revoked_at IS NULL
+      AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
+    JOIN portal_v2_workspaces workspace ON workspace.id=membership.workspace_id AND workspace.status='active'
+      AND workspace.legacy_account_id IS NOT NULL
+    JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+      AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
+    JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id
+      AND root.generation_id=checkpoint.active_generation_id AND root.entity_type=workspace.root_type
+      AND root.public_id=COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) AND root.active=1
+    WHERE portal_identity.issuer=? AND portal_identity.subject=? AND portal_identity.status='active' AND portal_identity.revoked_at IS NULL
+      ${hasTable("portal_v2_identity_eligibility_blocks") ? `AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_blocks block
+        WHERE block.status='active' AND datetime(block.valid_from)<=datetime('now')
+          AND (block.expires_at IS NULL OR datetime(block.expires_at)>datetime('now'))
+          AND ((block.match_type='issuer_subject' AND block.issuer=? AND block.subject=?)
+            OR (block.match_type='email' AND block.normalized_email=?)))` : ""}`)
+    .bind(workspaceId, principal.issuer, principal.subject,
+      ...(hasTable("portal_v2_identity_eligibility_blocks")
+        ? [principal.issuer, principal.subject, canonicalPrincipalEmail(principal.email) ?? ""] : []))
+    .first<WorkspaceRow & {
+      legacy_account_id: string; identity_id: string; active_generation_id: string;
+      source_sequence: number; root_source_version: string; membership_source_version: string | null;
+      shell_eligible: number;
+    }>();
+  let state: Awaited<ReturnType<typeof readState>>;
+  try {
+    state = await readState();
+  } catch (error) {
+    if (!/no such table:\s*(?:main\.)?portal_v2_identity_eligibility_(?:bindings|blocks|legacy_bridges)\b/i.test(
+      error instanceof Error ? error.message : String(error),
+    )) throw error;
+    await inspectOptionalTables();
+    state = await readState();
+  }
+  if (!state) return null;
+  const verifiedState = state;
+
+  // Preserve bridge priority, then independently intersect the active local
+  // account/link/member conditions required by the actual request INSERTs.
+  const readLocal = () => database.prepare(`WITH candidates(identity_id,priority) AS (
+      ${hasTable("portal_v2_legacy_member_bridges") ? `SELECT legacy_identity_id,0 FROM portal_v2_legacy_member_bridges
+        WHERE workspace_id=?1 AND identity_id=?2 AND legacy_account_id=?3 AND status='active' AND revoked_at IS NULL UNION ALL` : ""}
+      ${hasTable("portal_v2_identity_eligibility_legacy_bridges") ? `SELECT legacy_identity_id,1 FROM portal_v2_identity_eligibility_legacy_bridges
+        WHERE workspace_id=?1 AND identity_id=?2 AND legacy_account_id=?3 AND status='active' AND revoked_at IS NULL UNION ALL` : ""}
+      SELECT id,2 FROM client_identity_links
+        WHERE account_id=?3 AND issuer=?4 AND subject=?5 AND revoked_at IS NULL
+    ) SELECT identity.id legacy_identity_id,candidates.priority bridge_priority,
+      member.role,member.can_view_billing,identity.issuer,identity.subject,
+      project.project_alpha_project_id project_public_id,
+      CASE WHEN ?6 IS NULL THEN 1 ELSE EXISTS (
+        SELECT 1 FROM client_project_grants grant_record
+        WHERE grant_record.account_id=account.id AND grant_record.project_id=project.id
+          AND project.active=1 AND grant_record.revoked_at IS NULL AND grant_record.can_request_service=1
+          AND (member.role='manager' OR EXISTS(SELECT 1 FROM client_member_project_grants member_grant
+            WHERE member_grant.account_id=account.id AND member_grant.identity_id=identity.id
+              AND member_grant.project_id=project.id AND member_grant.revoked_at IS NULL))
+      ) END project_allowed
+    FROM candidates
+    JOIN client_accounts account ON account.id=?3 AND account.status='active'
+    JOIN client_identity_links identity ON identity.id=candidates.identity_id
+      AND identity.account_id=account.id AND identity.revoked_at IS NULL
+    JOIN client_account_members member ON member.account_id=account.id AND member.identity_id=identity.id
+      AND member.revoked_at IS NULL
+    LEFT JOIN projects project ON project.id=?6
+    ORDER BY candidates.priority,identity.id LIMIT 1`)
+    .bind(workspaceId, verifiedState.identity_id, verifiedState.legacy_account_id, principal.issuer, principal.subject, localProjectId)
+    .first<EffectiveWorkspaceRequestProof["local"] & { legacy_identity_id: string }>();
+  let local: Awaited<ReturnType<typeof readLocal>>;
+  try {
+    local = await readLocal();
+  } catch (error) {
+    if (!/no such table:\s*(?:main\.)?(?:portal_v2_legacy_member_bridges|portal_v2_identity_eligibility_legacy_bridges)\b/i.test(
+      error instanceof Error ? error.message : String(error),
+    )) throw error;
+    await inspectOptionalTables();
+    local = await readLocal();
+  }
+  if (!local) return null;
+
+  const rules = await database.prepare(`SELECT * FROM (
+      SELECT capability,effect,scope_type,scope_public_id FROM portal_v2_entitlements
+      WHERE workspace_id=?1 AND identity_id=?2 AND capability='workspace.view'
+        AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
+        AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+      ORDER BY entitlement_version DESC,id LIMIT 201
+    ) UNION ALL SELECT * FROM (
+      SELECT capability,effect,scope_type,scope_public_id FROM portal_v2_entitlements
+      WHERE workspace_id=?1 AND identity_id=?2 AND capability='request.create'
+        AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
+        AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+      ORDER BY entitlement_version DESC,id LIMIT 201
+    )`).bind(workspaceId, state.identity_id)
+    .all<EntitlementRow & { capability: "workspace.view" | "request.create" }>();
+  const denials = portalIdentityDenylistEnabled(env) ? (await database.prepare(`
+    SELECT workspace_id,scope_type,scope_public_id FROM portal_v2_identity_denials
+    WHERE identity_id=? AND status='active' AND revoked_at IS NULL
+      AND datetime(valid_from)<=datetime('now') AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+      AND (scope_type='global' OR workspace_id=?) ORDER BY id LIMIT 201`)
+    .bind(state.identity_id, workspaceId).all<IdentityDenialRow>()).results : [];
+  // Global denial always prevents resolving the identity, including when an
+  // eligibility shell would otherwise bypass workspace.view permission.
+  if (denials.length > 200 || denials.some(denial => denial.scope_type === "global")) return null;
+  const contractAvailable = portalHierarchyRelationsEnabled(env) || await legacyTargetContractAvailable(database, workspaceId);
+  const rootScopes = contractAvailable ? await targetScopes(
+    env, state, { scopeType: "workspace", publicId: workspaceId }, database, true,
+  ) : null;
+  const allows = (capability: "workspace.view" | "request.create", scopes: Set<string> | null): boolean =>
+    scopes !== null && !deniedByIdentityRows(denials, workspaceId, scopes) &&
+      allowedByEntitlementRows(rules.results.filter(rule => rule.capability === capability), scopes);
+  if (state.shell_eligible !== 1 && !allows("workspace.view", rootScopes)) return null;
+  const projectScopes = contractAvailable && localProjectId && local.project_allowed === 1 && local.project_public_id
+    ? await targetScopes(env, state, { scopeType: "project", publicId: local.project_public_id }, database, true)
+    : null;
+  return {
+    workspace: {
+      workspaceId, identityId: state.identity_id, rootType: state.root_type,
+      rootPublicId: state.pa_organization_public_id ?? state.pa_client_public_id!,
+      legacyAccountId: state.legacy_account_id, legacyIdentityId: local.legacy_identity_id,
+      displayName: state.display_name, role: local.role, canViewBilling: local.can_view_billing === 1,
+    },
+    local,
+    rootAllowed: allows("request.create", rootScopes),
+    projectAllowed: allows("request.create", projectScopes),
+    authorityProof: JSON.stringify([
+      state.active_generation_id, state.source_sequence, state.root_source_version, state.membership_source_version,
+      rules.results, denials, rootScopes && [...rootScopes].sort(), projectScopes && [...projectScopes].sort(),
+    ]),
+  };
 }
 
 export async function listPortalWorkspaces(

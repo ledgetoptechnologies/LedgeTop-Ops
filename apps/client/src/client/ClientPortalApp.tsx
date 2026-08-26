@@ -29,7 +29,7 @@ import {
   loadPortalPricingHint,
   listPortalRequestAttachments,
   loadPortalRequestAttachment,
-  loadPortalServiceCatalog,
+  loadPortalServiceCatalogPage,
   loadPortalServiceDraft,
   loadPortalServiceDrafts,
   loadPortalWorkspaceAccess,
@@ -94,6 +94,9 @@ import {
 } from "./portal-route";
 import { MapAreaSelector } from "./MapAreaSelector";
 import { ImageLocationMap } from "./ImageLocationMap";
+import { ServiceLibrary } from "./ServiceLibrary";
+import { canBeginRequest, RequestAvailabilityMessage, useRequestAvailability, type RequestAvailability } from "./RequestAvailability";
+import { RequestScopeBoundary } from "./RequestScopeBoundary";
 
 const PORTAL_FILE_RENDER_WINDOW = 450;
 const PORTAL_FILE_RENDER_STEP = 150;
@@ -939,6 +942,7 @@ function NewServiceRequestWizard({
   mapboxPublicToken,
   attachmentsEnabled = false,
   initialDraftId,
+  fixedScope = false,
 }: {
   projects: PortalProject[];
   projectId?: string;
@@ -947,13 +951,20 @@ function NewServiceRequestWizard({
   mapboxPublicToken: string | null;
   attachmentsEnabled?: boolean;
   initialDraftId?: string | null;
+  fixedScope?: boolean;
 }) {
   const eligibleProjects = projects.filter(project => project.canRequestService);
   const [step, setStepState] = useState<RequestStep>(requestStepFromLocation);
   const [catalog, setCatalog] = useState<PortalServiceCatalogItem[]>([]);
   const [catalogState, setCatalogState] = useState<"loading" | "ready" | "error">("loading");
+  const [catalogCursor, setCatalogCursor] = useState<string | null>(null);
+  const [catalogComplete, setCatalogComplete] = useState(false);
+  const [catalogLegacy, setCatalogLegacy] = useState(false);
+  const [catalogLoadingMore, setCatalogLoadingMore] = useState(false);
+  const [catalogPageError, setCatalogPageError] = useState("");
   const [selectedServices, setSelectedServices] = useState<string[]>([]);
   const [selectedServiceVersions, setSelectedServiceVersions] = useState<Record<string, string>>({});
+  const [selectedSnapshots, setSelectedSnapshots] = useState<Record<string, PortalServiceCatalogItem>>({});
   const [answers, setAnswers] = useState<Record<string, Record<string, unknown>>>({});
   const [projectId, setProjectId] = useState(fixedProjectId ?? "");
   const [title, setTitle] = useState("");
@@ -978,34 +989,65 @@ function NewServiceRequestWizard({
   const [loadingDraft, setLoadingDraft] = useState(Boolean(initialDraftId));
   const [draftLoadFailed, setDraftLoadFailed] = useState(false);
   const mounted = useRef(true);
+  const wizardLifetime = useRef(0);
   const draftRef = useRef<PortalServiceDraft | null>(null);
   const saveChain = useRef<Promise<void>>(Promise.resolve());
   const lastSaved = useRef("");
   const createKey = useRef(crypto.randomUUID());
   const pricingHintController = useRef<AbortController | null>(null);
   const pricingBasisRef = useRef("");
+  const catalogController = useRef<AbortController | null>(null);
+  const catalogSequence = useRef(0);
+  const catalogSource = useRef<{ generation: string; sequence: number } | null>(null);
 
-  const reloadCatalog = () => {
-    setCatalogState("loading");
-    loadPortalServiceCatalog().then(items => {
-      if (!mounted.current) return;
-      const selectedSnapshot = draftRef.current?.services ?? [];
-      const present = new Set(items.map(item => item.publicId));
-      setCatalog([...items, ...selectedSnapshot.filter(item => !present.has(item.publicId))]);
+  const loadCatalogPage = (cursor: string | null = null) => {
+    if (cursor && catalogController.current) return;
+    catalogController.current?.abort();
+    const controller = new AbortController();
+    catalogController.current = controller;
+    const sequence = ++catalogSequence.current;
+    if (cursor) setCatalogLoadingMore(true);
+    else { setCatalogState("loading"); setCatalog([]); setCatalogCursor(null); setCatalogComplete(false); setCatalogLegacy(false); catalogSource.current = null; }
+    setCatalogPageError("");
+    loadPortalServiceCatalogPage(cursor, controller.signal).then(result => {
+      if (!mounted.current || controller.signal.aborted || sequence !== catalogSequence.current) return;
+      if (cursor && (!result.source || !catalogSource.current || result.source.generation !== catalogSource.current.generation || result.source.sequence !== catalogSource.current.sequence)) {
+        setCatalog([]); setCatalogCursor(null); setCatalogComplete(false); setCatalogState("error");
+        setCatalogPageError("The service library changed while more services were loading. Refresh the library; your selected services and answers are preserved.");
+        return;
+      }
+      // Published choices and saved snapshots are different sources of truth.
+      setCatalog(current => [...new Map((cursor ? [...current, ...result.services] : result.services).map(item => [item.publicId, item])).values()]);
+      catalogSource.current = result.source;
+      setCatalogLegacy(result.legacy === true);
+      setCatalogCursor(result.nextCursor); setCatalogComplete(result.complete);
       setCatalogState("ready");
-    }).catch(() => {
-      if (mounted.current) setCatalogState("error");
+    }).catch(caught => {
+      if (!mounted.current || controller.signal.aborted || sequence !== catalogSequence.current) return;
+      if (cursor && ![401, 403, 409].includes((caught as RequestError).status ?? 0)) {
+        setCatalogPageError("More services could not be loaded. Your current selections and loaded categories are unchanged.");
+      } else {
+        setCatalog([]); setCatalogCursor(null); setCatalogComplete(false); setCatalogState("error");
+        if ((caught as RequestError).status === 409) setCatalogPageError("The service library changed. Refresh it to continue; your selected services and answers are preserved.");
+      }
+    }).finally(() => {
+      if (sequence === catalogSequence.current && !controller.signal.aborted) { catalogController.current = null; setCatalogLoadingMore(false); }
     });
   };
+  const reloadCatalog = () => loadCatalogPage();
 
   useEffect(() => {
     mounted.current = true;
+    wizardLifetime.current += 1;
     reloadCatalog();
     const onPopState = () => setStepState(requestStepFromLocation());
     window.addEventListener("popstate", onPopState);
     return () => {
       mounted.current = false;
+      wizardLifetime.current += 1;
       pricingHintController.current?.abort();
+      catalogController.current?.abort();
+      catalogSequence.current += 1;
       window.removeEventListener("popstate", onPopState);
     };
   }, []);
@@ -1058,11 +1100,8 @@ function NewServiceRequestWizard({
       setAreaGeoJson(saved.areaGeoJson);
       setSelectedServices(saved.services.map(service => service.publicId));
       setSelectedServiceVersions(Object.fromEntries(saved.services.map(service => [service.publicId, service.sourceVersion])));
+      setSelectedSnapshots(Object.fromEntries(saved.services.map(service => [service.publicId, service])));
       setAnswers(Object.fromEntries(saved.services.map(service => [service.publicId, service.answers])));
-      setCatalog(current => {
-        const present = new Set(current.map(item => item.publicId));
-        return [...current, ...saved.services.filter(item => !present.has(item.publicId))];
-      });
       setAttachments(savedAttachments.filter(item => item.status !== "aborted").map(item => ({
         key: item.id,
         id: item.id,
@@ -1138,8 +1177,10 @@ function NewServiceRequestWizard({
   pricingBasisRef.current = pricingBasisJson;
 
   const persist = (snapshot: PortalServiceDraftInput, serialized: string): Promise<void> => {
+    const lifetime = wizardLifetime.current;
+    const currentLifetime = () => mounted.current && wizardLifetime.current === lifetime;
     saveChain.current = saveChain.current.catch(() => undefined).then(async () => {
-      if (serialized === lastSaved.current) return;
+      if (!currentLifetime() || serialized === lastSaved.current) return;
       if (mounted.current) setSaveState("saving");
       try {
         const savedPricingBasis = JSON.stringify({
@@ -1151,6 +1192,7 @@ function NewServiceRequestWizard({
         const saved = current
           ? await savePortalServiceDraft(current.id, current.version, snapshot, crypto.randomUUID())
           : await createPortalServiceDraft(snapshot, createKey.current);
+        if (!currentLifetime()) return;
         draftRef.current = saved;
         if (!current) {
           const url = new URL(window.location.href);
@@ -1158,7 +1200,7 @@ function NewServiceRequestWizard({
           window.history.replaceState({}, "", `${url.pathname}${url.search}${url.hash}`);
         }
         lastSaved.current = serialized;
-        if (mounted.current) {
+        if (currentLifetime()) {
           setDraft(saved);
           setSaveState("saved");
           setDirty(false);
@@ -1175,7 +1217,7 @@ function NewServiceRequestWizard({
         }
       } catch (caught) {
         const error = caught as RequestError;
-        if (mounted.current) {
+        if (currentLifetime()) {
           const catalogChanged = error.status === 409 && error.body?.code === "catalog_changed";
           setSaveState(error.status === 409 && !catalogChanged ? "conflict" : "error");
           if (catalogChanged) setDirty(false);
@@ -1196,8 +1238,11 @@ function NewServiceRequestWizard({
     setAttachments(current => current.map(item => item.key === key ? { ...item, ...update } : item));
 
   async function pollAttachment(key: string, draftId: string, attachmentId: string) {
-    for (let attempt = 0; attempt < 120 && mounted.current; attempt += 1) {
+    const lifetime = wizardLifetime.current;
+    const currentLifetime = () => mounted.current && wizardLifetime.current === lifetime;
+    for (let attempt = 0; attempt < 120 && currentLifetime(); attempt += 1) {
       const current = await loadPortalRequestAttachment(draftId, attachmentId);
+      if (!currentLifetime()) return;
       updateAttachment(key, {
         status: current.status,
         error: current.status === "rejected"
@@ -1212,11 +1257,15 @@ function NewServiceRequestWizard({
   }
 
   async function uploadAttachment(item: RequestAttachmentUi) {
+    const lifetime = wizardLifetime.current;
+    const currentLifetime = () => mounted.current && wizardLifetime.current === lifetime;
+    if (!currentLifetime()) return;
     updateAttachment(item.key, { status: "uploading", error: undefined });
     try {
       const file = item.file;
       if (!file) throw new Error("Choose the file again to retry this upload.");
       await persist(input, inputJson);
+      if (!currentLifetime()) return;
       const currentDraft = draftRef.current;
       if (!currentDraft) throw new Error("Save the request draft before adding files.");
       const contentType = normalizedAttachmentType(file);
@@ -1224,6 +1273,7 @@ function NewServiceRequestWizard({
       const initialized = await initializePortalRequestAttachment(currentDraft.id, {
         clientUploadId: item.clientUploadId, name: item.name, contentType, size: item.size,
       });
+      if (!currentLifetime()) return;
       const completed = new Map(initialized.completedParts.map(part => [part.partNumber, part]));
       const count = Math.ceil(item.size / initialized.partSize);
       updateAttachment(item.key, { id: initialized.attachmentId, totalParts: count, completedParts: completed.size,
@@ -1233,22 +1283,27 @@ function NewServiceRequestWizard({
         return;
       }
       for (let partNumber = 1; partNumber <= count; partNumber += 1) {
+        if (!currentLifetime()) return;
         if (completed.has(partNumber)) continue;
         const start = (partNumber - 1) * initialized.partSize;
         const blob = file.slice(start, Math.min(item.size, start + initialized.partSize), contentType);
         const priorBytes = [...completed.values()].reduce((sum, part) => sum + part.size, 0);
         const ticket = await requestPortalAttachmentPartTicket(currentDraft.id, initialized.attachmentId, partNumber);
+        if (!currentLifetime()) return;
         if (ticket.contentLength !== blob.size || ticket.contentType !== contentType) throw new Error("The upload ticket does not match this file part.");
-        const etag = await uploadPortalAttachmentPart(ticket, blob, loaded => updateAttachment(item.key, { uploadedBytes: priorBytes + loaded }));
+        const etag = await uploadPortalAttachmentPart(ticket, blob, loaded => { if (currentLifetime()) updateAttachment(item.key, { uploadedBytes: priorBytes + loaded }); });
+        if (!currentLifetime()) return;
         const checkpoint = await checkpointPortalAttachmentPart(currentDraft.id, initialized.attachmentId, { partNumber, etag, size: blob.size });
+        if (!currentLifetime()) return;
         completed.set(partNumber, checkpoint);
         updateAttachment(item.key, { completedParts: completed.size, uploadedBytes: priorBytes + blob.size });
       }
       const result = await completePortalRequestAttachment(currentDraft.id, initialized.attachmentId, [...completed.values()]);
+      if (!currentLifetime()) return;
       updateAttachment(item.key, { status: result.status, uploadedBytes: item.size });
       await pollAttachment(item.key, currentDraft.id, initialized.attachmentId);
     } catch (caught) {
-      updateAttachment(item.key, { status: "error", error: (caught as Error).message || "Upload failed." });
+      if (currentLifetime()) updateAttachment(item.key, { status: "error", error: (caught as Error).message || "Upload failed." });
     }
   }
 
@@ -1270,11 +1325,15 @@ function NewServiceRequestWizard({
   }
 
   async function removeAttachment(item: RequestAttachmentUi) {
+    const lifetime = wizardLifetime.current;
+    const currentLifetime = () => mounted.current && wizardLifetime.current === lifetime;
+    if (!currentLifetime()) return;
     try {
       const currentDraft = draftRef.current;
       if (currentDraft && item.id && item.status !== "aborted") await removePortalRequestAttachment(currentDraft.id, item.id);
+      if (!currentLifetime()) return;
       setAttachments(current => current.filter(candidate => candidate.key !== item.key));
-    } catch (caught) { updateAttachment(item.key, { error: (caught as Error).message || "The file could not be removed." }); }
+    } catch (caught) { if (currentLifetime()) updateAttachment(item.key, { error: (caught as Error).message || "The file could not be removed." }); }
   }
 
   useEffect(() => {
@@ -1292,19 +1351,20 @@ function NewServiceRequestWizard({
   };
   const selectedCatalog = selectedServices.map(id => {
     const version = selectedServiceVersions[id];
-    return catalog.find(service => service.publicId === id && (!version || service.sourceVersion === version))
+    return (selectedSnapshots[id]?.sourceVersion === version ? selectedSnapshots[id] : undefined)
+      ?? catalog.find(service => service.publicId === id && (!version || service.sourceVersion === version))
       ?? draftRef.current?.services.find(service => service.publicId === id && (!version || service.sourceVersion === version));
   }).filter((service): service is PortalServiceCatalogItem => Boolean(service));
-  const displayCatalog = catalog.map(current => {
-    const version = selectedServiceVersions[current.publicId];
-    if (!version || version === current.sourceVersion) return current;
-    return draftRef.current?.services.find(service => service.publicId === current.publicId && service.sourceVersion === version) ?? current;
-  });
-  for (const selected of selectedCatalog) {
-    if (!displayCatalog.some(service => service.publicId === selected.publicId)) displayCatalog.push(selected);
-  }
-  const toggleService = (service: PortalServiceCatalogItem, selected: boolean) => changePricingBasis(() => {
+  const toggleService = (service: PortalServiceCatalogItem, selected: boolean) => {
+    if (selected && (selectedServices.includes(service.publicId) || selectedServices.length >= 10 || catalogState !== "ready")) return;
+    changePricingBasis(() => {
     setSelectedServices(current => selected ? [...current, service.publicId] : current.filter(id => id !== service.publicId));
+    setSelectedSnapshots(current => {
+      const next = { ...current };
+      if (selected) next[service.publicId] = service;
+      else delete next[service.publicId];
+      return next;
+    });
     setSelectedServiceVersions(current => {
       const next = { ...current };
       if (selected) next[service.publicId] = service.sourceVersion;
@@ -1316,15 +1376,19 @@ function NewServiceRequestWizard({
       delete next[service.publicId];
       return next;
     });
-  });
+    });
+  };
   const useCurrentServiceVersion = (service: PortalServiceCatalogItem) => {
     changePricingBasis(() => {
       setSelectedServiceVersions(current => ({ ...current, [service.publicId]: service.sourceVersion }));
+      setSelectedSnapshots(current => ({ ...current, [service.publicId]: service }));
       setAnswers(current => ({ ...current, [service.publicId]: {} }));
     });
     setMessage("The current service version is selected. Review and answer its questions before continuing.");
   };
-  const servicesComplete = selectedCatalog.length > 0 && selectedCatalog.every(service => service.questions.every(question => questionIsAnswered(question, answers[service.publicId]?.[question.id])));
+  const serviceVersionsCurrent = catalogState === "ready" && selectedCatalog.length === selectedServices.length
+    && selectedCatalog.every(service => catalog.some(current => current.publicId === service.publicId && current.sourceVersion === service.sourceVersion));
+  const servicesComplete = serviceVersionsCurrent && selectedCatalog.length > 0 && selectedCatalog.every(service => service.questions.every(question => questionIsAnswered(question, answers[service.publicId]?.[question.id])));
   const geometryRequired = selectedCatalog.some(service => service.geometryRequirement === "required");
   const geometryComplete = !geometryRequired || areaGeoJson !== null;
 
@@ -1337,7 +1401,7 @@ function NewServiceRequestWizard({
   }
 
   async function next() {
-    if (step === "services" && !servicesComplete) { setMessage("Select at least one service and answer its required questions."); return; }
+    if (step === "services" && !servicesComplete) { setMessage(!serviceVersionsCurrent && selectedServices.length ? "Review the current service library and resolve every changed or unavailable selection before continuing." : "Select at least one service and answer its required questions."); return; }
     if (step === "location" && !geometryComplete) { setMessage("Draw the required work area on the map before continuing."); return; }
     if (step === "details" && (!title.trim() || !details.trim())) { setMessage("Add a request title and description before continuing."); return; }
     if (step === "contact" && siteContactEmail && !/^\S+@\S+\.\S+$/.test(siteContactEmail)) { setMessage("Enter a valid on-site contact email or leave it blank."); return; }
@@ -1355,18 +1419,24 @@ function NewServiceRequestWizard({
       if (rejectedAttachments) setMessage("Remove every rejected attachment and upload a safe replacement before submitting.");
       else if (expiredAttachments) setMessage("Remove every expired attachment and upload it again before submitting.");
       else if (pendingAttachments) setMessage("Wait for every attachment to finish its security scan before submitting.");
+      else if (!servicesComplete) { setMessage("Review your selected services and their current questions before submitting."); goTo("services"); }
       else if (!geometryComplete) setMessage("Return to Work area and draw the area required by the selected service.");
       return;
     }
     setSubmitting(true);
     setMessage("");
+    const lifetime = wizardLifetime.current;
+    const currentLifetime = () => mounted.current && wizardLifetime.current === lifetime;
     try {
       await persist(input, inputJson);
+      if (!currentLifetime()) return;
       const current = draftRef.current;
       if (!current) throw new Error("Draft was not saved");
       const request = await submitPortalServiceDraft(current.id, current.version, crypto.randomUUID());
+      if (!currentLifetime()) return;
       onSaved(request);
     } catch (caught) {
+      if (!currentLifetime()) return;
       const error = caught as RequestError;
       const code = error.body?.code;
       if (error.status === 422 && code === "catalog_changed") { reloadCatalog(); goTo("services"); }
@@ -1374,7 +1444,7 @@ function NewServiceRequestWizard({
       else if (error.status === 422 && code === "geometry_required") goTo("location");
       else if (error.status === 422 && ["attachments_pending", "attachments_rejected", "attachments_expired"].includes(code ?? "")) goTo("contact");
       setMessage(error.message || "The request could not be submitted.");
-    } finally { setSubmitting(false); }
+    } finally { if (currentLifetime()) setSubmitting(false); }
   }
 
   if (loadingDraft) return <div className="portal-request-draft-loading" aria-label="Loading saved request"><Loading /></div>;
@@ -1384,13 +1454,15 @@ function NewServiceRequestWizard({
     <nav className="portal-request-stepper" aria-label="Service request progress"><ol>{REQUEST_STEPS.map((item, index) => <li key={item} className={item === step ? "is-current" : REQUEST_STEPS.indexOf(step) > index ? "is-complete" : ""}><button type="button" onClick={() => index <= REQUEST_STEPS.indexOf(step) && goTo(item)} aria-current={item === step ? "step" : undefined}><span>{index + 1}</span>{item === "services" ? "Services" : item === "location" ? "Work area" : item === "details" ? "Details" : item === "contact" ? "Contact" : "Review"}</button></li>)}</ol></nav>
     <div className="portal-autosave-status" role="status" aria-live="polite"><span className={`save-dot ${saveState}`} aria-hidden="true" />{saveState === "saving" ? "Saving draft..." : saveState === "saved" ? "Draft saved" : saveState === "error" ? "Draft not saved" : saveState === "conflict" ? "Draft conflict" : dirty ? "Changes waiting to save" : "Your progress will save automatically"}</div>
     {step === "services" && <section className="portal-wizard-panel" aria-labelledby="request-services-title"><header><span>Step 1 of 5</span><h3 id="request-services-title">What services do you need?</h3><p>Select between 1 and 10 services from the current Project Alpha service library.</p></header>
-      {catalogState === "loading" && <div aria-label="Loading service library"><Loading /></div>}
-      {catalogState === "error" && <div className="portal-inline-error" role="alert"><p>The service library could not be loaded. No request data was lost.</p><button type="button" className="button-ghost" onClick={reloadCatalog}>Retry</button></div>}
-      {catalogState === "ready" && catalog.length === 0 && <EmptyState title="No services available" detail="LTDS has not published any client-request services yet." />}
-      <div className="portal-service-catalog">{displayCatalog.map(service => { const selected = selectedServices.includes(service.publicId); const currentService = catalog.find(item => item.publicId === service.publicId); const changed = selected && Boolean(currentService) && selectedServiceVersions[service.publicId] !== currentService?.sourceVersion; return <article key={service.publicId} className={`${selected ? "is-selected" : ""}${changed ? " is-stale" : ""}`}><label className="portal-service-select"><input type="checkbox" checked={selected} disabled={!selected && selectedServices.length >= 10} onChange={(event) => toggleService(service, event.target.checked)} /><span><span className="portal-service-meta"><small>{service.category}</small><small>{service.geometryRequirement === "required" ? "Work area required" : service.geometryRequirement === "none" ? "No work area needed" : "Work area optional"}</small></span><strong>{service.name}</strong>{service.summary && <small>{service.summary}</small>}</span></label>{changed && currentService && <div className="portal-service-version-warning" role="alert"><strong>This service changed in Project Alpha.</strong><p>Your saved answers still use the prior version. Nothing was replaced automatically.</p><button type="button" className="button-ghost button-small" onClick={() => useCurrentServiceVersion(currentService)}>Use current service version</button></div>}{selected && service.questions.length > 0 && <div className="portal-service-questions">{service.questions.map(question => <ServiceQuestionField key={question.id} serviceId={service.publicId} question={question} value={answers[service.publicId]?.[question.id]} onChange={value => changePricingBasis(() => setAnswers(current => ({ ...current, [service.publicId]: { ...(current[service.publicId] ?? {}), [question.id]: value } })))} />)}</div>}</article>; })}</div>
+      <ServiceLibrary catalog={catalog} selected={selectedCatalog} state={catalogState} onRetry={reloadCatalog}
+        complete={catalogComplete} legacy={catalogLegacy} hasMore={catalogCursor !== null} loadingMore={catalogLoadingMore} pageError={catalogPageError} onLoadMore={() => { if (catalogCursor) loadCatalogPage(catalogCursor); }}
+        onSelect={service => toggleService(service, true)} onRemove={service => toggleService(service, false)} onUseCurrent={useCurrentServiceVersion}
+        renderQuestions={service => service.questions.length > 0 && <div className="portal-service-questions">{service.questions.map(question =>
+          <ServiceQuestionField key={question.id} serviceId={service.publicId} question={question} value={answers[service.publicId]?.[question.id]}
+            onChange={value => changePricingBasis(() => setAnswers(current => ({ ...current, [service.publicId]: { ...(current[service.publicId] ?? {}), [question.id]: value } })))} />)}</div>} />
     </section>}
     {step === "location" && <section className="portal-wizard-panel" aria-labelledby="request-location-title"><header><span>Step 2 of 5</span><h3 id="request-location-title">Show us the work area</h3><p>{geometryRequired ? "One or more selected services require a drawn work area. Search, add points, or draw the area directly on the secure map." : "The selected services do not require a work area, but you may add one when it helps explain the scope."} Clients cannot upload or import KML files.</p></header><div className="portal-request-map portal-request-map-step"><MapAreaSelector value={areaGeoJson} onChange={value => changePricingBasis(() => setAreaGeoJson(value))} token={mapboxPublicToken} points={points} onPoints={value => changePricingBasis(() => setPoints(value))} locationLabel={location} onLocationLabel={value => change(() => setLocation(value))} /></div>{draft?.areaAcres != null && <div className="portal-coverage-card"><span>Estimated coverage</span><strong>{draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres</strong><small>Calculated by LTDS from the area drawn above.</small></div>}</section>}
-    {step === "details" && <section className="portal-wizard-panel" aria-labelledby="request-details-title"><header><span>Step 3 of 5</span><h3 id="request-details-title">Scope and timing</h3><p>Describe the outcome you need. LTDS will confirm feasibility and the final scope.</p></header>{!fixedProjectId && <label>Project context<select value={projectId} onChange={event => changePricingBasis(() => setProjectId(event.target.value))}><option value="">New or one-off service</option>{eligibleProjects.map(project => <option key={project.id} value={project.id}>{project.projectName}</option>)}</select></label>}<label>Service request title<input value={title} onChange={event => change(() => setTitle(event.target.value))} maxLength={160} required /></label><label>What do you need?<textarea value={details} onChange={event => change(() => setDetails(event.target.value))} maxLength={5000} rows={6} required /></label><div className="portal-form-grid"><label>Location <span>(optional)</span><input value={location} onChange={event => change(() => setLocation(event.target.value))} maxLength={240} /></label><label>Preferred start <span>(optional)</span><input type="datetime-local" value={preferredStartAt} onChange={event => change(() => setPreferredStartAt(event.target.value))} /></label><label>Desired completion <span>(optional)</span><input type="datetime-local" value={desiredCompletionAt} onChange={event => change(() => setDesiredCompletionAt(event.target.value))} /></label></div><label>Requested deliverables <span>(optional)</span><textarea value={deliverables} onChange={event => change(() => setDeliverables(event.target.value))} maxLength={2000} rows={4} /></label></section>}
+    {step === "details" && <section className="portal-wizard-panel" aria-labelledby="request-details-title"><header><span>Step 3 of 5</span><h3 id="request-details-title">Scope and timing</h3><p>Describe the outcome you need. LTDS will confirm feasibility and the final scope.</p></header>{!fixedProjectId && !fixedScope && <label>Project context<select value={projectId} onChange={event => changePricingBasis(() => setProjectId(event.target.value))}><option value="">New or one-off service</option>{eligibleProjects.map(project => <option key={project.id} value={project.id}>{project.projectName}</option>)}</select></label>}<label>Service request title<input value={title} onChange={event => change(() => setTitle(event.target.value))} maxLength={160} required /></label><label>What do you need?<textarea value={details} onChange={event => change(() => setDetails(event.target.value))} maxLength={5000} rows={6} required /></label><div className="portal-form-grid"><label>Location <span>(optional)</span><input value={location} onChange={event => change(() => setLocation(event.target.value))} maxLength={240} /></label><label>Preferred start <span>(optional)</span><input type="datetime-local" value={preferredStartAt} onChange={event => change(() => setPreferredStartAt(event.target.value))} /></label><label>Desired completion <span>(optional)</span><input type="datetime-local" value={desiredCompletionAt} onChange={event => change(() => setDesiredCompletionAt(event.target.value))} /></label></div><label>Requested deliverables <span>(optional)</span><textarea value={deliverables} onChange={event => change(() => setDeliverables(event.target.value))} maxLength={2000} rows={4} /></label></section>}
     {step === "contact" && <section className="portal-wizard-panel" aria-labelledby="request-contact-title"><header><span>Step 4 of 5</span><h3 id="request-contact-title">Contact and supporting files</h3><p>Add an optional on-site contact and any authorized reference photos or PDFs.</p></header><fieldset className="portal-contact-fields"><legend>Contact details <span>(optional)</span></legend><label>Name<input value={siteContactName} onChange={event => change(() => setSiteContactName(event.target.value))} maxLength={160} /></label><label>Email<input type="email" value={siteContactEmail} onChange={event => change(() => setSiteContactEmail(event.target.value))} maxLength={320} /></label><label>Phone<input type="tel" value={siteContactPhone} onChange={event => change(() => setSiteContactPhone(event.target.value))} maxLength={64} /></label></fieldset>{attachmentsEnabled ? <div className="portal-attachment-uploader"><header><div><strong>Supporting files</strong><p>Up to 10 JPEG, PNG, WebP, HEIC, HEIF, or PDF files; 25 MiB each and 100 MiB total. Archives are not allowed.</p></div><label className="button-ghost portal-file-picker">Add files<input type="file" multiple accept=".jpg,.jpeg,.png,.webp,.heic,.heif,.pdf,image/jpeg,image/png,image/webp,image/heic,image/heif,application/pdf" onChange={event => { addAttachments(event.target.files); event.currentTarget.value = ""; }} /></label></header>{attachmentMessage && <p role="alert" className="portal-message error">{attachmentMessage}</p>}<div className="portal-attachment-list" aria-live="polite">{attachments.map(item => <article key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)} / {attachmentStatusLabel(item.status)}</span></div><progress max={item.size} value={Math.min(item.uploadedBytes, item.size)} aria-label={`${item.name} upload progress`} /><small>{item.totalParts ? `${item.completedParts} of ${item.totalParts} parts` : "Preparing upload"}</small>{item.error && <p role="alert">{item.error}</p>}<div>{item.status === "error" && <button type="button" className="button-ghost button-small" onClick={() => void uploadAttachment(item)}>Retry</button>}{item.status !== "aborted" && <button type="button" className="button-ghost button-small" onClick={() => void removeAttachment(item)}>Remove</button>}</div></article>)}</div></div> : <div className="portal-attachments-coming"><strong>Supporting files are coming soon</strong><p>Secure request attachments are not enabled for this portal. Do not place sensitive file links in the description.</p></div>}</section>}
     {step === "review" && <section className="portal-wizard-panel portal-review" aria-labelledby="request-review-title"><header><span>Step 5 of 5</span><h3 id="request-review-title">Review your request</h3><p>Double-check every section below. Nothing is submitted until you select Submit request.</p></header><div className="portal-review-grid"><article><header><h4>Services</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("services")}>Edit services</button></header><ul>{selectedCatalog.map(service => <li key={service.publicId}><strong>{service.name}</strong>{service.questions.map(question => { const value = answers[service.publicId]?.[question.id]; if (value === undefined || value === "" || (Array.isArray(value) && !value.length)) return null; const labels = question.type === "select" || question.type === "multi_select" ? question.options.filter(option => (Array.isArray(value) ? value : [value]).includes(option.value)).map(option => option.label).join(", ") : typeof value === "boolean" ? value ? "Yes" : "No" : String(value); return <span key={question.id}>{question.label}: {labels}</span>; })}</li>)}</ul></article><article className="portal-review-work-area"><header><h4>Work area</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("location")}>Edit work area</button></header><p>{location || "No location label provided"}</p><p>{draft?.areaAcres != null ? `${draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres` : areaGeoJson ? "Coverage is being calculated" : "No polygon drawn"} / {points.length} point{points.length === 1 ? "" : "s"}</p><RequestReviewMap area={areaGeoJson} points={points} />{points.length > 0 && <ol className="portal-review-pois" aria-label="Points of interest">{points.map((point, index) => <li key={`${point.longitude}:${point.latitude}:${index}`}><span>{index + 1}</span><div><strong>{point.label || `Point ${index + 1}`}</strong><small>{point.latitude.toFixed(6)}, {point.longitude.toFixed(6)}</small></div></li>)}</ol>}</article><article><header><h4>Scope and timing</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("details")}>Edit details</button></header><strong>{title || "Title required"}</strong><p>{details || "Description required"}</p><p>{projectId ? eligibleProjects.find(project => project.id === projectId)?.projectName ?? "Authorized project" : "New or one-off service"}</p><p>{deliverables || "No separate deliverables noted"}</p><dl className="portal-review-timing"><div><dt>Preferred start</dt><dd>{input.preferredStartAt ? formatDate(input.preferredStartAt) : "Not specified"}</dd></div><div><dt>Desired completion</dt><dd>{input.desiredCompletionAt ? formatDate(input.desiredCompletionAt) : "Not specified"}</dd></div></dl></article><article><header><h4>Contact</h4><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit contact</button></header><p>{siteContactName || "No on-site contact"}</p>{siteContactEmail && <p>{siteContactEmail}</p>}{siteContactPhone && <p>{siteContactPhone}</p>}</article></div><aside className="portal-pricing-hint"><span>Planning guidance</span>{pricingHint ? <>{draft?.areaAcres != null && <p className="portal-pricing-coverage">Estimated coverage: {draft.areaAcres.toLocaleString(undefined, { maximumFractionDigits: 2 })} acres</p>}<strong>{pricingHint.kind === "starting_at" ? `Starting at ${formatRequestMoney(pricingHint.startingAtMinor, pricingHint.currency)}` : `Typical range ${formatRequestMoney(pricingHint.minimumMinor, pricingHint.currency)} to ${formatRequestMoney(pricingHint.maximumMinor, pricingHint.currency)}`}</strong><p>{pricingHint.disclaimer}</p></> : <><strong>Final quote after review</strong><p>A reliable price hint is not available for this request. Submitting does not authorize work or create a charge. LTDS will review the scope and create the actual estimate in Project Alpha.</p></>}</aside></section>}
     {step === "review" && <section className="portal-review-attachments" aria-labelledby="review-attachments-title"><header><h3 id="review-attachments-title">Supporting files</h3><button type="button" className="button-ghost button-small" onClick={() => goTo("contact")}>Edit files</button></header>{attachments.some(item => item.status === "rejected") && <p className="portal-attachment-recovery" role="alert">A security scan rejected one or more files. Return to Edit files, remove each rejected file, and upload a safe replacement before submitting.</p>}{attachments.some(item => item.status === "expired") && <p className="portal-attachment-recovery" role="alert">One or more uploads expired before acceptance. Return to Edit files, remove each expired file, and upload it again before submitting.</p>}{attachments.length ? <ul>{attachments.filter(item => item.status !== "aborted").map(item => <li key={item.key}><div><strong>{item.name}</strong><span>{formatBytes(item.size)}</span></div><span className={`portal-attachment-status ${item.status}`}>{attachmentStatusLabel(item.status)}</span></li>)}</ul> : <p>No supporting files were added.</p>}</section>}
@@ -1399,9 +1471,16 @@ function NewServiceRequestWizard({
   </form>;
 }
 
-function ServiceRequestForm(props: Parameters<typeof NewServiceRequestWizard>[0] & { initial?: PortalServiceRequest; changeOf?: PortalServiceRequest; requestV2?: boolean }) {
-  if (props.requestV2 && !props.initial && !props.changeOf) return <NewServiceRequestWizard {...props} />;
-  return <LegacyServiceRequestForm {...props} />;
+function ServiceRequestForm(props: Parameters<typeof NewServiceRequestWizard>[0] & { initial?: PortalServiceRequest; changeOf?: PortalServiceRequest; requestV2?: boolean; requestAvailability?: RequestAvailability; requestContextKey?: string; requestWorkspaceId?: string | null }) {
+  if (props.initial || props.changeOf) return <LegacyServiceRequestForm {...props} />;
+  if (!props.requestAvailability || !props.requestContextKey) return <p role="status">Checking request availability…</p>;
+  return <RequestScopeBoundary key={`${props.requestContextKey}:${props.initialDraftId || "new"}:${props.projectId || "root"}`}
+    contextKey={props.requestContextKey} workspaceId={props.requestWorkspaceId ?? null} availability={props.requestAvailability}
+    projects={props.projects} fixedProjectId={props.projectId} draftId={props.initialDraftId}>
+    {(projectId, mode) => mode === "catalog"
+      ? <NewServiceRequestWizard {...props} projectId={projectId ?? undefined} fixedScope />
+      : <LegacyServiceRequestForm {...props} projectId={projectId ?? undefined} fixedScope />}
+  </RequestScopeBoundary>;
 }
 
 function LegacyServiceRequestForm({
@@ -1412,6 +1491,7 @@ function LegacyServiceRequestForm({
   onSaved,
   onCancel,
   mapboxPublicToken,
+  fixedScope = false,
 }: {
   projects: PortalProject[];
   projectId?: string;
@@ -1420,6 +1500,7 @@ function LegacyServiceRequestForm({
   onSaved: (request: PortalServiceRequest) => void;
   onCancel?: () => void;
   mapboxPublicToken: string | null;
+  fixedScope?: boolean;
 }) {
   const eligibleProjects = projects.filter(
     (project) => project.canRequestService,
@@ -1562,7 +1643,7 @@ function LegacyServiceRequestForm({
             <span>Request details</span>
             <h3>Tell us what you need</h3>
           </header>
-          {!fixedProjectId && (
+          {!fixedProjectId && !fixedScope && (
             <label>
               Project context
               <select
@@ -1866,6 +1947,9 @@ function ProjectWorkspace({
   mapboxPublicToken,
   requestV2,
   requestAttachments,
+  requestAvailability,
+  requestContextKey,
+  requestWorkspaceId,
   viewer,
   viewerDisplayUnits,
   onSaved,
@@ -1876,6 +1960,9 @@ function ProjectWorkspace({
   mapboxPublicToken: string | null;
   requestV2: boolean;
   requestAttachments: boolean;
+  requestAvailability: RequestAvailability;
+  requestContextKey: string;
+  requestWorkspaceId: string | null;
   viewer: boolean;
   viewerDisplayUnits: "imperial" | "metric";
   onSaved: (request: PortalServiceRequest) => void;
@@ -2043,6 +2130,9 @@ function ProjectWorkspace({
               mapboxPublicToken={mapboxPublicToken}
               requestV2={requestV2}
               attachmentsEnabled={requestAttachments}
+              requestAvailability={requestAvailability}
+              requestContextKey={requestContextKey}
+              requestWorkspaceId={requestWorkspaceId}
             />
           </Card>
           <Card title="Project request history">
@@ -2317,6 +2407,8 @@ export function ClientPortalApp({
   const [bootstrapRevision, setBootstrapRevision] = useState(0);
   const mobileNavTrigger = useRef<HTMLButtonElement>(null);
   const mobileNavPanel = useRef<HTMLDivElement>(null);
+  const requestContextKey = gate.status === "ready" ? `${gate.data.account.id}:${gate.data.selectedWorkspaceId ?? "legacy"}` : null;
+  const requestAvailability = useRequestAvailability(switchingWorkspace ? null : requestContextKey, gate.status === "ready" ? gate.data.selectedWorkspaceId ?? null : null);
   const pastDeliveryLoader = useMemo(
     () => (_folderId: string | null, cursor: string | null, signal: AbortSignal) => loadPortalPastDeliveries(cursor, undefined, signal),
     [],
@@ -2522,6 +2614,9 @@ export function ClientPortalApp({
         mapboxPublicToken={mapboxPublicToken}
         requestV2={capabilities.requestV2}
         requestAttachments={capabilities.requestAttachments}
+        requestAvailability={requestAvailability}
+        requestContextKey={requestContextKey!}
+        requestWorkspaceId={selectedWorkspaceId}
         viewer={capabilities.viewer}
         viewerDisplayUnits={gate.data.viewerDisplayUnits}
         onSaved={onSaved}
@@ -2708,13 +2803,14 @@ export function ClientPortalApp({
             <h1>Service requests</h1>
             <p>Review request status, scope, estimates, and prior activity.</p>
           </div>
-          {!editing && (
+          {!editing && canBeginRequest(requestAvailability, projects) && (
             <button className="button-orange" onClick={() => openNewRequest()}>
               Submit new request
             </button>
           )}
         </section>
         {requestNotice && <p className="portal-message portal-request-notice" role="status">{requestNotice}</p>}
+        {!editing && !canBeginRequest(requestAvailability, projects) && <RequestAvailabilityMessage availability={requestAvailability} />}
         {!editing && drafts.length > 0 && (
           <Card title="Saved drafts" className="portal-request-drafts-card">
             <p className="portal-card-intro">Continue an autosaved request in this workspace. Nothing is submitted until you review and confirm it.</p>
@@ -2775,7 +2871,7 @@ export function ClientPortalApp({
             <span className="eyebrow">New flight & service request</span>
             <h1>Define your site and scope</h1>
             <p>
-              Start with the map, then add the project, timing, deliverables,
+              Choose the request context, then add services, work area, timing, deliverables,
               and on-site details LTDS needs to review the work.
             </p>
           </div>
@@ -2793,6 +2889,9 @@ export function ClientPortalApp({
             requestV2={capabilities.requestV2}
             attachmentsEnabled={capabilities.requestAttachments}
             initialDraftId={requestDraftId}
+            requestAvailability={requestAvailability}
+            requestContextKey={requestContextKey!}
+            requestWorkspaceId={selectedWorkspaceId}
           />
         </Card>
       </>

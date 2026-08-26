@@ -30,6 +30,7 @@ import {
   submitServiceRequestDraft,
 } from "./request-v2";
 import { listAuthorizedAuthenticatedDeliveryPrefixes } from "./authenticated-delivery-grants";
+import { listServiceCatalogPage } from "./service-catalog-page";
 
 const CLIENT_FILE_PAGE_SIZE = 150;
 const CLIENT_FILE_QUERY_LIMIT = CLIENT_FILE_PAGE_SIZE + 1;
@@ -732,6 +733,10 @@ async function getServiceRequestByIdempotency(
 export const d1ClientPortalRepository: ClientPortalRepository = {
   async listServiceCatalog(env) {
     return listServiceCatalog(env);
+  },
+
+  async listServiceCatalogPage(env, _session, input) {
+    return listServiceCatalogPage(env, input);
   },
 
   async getServiceRequestDraft(env, session, draftId) {

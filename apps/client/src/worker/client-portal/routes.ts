@@ -24,6 +24,7 @@ import {
   resolveCloudflareClientPrincipal,
 } from "./access-identity";
 import { validateRequestArea } from "./request-area";
+import { ServiceCatalogPageError } from "./service-catalog-page";
 import {
   abortRequestAttachment,
   canonicalRequestAttachmentEtag,
@@ -79,6 +80,7 @@ import {
   type ProjectAlphaPricingAuthorizationContextResolver,
 } from "./project-alpha-pricing-hint";
 import { clientPortalNotificationsAvailable } from "./schema-readiness";
+import { readClientRequestReadiness } from "./request-readiness";
 
 interface ClientPortalDependencies {
   resolvePrincipal?: ResolveClientPrincipal;
@@ -488,6 +490,22 @@ export function createClientPortalRouter(
     c.json({ mapboxPublicToken: c.env.MAPBOX_PUBLIC_TOKEN || null }),
   );
 
+  router.get("/request-readiness", async (c) => {
+    c.header("Cache-Control", "private, no-store");
+    const projectIds = c.req.queries("projectId");
+    const parsedProject = projectIds === undefined ? null : opaqueId.safeParse(projectIds[0]);
+    if ((projectIds && projectIds.length !== 1) || (parsedProject && !parsedProject.success))
+      throw new HTTPException(400, { message: "Request project target is invalid" });
+    const projectId = parsedProject?.success ? parsedProject.data : null;
+    const backendConfigured = c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED === "true"
+      ? Boolean(repository.listServiceCatalog && repository.createServiceRequestDraft &&
+        repository.saveServiceRequestDraft && repository.submitServiceRequestDraft)
+      : typeof repository.createServiceRequest === "function" && typeof c.env.PUBLIC_BULK_RATE_LIMITER?.limit === "function";
+    return c.json(await readClientRequestReadiness(
+      c.env, c.get("clientPrincipal"), c.get("clientSession"), selectedWorkspace(c), projectId, backendConfigured,
+    ));
+  });
+
   router.get("/v2/workspaces", async (c) => {
     if (!portalHierarchyV2Enabled(c.env)) throw new HTTPException(404, { message: "Not found" });
     return c.json({ workspaces: await listPortalWorkspaces(c.env, c.get("clientPrincipal")) });
@@ -786,10 +804,11 @@ export function createClientPortalRouter(
     const projectId = opaqueId.safeParse(c.req.param("projectId"));
     if (!projectId.success)
       throw new HTTPException(404, { message: "Project not found" });
-    if (!(await Promise.all([
+    const [delivery, request] = await Promise.all([
       authorizeProject(c, "delivery.view", projectId.data),
       authorizeProject(c, "request.create", projectId.data),
-    ])).some(Boolean)) throw new HTTPException(404, { message: "Project not found" });
+    ]);
+    if (!delivery && !request) throw new HTTPException(404, { message: "Project not found" });
     const project = await repository.getProject(
       c.env,
       c.get("clientSession"),
@@ -797,7 +816,7 @@ export function createClientPortalRouter(
     );
     if (!project)
       throw new HTTPException(404, { message: "Project not found" });
-    return c.json({ project });
+    return c.json({ project: { ...project, canRequestService: project.canRequestService && request } });
   });
 
   router.get("/projects/:projectId/files", async (c) => {
@@ -1259,6 +1278,10 @@ export function createClientPortalRouter(
     if (c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
     await next();
   });
+  router.use("/service-catalog/*", async (c, next) => {
+    if (c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
+    await next();
+  });
   router.use("/service-request-drafts", async (c, next) => {
     if (c.env.CLIENT_PORTAL_REQUEST_V2_ENABLED !== "true") throw new HTTPException(404, { message: "Not found" });
     await next();
@@ -1278,6 +1301,29 @@ export function createClientPortalRouter(
     if (!repository.listServiceCatalog)
       throw new HTTPException(503, { message: "The service catalog is not configured" });
     return c.json({ services: await repository.listServiceCatalog(c.env, c.get("clientSession")) });
+  });
+
+  router.get("/service-catalog/page", async (c) => {
+    c.header("Cache-Control", "private, no-store");
+    const parameters = new URL(c.req.url).searchParams;
+    const limit = parameters.get("limit");
+    if ([...parameters.keys()].some(key => key !== "cursor" && key !== "limit") ||
+      parameters.getAll("limit").length > 1 || parameters.getAll("cursor").length > 1 ||
+      (limit !== null && !/^(?:[1-9][0-9]?|100)$/.test(limit))) {
+      return c.json({ error: "The service library page is invalid.", code: "catalog_cursor_invalid" }, 400);
+    }
+    if (!repository.listServiceCatalogPage) {
+      return c.json({ error: "Versioned service library browsing is not ready.", code: "catalog_not_ready" }, 503);
+    }
+    try {
+      return c.json(await repository.listServiceCatalogPage(c.env, c.get("clientSession"), {
+        ...(parameters.has("cursor") ? { cursor: parameters.get("cursor")! } : {}),
+        ...(limit !== null ? { limit: Number(limit) } : {}),
+      }));
+    } catch (error) {
+      if (error instanceof ServiceCatalogPageError) return c.json({ error: error.message, code: error.code }, error.status);
+      throw error;
+    }
   });
 
   router.get("/service-request-drafts", async (c) => {

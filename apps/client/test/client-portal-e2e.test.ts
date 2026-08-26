@@ -37,7 +37,9 @@ describe("client portal migrated-D1 end-to-end contract", () => {
     const migrationsDirectory = fileURLToPath(new URL("../migrations/", import.meta.url));
     for (const migration of readdirSync(migrationsDirectory).filter(name => name.endsWith(".sql")).sort()) {
       const sql = readFileSync(new URL(`../migrations/${migration}`, import.meta.url), "utf8").replace(/\r\n/g, "\n");
-      if (["0107_thumbnail_cleanup_jobs.sql", "0111_thumbnail_render_provenance.sql", "0116_incoming_upload_hardening.sql", "0118_staff_work_area_revisions.sql", "0119_client_request_attachments.sql", "0120_project_alpha_draft_quote_receipts.sql", "0121_client_workspace_hierarchy_v2.sql", "0126_delivery_share_recipient_snapshots.sql", "0127_portal_invitation_secret_scrub.sql", "0129_portal_hierarchy_relations.sql", "0130_client_delegated_share_provisioning.sql", "0132_portal_v2_legacy_member_bridges.sql", "0133_portal_invitation_access_enrollment_receipts.sql", "0134_rejected_request_attachment_submit_guard.sql", "0135_security_scan_followups.sql", "0136_portal_v2_identity_denials.sql", "0137_authenticated_delivery_grants.sql"].includes(migration)) {
+      // Trigger bodies contain statement terminators of their own. Detect
+      // them from SQL so new migrations cannot outgrow a filename whitelist.
+      if (/CREATE\s+TRIGGER\b/i.test(sql.replace(/^\s*--.*$/gm, ""))) {
         await db.exec(sql.replace(/^\s*--.*$/gm, "").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
         continue;
       }
@@ -62,11 +64,13 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       }
       if (migration === "0104_service_request_thread.sql")
         await db.prepare("UPDATE client_service_requests SET poi_points_json='also-not-json' WHERE id='migration-invalid-json'").run();
-      for (const statement of sql.split(/;\s*(?:\n|$)/)) {
-        const executable = statement.replace(/^\s*--.*$/gm, "").trim();
-        if (!executable || /^PRAGMA\s+foreign_keys\s*=\s*ON$/i.test(executable)) continue;
-        await db.prepare(executable).run();
-      }
+      const statements = sql.split(/;\s*(?:\n|$)/)
+        .map(statement => statement.replace(/^\s*--.*$/gm, "").trim())
+        .filter(statement => statement && !/^PRAGMA\s+foreign_keys\s*=\s*ON$/i.test(statement))
+        .map(statement => db.prepare(statement));
+      // Match D1's per-migration transaction, including deferred FK checks,
+      // without one local-worker round trip per individual SQL statement.
+      if (statements.length) await db.batch(statements);
     }
     await db.prepare("PRAGMA foreign_keys = ON").run();
 
@@ -162,7 +166,9 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       'delivery_share_recipient_members','client_share_folder_target_labels','client_delegated_share_staff_mutations',
       'legacy_video_thumbnail_recovery','portal_v2_legacy_member_bridges',
       'portal_v2_invitation_access_enrollment_receipts',
-      'portal_v2_invitation_access_enrollment_revocations'
+      'portal_v2_invitation_access_enrollment_revocations',
+      'client_folder_notification_batches','client_folder_notification_batch_items',
+      'client_folder_notification_object_state','client_folder_notification_batch_controls'
     ) ORDER BY name`).all<{ name: string }>();
     expect(migrationTables.results.map(row => row.name)).toEqual([
       "client_access_sync_outbox",
@@ -172,6 +178,10 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       "client_delegated_shares",
       "client_folder_grant_mutations",
       "client_folder_grant_notifications",
+      "client_folder_notification_batch_controls",
+      "client_folder_notification_batch_items",
+      "client_folder_notification_batches",
+      "client_folder_notification_object_state",
       "client_portal_notification_outbox",
       "client_service_request_area_revisions",
       "client_service_request_attachments",
@@ -249,9 +259,11 @@ describe("client portal migrated-D1 end-to-end contract", () => {
       'trg_delivery_share_audience_snapshots_no_update',
       'trg_delivery_share_audience_snapshots_no_delete',
       'trg_delivery_share_recipient_members_no_update',
-      'trg_delivery_share_recipient_members_no_delete'
+      'trg_delivery_share_recipient_members_no_delete',
+      'client_folder_notification_batch_control_result'
     ) ORDER BY name`).all<{ name: string }>()).results.map(row => row.name);
-    expect(triggerNames).toHaveLength(22);
+    expect(triggerNames).toHaveLength(23);
+    expect(triggerNames).toContain("client_folder_notification_batch_control_result");
     expect((await db.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     const bridgeMigration = readFileSync(new URL("../migrations/0132_portal_v2_legacy_member_bridges.sql", import.meta.url), "utf8")
       .replace(/\r\n/g, "\n").replace(/^\s*--.*$/gm, "")

@@ -1,15 +1,22 @@
-import { describe, expect, it, vi } from "vitest";
+import { readFileSync, readdirSync } from "node:fs";
+import { Miniflare } from "miniflare";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { createClientPortalRouter } from "../src/worker/client-portal/routes";
 import { validateRequestArea } from "../src/worker/client-portal/request-area";
 import {
   calculateRequestAreaSquareMeters,
+  createServiceRequestDraft,
+  getServiceRequestDraft,
+  saveServiceRequestDraft,
   sanitizeServiceQuestions,
+  submitServiceRequestDraft,
   validateServiceAnswers,
 } from "../src/worker/client-portal/request-v2";
 import type {
   ClientPortalRepository,
   ClientPortalSession,
   ClientServiceRequestDraft,
+  ClientServiceRequestDraftInput,
   ResolveClientPrincipal,
 } from "../src/worker/client-portal/types";
 import type { Env } from "../src/worker/types";
@@ -92,6 +99,171 @@ describe("service request v2 validation", () => {
     expect(validateServiceAnswers(questions, { resolution: "premium" })).toBeNull();
     expect(validateServiceAnswers(questions, { resolution: "standard", injected: "value" })).toBeNull();
     expect(sanitizeServiceQuestions([{ ...service.questions[0], label: "unsafe\u0000label" }])).toBeNull();
+  });
+});
+
+describe("service request v2 transaction-time catalog contract", () => {
+  let miniflare: Miniflare;
+  let database: D1Database;
+  let repositoryEnv: Env;
+  const input: ClientServiceRequestDraftInput = { ...draftBody, requestType: "service" };
+  const tables = ["client_service_request_drafts", "client_service_request_draft_services",
+    "client_service_request_draft_mutations", "client_service_requests", "client_service_request_services",
+    "request_revisions", "client_portal_notification_outbox", "audit_log"] as const;
+
+  beforeAll(async () => {
+    miniflare = new Miniflare({ compatibilityDate: "2026-07-22", modules: true,
+      script: "export default { fetch() { return new Response('ok'); } };",
+      d1Databases: { DELIVERY_DB: "request-v2-catalog-races" } });
+    database = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
+    // Use the deployed constraints, indexes and attachment triggers, not a
+    // permissive mock schema that could hide partial submission side effects.
+    const directory = new URL("../migrations/", import.meta.url);
+    for (const name of readdirSync(directory).filter(name => name.endsWith(".sql")).sort()) {
+      const sql = readFileSync(new URL(name, directory), "utf8").replace(/\r\n/g, "\n").replace(/^\s*--.*$/gm, "");
+      if (/\bCREATE\s+TRIGGER\b/i.test(sql)) {
+        await database.exec(sql.replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i, "").replace(/\s*\n\s*/g, " "));
+      } else {
+        const statements = sql.split(/;\s*(?:\n|$)/).map(value => value.trim()).filter(value => value && !/^PRAGMA/i.test(value));
+        if (name === "0103_client_portal_workspace.sql") await database.batch(statements.map(statement => database.prepare(statement)));
+        else for (const statement of statements) await database.prepare(statement).run();
+      }
+    }
+    await database.batch([
+      database.prepare("INSERT INTO client_accounts(id,display_name,status) VALUES('account-a','Acme','active')"),
+      database.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('identity-a','account-a','https://issuer.test','subject-a','client@example.test')"),
+      database.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('account-a','identity-a','manager')"),
+      database.prepare("INSERT INTO projects(id,client_name,project_name,r2_prefix,active) VALUES('project-a','Acme','Site mapping','Clients/Acme/Mapping/',1)"),
+      database.prepare("INSERT INTO client_project_grants(account_id,project_id,can_request_service) VALUES('account-a','project-a',1)"),
+    ]);
+    repositoryEnv = { DELIVERY_DB: database } as Env;
+  }, 60_000);
+
+  afterAll(async () => miniflare.dispose());
+
+  beforeEach(async () => {
+    await database.batch([
+      database.prepare("DELETE FROM client_service_request_drafts"),
+      database.prepare("DELETE FROM client_service_requests"),
+      database.prepare("DELETE FROM audit_log"),
+      database.prepare("DELETE FROM pa_service_catalog_items"),
+      database.prepare("UPDATE client_project_grants SET can_request_service=1,revoked_at=NULL"),
+      database.prepare(`INSERT INTO pa_service_catalog_items
+        (public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at)
+        VALUES(?,?,?,?,?,?,?,?,1,'2026-08-25T12:00:00Z')`)
+        .bind(service.publicId, service.sourceVersion, service.name, service.summary, service.category, service.displayOrder,
+          service.geometryRequirement, JSON.stringify(service.questions)),
+    ]);
+  });
+
+  function beforeTransaction(action: () => Promise<unknown>): Env {
+    let pending = true;
+    const wrapped = new Proxy(database, {
+      get(target, property) {
+        if (property === "withSession") return () => wrapped;
+        if (property === "batch") return async (statements: D1PreparedStatement[]) => {
+          if (pending) { pending = false; await action(); }
+          return target.batch(statements);
+        };
+        const value = Reflect.get(target, property, target);
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    return { ...repositoryEnv, DELIVERY_DB: wrapped };
+  }
+
+  async function createdDraft(): Promise<ClientServiceRequestDraft> {
+    const result = await createServiceRequestDraft(repositoryEnv, session, input, "initial-draft-key-0001");
+    expect(result?.kind).toBe("created");
+    if (!result || !("draft" in result)) throw new Error("Expected a created draft");
+    return result.draft;
+  }
+
+  async function requestState() {
+    const results = await database.batch(tables.map(table => database.prepare(`SELECT * FROM ${table} ORDER BY rowid`)));
+    return results.map(result => result.results);
+  }
+
+  async function changeCatalog(kind: "deactivated" | "version_changed", publicId = service.publicId) {
+    await database.prepare("UPDATE pa_service_catalog_items SET active=0 WHERE public_id=?").bind(publicId).run();
+    if (kind === "version_changed") {
+      await database.prepare(`INSERT INTO pa_service_catalog_items
+        (public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at)
+        SELECT public_id,'v8',name,summary,category,display_order,geometry_requirement,question_schema_json,1,'2026-08-25T13:00:00Z'
+        FROM pa_service_catalog_items WHERE public_id=? AND source_version='v7'`).bind(publicId).run();
+    }
+  }
+
+  for (const operation of ["create", "save", "submit"] as const) {
+    it.each(["deactivated", "version_changed"] as const)(`rejects a %s service changed between ${operation} review and transaction without partial writes`, async change => {
+      const original = operation === "create" ? null : await createdDraft();
+      const before = await requestState();
+      const mutationKey = `catalog-${operation}-race-0001`;
+      const changedInput = { ...input, title: "Updated mapping request" };
+      const raceEnv = beforeTransaction(() => changeCatalog(change));
+      const mutate = (target: Env) => operation === "create"
+        ? createServiceRequestDraft(target, session, input, mutationKey)
+        : operation === "save"
+          ? saveServiceRequestDraft(target, session, original!.id, original!.version, changedInput, mutationKey)
+          : submitServiceRequestDraft(target, session, original!.id, original!.version, mutationKey);
+      expect(await mutate(raceEnv)).toEqual(operation === "submit"
+        ? { kind: "incomplete", reason: "catalog_changed", servicePublicIds: [service.publicId] }
+        : { kind: "catalog_changed", servicePublicIds: [service.publicId] });
+      expect(await requestState()).toEqual(before);
+      // A rejected transaction consumes neither the optimistic version nor the
+      // idempotency key. The exact reviewed version can still be retried safely.
+      await database.batch([
+        database.prepare("DELETE FROM pa_service_catalog_items WHERE source_version='v8'"),
+        database.prepare("UPDATE pa_service_catalog_items SET active=1 WHERE source_version='v7'"),
+      ]);
+      expect((await mutate(repositoryEnv))?.kind).toBe(operation === "create" ? "created" : operation === "save" ? "updated" : "submitted");
+      const after = await requestState();
+      await changeCatalog(change);
+      expect((await mutate(repositoryEnv))?.kind).toBe("replayed");
+      expect(await requestState()).toEqual(after);
+      expect((await database.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+    });
+  }
+
+  it("checks every reviewed service at the ten-selection boundary, not just the first", async () => {
+    const services = Array.from({ length: 10 }, (_, index) => ({ ...input.services[0]!, publicId: `svc-mapping-${index}` }));
+    await database.batch(services.map(selected => database.prepare(`INSERT INTO pa_service_catalog_items
+      (public_id,source_version,name,category,geometry_requirement,question_schema_json,active,source_updated_at)
+      VALUES(?,'v7','Mapping','Mapping','required',?,1,'2026-08-25T12:00:00Z')`).bind(selected.publicId, JSON.stringify(service.questions))));
+    const boundedInput = { ...input, services };
+    const before = await requestState();
+    expect(await createServiceRequestDraft(beforeTransaction(() => changeCatalog("version_changed", services[9]!.publicId)), session,
+      boundedInput, "catalog-ten-services-0001")).toEqual({ kind: "catalog_changed", servicePublicIds: [services[9]!.publicId] });
+    expect(await requestState()).toEqual(before);
+  });
+
+  it("allows an empty autosave but keeps submission incomplete", async () => {
+    const result = await createServiceRequestDraft(repositoryEnv, session, { ...input, services: [] }, "empty-draft-create-0001");
+    expect(result?.kind).toBe("created");
+    if (!result || !("draft" in result)) throw new Error("Expected draft");
+    expect(await submitServiceRequestDraft(repositoryEnv, session, result.draft.id, result.draft.version, "empty-draft-submit-0001"))
+      .toEqual({ kind: "incomplete", reason: "answers_incomplete", servicePublicIds: [] });
+  });
+
+  it("does not turn a current catalog into permission to submit after the project grant changes", async () => {
+    const original = await createdDraft();
+    const before = await requestState();
+    const result = await submitServiceRequestDraft(beforeTransaction(() => database.prepare("UPDATE client_project_grants SET can_request_service=0").run()),
+      session, original.id, original.version, "catalog-grant-submit-0001");
+    expect(result).toEqual({ kind: "conflict" });
+    expect(await requestState()).toEqual(before);
+    expect((await getServiceRequestDraft(repositoryEnv, session, original.id))?.state).toBe("draft");
+  });
+
+  it("preserves the optimistic version conflict with an unchanged reviewed catalog", async () => {
+    const original = await createdDraft();
+    expect((await saveServiceRequestDraft(repositoryEnv, session, original.id, original.version, { ...input, title: "Saved first" }, "catalog-first-save-0001"))?.kind).toBe("updated");
+    const before = await requestState();
+    expect(await saveServiceRequestDraft(repositoryEnv, session, original.id, original.version, { ...input, title: "Stale save" }, "catalog-stale-save-0001"))
+      .toEqual({ kind: "conflict" });
+    expect(await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, "catalog-stale-submit-0001"))
+      .toEqual({ kind: "conflict" });
+    expect(await requestState()).toEqual(before);
   });
 });
 

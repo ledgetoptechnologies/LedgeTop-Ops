@@ -485,6 +485,29 @@ export interface PortalServiceCatalogItem {
   questions: PortalServiceQuestion[];
 }
 
+export type PortalRequestReadinessReason = "ready" | "legacy_access_unavailable" | "request_not_permitted" | "project_unavailable" | "catalog_unavailable" | "request_unavailable";
+export interface PortalRequestReadiness {
+  mode: "catalog" | "legacy";
+  workspaceId: string | null;
+  target: { kind: "root" | "project"; projectId: string | null };
+  canStartRequest: boolean;
+  reason: PortalRequestReadinessReason;
+  root: { canStartRequest: boolean; reason: PortalRequestReadinessReason };
+  projectRequestsSupported: boolean;
+  refreshedAt: string;
+}
+
+export async function loadPortalRequestReadiness(projectId: string | null, signal?: AbortSignal, request: PortalRequest = requestJson): Promise<PortalRequestReadiness> {
+  const result = await request<PortalRequestReadiness>(`/api/client/request-readiness${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`, { signal });
+  const reasons: PortalRequestReadinessReason[] = ["ready", "legacy_access_unavailable", "request_not_permitted", "project_unavailable", "catalog_unavailable", "request_unavailable"];
+  if (!result || !["catalog", "legacy"].includes(result.mode) || typeof result.canStartRequest !== "boolean"
+    || !reasons.includes(result.reason) || !result.root || typeof result.root.canStartRequest !== "boolean" || !reasons.includes(result.root.reason)
+    || typeof result.projectRequestsSupported !== "boolean" || !(result.workspaceId === null || typeof result.workspaceId === "string")
+    || result.target?.kind !== (projectId ? "project" : "root") || result.target.projectId !== projectId
+    || typeof result.refreshedAt !== "string" || !Number.isFinite(Date.parse(result.refreshedAt))) throw new Error("Request availability could not be verified.");
+  return result;
+}
+
 export interface PortalServiceDraftInput {
   projectId: string | null;
   requestType: "flight" | "service";
@@ -583,9 +606,35 @@ export async function createPortalServiceRequest(
 
 export async function loadPortalServiceCatalog(
   request: PortalRequest = requestJson,
+  signal?: AbortSignal,
 ): Promise<PortalServiceCatalogItem[]> {
-  const response = await request<{ services: PortalServiceCatalogItem[] }>("/api/client/service-catalog");
+  const response = await request<{ services: PortalServiceCatalogItem[] }>("/api/client/service-catalog", { signal });
   return response.services;
+}
+
+export interface PortalServiceCatalogPage {
+  services: PortalServiceCatalogItem[];
+  nextCursor: string | null;
+  complete: boolean;
+  source: { generation: string; sequence: number } | null;
+  legacy?: boolean;
+}
+export async function loadPortalServiceCatalogPage(cursor: string | null, signal?: AbortSignal, request: PortalRequest = requestJson): Promise<PortalServiceCatalogPage> {
+  let response: PortalServiceCatalogPage;
+  try {
+    response = await request<PortalServiceCatalogPage>(`/api/client/service-catalog/page${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
+  } catch (caught) {
+    const failure = caught as { status?: number; body?: { code?: string } };
+    if (!cursor && failure.status === 503 && failure.body?.code === "catalog_not_ready") {
+      return { services: await loadPortalServiceCatalog(request, signal), nextCursor: null, complete: false, source: null, legacy: true };
+    }
+    throw caught;
+  }
+  if (!response || !Array.isArray(response.services) || typeof response.complete !== "boolean"
+    || !(response.nextCursor === null || typeof response.nextCursor === "string" && response.nextCursor.length > 0)
+    || response.complete !== (response.nextCursor === null) || !response.source || typeof response.source.generation !== "string"
+    || !Number.isSafeInteger(response.source.sequence) || response.source.sequence < 0) throw new Error("Service library records could not be verified.");
+  return response;
 }
 
 export async function createPortalServiceDraft(
@@ -611,8 +660,9 @@ export async function loadPortalServiceDrafts(
 export async function loadPortalServiceDraft(
   draftId: string,
   request: PortalRequest = requestJson,
+  signal?: AbortSignal,
 ): Promise<PortalServiceDraft> {
-  const response = await request<{ draft: PortalServiceDraft }>(`/api/client/service-request-drafts/${encodeURIComponent(draftId)}`);
+  const response = await request<{ draft: PortalServiceDraft }>(`/api/client/service-request-drafts/${encodeURIComponent(draftId)}`, { signal });
   return response.draft;
 }
 

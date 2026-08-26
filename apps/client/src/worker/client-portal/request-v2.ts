@@ -142,7 +142,7 @@ export function sanitizeServiceQuestions(value: unknown): ClientServiceQuestion[
   return questions;
 }
 
-function mapCatalog(row: CatalogRow): ClientServiceCatalogItem | null {
+export function mapServiceCatalogItem(row: CatalogRow): ClientServiceCatalogItem | null {
   const summary = row.summary === null ? null : safeText(row.summary, 1000);
   const category = safeText(row.category, 100);
   if (!PUBLIC_ID.test(row.public_id) || !safeText(row.source_version, 128) || !safeText(row.name, 160) || (row.summary !== null && !summary) || !category) return null;
@@ -230,7 +230,7 @@ async function resolveSelections(env: Env, input: ClientServiceRequestDraftInput
     if (!PUBLIC_ID.test(inputService.publicId) || !SOURCE_VERSION.test(inputService.sourceVersion))
       return { kind: "invalid" };
     const row = await db(env).prepare(`SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json FROM pa_service_catalog_items WHERE public_id=? AND active=1`).bind(inputService.publicId).first<CatalogRow>();
-    const catalog = row ? mapCatalog(row) : null;
+    const catalog = row ? mapServiceCatalogItem(row) : null;
     if (!catalog || catalog.sourceVersion !== inputService.sourceVersion) {
       changed.push(inputService.publicId);
       continue;
@@ -331,11 +331,27 @@ function serviceSnapshot(service: ClientServiceDraftSelection): string {
   });
 }
 
+// At most ten reviewed selections enter this predicate. The indexed lookup is
+// part of the first write in each atomic batch, not just an earlier catalog read.
+const reviewedCatalogGuard = `NOT EXISTS (
+  SELECT 1 FROM json_each(?) reviewed
+  WHERE NOT EXISTS (
+    SELECT 1 FROM pa_service_catalog_items current
+    WHERE current.public_id=json_extract(reviewed.value,'$.publicId')
+      AND current.source_version=json_extract(reviewed.value,'$.sourceVersion')
+      AND current.active=1
+  )
+)`;
+
+function reviewedCatalogVersions(services: ClientServiceDraftSelection[]): string {
+  return JSON.stringify(services.map(({ publicId, sourceVersion }) => ({ publicId, sourceVersion })));
+}
+
 export async function listServiceCatalog(env: Env): Promise<ClientServiceCatalogItem[]> {
   const result = await db(env).prepare(`SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json
     FROM pa_service_catalog_items WHERE active=1
     ORDER BY category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id LIMIT 500`).all<CatalogRow>();
-  return result.results.map(mapCatalog).filter((item): item is ClientServiceCatalogItem => item !== null);
+  return result.results.map(mapServiceCatalogItem).filter((item): item is ClientServiceCatalogItem => item !== null);
 }
 
 export async function getServiceRequestDraft(env: Env, session: ClientPortalSession, draftId: string): Promise<ClientServiceRequestDraft | null> {
@@ -367,12 +383,15 @@ export async function createServiceRequestDraft(env: Env, session: ClientPortalS
       SELECT 1 FROM client_project_grants g JOIN projects p ON p.id=g.project_id AND p.active=1
       WHERE g.account_id=a.id AND g.project_id=? AND g.revoked_at IS NULL AND g.can_request_service=1
         AND (m.role='manager' OR EXISTS (SELECT 1 FROM client_member_project_grants mg WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=g.project_id AND mg.revoked_at IS NULL))
-    ))`).bind(id, input.projectId, JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, areaSquareMeters, areaSquareMeters === null ? null : areaSquareMeters / SQUARE_METERS_PER_ACRE, mutationKey, fingerprint, mutationKey, session.identityId, session.accountId, input.projectId, input.projectId);
+    )) AND ${reviewedCatalogGuard}`).bind(id, input.projectId, JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, areaSquareMeters, areaSquareMeters === null ? null : areaSquareMeters / SQUARE_METERS_PER_ACRE, mutationKey, fingerprint, mutationKey, session.identityId, session.accountId, input.projectId, input.projectId, reviewedCatalogVersions(services));
   const statements = [insert, ...services.map((service, ordinal) => database.prepare(`INSERT INTO client_service_request_draft_services(draft_id,ordinal,service_public_id,service_source_version,service_snapshot_json,answers_json)
     SELECT ?,?,?,?,?,? WHERE EXISTS (SELECT 1 FROM client_service_request_drafts WHERE id=? AND last_mutation_key=?)`).bind(id, ordinal, service.publicId, service.sourceVersion, serviceSnapshot(service), JSON.stringify(service.answers), id, mutationKey))];
   try {
     const results = await database.batch(statements);
-    if (!results[0]?.meta.changes) return null;
+    if (!results[0]?.meta.changes) {
+      const changed = await changedCatalogServices(env, services);
+      return changed.length ? { kind: "catalog_changed", servicePublicIds: changed } : null;
+    }
   } catch {
     const raced = await db(env).prepare(`SELECT id,create_fingerprint FROM client_service_request_drafts WHERE account_id=? AND create_idempotency_key=?`).bind(session.accountId, mutationKey).first<{ id: string; create_fingerprint: string }>();
     if (!raced || raced.create_fingerprint !== fingerprint) return raced ? { kind: "conflict" } : null;
@@ -406,8 +425,8 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
           SELECT 1 FROM client_project_grants g JOIN projects p ON p.id=g.project_id AND p.active=1
           WHERE g.account_id=a.id AND g.project_id=? AND g.revoked_at IS NULL AND g.can_request_service=1
             AND (m.role='manager' OR EXISTS (SELECT 1 FROM client_member_project_grants mg WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=g.project_id AND mg.revoked_at IS NULL))
-        )))`)
-    .bind(input.projectId, JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, areaSquareMeters, areaSquareMeters === null ? null : areaSquareMeters / SQUARE_METERS_PER_ACRE, mutationKey, draftId, session.accountId, expectedVersion, session.identityId, input.projectId, input.projectId);
+        ))) AND ${reviewedCatalogGuard}`)
+    .bind(input.projectId, JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, areaSquareMeters, areaSquareMeters === null ? null : areaSquareMeters / SQUARE_METERS_PER_ACRE, mutationKey, draftId, session.accountId, expectedVersion, session.identityId, input.projectId, input.projectId, reviewedCatalogVersions(services));
   const statements = [
     update,
     database.prepare(`DELETE FROM client_service_request_draft_services WHERE draft_id=? AND EXISTS (SELECT 1 FROM client_service_request_drafts WHERE id=? AND last_mutation_key=?)`).bind(draftId, draftId, mutationKey),
@@ -418,7 +437,10 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
   ];
   try {
     const results = await database.batch(statements);
-    if (!results[0]?.meta.changes) return { kind: "conflict" };
+    if (!results[0]?.meta.changes) {
+      const changed = await changedCatalogServices(env, services);
+      return changed.length ? { kind: "catalog_changed", servicePublicIds: changed } : { kind: "conflict" };
+    }
   } catch { return { kind: "conflict" }; }
   const draft = await loadDraft(env, session, draftId);
   return draft ? { kind: "updated", draft } : null;
@@ -520,8 +542,8 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
         SELECT 1 FROM client_project_grants g JOIN projects p ON p.id=g.project_id AND p.active=1
         WHERE g.account_id=a.id AND g.project_id=d.project_id AND g.revoked_at IS NULL AND g.can_request_service=1
           AND (m.role='manager' OR EXISTS (SELECT 1 FROM client_member_project_grants mg WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=g.project_id AND mg.revoked_at IS NULL))
-      ))`)
-    .bind(requestId, draft.requestType, draft.title, draft.details, draft.location, draft.preferredStartAt, serviceCategory, draft.deliverables, draft.siteContactName, draft.siteContactEmail, draft.siteContactPhone, draft.desiredCompletionAt, draft.latitude, draft.longitude, draft.areaGeoJson ? JSON.stringify(draft.areaGeoJson) : null, draft.poiPoints.length ? JSON.stringify(draft.poiPoints) : null, mutationKey, requestFingerprint, session.identityId, draftId, session.accountId, expectedVersion);
+      )) AND ${reviewedCatalogGuard}`)
+    .bind(requestId, draft.requestType, draft.title, draft.details, draft.location, draft.preferredStartAt, serviceCategory, draft.deliverables, draft.siteContactName, draft.siteContactEmail, draft.siteContactPhone, draft.desiredCompletionAt, draft.latitude, draft.longitude, draft.areaGeoJson ? JSON.stringify(draft.areaGeoJson) : null, draft.poiPoints.length ? JSON.stringify(draft.poiPoints) : null, mutationKey, requestFingerprint, session.identityId, draftId, session.accountId, expectedVersion, reviewedCatalogVersions(draft.services));
   const snapshot = JSON.stringify({ ...draft, status: "submitted" });
   const statements = [
     insert,
@@ -537,7 +559,10 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
   ];
   try {
     const results = await database.batch(statements);
-    if (!results[0]?.meta.changes) return { kind: "conflict" };
+    if (!results[0]?.meta.changes) {
+      const changed = await changedCatalogServices(env, draft.services);
+      return changed.length ? { kind: "incomplete", reason: "catalog_changed", servicePublicIds: changed } : { kind: "conflict" };
+    }
   } catch { return { kind: "conflict" }; }
   const request = await loadSubmittedRequest(env, session, requestId);
   return request ? { kind: "submitted", request } : null;

@@ -124,6 +124,19 @@ this roadmap into one unreviewable migration or deployment.
   Confirmed link revocations survive concurrent search/filter reads; an older
   response must not make a revoked link appear active again.
 
+Follow-up requested August 25 (verified locally; not published): show a current
+view item count, split into folders and files. Count immediate folder entries
+only, never descendant contents. Search counts describe matching results rather
+than the underlying folder. Mark partially loaded listings explicitly and do not
+present stale, loading, or failed results as a final total. This does not change
+the separate recent-links policy, which includes links within the folder tree.
+The type check and production build passed, as did 14 focused unit tests and
+74 desktop/mobile browser tests, including 10 new count cases. Desktop and
+375-pixel mobile screenshots were visually reviewed. No API, migration,
+thumbnail, or Viewer change is part of this follow-up.
+Saved locally as `5e2ec18` (`feat(delivery): show current folder and file counts`);
+this follow-up is not included in the deployed navigation release below.
+
 Implementation notes: the optional `prefix` query on `GET /api/delivery/shares`
 is an additional filter, not an authorization grant. Omitting it retains the
 global authorized history. No database migration, source-object move, thumbnail
@@ -513,15 +526,27 @@ requirements. Do not publish or claim production acceptance from local tests.
   requires an authoritative versioned Alpha contract; never infer it locally.
 - Routine technical deployments do not automatically notify clients.
 
-The source audit also found that the current flat catalog is not a category-first
-request workflow, and the New Request entry point can appear from a feature flag
-without proving current `request.create` readiness. A native workspace may still
-require an active legacy account/identity bridge for requests. A later slice
-should expose scoped request readiness and category search using the existing
-wizard, not derive access from service categories. Per-client service visibility
-is not projected yet, and the singleton catalog checkpoint is not safe to treat
-as a multi-producer contract. Generic asset/folder/project feedback remains a
-separate unimplemented feature, not a relabelled request or inspection note.
+The baseline source audit found a flat catalog and a New Request entry point
+without current `request.create` readiness. The next local increment implements
+scoped readiness, target selection before autosave, category-first
+browsing, bounded catalog pages, saved-version warnings, and transaction-time
+catalog guards. It is verified locally and not published. The final serial Client
+backend gate passed **521 tests across 50 files**, zero failures or skips, in
+**471.67 seconds**; the complete Client browser suite passed **138 tests**,
+including 34 new cases. TypeScript and the production build passed, and layouts
+were visually accepted at 375, 640, 1280 and 3440 pixels. A stale migration-test
+filename whitelist was replaced with SQL trigger detection; the real populated
+upgrade/FK checks and test timeouts were preserved. No application migration or
+Viewer/thumbnail runtime change was required. These are local package results,
+not a claim that the full monorepo or production workflow is accepted. See
+[the service request runbook](client-service-request-readiness.md).
+
+A native workspace may still require an active legacy account/identity bridge
+for requests. Per-client service visibility is not projected yet, and the
+singleton catalog checkpoint is not a multi-producer contract. Existing
+authorized draft pricing hints are supported and retained; catalog browsing
+does not expose internal pricing. Generic asset/folder/project feedback remains
+a separate unimplemented feature, not a relabelled request or inspection note.
 
 ### 6. Unified activity and release acceptance
 
@@ -577,6 +602,10 @@ Test the complete workflow, not only whether a component renders:
       project workspace, with responsive layouts and permission/race regressions.
 - [x] Locally implement and verify legacy folder-change notification batches,
       scoped staff controls, retry/cancellation races and populated upgrades.
+- [x] Locally implement and verify scoped request readiness, category-first
+      paged service selection, saved-draft protection and atomic catalog guards.
+- [x] Locally implement and verify current-view folder/file counts without
+      descendant totals, including filtered and partially loaded listings.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with
