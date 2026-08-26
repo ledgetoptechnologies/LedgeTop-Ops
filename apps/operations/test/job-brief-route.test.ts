@@ -131,12 +131,12 @@ function setup() {
 
   const delivery = new DatabaseSync(":memory:");
   delivery.exec(`
-    CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT);
-    CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,active INTEGER);
+    CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT,project_alpha_source_id TEXT);
+    CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,active INTEGER,project_alpha_source_id TEXT);
     CREATE TABLE client_folder_associations(id TEXT PRIMARY KEY,scope_type TEXT,project_id TEXT,account_id TEXT,r2_prefix TEXT,revoked_at TEXT);
     CREATE TABLE file_index(r2_key TEXT PRIMARY KEY,etag TEXT,size INTEGER,content_type TEXT);
-    INSERT INTO client_accounts VALUES ('account-1','active');
-    INSERT INTO projects VALUES ('portal-project-1','pa-project-1',1);
+    INSERT INTO client_accounts VALUES ('account-1','active',NULL);
+    INSERT INTO projects VALUES ('portal-project-1','pa-project-1',1,'project-alpha:primary');
     INSERT INTO client_folder_associations VALUES ('association-1','project','portal-project-1','account-1','Jobs/Clients/Acme/North/',NULL);
   `);
 
@@ -269,6 +269,18 @@ describe("operational job brief routes", () => {
     expect(refreshedPayload.history[0].author.displayName).toBe("Ops Admin");
     expect(state.ops.prepare("SELECT COUNT(*) count FROM audit_events").get()).toEqual({ count: 2 });
     expect(() => state.ops.prepare("UPDATE operational_job_brief_revisions SET change_kind='scope_saved'").run()).toThrow("immutable");
+  });
+
+  it("does not resolve a secondary operation through a primary Delivery project with the same raw ID", async () => {
+    const state = setup();
+    state.ops.prepare("UPDATE pa_operations SET projection_source_id='project-alpha:secondary' WHERE id='operation-1'").run();
+    const response = await worker.fetch(request("/api/operations/operation-1/job-brief/attachments/reference", "admin", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ expectedVersion: 0, objectKey: state.projectKml }),
+    }), state.env, executionCtx);
+    expect(response.status).toBe(404);
+    expect(state.ops.prepare("SELECT count(*) count FROM operational_job_brief_attachments").get()).toEqual({ count: 0 });
+    expect(state.objectGets()).toBe(0);
   });
 
   it("keeps staff uploads and authorized project KML private behind the brief assignment", async () => {

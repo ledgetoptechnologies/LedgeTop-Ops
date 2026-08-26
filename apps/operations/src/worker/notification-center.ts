@@ -24,7 +24,7 @@ const selectBatch = `SELECT batch.*,association.r2_prefix,account.status account
   FROM client_folder_notification_batches batch
   JOIN client_folder_associations association ON association.id=batch.association_id
     AND association.account_id=batch.account_id AND association.logical_grant_id=batch.logical_grant_id
-  JOIN client_accounts account ON account.id=batch.account_id`;
+  JOIN client_accounts account ON account.id=batch.account_id AND account.project_alpha_source_id='project-alpha:primary'`;
 const tables = ["client_folder_notification_batches", "client_folder_notification_batch_items", "client_folder_notification_batch_controls"];
 const actions = z.object({ expectedRevision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1) }).strict();
 
@@ -177,7 +177,7 @@ export async function controlDeliveryNotificationBatch(env: Env, principal: Staf
           SELECT 1 FROM client_folder_associations association JOIN client_accounts account ON account.id=association.account_id
           WHERE association.id=client_folder_notification_batches.association_id AND association.account_id=client_folder_notification_batches.account_id
             AND association.logical_grant_id=client_folder_notification_batches.logical_grant_id AND association.r2_prefix=?
-            AND account.status='active' AND account.project_alpha_client_id IS ? AND account.project_alpha_organization_id IS ?)`)
+            AND account.status='active' AND account.project_alpha_source_id='project-alpha:primary' AND account.project_alpha_client_id IS ? AND account.project_alpha_organization_id IS ?)`)
         .bind(status,action,id,expectedRevision,row.r2_prefix,row.project_alpha_client_id,row.project_alpha_organization_id),
       env.DELIVERY_DB.prepare(`INSERT INTO client_folder_notification_batch_controls
         (actor_id,mutation_key,fingerprint,batch_id,action,expected_revision,result_revision,result_status)

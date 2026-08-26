@@ -32,7 +32,7 @@ describe("legacy client account Project Alpha root activation", () => {
     await deliveryDb.exec(`
       CREATE TABLE client_accounts(
         id TEXT PRIMARY KEY,display_name TEXT NOT NULL,status TEXT NOT NULL,
-        project_alpha_client_id TEXT,project_alpha_organization_id TEXT,
+        project_alpha_client_id TEXT,project_alpha_organization_id TEXT,project_alpha_source_id TEXT,
         created_at TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
@@ -133,6 +133,21 @@ describe("legacy client account Project Alpha root activation", () => {
     expect(await deliveryDb.prepare("SELECT COUNT(*) count FROM audit_log").first("count")).toBe(1);
   });
 
+  it("does not activate a secondary Delivery account with equal primary Alpha IDs", async () => {
+    await deliveryDb.prepare(`UPDATE client_accounts SET project_alpha_source_id='project-alpha:secondary',
+      project_alpha_client_id='pa-client',project_alpha_organization_id='pa-org' WHERE id='other-account'`).run();
+    const list = await listClientAccountRootActivation(env);
+    expect(list.accounts.some(account => account.id === "other-account")).toBe(false);
+    await expect(activateClientAccountRoot(env, principal, "other-account", {
+      projectAlphaClientId: "pa-client", expectedUpdatedAt: "2026-08-16T00:00:00Z",
+    })).rejects.toMatchObject({ status: 409 });
+    expect(await deliveryDb.prepare("SELECT count(*) count FROM audit_log").first("count")).toBe(0);
+    // A secondary duplicate cannot prevent the actual primary root activation.
+    await expect(activateClientAccountRoot(env, principal, "legacy-account", {
+      projectAlphaClientId: "pa-client", expectedUpdatedAt: "2026-08-16T00:00:00Z",
+    })).resolves.toMatchObject({ unchanged: false, projectAlphaClientId: "pa-client" });
+  });
+
   it.each(["pa-local-secondary-client", "pa-local-secondary-standalone", "primary-client-secondary-ancestor"])(
     "excludes unsupported source %s and rejects direct activation without Delivery writes", async clientId => {
       await seedSecondaryActivationSources(opsDb);
@@ -200,11 +215,11 @@ describe("legacy client account Project Alpha root activation", () => {
         id TEXT PRIMARY KEY,legacy_account_id TEXT UNIQUE,root_type TEXT NOT NULL,
         pa_organization_public_id TEXT,pa_client_public_id TEXT,display_name TEXT NOT NULL,status TEXT NOT NULL
       );
-      UPDATE client_accounts SET project_alpha_client_id='pa-client',project_alpha_organization_id='pa-org'
+      UPDATE client_accounts SET project_alpha_source_id='project-alpha:primary',project_alpha_client_id='pa-client',project_alpha_organization_id='pa-org'
         WHERE id='legacy-account';
       INSERT INTO portal_v2_workspaces(id,legacy_account_id,root_type,pa_organization_public_id,display_name,status)
         VALUES ('workspace-legacy-account','legacy-account','organization','pa-org','Legacy Client','active');
-      UPDATE client_accounts SET project_alpha_client_id='pa-standalone' WHERE id='other-account';
+      UPDATE client_accounts SET project_alpha_source_id='project-alpha:primary',project_alpha_client_id='pa-standalone' WHERE id='other-account';
     `.replace(/\s*\n\s*/g, " "));
     const result = await listClientAccountRootActivation(env);
     expect(result.workspaceMigrationApplied).toBe(true);
@@ -482,8 +497,8 @@ describe("post-0121 client account root activation on the real Client migration 
     // when no projection rows exist and the exact optimistic version matches.
     await deliveryDb.batch([
       deliveryDb.prepare(`INSERT INTO client_accounts
-        (id,display_name,status,project_alpha_client_id,updated_at)
-        VALUES ('linked-account','Linked Account','active','pa-linked','linked-v1')`),
+        (id,display_name,status,project_alpha_client_id,updated_at,project_alpha_source_id)
+        VALUES ('linked-account','Linked Account','active','pa-linked','linked-v1','project-alpha:primary')`),
       deliveryDb.prepare(`INSERT INTO client_identity_links
         (id,account_id,issuer,subject,email) VALUES
         ('linked-identity','linked-account','https://issuer.test','linked-subject','linked@example.test')`),

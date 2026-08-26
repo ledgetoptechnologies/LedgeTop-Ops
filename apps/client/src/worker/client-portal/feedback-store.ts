@@ -6,8 +6,9 @@ export interface FeedbackStoreContext {
   workspaceIdentityId: string | null; issuer: string; subject: string;
 }
 export interface FeedbackSourceOwner {
-  account: { projectAlphaClientId: string | null; projectAlphaOrganizationId: string | null };
-  project: { projectAlphaProjectId: string | null; sourceUpdatedAt: string | null } | null;
+  version?: 2;
+  account: { projectAlphaClientId: string | null; projectAlphaOrganizationId: string | null; projectAlphaSourceId?: string | null };
+  project: { projectAlphaProjectId: string | null; sourceUpdatedAt: string | null; projectAlphaSourceId?: string | null } | null;
   workspace: { rootType: "organization" | "standalone_client"; rootPublicId: string; generationId: string; sourceSequence: number } | null;
   association: { prefix: string } | null;
   file: { etag: string; size: number; uploadedAt: string } | null;
@@ -37,12 +38,17 @@ const targetSchema = z.object({
   relativePath: nullableString, storageKey: nullableString, label: z.string().min(1).max(160),
   projectName: z.string().max(160).nullable(),
   sourceOwner: z.object({
-    account: z.object({ projectAlphaClientId: nullableString, projectAlphaOrganizationId: nullableString }).strict(),
-    project: z.object({ projectAlphaProjectId: nullableString, sourceUpdatedAt: nullableString }).strict().nullable(),
+    version: z.literal(2).optional(),
+    account: z.object({ projectAlphaClientId: nullableString, projectAlphaOrganizationId: nullableString,
+      projectAlphaSourceId: z.string().regex(/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/).nullable().optional() }).strict(),
+    project: z.object({ projectAlphaProjectId: nullableString, sourceUpdatedAt: nullableString,
+      projectAlphaSourceId: z.string().regex(/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/).nullable().optional() }).strict().nullable(),
     workspace: z.object({ rootType: z.enum(["organization", "standalone_client"]), rootPublicId: z.string(), generationId: z.string(), sourceSequence: z.number().int().nonnegative() }).strict().nullable(),
     association: z.object({ prefix: z.string() }).strict().nullable(),
     file: z.object({ etag: z.string(), size: z.number().int().nonnegative(), uploadedAt: z.string() }).strict().nullable(),
-  }).strict(),
+  }).strict().refine(owner => owner.version === 2
+    ? owner.account.projectAlphaSourceId !== undefined && (!owner.project || owner.project.projectAlphaSourceId !== undefined)
+    : owner.account.projectAlphaSourceId === undefined && (!owner.project || owner.project.projectAlphaSourceId === undefined)),
 }).strict().refine(target => target.kind === "project"
   ? target.projectId !== null && target.associationId === null && target.relativePath === null && target.storageKey === null
   : target.kind === "folder"

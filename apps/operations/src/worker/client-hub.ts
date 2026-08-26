@@ -86,7 +86,7 @@ async function businessAlias(env: Env, root: WorkspaceRow, portal: ClientHubWork
   }
   if (portal.legacy_account_id) {
     const account = await database(env).prepare(`SELECT project_alpha_client_id,project_alpha_organization_id
-      FROM client_accounts WHERE id=? AND status='active'`).bind(portal.legacy_account_id)
+      FROM client_accounts WHERE id=? AND status='active' AND project_alpha_source_id='project-alpha:primary'`).bind(portal.legacy_account_id)
       .first<{ project_alpha_client_id: string | null; project_alpha_organization_id: string | null }>();
     const internalId = portal.root_type === "organization" ? account?.project_alpha_organization_id
       : account?.project_alpha_organization_id === null ? account.project_alpha_client_id : null;
@@ -111,7 +111,7 @@ async function liveDetailRoot(env: Env, root: WorkspaceRow): Promise<WorkspaceRo
   const db = database(env);
   if (root.root_namespace === "account" && root.source_id === "delivery:local") {
     const account = await db.prepare(`SELECT id,display_name,status FROM client_accounts WHERE id=?
-      AND project_alpha_client_id IS NULL AND project_alpha_organization_id IS NULL AND status<>'closed'`)
+      AND project_alpha_source_id IS NULL AND project_alpha_client_id IS NULL AND project_alpha_organization_id IS NULL AND status<>'closed'`)
       .bind(root.public_id).first<{ id: string; display_name: string; status: string }>();
     if (!account) throw new HTTPException(404, { message: "Client not found" });
     return { ...root, display_name: account.display_name, status: account.status, workspace_id: null,

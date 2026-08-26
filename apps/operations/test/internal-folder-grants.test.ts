@@ -23,6 +23,7 @@ vi.mock("../src/worker/alerts", () => ({ sendAdminAlert: mocks.sendAdminAlert })
 
 import {
   createClientFolderGrant,
+  findClientFolderGrantTargets,
   processClientFolderChangeNotifications,
   processClientFolderGrantNotifications,
   recordClientFolderFileChange,
@@ -75,8 +76,8 @@ describe("direct authenticated client folder grants", () => {
     }
     await db.prepare("PRAGMA foreign_keys = ON").run();
     await db.batch([
-      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES('account-a','Acme','active','pa-client-a','pa-org-a')"),
-      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES('account-b','Other','active','pa-client-b','pa-org-b')"),
+      db.prepare("INSERT INTO client_accounts(project_alpha_source_id,id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES ('project-alpha:primary','account-a','Acme','active','pa-client-a','pa-org-a')"),
+      db.prepare("INSERT INTO client_accounts(project_alpha_source_id,id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES ('project-alpha:primary','account-b','Other','active','pa-client-b','pa-org-b')"),
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('identity-a','account-a','https://issuer.test','subject-a','client-a@example.test')"),
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('identity-b','account-b','https://issuer.test','subject-b','client-b@example.test')"),
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('account-a','identity-a','manager')"),
@@ -122,6 +123,17 @@ describe("direct authenticated client folder grants", () => {
   });
 
   afterAll(async () => miniflare.dispose());
+
+  it("does not reuse primary folder ownership for a secondary account with identical raw Alpha references", async () => {
+    await db.prepare("INSERT INTO client_accounts(project_alpha_source_id,id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES ('project-alpha:secondary','secondary-account','Acme secondary','active','pa-client-a','pa-org-a')").run();
+    await expect(createClientFolderGrant(env, request, principal, {
+      accountId: "secondary-account", divisionId: "division-a", r2Prefix: "Jobs/Clients/Acme/Delivery/",
+    }, "secondary-source-grant-0001")).rejects.toMatchObject({ status: 404 });
+    const targets = await findClientFolderGrantTargets(env, principal, { divisionId: "division-a", r2Prefix: "Jobs/Clients/Acme/Delivery/", query: "Acme" });
+    expect(targets.accounts.map(account => account.id)).toEqual(["account-a"]);
+    expect(await db.prepare("SELECT count(*) count FROM client_folder_associations WHERE account_id='secondary-account'").first("count")).toBe(0);
+    expect(mocks.sendNotificationMail).not.toHaveBeenCalled();
+  });
 
   it("creates only a client-scoped grant and suppresses mail when revoked during the grace window", async () => {
     const created = await createClientFolderGrant(env, request, principal, {

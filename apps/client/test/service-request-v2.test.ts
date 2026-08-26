@@ -131,11 +131,14 @@ describe("service request v2 transaction-time catalog contract", () => {
       if (statements.length) await database.batch(statements.map(statement => database.prepare(statement)));
     }
     await database.batch([
-      database.prepare("INSERT INTO client_accounts(id,display_name,status) VALUES('account-a','Acme','active')"),
+      database.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_organization_id,project_alpha_source_id) VALUES('account-a','Acme','active','same-org-id','project-alpha:primary'),('account-secondary','Other instance','active','same-org-id','project-alpha:secondary')"),
       database.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('identity-a','account-a','https://issuer.test','subject-a','client@example.test')"),
       database.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('account-a','identity-a','manager')"),
-      database.prepare("INSERT INTO projects(id,client_name,project_name,r2_prefix,active) VALUES('project-a','Acme','Site mapping','Clients/Acme/Mapping/',1)"),
+      database.prepare("INSERT INTO projects(id,client_name,project_name,r2_prefix,active,project_alpha_project_id,project_alpha_source_id) VALUES('project-a','Acme','Site mapping','Clients/Acme/Mapping/',1,'same-project-id','project-alpha:primary'),('project-secondary','Other instance','Secondary mapping','Secondary/Mapping/',1,'same-project-id','project-alpha:secondary')"),
       database.prepare("INSERT INTO client_project_grants(account_id,project_id,can_request_service) VALUES('account-a','project-a',1)"),
+      database.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('identity-secondary','account-secondary','https://issuer.test','secondary-user','secondary@example.test')"),
+      database.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('account-secondary','identity-secondary','manager')"),
+      database.prepare("INSERT INTO client_project_grants(account_id,project_id,can_request_service) VALUES('account-secondary','project-secondary',1)"),
     ]);
     repositoryEnv = { DELIVERY_DB: database } as Env;
   }, 60_000);
@@ -226,6 +229,18 @@ describe("service request v2 transaction-time catalog contract", () => {
       VALUES('request-other','account-a','project-a','identity-a','service','Private other-source request','Other-source details',?,
         'other-request-create-key',?,?)`).bind(status, "f".repeat(43), otherSource).run();
   }
+
+  it("does not route secondary Delivery parents with identical Alpha references into primary catalog requests", async () => {
+    const secondary={...session,accountId:"account-secondary",identityId:"identity-secondary"};
+    for(const projectId of [null,"project-secondary"]) {
+      expect(await createServiceRequestDraft(repositoryEnv,secondary,{...input,projectId,services:[]},`secondary-empty-${projectId??"root"}`)).toBeNull();
+      expect(await createServiceRequestDraft(repositoryEnv,secondary,{...input,projectId},`secondary-review-${projectId??"root"}`)).toBeNull();
+    }
+    expect(await listServiceRequestDrafts(repositoryEnv,secondary)).toEqual([]);
+    expect(await d1ClientPortalRepository.listServiceRequests(repositoryEnv,secondary)).toEqual([]);
+    expect(await database.prepare("SELECT count(*) n FROM client_service_request_drafts").first("n")).toBe(0);
+    expect((await createdDraft()).projectId).toBe("project-a");
+  });
 
   it("keeps primary selections and saved JSON stable when another source uses identical service IDs and versions", async () => {
     await seedOtherCatalog();

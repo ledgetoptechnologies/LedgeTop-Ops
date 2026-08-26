@@ -62,7 +62,7 @@ async function authoritativeScope(env: Env, row: ScopeRow): Promise<ClientFolder
       SELECT pf.division_id,pf.r2_prefix,p.client_id project_alpha_client_id,p.organization_id project_alpha_organization_id,
         length(rtrim(pf.r2_prefix,'/')||'/') prefix_length
       FROM project_folders pf JOIN pa_projects p ON p.id=pf.project_id
-      WHERE p.active=1 AND pf.r2_prefix IN (SELECT value FROM json_each(?1))
+      WHERE p.active=1 AND p.projection_source_id='project-alpha:primary' AND pf.r2_prefix IN (SELECT value FROM json_each(?1))
     ) SELECT DISTINCT division_id,
       CASE WHEN project_alpha_client_id IS NOT NULL AND project_alpha_client_id<>'' THEN 'client' ELSE 'organization' END owner_type,
       CASE WHEN project_alpha_client_id IS NOT NULL AND project_alpha_client_id<>'' THEN project_alpha_client_id ELSE project_alpha_organization_id END owner_id
@@ -82,7 +82,7 @@ export async function readClientFolderNotificationBatchScope(env: Env, batch: Cl
       CASE WHEN i.revoked_at IS NULL AND EXISTS(SELECT 1 FROM client_account_members m
         WHERE m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL) THEN i.email ELSE NULL END recipient_email,
       association.r2_prefix,a.project_alpha_client_id,a.project_alpha_organization_id
-    FROM client_folder_associations association JOIN client_accounts a ON a.id=association.account_id
+    FROM client_folder_associations association JOIN client_accounts a ON a.id=association.account_id AND a.project_alpha_source_id='project-alpha:primary'
     LEFT JOIN client_identity_links i ON i.id=? AND i.account_id=a.id
     WHERE association.id=? AND association.logical_grant_id=? AND association.account_id=?
       AND association.scope_type='client' AND association.project_id IS NULL`)
@@ -93,7 +93,7 @@ export async function readClientFolderNotificationBatchScope(env: Env, batch: Cl
 export async function authorizeClientFolderNotificationBatch(env: Env, batch: ClientFolderNotificationBatchIdentity): Promise<(ClientFolderNotificationBatchScope & { recipientEmail: string; mode: Mode }) | null> {
   const row = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT a.display_name account_name,i.email recipient_email,
       association.r2_prefix,a.project_alpha_client_id,a.project_alpha_organization_id,preference.mode
-    FROM client_folder_associations association JOIN client_accounts a ON a.id=association.account_id AND a.status='active'
+    FROM client_folder_associations association JOIN client_accounts a ON a.id=association.account_id AND a.status='active' AND a.project_alpha_source_id='project-alpha:primary'
     JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL AND i.email IS NOT NULL
     JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
     JOIN client_folder_notification_preferences preference ON preference.account_id=a.id

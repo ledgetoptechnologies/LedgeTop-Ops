@@ -1,4 +1,5 @@
 import type { Env as ClientEnv } from "../types";
+import { primaryWorkspaceAccount } from "./project-alpha-source";
 import type { PortalAuthorizationEnv } from "./workspace-v2";
 type Env = PortalAuthorizationEnv & Pick<ClientEnv, "AUTHENTICATED_DELIVERY_GRANTS_ENABLED">;
 import type { VerifiedClientPrincipal } from "./types";
@@ -58,6 +59,8 @@ async function candidates(
       AND principal_record.identity_id=recipient.identity_id AND principal_record.status='active'
       AND principal_record.source_version=recipient.principal_source_version
     WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
+      AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
+        AND workspace.status='active' AND ${primaryWorkspaceAccount("workspace")})
       AND (grant_record.audience_type<>'principal' OR principal_record.public_id IS NOT NULL)
       AND (? IS NULL OR binding.id=?)
     ORDER BY binding.id LIMIT ?`)
@@ -91,6 +94,8 @@ async function candidates(
       AND eligibility.principal_source_version=principal_record.source_version
       AND eligibility.verified_email=identity.verified_email
     WHERE identity.issuer=? AND identity.subject=? AND identity.status='active' AND identity.revoked_at IS NULL
+      AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=membership.workspace_id
+        AND workspace.status='active' AND ${primaryWorkspaceAccount("workspace")})
       AND principal_record.public_id IS NOT NULL
       AND (principal_record.identity_id=identity.id OR eligibility.identity_id=identity.id)
       AND (? IS NULL OR binding.id=?) ORDER BY binding.id LIMIT ?`)
@@ -216,7 +221,7 @@ export async function listAuthorizedAuthenticatedDeliveryPrefixes(
         AND membership.status='active' AND membership.revoked_at IS NULL
         AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
       JOIN portal_v2_workspaces workspace
-        ON workspace.id=membership.workspace_id AND workspace.status='active'
+        ON workspace.id=membership.workspace_id AND workspace.status='active' AND ${primaryWorkspaceAccount("workspace")}
       JOIN portal_v2_authenticated_delivery_grants grant_record
         ON grant_record.workspace_id=workspace.id AND grant_record.status='active'
         AND grant_record.revoked_at IS NULL

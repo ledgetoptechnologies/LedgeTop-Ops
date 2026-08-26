@@ -68,9 +68,9 @@ async function rootFacts(env: IndexEnv, roots: Root[]): Promise<Facts[]> {
   })));
   const values = roots.flatMap(root => [root.source_id, root.root_namespace, root.kind, root.public_id, linked.get(key(root))?.workspace?.id ?? null]);
   const accountMatch = `(CASE WHEN wanted.root_namespace='account' THEN account.id=wanted.public_id
-      AND account.project_alpha_client_id IS NULL AND account.project_alpha_organization_id IS NULL
-    WHEN wanted.root_namespace='business' AND wanted.source_id='${PA}' THEN (wanted.kind='organization' AND account.project_alpha_organization_id=wanted.public_id)
-      OR (wanted.kind='standalone_client' AND account.project_alpha_client_id=wanted.public_id AND account.project_alpha_organization_id IS NULL)
+      AND account.project_alpha_source_id IS NULL AND account.project_alpha_client_id IS NULL AND account.project_alpha_organization_id IS NULL
+    WHEN wanted.root_namespace='business' AND wanted.source_id='${PA}' THEN account.project_alpha_source_id=wanted.source_id AND ((wanted.kind='organization' AND account.project_alpha_organization_id=wanted.public_id)
+      OR (wanted.kind='standalone_client' AND account.project_alpha_client_id=wanted.public_id AND account.project_alpha_organization_id IS NULL))
     ELSE 0 END)`;
   const counts = (await env.DELIVERY_DB.withSession("first-primary").prepare(`
     WITH wanted(source_id,root_namespace,kind,public_id,workspace_id) AS (VALUES ${roots.map(() => "(?,?,?,?,?)").join(",")})
@@ -171,7 +171,7 @@ async function rootPage(env: IndexEnv, phase: Phase, cursor: string, generation:
   } else if (phase === "accounts") {
     rows = (await delivery.prepare(`SELECT '${LOCAL}' source_id,'account' root_namespace,'standalone_client' kind,
       id public_id,NULL pa_public_id,'not_applicable' mapping_status,display_name,status,0 contact_count,id cursor
-      FROM client_accounts WHERE project_alpha_client_id IS NULL AND project_alpha_organization_id IS NULL
+      FROM client_accounts WHERE project_alpha_source_id IS NULL AND project_alpha_client_id IS NULL AND project_alpha_organization_id IS NULL
         AND status<>'closed' AND id>? ORDER BY id COLLATE BINARY LIMIT ?`).bind(cursor, PAGE_SIZE).all<Root & { cursor: string }>()).results;
   } else {
     rows = (await delivery.prepare(`SELECT '${PA}' source_id,'portal' root_namespace,root_type kind,

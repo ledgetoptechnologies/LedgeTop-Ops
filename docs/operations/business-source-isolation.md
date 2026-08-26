@@ -85,8 +85,11 @@ changes, Viewer changes, or thumbnail runtime changes are part of this increment
 
 ## Remaining activation work
 
-Delivery account/project references and portal ownership, lifecycle, and replay
-state still need end-to-end source isolation. A registry must bind configured
+The subsequent [Delivery provenance increment](delivery-source-provenance.md)
+adds source-owned account/project references and primary-compatible consumer
+guards locally. Its verification and paired release gates are tracked there;
+it does not activate secondary delivery. Native portal ownership, lifecycle,
+and replay state still need end-to-end source isolation. A registry must bind configured
 credentials, a stable verified producer identity, and allowed capabilities and
 workspaces. Outbound requests must route to that owning connector. Explicit
 business-party linking must change presentation without merging identities or

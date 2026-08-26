@@ -29,6 +29,7 @@ describe("bounded staff grant and denial reads", () => {
       script: "export default { fetch(){ return new Response('ok') } }", d1Databases: { DELIVERY_DB: "grant-admin-reads" } });
     db = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
     await db.exec(executable(`
+      CREATE TABLE client_accounts(id TEXT PRIMARY KEY,project_alpha_source_id TEXT);
       CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT NOT NULL,subject TEXT NOT NULL,verified_email TEXT,
         status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,created_at TEXT DEFAULT (datetime('now')),updated_at TEXT DEFAULT (datetime('now')),UNIQUE(issuer,subject));
       CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT NOT NULL,pa_organization_public_id TEXT,pa_client_public_id TEXT,

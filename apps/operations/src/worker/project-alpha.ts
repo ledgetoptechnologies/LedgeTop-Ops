@@ -420,12 +420,12 @@ async function clientPortalProjectionStatements(env: Env, data: SnapshotCollecti
   const current = portalChanged ? await currentPortalProjectionState(env) : { clients: [], organizations: [], projects: [] };
   if (changed.has("clients")) for (const row of data.clients) {
     const id = text(row.id), name = text(row.name);
-    if (id && name) statements.push(db.prepare("UPDATE client_accounts SET display_name=?,project_alpha_organization_id=?,status=?,updated_at=datetime('now') WHERE project_alpha_client_id=?")
+    if (id && name) statements.push(db.prepare("UPDATE client_accounts SET display_name=?,project_alpha_organization_id=?,status=?,updated_at=datetime('now') WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_client_id=?")
       .bind(name, text(row.organization_id), sourceActive(row) ? "active" : "suspended", id));
   }
   if (changed.has("organizations")) for (const row of data.organizations) {
     const id = text(row.id), name = text(row.name);
-    if (id && name) statements.push(db.prepare("UPDATE client_accounts SET display_name=?,status=?,updated_at=datetime('now') WHERE project_alpha_organization_id=? AND project_alpha_client_id IS NULL")
+    if (id && name) statements.push(db.prepare("UPDATE client_accounts SET display_name=?,status=?,updated_at=datetime('now') WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_organization_id=? AND project_alpha_client_id IS NULL")
       .bind(name, sourceActive(row) ? "active" : "suspended", id));
   }
   if (changed.has("projects")) {
@@ -437,7 +437,7 @@ async function clientPortalProjectionStatements(env: Env, data: SnapshotCollecti
       const clientName = clients.get(text(row.client_id)) || organizations.get(text(row.organization_id)) || "Client";
       statements.push(db.prepare(`UPDATE projects SET client_name=?,project_name=?,status=?,summary=?,site_address=?,service_address=?,
         project_contact_name=?,project_contact_email=?,project_contact_phone=?,next_milestone=?,source_updated_at=?,
-        updated_at=datetime('now'),active=? WHERE project_alpha_project_id=?`)
+        updated_at=datetime('now'),active=? WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_project_id=?`)
         .bind(clientName, projectName, text(row.status), text(row.summary) || text(row.description), text(row.site_address),
           text(row.service_address), text(row.project_contact_name), normalizedEmail(row.project_contact_email),
           text(row.project_contact_phone), text(row.next_milestone), text(row.updated_at), sourceActive(row), id));
@@ -446,13 +446,13 @@ async function clientPortalProjectionStatements(env: Env, data: SnapshotCollecti
   if (changed.has("clients")) {
     const activeClientIds = current.clients.filter(row => row.active === 1).map(row => row.id);
     statements.push(db.prepare(`UPDATE client_accounts SET status='suspended',updated_at=datetime('now')
-      WHERE project_alpha_client_id IS NOT NULL AND project_alpha_client_id NOT IN (SELECT value FROM json_each(?))`)
+      WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_client_id IS NOT NULL AND project_alpha_client_id NOT IN (SELECT value FROM json_each(?))`)
       .bind(JSON.stringify(activeClientIds)));
   }
   if (changed.has("organizations")) {
     const activeOrganizationIds = current.organizations.filter(row => row.active === 1).map(row => row.id);
     statements.push(db.prepare(`UPDATE client_accounts SET status='suspended',updated_at=datetime('now')
-      WHERE project_alpha_client_id IS NULL AND project_alpha_organization_id IS NOT NULL
+      WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_client_id IS NULL AND project_alpha_organization_id IS NOT NULL
         AND project_alpha_organization_id NOT IN (SELECT value FROM json_each(?))`).bind(JSON.stringify(activeOrganizationIds)));
   }
   if (changed.has("projects")) {
@@ -460,7 +460,7 @@ async function clientPortalProjectionStatements(env: Env, data: SnapshotCollecti
     // A source may legitimately have more records than D1's bind-parameter
     // budget. One exact JSON relation also handles an empty active set safely.
     statements.push(db.prepare(`UPDATE projects SET active=0,updated_at=datetime('now')
-      WHERE project_alpha_project_id IS NOT NULL AND project_alpha_project_id NOT IN (SELECT value FROM json_each(?))`)
+      WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_project_id IS NOT NULL AND project_alpha_project_id NOT IN (SELECT value FROM json_each(?))`)
       .bind(JSON.stringify(activeProjectIds)));
   }
 
@@ -475,25 +475,26 @@ async function clientPortalProjectionStatements(env: Env, data: SnapshotCollecti
       const invalidAccounts = `SELECT g.account_id FROM client_project_grants g
         JOIN client_accounts a ON a.id=g.account_id
         JOIN projects p ON p.id=g.project_id
-        WHERE p.project_alpha_project_id=? AND g.revoked_at IS NULL AND NOT
+        WHERE p.project_alpha_source_id='project-alpha:primary' AND p.project_alpha_project_id=?
+          AND COALESCE(a.project_alpha_source_id,'project-alpha:primary')='project-alpha:primary' AND g.revoked_at IS NULL AND NOT
           (?=1 AND a.status='active' AND ((? IS NOT NULL AND a.project_alpha_client_id IS ?)
             OR (g.can_request_service=0 AND ? IS NOT NULL AND a.project_alpha_organization_id IS ?)))`;
       const invalidValues = [projectId, active, clientId, clientId, organizationId, organizationId];
       for (const table of ["client_folder_associations", "client_delivery_grants", "client_member_project_grants"] as const) {
         statements.push(db.prepare(`UPDATE ${table} SET revoked_at=COALESCE(revoked_at,datetime('now'))
-          WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_project_id=?) AND revoked_at IS NULL
+          WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_project_id=?) AND revoked_at IS NULL
             AND account_id IN (${invalidAccounts})`).bind(projectId, ...invalidValues));
       }
       statements.push(db.prepare(`UPDATE client_project_grants SET revoked_at=COALESCE(revoked_at,datetime('now'))
-        WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_project_id=?) AND revoked_at IS NULL
+        WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_project_id=?) AND revoked_at IS NULL
           AND account_id IN (${invalidAccounts})`).bind(projectId, ...invalidValues));
     }
     for (const table of ["client_folder_associations", "client_delivery_grants", "client_member_project_grants", "client_project_grants"] as const) {
       statements.push(db.prepare(`UPDATE ${table} SET revoked_at=COALESCE(revoked_at,datetime('now'))
-        WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_project_id IS NOT NULL AND active=0) AND revoked_at IS NULL`));
+        WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_project_id IS NOT NULL AND active=0) AND revoked_at IS NULL`));
     }
     statements.push(db.prepare(`UPDATE client_folder_associations SET revoked_at=COALESCE(revoked_at,datetime('now'))
-      WHERE scope_type='client' AND revoked_at IS NULL AND account_id IN (SELECT id FROM client_accounts WHERE status<>'active')`));
+      WHERE scope_type='client' AND revoked_at IS NULL AND account_id IN (SELECT id FROM client_accounts WHERE COALESCE(project_alpha_source_id,'project-alpha:primary')='project-alpha:primary' AND status<>'active')`));
   }
   return statements;
 }

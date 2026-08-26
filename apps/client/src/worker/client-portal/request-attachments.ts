@@ -160,12 +160,14 @@ export async function presignRequestAttachmentPart(input: {
 
 const draftAccessSql = `
   JOIN client_accounts a ON a.id=? AND a.status='active'
+    AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
   JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
   JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
   WHERE d.id=? AND d.account_id=a.id AND d.state='draft' AND d.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND (
     (d.project_id IS NULL AND (m.role='manager' OR d.created_by_identity_id=i.id)) OR
     (d.project_id IS NOT NULL AND EXISTS (
       SELECT 1 FROM client_project_grants g JOIN projects p ON p.id=g.project_id AND p.active=1
+        AND (p.project_alpha_source_id IS NULL OR p.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
       WHERE g.account_id=a.id AND g.project_id=d.project_id AND g.revoked_at IS NULL AND g.can_request_service=1
         AND (m.role='manager' OR EXISTS (
           SELECT 1 FROM client_member_project_grants mg
@@ -192,12 +194,14 @@ export async function listRequestAttachments(env: Env, session: ClientPortalSess
 
 const submittedRequestAccessSql = `
   JOIN client_accounts a ON a.id=? AND a.status='active'
+    AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
   JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
   JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
   WHERE request.id=? AND request.account_id=a.id AND request.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND (
     (request.project_id IS NULL AND (m.role='manager' OR request.created_by_identity_id=i.id)) OR
     (request.project_id IS NOT NULL AND EXISTS (
       SELECT 1 FROM client_project_grants g JOIN projects p ON p.id=g.project_id AND p.active=1
+        AND (p.project_alpha_source_id IS NULL OR p.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
       WHERE g.account_id=a.id AND g.project_id=request.project_id AND g.revoked_at IS NULL
         AND (m.role='manager' OR EXISTS (
           SELECT 1 FROM client_member_project_grants mg

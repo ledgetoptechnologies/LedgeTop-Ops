@@ -6,6 +6,7 @@ import { sourcePublicIdExpression } from "../src/worker/client-hub-source";
 import type { Env } from "../src/worker/types";
 
 const secondary = "project-alpha:secondary";
+const primarySources = { accountSourceId: "project-alpha:primary", projectSourceId: "project-alpha:primary" };
 const clientPublic = "a".repeat(32), orgPublic = "b".repeat(32), projectPublic = "c".repeat(32);
 const migrations = (directory: URL) => readdirSync(directory).filter(name => /^\d+_.+\.sql$/.test(name)).sort()
   .map(name => readFileSync(new URL(name, directory), "utf8"));
@@ -47,7 +48,7 @@ describe("primary outbound business provenance", () => {
       .run(JSON.stringify({ public_id: projectPublic }));
   }
   function portal() {
-    delivery.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES('account','Account','active',?,?)")
+    delivery.prepare("INSERT INTO client_accounts(project_alpha_source_id,id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES ('project-alpha:primary','account','Account','active',?,?)")
       .run(clientPublic, orgPublic);
     delivery.prepare("INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,legacy_account_id,display_name) VALUES('workspace','organization',?,'account','Workspace')").run(orgPublic);
     delivery.exec("INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete) VALUES('generation','workspace','source-generation',1,'active',1)");
@@ -55,13 +56,13 @@ describe("primary outbound business provenance", () => {
       VALUES('workspace','generation',?,?,?,'Source entity','source-v1')`);
     insert.run("organization", orgPublic, null); insert.run("client", clientPublic, orgPublic); insert.run("project", projectPublic, orgPublic);
     delivery.exec("INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES('workspace','generation',1)");
-    return { clientId: clientPublic, organizationId: orgPublic, projectId: projectPublic, accountId: "account" };
+    return { ...primarySources, clientId: clientPublic, organizationId: orgPublic, projectId: projectPublic, accountId: "account" };
   }
 
   it("preserves primary local identifiers and recognizes exact immutable primary public IDs", async () => {
     business();
-    expect(await provePrimaryBusinessReferences(env, { clientId: "1", organizationId: "2", projectId: "3" })).toEqual({ available: true });
-    expect(await provePrimaryBusinessReferences(env, { clientId: clientPublic, organizationId: orgPublic, projectId: projectPublic })).toEqual({ available: true });
+    expect(await provePrimaryBusinessReferences(env, { ...primarySources, clientId: "1", organizationId: "2", projectId: "3" })).toEqual({ available: true });
+    expect(await provePrimaryBusinessReferences(env, { ...primarySources, clientId: clientPublic, organizationId: orgPublic, projectId: projectPublic })).toEqual({ available: true });
     for (const table of ["pa_clients", "pa_organizations", "pa_projects"]) {
       const plan = ops.prepare(`EXPLAIN QUERY PLAN SELECT source.id,source.projection_source_id,source.active
         FROM ${table} source WHERE source.id=? OR
@@ -77,21 +78,34 @@ describe("primary outbound business provenance", () => {
     ops.prepare("INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id) VALUES(?,'client','1','secondary-client')").run(secondary);
     ops.prepare("INSERT INTO pa_clients(id,name,payload_json,last_sync_id,projection_source_id) VALUES('secondary-client','Other',?,'test',?)")
       .run(JSON.stringify({ public_id: clientPublic }), secondary);
-    expect(await provePrimaryBusinessReferences(env, { ...refs, clientId: "secondary-client" }))
+    expect(await provePrimaryBusinessReferences(env, { ...primarySources, ...refs, clientId: "secondary-client" }))
       .toEqual({ available: false, reason: "unsupported_source" });
-    expect(await provePrimaryBusinessReferences(env, { clientId: clientPublic })).toEqual({ available: true });
+    expect(await provePrimaryBusinessReferences(env, { ...primarySources, clientId: clientPublic })).toEqual({ available: true });
   });
 
   it("does not accept an unknown scalar or a same-name contact as primary provenance", async () => {
     business();
-    expect(await provePrimaryBusinessReferences(env, { clientId: "Client" })).toEqual({ available: false, reason: "mapping_unavailable" });
-    expect(await provePrimaryBusinessReferences(env, { clientId: "missing" })).toEqual({ available: false, reason: "mapping_unavailable" });
+    expect(await provePrimaryBusinessReferences(env, { ...primarySources, clientId: "Client" })).toEqual({ available: false, reason: "mapping_unavailable" });
+    expect(await provePrimaryBusinessReferences(env, { ...primarySources, clientId: "missing" })).toEqual({ available: false, reason: "mapping_unavailable" });
+  });
+
+  it.each(["account", "project"])("rejects a secondary %s source even when every raw ID matches the primary producer", async kind => {
+    business();
+    const refs = { ...primarySources, clientId: "1", organizationId: "2", projectId: "3",
+      ...(kind === "account" ? { accountSourceId: secondary } : { projectSourceId: secondary }) };
+    expect(await provePrimaryBusinessReferences(env, refs)).toEqual({ available: false, reason: "unsupported_source" });
+  });
+
+  it("does not interpret an unlinked or missing account source as primary quote authority", async () => {
+    business();
+    expect(await provePrimaryBusinessReferences(env, { accountSourceId: null, clientId: "1" }))
+      .toEqual({ available: false, reason: "unsupported_source" });
   });
 
   it("supports an established verified primary portal without requiring unpublished v1 public-ID exports", async () => {
     const refs = portal();
     expect(await provePrimaryBusinessReferences(env, refs)).toEqual({ available: true });
-    expect(await provePrimaryBusinessReferences(env, { ...refs, accountId: "another-account" }))
+    expect(await provePrimaryBusinessReferences(env, { ...primarySources, ...refs, accountId: "another-account" }))
       .toEqual({ available: false, reason: "mapping_unavailable" });
   });
 

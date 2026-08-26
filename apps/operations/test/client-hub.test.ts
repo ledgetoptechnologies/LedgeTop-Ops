@@ -78,9 +78,9 @@ async function fixture() {
   `);
   await applySql(delivery, `
     CREATE TABLE client_accounts(id TEXT PRIMARY KEY,display_name TEXT,status TEXT,project_alpha_client_id TEXT,
-      project_alpha_organization_id TEXT,created_at TEXT,updated_at TEXT);
-    CREATE UNIQUE INDEX account_pa_client ON client_accounts(project_alpha_client_id) WHERE project_alpha_client_id IS NOT NULL;
-    CREATE UNIQUE INDEX account_pa_organization ON client_accounts(project_alpha_organization_id) WHERE project_alpha_organization_id IS NOT NULL;
+      project_alpha_organization_id TEXT,created_at TEXT,updated_at TEXT,project_alpha_source_id TEXT);
+    CREATE UNIQUE INDEX account_pa_client ON client_accounts(project_alpha_source_id,project_alpha_client_id) WHERE project_alpha_client_id IS NOT NULL;
+    CREATE UNIQUE INDEX account_pa_organization ON client_accounts(project_alpha_source_id,project_alpha_organization_id) WHERE project_alpha_organization_id IS NOT NULL;
     CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT,pa_organization_public_id TEXT,
       pa_client_public_id TEXT,display_name TEXT,status TEXT,legacy_account_id TEXT);
     CREATE TABLE portal_v2_directory_generations(id TEXT PRIMARY KEY,workspace_id TEXT,source_generation TEXT,
@@ -90,7 +90,7 @@ async function fixture() {
       parent_public_id TEXT,active INTEGER,source_version TEXT);
     CREATE TABLE client_project_grants(account_id TEXT,project_id TEXT,can_request_service INTEGER,granted_at TEXT,revoked_at TEXT);
     CREATE TABLE projects(id TEXT PRIMARY KEY,project_name TEXT,client_name TEXT,r2_prefix TEXT,active INTEGER,
-      project_alpha_project_id TEXT);
+      project_alpha_project_id TEXT,project_alpha_source_id TEXT);
     CREATE TABLE client_service_requests(id TEXT PRIMARY KEY,account_id TEXT,project_id TEXT,request_type TEXT,title TEXT,
       status TEXT,created_at TEXT,updated_at TEXT);
     CREATE TABLE shares(id TEXT PRIMARY KEY,label TEXT,r2_prefix TEXT,created_at TEXT);
@@ -102,13 +102,13 @@ async function fixture() {
     CREATE TABLE viewer_client_grants(id TEXT PRIMARY KEY,account_id TEXT,project_id TEXT,scope_type TEXT,association_id TEXT,
       include_future_published INTEGER,can_measure INTEGER,can_view_cameras INTEGER,can_download INTEGER,
       authorization_expires_at TEXT,status TEXT,created_at TEXT,updated_at TEXT);
-    INSERT INTO client_accounts VALUES('account-standalone','Standalone One','active','pa-standalone',NULL,datetime('now'),datetime('now'));
-    INSERT INTO client_accounts VALUES('account-org','Organization One','active','pa-child-login','pa-org',datetime('now'),datetime('now'));
+    INSERT INTO client_accounts VALUES('account-standalone','Standalone One','active','pa-standalone',NULL,datetime('now'),datetime('now'),'project-alpha:primary');
+    INSERT INTO client_accounts VALUES('account-org','Organization One','active','pa-child-login','pa-org',datetime('now'),datetime('now'),'project-alpha:primary');
     INSERT INTO portal_v2_workspaces VALUES('workspace-org','organization','${organizationUuid}',NULL,'Organization One','active','account-org');
     INSERT INTO portal_v2_directory_generations VALUES('generation-org','workspace-org','native-1',1,'active',1);
     INSERT INTO portal_v2_directory_checkpoints VALUES('workspace-org','generation-org',1);
     INSERT INTO portal_v2_directory_entities VALUES('workspace-org','generation-org','organization','${organizationUuid}',NULL,1,'native-version');
-    INSERT INTO projects VALUES('project-one','Project One','Standalone One','clients/standalone/project-one/',1,'pa-project-one');
+    INSERT INTO projects VALUES('project-one','Project One','Standalone One','clients/standalone/project-one/',1,'pa-project-one','project-alpha:primary');
     INSERT INTO client_project_grants VALUES('account-standalone','project-one',1,datetime('now'),NULL);
     INSERT INTO client_service_requests VALUES('request-one','account-standalone','project-one','service','Oldest request','submitted','2026-01-01','2026-01-01');
     INSERT INTO shares VALUES('share-one','Delivered folder','clients/standalone/project-one/',datetime('now'));
@@ -326,7 +326,7 @@ describe("Client Hub bounded detail collections", () => {
   it("loads bounded first pages and every row beyond 200 across each grant/request inventory", async () => {
     const { app, env, delivery } = await fixture();
     await applySql(delivery, `WITH RECURSIVE ids(n) AS (SELECT 0 UNION ALL SELECT n+1 FROM ids WHERE n<209)
-      INSERT INTO projects SELECT printf('bulk-%04d',n),'Project '||n,'Organization','clients/org/',1,NULL FROM ids;
+      INSERT INTO projects SELECT printf('bulk-%04d',n),'Project '||n,'Organization','clients/org/',1,NULL,NULL FROM ids;
       INSERT INTO client_project_grants SELECT 'account-org',id,1,'2026-01-01',NULL FROM projects WHERE substr(id,1,5)='bulk-';
       INSERT INTO client_service_requests SELECT id,'account-org',id,'service','Request '||id,'submitted',NULL,'2026-02-01' FROM projects WHERE substr(id,1,5)='bulk-';
       INSERT INTO shares SELECT id,'Share '||id,'clients/org/'||id||'/','2026-01-01' FROM projects WHERE substr(id,1,5)='bulk-';
@@ -515,7 +515,7 @@ describe("Client Hub", () => {
     const { app, env, ops, delivery } = await fixture();
     await applySql(ops, `INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,display_name,sort_name,status,legacy_account_id)
       VALUES('delivery:local','account','standalone_client','pa-standalone','Local Client','local client','active','pa-standalone');`);
-    await applySql(delivery, `INSERT INTO client_accounts VALUES('pa-standalone','Local Client','active',NULL,NULL,datetime('now'),datetime('now'));`);
+    await applySql(delivery, `INSERT INTO client_accounts VALUES('pa-standalone','Local Client','active',NULL,NULL,datetime('now'),datetime('now'),NULL);`);
     expect((await app.request("http://local/api/client-hub/standalone/pa-standalone", {}, env)).status).toBe(409);
     const local = await app.request("http://local/api/client-hub/sources/delivery%3Alocal/standalone/pa-standalone", {}, env);
     await expect(local.json()).resolves.toMatchObject({ client: { source_id: "delivery:local" },

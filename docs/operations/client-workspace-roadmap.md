@@ -367,6 +367,13 @@ directory's source-qualified URLs do not make snapshot, catalog, staff or portal
 stores multi-producer. A second source remains disabled pending full isolation
 and an explicit staff-authority policy; no roles are unioned implicitly.
 
+Local catalog, business-projection and Delivery account/project provenance are
+now implemented with primary-compatible guards and scoped verification. See
+[Delivery source provenance](delivery-source-provenance.md) for the paired
+migration, compatibility/replay tests and release limitations. Native portal
+ownership, the verified connector registry, source-aware outbound routing and
+explicit business-party linking remain separate unfinished gates.
+
 - Introduce immutable connector provenance and an Operations business-party
   mapping without changing existing authorization identities or source URLs.
 - Preserve the current connector as the compatible default. Do not activate a
@@ -639,6 +646,12 @@ Test the complete workflow, not only whether a component renders:
       and outbound authority. See [business source isolation](business-source-isolation.md)
       for exact test results, the corrected feedback fixture and paired release
       gates. No second live connection or production migration was enabled.
+- [x] Locally implement and verify Delivery account/project provenance,
+      source-qualified primary consumers, immutable feedback compatibility and
+      migration/replay guards. See [Delivery source provenance](delivery-source-provenance.md)
+      for the scoped results and whole-database integrity-probe limitation.
+      Secondary native portal activation and frozen Viewer adapters remain pending;
+      no production migration, access change or deployment was performed.
 - [ ] Implement slice 1 and verify its backend-to-browser workflow.
 - [ ] Implement and verify subsequent slices without broadening authority implicitly.
 - [ ] Verify live workflows after approved deployment; do not equate local tests with

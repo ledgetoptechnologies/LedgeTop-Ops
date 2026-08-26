@@ -80,6 +80,8 @@ async function bindingContext(env: Env, bindingId: string): Promise<BindingConte
       binding.owner_public_id,binding.r2_prefix,binding.source_version,checkpoint.active_generation_id
     FROM portal_v2_folder_bindings binding
     JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'
+      AND (workspace.legacy_account_id IS NULL OR EXISTS (SELECT 1 FROM client_accounts account
+        WHERE account.id=workspace.legacy_account_id AND (account.project_alpha_source_id IS NULL OR account.project_alpha_source_id='project-alpha:primary')))
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=binding.workspace_id
     JOIN portal_v2_directory_generations generation
       ON generation.id=checkpoint.active_generation_id AND generation.workspace_id=checkpoint.workspace_id
@@ -95,7 +97,7 @@ async function bindingContext(env: Env, bindingId: string): Promise<BindingConte
   if (!row) throw new HTTPException(404, { message: "Folder binding not found" });
   const prefix = normalizePrefix(row.r2_prefix);
   const candidates = await env.OPS_DB.withSession("first-primary").prepare(`SELECT project_folders.division_id,project_folders.r2_prefix
-    FROM project_folders JOIN pa_projects ON pa_projects.id=project_folders.project_id AND pa_projects.active=1
+    FROM project_folders JOIN pa_projects ON pa_projects.id=project_folders.project_id AND pa_projects.active=1 AND pa_projects.projection_source_id='project-alpha:primary'
     WHERE substr(?,1,length(project_folders.r2_prefix))=project_folders.r2_prefix
     ORDER BY length(project_folders.r2_prefix) DESC LIMIT 51`).bind(prefix)
     .all<{ division_id: string; r2_prefix: string }>();

@@ -1,4 +1,5 @@
 import type { Env as ClientEnv } from "../types";
+import { localOrPrimaryAlphaReference, primaryAlphaReference, primaryWorkspaceAccount } from "./project-alpha-source";
 export type PortalAuthorizationEnv = Pick<ClientEnv, "DELIVERY_DB" | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED" |
   "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED" | "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED" |
   "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED" | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED" |
@@ -142,7 +143,8 @@ async function invitationAcceptanceScopes(
 ): Promise<Set<string> | null> {
   const workspace = await portalDb(env).prepare(`SELECT id,root_type,pa_organization_public_id,
       pa_client_public_id,display_name
-    FROM portal_v2_workspaces WHERE id=? AND status='active'`)
+    FROM portal_v2_workspaces WHERE id=? AND status='active'
+      AND ${primaryWorkspaceAccount("portal_v2_workspaces")}`)
     .bind(workspaceId).first<WorkspaceRow>();
   if (!workspace || !(await activeRootExists(env, workspace))) return null;
   const grants = await portalDb(env).prepare(`SELECT DISTINCT scope_type,scope_public_id
@@ -241,6 +243,7 @@ async function resolveGlobalIdentity(
         JOIN portal_v2_workspaces workspace ON workspace.id=principal.workspace_id AND workspace.status='active'
           AND workspace.legacy_account_id IS NOT NULL
         JOIN client_accounts account ON account.id=workspace.legacy_account_id AND account.status='active'
+          AND ${primaryAlphaReference("account")}
         WHERE principal.status='active' AND (principal.identity_id IS NULL OR principal.identity_id=?) AND lower(principal.email_hint)=?
           AND (principal.identity_id IS NULL
             OR NOT EXISTS(SELECT 1 FROM portal_v2_identity_eligibility_bindings eligibility
@@ -363,7 +366,7 @@ async function activeWorkspace(
     JOIN portal_v2_workspace_memberships m
       ON m.workspace_id=w.id AND m.identity_id=? AND m.status='active' AND m.revoked_at IS NULL
       AND (m.expires_at IS NULL OR datetime(m.expires_at)>datetime('now'))
-    WHERE w.id=? AND w.status='active'`)
+    WHERE w.id=? AND w.status='active' AND ${primaryWorkspaceAccount("w")}`)
     .bind(identityId, workspaceId)
     .first<WorkspaceRow>();
 }
@@ -424,7 +427,7 @@ export async function resolveEffectivePortalWorkspaceContext(
     SELECT bridge.legacy_identity_id identity_id,m.role,m.can_view_billing
     FROM portal_v2_legacy_member_bridges bridge
     JOIN client_accounts account
-      ON account.id=bridge.legacy_account_id AND account.id=? AND account.status='active'
+      ON account.id=bridge.legacy_account_id AND account.id=? AND account.status='active' AND ${localOrPrimaryAlphaReference("account")}
     JOIN client_identity_links i
       ON i.id=bridge.legacy_identity_id AND i.account_id=account.id AND i.revoked_at IS NULL
     JOIN client_account_members m
@@ -438,10 +441,13 @@ export async function resolveEffectivePortalWorkspaceContext(
   if (!legacy) try {
     legacy = await portalDb(env).prepare(`SELECT bridge.legacy_identity_id identity_id,member.role,member.can_view_billing
       FROM portal_v2_identity_eligibility_legacy_bridges bridge
+      JOIN client_accounts account ON account.id=bridge.legacy_account_id AND account.id=?
+        AND account.status='active' AND ${localOrPrimaryAlphaReference("account")}
+      JOIN client_identity_links link ON link.id=bridge.legacy_identity_id AND link.account_id=account.id AND link.revoked_at IS NULL
       JOIN client_account_members member ON member.account_id=bridge.legacy_account_id
         AND member.identity_id=bridge.legacy_identity_id AND member.revoked_at IS NULL
       WHERE bridge.workspace_id=? AND bridge.identity_id=? AND bridge.status='active' AND bridge.revoked_at IS NULL`)
-      .bind(workspaceId, identity.id).first<{ identity_id: string; role: "manager" | "member"; can_view_billing: number }>();
+      .bind(workspace.legacy_account_id, workspaceId, identity.id).first<{ identity_id: string; role: "manager" | "member"; can_view_billing: number }>();
   } catch (error) {
     if (!/no such table:\s*(?:main\.)?portal_v2_identity_eligibility_legacy_bridges\b/i.test(error instanceof Error ? error.message : String(error))) throw error;
   }
@@ -452,7 +458,7 @@ export async function resolveEffectivePortalWorkspaceContext(
       ON i.account_id=account.id AND i.issuer=? AND i.subject=? AND i.revoked_at IS NULL
     JOIN client_account_members m
       ON m.account_id=account.id AND m.identity_id=i.id AND m.revoked_at IS NULL
-    WHERE account.id=? AND account.status='active'`)
+    WHERE account.id=? AND account.status='active' AND ${localOrPrimaryAlphaReference("account")}`)
     .bind(principal.issuer, principal.subject, workspace.legacy_account_id)
     .first<{ identity_id: string; role: "manager" | "member"; can_view_billing: number }>();
   if (!legacy) return null;
@@ -492,7 +498,8 @@ export async function authorizeEffectiveWorkspaceProject(
   const project = await portalDb(env).prepare(`
     SELECT project.project_alpha_project_id public_id
     FROM client_project_grants grant_record
-    JOIN projects project ON project.id=grant_record.project_id AND project.active=1
+    JOIN projects project ON project.id=grant_record.project_id AND project.active=1 AND ${primaryAlphaReference("project")}
+    JOIN client_accounts account ON account.id=grant_record.account_id AND account.status='active' AND ${localOrPrimaryAlphaReference("account")}
     WHERE grant_record.account_id=? AND grant_record.project_id=?
       AND grant_record.revoked_at IS NULL
       AND project.project_alpha_project_id IS NOT NULL`)
@@ -772,7 +779,7 @@ export async function readEffectiveWorkspaceRequestProof(
       AND membership.workspace_id=? AND membership.status='active' AND membership.revoked_at IS NULL
       AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
     JOIN portal_v2_workspaces workspace ON workspace.id=membership.workspace_id AND workspace.status='active'
-      AND workspace.legacy_account_id IS NOT NULL
+      AND workspace.legacy_account_id IS NOT NULL AND ${primaryWorkspaceAccount("workspace")}
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
       AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
@@ -821,13 +828,13 @@ export async function readEffectiveWorkspaceRequestProof(
       CASE WHEN ?6 IS NULL THEN 1 ELSE EXISTS (
         SELECT 1 FROM client_project_grants grant_record
         WHERE grant_record.account_id=account.id AND grant_record.project_id=project.id
-          AND project.active=1 AND grant_record.revoked_at IS NULL AND grant_record.can_request_service=1
+          AND project.active=1 AND ${primaryAlphaReference("project")} AND grant_record.revoked_at IS NULL AND grant_record.can_request_service=1
           AND (member.role='manager' OR EXISTS(SELECT 1 FROM client_member_project_grants member_grant
             WHERE member_grant.account_id=account.id AND member_grant.identity_id=identity.id
               AND member_grant.project_id=project.id AND member_grant.revoked_at IS NULL))
       ) END project_allowed
     FROM candidates
-    JOIN client_accounts account ON account.id=?3 AND account.status='active'
+    JOIN client_accounts account ON account.id=?3 AND account.status='active' AND ${localOrPrimaryAlphaReference("account")}
     JOIN client_identity_links identity ON identity.id=candidates.identity_id
       AND identity.account_id=account.id AND identity.revoked_at IS NULL
     JOIN client_account_members member ON member.account_id=account.id AND member.identity_id=identity.id
@@ -909,7 +916,7 @@ export async function listPortalWorkspaces(
   const candidates = await portalDb(env).prepare(`
     SELECT w.id,w.root_type,w.pa_organization_public_id,w.pa_client_public_id,w.display_name
     FROM portal_v2_workspace_memberships m
-    JOIN portal_v2_workspaces w ON w.id=m.workspace_id AND w.status='active'
+    JOIN portal_v2_workspaces w ON w.id=m.workspace_id AND w.status='active' AND ${primaryWorkspaceAccount("w")}
     WHERE m.identity_id=? AND m.status='active' AND m.revoked_at IS NULL
       AND (m.expires_at IS NULL OR datetime(m.expires_at)>datetime('now'))
     ORDER BY w.display_name COLLATE NOCASE,w.id LIMIT 101`)
@@ -1029,7 +1036,9 @@ export async function acceptPortalWorkspaceInvitation(
   // Email narrows this one invitation only. The durable authorization subject
   // is always the provider-verified issuer + subject pair.
   const invitation = await portalDb(env).prepare(`SELECT id,workspace_id,status,accepted_by_identity_id
-    FROM portal_v2_invitations WHERE token_hash=? AND lower(invited_email)=?`)
+    FROM portal_v2_invitations WHERE token_hash=? AND lower(invited_email)=?
+      AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=portal_v2_invitations.workspace_id
+        AND workspace.status='active' AND ${primaryWorkspaceAccount("workspace")})`)
     .bind(tokenHash, normalizedEmail)
     .first<{ id: string; workspace_id: string; status: string; accepted_by_identity_id: string | null }>();
   if (!invitation) return "denied";
@@ -1092,6 +1101,8 @@ export async function acceptPortalWorkspaceInvitation(
     portalDb(env).prepare(`UPDATE portal_v2_invitations AS invitation
       SET status='accepted',accepted_at=datetime('now'),accepted_by_identity_id=?
       WHERE id=? AND status='pending' AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
+        AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=invitation.workspace_id
+          AND workspace.status='active' AND ${primaryWorkspaceAccount("workspace")})
         AND NOT EXISTS (
           SELECT 1 FROM portal_v2_workspace_memberships membership
           WHERE membership.workspace_id=invitation.workspace_id AND membership.identity_id=?
@@ -1169,6 +1180,7 @@ export async function acceptPortalWorkspaceInvitation(
       FROM portal_v2_legacy_member_bridges bridge
       JOIN client_project_grants grant_record ON grant_record.account_id=bridge.legacy_account_id
         AND grant_record.revoked_at IS NULL
+      JOIN projects project ON project.id=grant_record.project_id AND ${primaryAlphaReference("project")}
       WHERE bridge.workspace_id=? AND bridge.identity_id=? AND bridge.status='active'`)
       .bind(invitation.workspace_id, identity.id),
     portalDb(env).prepare(`INSERT INTO portal_v2_membership_audit

@@ -3,6 +3,7 @@ import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
 import { FeedbackStoreError, readFeedbackRecord, transitionFeedbackRecord, type FeedbackRecord, type FeedbackWriteGuard } from "../../../client/src/worker/client-portal/feedback-store";
+import { feedbackSourceOwnerSource } from "../../../client/src/worker/client-portal/feedback-target";
 import { evaluatePermission, isAdministrator, loadGrants, type SqlScope } from "./acl";
 import { base64Url, sha256 } from "./crypto";
 import { d1TablesPresent } from "./schema-readiness";
@@ -50,18 +51,22 @@ function projectScope(grants: GrantRow[]): SqlScope {
  * can still acknowledge a report after its image disappeared or author left. */
 export async function readStaffFeedbackScope(env: Env, actor: StaffPrincipal, record: FeedbackRecord, access?: StaffPolicy): Promise<Scope | null> {
   const auth = access ?? await policy(env, actor), target = record.target, owner = target.sourceOwner;
+  const accountSource = feedbackSourceOwnerSource(owner, "account"), projectSource = feedbackSourceOwnerSource(owner, "project");
+  if (accountSource !== "project-alpha:primary" || (target.projectId && projectSource !== "project-alpha:primary")) return null;
   const values = JSON.stringify({ accountId: record.context.accountId, clientId: owner.account.projectAlphaClientId,
     orgId: owner.account.projectAlphaOrganizationId, projectId: target.projectId, paProjectId: owner.project?.projectAlphaProjectId ?? null,
+    accountSource, projectSource,
     associationId: target.associationId, prefix: owner.association?.prefix ?? null, workspaceId: record.context.workspaceId,
     rootType: owner.workspace?.rootType ?? null, rootId: owner.workspace?.rootPublicId ?? null });
   const f = (name: string) => `json_extract(input.v,'$.${name}')`;
   const localSql = `WITH input AS (SELECT json(?) v) SELECT account.display_name account_name,account.project_alpha_client_id client_id,
+    account.project_alpha_source_id account_source,project.project_alpha_source_id project_source,
     account.project_alpha_organization_id org_id,project.project_alpha_project_id pa_project_id,association.r2_prefix prefix
     FROM input JOIN client_accounts account ON account.id=${f("accountId")} AND account.status='active'
     LEFT JOIN projects project ON project.id=${f("projectId")} AND project.active=1
     LEFT JOIN client_folder_associations association ON association.id=${f("associationId")} AND association.account_id=account.id AND association.revoked_at IS NULL
-    WHERE account.project_alpha_client_id IS ${f("clientId")} AND account.project_alpha_organization_id IS ${f("orgId")}
-      AND (${f("projectId")} IS NULL OR (project.id IS NOT NULL AND project.project_alpha_project_id IS ${f("paProjectId")}
+    WHERE account.project_alpha_source_id IS ${f("accountSource")} AND account.project_alpha_client_id IS ${f("clientId")} AND account.project_alpha_organization_id IS ${f("orgId")}
+      AND (${f("projectId")} IS NULL OR (project.id IS NOT NULL AND project.project_alpha_source_id IS ${f("projectSource")} AND project.project_alpha_project_id IS ${f("paProjectId")}
         AND EXISTS(SELECT 1 FROM client_project_grants g WHERE g.account_id=account.id AND g.project_id=project.id AND g.revoked_at IS NULL)))
       AND (${f("associationId")} IS NULL OR (association.id IS NOT NULL AND association.r2_prefix=${f("prefix")}
         AND ((${f("projectId")} IS NULL AND association.scope_type='client' AND association.project_id IS NULL)
@@ -88,7 +93,7 @@ export async function readStaffFeedbackScope(env: Env, actor: StaffPrincipal, re
       FROM pa_projects p JOIN divisions d ON d.project_alpha_business_unit_id=p.business_unit_id AND d.active=1
       LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.active=1
       LEFT JOIN pa_organizations organization ON organization.id=? AND organization.active=1
-      WHERE p.id=? AND (${filter.sql}) AND (${ownership.sql})`).bind(...assignment.values,local.org_id,local.pa_project_id,...filter.values,...ownership.values).first();
+      WHERE p.id=? AND p.projection_source_id='project-alpha:primary' AND (${filter.sql}) AND (${ownership.sql})`).bind(...assignment.values,local.org_id,local.pa_project_id,...filter.values,...ownership.values).first();
   } else {
     const prefix = local.prefix;
     if (!prefix || prefix.length > 1000 || !prefix.endsWith("/")) return null;
@@ -97,7 +102,7 @@ export async function readStaffFeedbackScope(env: Env, actor: StaffPrincipal, re
     const assignment = paProjectFilter(projectScope(auth.grants),actor,false,false);
     const rows = await ops.prepare(`WITH matching AS (
       SELECT p.id project_id,pf.division_id,p.client_id,p.organization_id,CASE WHEN ${assignment.sql} THEN 1 ELSE 0 END assigned,length(rtrim(pf.r2_prefix,'/')||'/') size
-      FROM project_folders pf JOIN pa_projects p ON p.id=pf.project_id AND p.active=1
+      FROM project_folders pf JOIN pa_projects p ON p.id=pf.project_id AND p.active=1 AND p.projection_source_id='project-alpha:primary'
       JOIN divisions d ON d.id=pf.division_id AND d.active=1
       WHERE pf.r2_prefix IN (SELECT value FROM json_each(?)))
       SELECT DISTINCT project_id,division_id,client_id,organization_id,assigned FROM matching WHERE size=(SELECT max(size) FROM matching) LIMIT 2`)

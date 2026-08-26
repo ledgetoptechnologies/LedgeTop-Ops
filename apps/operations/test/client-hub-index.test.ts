@@ -21,7 +21,7 @@ async function fixture() {
   await execute(ops, readFileSync(new URL("../migrations/0032_client_hub_directory.sql", import.meta.url), "utf8"));
   await ops.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0034_client_hub_projection_sources.sql", import.meta.url), "utf8")).map(statement => ops.prepare(statement)));
   await execute(delivery, `
-    CREATE TABLE client_accounts(id TEXT PRIMARY KEY,display_name TEXT,status TEXT,project_alpha_client_id TEXT,project_alpha_organization_id TEXT);
+    CREATE TABLE client_accounts(id TEXT PRIMARY KEY,display_name TEXT,status TEXT,project_alpha_client_id TEXT,project_alpha_organization_id TEXT,project_alpha_source_id TEXT);
     CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT,pa_organization_public_id TEXT,pa_client_public_id TEXT,display_name TEXT,status TEXT,legacy_account_id TEXT);
     CREATE TABLE pa_portal_principals(workspace_id TEXT,public_id TEXT,display_name TEXT,email_hint TEXT,status TEXT,PRIMARY KEY(workspace_id,public_id));
     CREATE TABLE client_project_grants(account_id TEXT,project_id TEXT,revoked_at TEXT);
@@ -79,7 +79,9 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
       .bind(JSON.stringify({ public_id: publicId }), JSON.stringify({ public_id: publicId })).run();
     await ops.prepare(`INSERT INTO pa_clients(id,name,organization_id,active,payload_json,projection_source_id)
       VALUES('secondary-contact','Secondary contact','secondary-org',1,'{"email":"secondary@example.test"}','project-alpha:secondary')`).run();
-    await delivery.prepare("INSERT INTO client_accounts VALUES('account','Primary account','active',NULL,'primary-org')").run();
+    await delivery.prepare("INSERT INTO client_accounts VALUES('account','Primary account','active',NULL,'primary-org','project-alpha:primary')").run();
+    await delivery.prepare("INSERT INTO client_accounts VALUES('secondary-account','Same raw ID','active',NULL,'primary-org','project-alpha:secondary')").run();
+    await delivery.prepare("INSERT INTO client_project_grants VALUES('secondary-account','secondary-share',NULL)").run();
     await delivery.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace','organization',?,NULL,'Primary portal','active','account')").bind(publicId).run();
     await projectWorkspace(delivery, "workspace", "organization", publicId);
     await delivery.prepare("INSERT INTO pa_portal_principals VALUES('workspace','person','Primary person','primary@example.test','active')").run();
@@ -88,7 +90,7 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
       .toEqual({ source_id: "project-alpha:secondary", pa_public_id: publicId, mapping_status: "mapped", workspace_id: null, account_count: 0, contact_count: 1, portal_status: "not_supported" });
     expect(await ops.prepare("SELECT source_id,root_public_id FROM client_hub_search_values WHERE normalized_value='secondary@example.test'").first())
       .toEqual({ source_id: "project-alpha:secondary", root_public_id: "secondary-org" });
-    expect(await ops.prepare("SELECT workspace_id FROM client_hub_roots WHERE public_id='primary-org'").first("workspace_id")).toBe("workspace");
+    expect(await ops.prepare("SELECT workspace_id,account_count,project_count FROM client_hub_roots WHERE public_id='primary-org'").first()).toEqual({ workspace_id: "workspace", account_count: 1, project_count: 0 });
   });
   it("backfills more than 500 roots with bounded pages and resumes from its persisted checkpoint", async () => {
     const { ops, env } = await fixture();
@@ -114,8 +116,8 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
       ops.prepare("INSERT INTO pa_projects(id,name,organization_id,client_id,active) VALUES('project','Roof survey','org','contact',1)"),
     ]);
     await delivery.batch([
-      delivery.prepare("INSERT INTO client_accounts VALUES('same','Local customer','active',NULL,NULL)"),
-      delivery.prepare("INSERT INTO client_accounts VALUES('linked','Business account','active','contact','org')"),
+      delivery.prepare("INSERT INTO client_accounts VALUES('same','Local customer','active',NULL,NULL,NULL)"),
+      delivery.prepare("INSERT INTO client_accounts VALUES('linked','Business account','active','contact','org','project-alpha:primary')"),
       delivery.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace','organization','org',NULL,'Business portal','active','linked')"),
       delivery.prepare("INSERT INTO pa_portal_principals VALUES('workspace','contact','Different portal person','portal@example.test','active')"),
       delivery.prepare("INSERT INTO client_project_grants VALUES('linked','shared-project',NULL)"),
@@ -180,7 +182,7 @@ describe("resumable Client Hub index", { timeout: 60_000 }, () => {
     const { ops, delivery, env } = await fixture();
     await ops.prepare("INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('old','Old owner',1,'{}'),('new','New owner',1,'{}')").run();
     await delivery.batch([
-      delivery.prepare("INSERT INTO client_accounts VALUES('account','Reassigned account','active',NULL,'new')"),
+      delivery.prepare("INSERT INTO client_accounts VALUES('account','Reassigned account','active',NULL,'new','project-alpha:primary')"),
       delivery.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace','organization','old',NULL,'Old portal','active','account')"),
       delivery.prepare("INSERT INTO client_project_grants VALUES('account','project',NULL)"),
       delivery.prepare("INSERT INTO client_service_requests VALUES('request','account')"),

@@ -63,6 +63,7 @@ interface DraftSummaryRow {
 
 const sessionJoin = `
   JOIN client_accounts a ON a.id=? AND a.status='active'
+    AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
   JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
   JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL`;
 
@@ -71,6 +72,7 @@ const draftAccess = `AND (
   (d.project_id IS NOT NULL AND EXISTS (
     SELECT 1 FROM client_project_grants g
     JOIN projects p ON p.id=g.project_id AND p.active=1
+      AND (p.project_alpha_source_id IS NULL OR p.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
     WHERE g.account_id=a.id AND g.project_id=d.project_id AND g.revoked_at IS NULL
       AND (m.role='manager' OR EXISTS (
         SELECT 1 FROM client_member_project_grants mg
@@ -381,8 +383,9 @@ export async function createServiceRequestDraft(env: Env, session: ClientPortalS
     FROM client_accounts a
     JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
     JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
-    WHERE a.id=? AND a.status='active' AND (? IS NULL OR EXISTS (
+    WHERE a.id=? AND a.status='active' AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}') AND (? IS NULL OR EXISTS (
       SELECT 1 FROM client_project_grants g JOIN projects p ON p.id=g.project_id AND p.active=1
+        AND (p.project_alpha_source_id IS NULL OR p.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
       WHERE g.account_id=a.id AND g.project_id=? AND g.revoked_at IS NULL AND g.can_request_service=1
         AND (m.role='manager' OR EXISTS (SELECT 1 FROM client_member_project_grants mg WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=g.project_id AND mg.revoked_at IS NULL))
     )) AND ${reviewedCatalogGuard}`).bind(id, input.projectId, JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, areaSquareMeters, areaSquareMeters === null ? null : areaSquareMeters / SQUARE_METERS_PER_ACRE, mutationKey, fingerprint, mutationKey, session.identityId, session.accountId, input.projectId, input.projectId, reviewedCatalogVersions(services));
@@ -426,8 +429,9 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
       AND EXISTS (SELECT 1 FROM client_accounts a
         JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
         JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
-        WHERE a.id=d.account_id AND a.status='active' AND (? IS NULL OR EXISTS (
+        WHERE a.id=d.account_id AND a.status='active' AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}') AND (? IS NULL OR EXISTS (
           SELECT 1 FROM client_project_grants g JOIN projects p ON p.id=g.project_id AND p.active=1
+            AND (p.project_alpha_source_id IS NULL OR p.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
           WHERE g.account_id=a.id AND g.project_id=? AND g.revoked_at IS NULL AND g.can_request_service=1
             AND (m.role='manager' OR EXISTS (SELECT 1 FROM client_member_project_grants mg WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=g.project_id AND mg.revoked_at IS NULL))
         ))) AND ${reviewedCatalogGuard}`)
@@ -541,11 +545,13 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
     SELECT ?,d.account_id,d.project_id,NULL,d.created_by_identity_id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,d.catalog_source_id
     FROM client_service_request_drafts d
     JOIN client_accounts a ON a.id=d.account_id AND a.status='active'
+      AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
     JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
     JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
     WHERE d.id=? AND d.account_id=? AND d.state='draft' AND d.version=? AND d.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
       AND ((d.project_id IS NULL AND (m.role='manager' OR d.created_by_identity_id=i.id)) OR EXISTS (
         SELECT 1 FROM client_project_grants g JOIN projects p ON p.id=g.project_id AND p.active=1
+          AND (p.project_alpha_source_id IS NULL OR p.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
         WHERE g.account_id=a.id AND g.project_id=d.project_id AND g.revoked_at IS NULL AND g.can_request_service=1
           AND (m.role='manager' OR EXISTS (SELECT 1 FROM client_member_project_grants mg WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=g.project_id AND mg.revoked_at IS NULL))
       )) AND ${reviewedCatalogGuard}`)

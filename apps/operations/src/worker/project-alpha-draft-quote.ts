@@ -35,6 +35,8 @@ interface RequestRow {
   project_alpha_client_id: string | null;
   project_alpha_organization_id: string | null;
   project_alpha_project_id: string | null;
+  account_source_id: string | null;
+  project_source_id: string | null;
   portal_project_id: string | null;
   project_authorized: number;
   area_geojson: string | null;
@@ -442,6 +444,7 @@ async function requestForDraft(env: Env, requestId: string): Promise<RequestRow 
   return database(env).prepare(
     `SELECT r.id,r.account_id,r.catalog_source_id,r.status,r.title,r.details,r.deliverables_text,
       account.project_alpha_client_id,account.project_alpha_organization_id,
+      account.project_alpha_source_id account_source_id,project.project_alpha_source_id project_source_id,
       project.project_alpha_project_id,r.project_id portal_project_id,
       CASE WHEN r.project_id IS NULL THEN 1 WHEN project.active=1 AND EXISTS (
         SELECT 1 FROM client_project_grants grant_row
@@ -495,6 +498,7 @@ async function buildPayload(env: Env, row: RequestRow): Promise<ProjectAlphaDraf
       throw new HTTPException(409, { message: "This request has an invalid Project Alpha authorization link" });
   }
   const provenance = await provePrimaryBusinessReferences(env, { accountId: row.account_id,
+    accountSourceId: row.account_source_id, projectSourceId: row.project_source_id,
     clientId: row.project_alpha_client_id, organizationId: row.project_alpha_organization_id, projectId: row.project_alpha_project_id });
   if (!provenance.available) throw new HTTPException(409, { message: provenance.reason === "unsupported_source"
     ? "unsupported_source: This request's business source has no configured quote connection"

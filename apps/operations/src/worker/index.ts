@@ -614,9 +614,10 @@ async function sha256Hex(value: string): Promise<string> {
 }
 async function verifyProjectAlphaQuote(
   env: Env,
-  input: { artifactId: number; clientId: string; projectId: string | null },
+  input: { artifactId: number; clientId: string; projectId: string | null; accountSourceId: string | null; projectSourceId: string | null },
 ) {
-  const provenance = await provePrimaryBusinessReferences(env, { clientId: input.clientId, projectId: input.projectId });
+  const provenance = await provePrimaryBusinessReferences(env, { clientId: input.clientId, projectId: input.projectId,
+    accountSourceId: input.accountSourceId, projectSourceId: input.projectSourceId });
   if (!provenance.available) throw new HTTPException(409, { message: provenance.reason === "unsupported_source"
     ? "unsupported_source: This business source has no configured artifact connection"
     : "mapping_unavailable: Refresh the primary Alpha projection before verifying this artifact" });
@@ -991,7 +992,7 @@ app.post("/api/client-portal/accounts", async (c) => {
     statements = [
       db
         .prepare(
-          "INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES (?,?,'active',?,?)",
+          "INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id,project_alpha_organization_id,project_alpha_source_id) VALUES (?,?,'active',?,?,'project-alpha:primary')",
         )
         .bind(
           accountId,
@@ -1226,7 +1227,7 @@ app.post("/api/client-portal/projects", async (c) => {
       .first<any>(),
     account = await c.env.DELIVERY_DB.withSession("first-primary")
       .prepare(
-        "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND status='active'",
+        "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND status='active' AND project_alpha_source_id='project-alpha:primary'",
       )
       .bind(value.accountId)
       .first<any>();
@@ -1256,7 +1257,7 @@ app.post("/api/client-portal/projects", async (c) => {
   await db.batch([
     db
       .prepare(
-        `INSERT INTO projects(id,external_ref,client_name,project_name,r2_prefix,active,project_alpha_project_id,status,source_updated_at) VALUES (?,?,?,?,?,1,?,?,?) ON CONFLICT(id) DO UPDATE SET client_name=excluded.client_name,project_name=excluded.project_name,active=1,status=excluded.status,source_updated_at=excluded.source_updated_at,updated_at=datetime('now')`,
+        `INSERT INTO projects(id,external_ref,client_name,project_name,r2_prefix,active,project_alpha_project_id,status,source_updated_at,project_alpha_source_id) VALUES (?,?,?,?,?,1,?,?,?,'project-alpha:primary') ON CONFLICT(id) DO UPDATE SET client_name=excluded.client_name,project_name=excluded.project_name,active=1,status=excluded.status,source_updated_at=excluded.source_updated_at,updated_at=datetime('now') WHERE projects.project_alpha_source_id=excluded.project_alpha_source_id`,
       )
       .bind(
         portalProjectId,
@@ -1329,7 +1330,7 @@ app.post("/api/projects/:id/folder", async (c) => {
     db = c.env.DELIVERY_DB.withSession("first-primary"),
     links = await db
       .prepare(
-        "SELECT g.account_id,p.id project_id FROM projects p JOIN client_project_grants g ON g.project_id=p.id AND g.revoked_at IS NULL WHERE p.project_alpha_project_id=? AND (? IS NULL OR g.account_id=?)",
+        "SELECT g.account_id,p.id project_id FROM projects p JOIN client_project_grants g ON g.project_id=p.id AND g.revoked_at IS NULL JOIN client_accounts a ON a.id=g.account_id AND a.project_alpha_source_id='project-alpha:primary' WHERE p.project_alpha_source_id='project-alpha:primary' AND p.project_alpha_project_id=? AND (? IS NULL OR g.account_id=?)",
       )
       .bind(c.req.param("id"), value.accountId || null, value.accountId || null)
       .all<{ account_id: string; project_id: string }>();
@@ -2335,6 +2336,7 @@ app.post("/api/client-service-requests/:id/pa-quote", async (c) => {
     id = c.req.param("id"),
     db = c.env.DELIVERY_DB.withSession("first-primary");
   const linkageQuery = `SELECT r.id,r.catalog_source_id,r.status,r.project_id,a.project_alpha_client_id,p.project_alpha_project_id,
+          a.project_alpha_source_id account_source_id,p.project_alpha_source_id project_source_id,
           __CATALOG_MARKER__ uses_catalog_v2
          FROM client_service_requests r JOIN client_accounts a ON a.id=r.account_id
          LEFT JOIN projects p ON p.id=r.project_id WHERE r.id=?`;
@@ -2345,6 +2347,8 @@ app.post("/api/client-service-requests/:id/pa-quote", async (c) => {
     project_id: string | null;
     project_alpha_client_id: string | null;
     project_alpha_project_id: string | null;
+    account_source_id: string | null;
+    project_source_id: string | null;
     uses_catalog_v2: number;
   };
   let request: LinkageRequest | null;
@@ -2379,6 +2383,8 @@ app.post("/api/client-service-requests/:id/pa-quote", async (c) => {
     artifactId: value.artifactId,
     clientId: request.project_alpha_client_id,
     projectId: request.project_alpha_project_id,
+    accountSourceId: request.account_source_id,
+    projectSourceId: request.project_source_id,
   });
   const totalMinor = Math.round(Number(artifact.total) * 100);
   if (!Number.isSafeInteger(totalMinor) || totalMinor < 0)

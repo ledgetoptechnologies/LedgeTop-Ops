@@ -43,7 +43,7 @@ const businessCandidate = `wanted.business_id IS NOT NULL AND EXISTS (
     OR (generation.source_generation='legacy-backfill' AND generation.source_sequence=0
       AND entity.source_version='legacy-backfill' AND entity.public_id=wanted.business_id
       AND EXISTS (SELECT 1 FROM client_accounts account WHERE account.id=workspace.legacy_account_id
-        AND account.status='active' AND (
+        AND account.status='active' AND account.project_alpha_source_id='project-alpha:primary' AND (
           (wanted.kind='organization' AND account.project_alpha_organization_id=wanted.business_id
             AND workspace.pa_organization_public_id=wanted.business_id AND workspace.pa_client_public_id IS NULL)
           OR (wanted.kind='standalone_client' AND account.project_alpha_client_id=wanted.business_id
@@ -55,7 +55,7 @@ const potentialBusinessCandidate = `wanted.business_id IS NOT NULL AND (
     (wanted.kind='organization' AND workspace.pa_organization_public_id=wanted.pa_public_id)
     OR (wanted.kind='standalone_client' AND workspace.pa_client_public_id=wanted.pa_public_id)))
   OR EXISTS (SELECT 1 FROM client_accounts account WHERE account.id=workspace.legacy_account_id
-    AND account.status='active' AND (
+    AND account.status='active' AND account.project_alpha_source_id='project-alpha:primary' AND (
       (wanted.kind='organization' AND account.project_alpha_organization_id=wanted.business_id
         AND workspace.pa_organization_public_id=wanted.business_id AND workspace.pa_client_public_id IS NULL)
       OR (wanted.kind='standalone_client' AND account.project_alpha_client_id=wanted.business_id
@@ -95,6 +95,8 @@ export async function resolveClientHubWorkspaces(
           ELSE (${businessCandidate}) END verified,
         ROW_NUMBER() OVER(PARTITION BY wanted.lookup_key ORDER BY workspace.id) candidate_number
       FROM wanted JOIN portal_v2_workspaces workspace ON workspace.root_type=wanted.kind AND workspace.status<>'closed'
+        AND (workspace.legacy_account_id IS NULL OR EXISTS (SELECT 1 FROM client_accounts account
+          WHERE account.id=workspace.legacy_account_id AND (account.project_alpha_source_id IS NULL OR account.project_alpha_source_id='project-alpha:primary')))
       WHERE (wanted.workspace_id IS NOT NULL AND workspace.id=wanted.workspace_id)
         OR (wanted.workspace_id IS NULL AND ${potentialBusinessCandidate})
     ) SELECT * FROM candidates WHERE candidate_number<=2 ORDER BY lookup_key,candidate_number`)

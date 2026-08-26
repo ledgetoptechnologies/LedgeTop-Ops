@@ -197,12 +197,17 @@ describe("Project Alpha pricing authorization context resolver", () => {
     try {
       const database = await miniflare.getD1Database("DELIVERY_DB") as unknown as D1Database;
       await database.batch([
-        database.prepare("CREATE TABLE projects (id TEXT PRIMARY KEY,project_alpha_project_id TEXT,active INTEGER NOT NULL)"),
+        database.prepare("CREATE TABLE projects (id TEXT PRIMARY KEY,project_alpha_project_id TEXT,active INTEGER NOT NULL,project_alpha_source_id TEXT)"),
+        database.prepare("CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT,project_alpha_source_id TEXT)"),
+        database.prepare("CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT,legacy_account_id TEXT,root_type TEXT,pa_organization_public_id TEXT,pa_client_public_id TEXT)"),
         database.prepare("CREATE TABLE client_project_grants (account_id TEXT NOT NULL,project_id TEXT NOT NULL,can_request_service INTEGER NOT NULL,revoked_at TEXT)"),
       ]);
       await database.batch([
-        database.prepare("INSERT INTO projects VALUES ('project-local','pa-project-north-site',1)"),
+        database.prepare("INSERT INTO projects VALUES ('project-local','pa-project-north-site',1,'project-alpha:primary'),('project-secondary','pa-project-north-site',1,'project-alpha:secondary')"),
+        database.prepare("INSERT INTO client_accounts VALUES ('account-a','active','project-alpha:primary'),('account-b','active','project-alpha:secondary')"),
+        database.prepare("INSERT INTO portal_v2_workspaces VALUES ('workspace-a','active','account-a','organization','pa-org-acme',NULL)"),
         database.prepare("INSERT INTO client_project_grants VALUES ('account-a','project-local',1,NULL)"),
+        database.prepare("INSERT INTO client_project_grants VALUES ('account-a','project-secondary',1,NULL),('account-b','project-secondary',1,NULL)"),
       ]);
       const workspace: EffectivePortalWorkspaceContext = {
         workspaceId: "workspace-a", identityId: "identity-v2", rootType: "organization",
@@ -212,6 +217,18 @@ describe("Project Alpha pricing authorization context resolver", () => {
       const resolved = await resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env, workspace, "project-local");
       expect(resolved).toEqual(pricingFixture.request.authorizationContext);
       expect(JSON.stringify(resolved)).not.toMatch(/project-local|account-a|identity/);
+      await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env,workspace,"project-secondary")).resolves.toBeNull();
+      await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env,{...workspace,legacyAccountId:"account-b"},"project-secondary")).resolves.toBeNull();
+      await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env,{...workspace,rootPublicId:"different-root"},"project-local")).resolves.toBeNull();
+      // A local legacy wrapper carries no Alpha client ref, but the verified
+      // native root and explicit primary project grant still supply this API's
+      // complete authorization context. A secondary wrapper never does.
+      await database.prepare("UPDATE client_accounts SET project_alpha_source_id=NULL WHERE id='account-a'").run();
+      await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env,workspace,"project-local"))
+        .resolves.toEqual(pricingFixture.request.authorizationContext);
+      await database.prepare("UPDATE client_accounts SET project_alpha_source_id='project-alpha:secondary' WHERE id='account-a'").run();
+      await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env,workspace,"project-local")).resolves.toBeNull();
+      await database.prepare("UPDATE client_accounts SET project_alpha_source_id='project-alpha:primary' WHERE id='account-a'").run();
 
       await database.prepare("UPDATE projects SET project_alpha_project_id='42' WHERE id='project-local'").run();
       await expect(resolveProjectAlphaPricingAuthorizationContext({ DELIVERY_DB: database } as Env, workspace, "project-local")).resolves.toBeNull();

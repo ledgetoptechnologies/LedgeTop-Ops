@@ -49,7 +49,7 @@ function database(kind: "ops" | "delivery", state: DbState) {
           const configured = state.first?.(kind, sql, this.values);
           if (configured !== undefined) return configured;
           if (kind === "delivery" && sql.includes("project_alpha_client_id")) {
-            return { id: "request-a", catalog_source_id: "project-alpha:primary", status: "accepted_pending_pa_linkage", project_id: "portal-pa-9", project_alpha_client_id: "21", project_alpha_project_id: "9" };
+            return { id: "request-a", catalog_source_id: "project-alpha:primary", account_source_id: "project-alpha:primary", project_source_id: "project-alpha:primary", status: "accepted_pending_pa_linkage", project_id: "portal-pa-9", project_alpha_client_id: "21", project_alpha_project_id: "9" };
           }
           if (kind === "delivery" && sql.includes("SELECT r.title,r.project_id,r.service_category")) {
             return { title: "North site progress imagery", project_id: "portal-pa-9", service_category: "Progress mapping", location_text: "Broadway, Green Bay, Wisconsin", latitude: 44.5132, longitude: -88.0831, project_name: "North Distribution Center" };
@@ -513,13 +513,33 @@ describe("verified Project Alpha quote linkage", () => {
     expect(upstream).not.toHaveBeenCalled();
   });
 
+  it.each(["account_source_id", "project_source_id"])("does not send same-ID secondary %s references to primary quote lookup", async field => {
+    const state: DbState = { batches: [], first(kind, sql) {
+      if (kind === "delivery" && sql.includes("uses_catalog_v2")) return {
+        id: "request-a", catalog_source_id: "project-alpha:primary",
+        account_source_id: "project-alpha:primary", project_source_id: "project-alpha:primary",
+        [field]: "project-alpha:secondary", status: "accepted_pending_pa_linkage",
+        project_id: "portal-pa-9", project_alpha_client_id: "21", project_alpha_project_id: "9", uses_catalog_v2: 0,
+      };
+      return null;
+    } };
+    const upstream = vi.fn();
+    vi.stubGlobal("fetch", upstream);
+    const response = await worker.fetch(new Request("https://ops.example/api/client-service-requests/request-a/pa-quote", {
+      method: "POST", headers: { "Content-Type": "application/json", Origin: "https://ops.example" }, body: JSON.stringify({ artifactId: 42 }),
+    }), environment(state, { LEGACY_CLIENT_REQUEST_PA_QUOTE_LINK_ENABLED: "true" }) as any, executionCtx);
+    expect(response.status).toBe(409);
+    expect(upstream).not.toHaveBeenCalled();
+    expect(state.batches).toEqual([]);
+  });
+
   it("rejects manual numeric quote linkage for v2 even when the legacy gate is on", async () => {
     const state: DbState = {
       batches: [],
       first(kind, sql) {
         if (kind === "delivery" && sql.includes("uses_catalog_v2"))
           return {
-            id: "request-a", catalog_source_id: "project-alpha:primary", status: "accepted_pending_pa_linkage",
+            id: "request-a", catalog_source_id: "project-alpha:primary", account_source_id: "project-alpha:primary", project_source_id: "project-alpha:primary", status: "accepted_pending_pa_linkage",
             project_id: "portal-pa-9", project_alpha_client_id: "21",
             project_alpha_project_id: "9", uses_catalog_v2: 1,
           };
@@ -552,7 +572,7 @@ describe("verified Project Alpha quote linkage", () => {
         if (sql.includes("request_revision") && sql.includes("FROM client_service_requests"))
           return {
             id: "request-a",
-            catalog_source_id: "project-alpha:primary",
+            catalog_source_id: "project-alpha:primary", account_source_id: "project-alpha:primary", project_source_id: "project-alpha:primary",
             status: "under_review",
             title: "North site mapping",
             details: "Capture the reviewed site.",
@@ -651,7 +671,7 @@ describe("verified Project Alpha quote linkage", () => {
       first(kind, sql) {
         if (kind === "delivery" && sql.includes("request_revision") && sql.includes("FROM client_service_requests"))
           return {
-            id: "request-a", catalog_source_id: "project-alpha:primary", status: "under_review", title: "North site", details: "Capture site.",
+            id: "request-a", catalog_source_id: "project-alpha:primary", account_source_id: "project-alpha:primary", project_source_id: "project-alpha:primary", status: "under_review", title: "North site", details: "Capture site.",
             deliverables_text: null, project_alpha_client_id: "client-public-a",
             project_alpha_organization_id: null, project_alpha_project_id: "project-public-a",
             portal_project_id: "portal-pa-9", project_authorized: 0,
@@ -683,7 +703,7 @@ describe("verified Project Alpha quote linkage", () => {
 
   it("replays the immutable local PA receipt without a second upstream command", async () => {
     const requestRow = {
-      id: "request-a", catalog_source_id: "project-alpha:primary", status: "under_review", title: "North site mapping",
+      id: "request-a", catalog_source_id: "project-alpha:primary", account_source_id: "project-alpha:primary", project_source_id: "project-alpha:primary", status: "under_review", title: "North site mapping",
       details: "Capture site.", deliverables_text: null,
       project_alpha_client_id: "client-public-a", project_alpha_organization_id: null,
       project_alpha_project_id: "project-public-a", area_geojson: null,
@@ -795,7 +815,7 @@ describe("verified Project Alpha quote linkage", () => {
       batches: [],
       first(kind, sql) {
         if (kind === "delivery" && sql.includes("FROM client_service_requests")) return {
-          id: "request-a", catalog_source_id: "project-alpha:primary", status: "under_review",
+          id: "request-a", catalog_source_id: "project-alpha:primary", account_source_id: "project-alpha:primary", project_source_id: "project-alpha:primary", status: "under_review",
           title: "Request", details: "Details", project_alpha_client_id: "client-public-a",
           project_alpha_organization_id: null, project_alpha_project_id: null, portal_project_id: null,
           request_revision: 1,
@@ -826,7 +846,7 @@ describe("verified Project Alpha quote linkage", () => {
       batches: [],
       first(kind, sql) {
         if (kind === "delivery" && sql.includes("request_revision") && sql.includes("FROM client_service_requests"))
-          return { id: "request-a", account_id: "account-a", catalog_source_id: "project-alpha:primary", status: "under_review",
+          return { id: "request-a", account_id: "account-a", catalog_source_id: "project-alpha:primary", account_source_id: "project-alpha:primary", project_source_id: "project-alpha:primary", status: "under_review",
             title: "Reviewed work", details: "Capture site", deliverables_text: null,
             project_alpha_client_id: "foreign-client", project_alpha_organization_id: null,
             project_alpha_project_id: null, portal_project_id: null, project_authorized: 1,

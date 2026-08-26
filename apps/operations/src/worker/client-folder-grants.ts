@@ -118,7 +118,7 @@ async function activeRecipient(env: Env, accountId: string, identityId: string):
     FROM client_accounts a
     JOIN client_identity_links i ON i.account_id=a.id AND i.id=? AND i.revoked_at IS NULL AND i.email IS NOT NULL
     JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
-    WHERE a.id=? AND a.status='active' AND (a.project_alpha_client_id IS NOT NULL OR a.project_alpha_organization_id IS NOT NULL)`).bind(identityId, accountId).first<{ ok: number }>();
+    WHERE a.id=? AND a.status='active' AND a.project_alpha_source_id='project-alpha:primary' AND (a.project_alpha_client_id IS NOT NULL OR a.project_alpha_organization_id IS NOT NULL)`).bind(identityId, accountId).first<{ ok: number }>();
   return Boolean(row?.ok);
 }
 
@@ -136,7 +136,7 @@ async function authoritativeFolderGrantScope(env: Env, prefix: string, account?:
   const associations = await env.OPS_DB.withSession("first-primary").prepare(`SELECT pf.division_id,pf.r2_prefix,
       p.client_id project_alpha_client_id,p.organization_id project_alpha_organization_id
     FROM project_folders pf JOIN pa_projects p ON p.id=pf.project_id
-    WHERE p.active=1 ORDER BY length(pf.r2_prefix) DESC`).all<AuthoritativeFolderAssociation>();
+    WHERE p.active=1 AND p.projection_source_id='project-alpha:primary' ORDER BY length(pf.r2_prefix) DESC`).all<AuthoritativeFolderAssociation>();
   const matches = associations.results
     .map(row => ({ row, prefix: normalizePrefix(row.r2_prefix) }))
     .filter(candidate => prefix.startsWith(candidate.prefix));
@@ -170,7 +170,7 @@ async function activeRecipients(env: Env, accountId: string, identityIds: string
   if (!unique.length) return [];
   const placeholders = unique.map(() => "?").join(",");
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT i.id
-    FROM client_identity_links i JOIN client_accounts a ON a.id=i.account_id AND a.status='active'
+    FROM client_identity_links i JOIN client_accounts a ON a.id=i.account_id AND a.status='active' AND a.project_alpha_source_id='project-alpha:primary'
     JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
     WHERE a.id=? AND i.revoked_at IS NULL AND i.email IS NOT NULL AND i.id IN (${placeholders})`)
     .bind(accountId, ...unique).all<{ id: string }>();
@@ -203,7 +203,7 @@ export async function findClientFolderGrantTargets(
   if (query.length < 2) return { accounts: [] };
   const ownerColumn = scope.ownerType === "client" ? "project_alpha_client_id" : "project_alpha_organization_id";
   const accounts = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,display_name
-    FROM client_accounts WHERE status='active' AND ${ownerColumn}=? AND display_name LIKE ? ESCAPE '\\'
+    FROM client_accounts WHERE status='active' AND project_alpha_source_id='project-alpha:primary' AND ${ownerColumn}=? AND display_name LIKE ? ESCAPE '\\'
     ORDER BY display_name COLLATE NOCASE LIMIT 20`)
     .bind(scope.ownerId, `%${query.replace(/[\\%_]/g, value => `\\${value}`)}%`).all<{ id: string; display_name: string }>();
   const result = [];
@@ -238,7 +238,7 @@ export async function createClientFolderGrant(env: Env, request: Request, princi
     throw new HTTPException(400, { message: "Idempotency-Key must contain 16-128 characters" });
   const prefix = normalizeCrudKey(input.r2Prefix, true);
   const account = await env.DELIVERY_DB.withSession("first-primary").prepare(
-    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND status='active' AND (project_alpha_client_id IS NOT NULL OR project_alpha_organization_id IS NOT NULL)",
+    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND status='active' AND project_alpha_source_id='project-alpha:primary' AND (project_alpha_client_id IS NOT NULL OR project_alpha_organization_id IS NOT NULL)",
   ).bind(input.accountId).first<ClientAccountMapping>();
   if (!account) throw new HTTPException(404, { message: "Active client workspace not found" });
   const { divisionId } = await authoritativeFolderGrantScope(env, prefix, account);
@@ -332,7 +332,7 @@ export async function revokeClientFolderGrant(env: Env, request: Request, princi
     FROM client_folder_associations WHERE logical_grant_id=? AND account_id=? AND scope_type='client' AND project_id IS NULL AND revoked_at IS NULL`).bind(grantId, accountId).first<GrantRow>();
   if (!row) throw new HTTPException(404, { message: "Active client folder grant not found" });
   const account = await env.DELIVERY_DB.withSession("first-primary").prepare(
-    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND (project_alpha_client_id IS NOT NULL OR project_alpha_organization_id IS NOT NULL)",
+    "SELECT id,project_alpha_client_id,project_alpha_organization_id FROM client_accounts WHERE id=? AND project_alpha_source_id='project-alpha:primary' AND (project_alpha_client_id IS NOT NULL OR project_alpha_organization_id IS NOT NULL)",
   ).bind(accountId).first<ClientAccountMapping>();
   if (!account) throw new HTTPException(404, { message: "Active client folder grant not found" });
   const { divisionId } = await authoritativeFolderGrantScope(env, row.r2_prefix, account);
@@ -397,7 +397,7 @@ export async function processClientFolderGrantNotifications(env: Env): Promise<n
     const context = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT association.r2_prefix,a.display_name account_name,i.email recipient_email,
         a.project_alpha_client_id,a.project_alpha_organization_id
       FROM client_folder_associations association
-      JOIN client_accounts a ON a.id=association.account_id AND a.status='active'
+      JOIN client_accounts a ON a.id=association.account_id AND a.status='active' AND a.project_alpha_source_id='project-alpha:primary'
         AND (a.project_alpha_client_id IS NOT NULL OR a.project_alpha_organization_id IS NOT NULL)
       JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL AND i.email IS NOT NULL
       JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
@@ -505,7 +505,7 @@ export async function processClientFolderChangeNotifications(env: Env): Promise<
       JOIN client_folder_notification_preferences preference
         ON preference.logical_grant_id=association.logical_grant_id AND preference.account_id=association.account_id
         AND preference.recipient_identity_id=? AND preference.mode<>'off'
-      JOIN client_accounts a ON a.id=association.account_id AND a.status='active'
+      JOIN client_accounts a ON a.id=association.account_id AND a.status='active' AND a.project_alpha_source_id='project-alpha:primary'
         AND (a.project_alpha_client_id IS NOT NULL OR a.project_alpha_organization_id IS NOT NULL)
       JOIN client_identity_links i ON i.id=preference.recipient_identity_id AND i.account_id=a.id AND i.revoked_at IS NULL AND i.email IS NOT NULL
       JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL

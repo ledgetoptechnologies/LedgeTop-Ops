@@ -67,7 +67,7 @@ describe("durable client folder notification batches", () => {
     upgradeForeignKeyViolations = (await db.prepare("PRAGMA foreign_key_check").all()).results;
     upgradeBatchCount = await db.prepare("SELECT COUNT(*) count FROM client_folder_notification_batches").first<number>("count");
     upgradeInboxCount = await db.prepare("SELECT COUNT(*) count FROM client_portal_notifications").first<number>("count");
-    await ops.exec("CREATE TABLE pa_projects(id TEXT PRIMARY KEY,client_id TEXT,organization_id TEXT,active INTEGER); CREATE TABLE project_folders(id TEXT PRIMARY KEY,project_id TEXT,division_id TEXT,r2_prefix TEXT UNIQUE);");
+    await ops.exec("CREATE TABLE pa_projects(id TEXT PRIMARY KEY,client_id TEXT,organization_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary'); CREATE TABLE project_folders(id TEXT PRIMARY KEY,project_id TEXT,division_id TEXT,r2_prefix TEXT UNIQUE);");
     env = { DELIVERY_DB: db, OPS_DB: ops, DELIVERY_BASE_URL: "https://client.example.test" } as Env;
   }, 60_000);
   afterAll(async () => mf.dispose());
@@ -80,10 +80,10 @@ describe("durable client folder notification batches", () => {
       await db.prepare(`DELETE FROM ${table}`).run();
     }
     await ops.batch([ops.prepare("DELETE FROM project_folders"), ops.prepare("DELETE FROM pa_projects"),
-      ops.prepare("INSERT INTO pa_projects VALUES('p','client-a','org-a',1)"),
+      ops.prepare("INSERT INTO pa_projects(id,client_id,organization_id,active) VALUES('p','client-a','org-a',1)"),
       ops.prepare("INSERT INTO project_folders VALUES('folder','p','division-a','Jobs/Clients/Acme/')")]);
     await db.batch([
-      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES('a','Acme','active','client-a','org-a')"),
+      db.prepare("INSERT INTO client_accounts(project_alpha_source_id,id,display_name,status,project_alpha_client_id,project_alpha_organization_id) VALUES ('project-alpha:primary','a','Acme','active','client-a','org-a')"),
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('i','a','https://issuer.test','subject','recipient@example.test')"),
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('a','i','manager')"),
       db.prepare("INSERT INTO client_folder_associations(id,scope_type,account_id,r2_prefix,logical_grant_id,division_id,created_by) VALUES('association','client','a',?,'g','division-a','staff')").bind(prefix),
@@ -104,7 +104,7 @@ describe("durable client folder notification batches", () => {
     expect(upgradeBefore).not.toBeNull();
     expect(upgradeBefore?.account).toMatchObject({ id: "upgrade-account", display_name: "Existing upgrade client", status: "active" });
     expect(upgradeBefore?.pending).toMatchObject({ id: "upgrade-pending", status: "pending", attempt_count: 1, created_at: "2026-08-20 12:00:00" });
-    expect(upgradeAfter).toEqual(upgradeBefore);
+    expect(upgradeAfter).toEqual({ ...upgradeBefore, account: { ...upgradeBefore?.account, project_alpha_source_id: "project-alpha:primary" } });
     expect(upgradeForeignKeyViolations).toEqual([]);
     expect(upgradeBatchCount).toBe(0);
     expect(upgradeInboxCount).toBe(0);
@@ -236,7 +236,7 @@ describe("durable client folder notification batches", () => {
   it("uses the longest current folder owner and accepts legacy prefixes without trailing slash", async () => {
     await ops.prepare("UPDATE project_folders SET r2_prefix='Jobs/Clients/Acme'").run();
     expect(await authorizeClientFolderNotificationBatch(env, identity)).toMatchObject({ divisionId: "division-a" });
-    await ops.batch([ops.prepare("INSERT INTO pa_projects VALUES('other','other-client',NULL,1)"),
+    await ops.batch([ops.prepare("INSERT INTO pa_projects(id,client_id,organization_id,active) VALUES('other','other-client',NULL,1)"),
       ops.prepare("INSERT INTO project_folders VALUES('nested','other','division-other',?)").bind(prefix)]);
     expect(await authorizeClientFolderNotificationBatch(env, identity)).toBeNull();
   });

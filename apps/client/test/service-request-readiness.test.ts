@@ -41,11 +41,11 @@ describe("request readiness against migrated D1 and real authorization", { timeo
     const directory = fileURLToPath(new URL("../migrations/", import.meta.url));
     for (const name of readdirSync(directory).filter(name => name.endsWith(".sql")).sort()) await migration(name);
     await db.batch([
-      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_organization_id) VALUES ('account-a','Example client','active','pa-org-a'),('account-b','Other client','active','pa-org-b')"),
+      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_organization_id,project_alpha_source_id) VALUES ('account-a','Example client','active','pa-org-a','project-alpha:primary'),('account-b','Other client','active','pa-org-b','project-alpha:primary')"),
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES ('identity-a','account-a',?,?,?),('identity-b','account-b',?,'readiness-b','b@example.test')")
         .bind(principal.issuer, principal.subject, principal.email, principal.issuer),
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES ('account-a','identity-a','manager'),('account-b','identity-b','manager')"),
-      db.prepare("INSERT INTO projects(id,project_alpha_project_id,client_name,project_name,r2_prefix) VALUES ('project-a','pa-project-a','Example client','Allowed project','clients/a/'),('project-b','pa-project-b','Other client','Private project','clients/b/')"),
+      db.prepare("INSERT INTO projects(id,project_alpha_project_id,client_name,project_name,r2_prefix,project_alpha_source_id) VALUES ('project-a','pa-project-a','Example client','Allowed project','clients/a/','project-alpha:primary'),('project-b','pa-project-b','Other client','Private project','clients/b/','project-alpha:primary')"),
       db.prepare("INSERT INTO client_project_grants(account_id,project_id,can_request_service) VALUES ('account-a','project-a',1),('account-b','project-b',1)"),
       db.prepare("INSERT INTO client_member_project_grants(account_id,identity_id,project_id,granted_by_identity_id) VALUES ('account-a','identity-a','project-a','identity-a')"),
       db.prepare("INSERT INTO pa_service_catalog_items(public_id,source_version,name,category,source_updated_at) VALUES ('service-a','version-1','Survey','Mapping',datetime('now'))"),

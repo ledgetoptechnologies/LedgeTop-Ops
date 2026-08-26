@@ -1,5 +1,6 @@
 import { HTTPException } from "hono/http-exception";
 import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
+import { localOrPrimaryAlphaReference } from "./project-alpha-source";
 import type { Env } from "../types";
 import type { ClientPortalSession, VerifiedClientPrincipal } from "./types";
 import {
@@ -88,7 +89,7 @@ export async function readClientRequestReadiness(
         CASE WHEN ? IS NULL THEN 1 ELSE EXISTS (
           SELECT 1 FROM client_project_grants grant_record
           WHERE grant_record.account_id=account.id AND grant_record.project_id=project.id
-            AND project.active=1 AND grant_record.revoked_at IS NULL AND grant_record.can_request_service=1
+            AND project.active=1 AND ${localOrPrimaryAlphaReference("project")} AND grant_record.revoked_at IS NULL AND grant_record.can_request_service=1
             AND (member.role='manager' OR EXISTS (
               SELECT 1 FROM client_member_project_grants member_grant
               WHERE member_grant.account_id=account.id AND member_grant.identity_id=identity.id
@@ -101,7 +102,7 @@ export async function readClientRequestReadiness(
       JOIN client_account_members member ON member.account_id=account.id AND member.identity_id=identity.id
         AND member.revoked_at IS NULL
       LEFT JOIN projects project ON project.id=?
-      WHERE account.id=? AND account.status='active'`)
+      WHERE account.id=? AND account.status='active' AND ${localOrPrimaryAlphaReference("account")}`)
       .bind(projectId, session.identityId, projectId, session.accountId).first<LocalAccess>();
     const localAllowed = local !== null && (currentWorkspace !== null ||
       (local.issuer === principal.issuer && local.subject === principal.subject));

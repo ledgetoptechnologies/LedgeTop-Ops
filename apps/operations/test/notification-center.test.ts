@@ -28,7 +28,7 @@ describe("folder notification center — real D1 authority and control receipts"
         else for (const statement of statements) await db.prepare(statement).run();
       }
     }
-    await ops.exec(`CREATE TABLE pa_projects(id TEXT PRIMARY KEY,client_id TEXT,organization_id TEXT,active INTEGER);
+    await ops.exec(`CREATE TABLE pa_projects(id TEXT PRIMARY KEY,client_id TEXT,organization_id TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
       CREATE TABLE project_folders(id TEXT PRIMARY KEY,project_id TEXT,division_id TEXT,r2_prefix TEXT UNIQUE);
       CREATE TABLE staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT);
       CREATE TABLE local_staff_role_assignments(staff_id TEXT,role_id TEXT,scope TEXT,division_id TEXT);
@@ -47,10 +47,10 @@ describe("folder notification center — real D1 authority and control receipts"
   });
 
   async function owner(id: string, division: string) {
-    await ops.batch([ops.prepare("INSERT INTO pa_projects VALUES(?,?,NULL,1)").bind(`project-${id}`, `client-${id}`),
+    await ops.batch([ops.prepare("INSERT INTO pa_projects(id,client_id,organization_id,active) VALUES(?,?,NULL,1)").bind(`project-${id}`, `client-${id}`),
       ops.prepare("INSERT INTO project_folders VALUES(?,?,?,?)").bind(`folder-${id}`, `project-${id}`, division, `Jobs/Clients/${id}/`)]);
     await db.batch([
-      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id) VALUES(?,?,'active',?)").bind(id, `Client ${id}`, `client-${id}`),
+      db.prepare("INSERT INTO client_accounts(project_alpha_source_id,id,display_name,status,project_alpha_client_id) VALUES ('project-alpha:primary',?,?,'active',?)").bind(id, `Client ${id}`, `client-${id}`),
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES(?,?,'https://issuer.test',?,?)").bind(`identity-${id}`, id, `subject-${id}`, `${id}@example.test`),
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES(?,?,'manager')").bind(id, `identity-${id}`),
       db.prepare("INSERT INTO client_folder_associations(id,scope_type,account_id,r2_prefix,logical_grant_id,division_id,created_by) VALUES(?,'client',?,?,?,?,'staff')")

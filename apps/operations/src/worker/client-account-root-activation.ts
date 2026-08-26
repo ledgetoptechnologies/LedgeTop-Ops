@@ -27,6 +27,7 @@ interface AccountRow {
   status: string;
   project_alpha_client_id: string | null;
   project_alpha_organization_id: string | null;
+  project_alpha_source_id: string | null;
   updated_at: string;
 }
 
@@ -184,7 +185,7 @@ function baselineProjectionCondition(hasGenerationContract: boolean): string {
         ON entity.workspace_id=e.workspace_id AND entity.generation_id=e.generation_id
         AND entity.entity_type='project' AND entity.public_id=project.project_alpha_project_id
       WHERE grant_record.account_id=e.account_id AND grant_record.revoked_at IS NULL
-        AND project.project_alpha_project_id IS NOT NULL
+        AND (project.project_alpha_source_id='project-alpha:primary' AND project.project_alpha_project_id IS NOT NULL)
         AND (entity.public_id IS NULL OR entity.parent_public_id<>e.root_id
           OR entity.display_name<>project.project_name OR entity.source_version<>'legacy-backfill'
           OR entity.active<>project.active OR entity.primary_contact<>0 OR entity.safe_metadata_json<>'{}'))
@@ -225,7 +226,7 @@ function baselineProjectionCondition(hasGenerationContract: boolean): string {
     AND NOT EXISTS (SELECT 1 FROM client_account_members member
       JOIN client_project_grants grant_record ON grant_record.account_id=member.account_id
       JOIN projects project ON project.id=grant_record.project_id
-        AND project.project_alpha_project_id IS NOT NULL
+        AND (project.project_alpha_source_id='project-alpha:primary' AND project.project_alpha_project_id IS NOT NULL)
       LEFT JOIN client_member_project_grants member_grant
         ON member_grant.account_id=member.account_id AND member_grant.identity_id=member.identity_id
         AND member_grant.project_id=grant_record.project_id AND member_grant.revoked_at IS NULL
@@ -246,7 +247,7 @@ function baselineProjectionCondition(hasGenerationContract: boolean): string {
     AND NOT EXISTS (SELECT 1 FROM client_account_members member
       JOIN client_project_grants grant_record ON grant_record.account_id=member.account_id
       JOIN projects project ON project.id=grant_record.project_id
-        AND project.project_alpha_project_id IS NOT NULL
+        AND (project.project_alpha_source_id='project-alpha:primary' AND project.project_alpha_project_id IS NOT NULL)
       LEFT JOIN client_member_project_grants member_grant
         ON member_grant.account_id=member.account_id AND member_grant.identity_id=member.identity_id
         AND member_grant.project_id=grant_record.project_id AND member_grant.revoked_at IS NULL
@@ -276,7 +277,7 @@ function baselineProjectionCondition(hasGenerationContract: boolean): string {
             AND entitlement.id='legacy-entitlement-' || member.account_id || '-' || member.identity_id || '-' || capabilities.capability)
         AND NOT EXISTS (SELECT 1 FROM client_account_members member
           JOIN client_project_grants grant_record ON grant_record.account_id=member.account_id
-          JOIN projects project ON project.id=grant_record.project_id AND project.project_alpha_project_id IS NOT NULL
+          JOIN projects project ON project.id=grant_record.project_id AND (project.project_alpha_source_id='project-alpha:primary' AND project.project_alpha_project_id IS NOT NULL)
           LEFT JOIN client_member_project_grants member_grant
             ON member_grant.account_id=member.account_id AND member_grant.identity_id=member.identity_id
             AND member_grant.project_id=grant_record.project_id AND member_grant.revoked_at IS NULL
@@ -290,7 +291,7 @@ function baselineProjectionCondition(hasGenerationContract: boolean): string {
       LEFT JOIN portal_v2_folder_bindings binding
         ON binding.id='legacy-folder-' || folder.id AND binding.workspace_id=e.workspace_id
       WHERE folder.account_id=e.account_id
-        AND (folder.scope_type='client' OR project.project_alpha_project_id IS NOT NULL)
+        AND (folder.scope_type='client' OR (project.project_alpha_source_id='project-alpha:primary' AND project.project_alpha_project_id IS NOT NULL))
         AND (binding.id IS NULL
           OR binding.owner_scope_type<>CASE WHEN folder.scope_type='project' THEN 'project' ELSE e.root_type END
           OR binding.owner_public_id<>CASE WHEN folder.scope_type='project' THEN project.project_alpha_project_id ELSE e.root_id END
@@ -302,7 +303,7 @@ function baselineProjectionCondition(hasGenerationContract: boolean): string {
       WHERE binding.workspace_id=e.workspace_id AND NOT EXISTS (
         SELECT 1 FROM client_folder_associations folder LEFT JOIN projects project ON project.id=folder.project_id
         WHERE folder.account_id=e.account_id
-          AND (folder.scope_type='client' OR project.project_alpha_project_id IS NOT NULL)
+          AND (folder.scope_type='client' OR (project.project_alpha_source_id='project-alpha:primary' AND project.project_alpha_project_id IS NOT NULL))
           AND binding.id='legacy-folder-' || folder.id))`;
 }
 
@@ -423,8 +424,9 @@ export async function listClientAccountRootActivation(env: Env): Promise<{
   const [schemaPresent, accountsResult, sourceResult] = await Promise.all([
     workspaceSchemaPresent(db),
     db.prepare(`SELECT id,display_name,status,project_alpha_client_id,
-      project_alpha_organization_id,updated_at
-      FROM client_accounts ORDER BY lower(display_name),id`).all<AccountRow>(),
+      project_alpha_organization_id,project_alpha_source_id,updated_at
+      FROM client_accounts WHERE project_alpha_source_id IS NULL OR project_alpha_source_id='project-alpha:primary'
+      ORDER BY lower(display_name),id`).all<AccountRow>(),
     env.OPS_DB.withSession("first-primary").prepare(`${SOURCE_SELECT}
       AND client.active=1
         AND (client.organization_id IS NULL OR organization.id IS NOT NULL)
@@ -508,10 +510,10 @@ async function duplicateLegacyRoot(
   source: ClientAccountRootSource,
 ): Promise<boolean> {
   const duplicate = source.organizationId
-    ? await db.prepare(`SELECT id FROM client_accounts WHERE id<>?
+    ? await db.prepare(`SELECT id FROM client_accounts WHERE id<>? AND project_alpha_source_id='project-alpha:primary'
         AND (project_alpha_client_id=? OR project_alpha_organization_id=?) LIMIT 1`)
       .bind(accountId, source.clientId, source.organizationId).first("id")
-    : await db.prepare(`SELECT id FROM client_accounts WHERE id<>?
+    : await db.prepare(`SELECT id FROM client_accounts WHERE id<>? AND project_alpha_source_id='project-alpha:primary'
         AND project_alpha_client_id=? LIMIT 1`)
       .bind(accountId, source.clientId).first("id");
   return duplicate !== null;
@@ -544,15 +546,15 @@ function postMigrationProjectionStatements(
   const statements: D1PreparedStatement[] = [];
   statements.push(repairExistingLink
     ? db.prepare(`UPDATE client_accounts SET updated_at=?
-        WHERE id=? AND status='active' AND updated_at=?
+        WHERE id=? AND status='active' AND updated_at=? AND project_alpha_source_id='project-alpha:primary'
           AND project_alpha_client_id=? AND project_alpha_organization_id IS ?`)
       .bind(activatedAt, account.id, expectedUpdatedAt, source.clientId, source.organizationId)
     : db.prepare(`UPDATE client_accounts SET project_alpha_client_id=?,
-        project_alpha_organization_id=?,updated_at=?
-        WHERE id=? AND status='active' AND updated_at=?
+        project_alpha_organization_id=?,updated_at=?,project_alpha_source_id='project-alpha:primary'
+        WHERE id=? AND status='active' AND updated_at=? AND project_alpha_source_id IS NULL
           AND project_alpha_client_id IS NULL AND project_alpha_organization_id IS NULL
           AND NOT EXISTS (
-            SELECT 1 FROM client_accounts other WHERE other.id<>client_accounts.id
+            SELECT 1 FROM client_accounts other WHERE other.id<>client_accounts.id AND other.project_alpha_source_id='project-alpha:primary'
               AND (other.project_alpha_client_id=?
                 OR (? IS NOT NULL AND other.project_alpha_organization_id=?))
           )`)
@@ -562,7 +564,7 @@ function postMigrationProjectionStatements(
   // produces a NOT NULL violation so D1 rolls the entire batch back.
   statements.push(db.prepare(`INSERT INTO audit_log
       (actor_type,actor_id,action,entity_type,entity_id,details_json)
-    SELECT CASE WHEN updated_at=? AND project_alpha_client_id=?
+    SELECT CASE WHEN updated_at=? AND project_alpha_source_id='project-alpha:primary' AND project_alpha_client_id=?
         AND project_alpha_organization_id IS ? THEN 'staff' ELSE NULL END,
       ?,?,?,?,?
     FROM client_accounts WHERE id=?`)
@@ -584,7 +586,7 @@ function postMigrationProjectionStatements(
       (id,root_type,pa_organization_public_id,pa_client_public_id,legacy_account_id,
         display_name,status,created_at,updated_at)
     SELECT ?,?,?,?,?,display_name,status,created_at,updated_at
-    FROM client_accounts WHERE id=? AND status='active'
+    FROM client_accounts WHERE id=? AND status='active' AND project_alpha_source_id='project-alpha:primary'
       AND project_alpha_client_id=? AND project_alpha_organization_id IS ?`)
     .bind(workspaceId, source.rootType, source.organizationId,
       source.organizationId === null ? source.clientId : null, account.id,
@@ -617,7 +619,7 @@ function postMigrationProjectionStatements(
       'legacy-backfill',project.active
     FROM client_project_grants grant_record JOIN projects project ON project.id=grant_record.project_id
     WHERE grant_record.account_id=? AND grant_record.revoked_at IS NULL
-      AND project.project_alpha_project_id IS NOT NULL`)
+      AND (project.project_alpha_source_id='project-alpha:primary' AND project.project_alpha_project_id IS NOT NULL)`)
     .bind(workspaceId, generationId, source.rootPublicId, account.id));
   statements.push(db.prepare(`INSERT INTO portal_v2_directory_checkpoints
       (workspace_id,active_generation_id,source_sequence,updated_at) VALUES (?,?,0,?)`)
@@ -645,7 +647,7 @@ function postMigrationProjectionStatements(
       CASE WHEN member.revoked_at IS NULL AND grant_record.revoked_at IS NULL THEN 'active' ELSE 'revoked' END
     FROM client_account_members member
     JOIN client_project_grants grant_record ON grant_record.account_id=member.account_id
-    JOIN projects project ON project.id=grant_record.project_id AND project.project_alpha_project_id IS NOT NULL
+    JOIN projects project ON project.id=grant_record.project_id AND (project.project_alpha_source_id='project-alpha:primary' AND project.project_alpha_project_id IS NOT NULL)
     LEFT JOIN client_member_project_grants member_grant
       ON member_grant.account_id=member.account_id AND member_grant.identity_id=member.identity_id
       AND member_grant.project_id=grant_record.project_id AND member_grant.revoked_at IS NULL
@@ -660,7 +662,7 @@ function postMigrationProjectionStatements(
         AND grant_record.can_request_service=1 THEN 'active' ELSE 'revoked' END
     FROM client_account_members member
     JOIN client_project_grants grant_record ON grant_record.account_id=member.account_id
-    JOIN projects project ON project.id=grant_record.project_id AND project.project_alpha_project_id IS NOT NULL
+    JOIN projects project ON project.id=grant_record.project_id AND (project.project_alpha_source_id='project-alpha:primary' AND project.project_alpha_project_id IS NOT NULL)
     LEFT JOIN client_member_project_grants member_grant
       ON member_grant.account_id=member.account_id AND member_grant.identity_id=member.identity_id
       AND member_grant.project_id=grant_record.project_id AND member_grant.revoked_at IS NULL
@@ -675,7 +677,7 @@ function postMigrationProjectionStatements(
       folder.revoked_at,folder.created_at
     FROM client_folder_associations folder LEFT JOIN projects project ON project.id=folder.project_id
     WHERE folder.account_id=?
-      AND (folder.scope_type='client' OR project.project_alpha_project_id IS NOT NULL)`)
+      AND (folder.scope_type='client' OR (project.project_alpha_source_id='project-alpha:primary' AND project.project_alpha_project_id IS NOT NULL))`)
     .bind(workspaceId, source.rootType, source.rootPublicId, account.id));
   // The guard inserts no row when the complete legacy postcondition holds. If
   // any source-derived row is missing or mismatched, NULL violates actor_type
@@ -721,11 +723,13 @@ export async function activateClientAccountRoot(
   const [schemaPresent, account, sourceRow] = await Promise.all([
     workspaceSchemaPresent(db),
     db.prepare(`SELECT id,display_name,status,project_alpha_client_id,
-      project_alpha_organization_id,updated_at FROM client_accounts WHERE id=?`)
+      project_alpha_organization_id,project_alpha_source_id,updated_at FROM client_accounts WHERE id=?`)
       .bind(accountId).first<AccountRow>(),
     activeSource(env, input.projectAlphaClientId),
   ]);
   if (!account) throw new HTTPException(404, { message: "Client account not found" });
+  if (account.project_alpha_source_id !== null && account.project_alpha_source_id !== PRIMARY_ALPHA_SOURCE_ID)
+    throw new HTTPException(409, { message: "This client's source does not support portal activation" });
   if (account.status !== "active")
     throw new HTTPException(409, { message: "Only an active client account can be linked" });
   if (!sourceRow)
@@ -734,7 +738,7 @@ export async function activateClientAccountRoot(
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(source.rootPublicId))
     throw new HTTPException(409, { message: "Project Alpha root public ID is not valid for a workspace" });
 
-  const exactCurrentLink = account.project_alpha_client_id === source.clientId
+  const exactCurrentLink = account.project_alpha_source_id === PRIMARY_ALPHA_SOURCE_ID && account.project_alpha_client_id === source.clientId
     && account.project_alpha_organization_id === source.organizationId;
   if (account.project_alpha_client_id || account.project_alpha_organization_id)
     if (!exactCurrentLink) throw new HTTPException(409, {
@@ -788,9 +792,9 @@ export async function activateClientAccountRoot(
       // constraint/CAS/audit failure stays closed and cannot leave partial rows
       // because D1 batch execution is transactional.
       const replayAccount = await db.prepare(`SELECT id,display_name,status,project_alpha_client_id,
-        project_alpha_organization_id,updated_at FROM client_accounts WHERE id=?`)
+        project_alpha_organization_id,project_alpha_source_id,updated_at FROM client_accounts WHERE id=?`)
         .bind(accountId).first<AccountRow>();
-      const replayComplete = replayAccount?.project_alpha_client_id === source.clientId
+      const replayComplete = replayAccount?.project_alpha_source_id === PRIMARY_ALPHA_SOURCE_ID && replayAccount.project_alpha_client_id === source.clientId
         && replayAccount.project_alpha_organization_id === source.organizationId
         && await recognizedProjectionComplete(db, accountId, source, hasGenerationContract);
       if (replayComplete) return activationResult(accountId, source, true);
@@ -823,18 +827,18 @@ export async function activateClientAccountRoot(
   });
   const result = await db.batch([
     db.prepare(`UPDATE client_accounts SET project_alpha_client_id=?,
-      project_alpha_organization_id=?,updated_at=?
-      WHERE id=? AND status='active' AND updated_at=?
+      project_alpha_organization_id=?,updated_at=?,project_alpha_source_id='project-alpha:primary'
+      WHERE id=? AND status='active' AND updated_at=? AND project_alpha_source_id IS NULL
         AND project_alpha_client_id IS NULL AND project_alpha_organization_id IS NULL
         AND NOT EXISTS (
-          SELECT 1 FROM client_accounts other WHERE other.id<>client_accounts.id
+          SELECT 1 FROM client_accounts other WHERE other.id<>client_accounts.id AND other.project_alpha_source_id='project-alpha:primary'
             AND (other.project_alpha_client_id=? OR (? IS NOT NULL AND other.project_alpha_organization_id=?))
         )`)
       .bind(source.clientId, source.organizationId, activatedAt, accountId,
         input.expectedUpdatedAt, source.clientId, source.organizationId, source.organizationId),
     db.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
       SELECT 'staff',?,'client.account.project_alpha_root_linked','client_account',?,?
-      FROM client_accounts WHERE id=? AND updated_at=?
+      FROM client_accounts WHERE id=? AND updated_at=? AND project_alpha_source_id='project-alpha:primary'
         AND project_alpha_client_id=?
         AND project_alpha_organization_id IS ?`)
       .bind(principal.id, accountId, details, accountId, activatedAt,

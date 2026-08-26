@@ -641,11 +641,13 @@ async function serviceRequestRead<T>(
   }
 }
 
-const requestAccessConstraint = `AND r.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND (
+const requestAccessConstraint = `AND r.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
+  AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}') AND (
   (r.project_id IS NULL AND (m.role='manager' OR r.created_by_identity_id=i.id)) OR
   (r.project_id IS NOT NULL AND EXISTS (
     SELECT 1 FROM client_project_grants request_grant
     JOIN projects request_project ON request_project.id=request_grant.project_id AND request_project.active=1
+      AND (request_project.project_alpha_source_id IS NULL OR request_project.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
     WHERE request_grant.account_id=a.id AND request_grant.project_id=r.project_id AND request_grant.revoked_at IS NULL
       AND (m.role='manager' OR EXISTS (
         SELECT 1 FROM client_member_project_grants request_member_grant
@@ -1386,6 +1388,8 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       JOIN client_project_grants g ON g.account_id=a.id AND g.project_id=? AND g.revoked_at IS NULL AND g.can_request_service=1
       JOIN projects p ON p.id=g.project_id AND p.active=1
       WHERE a.id=? AND a.status='active' ${memberProjectConstraint}
+        AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
+        AND (p.project_alpha_source_id IS NULL OR p.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
         AND (? IS NULL OR EXISTS (
           SELECT 1 FROM client_service_requests parent
           WHERE parent.id=? AND parent.account_id=a.id AND parent.project_id=g.project_id
@@ -1411,6 +1415,7 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
       JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
       JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
       WHERE a.id=? AND a.status='active'
+        AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
         AND (? IS NULL OR EXISTS (
           SELECT 1 FROM client_service_requests parent
           WHERE parent.id=? AND parent.account_id=a.id AND parent.project_id IS NULL
@@ -1527,11 +1532,13 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
             SELECT 1 FROM client_service_requests authorized
             ${sessionJoin}
             WHERE authorized.id=client_service_requests.id AND authorized.account_id=a.id
+              AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
               AND (
                 (authorized.project_id IS NULL AND (m.role='manager' OR authorized.created_by_identity_id=i.id)) OR
                 (authorized.project_id IS NOT NULL AND EXISTS (
                   SELECT 1 FROM client_project_grants request_grant
                   JOIN projects request_project ON request_project.id=request_grant.project_id AND request_project.active=1
+                    AND (request_project.project_alpha_source_id IS NULL OR request_project.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
                   WHERE request_grant.account_id=a.id AND request_grant.project_id=authorized.project_id
                     AND request_grant.revoked_at IS NULL
                     AND (m.role='manager' OR EXISTS (
@@ -1682,12 +1689,14 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
             SELECT 1 FROM client_service_requests authorized
             ${sessionJoin}
             WHERE authorized.id=request_operational_estimates.request_id AND authorized.account_id=a.id
+              AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
               AND authorized.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
               AND (
                 (authorized.project_id IS NULL AND (m.role='manager' OR authorized.created_by_identity_id=i.id)) OR
                 (authorized.project_id IS NOT NULL AND EXISTS (
                   SELECT 1 FROM client_project_grants request_grant
                   JOIN projects request_project ON request_project.id=request_grant.project_id AND request_project.active=1
+                    AND (request_project.project_alpha_source_id IS NULL OR request_project.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
                   WHERE request_grant.account_id=a.id AND request_grant.project_id=authorized.project_id
                     AND request_grant.revoked_at IS NULL
                     AND (m.role='manager' OR EXISTS (

@@ -3,6 +3,9 @@ import { isAlphaPublicId, sourcePublicIdExpression } from "./client-hub-source";
 import type { Env } from "./types";
 
 export interface PrimaryBusinessReferences {
+  /** Trusted Delivery row provenance; never inferred from a matching scalar. */
+  accountSourceId: string | null;
+  projectSourceId?: string | null;
   clientId: string;
   organizationId?: string | null;
   projectId?: string | null;
@@ -18,6 +21,9 @@ export type PrimaryReferenceProof = { available: true } | {
 export async function provePrimaryBusinessReferences(
   env: Pick<Env, "OPS_DB" | "DELIVERY_DB">, input: PrimaryBusinessReferences,
 ): Promise<PrimaryReferenceProof> {
+  if (input.accountSourceId !== PRIMARY_ALPHA_SOURCE_ID ||
+    (input.projectId != null && input.projectSourceId !== PRIMARY_ALPHA_SOURCE_ID))
+    return { available: false, reason: "unsupported_source" };
   const references = [
     { table: "pa_clients", kind: "client", id: input.clientId },
     ...(input.organizationId ? [{ table: "pa_organizations", kind: "organization", id: input.organizationId }] : []),
@@ -53,6 +59,7 @@ export async function provePrimaryBusinessReferences(
       AND generation.workspace_id=workspace.id AND generation.source_sequence=checkpoint.source_sequence
       AND generation.status='active' AND generation.complete=1 AND generation.source_generation<>'legacy-backfill'
     JOIN client_accounts account ON account.id=? AND account.status='active'
+      AND account.project_alpha_source_id='project-alpha:primary'
       AND account.project_alpha_client_id=? AND account.project_alpha_organization_id IS ?
     WHERE workspace.status='active' AND (workspace.legacy_account_id=account.id
       OR EXISTS (SELECT 1 FROM portal_v2_identity_eligibility_legacy_bridges bridge

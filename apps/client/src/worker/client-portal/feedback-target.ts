@@ -1,5 +1,6 @@
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import type { Env } from "../types";
 import type { ClientPortalSession, VerifiedClientPrincipal } from "./types";
 import {
@@ -13,7 +14,8 @@ import {
   type PortalAuthorizationEnv,
 } from "./workspace-v2";
 import { authorizeAuthenticatedDeliveryGrant, listAuthorizedAuthenticatedDeliveryPrefixes } from "./authenticated-delivery-grants";
-import type { FeedbackRecord } from "./feedback-store";
+import type { FeedbackRecord, FeedbackSourceOwner } from "./feedback-store";
+export type { FeedbackSourceOwner } from "./feedback-store";
 
 const opaqueId = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
 export const feedbackTargetInputSchema = z.discriminatedUnion("kind", [
@@ -26,12 +28,18 @@ export interface FeedbackTargetContext {
   accountId: string; workspaceId: string | null; identityId: string; workspaceIdentityId: string | null;
   issuer: string; subject: string;
 }
-export interface FeedbackSourceOwner {
-  account: { projectAlphaClientId: string | null; projectAlphaOrganizationId: string | null };
-  project: { projectAlphaProjectId: string | null; sourceUpdatedAt: string | null } | null;
-  workspace: { rootType: "organization" | "standalone_client"; rootPublicId: string; generationId: string; sourceSequence: number } | null;
-  association: { prefix: string } | null;
-  file: { etag: string; size: number; uploadedAt: string } | null;
+/** Interpret original snapshots without rewriting their immutable JSON or fingerprints. */
+export function feedbackSourceOwnerSource(owner: FeedbackSourceOwner, kind: "account" | "project"): string | null | undefined {
+  const row = owner[kind];
+  if (!row) return null;
+  if (owner.version === 2) {
+    const source = row.projectAlphaSourceId;
+    return source === null || (typeof source === "string" && /^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/.test(source)) ? source : undefined;
+  }
+  if (owner.version !== undefined || row.projectAlphaSourceId !== undefined) return undefined;
+  // Versionless snapshots were authored before any secondary Delivery source existed.
+  return (kind === "account" ? owner.account.projectAlphaClientId || owner.account.projectAlphaOrganizationId
+    : owner.project?.projectAlphaProjectId) ? PRIMARY_ALPHA_SOURCE_ID : null;
 }
 export interface CanonicalFeedbackTarget {
   kind: FeedbackTargetInput["kind"]; projectId: string | null; associationId: string | null;
@@ -44,7 +52,7 @@ export interface ResolvedFeedbackTarget {
 }
 interface TargetRow {
   project_id: string | null; project_name: string | null; pa_project_id: string | null; source_updated_at: string | null;
-  pa_client_id: string | null; pa_org_id: string | null;
+  pa_client_id: string | null; pa_org_id: string | null; account_source_id: string | null; project_source_id: string | null;
   association_id: string | null; prefix: string | null; storage_key: string | null;
   etag: string | null; size: number | null; uploaded_at: string | null;
   target_live: number;
@@ -59,6 +67,7 @@ const key = field("storageKey"), binding = field("bindingId");
 const notDeleted = (file: string) => `NOT EXISTS (SELECT 1 FROM delivery_tombstones tombstone WHERE tombstone.restored_at IS NULL
   AND (tombstone.physical_key=${file} OR (tombstone.tombstone_kind='prefix' AND substr(${file},1,length(tombstone.physical_key))=tombstone.physical_key)))`;
 const localSelect = `SELECT account.project_alpha_client_id pa_client_id,account.project_alpha_organization_id pa_org_id,
+  account.project_alpha_source_id account_source_id,project.project_alpha_source_id project_source_id,
   project.id project_id,project.project_name,project.project_alpha_project_id pa_project_id,project.source_updated_at,
   association.id association_id,association.r2_prefix prefix,file.r2_key storage_key,file.etag,file.size,file.uploaded_at,
   CASE WHEN ${field("kind")}='file' THEN file.r2_key IS NOT NULL AND ${notDeleted("file.r2_key")}
@@ -100,7 +109,7 @@ function changed(): never { throw new HTTPException(409, { message: "Feedback ta
 // removals, source changes and time-based validity changes in the transaction.
 function proofParts(native: boolean): ProofPart[] {
   const parts: ProofPart[] = [rowsProof(`${localSelect} ORDER BY association.id`, [
-    "pa_client_id", "pa_org_id", "project_id", "project_name", "pa_project_id", "source_updated_at", "association_id", "prefix", "storage_key", "etag", "size", "uploaded_at", "target_live",
+    "pa_client_id", "pa_org_id", "account_source_id", "project_source_id", "project_id", "project_name", "pa_project_id", "source_updated_at", "association_id", "prefix", "storage_key", "etag", "size", "uploaded_at", "target_live",
   ], 1), rowsProof(`SELECT member.role,member.can_view_billing,identity.issuer,identity.subject,identity.email FROM client_account_members member
     JOIN client_identity_links identity ON identity.id=member.identity_id
     WHERE member.account_id=${account} AND member.identity_id=${identity} AND member.revoked_at IS NULL AND identity.revoked_at IS NULL`,
@@ -261,7 +270,8 @@ async function resolveCanonicalTarget(
   // The staff workflow requires an explicit PA owner and, for project-scoped
   // targets, an explicit PA project. Do not accept structurally unroutable
   // reports that the authorized staff queue could never show.
-  if (requireStaffMapping && !stored && ((!source.pa_client_id?.trim() && !source.pa_org_id?.trim()) ||
+  if (requireStaffMapping && !stored && (source.account_source_id !== PRIMARY_ALPHA_SOURCE_ID ||
+    (targetInput.projectId !== null && source.project_source_id !== PRIMARY_ALPHA_SOURCE_ID) || (!source.pa_client_id?.trim() && !source.pa_org_id?.trim()) ||
     (targetInput.projectId !== null && !source.pa_project_id?.trim()))) {
     throw new HTTPException(503, { res: Response.json({ code: "feedback_target_unavailable",
       error: "Feedback is not available for this item until its client and project connection is configured." }, { status: 503 }) });
@@ -314,8 +324,9 @@ async function resolveCanonicalTarget(
       (targetInput.kind === "file" ? storageKey : `${source.prefix}${folder?.relativePath ?? ""}`)?.split("/").filter(Boolean).at(-1) ?? "Folder",
     projectName: source.project_name?.slice(0, 160) ?? null,
     sourceOwner: {
-      account: { projectAlphaClientId: source.pa_client_id, projectAlphaOrganizationId: source.pa_org_id },
-      project: source.project_id ? { projectAlphaProjectId: source.pa_project_id, sourceUpdatedAt: source.source_updated_at } : null,
+      version: 2,
+      account: { projectAlphaClientId: source.pa_client_id, projectAlphaOrganizationId: source.pa_org_id, projectAlphaSourceId: source.account_source_id },
+      project: source.project_id ? { projectAlphaProjectId: source.pa_project_id, sourceUpdatedAt: source.source_updated_at, projectAlphaSourceId: source.project_source_id } : null,
       workspace: selected && generation ? { rootType: selected.rootType, rootPublicId: selected.rootPublicId, generationId: generation.active_generation_id, sourceSequence: generation.source_sequence } : null,
       association: targetInput.kind === "project" || !source.prefix ? null : { prefix: source.prefix },
       file: source.etag !== null && source.size !== null && source.uploaded_at !== null ? { etag: source.etag, size: source.size, uploadedAt: source.uploaded_at } : null,
@@ -324,8 +335,11 @@ async function resolveCanonicalTarget(
   target.label = target.label.slice(0, 160);
   let available = source.target_live === 1;
   if (stored) {
+    if (feedbackSourceOwnerSource(stored.sourceOwner,"account") !== source.account_source_id ||
+      feedbackSourceOwnerSource(stored.sourceOwner,"project") !== (source.project_id ? source.project_source_id : null)) deny();
     const ownerKey = (value: CanonicalFeedbackTarget) => JSON.stringify([
-      value.kind,value.projectId,value.associationId,value.relativePath,value.storageKey,value.sourceOwner.account,
+      value.kind,value.projectId,value.associationId,value.relativePath,value.storageKey,
+      value.sourceOwner.account.projectAlphaClientId,value.sourceOwner.account.projectAlphaOrganizationId,
       value.sourceOwner.project?.projectAlphaProjectId ?? null,
       value.sourceOwner.workspace?.rootType ?? null,value.sourceOwner.workspace?.rootPublicId ?? null,value.sourceOwner.association?.prefix ?? null,
     ]);

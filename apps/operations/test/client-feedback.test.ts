@@ -69,6 +69,17 @@ describe("staff feedback current-owner authority and transitions",{timeout:30_00
     await expect(getStaffFeedback(f.env,feedbackStaff,record.id)).rejects.toMatchObject({status:404});
     await expect(action(record.id)).rejects.toMatchObject({status:404});
   });
+  it.each(["account", "project"] as const)("rejects explicit secondary %s ownership even when raw IDs match primary",async kind=>{
+    const owner=await f.seed();
+    const sourceOwner=owner.authorization.target.sourceOwner;
+    sourceOwner.version=2;
+    sourceOwner.account.projectAlphaSourceId=kind==="account"?"project-alpha:secondary":"project-alpha:primary";
+    sourceOwner.project!.projectAlphaSourceId=kind==="project"?"project-alpha:secondary":"project-alpha:primary";
+    const record=await owner.create();
+    expect((await listStaffFeedback(f.env,feedbackStaff,{accountId:owner.id})).items).toEqual([]);
+    await expect(getStaffFeedback(f.env,feedbackStaff,record.id)).rejects.toMatchObject({status:404});
+    await expect(action(record.id)).rejects.toMatchObject({status:404});
+  });
   it("rejects moved source project and local account remapping",async()=>{
     const owner=await f.seed(),record=await owner.create();
     await f.ops.prepare("UPDATE pa_projects SET client_id='different-client' WHERE id=?").bind(owner.pa).run();

@@ -8,6 +8,7 @@ import { createProjectAlphaSourceContext, prepareProjectAlphaSourceRecords, PRIM
 import { desiredAccessEmails } from "../src/access-group";
 import { handleRequest } from "../src/index";
 import type { EntitlementEvent, Env, ProjectionEvent } from "../src/types";
+import { deliveryProjectionFixture, secondaryDeliverySnapshot } from "../../operations/test/helpers/delivery-projection-fixture";
 
 let miniflare: Miniflare;
 let db: D1Database;
@@ -244,8 +245,8 @@ describe("entitlement projection",()=>{
     try{
       const delivery=await deliveryMiniflare.getD1Database("DELIVERY_DB") as D1Database;
       for(const statement of [
-        "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,project_alpha_client_id TEXT,project_alpha_organization_id TEXT)",
-        "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,project_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT)",
+        "CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT NOT NULL,project_alpha_client_id TEXT,project_alpha_organization_id TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary')",
+        "CREATE TABLE projects(id TEXT PRIMARY KEY,project_alpha_project_id TEXT,project_name TEXT,status TEXT,summary TEXT,source_updated_at TEXT,active INTEGER NOT NULL,updated_at TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary')",
         "CREATE TABLE client_project_grants(account_id TEXT,project_id TEXT,can_request_service INTEGER NOT NULL,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
         "CREATE TABLE client_folder_associations(id TEXT PRIMARY KEY,scope_type TEXT,account_id TEXT,project_id TEXT,revoked_at TEXT)",
         "CREATE TABLE client_delivery_grants(account_id TEXT,project_id TEXT,revoked_at TEXT,PRIMARY KEY(account_id,project_id))",
@@ -256,8 +257,8 @@ describe("entitlement projection",()=>{
         db.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,last_sync_id) VALUES ('80','Prior organization',1,'{}','seed'),('81','Current organization',1,'{}','seed')"),
       ]);
       await delivery.batch([
-        delivery.prepare("INSERT INTO client_accounts VALUES ('account-old','active','70','80')"),
-        delivery.prepare("INSERT INTO projects VALUES ('portal-pa-50','50','Project','active',NULL,NULL,1,NULL)"),
+        delivery.prepare("INSERT INTO client_accounts(id,status,project_alpha_client_id,project_alpha_organization_id) VALUES ('account-old','active','70','80')"),
+        delivery.prepare("INSERT INTO projects(id,project_alpha_project_id,project_name,status,summary,source_updated_at,active,updated_at) VALUES ('portal-pa-50','50','Project','active',NULL,NULL,1,NULL)"),
         delivery.prepare("INSERT INTO client_project_grants VALUES ('account-old','portal-pa-50',1,NULL)"),
         delivery.prepare("INSERT INTO client_folder_associations VALUES ('folder-old','project','account-old','portal-pa-50',NULL)"),
       ]);
@@ -282,6 +283,37 @@ describe("entitlement projection",()=>{
     const organizationStatus=state.writes.find(write=>write.sql.includes("project_alpha_organization_id=? AND project_alpha_client_id IS NULL")&&write.values.includes("80"));
     expect(organizationStatus?.values).toEqual(expect.arrayContaining([0,"80"]));
   });
+
+  it("primary events, revocations and replay leave colliding Delivery ownership untouched", async () => {
+    const { runtime, db: delivery } = await deliveryProjectionFixture();
+    try {
+      const before = await secondaryDeliverySnapshot(delivery);
+      await applyProjectionEvent(env(delivery), projection("client", "70", { id: "70", name: "Primary client renamed" }), "client-source");
+      expect(await delivery.prepare("SELECT client_name FROM projects WHERE id='local-client-project'").first("client_name")).toBe("Primary client renamed");
+      await applyProjectionEvent(env(delivery), projection("organization", "80", { id: "80", name: "Primary organization renamed" }), "organization-source");
+      expect(await delivery.prepare("SELECT client_name FROM projects WHERE id='local-org-project'").first("client_name")).toBe("Primary organization renamed");
+      await applyProjectionEvent(env(delivery), projection("project", "50", { id: "50", name: "Primary project renamed", client_id: "70", organization_id: "80" }), "project-source");
+      expect(await secondaryDeliverySnapshot(delivery)).toEqual(before);
+      expect(await delivery.prepare("SELECT project_name FROM projects WHERE id='a-50'").first("project_name")).toBe("Primary project renamed");
+      expect(await delivery.prepare("SELECT revoked_at FROM client_folder_associations WHERE id='local-suspended-folder'").first("revoked_at")).toBeTruthy();
+      expect(await delivery.prepare("SELECT revoked_at FROM client_folder_associations WHERE id='local-active-folder'").first("revoked_at")).toBeNull();
+      const revoked = projection("client", "70", { id: "70", name: "Primary revoked" }, "2026-08-26T13:00:00Z");
+      revoked.projection.action = "revoke";
+      await applyProjectionEvent(env(delivery), revoked, "revoked-source");
+      await completeEvent(env(delivery), revoked);
+      expect(await applyProjectionEvent(env(delivery), revoked, "revoked-source")).toBe("duplicate");
+      expect(await secondaryDeliverySnapshot(delivery)).toEqual(before);
+      expect(await delivery.prepare("SELECT status FROM client_accounts WHERE id='a-client'").first("status")).toBe("suspended");
+      expect(await delivery.prepare("SELECT revoked_at FROM client_project_grants WHERE account_id='a-client' AND project_id='a-50'").first("revoked_at")).toBeTruthy();
+      expect((await delivery.prepare(`SELECT id,project_alpha_source_id,project_alpha_project_id,active FROM projects
+        WHERE id IN ('local-client-project','local-org-project') ORDER BY id`).all()).results).toEqual([
+        { id: "local-client-project", project_alpha_source_id: null, project_alpha_project_id: null, active: 1 },
+        { id: "local-org-project", project_alpha_source_id: null, project_alpha_project_id: null, active: 1 },
+      ]);
+      expect(await delivery.prepare("SELECT status FROM client_accounts WHERE id='local-active-client'").first("status")).toBe("active");
+      expect(await delivery.prepare("SELECT revoked_at FROM client_folder_associations WHERE id='local-active-folder'").first("revoked_at")).toBeNull();
+    } finally { await runtime.dispose(); }
+  }, 30_000);
 
   it("keeps colliding event IDs, versions, receipts, failures and mapped client IDs independent by source",async()=>{
     const deliveryState={failNext:false,writes:[] as Array<{sql:string;values:unknown[]}>};

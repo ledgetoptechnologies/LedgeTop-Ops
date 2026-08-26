@@ -50,6 +50,8 @@ function requestNotificationRow(overrides: Record<string, unknown> = {}) {
     id: "notice-source",
     request_id: "request-source",
     catalog_source_id: PRIMARY_ALPHA_SOURCE_ID,
+    account_source_id: PRIMARY_ALPHA_SOURCE_ID,
+    project_source_id: null,
     event_type: "request_status_changed",
     status_value: "under_review",
     recipient_kind: "client_requester",
@@ -112,6 +114,8 @@ describe("client notifications", () => {
             id: "notice-legacy",
             request_id: "request-legacy",
             catalog_source_id: PRIMARY_ALPHA_SOURCE_ID,
+            account_source_id: PRIMARY_ALPHA_SOURCE_ID,
+            project_source_id: null,
             event_type: "request_status_changed",
             status_value: "under_review",
             recipient_kind: "client_requester",
@@ -184,12 +188,27 @@ describe("client notifications", () => {
     expect(value.calls.find(call => call.sql.includes("FROM client_portal_notification_outbox"))?.sql).toContain("r.catalog_source_id");
   });
 
+  it.each(["account_source_id", "project_source_id"])("suppresses client notices with secondary %s before mail or inbox delivery", async field => {
+    let reads = 0;
+    const row = requestNotificationRow({ [field]: "project-alpha:secondary", requester_email: "invalid", payload_json: "invalid" });
+    const value = recordingDatabase({ first: call => {
+      if (call.sql.includes("sqlite_master")) return { count: 1 };
+      if (call.sql.includes("FROM client_portal_notification_outbox")) return ++reads === 1 ? row : null;
+      return null;
+    } });
+    const send = vi.fn();
+    await expect(processClientPortalRequestNotifications({ DELIVERY_DB: value.database, NOTIFICATION_EMAIL: { send } } as unknown as Env)).resolves.toBe(1);
+    expect(send).not.toHaveBeenCalled();
+    expect(value.calls.some(call => call.sql.includes("INSERT OR IGNORE INTO client_portal_notifications"))).toBe(false);
+    expect(value.calls.find(call => call.sql.includes("SET status='suppressed'"))?.binds).toEqual(["unsupported-business-source", row.id]);
+  });
+
   it.each([
     { source: PRIMARY_ALPHA_SOURCE_ID, recipientKind: "client_requester", to: "client@example.test", inbox: true },
     { source: "project-alpha:secondary", recipientKind: "staff_triage", to: "triage@example.test", inbox: false },
   ])("preserves $recipientKind delivery for $source", async ({ source, recipientKind, to, inbox }) => {
     let outboxReads = 0;
-    const row = requestNotificationRow({ catalog_source_id: source, recipient_kind: recipientKind });
+    const row = requestNotificationRow({ catalog_source_id: source, account_source_id: source, recipient_kind: recipientKind });
     const value = recordingDatabase({
       first: call => {
         if (call.sql.includes("sqlite_master")) return { count: 1 };

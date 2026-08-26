@@ -20,6 +20,7 @@ import {
   authorizeEffectiveWorkspaceProject,
   hashPortalInvitationToken,
   listPortalWorkspaces,
+  readEffectiveWorkspaceRequestProof,
   resolveEffectivePortalWorkspaceContext,
 } from "../src/worker/client-portal/workspace-v2";
 import {
@@ -49,7 +50,7 @@ describe("client workspace hierarchy v2", () => {
     await db.exec(`
       CREATE TABLE client_accounts(
         id TEXT PRIMARY KEY,display_name TEXT NOT NULL,status TEXT NOT NULL,
-        project_alpha_client_id TEXT,project_alpha_organization_id TEXT,
+        project_alpha_client_id TEXT,project_alpha_organization_id TEXT,project_alpha_source_id TEXT DEFAULT 'project-alpha:primary',
         created_at TEXT NOT NULL DEFAULT (datetime('now')),updated_at TEXT NOT NULL DEFAULT (datetime('now'))
       );
       CREATE TABLE client_identity_links(
@@ -65,7 +66,8 @@ describe("client workspace hierarchy v2", () => {
       CREATE TABLE projects(
         id TEXT PRIMARY KEY,project_alpha_project_id TEXT,external_ref TEXT,client_name TEXT NOT NULL DEFAULT 'Client',project_name TEXT NOT NULL,
         active INTEGER NOT NULL DEFAULT 1,status TEXT,summary TEXT,site_address TEXT,service_address TEXT,project_contact_name TEXT,
-        project_contact_email TEXT,project_contact_phone TEXT,next_milestone TEXT,source_updated_at TEXT
+        project_contact_email TEXT,project_contact_phone TEXT,next_milestone TEXT,source_updated_at TEXT,
+        project_alpha_source_id TEXT DEFAULT 'project-alpha:primary'
       );
       CREATE TABLE client_project_grants(
         account_id TEXT NOT NULL,project_id TEXT NOT NULL,can_request_service INTEGER NOT NULL DEFAULT 0,
@@ -160,6 +162,69 @@ describe("client workspace hierarchy v2", () => {
       db.prepare("INSERT OR IGNORE INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status) VALUES ('b-directory','workspace-b','identity-one','directory.read','allow','workspace','workspace-b','project_alpha','active')"),
     ]);
   }
+
+  it("rejects a secondary account on a primary native workspace despite matching raw roots", async () => {
+    await db.prepare("UPDATE client_accounts SET project_alpha_source_id='project-alpha:secondary' WHERE id='account-a'").run();
+    try {
+      expect(await resolveEffectivePortalWorkspaceContext(env,principal,"workspace-account-a")).toBeNull();
+      expect(await authorizePortalWorkspaceCapability(env,principal,"workspace-account-a","workspace.view",{scopeType:"workspace",publicId:"workspace-account-a"})).toBe(false);
+    } finally { await db.prepare("UPDATE client_accounts SET project_alpha_source_id='project-alpha:primary' WHERE id='account-a'").run(); }
+  });
+
+  it("keeps an explicit local-only workspace wrapper usable without creating Alpha eligibility", async () => {
+    const local={issuer,subject:"local-wrapper",email:"local@example.test"};
+    await db.batch([
+      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_source_id) VALUES('local-wrapper-account','Local','active',NULL)"),
+      db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('local-wrapper-identity','local-wrapper-account',?,?,?)").bind(local.issuer,local.subject,local.email),
+      db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('local-wrapper-account','local-wrapper-identity','manager')"),
+      db.prepare("INSERT INTO portal_v2_identities(id,issuer,subject,verified_email) VALUES('local-wrapper-identity',?,?,?)").bind(local.issuer,local.subject,local.email),
+      db.prepare("INSERT INTO portal_v2_workspaces(id,root_type,pa_client_public_id,legacy_account_id,display_name) VALUES('local-wrapper','standalone_client','local-root','local-wrapper-account','Local')"),
+      db.prepare("INSERT INTO portal_v2_workspace_memberships(id,workspace_id,identity_id,source_type) VALUES('local-wrapper-member','local-wrapper','local-wrapper-identity','legacy')"),
+      db.prepare("INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete) VALUES('local-wrapper-generation','local-wrapper','legacy-backfill',0,'active',1)"),
+      db.prepare("INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,display_name,source_version) VALUES('local-wrapper','local-wrapper-generation','standalone_client','local-root','Local','legacy-backfill')"),
+      db.prepare("INSERT INTO portal_v2_directory_checkpoints VALUES('local-wrapper','local-wrapper-generation',0,datetime('now'))"),
+      db.prepare("INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,scope_type,scope_public_id,source_type) VALUES('local-wrapper-view','local-wrapper','local-wrapper-identity','workspace.view','workspace','local-wrapper','legacy')"),
+    ]);
+    try {
+    expect(await resolveEffectivePortalWorkspaceContext(env,local,"local-wrapper")).toMatchObject({legacyAccountId:"local-wrapper-account"});
+    expect(await db.prepare("SELECT count(*) n FROM portal_v2_workspace_memberships WHERE workspace_id='local-wrapper' AND source_type='project_alpha'").first("n")).toBe(0);
+    // An already-established shell bridge can point to a synthetic legacy
+    // identity. It cannot rely on the issuer/subject fallback to stay usable.
+    await db.prepare(`CREATE TABLE portal_v2_identity_eligibility_legacy_bridges (
+      workspace_id TEXT NOT NULL,identity_id TEXT NOT NULL,legacy_account_id TEXT NOT NULL,
+      legacy_identity_id TEXT NOT NULL,status TEXT NOT NULL DEFAULT 'active',revoked_at TEXT,
+      PRIMARY KEY(workspace_id,identity_id),UNIQUE(legacy_identity_id),
+      FOREIGN KEY(workspace_id,identity_id) REFERENCES portal_v2_workspace_memberships(workspace_id,identity_id) ON DELETE CASCADE,
+      FOREIGN KEY(legacy_identity_id,legacy_account_id) REFERENCES client_identity_links(id,account_id) ON DELETE CASCADE
+    )`).run();
+    await db.batch([
+      db.prepare("UPDATE client_identity_links SET issuer='portal-v2-eligibility',subject='synthetic-local' WHERE id='local-wrapper-identity'"),
+      db.prepare("INSERT INTO portal_v2_identity_eligibility_legacy_bridges(workspace_id,identity_id,legacy_account_id,legacy_identity_id) VALUES('local-wrapper','local-wrapper-identity','local-wrapper-account','local-wrapper-identity')"),
+      db.prepare("INSERT INTO client_project_grants(account_id,project_id,can_request_service) VALUES('local-wrapper-account','project-a',1)"),
+      db.prepare("INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version) VALUES('local-wrapper','local-wrapper-generation','project','pa-project-a','local-root','Primary project','legacy-backfill')"),
+      db.prepare("INSERT INTO portal_v2_entitlements(id,workspace_id,identity_id,capability,scope_type,scope_public_id,source_type) VALUES('local-wrapper-request','local-wrapper','local-wrapper-identity','request.create','project','pa-project-a','legacy')"),
+    ]);
+    const bridged = await resolveEffectivePortalWorkspaceContext(env,local,"local-wrapper");
+    expect(bridged).toMatchObject({legacyAccountId:"local-wrapper-account",legacyIdentityId:"local-wrapper-identity"});
+    expect(await authorizeEffectiveWorkspaceProject(env,local,bridged!,"request.create","project-a")).toBe(true);
+    expect(await readEffectiveWorkspaceRequestProof(env,local,"local-wrapper","project-a")).toMatchObject({projectAllowed:true});
+    await db.prepare("UPDATE client_accounts SET project_alpha_source_id='project-alpha:secondary' WHERE id='local-wrapper-account'").run();
+    expect(await resolveEffectivePortalWorkspaceContext(env,local,"local-wrapper")).toBeNull();
+    expect(await authorizeEffectiveWorkspaceProject(env,local,bridged!,"request.create","project-a")).toBe(false);
+    expect(await readEffectiveWorkspaceRequestProof(env,local,"local-wrapper","project-a")).toBeNull();
+    } finally {
+    // Isolate this synthetic wrapper even when an assertion fails.
+    await db.prepare("DROP TABLE IF EXISTS portal_v2_identity_eligibility_legacy_bridges").run();
+    await db.prepare("DELETE FROM client_project_grants WHERE account_id='local-wrapper-account'").run();
+    await db.prepare("DELETE FROM portal_v2_entitlements WHERE workspace_id='local-wrapper'").run();
+    await db.prepare("DELETE FROM portal_v2_directory_checkpoints WHERE workspace_id='local-wrapper'").run();
+    await db.prepare("DELETE FROM portal_v2_workspaces WHERE id='local-wrapper'").run();
+    await db.prepare("DELETE FROM client_account_members WHERE account_id='local-wrapper-account'").run();
+    await db.prepare("DELETE FROM portal_v2_identities WHERE id='local-wrapper-identity'").run();
+    await db.prepare("DELETE FROM client_identity_links WHERE id='local-wrapper-identity'").run();
+    await db.prepare("DELETE FROM client_accounts WHERE id='local-wrapper-account'").run();
+    }
+  });
 
   it("upgrades only rooted legacy accounts, backfills explicit grants, and retains foreign-key integrity", async () => {
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspaces").first("count")).toBe(2);

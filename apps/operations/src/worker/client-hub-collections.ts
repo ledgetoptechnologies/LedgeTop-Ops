@@ -51,7 +51,7 @@ export async function createClientHubCollectionContext(env: Env, principal: Staf
   // account link; local roots identify exactly one account and portal roots none.
   // Keep this proof bounded and fail closed if that invariant is ever violated.
   const accountProof = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT account.id,account.status,
-    account.project_alpha_client_id,account.project_alpha_organization_id FROM client_accounts account
+    account.project_alpha_client_id,account.project_alpha_organization_id,account.project_alpha_source_id FROM client_accounts account
     WHERE ${scope.where} ORDER BY account.id LIMIT 2`).bind(...scope.values).all<Record<string, unknown>>();
   if (accountProof.results.length > 1)
     throw new HTTPException(409, { message: "This client's account association is ambiguous and needs review" });
@@ -106,9 +106,9 @@ function decode(value: string): Cursor {
 function accountScope(root: ClientHubRoot): { where: string; values: string[] } {
   if (root.root_namespace === "business" && root.source_id !== "project-alpha:primary") return { where: "0=1", values: [] };
   if (root.root_namespace === "portal") return { where: "0=1", values: [] };
-  if (root.root_namespace === "account") return { where: "account.id=? AND account.project_alpha_client_id IS NULL AND account.project_alpha_organization_id IS NULL", values: [root.public_id] };
-  return { where: root.kind === "organization" ? "account.project_alpha_organization_id=?"
-    : "account.project_alpha_client_id=? AND account.project_alpha_organization_id IS NULL", values: [root.public_id] };
+  if (root.root_namespace === "account") return { where: "account.id=? AND account.project_alpha_source_id IS NULL AND account.project_alpha_client_id IS NULL AND account.project_alpha_organization_id IS NULL", values: [root.public_id] };
+  return { where: `account.project_alpha_source_id='project-alpha:primary' AND ${root.kind === "organization" ? "account.project_alpha_organization_id=?"
+    : "account.project_alpha_client_id=? AND account.project_alpha_organization_id IS NULL"}`, values: [root.public_id] };
 }
 function availability(context: ClientHubCollectionContext, collection: ClientHubCollection): ClientHubCollectionPage["reason"] {
   if (!context.access.directory || (collection === "requests" && !context.access.requests)
@@ -133,7 +133,7 @@ function collectionQuery(context: ClientHubCollectionContext, collection: Client
     case "projects": return { ...common,
       select: "project.id,project.project_name,project.client_name,project.r2_prefix,project.active,project.project_alpha_project_id,project_grant.account_id,project_grant.can_request_service,project_grant.granted_at",
       from: "client_project_grants project_grant JOIN client_accounts account ON account.id=project_grant.account_id JOIN projects project ON project.id=project_grant.project_id",
-      where: `${scope.where} AND project_grant.revoked_at IS NULL`,
+      where: `${scope.where} AND project_grant.revoked_at IS NULL AND COALESCE(project.project_alpha_source_id,'project-alpha:primary')=COALESCE(account.project_alpha_source_id,'project-alpha:primary')`,
       order: ["COALESCE(project_grant.granted_at,'')", "project_grant.account_id", "project_grant.project_id"], keys: ["account_id", "id"] };
     case "requests": return { ...common,
       select: "request.id,request.account_id,request.project_id,request.request_type,request.title,request.status,request.created_at,request.updated_at,project.project_name",

@@ -16,14 +16,14 @@ async function fixture(): Promise<{ db: D1Database; env: Env }> {
   await db.exec(`
     CREATE TABLE portal_v2_identities(id TEXT PRIMARY KEY,issuer TEXT,subject TEXT,verified_email TEXT,
       status TEXT,revoked_at TEXT,UNIQUE(issuer,subject));
-    CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT,display_name TEXT);
+    CREATE TABLE client_accounts(id TEXT PRIMARY KEY,status TEXT,display_name TEXT,project_alpha_source_id TEXT);
     CREATE TABLE client_identity_links(id TEXT PRIMARY KEY,account_id TEXT,issuer TEXT,subject TEXT,email TEXT,revoked_at TEXT,
       UNIQUE(issuer,subject),UNIQUE(id,account_id));
     CREATE TABLE client_account_members(account_id TEXT,identity_id TEXT,role TEXT,can_view_billing INTEGER,revoked_at TEXT,
       PRIMARY KEY(account_id,identity_id));
     CREATE TABLE projects(id TEXT PRIMARY KEY,external_ref TEXT,client_name TEXT,project_name TEXT,active INTEGER,status TEXT,
       summary TEXT,site_address TEXT,service_address TEXT,project_contact_name TEXT,project_contact_email TEXT,
-      project_contact_phone TEXT,next_milestone TEXT,source_updated_at TEXT);
+      project_contact_phone TEXT,next_milestone TEXT,source_updated_at TEXT,project_alpha_source_id TEXT);
     CREATE TABLE client_project_grants(account_id TEXT,project_id TEXT,can_request_service INTEGER,revoked_at TEXT);
     CREATE TABLE client_member_project_grants(account_id TEXT,identity_id TEXT,project_id TEXT,revoked_at TEXT);
     CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,root_type TEXT,pa_organization_public_id TEXT,
@@ -55,7 +55,7 @@ afterEach(async () => Promise.all(active.splice(0).map(instance => instance.disp
 describe("Project Alpha portal identity eligibility", () => {
   it("binds an exact active portal principal on first login without granting any workspace", async () => {
     const { db, env } = await fixture();
-    await db.prepare("INSERT INTO client_accounts VALUES('account-one','active','Client')").run();
+    await db.prepare("INSERT INTO client_accounts VALUES('account-one','active','Client','project-alpha:primary')").run();
     await db.prepare(`INSERT INTO portal_v2_workspaces VALUES
       ('workspace-one','organization','org-one',NULL,'Client Workspace','active','account-one')`).run();
     await db.prepare(`INSERT INTO pa_portal_principals VALUES
@@ -86,7 +86,7 @@ describe("Project Alpha portal identity eligibility", () => {
     expect(await db.prepare("SELECT COUNT(*) count FROM portal_v2_workspace_memberships").first("count")).toBe(1);
     expect(await db.prepare("SELECT COUNT(*) count FROM client_account_members").first("count")).toBe(1);
     await db.prepare(`INSERT INTO projects VALUES('project-private','ref','Client','Private project',1,'active',
-      NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL)`).run();
+      NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'project-alpha:primary')`).run();
     await db.prepare("INSERT INTO client_project_grants VALUES('account-one','project-private',0,NULL)").run();
     const bridge = await db.prepare(`SELECT legacy_identity_id FROM portal_v2_identity_eligibility_legacy_bridges`).first<string>("legacy_identity_id");
     await expect(d1ClientPortalRepository.listProjects(env, { accountId: "account-one", identityId: bridge!,
@@ -108,7 +108,7 @@ describe("Project Alpha portal identity eligibility", () => {
 
   it("does not treat unrelated or invalid email records as portal principals", async () => {
     const { db, env } = await fixture();
-    await db.prepare("INSERT INTO client_accounts VALUES('account-one','active','Client')").run();
+    await db.prepare("INSERT INTO client_accounts VALUES('account-one','active','Client','project-alpha:primary')").run();
     await db.prepare(`INSERT INTO portal_v2_workspaces VALUES
       ('workspace-one','organization','org-one',NULL,'Client Workspace','active','account-one')`).run();
     await db.prepare(`INSERT INTO pa_portal_principals VALUES
@@ -124,7 +124,7 @@ describe("Project Alpha portal identity eligibility", () => {
 
   it("applies exact subject and email eligibility blocks before identity creation", async () => {
     const { db, env } = await fixture();
-    await db.prepare("INSERT INTO client_accounts VALUES('account-one','active','Client')").run();
+    await db.prepare("INSERT INTO client_accounts VALUES('account-one','active','Client','project-alpha:primary')").run();
     await db.prepare(`INSERT INTO portal_v2_workspaces VALUES
       ('workspace-one','organization','org-one',NULL,'Client Workspace','active','account-one')`).run();
     await db.prepare(`INSERT INTO pa_portal_principals VALUES

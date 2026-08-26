@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { localOrPrimaryAlphaReference, primaryAlphaReference } from "./project-alpha-source";
 import type { Env } from "../types";
 import type { ClientPricingHint, ClientPricingHintInput, ClientPricingHintProvider } from "./types";
 import type { EffectivePortalWorkspaceContext } from "./workspace-v2";
@@ -82,11 +83,15 @@ export const resolveProjectAlphaPricingAuthorizationContext: ProjectAlphaPricing
   const database = typeof candidate.withSession === "function" ? candidate.withSession("first-primary") : env.DELIVERY_DB;
   const project = await database.prepare(`SELECT project.project_alpha_project_id public_id
     FROM projects project
+    JOIN client_accounts account ON account.id=? AND account.status='active' AND ${localOrPrimaryAlphaReference("account")}
+    JOIN portal_v2_workspaces native_workspace ON native_workspace.id=? AND native_workspace.status='active'
+      AND native_workspace.legacy_account_id=account.id AND native_workspace.root_type=?
+      AND COALESCE(native_workspace.pa_organization_public_id,native_workspace.pa_client_public_id)=?
     JOIN client_project_grants grant_record
       ON grant_record.project_id=project.id AND grant_record.account_id=?
       AND grant_record.revoked_at IS NULL AND grant_record.can_request_service=1
-    WHERE project.id=? AND project.active=1 AND project.project_alpha_project_id IS NOT NULL`)
-    .bind(workspace.legacyAccountId, localProjectId)
+    WHERE project.id=? AND project.active=1 AND ${primaryAlphaReference("project")} AND project.project_alpha_project_id IS NOT NULL`)
+    .bind(workspace.legacyAccountId, workspace.workspaceId, workspace.rootType, workspace.rootPublicId, workspace.legacyAccountId, localProjectId)
     .first<{ public_id: string }>();
   if (!project || !validOpaquePaId(project.public_id)) return null;
   return {

@@ -87,6 +87,7 @@ interface BriefSnapshot {
 
 interface OperationRow {
   id: string;
+  projection_source_id: string;
   project_id: string;
   title: string;
   status: string;
@@ -234,7 +235,7 @@ async function visibleOperation(
   );
   const row = await env.OPS_DB.withSession("first-primary")
     .prepare(
-      `SELECT o.id,o.project_id,o.title,o.status,o.scheduled_start_at,o.scheduled_end_at,o.location,
+      `SELECT o.id,o.projection_source_id,o.project_id,o.title,o.status,o.scheduled_start_at,o.scheduled_end_at,o.location,
         d.id division_id,
         (SELECT sl.name FROM pa_service_locations sl WHERE sl.project_id=o.project_id AND sl.active=1 AND sl.latitude IS NOT NULL AND sl.longitude IS NOT NULL ORDER BY sl.id LIMIT 1) service_location_name,
         (SELECT sl.latitude FROM pa_service_locations sl WHERE sl.project_id=o.project_id AND sl.active=1 AND sl.latitude IS NOT NULL AND sl.longitude IS NOT NULL ORDER BY sl.id LIMIT 1) service_latitude,
@@ -740,6 +741,10 @@ async function projectFile(
   operation: OperationRow,
   key: string,
 ): Promise<{ size: number; etag: string; content_type: string | null }> {
+  // Secondary business projects are data-only; their Ops-local mapped handle
+  // is not a Delivery raw reference or a configured file association.
+  if (operation.projection_source_id !== "project-alpha:primary")
+    throw new HTTPException(404, { message: "Project files are unavailable for this source" });
   const row = await env.DELIVERY_DB.withSession("first-primary")
     .prepare(
       `SELECT f.size,f.etag,f.content_type
@@ -748,10 +753,11 @@ async function projectFile(
        JOIN projects p ON p.id=association.project_id AND p.active=1
        JOIN file_index f ON f.r2_key=? AND substr(f.r2_key,1,length(association.r2_prefix))=association.r2_prefix
        WHERE association.scope_type='project' AND association.revoked_at IS NULL
-         AND p.project_alpha_project_id=?
+         AND p.project_alpha_project_id=? AND p.project_alpha_source_id=?
+         AND COALESCE(account.project_alpha_source_id,'project-alpha:primary')=p.project_alpha_source_id
        ORDER BY length(association.r2_prefix) DESC LIMIT 1`,
     )
-    .bind(key, operation.project_id)
+    .bind(key, operation.project_id, operation.projection_source_id)
     .first<{ size: number; etag: string; content_type: string | null }>();
   if (!row) throw new HTTPException(404, { message: "Project file not found" });
   const head = await env.DATA_BUCKET.head(key);

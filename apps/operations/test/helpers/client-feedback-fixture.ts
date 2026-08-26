@@ -32,10 +32,10 @@ export async function feedbackFixture() {
   async function seed(kind:"project"|"file"="project") {
     const id=crypto.randomUUID(),pa=`pa-${id}`,identity=`identity-${id}`,division=`division-${id}`,prefix=`Clients/${id}/`;
     await db.batch([
-      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_client_id) VALUES (?,?,'active',?)").bind(id,`Client ${id}`,pa),
+      db.prepare("INSERT INTO client_accounts(project_alpha_source_id,id,display_name,status,project_alpha_client_id) VALUES ('project-alpha:primary',?,?,'active',?)").bind(id,`Client ${id}`,pa),
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES (?,?,'https://issuer.test',?,?)").bind(identity,id,identity,`${id}@example.test`),
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES (?,?,'manager')").bind(id,identity),
-      db.prepare("INSERT INTO projects(id,project_alpha_project_id,client_name,project_name,r2_prefix) VALUES (?,?,?,?,?)").bind(id,pa,"Client","North site",prefix),
+      db.prepare("INSERT INTO projects(project_alpha_source_id,id,project_alpha_project_id,client_name,project_name,r2_prefix) VALUES ('project-alpha:primary',?,?,?,?,?)").bind(id,pa,"Client","North site",prefix),
       db.prepare("INSERT INTO client_project_grants(account_id,project_id,can_request_service) VALUES (?,?,1)").bind(id,id),
       db.prepare("INSERT INTO client_folder_associations(id,scope_type,account_id,r2_prefix,logical_grant_id,division_id,created_by) VALUES (?,'client',?,?,?,?,'staff')").bind(id,id,prefix,id,division),
     ]);

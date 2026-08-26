@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { syncProjectAlpha } from "../src/worker/project-alpha";
 import type { Env } from "../src/worker/types";
+import { deliveryProjectionFixture, secondaryDeliverySnapshot } from "./helpers/delivery-projection-fixture";
 
 // This suite inspects the snapshot statement plan. Real D1 identity allocation,
 // collisions and source guards are covered by the source/migration suites.
@@ -62,13 +63,58 @@ function repeatingSnapshot(overrides:Record<string,unknown>):ReturnType<typeof v
   return vi.fn(async()=>new Response(payload));
 }
 
-function environment(db: Database, deliveryDb: Database = new Database()): Env {
+function environment(db: Database, deliveryDb: Database | D1Database = new Database()): Env {
   return { OPS_DB: db as unknown as D1Database, DELIVERY_DB: deliveryDb as unknown as D1Database, PROJECT_ALPHA_BASE_URL: "https://pa.example.test", PROJECT_ALPHA_API_KEY: "secret", APPLICATION_KEY: "external_operations" } as unknown as Env;
 }
 
 afterEach(() => vi.unstubAllGlobals());
 
 describe("Project Alpha snapshot synchronization", () => {
+  it("updates and sweeps primary Delivery rows without touching a colliding source", async () => {
+    const { runtime, db: delivery } = await deliveryProjectionFixture();
+    try {
+      const db = new Database();
+      db.portalClients = [{ id: "70", active: 1 }];
+      db.portalOrganizations = [{ id: "80", active: 1 }];
+      db.portalProjects = [{ id: "50", client_id: "70", organization_id: "80", active: 1 }];
+      const before = await secondaryDeliverySnapshot(delivery);
+      vi.stubGlobal("fetch", repeatingSnapshot({
+        clients: [{ id: "70", name: "Primary client renamed", active: true }],
+        organizations: [{ id: "80", name: "Primary organization renamed", active: true }],
+        projects: [{ id: "50", name: "Primary project renamed", client_id: "70", organization_id: "80", active: true }],
+      }));
+      await syncProjectAlpha(environment(db, delivery));
+      expect(await secondaryDeliverySnapshot(delivery)).toEqual(before);
+      expect(await delivery.prepare("SELECT display_name FROM client_accounts WHERE id='a-client'").first("display_name")).toBe("Primary client renamed");
+      expect(await delivery.prepare("SELECT project_name FROM projects WHERE id='a-50'").first("project_name")).toBe("Primary project renamed");
+      expect(await delivery.prepare("SELECT active FROM projects WHERE id='a-99'").first("active")).toBe(0);
+      expect(await delivery.prepare("SELECT revoked_at FROM client_project_grants WHERE account_id='a-client' AND project_id='a-50'").first("revoked_at")).toBeNull();
+      expect(await delivery.prepare("SELECT revoked_at FROM client_folder_associations WHERE id='local-suspended-folder'").first("revoked_at")).toBeTruthy();
+      expect(await delivery.prepare("SELECT revoked_at FROM client_folder_associations WHERE id='local-active-folder'").first("revoked_at")).toBeNull();
+      // Unlike an incremental client-name event, a snapshot only projects
+      // explicit Alpha project references. Local project presentation is kept.
+      expect(await delivery.prepare("SELECT client_name FROM projects WHERE id='local-client-project'").first("client_name")).toBe("Local client before");
+      // An authoritative empty primary snapshot must not suspend a second
+      // source, including its rows absent from the primary ID set entirely.
+      db.portalClients = []; db.portalOrganizations = []; db.portalProjects = [];
+      vi.stubGlobal("fetch", repeatingSnapshot({}));
+      await syncProjectAlpha(environment(db, delivery));
+      expect(await secondaryDeliverySnapshot(delivery)).toEqual(before);
+      expect(await delivery.prepare("SELECT status FROM client_accounts WHERE id='a-client'").first("status")).toBe("suspended");
+      expect(await delivery.prepare("SELECT revoked_at FROM client_project_grants WHERE account_id='a-client' AND project_id='a-50'").first("revoked_at")).toBeTruthy();
+      expect((await delivery.prepare(`SELECT id,project_alpha_source_id,project_alpha_project_id,active FROM projects
+        WHERE id IN ('local-client-project','local-org-project') ORDER BY id`).all()).results).toEqual([
+        { id: "local-client-project", project_alpha_source_id: null, project_alpha_project_id: null, active: 1 },
+        { id: "local-org-project", project_alpha_source_id: null, project_alpha_project_id: null, active: 1 },
+      ]);
+      expect((await delivery.prepare(`SELECT id,project_alpha_source_id,status FROM client_accounts
+        WHERE id IN ('local-active-client','local-suspended-client') ORDER BY id`).all()).results).toEqual([
+        { id: "local-active-client", project_alpha_source_id: null, status: "active" },
+        { id: "local-suspended-client", project_alpha_source_id: null, status: "suspended" },
+      ]);
+      expect(await delivery.prepare("SELECT revoked_at FROM client_folder_associations WHERE id='local-active-folder'").first("revoked_at")).toBeNull();
+    } finally { await runtime.dispose(); }
+  }, 30_000);
   it("does not touch projections when a later snapshot page fails", async () => {
     const db = new Database();
     vi.stubGlobal("fetch", vi.fn()

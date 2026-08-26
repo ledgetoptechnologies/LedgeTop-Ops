@@ -127,6 +127,8 @@ const projectionCollections = {
 } as const;
 
 async function applyPortalProjection(env: Env, event: ProjectionEvent, active: number): Promise<void> {
+  // Public ingress and this legacy Delivery bridge are primary-only. The row
+  // predicate is still required: other producers may reuse these external IDs.
   if (event.projection.entity_type !== "client" && event.projection.entity_type !== "organization" && event.projection.entity_type !== "project") return;
   const db = env.DELIVERY_DB;
   if (!db) throw new Error("delivery-db-binding-required");
@@ -135,17 +137,17 @@ async function applyPortalProjection(env: Env, event: ProjectionEvent, active: n
   if (event.projection.entity_type === "client") {
     const name = value(data, "name") ?? `Client ${id}`;
     await db.batch([
-      db.prepare(`UPDATE client_accounts SET display_name=?,project_alpha_organization_id=?,status=CASE WHEN ?=0 THEN 'suspended' ELSE 'active' END,updated_at=datetime('now') WHERE project_alpha_client_id=?`).bind(name,value(data,"organization_id"),active,id),
-      db.prepare(`UPDATE projects SET client_name=?,updated_at=datetime('now') WHERE id IN (SELECT g.project_id FROM client_project_grants g JOIN client_accounts a ON a.id=g.account_id WHERE a.project_alpha_client_id=? AND g.revoked_at IS NULL)`).bind(name,id),
+      db.prepare(`UPDATE client_accounts SET display_name=?,project_alpha_organization_id=?,status=CASE WHEN ?=0 THEN 'suspended' ELSE 'active' END,updated_at=datetime('now') WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_client_id=?`).bind(name,value(data,"organization_id"),active,id),
+      db.prepare(`UPDATE projects SET client_name=?,updated_at=datetime('now') WHERE COALESCE(project_alpha_source_id,'project-alpha:primary')='project-alpha:primary' AND id IN (SELECT g.project_id FROM client_project_grants g JOIN client_accounts a ON a.id=g.account_id WHERE a.project_alpha_source_id='project-alpha:primary' AND a.project_alpha_client_id=? AND g.revoked_at IS NULL)`).bind(name,id),
     ]);
   } else if (event.projection.entity_type === "organization") {
     const name = value(data, "name") ?? `Organization ${id}`;
     await db.batch([
-      db.prepare(`UPDATE client_accounts SET display_name=?,status=CASE WHEN ?=0 THEN 'suspended' ELSE 'active' END,updated_at=datetime('now') WHERE project_alpha_organization_id=? AND project_alpha_client_id IS NULL`).bind(name,active,id),
-      db.prepare(`UPDATE projects SET client_name=?,updated_at=datetime('now') WHERE id IN (SELECT g.project_id FROM client_project_grants g JOIN client_accounts a ON a.id=g.account_id WHERE a.project_alpha_organization_id=? AND a.project_alpha_client_id IS NULL AND g.revoked_at IS NULL)`).bind(name,id),
+      db.prepare(`UPDATE client_accounts SET display_name=?,status=CASE WHEN ?=0 THEN 'suspended' ELSE 'active' END,updated_at=datetime('now') WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_organization_id=? AND project_alpha_client_id IS NULL`).bind(name,active,id),
+      db.prepare(`UPDATE projects SET client_name=?,updated_at=datetime('now') WHERE COALESCE(project_alpha_source_id,'project-alpha:primary')='project-alpha:primary' AND id IN (SELECT g.project_id FROM client_project_grants g JOIN client_accounts a ON a.id=g.account_id WHERE a.project_alpha_source_id='project-alpha:primary' AND a.project_alpha_organization_id=? AND a.project_alpha_client_id IS NULL AND g.revoked_at IS NULL)`).bind(name,id),
     ]);
   } else if (event.projection.entity_type === "project") {
-    await db.prepare(`UPDATE projects SET project_name=?,status=?,summary=?,source_updated_at=?,active=?,updated_at=datetime('now') WHERE project_alpha_project_id=?`)
+    await db.prepare(`UPDATE projects SET project_name=?,status=?,summary=?,source_updated_at=?,active=?,updated_at=datetime('now') WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_project_id=?`)
       .bind(value(data,"name")??`Project ${id}`,value(data,"status"),value(data,"description"),event.projection.source_updated_at,active,id).run();
   }
 }
@@ -167,21 +169,22 @@ async function reconcilePortalProjectionAccess(env: Env, source: ProjectAlphaSou
     const invalidAccounts=`SELECT g.account_id FROM client_project_grants g
       JOIN client_accounts a ON a.id=g.account_id
       JOIN projects p ON p.id=g.project_id
-      WHERE p.project_alpha_project_id=? AND g.revoked_at IS NULL AND NOT
+      WHERE p.project_alpha_source_id='project-alpha:primary' AND p.project_alpha_project_id=?
+        AND COALESCE(a.project_alpha_source_id,'project-alpha:primary')='project-alpha:primary' AND g.revoked_at IS NULL AND NOT
         (?=1 AND a.status='active' AND ((? IS NOT NULL AND a.project_alpha_client_id IS ?)
           OR (g.can_request_service=0 AND ? IS NOT NULL AND a.project_alpha_organization_id IS ?)))`;
     const invalidValues=[project.id,project.active,clientId,clientId,organizationId,organizationId];
     for(const table of ["client_folder_associations","client_delivery_grants","client_member_project_grants"] as const){
       statements.push(db.prepare(`UPDATE ${table} SET revoked_at=COALESCE(revoked_at,datetime('now'))
-        WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_project_id=?) AND revoked_at IS NULL
+        WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_project_id=?) AND revoked_at IS NULL
           AND account_id IN (${invalidAccounts})`).bind(project.id,...invalidValues));
     }
     statements.push(db.prepare(`UPDATE client_project_grants SET revoked_at=COALESCE(revoked_at,datetime('now'))
-      WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_project_id=?) AND revoked_at IS NULL
+      WHERE project_id IN (SELECT id FROM projects WHERE project_alpha_source_id='project-alpha:primary' AND project_alpha_project_id=?) AND revoked_at IS NULL
         AND account_id IN (${invalidAccounts})`).bind(project.id,...invalidValues));
   }
   statements.push(db.prepare(`UPDATE client_folder_associations SET revoked_at=COALESCE(revoked_at,datetime('now'))
-    WHERE scope_type='client' AND revoked_at IS NULL AND account_id IN (SELECT id FROM client_accounts WHERE status<>'active')`));
+    WHERE scope_type='client' AND revoked_at IS NULL AND account_id IN (SELECT id FROM client_accounts WHERE COALESCE(project_alpha_source_id,'project-alpha:primary')='project-alpha:primary' AND status<>'active')`));
   for(let index=0;index<statements.length;index+=75){
     await refreshGlobalProjection(env,source,ownerEventId);
     await db.batch(statements.slice(index,index+75));

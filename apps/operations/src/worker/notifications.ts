@@ -23,6 +23,8 @@ interface ClientPortalRequestNotificationRow {
   id: string;
   request_id: string;
   catalog_source_id: string;
+  account_source_id: string | null;
+  project_source_id: string | null;
   event_type: ClientPortalRequestEvent;
   status_value: string | null;
   recipient_kind: ClientPortalRequestRecipient;
@@ -349,6 +351,7 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
   for (; processed < 25; processed += 1) {
     const row = await env.DELIVERY_DB.prepare(`SELECT n.id,n.request_id,n.event_type,n.status_value,n.recipient_kind,n.payload_json,n.attempt_count,
       r.catalog_source_id,r.title,r.project_id,r.service_category,r.location_text,r.latitude,r.longitude,p.project_name,r.account_id,r.created_by_identity_id requester_identity_id,
+      account.project_alpha_source_id account_source_id,p.project_alpha_source_id project_source_id,
       CASE WHEN n.recipient_kind='client_requester' THEN i.email ELSE NULL END requester_email
       FROM client_portal_notification_outbox n
       JOIN client_service_requests r ON r.id=n.request_id
@@ -378,8 +381,10 @@ export async function processClientPortalRequestNotifications(env: Env): Promise
     // Client request routes currently support only the primary catalog. Keep
     // other sources in staff triage, but never send an unusable client action.
     // Suppress after claiming so unsupported intent cannot remain queued forever.
-    if (row.recipient_kind === "client_requester" && row.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID) {
-      const reason = "unsupported-catalog-source";
+    if (row.recipient_kind === "client_requester" && (row.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID ||
+      (row.account_source_id !== null && row.account_source_id !== PRIMARY_ALPHA_SOURCE_ID) ||
+      (row.project_source_id !== null && row.project_source_id !== PRIMARY_ALPHA_SOURCE_ID))) {
+      const reason = row.catalog_source_id !== PRIMARY_ALPHA_SOURCE_ID ? "unsupported-catalog-source" : "unsupported-business-source";
       await env.DELIVERY_DB.prepare("UPDATE client_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=? AND status='processing'")
         .bind(reason, row.id).run();
       await auditClientRequestNotification(env, "client_request_notification.suppressed", row, { attempt, reason });

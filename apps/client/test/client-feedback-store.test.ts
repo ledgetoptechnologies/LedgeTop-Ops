@@ -199,6 +199,40 @@ describe("feedback durable lifecycle on migrated D1", { timeout: 30_000 }, () =>
     for (const message of ["", " ", "x".repeat(5001), "hidden\u0000control"]) await expect(createFeedbackRecord(db,authorization(),message,key())).rejects.toMatchObject({ code: "invalid" });
     expect(await count("client_feedback")).toBe(before);
   });
+  it("accepts complete legacy and versioned source snapshots without rewriting them", async () => {
+    for (const versioned of [false,true]) {
+      const auth = authorization();
+      if (versioned) {
+        auth.target.sourceOwner.version = 2;
+        auth.target.sourceOwner.account.projectAlphaSourceId = "project-alpha:primary";
+        auth.target.sourceOwner.project!.projectAlphaSourceId = "project-alpha:primary";
+      }
+      const { record } = await createFeedbackRecord(db,auth,"Valid source snapshot",key());
+      expect(record.target.sourceOwner).toEqual(auth.target.sourceOwner);
+      expect((await readFeedbackRecord(db,record.id))?.target.sourceOwner).toEqual(auth.target.sourceOwner);
+    }
+  });
+  it("rejects incomplete, mixed, unknown, or malformed source versions before writing", async () => {
+    const invalid: Array<(auth: FeedbackWriteAuthorization) => void> = [
+      auth => { auth.target.sourceOwner.version = 2; },
+      auth => { auth.target.sourceOwner.version = 2; auth.target.sourceOwner.account.projectAlphaSourceId = "project-alpha:primary"; },
+      auth => { auth.target.sourceOwner.version = 2; auth.target.sourceOwner.project!.projectAlphaSourceId = "project-alpha:primary"; },
+      auth => { auth.target.sourceOwner.account.projectAlphaSourceId = "project-alpha:primary"; },
+      auth => { auth.target.sourceOwner.project!.projectAlphaSourceId = "project-alpha:primary"; },
+      auth => { Object.assign(auth.target.sourceOwner,{version:3}); },
+      auth => {
+        auth.target.sourceOwner.version = 2;
+        auth.target.sourceOwner.account.projectAlphaSourceId = "primary";
+        auth.target.sourceOwner.project!.projectAlphaSourceId = "project-alpha:primary";
+      },
+    ];
+    const before = await Promise.all([count("client_feedback"),count("client_feedback_events"),count("audit_log")]);
+    for (const mutate of invalid) {
+      const auth = authorization(); mutate(auth);
+      await expect(createFeedbackRecord(db,auth,"Invalid source snapshot",key())).rejects.toMatchObject({name:"ZodError"});
+    }
+    expect(await Promise.all([count("client_feedback"),count("client_feedback_events"),count("audit_log")])).toEqual(before);
+  });
   it("uses bounded status and author indexes for progression", async () => {
     const statusPlan = await db.prepare("EXPLAIN QUERY PLAN SELECT id FROM client_feedback WHERE status=? ORDER BY created_at,id LIMIT 26").bind("new").all();
     const authorPlan = await db.prepare("EXPLAIN QUERY PLAN SELECT id FROM client_feedback WHERE scope_key=? AND principal_issuer=? AND principal_subject=? ORDER BY created_at DESC,id DESC LIMIT 26")

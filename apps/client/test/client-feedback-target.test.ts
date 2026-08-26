@@ -9,6 +9,7 @@ import { createClientPortalFileHandle,encodeProjectFolderHandle,d1ClientPortalRe
 import { resolveEffectivePortalWorkspaceContext } from "../src/worker/client-portal/workspace-v2";
 import { resolveClientFeedbackTarget,reauthorizeFeedbackRecipient,clientFeedbackTargetActionPath,type FeedbackTargetInput } from "../src/worker/client-portal/feedback-target";
 import { createFeedbackRecord,transitionFeedbackRecord } from "../src/worker/client-portal/feedback-store";
+import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 
 const origin="https://client.test", storageKey="clients/a/north/edited/photo.jpg";
 const principal:VerifiedClientPrincipal={issuer:"https://team.cloudflareaccess.com",subject:"feedback-a",email:"a@example.test"};
@@ -19,20 +20,18 @@ describe("feedback target authorization against migrated D1",{timeout:60_000},()
   let runtime:Miniflare,db:D1Database,env:Env,sequence=0;
   const mutationKey=()=>`feedback-target-test-${++sequence}`;
   async function migration(name:string){
-    const sql=readFileSync(new URL(`../migrations/${name}`,import.meta.url),"utf8").replace(/\r\n/g,"\n").replace(/^\s*--.*$/gm,"");
-    if(/CREATE\s+TRIGGER\b/i.test(sql)) await db.exec(sql.replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/i,"").replace(/\s*\n\s*/g," "));
-    else {const statements=sql.split(/;\s*(?:\n|$)/).map(s=>s.trim()).filter(s=>s&&!/^PRAGMA\s+foreign_keys\s*=\s*ON$/i.test(s));
-      if(statements.length)await db.batch(statements.map(s=>db.prepare(s)));}
+    const statements=splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),"utf8"));
+    if(statements.length)await db.batch(statements.map(s=>db.prepare(s)));
   }
   beforeAll(async()=>{
     runtime=new Miniflare({compatibilityDate:"2026-07-16",modules:true,script:"export default {fetch(){return new Response('test')}}",d1Databases:{DELIVERY_DB:"feedback-target"}});
     db=await runtime.getD1Database("DELIVERY_DB") as unknown as D1Database;
     for(const name of readdirSync(fileURLToPath(new URL("../migrations/",import.meta.url))).filter(n=>n.endsWith(".sql")).sort())await migration(name);
     await db.batch([
-      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_organization_id) VALUES ('account-a','Client A','active','pa-org-a'),('account-b','Client B','active','pa-org-b')"),
+      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_organization_id,project_alpha_source_id) VALUES ('account-a','Client A','active','pa-org-a','project-alpha:primary'),('account-b','Client B','active','pa-org-b','project-alpha:primary')"),
       db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES ('identity-a','account-a',?,?,?),('identity-b','account-b',?,'feedback-b','b@example.test')").bind(principal.issuer,principal.subject,principal.email,principal.issuer),
       db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES ('account-a','identity-a','manager'),('account-b','identity-b','manager')"),
-      db.prepare("INSERT INTO projects(id,project_alpha_project_id,client_name,project_name,r2_prefix) VALUES ('project-a','pa-project-a','Client A','North site','clients/a/north/'),('project-b','pa-project-b','Client B','Other site','clients/b/')"),
+      db.prepare("INSERT INTO projects(id,project_alpha_project_id,client_name,project_name,r2_prefix,project_alpha_source_id) VALUES ('project-a','pa-project-a','Client A','North site','clients/a/north/','project-alpha:primary'),('project-b','pa-project-b','Client B','Other site','clients/b/','project-alpha:primary')"),
       db.prepare("INSERT INTO client_project_grants(account_id,project_id,can_request_service) VALUES ('account-a','project-a',1),('account-b','project-b',1)"),
       db.prepare("INSERT INTO client_folder_associations(id,scope_type,project_id,account_id,r2_prefix,created_by) VALUES ('folder-a','project','project-a','account-a','clients/a/north/','staff'),('folder-b','project','project-b','account-b','clients/b/','staff'),('folder-client','client',NULL,'account-a','clients/a/','staff')"),
       db.prepare("INSERT INTO file_index(r2_key,etag,size,uploaded_at,content_type,media_kind) VALUES (?,'etag-one',200,'2026-08-25T01:00:00Z','image/jpeg','image'),('clients/b/secret.jpg','private',100,'2026-08-25T01:00:00Z','image/jpeg','image')").bind(storageKey),
@@ -96,6 +95,48 @@ describe("feedback target authorization against migrated D1",{timeout:60_000},()
     expect(exact.target.sourceOwner.workspace?.rootPublicId).toBe("pa-org-a");
     expect(exact.guard.sql.length).toBeLessThan(100_000);expect(exact.guard.bindings.length).toBeLessThanOrEqual(75);
     expect((await createFeedbackRecord(db,exact,"Native file note",mutationKey())).record.status).toBe("new");
+  });
+  it("keeps versionless primary feedback snapshots byte-for-byte while new snapshots record source",async()=>{
+    const authorization=await resolve({kind:"project",projectId:"project-a"});
+    expect(authorization.target.sourceOwner).toMatchObject({version:2,account:{projectAlphaSourceId:"project-alpha:primary"},project:{projectAlphaSourceId:"project-alpha:primary"}});
+    const legacy=structuredClone(authorization);
+    delete legacy.target.sourceOwner.version;
+    delete legacy.target.sourceOwner.account.projectAlphaSourceId;
+    delete legacy.target.sourceOwner.project!.projectAlphaSourceId;
+    const key=mutationKey();
+    const created=await createFeedbackRecord(db,legacy,"Historical report",key);
+    const before=await db.prepare("SELECT target_json,request_fingerprint FROM client_feedback WHERE id=?").bind(created.record.id).first();
+    expect(await reauthorizeFeedbackRecipient(env,created.record)).not.toBeNull();
+    const current=await resolve({kind:"project",projectId:"project-a"});
+    expect(current.target.sourceOwner.version).toBe(2);
+    expect(await createFeedbackRecord(db,current,"Historical report",key)).toMatchObject({record:{id:created.record.id},replayed:true});
+    await expect(createFeedbackRecord(db,current,"Changed historical report",key)).rejects.toMatchObject({code:"idempotency_conflict"});
+    expect(await db.prepare("SELECT target_json,request_fingerprint FROM client_feedback WHERE id=?").bind(created.record.id).first()).toEqual(before);
+    expect(await db.prepare("SELECT count(*) n FROM client_feedback_events WHERE feedback_id=?").bind(created.record.id).first("n")).toBe(1);
+  });
+  it("does not create primary staff feedback for secondary parents with identical Alpha IDs",async()=>{
+    const actor={issuer:principal.issuer,subject:"secondary-feedback",email:"secondary@example.test"};
+    await db.batch([
+      db.prepare("INSERT INTO client_accounts(id,display_name,status,project_alpha_organization_id,project_alpha_source_id) VALUES('secondary-feedback-account','Secondary','active','pa-org-a','project-alpha:secondary')"),
+      db.prepare("INSERT INTO projects(id,project_alpha_project_id,client_name,project_name,r2_prefix,project_alpha_source_id) VALUES('secondary-feedback-project','pa-project-a','Secondary','Same external project','secondary-feedback/','project-alpha:secondary')"),
+      db.prepare("INSERT INTO client_identity_links(id,account_id,issuer,subject,email) VALUES('secondary-feedback-identity','secondary-feedback-account',?,?,?)").bind(actor.issuer,actor.subject,actor.email),
+      db.prepare("INSERT INTO client_account_members(account_id,identity_id,role) VALUES('secondary-feedback-account','secondary-feedback-identity','manager')"),
+      db.prepare("INSERT INTO client_project_grants(account_id,project_id) VALUES('secondary-feedback-account','secondary-feedback-project')"),
+    ]);
+    try {
+      const before=await count();
+      await expect(resolveClientFeedbackTarget(env,actor,{...session,accountId:"secondary-feedback-account",identityId:"secondary-feedback-identity"},null,
+        {kind:"project",projectId:"secondary-feedback-project"})).rejects.toMatchObject({status:503});
+      expect(await count()).toBe(before);
+    } finally {
+      await db.batch([
+        db.prepare("DELETE FROM client_project_grants WHERE account_id='secondary-feedback-account'"),
+        db.prepare("DELETE FROM client_account_members WHERE account_id='secondary-feedback-account'"),
+        db.prepare("DELETE FROM client_identity_links WHERE id='secondary-feedback-identity'"),
+        db.prepare("DELETE FROM projects WHERE id='secondary-feedback-project'"),
+        db.prepare("DELETE FROM client_accounts WHERE id='secondary-feedback-account'"),
+      ]);
+    }
   });
   it("does not infer root delivery access from a project grant",async()=>{
     const fileId=await createClientPortalFileHandle(env,storageKey);
