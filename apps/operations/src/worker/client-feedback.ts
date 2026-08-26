@@ -12,7 +12,7 @@ import type { Env, GrantRow, StaffPrincipal } from "./types";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
 type StatusFilter = ClientFeedbackStatus | "all" | "open";
-interface StaffPolicy { grants: GrantRow[]; administrator: boolean; proof: string }
+export interface StaffFeedbackPolicy { grants: GrantRow[]; administrator: boolean; proof: string }
 interface Scope { accountName: string; divisionId: string; projectId: string; available: boolean; proof: string; guard: FeedbackWriteGuard }
 interface SourceScope { project_id: string; division_id: string; client_id: string | null; organization_id: string | null; assigned: number; owner_id?: string | null; owner_organization_id?: string | null; root_organization_id?: string | null }
 interface Cursor { v: 1; status: StatusFilter; accountId: string; q: string; policy: string; after: [string,string]; expires: number }
@@ -22,10 +22,10 @@ const actionSchema = z.object({ expectedRevision: z.number().int().min(1).max(2)
 const tables = ["client_feedback", "client_feedback_events", "client_feedback_mutations", "client_feedback_notifications", "client_feedback_notification_outbox"];
 function missing(): never { throw new HTTPException(404, { message: "Feedback is unavailable" }); }
 function changed(): never { throw new HTTPException(409, { message: "Feedback or access changed. Refresh before trying again." }); }
-async function ready(env: Env) {
+export async function requireClientFeedbackReady(env: Env) {
   if (!(await d1TablesPresent(env.DELIVERY_DB, tables))) throw new HTTPException(503, { message: "Feedback is not ready. The database upgrade must finish first." });
 }
-async function policy(env: Env, actor: StaffPrincipal): Promise<StaffPolicy> {
+export async function readStaffFeedbackPolicy(env: Env, actor: StaffPrincipal): Promise<StaffFeedbackPolicy> {
   const [grants, administrator] = await Promise.all([loadGrants(env, actor.id), isAdministrator(env, actor)]);
   const management = grants.filter(row => row.permission === "operations.manage");
   if (!management.some(row => row.effect === "allow") || management.some(row => row.source === "override" && row.effect === "deny" && row.scope === "global"))
@@ -49,8 +49,8 @@ function projectScope(grants: GrantRow[]): SqlScope {
 /** Staff history does not impersonate the author. It requires the same current
  * source owner, active delivery association and staff resource permission, but
  * can still acknowledge a report after its image disappeared or author left. */
-export async function readStaffFeedbackScope(env: Env, actor: StaffPrincipal, record: FeedbackRecord, access?: StaffPolicy): Promise<Scope | null> {
-  const auth = access ?? await policy(env, actor), target = record.target, owner = target.sourceOwner;
+export async function readStaffFeedbackScope(env: Env, actor: StaffPrincipal, record: FeedbackRecord, access?: StaffFeedbackPolicy): Promise<Scope | null> {
+  const auth = access ?? await readStaffFeedbackPolicy(env, actor), target = record.target, owner = target.sourceOwner;
   const accountSource = feedbackSourceOwnerSource(owner, "account"), projectSource = feedbackSourceOwnerSource(owner, "project");
   if (accountSource !== "project-alpha:primary" || (target.projectId && projectSource !== "project-alpha:primary")) return null;
   const values = JSON.stringify({ accountId: record.context.accountId, clientId: owner.account.projectAlphaClientId,
@@ -143,7 +143,7 @@ function item(record: FeedbackRecord, scope: Scope): StaffClientFeedbackItem {
     target: { kind: record.target.kind, projectId: record.target.projectId, label: record.target.label, projectName: record.target.projectName,
       available: scope.available, actionPath: null } };
 }
-async function events(env: Env, id: string): Promise<ClientFeedbackEvent[]> {
+export async function readStaffFeedbackEvents(env: Env, id: string): Promise<ClientFeedbackEvent[]> {
   const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT revision,actor_type actor,status,note,created_at createdAt
     FROM client_feedback_events WHERE feedback_id=? ORDER BY revision LIMIT 3`).bind(id).all<ClientFeedbackEvent>();
   return rows.results;
@@ -175,8 +175,8 @@ export async function listStaffFeedback(env: Env, actor: StaffPrincipal, query: 
   if ((query.q?.length ?? 0) > 200 || /[\u0000-\u001f\u007f]/.test(query.q ?? "")) throw new HTTPException(400,{message:"Feedback search is invalid"});
   const q = (query.q ?? "").normalize("NFC").trim().toLocaleLowerCase("en-US");
   if (q.length > 200) throw new HTTPException(400,{message:"Feedback search is invalid"});
-  const status = parsed.data, accountId = query.accountId ?? "", access = await policy(env, actor);
-  await ready(env);
+  const status = parsed.data, accountId = query.accountId ?? "", access = await readStaffFeedbackPolicy(env, actor);
+  await requireClientFeedbackReady(env);
   const cursor = query.cursor ? await decodeCursor(env,actor,query.cursor,status,accountId,q,access.proof) : null;
   const predicates: string[] = [], values: string[] = [];
   if (status === "open") predicates.push("status IN ('new','in_progress')");
@@ -195,7 +195,7 @@ export async function listStaffFeedback(env: Env, actor: StaffPrincipal, query: 
     if (scope && (!q || [scope.accountName,record.message,record.target.label,record.target.projectName ?? ""].some(value => value.normalize("NFC").toLocaleLowerCase("en-US").includes(q)))) shown.push({record,scope});
     if (shown.length === 25) break;
   }
-  if ((await policy(env,actor)).proof !== access.proof) changed();
+  if ((await readStaffFeedbackPolicy(env,actor)).proof !== access.proof) changed();
   for (const result of shown) if ((await readStaffFeedbackScope(env,actor,result.record,access))?.proof !== result.scope.proof) changed();
   const last = rows.results[examined-1];
   return { items: shown.map(value => item(value.record,value.scope)), nextCursor: last && rows.results.length > examined
@@ -203,30 +203,30 @@ export async function listStaffFeedback(env: Env, actor: StaffPrincipal, query: 
 }
 export async function getStaffFeedback(env: Env, actor: StaffPrincipal, id: string) {
   if (!idSchema.safeParse(id).success) missing();
-  const access = await policy(env,actor); await ready(env);
+  const access = await readStaffFeedbackPolicy(env,actor); await requireClientFeedbackReady(env);
   const record = await readFeedbackRecord(env.DELIVERY_DB.withSession("first-primary"),id);
   const scope = record ? await readStaffFeedbackScope(env,actor,record,access) : null;
   if (!record || !scope) missing();
-  const history = await events(env,id);
-  if ((await policy(env,actor)).proof !== access.proof || (await readStaffFeedbackScope(env,actor,record,access))?.proof !== scope.proof) changed();
+  const history = await readStaffFeedbackEvents(env,id);
+  if ((await readStaffFeedbackPolicy(env,actor)).proof !== access.proof || (await readStaffFeedbackScope(env,actor,record,access))?.proof !== scope.proof) changed();
   return { feedback: item(record,scope), events: history };
 }
 export async function transitionStaffFeedback(env: Env, actor: StaffPrincipal, id: string, value: unknown, key: string) {
   if (!idSchema.safeParse(id).success) missing();
   const parsed = actionSchema.safeParse(value);
   if (!parsed.success) throw new HTTPException(400, { message: "Feedback status update is invalid" });
-  const access = await policy(env,actor); await ready(env);
+  const access = await readStaffFeedbackPolicy(env,actor); await requireClientFeedbackReady(env);
   const db = env.DELIVERY_DB.withSession("first-primary"), record = await readFeedbackRecord(db,id);
   const scope = record ? await readStaffFeedbackScope(env,actor,record,access) : null;
   if (!record || !scope) missing();
   const assertCurrent = async () => {
-    if ((await policy(env,actor)).proof !== access.proof || (await readStaffFeedbackScope(env,actor,record,access))?.proof !== scope.proof) changed();
+    if ((await readStaffFeedbackPolicy(env,actor)).proof !== access.proof || (await readStaffFeedbackScope(env,actor,record,access))?.proof !== scope.proof) changed();
   };
   await assertCurrent();
   try {
     const result = await transitionFeedbackRecord(db,record,actor.id,parsed.data,key,scope.guard);
     await assertCurrent();
-    return { feedback: item(result.record,scope), events: await events(env,id), replayed: result.replayed, appliedRevision: result.appliedRevision };
+    return { feedback: item(result.record,scope), events: await readStaffFeedbackEvents(env,id), replayed: result.replayed, appliedRevision: result.appliedRevision };
   } catch (error) {
     if (error instanceof FeedbackStoreError) throw new HTTPException(error.code === "invalid" ? 400 : 409, { message: error.code === "idempotency_conflict" ? "This action key was already used for another change" : "Feedback changed. Refresh before trying again." });
     throw error;

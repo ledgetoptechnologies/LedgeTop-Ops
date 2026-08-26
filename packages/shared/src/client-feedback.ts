@@ -52,6 +52,40 @@ export interface ClientFeedbackDetail {
   events: ClientFeedbackEvent[];
 }
 
+/** Read-only project history. Messages, notes, actors, target snapshots and
+ * authorization proofs are intentionally not part of this DTO. */
+export interface ProjectFeedbackHistoryEvent {
+  revision: number;
+  action: "submitted" | "started" | "completed";
+  occurredAt: string;
+}
+
+export interface ProjectFeedbackHistoryItem {
+  feedbackId: string;
+  createdAt: string;
+  status: ClientFeedbackStatus;
+  events: ProjectFeedbackHistoryEvent[];
+  detailPath: string;
+}
+
+export interface ProjectFeedbackHistoryPage {
+  canonicalRoot: { sourceId: string; rootNamespace: string; kind: string; publicId: string };
+  projectId: string;
+  contextVersion: string;
+  refreshedAt: string;
+  asOf: string;
+  coverage: "feedback_only";
+  items: ProjectFeedbackHistoryItem[];
+  page: {
+    available: boolean;
+    reason: "unsupported_source" | null;
+    nextCursor: string | null;
+    hasMore: boolean;
+    returned: number;
+    limit: number;
+  };
+}
+
 export const CLIENT_FEEDBACK_MESSAGE_LIMIT = 5000;
 export const CLIENT_FEEDBACK_NOTE_LIMIT = 2000;
 

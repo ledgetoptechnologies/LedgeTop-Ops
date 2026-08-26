@@ -5,6 +5,7 @@ import { api, ApiError } from "./api";
 import { ClientHub } from "./ClientHub";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 import { ClientBusinessActivity } from "./ClientBusinessActivity";
+import { ProjectFeedbackHistory } from "./ProjectFeedbackHistory";
 import { clientDirectoryReturnPath } from "./ClientDirectory";
 import { businessProjectClientPath, clientWorkspaceFilters, readBusinessProjectRoute, type BusinessProjectRoute } from "./business-project-route";
 import "./BusinessProjectWorkspace.css";
@@ -47,7 +48,7 @@ function projectTone(status: string | null): "success" | "warning" | "danger" | 
   return status === "completed" ? "success" : status === "overdue" ? "warning" : status === "cancelled" ? "danger" : "neutral";
 }
 
-function ProjectWorkspace({ route }: { route: BusinessProjectRoute }) {
+function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRoute; feedbackEnabled: boolean }) {
   const clientPath = businessProjectClientPath(route), backPath = `${clientPath}${clientWorkspaceFilters(location.search)}`;
   const requestPath = `/api${clientPath.replace("/clients/", "/client-hub/")}/business-projects/${encodeURIComponent(route.projectId)}`;
   const [revision, setRevision] = useState(0);
@@ -115,6 +116,9 @@ function ProjectWorkspace({ route }: { route: BusinessProjectRoute }) {
       </div>
       <ClientBusinessActivity key={revision} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
         contextSignal={pending.current!.signal} onInvalidated={invalidate} />
+      {feedbackEnabled && detail.canonicalRoot.sourceId === "project-alpha:primary" && <ProjectFeedbackHistory key={`feedback-${revision}`}
+        root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
+        contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
       <p className="business-project-availability">Site/billing contact assignments and project notes are not provided by this connection yet.</p>
       <p className="business-project-refreshed">Project records refreshed {displayDate(detail.refreshedAt)}. A record refresh does not indicate project activity.</p>
     </>}
@@ -133,5 +137,5 @@ export function ClientHubWorkspaceRouter({ mapToken, permissions, feedbackEnable
   if (!route) return <ClientHub mapToken={mapToken} permissions={permissions} feedbackEnabled={feedbackEnabled} invitationAccess={invitationAccess} />;
   if ("invalid" in route) return <Card><EmptyState title="Project link unavailable" detail="This project link is invalid." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
   if (!permissions.includes("team.view")) return <Card><EmptyState title="Project unavailable" detail="Client-directory access is required." /><a href={clientDirectoryReturnPath()}>Back to Client Hub</a></Card>;
-  return <ProjectWorkspace key={JSON.stringify(route)} route={route} />;
+  return <ProjectWorkspace key={JSON.stringify(route)} route={route} feedbackEnabled={feedbackEnabled} />;
 }
