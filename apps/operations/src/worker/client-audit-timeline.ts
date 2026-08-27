@@ -1,0 +1,445 @@
+import {
+  CLIENT_AUDIT_TIMELINE_ACTORS,
+  CLIENT_AUDIT_TIMELINE_CATEGORIES,
+  CLIENT_AUDIT_TIMELINE_RESULTS,
+  PRIMARY_ALPHA_SOURCE_ID,
+  type ClientAuditTimelineActorType,
+  type ClientAuditTimelineCategory,
+  type ClientAuditTimelineFilters,
+  type ClientAuditTimelineItem,
+  type ClientAuditTimelinePage,
+  type ClientAuditTimelineResult,
+} from "@ltds/shared";
+import { HTTPException } from "hono/http-exception";
+import { z } from "zod";
+import { sqlScope } from "./acl";
+import { eligibleBusinessActivitySql } from "./client-business-activity";
+import { readClientHubBusinessProjectDetail } from "./client-hub-business-project-detail";
+import { clientHubBusinessProjectSourceProof } from "./client-hub-business-projects";
+import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
+import type { ClientHubCollectionContext } from "./client-hub-collections";
+import { base64Url, sha256 } from "./crypto";
+import type { Env, StaffPrincipal } from "./types";
+
+type Producer = ClientAuditTimelineItem["producer"];
+type CoverageReason = ClientAuditTimelinePage["coverage"][ClientAuditTimelineCategory]["reason"];
+interface DeliveryScope {
+  accountId: string | null;
+  projectId: string | null;
+  projectPublicId: string | null;
+  workspaceId: string | null;
+  proof: string;
+}
+interface CandidateRow {
+  rowid: number;
+  event_id: string | number;
+  action: string;
+  actor_type?: string | null;
+  occurred_at: string;
+  resource_id?: string | null;
+  resource_label?: string | null;
+}
+interface TimelineCursor {
+  v: 1;
+  actor: string;
+  root: [string, string, string, string];
+  projectId: string | null;
+  context: string;
+  scope: string;
+  project: string | null;
+  businessPolicy: string;
+  businessSource: string;
+  businessRevision: number;
+  deliveryAuditPolicy: string;
+  filters: ClientAuditTimelineFilters;
+  asOf: string;
+  waters: Record<string, number>;
+  after: [string, Producer, string] | null;
+  expires: number;
+}
+
+const identifier = z.string().min(1).max(512).refine(value => !/[\u0000-\u001f\u007f]/.test(value));
+const proof = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+const timestamp = z.string().max(64).refine(value => {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) && new Date(parsed).toISOString() === value;
+});
+const filtersSchema = z.object({
+  category: z.enum(["all", ...CLIENT_AUDIT_TIMELINE_CATEGORIES]),
+  actorType: z.enum(["all", ...CLIENT_AUDIT_TIMELINE_ACTORS]),
+  result: z.enum(["all", ...CLIENT_AUDIT_TIMELINE_RESULTS]),
+  from: timestamp.nullable(),
+  to: timestamp.nullable(),
+}).strict();
+const cursorSchema = z.object({
+  v: z.literal(1), actor: identifier, root: z.tuple([identifier, identifier, identifier, identifier]),
+  projectId: identifier.nullable(), context: proof, scope: proof, project: proof.nullable(),
+  businessPolicy: proof, businessSource: proof, businessRevision: z.number().int().nonnegative(), deliveryAuditPolicy: proof,
+  filters: filtersSchema, asOf: timestamp,
+  waters: z.record(z.string().min(1).max(80), z.number().int().nonnegative()),
+  after: z.tuple([timestamp, z.enum(["project_alpha", "service_requests", "portal_access", "client_delivery"]), identifier]).nullable(),
+  expires: z.number().int().positive(),
+}).strict();
+
+const timeExpression = (column: string) => `strftime('%Y-%m-%dT%H:%M:%fZ',${column})`;
+const safeText = (value: unknown, fallback: string, maximum = 180): string => {
+  if (typeof value !== "string") return fallback;
+  const normalized = value.replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").trim();
+  return normalized ? normalized.slice(0, maximum) : fallback;
+};
+const normalizeTime = (value: unknown): string | null => {
+  if (typeof value !== "string") return null;
+  const parsed = Date.parse(value.endsWith("Z") || /[+-]\d{2}:\d{2}$/.test(value) ? value : `${value.replace(" ", "T")}Z`);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+};
+const rootTuple = (context: ClientHubCollectionContext): TimelineCursor["root"] => [context.root.source_id,
+  context.root.root_namespace, context.root.kind, context.root.public_id];
+const rootPath = (context: ClientHubCollectionContext): string => `/clients/sources/${encodeURIComponent(context.root.source_id)}/business/${
+  context.root.kind === "organization" ? "organizations" : "standalone"}/${encodeURIComponent(context.root.public_id)}`;
+const changed = (): never => { throw new HTTPException(409, { message: "Timeline scope or access changed. Refresh the client workspace to continue" }); };
+
+async function cursorKey(env: Env): Promise<CryptoKey> {
+  if (!env.OPERATIONS_SESSION_SECRET || env.OPERATIONS_SESSION_SECRET.length < 32)
+    throw new Error("Client timeline cursor configuration unavailable");
+  const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`client-audit-timeline:v1:${env.OPERATIONS_SESSION_SECRET}`));
+  return crypto.subtle.importKey("raw", material, "AES-GCM", false, ["encrypt", "decrypt"]);
+}
+function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) throw new Error();
+  const raw = atob(value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "="));
+  return Uint8Array.from(raw, character => character.charCodeAt(0));
+}
+async function encodeCursor(env: Env, actor: StaffPrincipal, value: TimelineCursor): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const body = await crypto.subtle.encrypt({ name: "AES-GCM", iv,
+    additionalData: new TextEncoder().encode(`client-audit-timeline:v1:${actor.id}`) }, await cursorKey(env),
+  new TextEncoder().encode(JSON.stringify(value)));
+  return `${base64Url(iv)}.${base64Url(new Uint8Array(body))}`;
+}
+async function decodeCursor(env: Env, actor: StaffPrincipal, raw: string): Promise<TimelineCursor> {
+  try {
+    if (raw.length > 12_000) throw new Error();
+    const parts = raw.split(".");
+    if (parts.length !== 2) throw new Error();
+    const body = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decodeBase64Url(parts[0]!),
+      additionalData: new TextEncoder().encode(`client-audit-timeline:v1:${actor.id}`) }, await cursorKey(env), decodeBase64Url(parts[1]!));
+    return cursorSchema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)));
+  } catch { throw new HTTPException(400, { message: "Client timeline cursor is invalid" }); }
+}
+
+export function parseClientAuditTimelineFilters(params: URLSearchParams): ClientAuditTimelineFilters {
+  const category = params.get("category") ?? "all", actorType = params.get("actorType") ?? "all",
+    result = params.get("result") ?? "all", from = params.get("from"), to = params.get("to");
+  const parsed = filtersSchema.safeParse({ category, actorType, result, from, to });
+  if (!parsed.success || (parsed.data.from && parsed.data.to && parsed.data.from > parsed.data.to))
+    throw new HTTPException(400, { message: "Client timeline filters are invalid" });
+  return parsed.data;
+}
+
+function coverage(available: boolean, reason: CoverageReason = null) { return { available, reason: available ? null : reason }; }
+function actor(value: string | null | undefined): ClientAuditTimelineItem["actor"] {
+  switch (value) {
+    case "staff": return { type: "staff", label: "Team" };
+    case "client": case "client_manager": case "identity": return { type: "client", label: "Client" };
+    case "integration": return { type: "integration", label: "Connected service" };
+    case "public": return { type: "public", label: "Public visitor" };
+    case "system": return { type: "system", label: "System" };
+    default: return null;
+  }
+}
+function allowedByFilters(filters: ClientAuditTimelineFilters, category: ClientAuditTimelineCategory,
+  actorType: ClientAuditTimelineActorType, result: ClientAuditTimelineResult): boolean {
+  return (filters.category === "all" || filters.category === category)
+    && (filters.actorType === "all" || filters.actorType === actorType)
+    && (filters.result === "all" || filters.result === result);
+}
+function timeBounds(filters: ClientAuditTimelineFilters, asOf: string, expression: string): { sql: string; values: string[] } {
+  const upper = filters.to && filters.to < asOf ? filters.to : asOf;
+  return { sql: `${expression}<=?${filters.from ? ` AND ${expression}>=?` : ""}`, values: [upper, ...(filters.from ? [filters.from] : [])] };
+}
+function seek(expression: string, idExpression: string, producer: Producer,
+  after: TimelineCursor["after"]): { sql: string; values: string[] } {
+  if (!after) return { sql: "", values: [] };
+  if (producer < after[1]) return { sql: ` AND ${expression}<?`, values: [after[0]] };
+  if (producer > after[1]) return { sql: ` AND ${expression}<=?`, values: [after[0]] };
+  return { sql: ` AND (${expression}<? OR (${expression}=? AND CAST(${idExpression} AS TEXT)>?))`,
+    values: [after[0], after[0], after[2]] };
+}
+async function maxRowid(db: D1DatabaseSession, table: string): Promise<number> {
+  const value = await db.prepare(`SELECT COALESCE(MAX(rowid),0) value FROM ${table}`).first<number>("value");
+  return Number.isSafeInteger(value) && value! >= 0 ? value! : 0;
+}
+
+async function deliveryScope(env: Env, context: ClientHubCollectionContext, projectId: string | null): Promise<DeliveryScope> {
+  const root = context.root, db = env.DELIVERY_DB.withSession("first-primary");
+  if (root.root_namespace === "business" && root.source_id !== PRIMARY_ALPHA_SOURCE_ID)
+    return { accountId: null, projectId: null, projectPublicId: null, workspaceId: null,
+      proof: await sha256(JSON.stringify([rootTuple(context), "secondary-source-records-only"])) };
+  let accounts: Array<{ id: string; status: string; project_alpha_source_id: string | null;
+    project_alpha_client_id: string | null; project_alpha_organization_id: string | null }> = [];
+  if (root.root_namespace === "account" && root.source_id === "delivery:local") {
+    accounts = (await db.prepare(`SELECT id,status,project_alpha_source_id,project_alpha_client_id,project_alpha_organization_id
+      FROM client_accounts WHERE id=? AND status='active' AND project_alpha_source_id IS NULL
+      AND project_alpha_client_id IS NULL AND project_alpha_organization_id IS NULL LIMIT 2`).bind(root.public_id).all<typeof accounts[number]>()).results;
+  } else if (root.root_namespace === "business" && root.source_id === PRIMARY_ALPHA_SOURCE_ID) {
+    const owner = root.kind === "organization" ? "project_alpha_organization_id=?"
+      : "project_alpha_client_id=? AND project_alpha_organization_id IS NULL";
+    accounts = (await db.prepare(`SELECT id,status,project_alpha_source_id,project_alpha_client_id,project_alpha_organization_id
+      FROM client_accounts WHERE status='active' AND project_alpha_source_id=? AND ${owner} LIMIT 2`)
+      .bind(PRIMARY_ALPHA_SOURCE_ID, root.public_id).all<typeof accounts[number]>()).results;
+  }
+  if (accounts.length > 1) changed();
+  const account = accounts[0] ?? null;
+  let projects: Array<{ id: string; project_alpha_source_id: string | null; project_alpha_project_id: string | null;
+    active: number; granted_at: string; revoked_at: string | null }> = [];
+  if (account && projectId) {
+    projects = (await db.prepare(`SELECT project.id,project.project_alpha_source_id,project.project_alpha_project_id,
+      project.active,grant_record.granted_at,grant_record.revoked_at FROM projects project
+      JOIN client_project_grants grant_record ON grant_record.project_id=project.id AND grant_record.account_id=?
+      WHERE project.active=1 AND grant_record.revoked_at IS NULL AND project.project_alpha_source_id=?
+        AND project.project_alpha_project_id=? LIMIT 2`).bind(account.id, root.source_id, projectId)
+      .all<typeof projects[number]>()).results;
+    if (projects.length > 1) changed();
+  }
+  const project = projects[0] ?? null;
+  const stable = [rootTuple(context), account, project, root.workspace_id ?? null];
+  return { accountId: account?.id ?? null, projectId: project?.id ?? null,
+    projectPublicId: project?.project_alpha_project_id ?? null, workspaceId: root.workspace_id ?? null,
+    proof: await sha256(JSON.stringify(stable)) };
+}
+
+async function readDeliveryAuditPolicy(env: Env, principal: StaffPrincipal): Promise<{ allowed: boolean; proof: string }> {
+  const scope = await sqlScope(env, principal, "delivery.share.audit");
+  const allowed = scope.global && !scope.deniedGlobal;
+  return { allowed, proof: await sha256(JSON.stringify([principal.id, "delivery.share.audit", allowed, scope])) };
+}
+
+function item(input: Omit<ClientAuditTimelineItem, "id">): ClientAuditTimelineItem {
+  return { ...input, id: `${input.producer}:${input.sourceId}:${input.producerEventId}` };
+}
+function compare(left: ClientAuditTimelineItem, right: ClientAuditTimelineItem): number {
+  return right.occurredAt.localeCompare(left.occurredAt) || left.producer.localeCompare(right.producer)
+    || left.producerEventId.localeCompare(right.producerEventId);
+}
+
+async function businessCandidates(env: Env, context: ClientHubCollectionContext, filters: ClientAuditTimelineFilters,
+  projectId: string | null, asOf: string, after: TimelineCursor["after"], water: number,
+  limit: number, policy: Awaited<ReturnType<typeof readClientHubBusinessProjectPolicy>>): Promise<ClientAuditTimelineItem[]> {
+  if (context.root.root_namespace !== "business" || !allowedByFilters(filters, "project", "source", "informational")) return [];
+  const eligible = eligibleBusinessActivitySql(policy.filter, asOf), producer: Producer = "project_alpha";
+  const bounds = timeBounds(filters, asOf, "occurred_at"), continuation = seek("occurred_at", "sequence", producer, after);
+  const rows = await env.OPS_DB.withSession("first-primary").prepare(`WITH eligible AS (${eligible.sql})
+    SELECT sequence rowid,sequence event_id,action,occurred_at,record_kind,record_id,record_name
+    FROM eligible WHERE sequence<=? AND projection_source_id=? AND root_kind=? AND root_id=?
+      ${projectId ? "AND record_kind='project' AND record_id=?" : ""}
+      AND ${bounds.sql}${continuation.sql}
+    ORDER BY occurred_at DESC,CAST(sequence AS TEXT) ASC LIMIT ?`).bind(...eligible.values, water,
+      context.root.source_id, context.root.kind, context.root.public_id, ...(projectId ? [projectId] : []),
+      ...bounds.values, ...continuation.values, limit + 1).all<CandidateRow & { record_kind: string; record_id: string; record_name: string }>();
+  const path = rootPath(context);
+  return rows.results.map(row => item({ sourceId: context.root.source_id, producer,
+    producerEventId: String(row.event_id), category: "project", action: safeText(row.action, "source_record_updated", 80),
+    actor: null, resource: { type: safeText(row.record_kind, "source_record", 40), id: safeText(row.record_id, "source-record", 512),
+      label: safeText(row.record_name, "Source record", 180),
+      detailPath: row.record_kind === "project" ? `${path}/projects/${encodeURIComponent(row.record_id)}` : path },
+    result: "informational", occurredAt: normalizeTime(row.occurred_at)! }));
+}
+
+async function requestCandidates(env: Env, context: ClientHubCollectionContext, scope: DeliveryScope,
+  filters: ClientAuditTimelineFilters, asOf: string, after: TimelineCursor["after"], water: number,
+  limit: number): Promise<ClientAuditTimelineItem[]> {
+  if (!scope.accountId || !context.access.requests || !allowedByFilters(filters, "request", "client", "succeeded")
+    && !allowedByFilters(filters, "request", "staff", "succeeded")
+    && !allowedByFilters(filters, "request", "system", "succeeded")) return [];
+  const producer: Producer = "service_requests", at = timeExpression("revision.created_at"),
+    bounds = timeBounds(filters, asOf, at), continuation = seek(at, "revision.id", producer, after);
+  const author = filters.actorType === "all" ? "" : ` AND revision.author_type=?`;
+  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT revision.rowid,revision.id event_id,
+    revision.action,revision.author_type actor_type,${at} occurred_at,request.id resource_id,request.title resource_label
+    FROM request_revisions revision JOIN client_service_requests request ON request.id=revision.request_id
+    JOIN client_accounts account ON account.id=request.account_id AND account.status='active'
+    WHERE revision.rowid<=? AND request.account_id=? ${scope.projectId ? "AND request.project_id=?" : ""}
+      AND ${bounds.sql}${author}${continuation.sql}
+    ORDER BY ${at} DESC,revision.id ASC LIMIT ?`).bind(water, scope.accountId,
+      ...(scope.projectId ? [scope.projectId] : []), ...bounds.values,
+      ...(filters.actorType === "all" ? [] : [filters.actorType]), ...continuation.values, limit + 1).all<CandidateRow>();
+  return rows.results.flatMap(row => {
+    const actorValue = row.actor_type === "client" ? "client" : row.actor_type === "staff" ? "staff" : "system";
+    if (!allowedByFilters(filters, "request", actorValue, "succeeded")) return [];
+    return [item({ sourceId: context.root.source_id, producer, producerEventId: String(row.event_id), category: "request",
+      action: safeText(row.action, "request.updated", 80), actor: actor(actorValue),
+      resource: { type: "service_request", id: safeText(row.resource_id, "request", 512),
+        label: safeText(row.resource_label, "Service request", 180),
+        detailPath: `/clients/requests/${encodeURIComponent(String(row.resource_id))}` },
+      result: "succeeded", occurredAt: normalizeTime(row.occurred_at)! })];
+  });
+}
+
+async function accessCandidates(env: Env, context: ClientHubCollectionContext, scope: DeliveryScope,
+  filters: ClientAuditTimelineFilters, projectId: string | null, asOf: string, after: TimelineCursor["after"],
+  waters: Record<string, number>, limit: number): Promise<ClientAuditTimelineItem[]> {
+  if (!scope.workspaceId || !context.access.requests) return [];
+  const producer: Producer = "portal_access", db = env.DELIVERY_DB.withSession("first-primary"), candidates: ClientAuditTimelineItem[] = [];
+  if (!projectId && (filters.actorType === "all" || ["client", "system"].includes(filters.actorType))
+    && (filters.result === "all" || filters.result === "succeeded")
+    && (filters.category === "all" || filters.category === "access")) {
+    const at = timeExpression("created_at"), bounds = timeBounds(filters, asOf, at), continuation = seek(at, "'membership:'||id", producer, after),
+      actorPredicate = filters.actorType === "all" ? "" : " AND CASE WHEN actor_identity_id IS NULL THEN 'system' ELSE 'client' END=?";
+    const rows = await db.prepare(`SELECT rowid,id event_id,action,CASE WHEN actor_identity_id IS NULL THEN 'system' ELSE 'client' END actor_type,
+      ${at} occurred_at FROM portal_v2_membership_audit WHERE rowid<=? AND workspace_id=?${actorPredicate} AND ${bounds.sql}${continuation.sql}
+      ORDER BY ${at} DESC,id ASC LIMIT ?`).bind(waters.memberships ?? 0, scope.workspaceId,
+      ...(filters.actorType === "all" ? [] : [filters.actorType]), ...bounds.values, ...continuation.values, limit + 1).all<CandidateRow>();
+    for (const row of rows.results) candidates.push(item({ sourceId: context.root.source_id, producer,
+      producerEventId: `membership:${String(row.event_id)}`, category: "access", action: safeText(row.action, "membership.updated", 80),
+      actor: actor(row.actor_type), resource: { type: "workspace_membership", label: "Client workspace access" },
+      result: "succeeded", occurredAt: normalizeTime(row.occurred_at)! }));
+  }
+  if ((filters.actorType === "all" || filters.actorType === "staff")
+    && (filters.result === "all" || filters.result === "succeeded")
+    && (filters.category === "all" || filters.category === "access")) {
+    const at = timeExpression("audit.created_at"), bounds = timeBounds(filters, asOf, at),
+      continuation = seek(at, "'grant:'||audit.id", producer, after);
+    const rows = await db.prepare(`SELECT audit.rowid,audit.id event_id,audit.action,'staff' actor_type,${at} occurred_at
+      FROM portal_v2_authenticated_delivery_grant_audit audit
+      JOIN portal_v2_authenticated_delivery_grants grant_record ON grant_record.id=audit.grant_id AND grant_record.workspace_id=audit.workspace_id
+      JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id AND binding.workspace_id=audit.workspace_id
+      WHERE audit.rowid<=? AND audit.workspace_id=? ${projectId ? "AND binding.owner_scope_type='project' AND binding.owner_public_id=?" : ""}
+      AND ${bounds.sql}${continuation.sql} ORDER BY ${at} DESC,audit.id ASC LIMIT ?`).bind(waters.authenticatedGrants ?? 0,
+      scope.workspaceId, ...(projectId ? [scope.projectPublicId] : []), ...bounds.values, ...continuation.values, limit + 1).all<CandidateRow>();
+    for (const row of rows.results) candidates.push(item({ sourceId: context.root.source_id, producer,
+      producerEventId: `grant:${String(row.event_id)}`, category: "access", action: safeText(row.action, "grant.updated", 80),
+      actor: actor("staff"), resource: { type: "authenticated_delivery_grant", label: "Authenticated delivery access" },
+      result: "succeeded", occurredAt: normalizeTime(row.occurred_at)! }));
+  }
+  return candidates;
+}
+
+async function deliveryCandidates(env: Env, context: ClientHubCollectionContext, scope: DeliveryScope,
+  filters: ClientAuditTimelineFilters, asOf: string, after: TimelineCursor["after"], water: number,
+  limit: number): Promise<ClientAuditTimelineItem[]> {
+  if (!scope.accountId || !context.access.delivery || !["all", "delivery", "notification"].includes(filters.category)) return [];
+  const producer: Producer = "client_delivery", at = timeExpression("audit.created_at"), bounds = timeBounds(filters, asOf, at),
+    continuation = seek(at, "audit.id", producer, after);
+  const lifecycle = ["share.created", "share.updated", "share.revoked", "share.auto_revoked"];
+  const notifications = ["notification.sent", "notification.suppressed", "notification.failed", "notification.retry_scheduled"];
+  const requestedActions = filters.category === "delivery" ? lifecycle : filters.category === "notification" ? notifications : [...lifecycle, ...notifications];
+  const placeholders = requestedActions.map(() => "?").join(",");
+  const actorExpression = "CASE WHEN audit.actor_type='staff' THEN 'staff' WHEN audit.actor_type='integration' THEN 'integration' "
+    + "WHEN audit.actor_type='public' THEN 'public' ELSE 'system' END";
+  const resultExpression = "CASE WHEN audit.action LIKE '%.failed' THEN 'failed' WHEN audit.action LIKE '%.suppressed' THEN 'denied' "
+    + "WHEN audit.action LIKE '%.retry_scheduled' THEN 'informational' ELSE 'succeeded' END";
+  const actorPredicate = filters.actorType === "all" ? "" : ` AND ${actorExpression}=?`;
+  const resultPredicate = filters.result === "all" ? "" : ` AND ${resultExpression}=?`;
+  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT audit.rowid,audit.id event_id,audit.action,
+    audit.actor_type,${at} occurred_at,share.id resource_id,share.label resource_label
+    FROM audit_log audit JOIN shares share ON audit.entity_type='share' AND share.id=audit.entity_id
+    JOIN projects project ON project.id=share.project_id AND project.active=1
+    JOIN client_project_grants grant_record ON grant_record.project_id=project.id AND grant_record.account_id=? AND grant_record.revoked_at IS NULL
+    WHERE audit.rowid<=? ${scope.projectId ? "AND project.id=?" : ""} AND audit.action IN (${placeholders})
+      ${actorPredicate}${resultPredicate} AND ${bounds.sql}${continuation.sql} ORDER BY ${at} DESC,CAST(audit.id AS TEXT) ASC LIMIT ?`).bind(scope.accountId, water,
+      ...(scope.projectId ? [scope.projectId] : []), ...requestedActions,
+      ...(filters.actorType === "all" ? [] : [filters.actorType]), ...(filters.result === "all" ? [] : [filters.result]),
+      ...bounds.values, ...continuation.values, limit + 1).all<CandidateRow>();
+  return rows.results.flatMap(row => {
+    const category: ClientAuditTimelineCategory = row.action.startsWith("notification.") ? "notification" : "delivery";
+    const result: ClientAuditTimelineResult = row.action.endsWith(".failed") ? "failed"
+      : row.action.endsWith(".suppressed") ? "denied" : row.action.endsWith(".retry_scheduled") ? "informational" : "succeeded";
+    const actorValue = row.actor_type === "staff" ? "staff" : row.actor_type === "integration" ? "integration"
+      : row.actor_type === "public" ? "public" : "system";
+    if (!allowedByFilters(filters, category, actorValue, result)) return [];
+    return [item({ sourceId: context.root.source_id, producer, producerEventId: String(row.event_id), category,
+      action: safeText(row.action, `${category}.updated`, 100), actor: actor(actorValue),
+      resource: { type: "delivery_share", id: safeText(row.resource_id, "share", 512),
+        label: safeText(row.resource_label, "Client delivery link", 180) }, result,
+      occurredAt: normalizeTime(row.occurred_at)! })];
+  });
+}
+
+async function currentWatermarks(env: Env, context: ClientHubCollectionContext, scope: DeliveryScope,
+  deliveryAuditAllowed: boolean): Promise<Record<string, number>> {
+  const ops = env.OPS_DB.withSession("first-primary"), delivery = env.DELIVERY_DB.withSession("first-primary");
+  const waters: Record<string, number> = {};
+  if (context.root.root_namespace === "business") waters.business = await ops.prepare("SELECT COALESCE(MAX(sequence),0) value FROM client_business_activity").first<number>("value") ?? 0;
+  if (scope.accountId && context.access.requests) waters.requests = await maxRowid(delivery, "request_revisions");
+  if (scope.workspaceId && context.access.requests) {
+    waters.memberships = await maxRowid(delivery, "portal_v2_membership_audit");
+    waters.authenticatedGrants = await maxRowid(delivery, "portal_v2_authenticated_delivery_grant_audit");
+  }
+  if (scope.accountId && deliveryAuditAllowed) waters.deliveryAudit = await maxRowid(delivery, "audit_log");
+  return waters;
+}
+
+/** Staff-only, read-only federation over already-recorded meaningful events.
+ * It never treats a business-party link, cursor, display cache or event actor as
+ * authorization. Raw payloads, notes, addresses, storage keys and proofs are
+ * not selected and therefore cannot cross the response boundary. */
+export async function listClientAuditTimeline(env: Env, principal: StaffPrincipal, context: ClientHubCollectionContext,
+  options: { projectId?: string; expectedContextVersion?: string; filters?: ClientAuditTimelineFilters;
+    limit?: number; cursor?: string } = {}): Promise<ClientAuditTimelinePage> {
+  const projectId = options.projectId ?? null, limit = options.limit ?? 10, filters = options.filters ?? {
+    category: "all", actorType: "all", result: "all", from: null, to: null,
+  };
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100 || (projectId !== null && !identifier.safeParse(projectId).success)
+    || (options.expectedContextVersion !== undefined && !proof.safeParse(options.expectedContextVersion).success)
+    || !filtersSchema.safeParse(filters).success) throw new HTTPException(400, { message: "Client timeline query is invalid" });
+  if (!context.access.directory) throw new HTTPException(403, { message: "Global team.view permission required" });
+  if (options.expectedContextVersion !== undefined && options.expectedContextVersion !== context.contextVersion) changed();
+  const detail = projectId ? await readClientHubBusinessProjectDetail(env, principal, context, projectId,
+    { expectedContextVersion: options.expectedContextVersion }) : null;
+  const projectProof = detail ? await sha256(JSON.stringify(detail.project)) : null;
+  const scope = await deliveryScope(env, context, projectId), policy = await readClientHubBusinessProjectPolicy(env, principal),
+    deliveryAuditPolicy = await readDeliveryAuditPolicy(env, principal),
+    source = context.root.root_namespace === "business" ? await clientHubBusinessProjectSourceProof(env, context)
+      : await sha256(JSON.stringify([rootTuple(context), "not-business"]));
+  const businessRevision = context.root.root_namespace === "business"
+    ? await env.OPS_DB.withSession("first-primary").prepare("SELECT revision FROM client_business_activity_state WHERE singleton=1").first<number>("revision") ?? 0 : 0;
+  const cursor = options.cursor ? await decodeCursor(env, principal, options.cursor) : null;
+  if (cursor && (cursor.actor !== principal.id || JSON.stringify(cursor.root) !== JSON.stringify(rootTuple(context))
+    || cursor.projectId !== projectId || JSON.stringify(cursor.filters) !== JSON.stringify(filters)))
+    throw new HTTPException(400, { message: "Client timeline cursor does not match this view" });
+  if (cursor && (cursor.expires < Date.now() || cursor.context !== context.contextVersion || cursor.scope !== scope.proof
+    || cursor.project !== projectProof || cursor.businessPolicy !== policy.proof || cursor.businessSource !== source
+    || cursor.businessRevision !== businessRevision || cursor.deliveryAuditPolicy !== deliveryAuditPolicy.proof)) changed();
+  const asOf = cursor?.asOf ?? new Date().toISOString(), waters = cursor?.waters
+    ?? await currentWatermarks(env, context, scope, deliveryAuditPolicy.allowed);
+  const secondary = context.root.root_namespace === "business" && context.root.source_id !== PRIMARY_ALPHA_SOURCE_ID;
+  const sourceAvailable = context.root.root_namespace === "business";
+  const requestAvailable = !secondary && Boolean(scope.accountId) && context.access.requests;
+  const accessAvailable = !secondary && Boolean(scope.workspaceId) && context.access.requests;
+  const deliveryAvailable = !secondary && Boolean(scope.accountId) && deliveryAuditPolicy.allowed;
+  const responseCoverage: ClientAuditTimelinePage["coverage"] = {
+    project: coverage(sourceAvailable, "not_applicable"),
+    request: coverage(requestAvailable, secondary ? "unsupported_source" : !scope.accountId ? "not_applicable" : "permission_required"),
+    feedback: coverage(false, secondary ? "unsupported_source" : "not_collected"),
+    access: coverage(accessAvailable, secondary ? "unsupported_source" : !scope.workspaceId ? "not_applicable" : "permission_required"),
+    delivery: coverage(deliveryAvailable, secondary ? "unsupported_source" : !scope.accountId ? "not_applicable" : "permission_required"),
+    notification: coverage(deliveryAvailable, secondary ? "unsupported_source" : !scope.accountId ? "not_applicable" : "permission_required"),
+  };
+  const candidates = (await Promise.all([
+    sourceAvailable ? businessCandidates(env, context, filters, projectId, asOf, cursor?.after ?? null, waters.business ?? 0, limit, policy) : [],
+    requestAvailable ? requestCandidates(env, context, scope, filters, asOf, cursor?.after ?? null, waters.requests ?? 0, limit) : [],
+    accessAvailable ? accessCandidates(env, context, scope, filters, projectId, asOf, cursor?.after ?? null, waters, limit) : [],
+    deliveryAvailable ? deliveryCandidates(env, context, scope, filters, asOf, cursor?.after ?? null, waters.deliveryAudit ?? 0, limit) : [],
+  ])).flat().filter(candidate => candidate.occurredAt && candidate.occurredAt <= asOf).sort(compare);
+  const pageItems = candidates.slice(0, limit), hasMore = candidates.length > limit;
+  const [currentScope, currentPolicy, currentSource, currentRevision, currentDetail, currentDeliveryAuditPolicy] = await Promise.all([
+    deliveryScope(env, context, projectId), readClientHubBusinessProjectPolicy(env, principal),
+    context.root.root_namespace === "business" ? clientHubBusinessProjectSourceProof(env, context) : Promise.resolve(source),
+    context.root.root_namespace === "business" ? env.OPS_DB.withSession("first-primary")
+      .prepare("SELECT revision FROM client_business_activity_state WHERE singleton=1").first<number>("revision") : Promise.resolve(0),
+    projectId ? readClientHubBusinessProjectDetail(env, principal, context, projectId,
+      { expectedContextVersion: options.expectedContextVersion }) : Promise.resolve(null), readDeliveryAuditPolicy(env, principal),
+  ]);
+  if (currentScope.proof !== scope.proof || currentPolicy.proof !== policy.proof || currentSource !== source
+    || currentRevision !== businessRevision || currentDeliveryAuditPolicy.proof !== deliveryAuditPolicy.proof
+    || (currentDetail && await sha256(JSON.stringify(currentDetail.project)) !== projectProof)) changed();
+  const last = pageItems.at(-1);
+  return { canonicalRoot: context.canonicalRoot, projectId, contextVersion: context.contextVersion,
+    refreshedAt: new Date().toISOString(), asOf, coverage: responseCoverage, filters, items: pageItems,
+    page: { returned: pageItems.length, limit, hasMore, nextCursor: hasMore && last ? await encodeCursor(env, principal, {
+      v: 1, actor: principal.id, root: rootTuple(context), projectId, context: context.contextVersion, scope: scope.proof,
+      project: projectProof, businessPolicy: policy.proof, businessSource: source, businessRevision,
+      deliveryAuditPolicy: deliveryAuditPolicy.proof,
+      filters, asOf, waters, after: [last.occurredAt, last.producer, last.producerEventId], expires: Date.now() + 30 * 60_000,
+    }) : null } };
+}

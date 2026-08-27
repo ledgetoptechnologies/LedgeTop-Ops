@@ -8,6 +8,7 @@ import { businessProjectHref } from "./business-project-route";
 import { ClientDirectory, clientDirectoryReturnPath, clientPortalStatus, type ClientSummary, type ClientHubCapabilities, type ClientRootNamespace } from "./ClientDirectory";
 import { ClientBusinessParty, SourceBusinessParty, type BusinessPartyReference } from "./ClientBusinessParty";
 import { ClientBusinessActivity } from "./ClientBusinessActivity";
+import { ClientAuditTimeline } from "./ClientAuditTimeline";
 import { ClientInvitationPolicy } from "./ClientInvitationPolicy";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 
@@ -348,6 +349,9 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
       {data.client.root_namespace === "business" && data.client.source_id && data.contextVersion && <ClientBusinessActivity
         root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: data.client.kind, publicId: data.client.public_id }}
         contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
+      {data.client.source_id && data.client.root_namespace && data.contextVersion && <div className="client-hub-audit-panel"><ClientAuditTimeline
+        root={{ sourceId: data.client.source_id, rootNamespace: data.client.root_namespace, kind: data.client.kind, publicId: data.client.public_id }}
+        contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /></div>}
       <Card title="Shared projects"><ClientCollection {...collectionProps} collection="projects" label="Shared projects" initial={data.projects} page={data.pages?.projects}
         emptyTitle="No project access" emptyDetail="Projects remain unavailable until explicitly granted.">
         {items => <div className="simple-rows">{items.map(project => <div key={collectionKey("projects", project)}><div><strong>{project.project_name}</strong><small>{project.client_name} · {project.can_request_service ? "Requests allowed" : "View access only"}</small></div><StatusPill tone={project.active ? "success" : "neutral"}>{project.active ? "active" : "inactive"}</StatusPill></div>)}</div>}

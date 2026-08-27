@@ -18,7 +18,7 @@ export interface ProjectAccessReadOptions {
 }
 
 function isOrdinaryHistoryGrant(row:ProjectAccessReadRow):boolean {
-  return row.source_type==='project_alpha'||(row.source_type==='legacy'&&row.scope_type==='project');
+  return row.scope_type==='project'&&(row.source_type==='project_alpha'||row.source_type==='legacy');
 }
 
 export function projectAccessReadColumns(alias:string,ready:boolean):string {

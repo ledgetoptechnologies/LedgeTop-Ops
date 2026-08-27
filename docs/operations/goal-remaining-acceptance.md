@@ -118,9 +118,10 @@ or 14 complete. The broader workflows and coordinated rollout remain open.
 
 The initial August 26 read-only trace confirmed that changing the global 30-day
 cutoff to seven days would be incorrect. The completed-history correction now
-removes that cutoff only for read capabilities backed by existing Project Alpha
-authority or a migrated legacy project grant. Ambiguous Operations rules and
-unclassified invitation grants keep the old behavior. Feedback authoring,
+removes that cutoff only for read capabilities backed by an explicit
+project-scoped Project Alpha authority, a migrated legacy project grant, or a
+currently valid reviewed delivery term. Workspace-wide authority, ambiguous
+Operations rules and unclassified invitation grants keep the old behavior. Feedback authoring,
 service requests and Viewer-share creation do not inherit read-only history.
 
 Implement explicit, versioned access terms on the exact project delegation,
@@ -300,6 +301,9 @@ release blocker.
 
 This closes the client-side multiple-administrator lifecycle locally. Identity
 reconciliation, authoritative per-customer service assignments, legacy grant
-reclassification, expiry notices, project memory, copy-forward and a unified
-audit timeline remain open. No production migration, flag change, deployment
-or push is included in this checkpoint.
+reclassification, expiry notices, project memory and copy-forward remain open.
+The subsequent staff-only Client Hub timeline backend federates existing
+source-record, request, portal-access, delivery-link and notification ledgers;
+feedback bulk history, authenticated content-read production, global filters,
+client visibility and common retention still remain. No production migration,
+flag change, deployment or push is included in either checkpoint.

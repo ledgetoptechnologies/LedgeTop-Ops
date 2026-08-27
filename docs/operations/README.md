@@ -4,6 +4,10 @@ See [Operational job briefs](job-briefs.md) for the versioned pilot-instruction 
 
 See [Internal browser SOP library](sops.md) for the separate Operations-owned authoring lifecycle, Markdown allow list, immutable revisions, published staff access, and exact job-brief revision links. Browser SOPs are not repository runbooks.
 
+See [Staff Client Hub audit timeline](client-audit-timeline.md) for the bounded,
+source-qualified event federation, per-adapter authorization and coverage,
+cursor/redaction contract, and online-retention boundary.
+
 This runbook records operator-owned controls that are not safely expressible in the application repository.
 
 ## Staging

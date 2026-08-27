@@ -182,14 +182,15 @@ existing hierarchy/request/feedback/primary delivery readers. Client type
 checking also passed after those changes.
 
 The subsequent ordinary-history correction is deliberately read-only and
-provenance-aware. Unclassified `project_alpha` authorization and migrated
-project-scoped `legacy` delivery authorization may continue to read completed
-projects after 30 days. Unclassified `operations` and `client_invitation`
-authorization do not gain indefinite access, and mutation capabilities retain
-the legacy cutoff. Explicit customer and collaborator terms remain
-authoritative. Primary and secondary/native Project Alpha adapters use the same
-policy; pre-terms schemas keep the prior 30-day behavior during rolling
-deployment. No data rewrite or migration is required.
+provenance-aware. Explicit project-scoped `project_alpha` authorization and
+migrated project-scoped `legacy` delivery authorization may continue to read
+completed projects after 30 days. Workspace-wide authorization, unclassified
+`operations`, and `client_invitation` authorization do not gain indefinite
+project access, and mutation capabilities retain the legacy cutoff. Explicit
+customer and collaborator terms remain authoritative. Primary and
+secondary/native Project Alpha adapters use the same policy; pre-terms schemas
+keep the prior 30-day behavior during rolling deployment. No data rewrite or
+migration is required.
 The final frozen-code Operations producer/resource gate passed **84 of 84**
 tests across three files in 959.04 seconds: twenty primary producer,
 thirty-six native producer and twenty-eight native resource cases. Both new

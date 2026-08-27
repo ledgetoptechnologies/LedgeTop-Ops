@@ -5,6 +5,7 @@ import { api, ApiError } from "./api";
 import { ClientHub } from "./ClientHub";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 import { ClientBusinessActivity } from "./ClientBusinessActivity";
+import { ClientAuditTimeline } from "./ClientAuditTimeline";
 import { ProjectFeedbackHistory } from "./ProjectFeedbackHistory";
 import { clientDirectoryReturnPath } from "./ClientDirectory";
 import { businessProjectClientPath, clientWorkspaceFilters, readBusinessProjectRoute, type BusinessProjectRoute } from "./business-project-route";
@@ -115,6 +116,8 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
         </Card>
       </div>
       <ClientBusinessActivity key={revision} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
+        contextSignal={pending.current!.signal} onInvalidated={invalidate} />
+      <ClientAuditTimeline key={`audit-${revision}`} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
         contextSignal={pending.current!.signal} onInvalidated={invalidate} />
       {feedbackEnabled && detail.canonicalRoot.sourceId === "project-alpha:primary" && <ProjectFeedbackHistory key={`feedback-${revision}`}
         root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}

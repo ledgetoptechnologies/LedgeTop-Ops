@@ -55,6 +55,7 @@ export const PERMISSIONS = [
 
 export * from "./viewer-service";
 export * from "./client-feedback";
+export * from "./client-audit-timeline";
 
 export type Permission = (typeof PERMISSIONS)[number];
 export type PermissionScope = "global" | "division" | "assigned" | "own";

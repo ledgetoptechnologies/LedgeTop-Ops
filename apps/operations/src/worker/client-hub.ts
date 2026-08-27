@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { listClientBusinessActivity } from "./client-business-activity";
+import { listClientAuditTimeline, parseClientAuditTimelineFilters } from "./client-audit-timeline";
 import { sqlScope } from "./acl";
 import { clientHubDetailPath, clientHubRouteKind, findClientHubRoot, listClientHubRoots,
   isClientHubRootNamespace, isClientHubSource, type ClientHubKind, type ClientHubRoot } from "./client-hub-directory";
@@ -246,6 +247,22 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
 }
 
 export function registerClientHubRoutes(app: App): void {
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/timeline", async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"),
+      c.req.param("sourceId"), c.req.param("rootNamespace"));
+    const params = new URL(c.req.url).searchParams, rawLimit = params.get("limit");
+    const result = await listClientAuditTimeline(c.env, principal, context, {
+      expectedContextVersion: params.get("expectedContextVersion") ?? undefined,
+      filters: parseClientAuditTimelineFilters(params), cursor: params.get("cursor") ?? undefined,
+      limit: rawLimit === null ? 10 : /^\d+$/.test(rawLimit) ? Number(rawLimit) : Number.NaN,
+    });
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/activity", async c => {
     if (c.req.param("rootNamespace") !== "business" || !isBusinessProjectionSource(c.req.param("sourceId")))
       throw new HTTPException(404, { message: "Business activity is unavailable for this source" });
@@ -275,6 +292,24 @@ export function registerClientHubRoutes(app: App): void {
     const result = await readClientHubBusinessProjectDetail(c.env, principal, context, c.req.param("projectId"),
       { expectedContextVersion: c.req.query("expectedContextVersion") });
     await verifyContext(c.env, principal, context);
+    return c.json(result);
+  });
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId/timeline", async c => {
+    if (c.req.param("rootNamespace") !== "business" || !isBusinessProjectionSource(c.req.param("sourceId")))
+      throw new HTTPException(404, { message: "Business project timeline is unavailable for this source" });
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"),
+      c.req.param("sourceId"), "business");
+    const params = new URL(c.req.url).searchParams, rawLimit = params.get("limit");
+    const result = await listClientAuditTimeline(c.env, principal, context, {
+      projectId: c.req.param("projectId"), expectedContextVersion: params.get("expectedContextVersion") ?? undefined,
+      filters: parseClientAuditTimelineFilters(params), cursor: params.get("cursor") ?? undefined,
+      limit: rawLimit === null ? 10 : /^\d+$/.test(rawLimit) ? Number(rawLimit) : Number.NaN,
+    });
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
     return c.json(result);
   });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId/feedback-history", async c => {

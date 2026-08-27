@@ -88,7 +88,7 @@ export function businessActivityObservationStatement(db: Pick<D1Database,"prepar
     .bind(sourceId,recordKind,recordId);
 }
 
-function eligibleActivitySql(projectFilter: SqlFilter, asOf: string): SqlFilter {
+export function eligibleBusinessActivitySql(projectFilter: SqlFilter, asOf: string): SqlFilter {
   if (!canonicalTime(asOf)) throw new Error("business-activity-as-of-invalid");
   return { sql: `SELECT activity.*,substr(record.record_name,1,500) record_name
     FROM client_business_activity activity
@@ -111,7 +111,7 @@ function eligibleActivitySql(projectFilter: SqlFilter, asOf: string): SqlFilter 
  * before MAX: a hidden project cannot change a visible customer's sort order.
  * No raw payload or globally cached maximum is returned. */
 export function businessActivityRecencyCte(projectFilter: SqlFilter, asOf: string): SqlFilter {
-  const eligible = eligibleActivitySql(projectFilter,asOf);
+  const eligible = eligibleBusinessActivitySql(projectFilter,asOf);
   return { sql: `business_activity_eligible AS (${eligible.sql}),
     business_activity_roots AS (
       SELECT projection_source_id source_id,root_kind,root_id,MAX(occurred_at) meaningful_activity_at
@@ -178,7 +178,7 @@ export async function listClientBusinessActivity(env: Env, principal: StaffPrinc
   const source=await clientHubBusinessProjectSourceProof(env,context);
   if (options.projectId) await exactProject(env,context,options.projectId,policy.filter);
   if (cursor && (cursor.policy!==policy.proof || cursor.source!==source)) changed();
-  const eligible=eligibleActivitySql(policy.filter,asOf);
+  const eligible=eligibleBusinessActivitySql(policy.filter,asOf);
   const db=env.OPS_DB.withSession("first-primary");
   const results=await db.batch<ActivityRow|{revision:number}>([
     db.prepare("SELECT revision FROM client_business_activity_state WHERE singleton=1"),

@@ -1612,6 +1612,7 @@ tbody tr:last-child td { border: 0; }
 .client-access-management-list > section > .actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: .5rem; }
 .client-hub-back { display: inline-flex; margin-bottom: 1rem; }
 .client-hub-detail-grid { align-items: start; }
+.client-hub-audit-panel { grid-column: 1 / -1; min-width: 0; }
 .client-hub-detail-grid .simple-rows > a { color: inherit; text-decoration: none; }
 .client-hub-detail-grid > *, .client-hub-collection { min-width: 0; }
 .client-hub-detail-grid, .client-hub-title { overflow-wrap: anywhere; }

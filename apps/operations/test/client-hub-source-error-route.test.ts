@@ -23,6 +23,9 @@ async function request(query = "") {
 async function activityRequest(id: string, query = "", namespace = "business") {
   return worker.fetch(new Request(`https://ops.example/api/client-hub/sources/${encodeURIComponent(sourceId)}/${namespace}/standalone/${encodeURIComponent(id)}/activity${query}`), env, execution);
 }
+async function timelineRequest(id: string, query = "", namespace = "business") {
+  return worker.fetch(new Request(`https://ops.example/api/client-hub/sources/${encodeURIComponent(sourceId)}/${namespace}/standalone/${encodeURIComponent(id)}/timeline${query}`), env, execution);
+}
 async function activityClient(times = ["2025-04-01T12:00:00.000Z", "2025-04-02T12:00:00.000Z"]) {
   const externalId = `activity-http-${crypto.randomUUID()}`;
   const mapping = await prepareProjectAlphaSourceRecords(db, createProjectAlphaSourceContext(sourceId), [{ kind: "client", externalId }]);
@@ -47,19 +50,13 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
     for (const file of readdirSync(directory).filter(file => /^\d{4}_.*\.sql$/.test(file) && file.slice(0, 4) <= "0037").sort()) {
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(file, directory), "utf8")).map(sql => db.prepare(sql)));
     }
-    // The source-specific activity route rechecks the shared, empty account
-    // association. Use the actual account definition and provenance column;
-    // no portal records or permissions are synthesized for secondary sources.
-    const foundation = splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0096_client_portal_foundation.sql", import.meta.url), "utf8"));
-    const workspace = splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0103_client_portal_workspace.sql", import.meta.url), "utf8"));
-    const provenance = splitD1MigrationStatements(readFileSync(new URL("../../client/migrations/0157_delivery_source_provenance.sql", import.meta.url), "utf8"));
-    const accounts = foundation.filter(sql => /CREATE TABLE IF NOT EXISTS client_accounts\s*\(/.test(sql));
-    const references = workspace.filter(sql => /ALTER TABLE client_accounts ADD COLUMN project_alpha_(?:client|organization)_id\b/.test(sql));
-    const sourceColumn = provenance.filter(sql => /ALTER TABLE client_accounts ADD COLUMN project_alpha_source_id\b/.test(sql));
-    expect(accounts).toHaveLength(1);
-    expect(references).toHaveLength(2);
-    expect(sourceColumn).toHaveLength(1);
-    await delivery.batch([...accounts, ...references, ...sourceColumn].map(sql => delivery.prepare(sql)));
+    // Use the current Delivery schema: exact secondary workspace resolution is
+    // part of the shared root proof even when this fixture has no workspace.
+    const clientMigrations = new URL("../../client/migrations/", import.meta.url);
+    for (const file of readdirSync(clientMigrations).filter(file => /^\d{4}_.*\.sql$/.test(file)).sort()) {
+      await delivery.batch(splitD1MigrationStatements(readFileSync(new URL(file, clientMigrations), "utf8"))
+        .map(sql => delivery.prepare(sql)));
+    }
     await db.batch([
       db.prepare("INSERT INTO staff_users(id,email,display_name,status) VALUES(?,?,?,'active')").bind(actor.id, actor.email, actor.displayName),
       db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key) VALUES('source-error-role',?,'role-admin','global','global')").bind(actor.id),
@@ -79,7 +76,7 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
     // Directory reads are Operations-only; activity uses only the empty
     // Delivery account proof above, never media, queues or external networking.
     env = { OPS_DB: db, DELIVERY_DB: delivery, ENVIRONMENT: "development", EXPECTED_HOST: "ops.example", INCOMING_EXPECTED_HOST: "incoming.example",
-      PUBLIC_BASE_URL: "https://ops.example" } as Env;
+      PUBLIC_BASE_URL: "https://ops.example", OPERATIONS_SESSION_SECRET: "source-timeline-secret-that-is-long-enough-123" } as Env;
   }, 60_000);
   beforeEach(async () => {
     mocks.authenticateStaff.mockReset().mockResolvedValue(actor);
@@ -101,7 +98,7 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
     const refreshed = await request();
     expect(refreshed.status).toBe(200);
     expect(await refreshed.text()).not.toContain("Private secondary");
-  });
+  }, 30_000);
 
   it("does not forward arbitrary HTTPException response bodies from other failures", async () => {
     mocks.authenticateStaff.mockRejectedValue(new HTTPException(403, { message: "Authentication required",
@@ -144,6 +141,25 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
     expect(second.items[0]?.id).not.toBe(page.items[0]?.id);
     expect(await db.prepare("SELECT count(*) count FROM client_business_activity").first<number>("count")).toBe(before);
     expect(await env.DELIVERY_DB.prepare("SELECT count(*) count FROM client_accounts").first<number>("count")).toBe(0);
+  }, 30_000);
+
+  it("exposes a source-qualified staff timeline while keeping every secondary portal category unavailable", async () => {
+    const client = await activityClient(["2025-05-01T12:00:00.000Z", "2025-05-02T12:00:00.000Z"]);
+    const first = await timelineRequest(client.id, "?limit=1");
+    expect(first.status).toBe(200);
+    expect(first.headers.get("Cache-Control")).toContain("no-store");
+    const page = await first.json() as import("@ltds/shared").ClientAuditTimelinePage;
+    expect(page).toMatchObject({ canonicalRoot: { sourceId, rootNamespace: "business", publicId: client.id },
+      coverage: { project: { available: true, reason: null }, request: { available: false, reason: "unsupported_source" },
+        feedback: { available: false, reason: "unsupported_source" }, access: { available: false, reason: "unsupported_source" },
+        delivery: { available: false, reason: "unsupported_source" }, notification: { available: false, reason: "unsupported_source" } },
+      page: { returned: 1, hasMore: true, limit: 1 } });
+    expect(page.items[0]).toMatchObject({ sourceId, producer: "project_alpha", category: "project",
+      actor: null, result: "informational", resource: { label: client.name } });
+    expect(JSON.stringify(page)).not.toMatch(/untrusted-actor|private-payload|payload_json|event_key/);
+    const next = await timelineRequest(client.id, `?limit=1&expectedContextVersion=${encodeURIComponent(page.contextVersion)}&cursor=${encodeURIComponent(page.page.nextCursor!)}`);
+    expect(next.status).toBe(200);
+    expect((await next.json() as import("@ltds/shared").ClientAuditTimelinePage).page).toMatchObject({ returned: 1, hasMore: false });
   }, 30_000);
 
   it("rejects stale expected workspace context before returning activity", async () => {

@@ -612,6 +612,14 @@ ownership, mail semantics, and the outstanding gates.
 - Confirm migrations, foreign keys, source isolation, rollback/recovery, browser
   behavior, authorization, notification races, and operational runbooks.
 
+The local backend checkpoint in [staff Client Hub audit timeline](client-audit-timeline.md)
+now federates bounded source-record, request, portal-access, delivery-link and
+notification history for staff. Secondary roots remain source-record-only and
+every unavailable category is explicit. Feedback bulk history, authenticated
+content-read production, global audit filtering, common retention and client
+visibility remain open; this checkpoint must not be described as a complete
+audit ledger or a production deployment.
+
 ## UI and workflow acceptance matrix
 
 Test the complete workflow, not only whether a component renders:
