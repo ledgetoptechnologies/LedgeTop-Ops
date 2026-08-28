@@ -230,7 +230,12 @@ export async function loadPortalBootstrap(
       capabilities: {
         directoryRead: context.capabilities.directoryRead, deliveryView: context.capabilities.deliveryView,
         workspaceHierarchyV2: true, manageTeam: false, viewBilling: false, requestV2: false, requestAttachments: false,
-        workspaceMembershipManagement: false, hierarchyScopedInvitations: false, invitationEmailDelivery: false,
+        // These three flags only expose the global invitation surface. The
+        // selected workspace's /access response remains the authority for
+        // whether the signed-in identity may see or change any member data.
+        workspaceMembershipManagement: session.capabilities?.workspaceMembershipManagement === true,
+        hierarchyScopedInvitations: session.capabilities?.hierarchyScopedInvitations === true,
+        invitationEmailDelivery: session.capabilities?.invitationEmailDelivery === true,
         delegatedShares: false, viewer: false, viewerShares: false, feedback: false,
       },
     };

@@ -50,9 +50,10 @@ function FeatureReadiness({features}: {features: NativeWorkspaceFeatureReadiness
   </Card>;
 }
 
-export function NativeWorkspaceContent({ context, page, projectId, onInvalid, renderFiles, openProject }: {
+export function NativeWorkspaceContent({ context, page, projectId, onInvalid, renderFiles, openProject, renderTeam }: {
   context: NativePortalBootstrap; page: ClientPortalPage; projectId: string | null;
   onInvalid: (caught: unknown) => void; renderFiles: (options: NativeFileBrowserOptions) => ReactNode; openProject: (id: string) => void;
+  renderTeam?: () => ReactNode;
 }) {
   const [locationSearch, setLocationSearch] = useState(location.search);
   const [hierarchy, setHierarchy] = useState<NativeHierarchy["entries"]>([]);
@@ -127,7 +128,7 @@ export function NativeWorkspaceContent({ context, page, projectId, onInvalid, re
 
   return <section className="native-workspace" aria-label="Connected client workspace">
     <header className="portal-welcome"><span className="eyebrow">Connected workspace</span><h1>{context.workspace.displayName}</h1><p className="native-workspace-source">Source: {context.workspace.sourceId}</p></header>
-    {unsupportedRoute ? <><Card title="Feature unavailable"><p>{featureDetail(unavailableFeature, context.features)}</p></Card><FeatureReadiness features={context.features} /></> : page === "account" ? <><Card title="Workspace access"><p>You are viewing resources shared with your signed-in identity in this workspace. Access is evaluated from the current Project Alpha source and workspace authorization.</p></Card><FeatureReadiness features={context.features} /></> : page === "not-found" ? <Card title="Page unavailable"><p>This page is not available in this workspace.</p></Card> : relevantHierarchy ? <>
+    {unsupportedRoute ? <><Card title="Feature unavailable"><p>{featureDetail(unavailableFeature, context.features)}</p></Card><FeatureReadiness features={context.features} /></> : page === "account" ? <><Card title="Workspace access"><p>You are viewing resources shared with your signed-in identity in this workspace. Access is evaluated from the current Project Alpha source and workspace authorization.</p></Card>{renderTeam?.()}<FeatureReadiness features={context.features} /></> : page === "not-found" ? <Card title="Page unavailable"><p>This page is not available in this workspace.</p></Card> : relevantHierarchy ? <>
       <Card title={page === "dashboard" ? "Workspace directory" : page === "project" ? "Project" : "Projects"}>
         {!context.capabilities.directoryRead ? <p>The directory is not included in your current workspace access.</p> : <>
           {hierarchyError && <div role="alert"><p>{hierarchyError}</p><button className="button-ghost" onClick={() => hierarchyCursor ? void fetchHierarchy(hierarchyCursor) : setHierarchyRetry(value => value + 1)}>Retry directory</button></div>}

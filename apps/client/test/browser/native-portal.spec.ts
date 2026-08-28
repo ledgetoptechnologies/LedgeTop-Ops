@@ -254,6 +254,176 @@ test("native feature readiness is operational status, not purchased services or 
   nativeCallsOnly(calls);
 });
 
+for (const width of [1280, 390]) test(`secondary workspace member management is source-aware and responsive at ${width}px`, async ({page}) => {
+  const invitations = [{id: "invitation-pending", email: "pending@example.test", status: "pending", scope: {type: "project", publicId: "project-shared"}, capabilities: ["delivery.view"], expiresAt: "2099-01-01T00:00:00Z", accessTerms: null}];
+  const members = [
+    {identityId: "source-manager", email: "manager@example.test", status: "active", manager: true, source: "project_alpha", managerVersion: 1, canChangeManager: false},
+    {identityId: "invited-active", email: "active@example.test", status: "active", manager: false, source: "client_invitation", managerVersion: 0, canChangeManager: false},
+    {identityId: "invited-suspended", email: "suspended@example.test", status: "suspended", manager: false, source: "client_invitation", managerVersion: 0, canChangeManager: false},
+  ];
+  const calls = await mock(page, (route, call) => {
+    if (call.path === "/api/client/session") return route.fulfill({json: {account: {id: "", displayName: "Client portal"}, capabilities: {workspaceHierarchyV2: true, workspaceMembershipManagement: true, hierarchyScopedInvitations: true, invitationEmailDelivery: true}}});
+    if (call.path === "/api/client/v2/workspaces/workspace-b/access") return route.fulfill({json: {
+      sourceId: "project-alpha:coastal", sourceName: "Project Alpha", workspaceName: workspace("workspace-b").displayName,
+      canManageMembers: true, peerAdminManagement: false, invitationRequestsSupported: false,
+      addressBookAvailable: false, canManageAddressBook: false,
+      inviteScopes: [{type: "project", publicId: "project-shared", displayName: "Coastal seawall construction documentation", capabilities: ["delivery.view", "request.create"], projectEndSupported: true}],
+      members, invitations, invitationPolicy: {mode: "allowed", version: 4}, projectAccessTermsSupported: true,
+      projectAccessOptions: [{projectPublicId: "project-shared", projectEndSupported: true}],
+    }});
+    if (call.path === "/api/client/v2/workspaces/workspace-b/invitations" && call.method === "POST") {
+      const input = route.request().postDataJSON() as {email: string; targetScope: {type: string; publicId: string}; capabilities: string[]};
+      invitations.unshift({id: "invitation-created", email: input.email, status: "pending", scope: input.targetScope, capabilities: input.capabilities, expiresAt: "2099-01-02T00:00:00Z", accessTerms: null});
+      return route.fulfill({status: 201, json: {outcome: "created"}});
+    }
+    if (call.path === "/api/client/v2/workspaces/workspace-b/members/invited-active" && call.method === "DELETE") {
+      members[1] = {...members[1]!, status: "suspended"}; return route.fulfill({status: 204});
+    }
+    if (call.path === "/api/client/v2/workspaces/workspace-b/invitations/invitation-pending" && call.method === "DELETE") {
+      invitations.splice(invitations.findIndex(value => value.id === "invitation-pending"), 1); return route.fulfill({status: 204});
+    }
+    return undefined;
+  });
+  await page.setViewportSize({width, height: 900}); await page.goto("/portal/account?workspace=workspace-b");
+  await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toBeVisible();
+  const source = page.locator(".portal-team-row", {hasText: "manager@example.test"});
+  await expect(source).toContainText("Source-managed member"); await expect(source).toContainText("managed in this Project Alpha source");
+  await expect(source.getByRole("button", {name: /Suspend|administrator/i})).toHaveCount(0);
+  const active = page.locator(".portal-team-row", {hasText: "active@example.test"});
+  await expect(active).toContainText("Locally invited collaborator"); await expect(active.getByRole("button", {name: "Suspend"})).toBeVisible();
+  const suspended = page.locator(".portal-team-row", {hasText: "suspended@example.test"});
+  await expect(suspended).toContainText("Member · suspended"); await expect(suspended.getByRole("button", {name: "Suspend"})).toHaveCount(0);
+  await expect(page.locator(".portal-team-row", {hasText: "pending@example.test"})).toContainText("pending");
+  await expect(page.getByRole("heading", {name: "Your invitation requests"})).toHaveCount(0);
+  await page.getByLabel("Email address").fill("new@example.test");
+  await page.getByRole("button", {name: "Review invitation"}).click(); await page.getByRole("button", {name: "Send invitation"}).click();
+  await expect(page.locator(".portal-team-row", {hasText: "new@example.test"})).toContainText("pending");
+  await active.getByRole("button", {name: "Suspend"}).click(); await expect(active).toContainText("Member · suspended");
+  const pending = page.locator(".portal-team-row", {hasText: "pending@example.test"}); await pending.getByRole("button", {name: "Revoke"}).click(); await expect(pending).toHaveCount(0);
+  expect(calls.filter(call => call.method === "POST" || call.method === "DELETE").map(call => `${call.method} ${call.path}`)).toEqual([
+    "POST /api/client/v2/workspaces/workspace-b/invitations",
+    "DELETE /api/client/v2/workspaces/workspace-b/members/invited-active",
+    "DELETE /api/client/v2/workspaces/workspace-b/invitations/invitation-pending",
+  ]);
+  expect(calls.some(call => call.path.endsWith("workspace-b/access") && call.method === "GET")).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1)).toBe(true);
+});
+
+test("native team rejects a valid access envelope from the wrong source before rendering protected controls", async ({page}) => {
+  await mock(page, (route, call) => {
+    if (call.path === "/api/client/session") return route.fulfill({json: {account: {id: "", displayName: "Client portal"}, capabilities: {workspaceHierarchyV2: true, workspaceMembershipManagement: true, hierarchyScopedInvitations: true, invitationEmailDelivery: true}}});
+    if (call.path === "/api/client/v2/workspaces/workspace-b/access") return route.fulfill({json: {
+      sourceId: "project-alpha:mountain", sourceName: "Project Alpha", workspaceName: "Wrong source",
+      canManageMembers: true, peerAdminManagement: true, invitationRequestsSupported: true, addressBookAvailable: true, canManageAddressBook: true,
+      inviteScopes: [], members: [{identityId: "leaked", email: "leaked@example.test", status: "active", manager: true, source: "project_alpha"}], invitations: [],
+      invitationPolicy: {mode: "allowed", version: 1}, projectAccessTermsSupported: true, projectAccessOptions: [],
+    }});
+    return undefined;
+  });
+  await page.goto("/portal/account?workspace=workspace-b");
+  await expect(page.getByRole("alert")).toContainText("workspace source could not be verified");
+  await expect(page.getByText("leaked@example.test", {exact: true})).toHaveCount(0);
+  await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: /administrator|Suspend|approval/i})).toHaveCount(0);
+});
+
+test("member authority loss clears ambiguous retries and every protected team control", async ({page}) => {
+  let canManage = true;
+  await mock(page, (route, call) => {
+    if (call.path === "/api/client/session") return route.fulfill({json: {account: {id: "", displayName: "Client portal"}, capabilities: {workspaceHierarchyV2: true, workspaceMembershipManagement: true, hierarchyScopedInvitations: true, invitationEmailDelivery: true}}});
+    if (call.path === "/api/client/v2/workspaces/workspace-b/access") return route.fulfill({json: {
+      sourceId: "project-alpha:coastal", sourceName: "Project Alpha", workspaceName: workspace("workspace-b").displayName,
+      canManageMembers: canManage, peerAdminManagement: false, invitationRequestsSupported: false,
+      inviteScopes: [{type: "project", publicId: "project-shared", displayName: "Project", capabilities: ["delivery.view"], projectEndSupported: true}],
+      members: canManage ? [{identityId: "local", email: "local@example.test", status: "active", manager: false, source: "client_invitation"}] : [], invitations: [],
+      invitationPolicy: {mode: "allowed", version: 1}, projectAccessTermsSupported: true, projectAccessOptions: [{projectPublicId: "project-shared", projectEndSupported: true}],
+    }});
+    if (call.path === "/api/client/v2/workspaces/workspace-b/invitations" && call.method === "POST") { canManage = false; return route.abort("failed"); }
+    return undefined;
+  });
+  await page.goto("/portal/account?workspace=workspace-b"); await page.getByLabel("Email address").fill("uncertain@example.test");
+  await page.getByRole("button", {name: "Review invitation"}).click(); await page.getByRole("button", {name: "Send invitation"}).click();
+  await expect(page.getByRole("button", {name: "Retry same invitation"})).toBeVisible();
+  await page.getByRole("button", {name: "Refresh team access"}).click();
+  await expect(page.getByText("Workspace member management is not included in your current verified access.", {exact: false})).toBeVisible();
+  await expect(page.getByRole("button", {name: "Retry same invitation"})).toHaveCount(0);
+  await expect(page.getByRole("heading", {name: /Invite a collaborator|People|Invitations/})).toHaveCount(0);
+  await expect(page.getByText("local@example.test", {exact: true})).toHaveCount(0);
+});
+
+test("transient access refresh preserves the exact ambiguous invitation retry", async ({page}) => {
+  let accessReads = 0, invitationWrites = 0; const keys: Array<string | undefined> = [];
+  await mock(page, (route, call) => {
+    if (call.path === "/api/client/session") return route.fulfill({json: {account: {id: "", displayName: "Client portal"}, capabilities: {workspaceHierarchyV2: true, workspaceMembershipManagement: true, hierarchyScopedInvitations: true, invitationEmailDelivery: true}}});
+    if (call.path === "/api/client/v2/workspaces/workspace-b/access") {
+      accessReads++; if (accessReads === 2) return route.fulfill({status: 503, json: {error: "Temporary access failure"}});
+      return route.fulfill({json: {
+        sourceId: "project-alpha:coastal", sourceName: "Project Alpha", workspaceName: workspace("workspace-b").displayName,
+        canManageMembers: true, peerAdminManagement: false, invitationRequestsSupported: false,
+        inviteScopes: [{type: "project", publicId: "project-shared", displayName: "Project", capabilities: ["delivery.view"], projectEndSupported: true}],
+        members: [], invitations: [], invitationPolicy: {mode: "allowed", version: 1}, projectAccessTermsSupported: true,
+        projectAccessOptions: [{projectPublicId: "project-shared", projectEndSupported: true}],
+      }});
+    }
+    if (call.path === "/api/client/v2/workspaces/workspace-b/invitations" && call.method === "POST") {
+      invitationWrites++; keys.push(route.request().headers()["idempotency-key"]);
+      return invitationWrites === 1 ? route.abort("failed") : route.fulfill({status: 200, json: {outcome: "replayed"}});
+    }
+    return undefined;
+  });
+  await page.goto("/portal/account?workspace=workspace-b"); await page.getByLabel("Email address").fill("retry@example.test");
+  await page.getByRole("button", {name: "Review invitation"}).click(); await page.getByRole("button", {name: "Send invitation"}).click();
+  const retry = page.getByRole("button", {name: "Retry same invitation"}); await expect(retry).toBeVisible();
+  await page.getByRole("button", {name: "Refresh team access"}).click(); await expect(page.getByRole("alert")).toContainText("Temporary access failure");
+  await expect(retry).toBeVisible(); await expect(retry).toBeDisabled(); expect(invitationWrites).toBe(1);
+  await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toHaveCount(0);
+  await expect(page.getByRole("heading", {name: /People|Invitations/})).toHaveCount(0);
+  await page.getByRole("button", {name: "Refresh team access"}).click(); await expect(retry).toBeEnabled();
+  await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toHaveCount(0);
+  await expect(page.getByRole("heading", {name: /People|Invitations/})).toHaveCount(0);
+  await expect(page.locator(".portal-team-row")).toHaveCount(0);
+  await retry.click(); await expect(page.getByText("Invitation issued.", {exact: false})).toBeVisible();
+  expect(invitationWrites).toBe(2); expect(keys[0]).toMatch(/^[A-Za-z0-9-]{16,}$/); expect(keys[1]).toBe(keys[0]);
+});
+
+test("secondary approval policy is explicit and exposes no broken approval workflow", async ({page}) => {
+  await mock(page, (route, call) => {
+    if (call.path === "/api/client/session") return route.fulfill({json: {account: {id: "", displayName: "Client portal"}, capabilities: {workspaceHierarchyV2: true, workspaceMembershipManagement: true, hierarchyScopedInvitations: true, invitationEmailDelivery: true}}});
+    if (call.path === "/api/client/v2/workspaces/workspace-b/access") return route.fulfill({json: {
+      sourceId: "project-alpha:coastal", sourceName: "Project Alpha", workspaceName: workspace("workspace-b").displayName,
+      canManageMembers: true, peerAdminManagement: false, invitationRequestsSupported: false, addressBookAvailable: false, canManageAddressBook: false,
+      inviteScopes: [], members: [], invitations: [], invitationPolicy: {mode: "require_approval", version: 7},
+      projectAccessTermsSupported: true, projectAccessOptions: [],
+    }});
+    return undefined;
+  });
+  await page.goto("/portal/account?workspace=workspace-b");
+  await expect(page.getByText("Invitations need a source policy change.", {exact: false})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toHaveCount(0);
+  await expect(page.getByRole("button", {name: /approval/i})).toHaveCount(0);
+  await expect(page.getByText("No workspace members are available.", {exact: true})).toBeVisible();
+});
+
+test("secondary member management fails closed and retries without exposing records", async ({page}) => {
+  let available = false;
+  await mock(page, (route, call) => {
+    if (call.path === "/api/client/session") return route.fulfill({json: {account: {id: "", displayName: "Client portal"}, capabilities: {workspaceHierarchyV2: true, workspaceMembershipManagement: true, hierarchyScopedInvitations: true, invitationEmailDelivery: true}}});
+    if (call.path === "/api/client/v2/workspaces/workspace-b/access") return available ? route.fulfill({json: {
+      sourceId: "project-alpha:coastal", sourceName: "Project Alpha", workspaceName: workspace("workspace-b").displayName,
+      canManageMembers: false, peerAdminManagement: false, invitationRequestsSupported: false, inviteScopes: [{type: "project", publicId: "project-shared", displayName: "Project", capabilities: ["delivery.view"], projectEndSupported: true}],
+      members: [], invitations: [], invitationPolicy: {mode: "allowed", version: 1}, projectAccessTermsSupported: true, projectAccessOptions: [],
+    }}) : route.fulfill({status: 503, json: {error: "Temporary membership failure"}});
+    return undefined;
+  });
+  await page.goto("/portal/account?workspace=workspace-b");
+  await expect(page.getByRole("alert")).toContainText("Temporary membership failure");
+  await expect(page.getByRole("heading", {name: "People"})).toHaveCount(0);
+  available = true; await page.getByRole("button", {name: "Refresh team access"}).click();
+  await expect(page.getByText("Workspace member management is not included in your current verified access.", {exact: false})).toBeVisible();
+  await expect(page.getByRole("heading", {name: "Invite a collaborator"})).toHaveCount(0);
+  await expect(page.getByRole("heading", {name: "People"})).toHaveCount(0);
+});
+
 test("a context capability and readiness mismatch fails closed before protected probes", async ({page}) => {
   const calls = await mock(page, (route, call) => call.path.endsWith("workspace-b/context") ? route.fulfill({json: {...context(), features: {...features(), directory: {state: "not_in_access", reason: "capability_not_granted"}}}}) : undefined);
   await page.goto("/portal?workspace=workspace-b");
