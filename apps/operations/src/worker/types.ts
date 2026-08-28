@@ -13,6 +13,7 @@ export type Env = Omit<
   | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED"
   | "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED"
   | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED"
+  | "PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED"
 > & {
   PROJECT_ALPHA_API_KEY?: string;
   /** Deploy-managed connector credential sets; never returned by registry APIs. */
@@ -101,6 +102,8 @@ export type Env = Omit<
   /** Mirrors the client Worker denylist rollout for safe grant recipient checks. */
   CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED?: string;
   CLIENT_PORTAL_OPERATIONS_MANAGEMENT_ENABLED?: string;
+  /** Default-off collaborator access-expiry notice reconciliation and mail. */
+  PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED?: string;
   /** Default-off explicit authenticated folder-grant management. */
   AUTHENTICATED_DELIVERY_GRANTS_ENABLED?: string;
   /** Default-off LTDS authorization/control-plane integration with the self-hosted Viewer. */

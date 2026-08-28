@@ -94,6 +94,7 @@ import {
 import { requiresAdministratorForMutation } from "./r2-crud-validation";
 import { registerClientFeedbackRoutes, staffFeedbackEntryEnabled } from "./client-feedback";
 import { processClientFeedbackNotifications } from "./client-feedback-notifications";
+import { processProjectAccessExpiryNotifications } from "./project-access-expiry-notifications";
 import {
   enqueueExpiringNotifications,
   processClientPortalRequestNotifications,
@@ -3131,6 +3132,7 @@ async function scheduled(
         processClientFolderChangeNotifications(env),
         processClientFeedbackNotifications(env),
         processViewerProcessingNotifications(env),
+        processProjectAccessExpiryNotifications(env),
       ]);
     } catch (error) {
       console.error(
