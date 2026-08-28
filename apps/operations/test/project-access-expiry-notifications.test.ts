@@ -29,6 +29,8 @@ const baseSchema = `
   CREATE TABLE portal_project_access_deadlines(access_terms_id TEXT PRIMARY KEY,deadline_at TEXT);
   CREATE TABLE portal_v2_entitlements(id TEXT PRIMARY KEY,workspace_id TEXT,identity_id TEXT,capability TEXT,effect TEXT,
     scope_type TEXT,scope_public_id TEXT,status TEXT,valid_from TEXT,expires_at TEXT,revoked_at TEXT,access_terms_id TEXT);
+  CREATE TABLE portal_v2_invitations(id TEXT PRIMARY KEY,workspace_id TEXT,invited_by_identity_id TEXT,status TEXT);
+  CREATE TABLE portal_v2_invitation_entitlements(invitation_id TEXT,access_terms_id TEXT);
   CREATE TABLE portal_v2_authenticated_delivery_grants(id TEXT PRIMARY KEY,workspace_id TEXT,audience_type TEXT,status TEXT,
     expires_at TEXT,revoked_at TEXT,access_terms_id TEXT);
   CREATE TABLE portal_v2_authenticated_delivery_grant_recipients(grant_id TEXT,workspace_id TEXT,principal_public_id TEXT,

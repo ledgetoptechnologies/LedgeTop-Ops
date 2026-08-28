@@ -1,4 +1,8 @@
 import { sendNotificationMail, smtpNotificationsEnabled, type OutboundMail } from "./mailer";
+import {
+  dispatchProjectAccessExpiryCompanionNotices,
+  reconcileProjectAccessExpiryCompanionNotices,
+} from "./project-access-expiry-companion-notifications";
 import { d1TablesPresent } from "./schema-readiness";
 import type { Env } from "./types";
 
@@ -351,6 +355,13 @@ export async function dispatchProjectAccessExpiryNotices(env: Env, dependencies:
 export async function processProjectAccessExpiryNotifications(env: Env): Promise<{enabled:boolean;staged:number;suppressed:number;processed:number}> {
   if (!enabled(env)) return {enabled:false,staged:0,suppressed:0,processed:0};
   const reconciliation = await reconcileProjectAccessExpiryNotices(env);
-  const processed = await dispatchProjectAccessExpiryNotices(env);
-  return {enabled:true,...reconciliation,processed};
+  const companionReconciliation = await reconcileProjectAccessExpiryCompanionNotices(env);
+  const processed = await dispatchProjectAccessExpiryNotices(env)
+    + await dispatchProjectAccessExpiryCompanionNotices(env);
+  return {
+    enabled:true,
+    staged:reconciliation.staged+companionReconciliation.staged,
+    suppressed:reconciliation.suppressed+companionReconciliation.suppressed,
+    processed,
+  };
 }
