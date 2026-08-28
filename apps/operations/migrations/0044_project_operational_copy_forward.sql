@@ -61,6 +61,8 @@ CREATE TABLE project_operational_copy_fences (
   destination_contacts_version INTEGER NOT NULL CHECK(destination_contacts_version>=0),
   source_memory_version INTEGER NOT NULL CHECK(source_memory_version>=0),
   destination_memory_version INTEGER NOT NULL CHECK(destination_memory_version>=0),
+  contacts_changes INTEGER NOT NULL CHECK(contacts_changes IN (0,1)),
+  memory_changes INTEGER NOT NULL CHECK(memory_changes IN (0,1)),
   requires_contacts INTEGER NOT NULL CHECK(requires_contacts IN (0,1)),
   requires_memory INTEGER NOT NULL CHECK(requires_memory IN (0,1)),
   source_contact_ids_json TEXT NOT NULL CHECK(json_valid(source_contact_ids_json) AND length(source_contact_ids_json)<=65536),
@@ -111,18 +113,16 @@ WHERE fence.write_guard=1 AND fence.source_project_id<>fence.destination_project
       WHERE item.projection_source_id=fence.projection_source_id AND item.project_id=fence.source_project_id))
     OR EXISTS(SELECT 1 FROM project_operational_contact_sets item WHERE item.projection_source_id=fence.projection_source_id
       AND item.project_id=fence.source_project_id AND item.version=fence.source_contacts_version))
-  AND ((fence.destination_contacts_version=0 AND NOT EXISTS(SELECT 1 FROM project_operational_contact_sets item
-      WHERE item.projection_source_id=fence.projection_source_id AND item.project_id=fence.destination_project_id))
-    OR EXISTS(SELECT 1 FROM project_operational_contact_sets item WHERE item.projection_source_id=fence.projection_source_id
-      AND item.project_id=fence.destination_project_id AND item.version IN (fence.destination_contacts_version,fence.destination_contacts_version+1)))
+  AND COALESCE((SELECT item.version FROM project_operational_contact_sets item
+      WHERE item.projection_source_id=fence.projection_source_id AND item.project_id=fence.destination_project_id),0)
+    BETWEEN fence.destination_contacts_version AND fence.destination_contacts_version+fence.contacts_changes
   AND ((fence.source_memory_version=0 AND NOT EXISTS(SELECT 1 FROM project_operational_memory item
       WHERE item.projection_source_id=fence.projection_source_id AND item.project_id=fence.source_project_id))
     OR EXISTS(SELECT 1 FROM project_operational_memory item WHERE item.projection_source_id=fence.projection_source_id
       AND item.project_id=fence.source_project_id AND item.version=fence.source_memory_version))
-  AND ((fence.destination_memory_version=0 AND NOT EXISTS(SELECT 1 FROM project_operational_memory item
-      WHERE item.projection_source_id=fence.projection_source_id AND item.project_id=fence.destination_project_id))
-    OR EXISTS(SELECT 1 FROM project_operational_memory item WHERE item.projection_source_id=fence.projection_source_id
-      AND item.project_id=fence.destination_project_id AND item.version IN (fence.destination_memory_version,fence.destination_memory_version+1)))
+  AND COALESCE((SELECT item.version FROM project_operational_memory item
+      WHERE item.projection_source_id=fence.projection_source_id AND item.project_id=fence.destination_project_id),0)
+    BETWEEN fence.destination_memory_version AND fence.destination_memory_version+fence.memory_changes
   AND (SELECT count(*) FROM permissions required
     WHERE required.key IN ('team.view','projects.view')
       AND (EXISTS(SELECT 1 FROM staff_role_assignments assignment JOIN role_permissions grant_row ON grant_row.role_id=assignment.role_id

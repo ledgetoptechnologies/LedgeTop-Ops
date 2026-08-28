@@ -48,7 +48,8 @@ interface CopyPlan { input: PreviewRecurringProjectCopyInput; context: ClientHub
   contactConflicts: number; memoryConflicts: ProjectMemorySection[]; copiedContacts: number; copiedMemorySections: ProjectMemorySection[];
   sourceContactIds: string[]; fingerprint: string }
 interface ReceiptRow { request_fingerprint: string; preview_fingerprint: string; projection_source_id: string;
-  source_project_id: string; destination_project_id: string; result_json: string }
+  source_project_id: string; destination_project_id: string; root_record_kind: "organization" | "client";
+  root_id: string; result_json: string }
 
 export interface RecurringProjectCopyPreview {
   fingerprint: string;
@@ -314,12 +315,14 @@ function copyFence(db: Database, plan: CopyPlan, principal: StaffPrincipal, idem
   return db.prepare(`INSERT INTO project_operational_copy_fences(actor_id,idempotency_key,projection_source_id,
       source_project_id,destination_project_id,root_record_kind,root_id,root_last_sync_id,source_project_last_sync_id,
       destination_project_last_sync_id,source_contacts_version,destination_contacts_version,source_memory_version,
-      destination_memory_version,requires_contacts,requires_memory,source_contact_ids_json,receipt_writes,write_guard)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,CASE WHEN ${evaluatedGuard} THEN 1 ELSE 0 END)`)
+      destination_memory_version,contacts_changes,memory_changes,requires_contacts,requires_memory,source_contact_ids_json,
+      receipt_writes,write_guard)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,CASE WHEN ${evaluatedGuard} THEN 1 ELSE 0 END)`)
     .bind(principal.id, idempotencyKey, context.root.source_id, plan.pair.source.id, plan.pair.destination.id,
       rootKind(context), context.root.public_id, plan.pair.root.last_sync_id, plan.pair.source.last_sync_id,
       plan.pair.destination.last_sync_id, plan.source.contactsVersion, plan.destination.contactsVersion,
-      plan.source.memoryVersion, plan.destination.memoryVersion, needsContacts ? 1 : 0, needsMemory ? 1 : 0,
+      plan.source.memoryVersion, plan.destination.memoryVersion, plan.contactsChanged ? 1 : 0, plan.memoryChanged ? 1 : 0,
+      needsContacts ? 1 : 0, needsMemory ? 1 : 0,
       JSON.stringify(plan.sourceContactIds), ...guardValues);
 }
 
@@ -395,14 +398,16 @@ export async function commitRecurringProjectCopy(env: Environment, principal: St
   const requestFingerprint = await sha({ ...input, idempotencyKey: undefined });
   const db = database(env);
   const receipt = await db.prepare(`SELECT request_fingerprint,preview_fingerprint,projection_source_id,source_project_id,
-      destination_project_id,result_json FROM project_operational_copy_receipts WHERE actor_id=? AND idempotency_key=?`)
+      destination_project_id,root_record_kind,root_id,result_json FROM project_operational_copy_receipts
+      WHERE actor_id=? AND idempotency_key=?`)
     .bind(principal.id, input.idempotencyKey).first<ReceiptRow>();
   if (receipt) {
     if (receipt.request_fingerprint !== requestFingerprint || receipt.preview_fingerprint !== input.previewFingerprint
       || receipt.projection_source_id !== context.root.source_id || receipt.source_project_id !== input.sourceProjectId
-      || receipt.destination_project_id !== input.destinationProjectId)
+      || receipt.destination_project_id !== input.destinationProjectId || receipt.root_record_kind !== rootKind(context)
+      || receipt.root_id !== context.root.public_id)
       throw new HTTPException(409, { message: "This operation key was already used for a different copy" });
-    await authorizePair(env, principal, context, input, { enforceExpectedContext: false, enforceDestinationOpen: false });
+    await authorizePair(env, principal, context, input, { enforceDestinationOpen: false });
     try { return { ...(JSON.parse(receipt.result_json) as RecurringProjectCopyResult), replayed: true }; }
     catch { throw new HTTPException(503, { message: "Saved copy receipt requires administrative review" }); }
   }

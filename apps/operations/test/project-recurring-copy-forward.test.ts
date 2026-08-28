@@ -63,7 +63,8 @@ async function fixture(options: { sourceStatus?: string; destinationStatus?: str
 }
 
 async function seedSource(item: Fixture, options: { sourceInstructions?: string; sourcePlan?: string; destinationInstructions?: string;
-  destinationPlan?: string; sourcePreferredContactMethod?: "email" | "phone" | "text" | null } = {}) {
+  destinationPlan?: string; sourcePreferredContactMethod?: "email" | "phone" | "text" | null;
+  destinationPreferredContactMethod?: "email" | "phone" | "text" | null } = {}) {
   let sourceContacts = 0, destinationContacts = 0, sourceMemory = 0, destinationMemory = 0;
   if (options.sourceInstructions !== undefined) {
     await saveProjectOperationalContacts(env, owner, item.context, item.sourceProjectId, { expectedContextVersion: item.context.contextVersion,
@@ -74,7 +75,8 @@ async function seedSource(item: Fixture, options: { sourceInstructions?: string;
   if (options.destinationInstructions !== undefined) {
     await saveProjectOperationalContacts(env, owner, item.context, item.destinationProjectId, { expectedContextVersion: item.context.contextVersion,
       expectedVersion: 0, idempotencyKey: key(), assignments: [{ contactId: item.contactId, role: "project_contact",
-        preferredContactMethod: "phone", instructions: options.destinationInstructions }, { contactId: item.secondContactId,
+        preferredContactMethod: options.destinationPreferredContactMethod === undefined ? "phone" : options.destinationPreferredContactMethod,
+        instructions: options.destinationInstructions }, { contactId: item.secondContactId,
         role: "site_contact", preferredContactMethod: "phone", instructions: "Destination only" }] }); destinationContacts = 1;
   }
   if (options.sourcePlan !== undefined) {
@@ -97,6 +99,24 @@ function request(item: Fixture, state: Awaited<ReturnType<typeof seedSource>>, o
       destinationProjectRevision: item.context.root.source_version!.replace("root", "destination"),
       sourceContactsVersion: state.sourceContacts, destinationContactsVersion: state.destinationContacts,
       sourceMemoryVersion: state.sourceMemory, destinationMemoryVersion: state.destinationMemory }, ...overrides };
+}
+
+function racingDatabase(action: () => Promise<void>): D1Database {
+  const raw = db, statements = new WeakMap<D1PreparedStatement, D1PreparedStatement>(); let fired = false;
+  const wrap = (statement: D1PreparedStatement): D1PreparedStatement => { const proxy = new Proxy(statement, { get(target, property) {
+    if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values));
+    const value = Reflect.get(target, property, target); return typeof value === "function" ? value.bind(target) : value;
+  } }); statements.set(proxy, statement); return proxy; };
+  const proxy = new Proxy(raw, { get(target, property) {
+    if (property === "withSession") return () => proxy;
+    if (property === "prepare") return (sql: string) => wrap(target.prepare(sql));
+    if (property === "batch") return async <T>(values: D1PreparedStatement[]) => {
+      if (!fired) { fired = true; await action(); }
+      return target.batch<T>(values.map(value => statements.get(value) ?? value));
+    };
+    const value = Reflect.get(target, property, target); return typeof value === "function" ? value.bind(target) : value;
+  } }) as D1Database;
+  return proxy;
 }
 
 beforeAll(async () => {
@@ -193,6 +213,39 @@ describe("recurring project operational copy-forward", () => {
     expect(saved.destination).toMatchObject({ contactsVersionAfter: 1, memoryVersionAfter: 1 });
   }, TIMEOUT);
 
+  it("fails closed when a no-op destination overlay advances immediately before the atomic batch", async () => {
+    const contact = await fixture(), contactState = await seedSource(contact, { sourceInstructions: "Same",
+      sourcePreferredContactMethod: "email", destinationInstructions: "Same", destinationPreferredContactMethod: "email" });
+    const contactInput = request(contact, contactState, { selectedMemorySections: [] }),
+      contactPreview = await previewRecurringProjectCopy(env, owner, contact.context, contactInput), contactKey = key();
+    expect(contactPreview.changes.contactsChanged).toBe(false);
+    const contactRace = racingDatabase(async () => {
+      await saveProjectOperationalContacts(env, owner, contact.context, contact.destinationProjectId, {
+        expectedContextVersion: contact.context.contextVersion, expectedVersion: 1, idempotencyKey: key(), assignments: [
+          { contactId: contact.contactId, role: "project_contact", preferredContactMethod: "email", instructions: "Same" },
+          { contactId: contact.secondContactId, role: "site_contact", preferredContactMethod: "phone", instructions: "Destination only" },
+        ] });
+    });
+    await expect(commitRecurringProjectCopy({ OPS_DB: contactRace }, owner, contact.context, { ...contactInput,
+      previewFingerprint: contactPreview.fingerprint, idempotencyKey: contactKey })).rejects.toMatchObject({ status: 409 });
+    expect(await db.prepare("SELECT count(*) count FROM project_operational_copy_receipts WHERE actor_id=? AND idempotency_key=?")
+      .bind(owner.id, contactKey).first("count")).toBe(0);
+
+    const memoryItem = await fixture(), memoryState = await seedSource(memoryItem, { sourcePlan: "Same plan", destinationPlan: "Same plan" });
+    const memoryInput = request(memoryItem, memoryState, { selectedContactRoles: [], selectedMemorySections: ["plan"] }),
+      memoryPreview = await previewRecurringProjectCopy(env, owner, memoryItem.context, memoryInput), memoryKey = key();
+    expect(memoryPreview.changes.memoryChanged).toBe(false);
+    const memoryRace = racingDatabase(async () => {
+      await saveProjectMemory(env, owner, memoryItem.context, memoryItem.destinationProjectId, {
+        expectedContextVersion: memoryItem.context.contextVersion, expectedVersion: 1, idempotencyKey: key(),
+        memory: memory({ plan: "Same plan", successes: "Destination success", recommendations: "Concurrent update" }) });
+    });
+    await expect(commitRecurringProjectCopy({ OPS_DB: memoryRace }, owner, memoryItem.context, { ...memoryInput,
+      previewFingerprint: memoryPreview.fingerprint, idempotencyKey: memoryKey })).rejects.toMatchObject({ status: 409 });
+    expect(await db.prepare("SELECT count(*) count FROM project_operational_copy_receipts WHERE actor_id=? AND idempotency_key=?")
+      .bind(owner.id, memoryKey).first("count")).toBe(0);
+  }, TIMEOUT);
+
   it("fails closed for self-copy, wrong roots/sources, inactive and terminal destinations", async () => {
     const item = await fixture(), state = await seedSource(item, { sourcePlan: "Plan" }), base = request(item, state);
     await expect(previewRecurringProjectCopy(env, owner, item.context, { ...base, destinationProjectId: item.sourceProjectId }))
@@ -236,21 +289,8 @@ describe("recurring project operational copy-forward", () => {
 
     const raced = await fixture(), racedState = await seedSource(raced, { sourcePlan: "Race" }), racedInput = request(raced, racedState,
       { selectedContactRoles: [] }), racedPreview = await previewRecurringProjectCopy(env, owner, raced.context, racedInput);
-    const raw = db, statements = new WeakMap<D1PreparedStatement, D1PreparedStatement>(); let fired = false;
-    const wrap = (statement: D1PreparedStatement): D1PreparedStatement => { const proxy = new Proxy(statement, { get(target, property) {
-      if (property === "bind") return (...values: unknown[]) => wrap(target.bind(...values));
-      const value = Reflect.get(target, property, target); return typeof value === "function" ? value.bind(target) : value;
-    } }); statements.set(proxy, statement); return proxy; };
-    const racingDb = new Proxy(raw, { get(target, property) {
-      if (property === "withSession") return () => racingDb;
-      if (property === "prepare") return (sql: string) => wrap(target.prepare(sql));
-      if (property === "batch") return async <T>(values: D1PreparedStatement[]) => {
-        if (!fired) { fired = true; await raw.prepare("UPDATE pa_projects SET last_sync_id=last_sync_id||'-race' WHERE id=?")
-          .bind(raced.destinationProjectId).run(); }
-        return target.batch<T>(values.map(value => statements.get(value) ?? value));
-      };
-      const value = Reflect.get(target, property, target); return typeof value === "function" ? value.bind(target) : value;
-    } }) as D1Database;
+    const racingDb = racingDatabase(async () => { await db.prepare("UPDATE pa_projects SET last_sync_id=last_sync_id||'-race' WHERE id=?")
+      .bind(raced.destinationProjectId).run(); });
     await expect(commitRecurringProjectCopy({ OPS_DB: racingDb }, owner, raced.context, { ...racedInput,
       previewFingerprint: racedPreview.fingerprint, idempotencyKey: key() })).rejects.toMatchObject({ status: 409 });
   }, TIMEOUT);
@@ -269,6 +309,26 @@ describe("recurring project operational copy-forward", () => {
       .bind(item.destinationProjectId).first("count")).toBe(0);
     await commitRecurringProjectCopy(env, owner, item.context, { ...input, previewFingerprint: preview.fingerprint, idempotencyKey });
     await expect(commitRecurringProjectCopy(env, owner, item.context, { ...input, conflictPolicy: "replace_source",
+      previewFingerprint: preview.fingerprint, idempotencyKey })).rejects.toMatchObject({ status: 409 });
+  }, TIMEOUT);
+
+  it("binds idempotent replay to the receipt's original exact canonical root", async () => {
+    const item = await fixture(), state = await seedSource(item, { sourcePlan: "Copy once" }), input = request(item, state,
+      { selectedContactRoles: [] }), preview = await previewRecurringProjectCopy(env, owner, item.context, input), idempotencyKey = key();
+    await commitRecurringProjectCopy(env, owner, item.context, { ...input, previewFingerprint: preview.fingerprint, idempotencyKey });
+    const reassignedRoot = `copy-reassigned-org-${sequence}`;
+    await db.batch([
+      db.prepare(`INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id)
+        VALUES(?,?,?,?)`).bind(SOURCE, "organization", reassignedRoot, reassignedRoot),
+      db.prepare("INSERT INTO pa_organizations(id,name,active,payload_json,last_sync_id,projection_source_id) VALUES(?,?,1,'{}',?,?)")
+        .bind(reassignedRoot, "Reassigned Organization", `reassigned-sync-${sequence}`, SOURCE),
+      db.prepare("UPDATE pa_projects SET organization_id=? WHERE id IN (?,?)")
+        .bind(reassignedRoot, item.sourceProjectId, item.destinationProjectId),
+    ]);
+    const reassignedContext: ClientHubCollectionContext = { ...item.context, root: { ...item.context.root,
+      public_id: reassignedRoot, pa_public_id: reassignedRoot, display_name: "Reassigned Organization",
+      source_version: `reassigned-sync-${sequence}` }, canonicalRoot: { ...item.context.canonicalRoot, publicId: reassignedRoot } };
+    await expect(commitRecurringProjectCopy(env, owner, reassignedContext, { ...input,
       previewFingerprint: preview.fingerprint, idempotencyKey })).rejects.toMatchObject({ status: 409 });
   }, TIMEOUT);
 });
