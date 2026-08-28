@@ -88,10 +88,12 @@ the consumer to pre-terms code is not a rollback strategy.
   automatically customer grants merely because they came from Alpha.
 - Organization policy administration and the actual staff approval workflow;
   `require_approval` must not silently approve a new client invitation.
-- Collaborator expiry notices now have a locally verified, default-off durable
-  backend for 7-day, 24-hour, and expired stages with current exact-authority
-  rechecks. Joined staging mail acceptance, inviter-specific product policy,
-  and any UI remain pending; see `project-access-expiry-notifications.md`.
+- Collaborator expiry notices now have locally verified, default-off,
+  independently durable ledgers for the collaborator and the exact inviter or
+  principal-grant access creator. Seven-day, 24-hour, and expired stages use
+  current exact-origin and authority rechecks, final recipient reads, and
+  duplicate-email suppression. Joined staging mail acceptance and any UI remain
+  pending; see `project-access-expiry-notifications.md`.
 - Peer organization administrators, a reusable address book, and the unified
   filtered access/content audit timeline.
 - Joined real-source/client workflow acceptance and coordinated release.

@@ -2,9 +2,11 @@
 
 Status: locally verified, default off, not migrated or enabled in production.
 
-Migration `0169_project_access_expiry_notifications.sql` adds a durable notice
-outbox and immutable audit history to the Client/Delivery database. Operations
-owns the bounded scheduled processor. This feature observes existing explicit
+Migration `0169_project_access_expiry_notifications.sql` adds separate durable
+collaborator and companion outboxes with immutable audit history to the
+Client/Delivery database. Operations owns the bounded scheduled processor. A
+collaborator send and an inviter/access-creator send have independent state,
+leases, retries, audit identities, and stable Message-IDs. This feature observes existing explicit
 project access terms; it never grants, extends, revokes, expires, or cleans up
 membership, entitlements, authenticated grants, delegations, or shares.
 
@@ -40,13 +42,54 @@ If a pending earlier warning becomes obsolete, it is terminally suppressed.
 Sent history remains immutable. Each term, identity, event, and effective
 deadline has one deterministic outbox identity and one stable SMTP Message-ID.
 
+## Companion recipient policy
+
+One generic companion notice is eligible only when its creation origin remains
+exact and current:
+
+- Invitation access follows `access term -> invitation entitlement -> accepted
+  invitation -> invited_by_identity_id`. The inviter must still be an active
+  portal identity with a live membership in that same workspace and no active
+  applicable identity denial. The current collaborator authority must belong
+  exactly to the invitation's `accepted_by_identity_id`; an unrelated identity
+  on the same term does not preserve the invitation origin. A separately
+  recorded staff approval actor is never treated as the inviter.
+- Authenticated access follows `access term -> exact-principal grant ->
+  created_by_staff_id`. The grant must still bind the same active project folder
+  and source version, retain a current exact principal recipient, and have one
+  current active Operations staff creator. The mail describes that person as
+  the access creator, never as a manager.
+
+Multiple invitation origins for one term, or multiple active matching grants
+from one creator, are ambiguous and fail closed. Group/dynamic, legacy,
+unlinked, revoked, inactive, cross-workspace, cross-source, and cross-project
+origins are excluded. Both origin and actor are checked again immediately
+before delivery, and the final read supplies the current verified email. If
+that address is already a current collaborator recipient address for the term,
+the companion row is terminally suppressed as `duplicate-recipient` rather
+than sending the person two messages. The same rule applies across inviter and
+access-creator rows: a deterministic inviter-first ordering selects one current
+recipient. Dispatch first uses a short-lived, token-fenced SHA-256 reservation;
+an unsent reservation is released if that actor's final address changes. Only
+the stable address is promoted to an immutable SHA-256 recipient claim
+immediately before SMTP. That claim suppresses later duplicates, including an
+accepted-but-not-yet-acknowledged retry, without sharing delivery state or
+storing the address.
+
+Migration 0169 also makes both `invited_by_identity_id` and
+`accepted_by_identity_id` immutable after an invitation is accepted or linked
+to explicit project access terms, and blocks `INSERT OR REPLACE` from bypassing
+that provenance. A pending, unlinked invitation can still be corrected, the one
+legitimate pending-to-accepted identity assignment remains allowed, and
+workspace cascades remain unaffected.
+
 ## Delivery safety
 
 The processor is inert unless
 `PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED=true`. The checked-in Wrangler
 configuration sets it to `false`. It shares the existing five-minute
-notification invocation but has its own bounded work: at most 100 reconciliation
-candidates and 20 dispatch candidates per invocation. A claimed notice has a
+notification invocation but each isolated ledger has bounded work: at most 100
+reconciliation candidates and 20 dispatch candidates per invocation. A claimed notice has a
 five-minute token-fenced lease. Delivery is attempted at most three times; an
 abandoned third lease is terminally failed.
 
@@ -63,6 +106,15 @@ the shared binding adapter does not carry the outbox `messageIdKey` into a stabl
 RFC Message-ID. Binding-only or incomplete SMTP configuration terminally
 suppresses the notice as `mail-disabled`; it does not fall back to a delivery
 whose retry identity cannot be preserved.
+
+After a companion wins its normalized-email reservation, dispatch verifies its
+live lease and performs another complete origin, authority, denial, membership,
+and recipient-email read. A changed email releases the unsent reservation and
+is re-evaluated; denial or membership loss suppresses the row. Once the final
+email matches its reservation, dispatch creates the immutable claim, composes
+the message, and performs one final joined outbox-token, lease, reservation,
+and claim fence immediately before SMTP. The address captured before the final
+read is never used for delivery, and an expired or reclaimed owner cannot send.
 
 Migration 0169 also adds missing update guards to the older
 `portal_v2_membership_audit` and `client_delegated_share_events` ledgers.
@@ -88,7 +140,7 @@ or flag enablement is authorized by this document.
 
 ## Verified locally
 
-The focused twelve-case Miniflare/real-D1 suite covers populated migration and
+The collaborator-focused twelve-case Miniflare/real-D1 suite covers populated migration and
 replay, immutable old and new histories, default-off behavior, exact-recipient
 and tenant isolation, dynamic-audience exclusion, deterministic replay,
 obsolete warning suppression, authority revocation before send, expired-term
@@ -101,7 +153,19 @@ reads and proves that only the final address can be sent. Transport coverage
 proves binding-only configuration is refused and the SMTP adapter renders the
 stable outbox key as the RFC Message-ID.
 
+The companion-focused real-D1 suite additionally covers populated migration
+replay, immutable companion history, exact invitation and principal-grant
+origins, approval-actor exclusion, ambiguous and dynamic-origin rejection,
+accepted-identity mismatch, inviter-denial and inactive/revoked/cross-project
+rejection, immutable accepted invitation provenance, cross-role normalized-email
+deduplication, current inviter/staff email reads, preflight-to-final and
+post-claim email/denial/membership races, and
+independent capped retry state with redacted errors and stable Message-ID.
+
 Remaining acceptance is a joined staging run with the actual mail transport,
-current Client reader, and Project Alpha projection. The processor intentionally
-does not notify inviters separately and does not display notice history in the
-staff or client UI; both require an explicitly approved product workflow.
+current Client reader, and Project Alpha projection. Staff with the current exact Client Hub
+scope and portal-management permission can read the allowlisted, redacted notice
+lifecycle in the unified client/project timeline after migration 0169 is ready.
+That timeline is notification history only: it exposes no recipient, identity,
+outbox, error or authority detail and does not infer access revocation or mail
+receipt. Client-facing notice history remains outside this workflow.

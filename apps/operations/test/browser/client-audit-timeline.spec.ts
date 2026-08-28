@@ -19,6 +19,11 @@ const accessCoverage = {
   delegated_client_share: { available: false, reason: "permission_required" },
   viewer_client_grant: { available: false, reason: "permission_required" }, project_access: { available: false, reason: "not_collected" },
 };
+const notificationCoverage = {
+  delivery_share_notification: { available: false, reason: "permission_required" },
+  project_access_collaborator_notice: { available: false, reason: "not_collected" },
+  project_access_companion_notice: { available: false, reason: "not_collected" },
+};
 type Filters = { category: string; actorType: string; result: string; from: string | null; to: string | null };
 function item(id: string, overrides: Record<string, unknown> = {}) {
   return { id, sourceId: source, producer: "portal_access", producerEventId: `event-${id}`, category: "access", action: "member_denied",
@@ -30,7 +35,8 @@ function filters(url: URL): Filters {
     result: url.searchParams.get("result") || "all", from: url.searchParams.get("from"), to: url.searchParams.get("to") };
 }
 function timeline(url: URL, items = [item("one")], nextCursor: string | null = null, contextVersion = "client-context", projectId: string | null = null) {
-  return { canonicalRoot, projectId, contextVersion, refreshedAt: asOf, asOf, coverage, accessCoverage, filters: filters(url), items,
+  return { canonicalRoot, projectId, contextVersion, refreshedAt: asOf, asOf, coverage, accessCoverage, notificationCoverage,
+    filters: filters(url), items,
     page: { nextCursor, hasMore: Boolean(nextCursor), returned: items.length, limit: 10 } };
 }
 function clientDetail() {
@@ -46,6 +52,15 @@ function projectDetail() {
     project: { id: "project-one", name: "Church survey", status: "active", description: null, start_date: null, end_date: null, created_at: null, manager: null },
     linkedContact: null, availability: { linkedContact: "not_projected", siteContacts: "not_projected", billingContacts: "not_projected", projectMemory: "not_projected" } };
 }
+function operationalWorkspace() {
+  return { canonicalRoot, contextVersion: "project-context",
+    project: { id: "project-one", sourceId: source, status: "active", revision: "project-one-revision" },
+    contacts: { version: 0, assignments: [], revisions: [] },
+    memory: { version: 0, snapshot: { plan: "", actualOutcome: "", deviationsAndReasons: "", observations: "", problems: "",
+      successes: "", recommendations: "", nextTimeRequests: "" }, revisions: [] },
+    capabilities: { canManageContacts: false, canManageMemory: false }, contactOptions: [],
+    contactPage: { available: false, reason: "permission_required", nextCursor: null, hasMore: false, returned: 0, limit: 25 } };
+}
 type Handler = (route: Route, url: URL) => Promise<unknown>;
 async function fixture(page: Page, timelineHandler: Handler) {
   const calls: URL[] = [];
@@ -56,6 +71,10 @@ async function fixture(page: Page, timelineHandler: Handler) {
       timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {} } });
     if (url.pathname === clientApi) return route.fulfill({ json: clientDetail() });
     if (url.pathname === projectApi) return route.fulfill({ json: projectDetail() });
+    if (url.pathname === `${projectApi}/operational-workspace`) return route.fulfill({ json: operationalWorkspace() });
+    if (url.pathname === `${clientApi}/collections/businessProjects`) return route.fulfill({ json: { canonicalRoot,
+      contextVersion: "project-context", items: [{ id: "project-one", name: "Church survey", status: "active", row_key: "business:project-one" }],
+      page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 25 } } });
     if (url.pathname === `${clientApi}/timeline` || url.pathname === `${projectApi}/timeline`) return timelineHandler(route, url);
     return route.fulfill({ status: 404, json: { error: "Unsupported fixture route" } });
   });
@@ -84,6 +103,9 @@ test("client timeline applies exact server filters, discloses coverage, and retr
   await expect(section.getByText(/empty result does not prove/i)).toBeVisible();
   await expect(section.getByText("not collected", { exact: true }).first()).toBeVisible();
   await expect(section.getByText("Access · project access", { exact: true })).toBeVisible();
+  await expect(section.getByText("Notifications · project access collaborator notice", { exact: true })).toBeVisible();
+  await expect(section.getByText("Notifications · project access companion notice", { exact: true })).toBeVisible();
+  await expect(section.getByText("Notifications · delivery share notification", { exact: true })).toBeVisible();
   await expect(section.getByText("permission required", { exact: true }).first()).toBeVisible();
   const first = calls.find(url => url.pathname.endsWith("/timeline"))!;
   expect(Object.fromEntries(["category", "actorType", "result", "from", "to", "limit", "expectedContextVersion"].map(key => [key, first.searchParams.get(key)]))).toEqual({
@@ -119,19 +141,26 @@ test("invalid dates and malformed responses fail locally without inventing event
 });
 
 test("project timeline uses the child route, invalidates stale context, and parent refresh cancels a pending page", async ({ page }) => {
-  let pending: Route | null = null, mode: "pending" | "mismatch" = "pending";
+  const pending: Route[] = [];
+  let mode: "pending" | "mismatch" = "pending";
   const calls = await fixture(page, async (route, url) => {
-    if (mode === "pending") { pending = route; return; }
+    if (mode === "pending") { pending.push(route); return; }
     return route.fulfill({ status: 409, json: { error: "The project context changed. Refresh and retry." } });
   });
   await page.goto(projectPath);
   let section = projectTimeline(page);
   await section.getByRole("button", { name: "Apply timeline filters" }).click();
-  await expect.poll(() => Boolean(pending)).toBe(true);
+  await expect.poll(() => pending.length).toBe(1);
+  const stale = pending[0]!;
   await page.getByRole("button", { name: "Refresh project", exact: true }).click();
-  await expect(projectTimeline(page).getByText("Apply filters to load the timeline.", { exact: true })).toBeVisible();
-  await pending!.fulfill({ json: timeline(new URL(pending!.request().url()), [item("late")], null, "project-context", "project-one") }).catch(() => undefined);
+  // Applied filters are URL state, so a parent refresh intentionally restores
+  // them in a new child request while aborting the request from the old tree.
+  await expect.poll(() => pending.length).toBe(2);
+  await stale.fulfill({ json: timeline(new URL(stale.request().url()), [item("late")], null, "project-context", "project-one") }).catch(() => undefined);
   await expect(page.getByText("Alex Client", { exact: true })).toHaveCount(0);
+  const current = pending[1]!;
+  await current.fulfill({ json: timeline(new URL(current.request().url()), [], null, "project-context", "project-one") });
+  await expect(projectTimeline(page).getByText("No matching events are available within the reported coverage.", { exact: true })).toBeVisible();
   mode = "mismatch"; section = projectTimeline(page);
   await section.getByRole("button", { name: "Apply timeline filters" }).click();
   await expect(page.getByRole("alert")).toContainText("context changed");

@@ -33,15 +33,18 @@ Filters are `category`, `actorType`, `result`, optional canonical ISO `from` and
 `expectedContextVersion` binds the initial browser request to the current Client
 Hub workspace. The server echoes normalized filters and returns explicit
 coverage for all six categories. `accessCoverage` separately reports every
-access adapter, so one available ledger cannot hide permission-required,
-unsupported, not-applicable, or not-collected adapters.
+access adapter, while `notificationCoverage` distinguishes delivery-share,
+project-access collaborator, and project-access companion notices. One available ledger therefore
+cannot hide permission-required, unsupported, not-applicable, or not-collected
+adapters.
 
-The AES-GCM cursor is actor-bound and includes the exact source-qualified root,
+The version-five AES-GCM cursor is actor-bound and includes the exact source-qualified root,
 optional project, normalized filters, current context and scope proofs, an
-`asOf` time, bounded producer high-water marks, the last global sort tuple and a
-30-minute expiry. A cursor authorizes nothing. Every continuation repeats live
-authorization. Items sort by event time descending, producer and immutable
-event ID, and each producer query is bounded to `limit + 1`.
+`asOf` time, bounded producer high-water marks, separate collaborator/companion notice schema
+readiness, the last global sort tuple and a 30-minute expiry. A cursor authorizes
+nothing. Every continuation repeats live authorization and schema-readiness
+checks. Items sort by event time descending, producer and immutable event ID,
+and each producer query is bounded to `limit + 1`.
 
 The checkpoint includes:
 
@@ -55,7 +58,11 @@ The checkpoint includes:
   current root/project mapping and the corresponding staff permission are
   both present;
 - primary/local staff delivery-link lifecycle and its durable notification
-  outcomes.
+  outcomes;
+- migration-0169 collaborator, inviter, and access-creator project-access notice
+  staging, sending, suppression, retry and terminal failure outcomes for the
+  exact current primary workspace and, where selected, exact source-qualified
+  project.
 
 Portal workspace access rows require exact current global `operations.manage`;
 its SQL-scope proof is cursor-bound and re-read after bounded ledger queries.
@@ -78,9 +85,13 @@ manifest, preview, map and download events are intentionally excluded as noisy
 content reads rather than access-authority changes.
 
 `portal_project_access_terms` and deadline tables contain current immutable
-terms, but there is no project-access audit ledger in the current schema. This
-increment reports `project_access` as `not_collected`; it does not reconstruct
-history from present state.
+terms, but they are current authority rather than an authority-event ledger.
+`project_access` therefore remains honestly `not_collected`. Migration 0169's
+collaborator and companion notice audits are exposed separately as notification history and never presented
+as proof that access was granted, revoked, expired or received. Before the two
+collaborator or companion tables are present, their respective notification
+coverage is `not_collected`; deploy-before-migration and partially applied
+upgrades remain honest and safe.
 
 Feedback remains `not_collected` in this endpoint. The existing project
 feedback history keeps its stricter per-record scope checks until a bulk adapter
@@ -91,10 +102,15 @@ the meaningful-content and noise policy is unresolved.
 
 ## Redaction and retention boundary
 
-Adapters select allowlisted actions and columns only. Responses never include raw
+Adapters rejoin each notice audit and outbox row to the exact authoritative
+`portal_project_access_terms` workspace/source/project tuple, then select
+allowlisted actions, recipient roles, event types and columns only. Project-access
+notice resources use the generic label `Project access notice`; results are
+limited to succeeded, failed or informational and cannot imply access authority
+or delivery receipt. Responses never include raw
 `details_json`, request snapshots or notes, feedback text, identity IDs, email
 addresses, IP hashes, user agents, storage paths, item references, bearer URLs,
-tokens, reasons, idempotency keys, legacy account IDs, or authorization proofs.
+tokens, outbox IDs, errors, reasons, idempotency keys, legacy account IDs, or authorization proofs.
 Access resources use generic labels and contain no subject, actor, invitation,
 grant, delegation, share or folder IDs. Actor output is only a safe kind and
 generic label.
@@ -114,10 +130,11 @@ describe the timeline as a complete lifetime record.
 
 ## Verification and release
 
-Focused D1 tests cover the seven available access ledgers, strict redaction,
+Focused D1 tests cover the seven available access ledgers, both migration-0169
+notification ledgers, authoritative-term mismatch rejection, strict redaction,
 meaningful-event allowlists, exact project/sibling isolation, stable high-water
 pagination, malformed cross-workspace rejection, mid-read permission loss,
-per-adapter coverage, category/actor/result/date filters, actor/filter/scope-bound
+per-adapter coverage and pre-migration not-collected behavior, category/actor/result/date filters, actor/filter/scope-bound
 continuation and exact secondary source-only coverage. Focused browser tests
 cover refresh/back/forward restoration of every applied filter, preservation
 of unrelated query parameters, reset behavior, 44-pixel controls and

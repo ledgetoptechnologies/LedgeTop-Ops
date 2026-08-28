@@ -32,6 +32,11 @@ export const CLIENT_AUDIT_TIMELINE_ACCESS_ADAPTERS = [
 ] as const;
 export type ClientAuditTimelineAccessAdapter = (typeof CLIENT_AUDIT_TIMELINE_ACCESS_ADAPTERS)[number];
 
+export const CLIENT_AUDIT_TIMELINE_NOTIFICATION_ADAPTERS = [
+  "delivery_share_notification", "project_access_collaborator_notice", "project_access_companion_notice",
+] as const;
+export type ClientAuditTimelineNotificationAdapter = (typeof CLIENT_AUDIT_TIMELINE_NOTIFICATION_ADAPTERS)[number];
+
 export interface ClientAuditTimelineItem {
   /** Namespaced, opaque event key. It is not a storage key or authorization handle. */
   id: string;
@@ -62,6 +67,7 @@ export interface ClientAuditTimelinePage {
   asOf: string;
   coverage: Record<ClientAuditTimelineCategory, ClientAuditTimelineCoverage>;
   accessCoverage: Record<ClientAuditTimelineAccessAdapter, ClientAuditTimelineCoverage>;
+  notificationCoverage: Record<ClientAuditTimelineNotificationAdapter, ClientAuditTimelineCoverage>;
   filters: ClientAuditTimelineFilters;
   items: ClientAuditTimelineItem[];
   page: { nextCursor: string | null; hasMore: boolean; returned: number; limit: number };

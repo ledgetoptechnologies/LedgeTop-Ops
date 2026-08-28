@@ -72,7 +72,7 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
         entity_type TEXT NOT NULL,entity_id TEXT NOT NULL,details_json TEXT,created_at TEXT NOT NULL);
       CREATE TABLE portal_v2_membership_audit(id TEXT PRIMARY KEY,workspace_id TEXT,actor_identity_id TEXT,
         action TEXT,created_at TEXT);
-      CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,project_alpha_source_id TEXT);
+      CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,project_alpha_source_id TEXT,status TEXT);
       CREATE TABLE portal_v2_authenticated_delivery_grant_audit(id TEXT PRIMARY KEY,grant_id TEXT,workspace_id TEXT,
         action TEXT,created_at TEXT);
       CREATE TABLE portal_v2_authenticated_delivery_grants(id TEXT PRIMARY KEY,workspace_id TEXT,folder_binding_id TEXT);
@@ -98,8 +98,8 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
       INSERT INTO client_business_activity_state VALUES(1,1);
       CREATE TABLE client_business_activity(sequence INTEGER PRIMARY KEY);`);
     await delivery.batch([
-      delivery.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace-one','project-alpha:primary')"),
-      delivery.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace-other','project-alpha:secondary')"),
+      delivery.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace-one','project-alpha:primary','active')"),
+      delivery.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace-other','project-alpha:secondary','active')"),
       delivery.prepare("INSERT INTO client_accounts VALUES(?, 'active',NULL,NULL,NULL)").bind(accountId),
       delivery.prepare("INSERT INTO projects VALUES('project-local',1,NULL,NULL,'Private project label')"),
       delivery.prepare("INSERT INTO client_project_grants VALUES(?,'project-local','2026-08-01T00:00:00.000Z',NULL)").bind(accountId),
@@ -313,5 +313,102 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
       expect(result.accessCoverage.viewer_client_grant).toEqual({ available: false, reason: "permission_required" });
       expect(result.accessCoverage.project_access).toEqual({ available: false, reason: "not_collected" });
     } finally { projectPolicy.deliveryAudit = true; projectPolicy.viewerManage = true; }
+  });
+
+  it("reports project-access notices as not collected before migration 0169 is ready", async () => {
+    const result = await listClientAuditTimeline(env, staff, primaryContext(), { projectId: "project-one", limit: 10,
+      filters: { category: "notification", actorType: "all", result: "all", from: null, to: null } });
+    expect(result.notificationCoverage.project_access_collaborator_notice).toEqual({ available: false, reason: "not_collected" });
+    expect(result.notificationCoverage.project_access_companion_notice).toEqual({ available: false, reason: "not_collected" });
+    expect(result.items).toEqual([]);
+  });
+
+  it("federates redacted project-access notices with exact root/project scope and a stable high-water", async () => {
+    await delivery.exec(`
+      CREATE TABLE portal_project_access_terms(id TEXT PRIMARY KEY,workspace_id TEXT,source_id TEXT,
+        project_public_id TEXT,kind TEXT);
+      CREATE TABLE portal_project_access_notice_outbox(id TEXT PRIMARY KEY,access_terms_id TEXT,workspace_id TEXT,source_id TEXT,
+        project_public_id TEXT,identity_id TEXT,event_type TEXT,error_code TEXT);
+      CREATE TABLE portal_project_access_notice_audit(id TEXT PRIMARY KEY,outbox_id TEXT,workspace_id TEXT,
+        project_public_id TEXT,identity_id TEXT,event_type TEXT,action TEXT,reason_code TEXT,created_at TEXT);
+      CREATE TABLE portal_project_access_companion_notice_outbox(id TEXT PRIMARY KEY,access_terms_id TEXT,workspace_id TEXT,
+        source_id TEXT,project_public_id TEXT,recipient_role TEXT,origin_id TEXT,companion_actor_id TEXT,event_type TEXT,error_code TEXT);
+      CREATE TABLE portal_project_access_companion_notice_audit(id TEXT PRIMARY KEY,outbox_id TEXT,workspace_id TEXT,
+        project_public_id TEXT,recipient_role TEXT,event_type TEXT,action TEXT,reason_code TEXT,created_at TEXT);
+    `.replace(/\s*\n\s*/g, " "));
+    await delivery.batch([
+      delivery.prepare("INSERT INTO portal_project_access_terms VALUES('terms-one','workspace-one','project-alpha:primary','project-one','collaborator')"),
+      delivery.prepare("INSERT INTO portal_project_access_terms VALUES('terms-two','workspace-one','project-alpha:primary','project-two','collaborator')"),
+      delivery.prepare("INSERT INTO portal_project_access_terms VALUES('terms-other','workspace-other','project-alpha:secondary','project-one','collaborator')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_outbox VALUES('outbox-one','terms-one','workspace-one','project-alpha:primary','project-one','identity-private-one','warning_7d','private-error')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_outbox VALUES('outbox-two','terms-one','workspace-one','project-alpha:primary','project-one','identity-private-two','warning_24h','private-error-two')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_outbox VALUES('outbox-sibling','terms-two','workspace-one','project-alpha:primary','project-two','identity-sibling','expired','private-sibling')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_outbox VALUES('outbox-wrong-source','terms-one','workspace-one','project-alpha:secondary','project-one','identity-wrong-source','expired','private-source')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_outbox VALUES('outbox-other-workspace','terms-other','workspace-other','project-alpha:secondary','project-one','identity-other-workspace','expired','private-workspace')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_outbox VALUES('outbox-terms-mismatch','terms-two','workspace-one','project-alpha:primary','project-one','identity-terms-mismatch','expired','private-terms')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_audit VALUES('audit-one','outbox-one','workspace-one','project-one','identity-private-one','warning_7d','notice.sent','private-reason-one','2026-08-27T10:00:00.000Z')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_audit VALUES('audit-two','outbox-two','workspace-one','project-one','identity-private-two','warning_24h','notice.retry_scheduled','private-reason-two','2026-08-27T09:00:00.000Z')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_audit VALUES('audit-sibling','outbox-sibling','workspace-one','project-two','identity-sibling','expired','notice.failed','private-sibling-reason','2026-08-27T08:00:00.000Z')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_audit VALUES('audit-wrong-source','outbox-wrong-source','workspace-one','project-one','identity-wrong-source','expired','notice.sent','private-source-reason','2026-08-27T07:00:00.000Z')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_audit VALUES('audit-other-workspace','outbox-other-workspace','workspace-other','project-one','identity-other-workspace','expired','notice.sent','private-workspace-reason','2026-08-27T06:00:00.000Z')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_audit VALUES('audit-terms-mismatch','outbox-terms-mismatch','workspace-one','project-one','identity-terms-mismatch','expired','notice.sent','private-terms-reason','2026-08-27T11:45:00.000Z')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_audit VALUES('audit-noise-action','outbox-one','workspace-one','project-one','identity-private-one','warning_7d','notice.opened','private-open','2026-08-27T11:00:00.000Z')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_audit VALUES('audit-noise-type','outbox-one','workspace-one','project-one','identity-private-one','warning_30d','notice.sent','private-type','2026-08-27T11:30:00.000Z')"),
+      delivery.prepare("INSERT INTO portal_project_access_companion_notice_outbox VALUES('companion-inviter','terms-one','workspace-one','project-alpha:primary','project-one','inviter','invitation-private','identity-inviter-private','warning_7d','private-companion-error')"),
+      delivery.prepare("INSERT INTO portal_project_access_companion_notice_outbox VALUES('companion-creator','terms-one','workspace-one','project-alpha:primary','project-one','access_creator','grant-private','staff-private','warning_24h','private-creator-error')"),
+      delivery.prepare("INSERT INTO portal_project_access_companion_notice_outbox VALUES('companion-sibling','terms-two','workspace-one','project-alpha:primary','project-two','inviter','invitation-sibling','identity-sibling-private','expired','private-sibling-error')"),
+      delivery.prepare("INSERT INTO portal_project_access_companion_notice_outbox VALUES('companion-mismatch','terms-two','workspace-one','project-alpha:primary','project-one','inviter','invitation-mismatch','identity-mismatch-private','expired','private-mismatch-error')"),
+      delivery.prepare("INSERT INTO portal_project_access_companion_notice_audit VALUES('companion-audit-inviter','companion-inviter','workspace-one','project-one','inviter','warning_7d','notice.sent','private-companion-reason','2026-08-27T10:30:00.000Z')"),
+      delivery.prepare("INSERT INTO portal_project_access_companion_notice_audit VALUES('companion-audit-creator','companion-creator','workspace-one','project-one','access_creator','warning_24h','notice.failed','private-creator-reason','2026-08-27T09:30:00.000Z')"),
+      delivery.prepare("INSERT INTO portal_project_access_companion_notice_audit VALUES('companion-audit-sibling','companion-sibling','workspace-one','project-two','inviter','expired','notice.sent','private-sibling-companion','2026-08-27T08:30:00.000Z')"),
+      delivery.prepare("INSERT INTO portal_project_access_companion_notice_audit VALUES('companion-audit-mismatch','companion-mismatch','workspace-one','project-one','inviter','expired','notice.sent','private-mismatch-companion','2026-08-27T11:50:00.000Z')"),
+    ]);
+    const options = { projectId: "project-one", limit: 2,
+      filters: { category: "notification", actorType: "system", result: "all", from: null, to: null } as const };
+    const first = await listClientAuditTimeline(env, staff, primaryContext(), options);
+    expect(first.notificationCoverage).toMatchObject({ project_access_collaborator_notice: { available: true, reason: null },
+      project_access_companion_notice: { available: true, reason: null } });
+    expect(first.items).toMatchObject([
+      { producerEventId: "project-access-companion-notice:companion-audit-inviter", category: "notification",
+        action: "project_access.inviter.warning_7d.sent", actor: { type: "system", label: "System" },
+        resource: { type: "project_access_notice", label: "Project access notice" }, result: "succeeded" },
+      { producerEventId: "project-access-notice:audit-one", action: "project_access.collaborator.warning_7d.sent", result: "succeeded" },
+    ]);
+    expect(first.page.hasMore).toBe(true);
+    await delivery.batch([
+      delivery.prepare("INSERT INTO portal_project_access_notice_outbox VALUES('outbox-late','terms-one','workspace-one','project-alpha:primary','project-one','identity-late','expired','private-late')"),
+      delivery.prepare("INSERT INTO portal_project_access_notice_audit VALUES('audit-late','outbox-late','workspace-one','project-one','identity-late','expired','notice.failed','private-late-reason','2026-08-27T12:00:00.000Z')"),
+    ]);
+    const second = await listClientAuditTimeline(env, staff, primaryContext(), { ...options, cursor: first.page.nextCursor! });
+    expect(second.items).toMatchObject([
+      { producerEventId: "project-access-companion-notice:companion-audit-creator",
+        action: "project_access.access_creator.warning_24h.failed", result: "failed" },
+      { producerEventId: "project-access-notice:audit-two",
+        action: "project_access.collaborator.warning_24h.retry_scheduled", result: "informational" },
+    ]);
+    expect(second.page).toMatchObject({ hasMore: false, nextCursor: null });
+    const serialized = JSON.stringify([first, second]);
+    expect(serialized).not.toMatch(/identity-private|identity-sibling|identity-wrong|identity-other|identity-late|identity-inviter|staff-private|invitation-private|grant-private|private-|outbox-|reason_code|error_code/i);
+    const root = await listClientAuditTimeline(env, staff, primaryContext(), { limit: 100,
+      filters: { category: "notification", actorType: "system", result: "all", from: null, to: null } });
+    expect(new Set(root.items.filter(event => event.resource.type === "project_access_notice").map(event => event.producerEventId)))
+      .toEqual(new Set(["project-access-notice:audit-one", "project-access-notice:audit-two", "project-access-notice:audit-sibling",
+        "project-access-notice:audit-late", "project-access-companion-notice:companion-audit-inviter",
+        "project-access-companion-notice:companion-audit-creator", "project-access-companion-notice:companion-audit-sibling"]));
+  });
+
+  it("binds notice continuation and coverage to the current portal-management permission", async () => {
+    const options = { projectId: "project-one", limit: 1,
+      filters: { category: "notification", actorType: "system", result: "all", from: null, to: null } as const };
+    const first = await listClientAuditTimeline(env, staff, primaryContext(), options);
+    projectPolicy.portal = false;
+    try {
+      await expect(listClientAuditTimeline(env, staff, primaryContext(), { ...options, cursor: first.page.nextCursor! }))
+        .rejects.toMatchObject({ status: 409 });
+      const denied = await listClientAuditTimeline(env, staff, primaryContext(), options);
+      expect(denied.notificationCoverage.project_access_collaborator_notice).toEqual({ available: false, reason: "permission_required" });
+      expect(denied.notificationCoverage.project_access_companion_notice).toEqual({ available: false, reason: "permission_required" });
+      expect(denied.items).toEqual([]);
+    } finally { projectPolicy.portal = true; }
   });
 });
