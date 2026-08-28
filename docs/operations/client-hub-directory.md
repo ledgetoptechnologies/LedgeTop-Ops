@@ -93,6 +93,44 @@ existing base64url fingerprint helper serves other contracts and is not changed.
 Recovery only queues an existing valid invitation with intact delivery payload;
 it cannot manufacture an identity, membership or content grant.
 
+### External access roster (local follow-on, not deployed)
+
+The exact source client workspace now has a separate, read-only **External
+access** roster. Unlike Portal logins, this reader starts from authoritative
+workspace memberships and invitations, so an Operations- or legacy-created
+membership without an Alpha principal and a pending invitation without a linked
+identity remain visible. Records are never combined by email. Business contacts,
+login bindings, access rules, content grants and external-access records remain
+separate concepts.
+
+The initial client response includes at most five current records; continuation
+uses 25-row pages and a maximum of 100. Search is server-side by display name or
+email metadata, and lifecycle filters include current, all, active membership,
+no assigned access, pending, suspended, blocked, expired and revoked. An active
+membership with no current allow rule is explicitly labelled **No assigned
+access**; it is never presented as effective access. Project Alpha membership
+rows also require a current same-version active principal before they can be
+labelled active. A malformed expiry is labelled as
+needing review instead of being treated as perpetual access. The opaque cursor
+is bound to the exact canonical root, selected workspace, staff/context proof and
+filters, and orders by immutable creation time plus record kind and ID. Cursors
+never authorize access.
+
+The DTO exposes only safe presentation fields: display name/email, lifecycle
+status, membership source, expiry/revocation timestamps and the count of current
+allow rules or invitation rules. Assigned rules are an inventory, not proof of
+effective resource authorization; denies and resource-specific authority remain
+in their existing readers. The roster does not select or return issuer/subject,
+invitation hashes, bearer material, storage paths or audit payloads. The roster
+has no grant, revoke, block, retry or editing action. Existing Portal login and
+delivery-access tools retain their own permissions and workflows.
+
+Ordinary network failures are local to the roster and preserve loaded rows for
+an exact retry. A 401, 403, 404 or 409 invalidates the complete client workspace
+and cancels late reads. A missing verified portal workspace is shown as
+unavailable, never as a false zero. This follow-on adds no migration, access
+mutation, Project Alpha write, Viewer change or deployment.
+
 Business-project history is separate from shared-project access. It applies
 the existing project-view and assignment policy, current source ownership and
 source-qualified client root before pagination. Source-created dates order

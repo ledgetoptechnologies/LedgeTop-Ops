@@ -4,6 +4,7 @@ import type { Permission } from "@ltds/shared";
 import { api, ApiError } from "./api";
 import { ClientRequestWorkflow } from "./ClientRequestWorkflow";
 import { ClientPortalAccessPanel, type PortalIdentityPage } from "./ClientPortalAccessPanel";
+import { ClientExternalAccessRoster, type ExternalAccessResult } from "./ClientExternalAccessRoster";
 import { businessProjectHref } from "./business-project-route";
 import { ClientDirectory, clientDirectoryReturnPath, clientPortalStatus, type ClientSummary, type ClientHubCapabilities, type ClientRootNamespace } from "./ClientDirectory";
 import { ClientBusinessParty, SourceBusinessParty, type BusinessPartyReference } from "./ClientBusinessParty";
@@ -34,6 +35,7 @@ interface ClientDetailResponse {
   contextVersion?: string;
   pages?: Partial<Record<ClientCollectionName, ClientCollectionPage>>;
   portalIdentities?: PortalIdentityPage;
+  externalAccess?: ExternalAccessResult;
   businessProjects?: BusinessProject[];
   businessParty?: BusinessPartyReference | null;
   canManageBusinessParties?: boolean;
@@ -335,6 +337,12 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
           {items => <ContactList contacts={items} />}
         </ClientCollection>
       </Card>
+      {data.externalAccess && portalBasePath && data.client.source_id && data.client.root_namespace && <div className="client-hub-audit-panel">
+        <ClientExternalAccessRoster initialPage={data.externalAccess} basePath={portalBasePath}
+          contextVersion={data.contextVersion || data.externalAccess.contextVersion}
+          canonicalRoot={{ sourceId: data.client.source_id, rootNamespace: data.client.root_namespace, kind: data.client.kind, publicId: data.client.public_id }}
+          contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />
+      </div>}
       {data.client.workspace_id && data.client.source_id === "project-alpha:primary" && (invitationAccess?.enabled && invitationAccess.canManagePolicy ? <ClientInvitationPolicy key={`${data.client.source_id}:${data.client.workspace_id}:${revision}`} workspaceId={data.client.workspace_id} sourceId={data.client.source_id} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /> : invitationAccess?.error ? <Card title="Invitation policy"><p role="alert">{invitationAccess.error}</p></Card> : null)}
       {data.portalIdentities ? portalBasePath ? <ClientPortalAccessPanel initialPage={data.portalIdentities} basePath={portalBasePath}
         contextVersion={data.contextVersion || data.portalIdentities.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate}

@@ -32,6 +32,13 @@ const identityReads = vi.hoisted(() => ({
       contextVersion: scope.context.contextVersion, principalContextVersion: "principal-version", refreshedAt: "2026-08-25T00:00:00Z",
     })),
 }));
+const externalAccessReads = vi.hoisted(() => ({
+  listClientExternalAccess: vi.fn(async (_env: unknown, context: import("../src/worker/client-hub-collections").ClientHubCollectionContext) => ({
+    items: [], page: { available: Boolean(context.root.workspace_id), reason: context.root.workspace_id ? null : "workspace_unavailable",
+      nextCursor: null, hasMore: false, returned: 0, limit: 5 }, canonicalRoot: context.canonicalRoot,
+    contextVersion: context.contextVersion, refreshedAt: "2026-08-27T00:00:00Z",
+  })),
+}));
 const eligibility = vi.hoisted(() => ({
   eligibilityBlockManagementEnabled: vi.fn(() => true),
   portalOperationsManagementEnabled: vi.fn(() => true),
@@ -41,6 +48,9 @@ vi.mock("../src/worker/acl", () => acl);
 vi.mock("../src/worker/client-identity-eligibility", () => eligibility);
 vi.mock("../src/worker/client-portal-identity-read", async importOriginal => ({
   ...await importOriginal<typeof import("../src/worker/client-portal-identity-read")>(), ...identityReads,
+}));
+vi.mock("../src/worker/client-external-access", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/worker/client-external-access")>(), ...externalAccessReads,
 }));
 
 import { registerClientHubRoutes } from "../src/worker/client-hub";
@@ -78,7 +88,9 @@ async function fixture() {
   await applySql(ops, `
     CREATE TABLE pa_organizations(id TEXT PRIMARY KEY,name TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     CREATE TABLE pa_clients(id TEXT PRIMARY KEY,name TEXT,organization_id TEXT,active INTEGER,payload_json TEXT NOT NULL DEFAULT '{}',projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
-    CREATE TABLE pa_projects(id TEXT PRIMARY KEY,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT,status TEXT,start_date TEXT,end_date TEXT,
+      client_id TEXT,organization_id TEXT,manager_user_id TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
+    CREATE TABLE pa_users(id TEXT PRIMARY KEY,display_name TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
     INSERT INTO pa_organizations(id,name,active,payload_json) VALUES('pa-org','Organization One',1,'{"public_id":"${organizationUuid}"}');
     INSERT INTO pa_clients(id,name,organization_id,active) VALUES('pa-child-login','Login Contact','pa-org',1);
     INSERT INTO pa_clients(id,name,organization_id,active) VALUES('pa-child-no-login','No Login Contact','pa-org',1);
@@ -328,10 +340,8 @@ describe("Client Hub bounded detail collections", () => {
 
   it("serves business-project detail through the canonical route and rechecks cross-database root ownership", async () => {
     const { app, env, ops, delivery } = await fixture();
-    await applySql(ops, `CREATE TABLE pa_projects(id TEXT PRIMARY KEY,name TEXT,status TEXT,start_date TEXT,end_date TEXT,
-      client_id TEXT,organization_id TEXT,manager_user_id TEXT,active INTEGER,payload_json TEXT,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
-      CREATE TABLE pa_users(id TEXT PRIMARY KEY,display_name TEXT,active INTEGER,projection_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
-      INSERT INTO pa_projects(id,name,status,start_date,end_date,client_id,organization_id,manager_user_id,active,payload_json) VALUES('business-one','Business One','active','2026-01-01',NULL,'pa-child-login',NULL,NULL,1,'{"description":"Business detail"}');`);
+    await applySql(ops, `INSERT INTO pa_projects(id,name,status,start_date,end_date,client_id,organization_id,manager_user_id,active,payload_json)
+      VALUES('business-one','Business One','active','2026-01-01',NULL,'pa-child-login',NULL,NULL,1,'{"description":"Business detail"}');`);
     try {
       acl.hasPermission.mockImplementation(async (_env, _principal, permission) =>
         ["delivery.share.audit", "viewer.view", "projects.view"].includes(permission));

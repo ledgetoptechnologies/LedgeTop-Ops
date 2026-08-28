@@ -13,6 +13,7 @@ import { listClientHubBusinessProjects, BUSINESS_PROJECT_FILTERS, type BusinessP
 import { readClientHubBusinessProjectDetail } from "./client-hub-business-project-detail";
 import { listClientHubProjectFeedbackHistory } from "./client-hub-project-feedback-history";
 import { isPortalIdentityCollection, listPortalIdentityCollection, listPortalIdentityPage, portalIdentityQuery } from "./client-portal-identity-read";
+import { externalAccessQuery, listClientExternalAccess } from "./client-external-access";
 import type { Env, StaffPrincipal } from "./types";
 import { requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
 import { readBusinessPartyForRoot } from "./business-parties";
@@ -212,8 +213,9 @@ async function verifyContext(env: Env, principal: StaffPrincipal, context: Clien
 async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: ClientKind, publicId: string, sourceId?: string, rootNamespace?: string) {
   const context = await resolveDetailContext(env, principal, kind, publicId, sourceId, rootNamespace);
   const workspace = context.root, access = context.access;
-  const [portalIdentities, collections] = await Promise.all([
+  const [portalIdentities, externalAccess, collections] = await Promise.all([
     listPortalIdentityPage(env, principal, { kind: "client", context }, { limit: 5 }),
+    listClientExternalAccess(env, context, { limit: 5 }),
     Promise.all(DETAIL_COLLECTIONS.map(async collection => ({ collection,
       result: collection === "businessProjects" ? await listClientHubBusinessProjects(env, principal, context, { initial: true, limit: 5 })
         : await listClientHubCollection(env, context, collection, { initial: true, limit: 5 }) }))),
@@ -233,6 +235,7 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
     client: { ...workspace, route_kind: clientHubRouteKind(workspace.kind), detail_path: clientHubDetailPath(workspace) },
     contacts: items("businessContacts"),
     portalIdentities,
+    externalAccess,
     accounts: items("accounts"),
     projects: items("projects"),
     businessProjects: items("businessProjects"),
@@ -335,6 +338,16 @@ export function registerClientHubRoutes(app: App): void {
     const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
     const result = await listPortalIdentityPage(c.env, principal, { kind: "client", context }, portalIdentityQuery(new URL(c.req.url).searchParams));
     await verifyContext(c.env, principal, context);
+    return c.json(result);
+  });
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/external-access", async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"), c.req.param("sourceId"), c.req.param("rootNamespace"));
+    const result = await listClientExternalAccess(c.env, context, externalAccessQuery(new URL(c.req.url).searchParams));
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
     return c.json(result);
   });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/identities/:principalId/:collection", async c => {
