@@ -17,6 +17,8 @@ export const PERMISSIONS = [
   "sops.assign",
   "sops.manage",
   "projects.view",
+  "project.contacts.manage",
+  "project.memory.manage",
   "tasks.view",
   "tasks.create",
   "tasks.update",
