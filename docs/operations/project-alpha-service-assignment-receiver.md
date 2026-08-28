@@ -75,3 +75,47 @@ Rollback the receiver by setting the flag back to `false`. Suspending the
 source grant or individual receiver workspace is an additional fail-closed
 control. Retain stored facts and immutable receipts/audit records for diagnosis;
 this foundation defines no production cleanup or downstream policy behavior.
+
+## Staff Client Hub read model (local follow-on, not deployed)
+
+The prepared Operations follow-on adds a read-only **Project Alpha service
+assignments** card to an exact Client Hub business record. It requires both a
+global `team.view` scope and a global `operations.manage` scope. The card is
+informational: an assignment does not grant portal access, enable a service
+request, create delivery or Viewer access, or expose pricing.
+
+The read is deliberately narrower than the receiver workspace. An organization
+card selects only `subject_type='organization'` and that exact exported public
+ID; a standalone-client card selects only `subject_type='standalone_client'`
+and that exact exported public ID. It never rolls up projects, departments,
+children, parents, linked business-party records, email addresses, names, or
+the rest of a workspace. A project workspace may later expose its own exact
+project assignment, but the client card does not do so.
+
+Before returning facts, the Worker verifies all of the following in
+`DELIVERY_DB`:
+
+- migration 0168's required tables exist;
+- the exact source receiver grant and exact source/workspace enrollment are
+  active;
+- the workspace ownership reservation still matches the source;
+- the current, complete directory generation contains the exact active root
+  subject; and
+- the assignment checkpoint identifies a complete active generation.
+
+Missing schema, enrollment, mapping, workspace, directory proof, or projection
+checkpoint is returned as a factual unavailable state rather than an empty
+history or a crash. The source-capability observation remains diagnostic and
+does not authorize the read. If the same-source active catalog item still has
+the assignment's exact service source version, its current name is shown;
+otherwise only the opaque service ID is shown.
+
+Initial detail returns at most five rows; continuation returns at most 25.
+Opaque cursors bind the staff actor through a one-way selection proof plus the
+source, exact root, null project scope, Client Hub context, filters, and active
+assignment checkpoint. Raw staff IDs are not serialized into cursors. After
+the assignment read, Operations rechecks the receiver enrollment, workspace
+ownership, current directory generation and root version, source observation,
+and assignment checkpoint. It then rechecks the independent live Client Hub
+context after the cross-D1 read. Any change invalidates the whole client
+workspace instead of releasing a mixed-authority result.

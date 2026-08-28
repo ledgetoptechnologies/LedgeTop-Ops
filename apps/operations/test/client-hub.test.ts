@@ -39,6 +39,16 @@ const externalAccessReads = vi.hoisted(() => ({
     contextVersion: context.contextVersion, refreshedAt: "2026-08-27T00:00:00Z",
   })),
 }));
+const serviceAssignmentReads = vi.hoisted(() => ({
+  listClientServiceAssignments: vi.fn(async (_env: unknown, _principal: unknown,
+    context: import("../src/worker/client-hub-collections").ClientHubCollectionContext, _options: unknown) => ({
+    items: [], page: { available: context.access.directory && context.access.requests && Boolean(context.root.workspace_id),
+      reason: !context.access.directory || !context.access.requests ? "permission_required"
+        : context.root.workspace_id ? null : "workspace_unavailable", nextCursor: null, hasMore: false, returned: 0, limit: 5 },
+    readiness: { tables: "ready", receiver: "ready", source: "observed", directory: "ready", projection: "ready", catalog: "ready" },
+    canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion, refreshedAt: "2026-08-27T00:00:00Z",
+  })),
+}));
 const eligibility = vi.hoisted(() => ({
   eligibilityBlockManagementEnabled: vi.fn(() => true),
   portalOperationsManagementEnabled: vi.fn(() => true),
@@ -51,6 +61,9 @@ vi.mock("../src/worker/client-portal-identity-read", async importOriginal => ({
 }));
 vi.mock("../src/worker/client-external-access", async importOriginal => ({
   ...await importOriginal<typeof import("../src/worker/client-external-access")>(), ...externalAccessReads,
+}));
+vi.mock("../src/worker/client-service-assignments", async importOriginal => ({
+  ...await importOriginal<typeof import("../src/worker/client-service-assignments")>(), ...serviceAssignmentReads,
 }));
 
 import { registerClientHubRoutes } from "../src/worker/client-hub";
@@ -406,6 +419,26 @@ describe("Client Hub bounded detail collections", () => {
     expect(body).toHaveProperty("pages.businessProjects", expect.objectContaining({ available: false, reason: "permission_required" }));
     expect((await app.request(organizationPath + "/collections/businessProjects", {}, env)).status).toBe(403);
     expect((await app.request(organizationPath + "/collections/businessProjects?filter=unknown", {}, env)).status).toBe(400);
+  });
+
+  it("routes exact-root service assignment pages and rechecks the live Client Hub context", async () => {
+    const { app, env, ops } = await fixture();
+    const response = await app.request(organizationPath
+      + "/service-assignments?q=Mapping&status=effective&limit=25&cursor=opaque-cursor", {}, env);
+    expect(response.status).toBe(200);
+    const call = serviceAssignmentReads.listClientServiceAssignments.mock.calls.at(-1)!;
+    expect(call[1]).toMatchObject({ id: "staff-one" });
+    expect(call[2]).toMatchObject({ canonicalRoot: { sourceId: "project-alpha:primary", rootNamespace: "business",
+      kind: "organization", publicId: "pa-org" }, root: { pa_public_id: organizationUuid, workspace_id: "workspace-org" } });
+    expect(call[3]).toMatchObject({ q: "Mapping", status: "effective", limit: 25, cursor: "opaque-cursor" });
+
+    const original = serviceAssignmentReads.listClientServiceAssignments.getMockImplementation()!;
+    serviceAssignmentReads.listClientServiceAssignments.mockImplementationOnce(async (...args) => {
+      const result = await original(...args);
+      await ops.prepare("UPDATE pa_connector_directory_state SET read_revision=read_revision+1 WHERE id='directory'").run();
+      return result;
+    });
+    expect((await app.request(organizationPath + "/service-assignments", {}, env)).status).toBe(409);
   });
 
   it("pages more than 500 business contacts separately from the existing portal identities", async () => {

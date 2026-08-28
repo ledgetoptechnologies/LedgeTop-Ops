@@ -1,0 +1,29 @@
+.client-service-assignments, .client-service-assignment-search, .client-service-assignment-actions { display: grid; gap: .75rem; min-width: 0; overflow-wrap: anywhere; }
+.client-service-assignments p, .client-service-assignments h3, .client-service-assignment-actions p { margin: 0; }
+.client-service-assignments button, .client-service-assignments input, .client-service-assignments select { min-height: 44px; max-width: 100%; }
+.client-service-assignments button { white-space: normal; }
+.client-service-assignments button[aria-disabled="true"] { cursor: default; opacity: .65; }
+.client-service-assignment-warning { padding: .75rem; border-left: 4px solid #b15b00; background: #fff7e8; }
+.client-service-assignment-search > label { font-weight: 750; }
+.client-service-assignment-search > div { display: flex; flex-wrap: wrap; align-items: end; gap: .6rem; min-width: 0; }
+.client-service-assignment-search input { flex: 1 1 15rem; min-width: 0; padding: .7rem .8rem; border: 1px solid var(--line); border-radius: 8px; font: inherit; }
+.client-service-assignment-search div > label { display: grid; gap: .3rem; flex: 1 1 11rem; color: var(--muted); font-size: .85rem; }
+.client-service-assignment-search select { width: 100%; min-width: 0; padding: .6rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
+.client-service-assignment-rows { display: grid; gap: .8rem; min-width: 0; }
+.client-service-assignment-rows article { display: grid; gap: .75rem; padding: .9rem; border: 1px solid var(--line); border-radius: 10px; background: #f7f9fa; min-width: 0; }
+.client-service-assignment-rows header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: .5rem; }
+.client-service-assignment-rows header > div { display: grid; gap: .25rem; min-width: 0; }
+.client-service-assignment-rows h3 { font-size: 1rem; }
+.client-service-assignment-rows header p, .client-service-assignment-actions, .client-service-assignment-actions small { color: var(--muted); font-size: .8rem; }
+.client-service-assignment-rows dl { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .65rem; margin: 0; }
+.client-service-assignment-rows dl > div { display: grid; align-content: start; gap: .2rem; min-width: 0; }
+.client-service-assignment-rows dt { color: var(--muted); font-size: .75rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.client-service-assignment-rows dd { margin: 0; }
+.client-service-assignment-rows dd + dd { color: var(--muted); font-size: .78rem; }
+.client-service-assignment-actions > button { justify-self: start; }
+.client-service-assignment-error { color: #a12c2c; }
+@media (max-width: 640px) {
+  .client-service-assignment-search input { flex-basis: 100%; }
+  .client-service-assignment-search > div > button { flex: 1; }
+  .client-service-assignment-rows dl { grid-template-columns: 1fr; }
+}
