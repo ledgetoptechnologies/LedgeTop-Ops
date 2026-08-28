@@ -62,7 +62,7 @@ export interface ProjectOperationalContact {
 }
 export interface ProjectOperationalWorkspace {
   canonicalRoot: ClientHubCollectionContext["canonicalRoot"]; contextVersion: string;
-  project: { id: string; sourceId: string; status: string | null };
+  project: { id: string; sourceId: string; status: string | null; revision: string };
   contacts: { version: number; assignments: ProjectOperationalContact[]; revisions: Array<{ version: number; actorId: string; createdAt: string }> };
   memory: { version: number; snapshot: ProjectMemorySnapshot; revisions: Array<{ version: number; changeKind: "saved" | "post_completion_amendment"; amendmentReason: string | null; actorId: string; createdAt: string }> };
   capabilities: { canManageContacts: boolean; canManageMemory: boolean };
@@ -278,7 +278,7 @@ export async function readProjectOperationalWorkspace(env: Environment, principa
   const [canManageContacts, canManageMemory] = await Promise.all([manage("project.contacts.manage"), manage("project.memory.manage")]);
   return {
     canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion,
-    project: { id: projectId, sourceId: source, status: prepared.project.status },
+    project: { id: projectId, sourceId: source, status: prepared.project.status, revision: prepared.project.last_sync_id },
     contacts: { version: firstMetadata[0]?.version ?? 0, assignments: first.rows.map(row => ({ id: row.id, role: row.role,
       preferredContactMethod: row.preferred_contact_method, instructions: row.instructions, sortOrder: row.sort_order,
       availability: row.contact_name === null ? "unavailable" : "available", contact: row.contact_name === null ? null

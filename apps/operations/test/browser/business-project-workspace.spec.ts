@@ -25,7 +25,7 @@ function clientDetail() {
     capabilities: { directory: true, requests: false, delivery: false, viewer: false } };
 }
 function operational(status = "completed", projectId = "project-one") {
-  return { canonicalRoot: detail().canonicalRoot, contextVersion: "project-context", project: { id: projectId, sourceId: "project-alpha:primary", status },
+  return { canonicalRoot: detail().canonicalRoot, contextVersion: "project-context", project: { id: projectId, sourceId: "project-alpha:primary", status, revision: `${projectId}-revision` },
     contacts: { version: 1, assignments: [{ id: "assignment-one", role: "project_contact", preferredContactMethod: "email", instructions: "Confirm the arrival window.", sortOrder: 0,
       availability: "available", contact: { id: "contact-one", displayName: "Bailey Contact", email: "bailey@example.test" as string | null, phone: "+1 920 555 0123" as string | null } }],
       revisions: [{ version: 1, actorId: "hidden-staff-id", createdAt: "2026-08-26T12:00:00Z" }] },
@@ -39,19 +39,23 @@ function operational(status = "completed", projectId = "project-one") {
       nextCursor: null as string | null, hasMore: false, returned: 2, limit: 25 } };
 }
 async function mock(page: Page, handler: (route: Route, url: URL) => Promise<unknown>, permissions = ["team.view", "projects.view"],
-  operationalHandler?: (route: Route, url: URL) => Promise<unknown>) {
+  operationalHandler?: (route: Route, url: URL) => Promise<unknown>,
+  projectItems: Array<{ id: string; name: string; status: string | null; row_key: string; [key: string]: unknown }> = clientDetail().businessProjects) {
   const requests: Array<{ url: URL; method: string }> = [];
   await page.route("**/api/**", route => {
     const request = route.request(), url = new URL(request.url()); requests.push({ url, method: request.method() });
     if (url.pathname === "/api/session") return route.fulfill({ json: { user: { id: "staff-one", email: "staff@example.test", displayName: "Staff", status: "Active", profileType: "Employee",
       isAdministrator: false, permissions, divisions: [] }, csrfToken: "test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {} } });
     if (url.pathname === apiBase) return route.fulfill({ json: clientDetail() });
-    if (url.pathname === `${apiBase}/collections/businessProjects`) return route.fulfill({ json: { items: clientDetail().businessProjects,
-      page: clientDetail().pages.businessProjects, canonicalRoot: detail().canonicalRoot, contextVersion: "client-context" } });
+    if (url.pathname === `${apiBase}/collections/businessProjects`) return route.fulfill({ json: { items: projectItems,
+      page: { ...clientDetail().pages.businessProjects, returned: projectItems.length, limit: Number(url.searchParams.get("limit") || 5) },
+      canonicalRoot: detail().canonicalRoot, contextVersion: url.searchParams.get("expectedContextVersion") || "client-context" } });
     if (url.pathname.endsWith("/operational-workspace")) return operationalHandler ? operationalHandler(route, url)
       : route.fulfill({ json: operational("completed", decodeURIComponent(url.pathname.split("/").at(-2)!)) });
     if (url.pathname.endsWith("/operational-contacts") || url.pathname.endsWith("/operational-memory"))
       return operationalHandler ? operationalHandler(route, url) : route.fulfill({ status: 500, json: { error: "Unexpected operational write" } });
+    if (url.pathname.endsWith("/recurring-copy/preview") || url.pathname.endsWith("/recurring-copy/commit"))
+      return operationalHandler ? operationalHandler(route, url) : route.fulfill({ status: 500, json: { error: "Unexpected recurring-project copy" } });
     return handler(route, url);
   });
   return requests;
@@ -372,4 +376,97 @@ test("project workspace layout supports mobile, narrow, laptop and ultrawide wit
   const refresh = workspace(page).getByRole("button", { name: "Refresh project", exact: true });
   await refresh.focus(); await page.keyboard.press("Enter");
   await expect(workspace(page).getByRole("button", { name: "Refresh project", exact: true })).toBeFocused();
+});
+
+test("recurring project copy previews explicit selections and retries commit with one stable operation key", async ({ page }) => {
+  const writes: Array<{ action: string; body: Record<string, unknown> }> = []; let commits = 0;
+  const projects = [
+    { ...detail().project, row_key: "destination", manager_name: "Morgan Manager" },
+    { ...detail("project-zero", "Previous church survey").project, status: "completed", row_key: "source", manager_name: "Morgan Manager" },
+  ];
+  await mock(page, (route, url) => {
+    const value = detail(); value.project.status = "active"; return route.fulfill({ json: value });
+  }, ["team.view", "projects.view", "project.contacts.manage", "project.memory.manage"], async (route, url) => {
+    if (url.pathname.endsWith("/operational-workspace")) {
+      const id = decodeURIComponent(url.pathname.split("/").at(-2)!);
+      return route.fulfill({ json: operational(id === "project-one" ? "active" : "completed", id) });
+    }
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    if (url.pathname.endsWith("/recurring-copy/preview")) {
+      writes.push({ action: "preview", body });
+      return route.fulfill({ json: { fingerprint: "f".repeat(64),
+        source: { projectId: "project-zero", projectRevision: "project-zero-revision", contactsVersion: 1, memoryVersion: 1 },
+        destination: { projectId: "project-one", projectRevision: "project-one-revision", contactsVersion: 1, memoryVersion: 1 },
+        selection: { contactRoles: ["project_contact"], memorySections: ["plan"], conflictPolicy: "keep_destination" },
+        changes: { contactsChanged: true, memoryChanged: true, copiedContacts: 1, copiedMemorySections: ["plan"], contactConflicts: 1, memoryConflicts: ["plan"] } } });
+    }
+    if (url.pathname.endsWith("/recurring-copy/commit")) {
+      writes.push({ action: "commit", body }); commits += 1;
+      if (commits === 1) return route.fulfill({ status: 503, json: { error: "Temporary copy interruption" } });
+      return route.fulfill({ json: { replayed: false, fingerprint: "f".repeat(64),
+        source: { projectId: "project-zero", projectRevision: "project-zero-revision", contactsVersion: 1, memoryVersion: 1 },
+        destination: { projectId: "project-one", projectRevision: "project-one-revision", contactsVersion: 1, memoryVersion: 1,
+          contactsVersionAfter: 2, memoryVersionAfter: 2 },
+        selection: { contactRoles: ["project_contact"], memorySections: ["plan"], conflictPolicy: "keep_destination" },
+        changes: { contactsChanged: true, memoryChanged: true, copiedContacts: 1, copiedMemorySections: ["plan"], contactConflicts: 1, memoryConflicts: ["plan"] } } });
+    }
+    return route.fulfill({ status: 500, json: { error: "Unexpected operational request" } });
+  }, projects);
+  await open(page);
+  const copy = workspace(page).getByRole("region", { name: "Copy from a previous project", exact: true });
+  await copy.getByRole("combobox", { name: "Previous project", exact: true }).selectOption("project-zero");
+  await copy.getByRole("checkbox", { name: "Project contacts", exact: true }).check();
+  await copy.getByRole("checkbox", { name: "Plan", exact: true }).check();
+  await copy.getByRole("button", { name: "Preview copy", exact: true }).click();
+  await expect(copy.getByRole("region", { name: "Copy preview", exact: true })).toContainText("1 contact assignment will be added or updated");
+  await expect(copy.getByRole("button", { name: "Apply copy to this project", exact: true })).toBeDisabled();
+  await copy.getByRole("checkbox", { name: /I reviewed this preview/ }).check();
+  await copy.getByRole("button", { name: "Apply copy to this project", exact: true }).click();
+  await expect(copy.getByRole("alert")).toContainText("Temporary copy interruption");
+  await copy.getByRole("button", { name: "Apply copy to this project", exact: true }).click();
+  await expect(copy.getByText("Selected operational details copied. Operational details are refreshing.", { exact: true })).toBeVisible();
+  expect(writes.map(item => item.action)).toEqual(["preview", "commit", "commit"]);
+  expect(writes[0]!.body).toMatchObject({ expectedContextVersion: "project-context", sourceProjectId: "project-zero", destinationProjectId: "project-one",
+    selectedContactRoles: ["project_contact"], selectedMemorySections: ["plan"], conflictPolicy: "keep_destination",
+    expected: { sourceProjectRevision: "project-zero-revision", destinationProjectRevision: "project-one-revision",
+      sourceContactsVersion: 1, destinationContactsVersion: 1, sourceMemoryVersion: 1, destinationMemoryVersion: 1 } });
+  expect(writes[1]!.body.idempotencyKey).toBe(writes[2]!.body.idempotencyKey);
+  expect(writes[1]!.body.previewFingerprint).toBe("f".repeat(64));
+  for (const item of writes) expect(JSON.stringify(item.body)).not.toMatch(/portal|grant|billing|invitation|notification|attachment/i);
+});
+
+test("recurring copy clears protected project data when preview authorization or context changes", async ({ page }) => {
+  const projects = [{ ...detail().project, status: "active", row_key: "destination" },
+    { ...detail("project-zero", "Previous project").project, row_key: "source" }];
+  await mock(page, (route, url) => { const value = detail(); value.project.status = "active"; return route.fulfill({ json: value }); },
+    ["team.view", "projects.view", "project.contacts.manage"], async (route, url) => {
+      if (url.pathname.endsWith("/operational-workspace")) {
+        const id = decodeURIComponent(url.pathname.split("/").at(-2)!); return route.fulfill({ json: operational("active", id) });
+      }
+      return route.fulfill({ status: 409, json: { error: "Project ownership changed before preview" } });
+    }, projects);
+  await open(page);
+  const copy = workspace(page).getByRole("region", { name: "Copy from a previous project", exact: true });
+  await copy.getByRole("combobox", { name: "Previous project", exact: true }).selectOption("project-zero");
+  await copy.getByRole("checkbox", { name: "Project contacts", exact: true }).check();
+  await copy.getByRole("button", { name: "Preview copy", exact: true }).click();
+  await expect(workspace(page).getByRole("alert")).toContainText("Project ownership changed before preview");
+  await expect(page.getByText("Bailey Contact", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Photograph the roof.", { exact: true })).toHaveCount(0);
+});
+
+test("recurring copy stays usable without horizontal overflow on mobile", async ({ page }) => {
+  const projects = [{ ...detail().project, status: "active", row_key: "destination" },
+    { ...detail("project-zero", "A very long previous project name for a regional construction client").project, row_key: "source" }];
+  await page.setViewportSize({ width: 375, height: 900 });
+  await mock(page, (route, url) => { const value = detail(); value.project.status = "active"; return route.fulfill({ json: value }); },
+    ["team.view", "projects.view", "project.contacts.manage", "project.memory.manage"], undefined, projects);
+  await open(page);
+  const copy = workspace(page).getByRole("region", { name: "Copy from a previous project", exact: true });
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  for (const control of await copy.locator("button, select, input[type=checkbox], input[type=radio]").all()) {
+    const bounds = await control.boundingBox();
+    if (await control.getAttribute("type") === "checkbox" || await control.getAttribute("type") === "radio") continue;
+    expect(bounds!.height).toBeGreaterThanOrEqual(44); expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(376);
+  }
 });

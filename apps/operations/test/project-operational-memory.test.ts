@@ -119,6 +119,7 @@ describe("source-qualified operational contacts and project memory", () => {
     expect(saved).toMatchObject({ version: 1, replayed: false });
     expect(await saveProjectOperationalContacts(environment, owner, item.context, item.projectId, input)).toEqual({ ...saved, replayed: true });
     const workspace = await readProjectOperationalWorkspace(environment, owner, item.context, item.projectId);
+    expect(workspace.project.revision).toMatch(/^project-sync-/);
     expect(workspace.contacts.assignments.map(value => value.role)).toEqual(["project_contact", "site_contact"]);
     expect(workspace.contacts.assignments[0]?.contact?.email).toContain("@example.test");
     expect(await stableAuthority()).toEqual(authority);

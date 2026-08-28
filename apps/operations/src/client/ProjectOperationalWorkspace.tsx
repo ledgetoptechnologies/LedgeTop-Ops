@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type MutableRefObject } from "react";
 import { Card, EmptyState, StatusPill } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import type { BusinessProjectDetail } from "./BusinessProjectWorkspace";
+import { RecurringProjectCopyForward } from "./RecurringProjectCopyForward";
 import "./ProjectOperationalWorkspace.css";
 
 const memorySections = [
@@ -27,7 +28,7 @@ interface ContactAssignment {
 interface OperationalWorkspace {
   canonicalRoot: BusinessProjectDetail["canonicalRoot"];
   contextVersion: string;
-  project: { id: string; sourceId: string; status: string | null };
+  project: { id: string; sourceId: string; status: string | null; revision: string };
   contacts: { version: number; assignments: ContactAssignment[]; revisions: Array<{ version: number; actorId: string; createdAt: string }> };
   memory: { version: number; snapshot: Memory; revisions: Array<{ version: number; changeKind: "saved" | "post_completion_amendment"; amendmentReason: string | null; actorId: string; createdAt: string }> };
   capabilities: { canManageContacts: boolean; canManageMemory: boolean };
@@ -85,7 +86,7 @@ function validWorkspace(value: unknown, root: BusinessProjectDetail["canonicalRo
     && (item.amendmentReason === null || typeof item.amendmentReason === "string");
   return rootKey(candidate.canonicalRoot) === rootKey(root) && candidate.project.id === projectId
     && candidate.project.sourceId === root.sourceId && candidate.contextVersion === contextVersion
-    && (candidate.project.status === null || typeof candidate.project.status === "string")
+    && (candidate.project.status === null || typeof candidate.project.status === "string") && typeof candidate.project.revision === "string" && candidate.project.revision.length > 0
     && Number.isSafeInteger(candidate.contacts.version) && Array.isArray(candidate.contacts.assignments) && candidate.contacts.assignments.every(validAssignment)
     && Array.isArray(candidate.contacts.revisions) && candidate.contacts.revisions.every(validRevision)
     && Number.isSafeInteger(candidate.memory.version)
@@ -280,5 +281,7 @@ export function ProjectOperationalWorkspace({ root, projectId, contextVersion, c
         Version {item.version} · {item.changeKind === "post_completion_amendment" ? "Post-completion amendment" : "Saved"} · {displayDate(item.createdAt)}
         {item.amendmentReason && <span> — {item.amendmentReason}</span>}</li>)}</ol></details>}
     </Card>
+    <RecurringProjectCopyForward root={root} projectId={projectId} projectStatus={data.project.status} contextVersion={contextVersion}
+      contextSignal={contextSignal} capabilities={data.capabilities} onInvalidated={onInvalidated} onApplied={() => setRevision(value => value + 1)} />
   </section>;
 }

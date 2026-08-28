@@ -7,6 +7,8 @@ const services = vi.hoisted(() => ({
   saveProjectOperationalContacts: vi.fn(),
   saveProjectMemory: vi.fn(),
   listClientHubCollection: vi.fn(),
+  previewRecurringProjectCopy: vi.fn(),
+  commitRecurringProjectCopy: vi.fn(),
 }));
 vi.mock("../src/worker/project-operational-memory", () => ({
   readProjectOperationalWorkspace: services.readProjectOperationalWorkspace,
@@ -16,6 +18,10 @@ vi.mock("../src/worker/project-operational-memory", () => ({
 vi.mock("../src/worker/client-hub-collections", async importOriginal => ({
   ...await importOriginal<typeof import("../src/worker/client-hub-collections")>(),
   listClientHubCollection: services.listClientHubCollection,
+}));
+vi.mock("../src/worker/project-recurring-copy-forward", () => ({
+  previewRecurringProjectCopy: services.previewRecurringProjectCopy,
+  commitRecurringProjectCopy: services.commitRecurringProjectCopy,
 }));
 
 import { registerProjectOperationalRoutes } from "../src/worker/project-operational-routes";
@@ -31,7 +37,7 @@ const context: ClientHubCollectionContext = { root: { source_id: "project-alpha:
   canonicalRoot: { sourceId: "project-alpha:primary", rootNamespace: "business", kind: "organization", publicId: "org-one" },
   access: { directory: true, requests: true, delivery: false, viewer: false }, contextVersion: "a".repeat(43) };
 const workspace = { canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion,
-  project: { id: "project-one", sourceId: "project-alpha:primary", status: "active" },
+  project: { id: "project-one", sourceId: "project-alpha:primary", status: "active", revision: "project-revision-one" },
   contacts: { version: 0, assignments: [], revisions: [] }, memory: { version: 0,
     snapshot: { plan: "", actualOutcome: "", deviationsAndReasons: "", observations: "", problems: "", successes: "", recommendations: "", nextTimeRequests: "" }, revisions: [] },
   capabilities: { canManageContacts: true, canManageMemory: true } };
@@ -51,6 +57,16 @@ beforeEach(() => {
     page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 25 }, canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion });
   services.saveProjectOperationalContacts.mockResolvedValue({ sourceId: "project-alpha:primary", projectId: "project-one", version: 1, replayed: false });
   services.saveProjectMemory.mockResolvedValue({ sourceId: "project-alpha:primary", projectId: "project-one", version: 1, replayed: false });
+  services.previewRecurringProjectCopy.mockResolvedValue({ fingerprint: "f".repeat(64),
+    source: { projectId: "project-zero", projectRevision: "source-revision", contactsVersion: 1, memoryVersion: 2 },
+    destination: { projectId: "project-one", projectRevision: "destination-revision", contactsVersion: 0, memoryVersion: 0 },
+    selection: { contactRoles: ["project_contact"], memorySections: ["plan"], conflictPolicy: "keep_destination" },
+    changes: { contactsChanged: true, memoryChanged: true, copiedContacts: 1, copiedMemorySections: ["plan"], contactConflicts: 0, memoryConflicts: [] } });
+  services.commitRecurringProjectCopy.mockResolvedValue({ replayed: false, fingerprint: "f".repeat(64),
+    source: { projectId: "project-zero", projectRevision: "source-revision", contactsVersion: 1, memoryVersion: 2 },
+    destination: { projectId: "project-one", projectRevision: "destination-revision", contactsVersion: 0, memoryVersion: 0,
+      contactsVersionAfter: 1, memoryVersionAfter: 1 }, selection: { contactRoles: ["project_contact"], memorySections: ["plan"], conflictPolicy: "keep_destination" },
+    changes: { contactsChanged: true, memoryChanged: true, copiedContacts: 1, copiedMemorySections: ["plan"], contactConflicts: 0, memoryConflicts: [] } });
 });
 
 describe("project operational routes", () => {
@@ -98,6 +114,38 @@ describe("project operational routes", () => {
     const { app, verify, env } = fixture(); verify.mockRejectedValueOnce(new HTTPException(409, { message: "Client mapping changed" }));
     const response = await app.request(`${path}/operational-workspace`, {}, env);
     expect(response.status).toBe(409); expect(services.readProjectOperationalWorkspace).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds copy preview and commit to the open destination and reverifies the root context", async () => {
+    const { app, verify, env } = fixture();
+    const body = { expectedContextVersion: context.contextVersion, sourceProjectId: "project-zero", destinationProjectId: "project-one",
+      selectedContactRoles: ["project_contact"], selectedMemorySections: ["plan"], conflictPolicy: "keep_destination",
+      expected: { sourceProjectRevision: "source-revision", destinationProjectRevision: "destination-revision",
+        sourceContactsVersion: 1, destinationContactsVersion: 0, sourceMemoryVersion: 2, destinationMemoryVersion: 0 } };
+    const preview = await app.request(`${path}/recurring-copy/preview`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, env);
+    expect(preview.status).toBe(200); expect(preview.headers.get("Cache-Control")).toBe("no-store");
+    expect(services.previewRecurringProjectCopy).toHaveBeenCalledWith(env, principal, context, body);
+    const commitBody = { ...body, previewFingerprint: "f".repeat(64), idempotencyKey: "copy_operation_key_1234" };
+    const commit = await app.request(`${path}/recurring-copy/commit`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(commitBody) }, env);
+    expect(commit.status).toBe(200); expect(commit.headers.get("Cache-Control")).toBe("no-store");
+    expect(services.commitRecurringProjectCopy).toHaveBeenCalledWith(env, principal, context, commitBody);
+    expect(verify).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["preview", "commit"])("rejects a %s body that targets a project other than the open route", async action => {
+    const { app, resolve, verify, env } = fixture();
+    const response = await app.request(`${path}/recurring-copy/${action}`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ destinationProjectId: "another-project" }) }, env);
+    expect(response.status).toBe(400); expect(resolve).toHaveBeenCalledTimes(1); expect(verify).not.toHaveBeenCalled();
+    expect(services.previewRecurringProjectCopy).not.toHaveBeenCalled(); expect(services.commitRecurringProjectCopy).not.toHaveBeenCalled();
+  });
+
+  it.each(["preview", "commit"])("does not release a %s response after context verification changes", async action => {
+    const { app, verify, env } = fixture(); verify.mockRejectedValueOnce(new HTTPException(409, { message: "Client mapping changed" }));
+    const response = await app.request(`${path}/recurring-copy/${action}`, { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ destinationProjectId: "project-one" }) }, env);
+    expect(response.status).toBe(409);
+    expect(action === "preview" ? services.previewRecurringProjectCopy : services.commitRecurringProjectCopy).toHaveBeenCalledTimes(1);
   });
 
   it.each([

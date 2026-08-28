@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { isBusinessProjectionSource } from "./client-hub-source";
 import { listClientHubCollection, type ClientHubCollectionContext } from "./client-hub-collections";
 import { readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts } from "./project-operational-memory";
+import { commitRecurringProjectCopy, previewRecurringProjectCopy } from "./project-recurring-copy-forward";
 import type { Env, StaffPrincipal } from "./types";
 
 type AppEnv = { Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } };
@@ -20,6 +21,12 @@ function routeKind(c: { req: { param(name: string): string } }, unavailable: str
     throw new HTTPException(404, { message: unavailable });
   const value = kind(c.req.param("kind"));
   if (!value) throw new HTTPException(404, { message: "Client not found" });
+  return value;
+}
+const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
+function destinationBoundBody(value: unknown, destinationProjectId: string): unknown {
+  if (!object(value) || value.destinationProjectId !== destinationProjectId)
+    throw new HTTPException(400, { message: "The copy destination must be the open project" });
   return value;
 }
 
@@ -58,6 +65,24 @@ export function registerProjectOperationalRoutes(app: App, resolveContext: Resol
     const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
     const result = await saveProjectMemory(c.env, principal, context, c.req.param("projectId"),
       await c.req.json().catch(() => undefined));
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
+  app.post(`${base}/recurring-copy/preview`, async c => {
+    const clientKind = routeKind(c, "Recurring-project copy is unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const body = destinationBoundBody(await c.req.json().catch(() => undefined), c.req.param("projectId"));
+    const result = await previewRecurringProjectCopy(c.env, principal, context, body);
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
+  app.post(`${base}/recurring-copy/commit`, async c => {
+    const clientKind = routeKind(c, "Recurring-project copy is unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const body = destinationBoundBody(await c.req.json().catch(() => undefined), c.req.param("projectId"));
+    const result = await commitRecurringProjectCopy(c.env, principal, context, body);
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
     return c.json(result);
