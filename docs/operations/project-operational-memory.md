@@ -1,6 +1,6 @@
 # Project operational contacts and memory
 
-Status: backend contract implemented; route and UI integration intentionally deferred.
+Status: backend contract and staff project-workspace integration implemented locally; publication and live acceptance remain pending.
 
 ## Authority boundary
 
@@ -41,14 +41,27 @@ Completed or cancelled projects remain amendable because operational history som
 
 ## Integration surface
 
-`apps/operations/src/worker/project-operational-memory.ts` exports validation schemas, types, and pure service functions ready for staff-authenticated routes:
+`apps/operations/src/worker/project-operational-memory.ts` exports validation schemas, types, and pure service functions used by the staff-authenticated project routes:
 
 - `readProjectOperationalWorkspace`
 - `saveProjectOperationalContacts`
 - `saveProjectMemory`
 
-Route handlers must create a current `ClientHubCollectionContext`; they must not accept a source, root, or permission result from browser input. The first UI should expose the two operational roles and the fixed text sections in the existing business-project detail workspace. Attachments, automatic recurring-project copy-forward, portal exposure, and Project Alpha writes are deliberately out of scope for this slice.
+`apps/operations/src/worker/project-operational-routes.ts` creates the current `ClientHubCollectionContext` server-side for every read and save. It never accepts source ownership, root ownership, permissions, or contact candidates from browser authority. Its GET returns the operational overlay with an exact-root `businessContacts` page of 25 records; continuation uses the existing context-bound collection cursor and another bounded page. The two POST routes pass the request body to the service schemas unchanged and recheck the live Client Hub context after the operation.
+
+`apps/operations/src/client/ProjectOperationalWorkspace.tsx` presents the overlay in the existing exact-source business-project workspace. Staff can explicitly edit or cancel:
+
+- `project_contact` and `site_contact` assignments chosen only from the progressively loaded exact-root projected contacts;
+- preferred contact method and bounded operational instructions;
+- all eight structured project-memory sections;
+- an audited amendment reason when the current source project is completed or cancelled.
+
+There is no auto-save. Each explicit save receives a new idempotency key, while an exact retry after a transient failure reuses that key and preserves the draft. An ownership/context `409` clears the whole project workspace; transient failures remain local. Revision lists show version, time, change kind, and amendment reason without displaying raw staff actor IDs. All interactive controls have a 44-pixel minimum target and collapse to a single-column mobile layout.
+
+Attachments, portal exposure, and Project Alpha writes are deliberately out of scope for this slice. Operational roles still do not create any access, recipient, billing, or notification authority.
 
 ## Verification
 
 `apps/operations/test/project-operational-memory.test.ts` applies the real migration chain to populated D1, verifies no inferred rows or authority changes, exercises exact-root assignments and memory amendments, proves idempotency and schema-enforced immutable history, rejects invalid contacts and stale versions, validates exhausted-fence and actor-mismatch defenses for the service protocol, and injects an authoritative root change immediately before the official mutation batch to prove its atomic rollback behavior.
+
+`apps/operations/test/project-operational-routes.test.ts` verifies server-side context resolution, bounded contact continuation, stale/unauthorized rejection, unmodified expected-version and idempotency bodies, post-read context races, and unsupported source/namespace rejection. `apps/operations/test/browser/business-project-workspace.spec.ts` covers explicit saves, exact role payloads, terminal amendment validation, no authority fields, retry-stable idempotency, draft preservation, whole-workspace conflict invalidation, refresh races, and desktop/mobile layouts.

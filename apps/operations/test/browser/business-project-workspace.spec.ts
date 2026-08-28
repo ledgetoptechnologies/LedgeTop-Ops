@@ -24,7 +24,22 @@ function clientDetail() {
       contextVersion: "client-context", refreshedAt: "2026-08-25T12:00:00Z", capabilities: { canManagePortal: false, canManageEligibilityBlocks: false } },
     capabilities: { directory: true, requests: false, delivery: false, viewer: false } };
 }
-async function mock(page: Page, handler: (route: Route, url: URL) => Promise<unknown>, permissions = ["team.view", "projects.view"]) {
+function operational(status = "completed", projectId = "project-one") {
+  return { canonicalRoot: detail().canonicalRoot, contextVersion: "project-context", project: { id: projectId, sourceId: "project-alpha:primary", status },
+    contacts: { version: 1, assignments: [{ id: "assignment-one", role: "project_contact", preferredContactMethod: "email", instructions: "Confirm the arrival window.", sortOrder: 0,
+      availability: "available", contact: { id: "contact-one", displayName: "Bailey Contact", email: "bailey@example.test" as string | null, phone: "+1 920 555 0123" as string | null } }],
+      revisions: [{ version: 1, actorId: "hidden-staff-id", createdAt: "2026-08-26T12:00:00Z" }] },
+    memory: { version: 1, snapshot: { plan: "Photograph the roof.", actualOutcome: "Roof captured.", deviationsAndReasons: "", observations: "", problems: "",
+      successes: "Good coverage.", recommendations: "Return in spring.", nextTimeRequests: "Call before arrival." },
+      revisions: [{ version: 1, changeKind: "saved", amendmentReason: null, actorId: "hidden-staff-id", createdAt: "2026-08-26T12:05:00Z" }] },
+    capabilities: { canManageContacts: true, canManageMemory: true },
+    contactOptions: [{ public_id: "contact-one", display_name: "Bailey Contact", email: "bailey@example.test" as string | null, phone: "+1 920 555 0123" as string | null, record_type: "business_contact" as const },
+      { public_id: "site-one", display_name: "Site Supervisor", email: null as string | null, phone: "+1 920 555 0100" as string | null, record_type: "business_contact" as const }],
+    contactPage: { available: true, reason: null as "permission_required" | "workspace_unavailable" | "not_applicable" | null,
+      nextCursor: null as string | null, hasMore: false, returned: 2, limit: 25 } };
+}
+async function mock(page: Page, handler: (route: Route, url: URL) => Promise<unknown>, permissions = ["team.view", "projects.view"],
+  operationalHandler?: (route: Route, url: URL) => Promise<unknown>) {
   const requests: Array<{ url: URL; method: string }> = [];
   await page.route("**/api/**", route => {
     const request = route.request(), url = new URL(request.url()); requests.push({ url, method: request.method() });
@@ -33,6 +48,10 @@ async function mock(page: Page, handler: (route: Route, url: URL) => Promise<unk
     if (url.pathname === apiBase) return route.fulfill({ json: clientDetail() });
     if (url.pathname === `${apiBase}/collections/businessProjects`) return route.fulfill({ json: { items: clientDetail().businessProjects,
       page: clientDetail().pages.businessProjects, canonicalRoot: detail().canonicalRoot, contextVersion: "client-context" } });
+    if (url.pathname.endsWith("/operational-workspace")) return operationalHandler ? operationalHandler(route, url)
+      : route.fulfill({ json: operational("completed", decodeURIComponent(url.pathname.split("/").at(-2)!)) });
+    if (url.pathname.endsWith("/operational-contacts") || url.pathname.endsWith("/operational-memory"))
+      return operationalHandler ? operationalHandler(route, url) : route.fulfill({ status: 500, json: { error: "Unexpected operational write" } });
     return handler(route, url);
   });
   return requests;
@@ -43,7 +62,7 @@ async function open(page: Page, suffix = "") {
   await expect(workspace(page).getByRole("heading", { name: "Church survey", exact: true })).toBeVisible();
 }
 
-test("business project links open a read-only workspace and preserve client filters through breadcrumbs, Back and refresh", async ({ page }) => {
+test("business project links open a scoped workspace and preserve client filters through breadcrumbs, Back and refresh", async ({ page }) => {
   const requests = await mock(page, route => route.fulfill({ json: detail() }));
   await page.goto(`${clientPath}${filters}`);
   const link = page.getByRole("region", { name: "Business projects", exact: true }).getByRole("link", { name: "Church survey", exact: true });
@@ -51,18 +70,20 @@ test("business project links open a read-only workspace and preserve client filt
   await expect(workspace(page).getByRole("heading", { name: "Church survey", exact: true })).toBeVisible();
   expect(new URL(page.url()).pathname).toBe(projectPath);
   await expect(workspace(page).getByRole("heading", { name: "Project Alpha linked contact", exact: true })).toBeVisible();
-  await expect(workspace(page).getByText("Bailey Contact", { exact: true })).toBeVisible();
-  await expect(workspace(page).getByText("bailey@example.test", { exact: true })).toBeVisible();
-  await expect(workspace(page).getByText("+1 920 555 0123", { exact: true })).toBeVisible();
+  await expect(workspace(page).getByRole("definition").filter({ hasText: /^Bailey Contact$/ })).toBeVisible();
+  await expect(workspace(page).getByRole("definition").filter({ hasText: /^bailey@example\.test$/ })).toBeVisible();
+  await expect(workspace(page).getByRole("definition").filter({ hasText: /^\+1 920 555 0123$/ })).toBeVisible();
   await expect(workspace(page).getByText("Morgan Manager", { exact: true })).toBeVisible();
   await expect(workspace(page).getByText(/Specific site and billing roles are not verified/)).toBeVisible();
-  await expect(workspace(page).getByRole("button", { name: /Edit|Delete|Save|Add|Invite/ })).toHaveCount(0);
+  await expect(workspace(page).getByRole("region", { name: "Operational project details", exact: true })).toContainText("Confirm the arrival window.");
+  await expect(workspace(page).getByText("Photograph the roof.", { exact: true })).toBeVisible();
+  await expect(workspace(page).getByText("hidden-staff-id", { exact: true })).toHaveCount(0);
   const breadcrumb = workspace(page).getByRole("navigation", { name: "Project breadcrumbs" }).getByRole("link", { name: "Acme Construction", exact: true });
   const backUrl = new URL(await breadcrumb.getAttribute("href") || "", page.url());
   expect(backUrl.pathname).toBe(clientPath);
   for (const [key, value] of new URLSearchParams(filters)) expect(backUrl.searchParams.get(key)).toBe(value);
   await page.reload();
-  await expect(workspace(page).getByText("Bailey Contact", { exact: true })).toBeVisible();
+  await expect(workspace(page).getByRole("definition").filter({ hasText: /^Bailey Contact$/ })).toBeVisible();
   await breadcrumb.click();
   await expect(page.getByRole("combobox", { name: "Project status", exact: true })).toHaveValue("completed");
   await page.goBack();
@@ -79,7 +100,7 @@ for (const code of [403, 404, 409, 503]) {
     await expect(workspace(page).getByRole("alert")).toContainText("Project record unavailable for this request");
     await expect(workspace(page).getByText("Bailey Contact", { exact: true })).toHaveCount(0);
     await workspace(page).getByRole("button", { name: code === 409 ? "Reload project workspace" : "Retry project", exact: true }).click();
-    await expect(workspace(page).getByText("Bailey Contact", { exact: true })).toBeVisible();
+    await expect(workspace(page).getByRole("definition").filter({ hasText: /^Bailey Contact$/ })).toBeVisible();
   });
 }
 
@@ -131,9 +152,175 @@ test("missing source data is not represented as missing login, site or billing r
   await open(page);
   await expect(workspace(page).getByText("Status not recorded", { exact: true })).toBeVisible();
   await expect(workspace(page).getByText("A linked-contact reference was not included in the synchronized project record.")).toBeVisible();
-  await expect(workspace(page).getByText("Site/billing contact assignments and project notes are not provided by this connection yet.")).toBeVisible();
+  await expect(workspace(page).getByRole("heading", { name: "Operational contacts", exact: true })).toBeVisible();
   await expect(workspace(page).getByText(/No portal login|No site contacts|No billing contacts/)).toHaveCount(0);
 });
+
+test("explicit contact and memory saves preserve expected versions and never send access authority fields", async ({ page }) => {
+  const writes: Array<{ path: string; body: Record<string, unknown> }> = [];
+  let version = 1;
+  await mock(page, route => route.fulfill({ json: detail() }), ["team.view", "projects.view", "project.contacts.manage", "project.memory.manage"], async (route, url) => {
+    if (url.pathname.endsWith("/operational-workspace")) {
+      const value = operational(); value.contacts.version = version; value.memory.version = version;
+      return route.fulfill({ json: value });
+    }
+    const body = route.request().postDataJSON() as Record<string, unknown>; writes.push({ path: url.pathname, body }); version += 1;
+    return route.fulfill({ json: { sourceId: "project-alpha:primary", projectId: "project-one", version, replayed: false } });
+  });
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByRole("button", { name: "Edit operational contacts", exact: true }).click();
+  await operations.getByRole("button", { name: "Add contact assignment", exact: true }).click();
+  await operations.getByRole("combobox", { name: "Contact for assignment 2", exact: true }).selectOption("site-one");
+  await operations.getByRole("combobox", { name: "Role for assignment 2", exact: true }).selectOption("site_contact");
+  await operations.getByRole("textbox", { name: "Instructions for assignment 2", exact: true }).fill("Use the east entrance.");
+  await operations.getByRole("button", { name: "Save contacts", exact: true }).click();
+  await expect(operations.getByText("Operational contacts saved.", { exact: true })).toBeVisible();
+  await operations.getByRole("button", { name: "Edit project memory", exact: true }).click();
+  await operations.getByRole("textbox", { name: "Plan", exact: true }).fill("Capture the roof and west elevation.");
+  await operations.getByRole("button", { name: "Save project memory", exact: true }).click();
+  await expect(operations.getByRole("alert")).toContainText("Explain why");
+  await operations.getByRole("textbox", { name: "Amendment reason", exact: true }).fill("Added the final field note after closeout.");
+  await operations.getByRole("button", { name: "Save project memory", exact: true }).click();
+  await expect(operations.getByText("Project-memory amendment saved.", { exact: true })).toBeVisible();
+  expect(writes).toHaveLength(2);
+  expect(writes[0]!.body).toMatchObject({ expectedContextVersion: "project-context", expectedVersion: 1,
+    assignments: expect.arrayContaining([expect.objectContaining({ contactId: "site-one", role: "site_contact", instructions: "Use the east entrance." })]) });
+  expect(writes[1]!.body).toMatchObject({ expectedContextVersion: "project-context", expectedVersion: 2,
+    memory: expect.objectContaining({ plan: "Capture the roof and west elevation." }), amendmentReason: "Added the final field note after closeout." });
+  for (const { body } of writes) {
+    expect(body.idempotencyKey).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(JSON.stringify(body)).not.toMatch(/portal|grant|billing|notification|recipient/i);
+  }
+});
+
+test("transient contact-save errors preserve edits and retry with the same idempotency key", async ({ page }) => {
+  const attempts: Array<Record<string, unknown>> = [];
+  await mock(page, route => route.fulfill({ json: detail() }), undefined, async (route, url) => {
+    if (url.pathname.endsWith("/operational-workspace")) return route.fulfill({ json: operational("active") });
+    const body = route.request().postDataJSON() as Record<string, unknown>; attempts.push(body);
+    return attempts.length === 1 ? route.fulfill({ status: 503, json: { error: "Temporary database interruption" } })
+      : route.fulfill({ json: { sourceId: "project-alpha:primary", projectId: "project-one", version: 2, replayed: true } });
+  });
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByRole("button", { name: "Edit operational contacts", exact: true }).click();
+  const instructions = operations.getByRole("textbox", { name: "Instructions for assignment 1", exact: true });
+  await instructions.fill("Keep this edit through a retry.");
+  await operations.getByRole("button", { name: "Save contacts", exact: true }).click();
+  await expect(operations.getByRole("alert")).toContainText("Temporary database interruption");
+  await expect(instructions).toHaveValue("Keep this edit through a retry.");
+  await operations.getByRole("button", { name: "Save contacts", exact: true }).click();
+  await expect(operations.getByText("Operational contacts saved.", { exact: true })).toBeVisible();
+  expect(attempts).toHaveLength(2); expect(attempts[0]!.idempotencyKey).toBe(attempts[1]!.idempotencyKey);
+});
+
+test("an ownership-change conflict clears the entire protected project workspace", async ({ page }) => {
+  await mock(page, route => route.fulfill({ json: detail() }), undefined, async (route, url) => url.pathname.endsWith("/operational-workspace")
+    ? route.fulfill({ json: operational("active") }) : route.fulfill({ status: 409, json: { error: "Project ownership changed. Refresh before continuing." } }));
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByRole("button", { name: "Edit operational contacts", exact: true }).click();
+  await operations.getByRole("button", { name: "Save contacts", exact: true }).click();
+  await expect(workspace(page).getByRole("button", { name: "Reload project workspace", exact: true })).toBeVisible();
+  await expect(page.getByText("Bailey Contact", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Photograph the roof.", { exact: true })).toHaveCount(0);
+});
+
+test("an assigned exact-root contact beyond the first 25 is selected and saves without paging", async ({ page }) => {
+  const writes: Record<string, unknown>[] = []; let workspaceReads = 0;
+  await mock(page, route => route.fulfill({ json: detail() }), undefined, async (route, url) => {
+    if (url.pathname.endsWith("/operational-workspace")) {
+      workspaceReads += 1;
+      const value = operational("active");
+      value.contacts.assignments[0]!.contact = { id: "assigned-26", displayName: "Assigned Beyond First Page", email: "assigned@example.test", phone: null };
+      value.contactOptions = Array.from({ length: 25 }, (_, index) => ({ public_id: `contact-${index}`, display_name: `Contact ${index}`,
+        email: null, phone: null, record_type: "business_contact" as const }));
+      value.contactPage = { available: true, reason: null, nextCursor: "page-two", hasMore: true, returned: 25, limit: 25 };
+      return route.fulfill({ json: value });
+    }
+    const body = route.request().postDataJSON() as Record<string, unknown>; writes.push(body);
+    return route.fulfill({ json: { sourceId: "project-alpha:primary", projectId: "project-one", version: 2, replayed: false } });
+  });
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByRole("button", { name: "Edit operational contacts", exact: true }).click();
+  await expect(operations.getByRole("combobox", { name: "Contact for assignment 1", exact: true })).toHaveValue("assigned-26");
+  await operations.getByRole("button", { name: "Save contacts", exact: true }).click();
+  await expect(operations.getByText("Operational contacts saved.", { exact: true })).toBeVisible();
+  expect(writes[0]).toMatchObject({ assignments: [expect.objectContaining({ contactId: "assigned-26" })] });
+  expect(workspaceReads).toBe(2); // Initial read plus the post-save refresh; no contact-page request.
+});
+
+test("malformed contact-page metadata fails closed without rendering project data", async ({ page }) => {
+  await mock(page, route => route.fulfill({ json: detail() }), undefined, (route, url) => {
+    const value = operational("active"); value.contactPage.returned = 1; // Two options were returned.
+    return route.fulfill({ json: value });
+  });
+  await page.goto(projectPath);
+  await expect(workspace(page).getByRole("button", { name: "Reload project workspace", exact: true })).toBeVisible();
+  await expect(page.getByText("Photograph the roof.", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Bailey Contact", { exact: true })).toHaveCount(0);
+});
+
+test("malformed mutation responses preserve the editor and never claim success", async ({ page }) => {
+  await mock(page, route => route.fulfill({ json: detail() }), undefined, (route, url) => url.pathname.endsWith("/operational-workspace")
+    ? route.fulfill({ json: operational("active") })
+    : route.fulfill({ json: { sourceId: "unrelated-source", projectId: "project-one", version: 99, replayed: "no" } }));
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByRole("button", { name: "Edit operational contacts", exact: true }).click();
+  const instructions = operations.getByRole("textbox", { name: "Instructions for assignment 1", exact: true });
+  await instructions.fill("Preserve this draft after an unverifiable response.");
+  await operations.getByRole("button", { name: "Save contacts", exact: true }).click();
+  await expect(operations.getByRole("alert")).toContainText("could not be verified");
+  await expect(instructions).toHaveValue("Preserve this draft after an unverifiable response.");
+  await expect(operations.getByText("Operational contacts saved.", { exact: true })).toHaveCount(0);
+});
+
+for (const code of [403, 404]) {
+  test(`operational read ${code} invalidates the whole protected project workspace`, async ({ page }) => {
+    await mock(page, route => route.fulfill({ json: detail() }), undefined,
+      route => route.fulfill({ status: code, json: { error: code === 404 ? "Project was deleted" : "Project access was revoked" } }));
+    await page.goto(projectPath);
+    await expect(workspace(page).getByRole("alert")).toContainText(code === 404 ? "Project was deleted" : "Project access was revoked");
+    await expect(page.getByText("Bailey Contact", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Photograph the roof.", { exact: true })).toHaveCount(0);
+  });
+}
+
+test("authorization loss while loading more contacts invalidates the whole workspace", async ({ page }) => {
+  let reads = 0;
+  await mock(page, route => route.fulfill({ json: detail() }), undefined, (route, url) => {
+    if (++reads > 1) return route.fulfill({ status: 401, json: { error: "Staff session expired" } });
+    const value = operational("active"); value.contactPage = { available: true, reason: null, nextCursor: "page-two", hasMore: true, returned: 2, limit: 25 };
+    return route.fulfill({ json: value });
+  });
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByRole("button", { name: "Edit operational contacts", exact: true }).click();
+  await operations.getByRole("button", { name: "Load more available contacts", exact: true }).click();
+  await expect(workspace(page).getByRole("alert")).toContainText("Staff session expired");
+  await expect(page.getByText("Bailey Contact", { exact: true })).toHaveCount(0);
+});
+
+for (const { endpoint, button, code } of [
+  { endpoint: "operational-contacts", button: "Save contacts", code: 403 },
+  { endpoint: "operational-memory", button: "Save project memory", code: 404 },
+] as const) {
+  test(`${endpoint} ${code} invalidates protected data rather than preserving a stale editor`, async ({ page }) => {
+    await mock(page, route => route.fulfill({ json: detail() }), undefined, (route, url) => url.pathname.endsWith("/operational-workspace")
+      ? route.fulfill({ json: operational("active") }) : route.fulfill({ status: code, json: { error: code === 404 ? "Project was deleted" : "Project access was revoked" } }));
+    await open(page);
+    const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+    if (endpoint === "operational-contacts") await operations.getByRole("button", { name: "Edit operational contacts", exact: true }).click();
+    else await operations.getByRole("button", { name: "Edit project memory", exact: true }).click();
+    await operations.getByRole("button", { name: button, exact: true }).click();
+    await expect(workspace(page).getByRole("alert")).toContainText(code === 404 ? "Project was deleted" : "Project access was revoked");
+    await expect(page.getByText("Bailey Contact", { exact: true })).toHaveCount(0);
+    await expect(page.getByText("Photograph the roof.", { exact: true })).toHaveCount(0);
+  });
+}
 
 test("project identifiers decode once and unsupported or malformed project URLs do not fetch records", async ({ page }) => {
   const requests = await mock(page, route => route.fulfill({ json: detail("project%2Fone") }));
@@ -163,6 +350,9 @@ test("project workspace layout supports mobile, narrow, laptop and ultrawide wit
   await mock(page, route => route.fulfill({ json: value }));
   await page.goto(projectPath);
   await expect(workspace(page).getByRole("heading", { name: value.project.name, exact: true })).toBeVisible();
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByRole("button", { name: "Edit operational contacts", exact: true }).click();
+  await operations.getByRole("button", { name: "Edit project memory", exact: true }).click();
   for (const width of [375, 640, 1280, 3440]) {
     await page.setViewportSize({ width, height: 960 });
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
@@ -171,6 +361,9 @@ test("project workspace layout supports mobile, narrow, laptop and ultrawide wit
     expect(value!.y - (label!.y + label!.height)).toBeLessThanOrEqual(12);
     for (const action of await workspace(page).getByRole("link").all()) {
       const bounds = await action.boundingBox(); expect(bounds!.height).toBeGreaterThanOrEqual(44); expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width + 1);
+    }
+    for (const control of await operations.locator("button, select, textarea, summary").all()) {
+      const bounds = await control.boundingBox(); expect(bounds!.height).toBeGreaterThanOrEqual(44); expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width + 1);
     }
     await page.evaluate(() => scrollTo(0, 0));
     await page.screenshot({ path: testInfo.outputPath(`business-project-${width}.png`) });

@@ -18,6 +18,7 @@ import { listClientServiceAssignments, serviceAssignmentQuery } from "./client-s
 import type { Env, StaffPrincipal } from "./types";
 import { requireProjectAlphaReadVisibility } from "./project-alpha-read-visibility";
 import { readBusinessPartyForRoot } from "./business-parties";
+import { registerProjectOperationalRoutes } from "./project-operational-routes";
 
 type AppEnv = {
   Bindings: Env;
@@ -253,6 +254,7 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
 }
 
 export function registerClientHubRoutes(app: App): void {
+  registerProjectOperationalRoutes(app, resolveDetailContext, verifyContext);
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/timeline", async c => {
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });

@@ -7,6 +7,7 @@ import type { InvitationAdministrationAccess } from "./invitation-administration
 import { ClientBusinessActivity } from "./ClientBusinessActivity";
 import { ClientAuditTimeline } from "./ClientAuditTimeline";
 import { ProjectFeedbackHistory } from "./ProjectFeedbackHistory";
+import { ProjectOperationalWorkspace } from "./ProjectOperationalWorkspace";
 import { clientDirectoryReturnPath } from "./ClientDirectory";
 import { businessProjectClientPath, clientWorkspaceFilters, readBusinessProjectRoute, type BusinessProjectRoute } from "./business-project-route";
 import "./BusinessProjectWorkspace.css";
@@ -115,6 +116,8 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
             : "A linked-contact reference was not included in the synchronized project record."}</p>}
         </Card>
       </div>
+      <ProjectOperationalWorkspace key={`operations-${revision}`} root={detail.canonicalRoot} projectId={project.id}
+        contextVersion={detail.contextVersion} contextSignal={pending.current!.signal} onInvalidated={invalidate} />
       <ClientBusinessActivity key={revision} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
         contextSignal={pending.current!.signal} onInvalidated={invalidate} />
       <ClientAuditTimeline key={`audit-${revision}`} root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
@@ -122,7 +125,6 @@ function ProjectWorkspace({ route, feedbackEnabled }: { route: BusinessProjectRo
       {feedbackEnabled && detail.canonicalRoot.sourceId === "project-alpha:primary" && <ProjectFeedbackHistory key={`feedback-${revision}`}
         root={detail.canonicalRoot} projectId={project.id} contextVersion={detail.contextVersion}
         contextSignal={pending.current!.signal} onInvalidated={invalidate} />}
-      <p className="business-project-availability">Site/billing contact assignments and project notes are not provided by this connection yet.</p>
       <p className="business-project-refreshed">Project records refreshed {displayDate(detail.refreshedAt)}. A record refresh does not indicate project activity.</p>
     </>}
   </section>;

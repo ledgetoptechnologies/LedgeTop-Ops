@@ -1,0 +1,65 @@
+import { Hono } from "hono";
+import { HTTPException } from "hono/http-exception";
+import { isBusinessProjectionSource } from "./client-hub-source";
+import { listClientHubCollection, type ClientHubCollectionContext } from "./client-hub-collections";
+import { readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts } from "./project-operational-memory";
+import type { Env, StaffPrincipal } from "./types";
+
+type AppEnv = { Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } };
+type App = Hono<AppEnv>;
+type ClientKind = "organization" | "standalone_client";
+export type ResolveProjectOperationalContext = (env: Env, principal: StaffPrincipal, kind: ClientKind,
+  publicId: string, sourceId: string, rootNamespace: "business") => Promise<ClientHubCollectionContext>;
+export type VerifyProjectOperationalContext = (env: Env, principal: StaffPrincipal,
+  context: ClientHubCollectionContext) => Promise<void>;
+
+const kind = (value: string): ClientKind | null => value === "organizations" ? "organization"
+  : value === "standalone" ? "standalone_client" : null;
+function routeKind(c: { req: { param(name: string): string } }, unavailable: string): ClientKind {
+  if (c.req.param("rootNamespace") !== "business" || !isBusinessProjectionSource(c.req.param("sourceId")))
+    throw new HTTPException(404, { message: unavailable });
+  const value = kind(c.req.param("kind"));
+  if (!value) throw new HTTPException(404, { message: "Client not found" });
+  return value;
+}
+
+/** Routes hydrate all source, root, authority and context state server-side.
+ * Request bodies contain only guarded operational mutations and are validated by
+ * the project-operational-memory service. */
+export function registerProjectOperationalRoutes(app: App, resolveContext: ResolveProjectOperationalContext,
+  verifyContext: VerifyProjectOperationalContext): void {
+  const base = "/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/business-projects/:projectId";
+  app.get(`${base}/operational-workspace`, async c => {
+    const clientKind = routeKind(c, "Project operational details are unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const expectedContextVersion = c.req.query("expectedContextVersion");
+    if (expectedContextVersion !== undefined && expectedContextVersion !== context.contextVersion)
+      throw new HTTPException(409, { message: "Project ownership or permissions changed. Refresh the project workspace to continue" });
+    const cursor = c.req.query("contactCursor");
+    const [workspace, contacts] = await Promise.all([
+      readProjectOperationalWorkspace(c.env, principal, context, c.req.param("projectId")),
+      listClientHubCollection(c.env, context, "businessContacts", { limit: 25, ...(cursor ? { cursor } : {}) }),
+    ]);
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json({ ...workspace, contactOptions: contacts.items, contactPage: contacts.page });
+  });
+  app.post(`${base}/operational-contacts`, async c => {
+    const clientKind = routeKind(c, "Project operational contacts are unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const result = await saveProjectOperationalContacts(c.env, principal, context, c.req.param("projectId"),
+      await c.req.json().catch(() => undefined));
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
+  app.post(`${base}/operational-memory`, async c => {
+    const clientKind = routeKind(c, "Project operational memory is unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const result = await saveProjectMemory(c.env, principal, context, c.req.param("projectId"),
+      await c.req.json().catch(() => undefined));
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
+}
