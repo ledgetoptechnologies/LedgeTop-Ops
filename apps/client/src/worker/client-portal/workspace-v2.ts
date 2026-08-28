@@ -155,11 +155,35 @@ async function invitationAcceptanceScopes(
   workspaceId: string,
   invitationId: string,
 ): Promise<Set<string> | null> {
-  const workspace = await portalDb(env).prepare(`SELECT id,root_type,pa_organization_public_id,
-      pa_client_public_id,display_name
+  const database=portalDb(env);
+  let workspace=await database.prepare(`SELECT id,root_type,pa_organization_public_id,
+      pa_client_public_id,display_name,project_alpha_source_id,legacy_account_id
     FROM portal_v2_workspaces WHERE id=? AND status='active'
       AND ${primaryWorkspaceAccount("portal_v2_workspaces")}`)
     .bind(workspaceId).first<WorkspaceRow>();
+  if(!workspace){
+    try{
+      workspace=await database.prepare(`SELECT workspace.id,workspace.root_type,workspace.pa_organization_public_id,
+          workspace.pa_client_public_id,workspace.display_name,workspace.project_alpha_source_id,workspace.legacy_account_id
+        FROM portal_v2_workspaces workspace
+        JOIN portal_secondary_workspace_invitation_authority binding ON binding.workspace_id=workspace.id
+          AND binding.invitation_id=? AND binding.source_id=workspace.project_alpha_source_id
+        JOIN pa_portal_source_authorities authority ON authority.source_id=binding.source_id AND authority.state='active'
+          AND authority.active_revision=binding.authority_revision AND authority.version=binding.authority_version
+          AND authority.connector_revision=binding.connector_revision AND authority.connector_version=binding.connector_version
+        JOIN pa_portal_source_authority_revisions revision ON revision.source_id=authority.source_id AND revision.revision=authority.active_revision
+        JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=binding.workspace_id
+          AND checkpoint.active_generation_id=binding.generation_id AND checkpoint.source_sequence=binding.source_sequence
+        JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+          AND generation.workspace_id=binding.workspace_id AND generation.status='active' AND generation.complete=1
+          AND generation.source_sequence=checkpoint.source_sequence
+        WHERE workspace.id=? AND workspace.status='active' AND workspace.legacy_account_id IS NULL`)
+        .bind(invitationId,workspaceId).first<WorkspaceRow>();
+    }catch(error){
+      if(isMissingSecondaryMembershipSchema(error))return null;
+      throw error;
+    }
+  }
   if (!workspace || !(await activeRootExists(env, workspace))) return null;
   const grants = await portalDb(env).prepare(`SELECT DISTINCT scope_type,scope_public_id
     FROM portal_v2_invitation_entitlements WHERE invitation_id=?
@@ -205,6 +229,11 @@ function canonicalPrincipalEmail(value: string): string | null {
 function isPreLegacyBridgeDatabase(error: unknown): boolean {
   const message = error instanceof Error ? error.message : String(error);
   return /no such table:\s*(?:main\.)?portal_v2_legacy_member_bridges\b/i.test(message);
+}
+
+function isMissingSecondaryMembershipSchema(error:unknown):boolean{
+  const message=error instanceof Error?error.message:String(error);
+  return /no such table:\s*(?:main\.)?(?:portal_secondary_workspace_invitation_authority|portal_secondary_workspace_membership_fences|pa_portal_source_authorities|pa_portal_source_authority_revisions)\b/i.test(message);
 }
 
 async function resolveGlobalIdentity(
@@ -1290,12 +1319,40 @@ export async function acceptPortalWorkspaceInvitation(
   if (!tokenHash || !normalizedEmail || !validPrincipalPart(principal.issuer) || !validPrincipalPart(principal.subject)) return "denied";
   // Email narrows this one invitation only. The durable authorization subject
   // is always the provider-verified issuer + subject pair.
-  const invitation = await portalDb(env).prepare(`SELECT id,workspace_id,status,accepted_by_identity_id
-    FROM portal_v2_invitations WHERE token_hash=? AND lower(invited_email)=?
-      AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=portal_v2_invitations.workspace_id
-        AND workspace.status='active' AND ${primaryWorkspaceAccount("workspace")})`)
+  type AcceptanceInvitation={id:string;workspace_id:string;status:string;accepted_by_identity_id:string|null;source_id:string;secondary_context_hash:string|null};
+  const database=portalDb(env);
+  let invitation=await database.prepare(`SELECT invitation.id,invitation.workspace_id,invitation.status,invitation.accepted_by_identity_id,
+      workspace.project_alpha_source_id source_id,NULL secondary_context_hash
+    FROM portal_v2_invitations invitation
+    JOIN portal_v2_workspaces workspace ON workspace.id=invitation.workspace_id AND workspace.status='active'
+    WHERE invitation.token_hash=? AND lower(invitation.invited_email)=?
+      AND ${primaryWorkspaceAccount("workspace")}`)
     .bind(tokenHash, normalizedEmail)
-    .first<{ id: string; workspace_id: string; status: string; accepted_by_identity_id: string | null }>();
+    .first<AcceptanceInvitation>();
+  if(!invitation){
+    try{
+      invitation=await database.prepare(`SELECT invitation.id,invitation.workspace_id,invitation.status,invitation.accepted_by_identity_id,
+          workspace.project_alpha_source_id source_id,binding.context_hash secondary_context_hash
+        FROM portal_v2_invitations invitation
+        JOIN portal_v2_workspaces workspace ON workspace.id=invitation.workspace_id AND workspace.status='active'
+          AND workspace.legacy_account_id IS NULL
+        JOIN portal_secondary_workspace_invitation_authority binding ON binding.invitation_id=invitation.id
+          AND binding.workspace_id=invitation.workspace_id AND binding.source_id=workspace.project_alpha_source_id
+        JOIN pa_portal_source_authorities authority ON authority.source_id=binding.source_id AND authority.state='active'
+          AND authority.active_revision=binding.authority_revision AND authority.version=binding.authority_version
+          AND authority.connector_revision=binding.connector_revision AND authority.connector_version=binding.connector_version
+        JOIN pa_portal_source_authority_revisions revision ON revision.source_id=authority.source_id AND revision.revision=authority.active_revision
+        JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+          AND checkpoint.active_generation_id=binding.generation_id AND checkpoint.source_sequence=binding.source_sequence
+        JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id AND generation.workspace_id=workspace.id
+          AND generation.status='active' AND generation.complete=1 AND generation.source_sequence=checkpoint.source_sequence
+        WHERE invitation.token_hash=? AND lower(invitation.invited_email)=?`)
+        .bind(tokenHash,normalizedEmail).first<AcceptanceInvitation>();
+    }catch(error){
+      if(isMissingSecondaryMembershipSchema(error))return 'denied';
+      throw error;
+    }
+  }
   if (!invitation) return "denied";
   const accessTermsReady=await projectAccessTermsReady(portalDb(env));
   const approvalReady=await invitationRequestsReady(portalDb(env));
@@ -1304,6 +1361,16 @@ export async function acceptPortalWorkspaceInvitation(
   let identity = await portalDb(env).prepare(`SELECT id FROM portal_v2_identities
     WHERE issuer=? AND subject=? AND status='active' AND revoked_at IS NULL AND lower(verified_email)=?`)
     .bind(principal.issuer, principal.subject, normalizedEmail).first<IdentityRow>();
+  try{
+    const enrollmentBlocked=await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_identity_eligibility_blocks
+      WHERE status='active' AND datetime(valid_from)<=datetime('now')
+        AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
+        AND ((match_type='issuer_subject' AND issuer=? AND subject=?) OR (match_type='email' AND normalized_email=?)) LIMIT 1`)
+      .bind(principal.issuer,principal.subject,normalizedEmail).first('ok');
+    if(enrollmentBlocked!==null)return 'denied';
+  }catch(error){
+    if(!/no such table:\s*(?:main\.)?portal_v2_identity_eligibility_blocks\b/i.test(error instanceof Error?error.message:String(error)))throw error;
+  }
   if (invitation.status === "accepted")
     return identity && invitation.accepted_by_identity_id === identity.id ? "replayed" : "denied";
   if (invitation.status !== "pending") return "denied";
@@ -1357,37 +1424,76 @@ export async function acceptPortalWorkspaceInvitation(
   if (!acceptanceScopes || await identityDeniedForScopes(
     env, identity.id, invitation.workspace_id, acceptanceScopes,
   )) return "denied";
-  try{await portalDb(env).batch([
-    portalDb(env).prepare(`UPDATE portal_v2_invitations AS invitation
+  const enrollmentAcceptanceGuard=requireEnrollmentReceipt?`AND EXISTS (
+    SELECT 1 FROM portal_v2_invitation_access_enrollment_receipts receipt
+    JOIN portal_v2_invitation_email_outbox outbox ON outbox.invitation_id=invitation.id
+      AND outbox.recipient_email_hash=receipt.invited_email_hash
+    WHERE receipt.invitation_id=invitation.id AND receipt.workspace_id=invitation.workspace_id
+      AND receipt.invitation_token_hash=invitation.token_hash AND receipt.revoked_at IS NULL
+      AND datetime(receipt.enrolled_at)<=datetime('now') AND datetime(receipt.expires_at)>datetime('now'))`:'';
+  const acceptanceUpdate=invitation.secondary_context_hash
+    ?database.prepare(`UPDATE portal_v2_invitations AS invitation
+      SET status='accepted',accepted_at=datetime('now'),accepted_by_identity_id=?
+      WHERE id=? AND status='pending' AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
+        AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace
+          JOIN portal_secondary_workspace_invitation_authority binding ON binding.invitation_id=invitation.id
+            AND binding.workspace_id=workspace.id AND binding.source_id=workspace.project_alpha_source_id
+          JOIN pa_portal_source_authorities authority ON authority.source_id=binding.source_id AND authority.state='active'
+            AND authority.active_revision=binding.authority_revision AND authority.version=binding.authority_version
+            AND authority.connector_revision=binding.connector_revision AND authority.connector_version=binding.connector_version
+          JOIN pa_portal_source_authority_revisions revision ON revision.source_id=authority.source_id AND revision.revision=authority.active_revision
+          JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+            AND checkpoint.active_generation_id=binding.generation_id AND checkpoint.source_sequence=binding.source_sequence
+          JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+            AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
+            AND generation.source_sequence=checkpoint.source_sequence
+          WHERE workspace.id=invitation.workspace_id AND workspace.status='active' AND workspace.legacy_account_id IS NULL)
+        AND NOT EXISTS(SELECT 1 FROM portal_v2_workspace_memberships membership
+          WHERE membership.workspace_id=invitation.workspace_id AND membership.identity_id=?)
+        ${enrollmentAcceptanceGuard}`).bind(identity.id,invitation.id,identity.id)
+    :database.prepare(`UPDATE portal_v2_invitations AS invitation
       SET status='accepted',accepted_at=datetime('now'),accepted_by_identity_id=?
       WHERE id=? AND status='pending' AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
         AND EXISTS(SELECT 1 FROM portal_v2_workspaces workspace WHERE workspace.id=invitation.workspace_id
-          AND workspace.status='active' AND ${primaryWorkspaceAccount("workspace")})
-        AND NOT EXISTS (
-          SELECT 1 FROM portal_v2_workspace_memberships membership
+          AND workspace.status='active' AND ${primaryWorkspaceAccount('workspace')})
+        AND NOT EXISTS(SELECT 1 FROM portal_v2_workspace_memberships membership
           WHERE membership.workspace_id=invitation.workspace_id AND membership.identity_id=?
-            AND membership.source_type<>'client_invitation'
-        )
-        ${requireEnrollmentReceipt ? `AND EXISTS (
-          SELECT 1
-          FROM portal_v2_invitation_access_enrollment_receipts receipt
-          JOIN portal_v2_invitation_email_outbox outbox
-            ON outbox.invitation_id=invitation.id
-           AND outbox.recipient_email_hash=receipt.invited_email_hash
-          WHERE receipt.invitation_id=invitation.id
-            AND receipt.workspace_id=invitation.workspace_id
-            AND receipt.invitation_token_hash=invitation.token_hash
-            AND receipt.revoked_at IS NULL
-            AND datetime(receipt.enrolled_at)<=datetime('now')
-            AND datetime(receipt.expires_at)>datetime('now')
-        )` : ""}`)
-      .bind(identity.id, invitation.id, identity.id),
-    portalDb(env).prepare(`INSERT INTO portal_v2_workspace_memberships
-      (id,workspace_id,identity_id,source_type,status)
-      SELECT 'invitation-membership-' || id,workspace_id,?,'client_invitation','active'
-      FROM portal_v2_invitations WHERE id=? AND status='accepted' AND accepted_by_identity_id=?
-      ON CONFLICT(workspace_id,identity_id) DO NOTHING`)
-      .bind(identity.id, invitation.id, identity.id),
+            AND (membership.source_type<>'client_invitation' OR membership.status<>'active'
+              OR membership.revoked_at IS NOT NULL
+              OR (membership.expires_at IS NOT NULL AND datetime(membership.expires_at)<=datetime('now'))))
+        ${enrollmentAcceptanceGuard}`).bind(identity.id,invitation.id,identity.id);
+  const membershipInsert=invitation.secondary_context_hash
+    ?database.prepare(`INSERT INTO portal_v2_workspace_memberships
+      (id,workspace_id,identity_id,source_type,status,source_version)
+      SELECT 'invitation-membership-' || invitation.id,invitation.workspace_id,?,'client_invitation','active',binding.context_hash
+      FROM portal_v2_invitations invitation
+      JOIN portal_secondary_workspace_invitation_authority binding ON binding.invitation_id=invitation.id
+      WHERE invitation.id=? AND invitation.status='accepted' AND invitation.accepted_by_identity_id=?
+      ON CONFLICT(workspace_id,identity_id) DO NOTHING`).bind(identity.id,invitation.id,identity.id)
+    :database.prepare(`INSERT INTO portal_v2_workspace_memberships
+      (id,workspace_id,identity_id,source_type,status,source_version)
+      SELECT 'invitation-membership-' || invitation.id,invitation.workspace_id,?,'client_invitation','active',NULL
+      FROM portal_v2_invitations invitation
+      WHERE invitation.id=? AND invitation.status='accepted' AND invitation.accepted_by_identity_id=?
+      ON CONFLICT(workspace_id,identity_id) DO NOTHING`).bind(identity.id,invitation.id,identity.id);
+  try{await database.batch([
+    ...(invitation.secondary_context_hash?[database.prepare(`INSERT INTO portal_secondary_workspace_membership_fences(id,write_guard)
+      VALUES(?,CASE WHEN EXISTS(SELECT 1 FROM portal_secondary_workspace_invitation_authority binding
+        JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'
+          AND workspace.legacy_account_id IS NULL AND workspace.project_alpha_source_id=binding.source_id
+        JOIN pa_portal_source_authorities authority ON authority.source_id=binding.source_id AND authority.state='active'
+          AND authority.active_revision=binding.authority_revision AND authority.version=binding.authority_version
+          AND authority.connector_revision=binding.connector_revision AND authority.connector_version=binding.connector_version
+        JOIN pa_portal_source_authority_revisions revision ON revision.source_id=authority.source_id AND revision.revision=authority.active_revision
+        JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+          AND checkpoint.active_generation_id=binding.generation_id AND checkpoint.source_sequence=binding.source_sequence
+        JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+          AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
+          AND generation.source_sequence=checkpoint.source_sequence
+        WHERE binding.invitation_id=? AND binding.context_hash=?) THEN 1 ELSE 0 END)`)
+      .bind(`secondary-accept-${crypto.randomUUID()}`,invitation.id,invitation.secondary_context_hash)]:[]),
+    acceptanceUpdate,
+    membershipInsert,
     portalDb(env).prepare(`INSERT OR IGNORE INTO portal_v2_entitlements
       (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status,entitlement_version${accessTermsReady?',access_terms_id':''})
       SELECT 'invitation-entitlement-' || invitation.id || '-' || grants.capability || '-' || grants.scope_type || '-' || grants.scope_public_id,
@@ -1409,7 +1515,8 @@ export async function acceptPortalWorkspaceInvitation(
         invitation.accepted_by_identity_id,identity.verified_email,datetime('now')
       FROM portal_v2_invitations invitation
       JOIN portal_v2_workspaces workspace ON workspace.id=invitation.workspace_id
-        AND workspace.status='active' AND workspace.legacy_account_id IS NOT NULL
+        AND workspace.status='active' AND workspace.project_alpha_source_id='project-alpha:primary'
+        AND workspace.legacy_account_id IS NOT NULL
       JOIN portal_v2_identities identity ON identity.id=invitation.accepted_by_identity_id
         AND identity.status='active' AND identity.revoked_at IS NULL
       WHERE invitation.id=? AND invitation.status='accepted' AND invitation.accepted_by_identity_id=?`)
@@ -1419,7 +1526,8 @@ export async function acceptPortalWorkspaceInvitation(
       SELECT workspace.legacy_account_id,link.id,'member',0
       FROM portal_v2_invitations invitation
       JOIN portal_v2_workspaces workspace ON workspace.id=invitation.workspace_id
-        AND workspace.status='active' AND workspace.legacy_account_id IS NOT NULL
+        AND workspace.status='active' AND workspace.project_alpha_source_id='project-alpha:primary'
+        AND workspace.legacy_account_id IS NOT NULL
       JOIN client_identity_links link ON link.account_id=workspace.legacy_account_id
         AND link.issuer='urn:ltds:portal-v2-bridge:' || invitation.workspace_id
         AND link.subject=invitation.accepted_by_identity_id
@@ -1431,7 +1539,8 @@ export async function acceptPortalWorkspaceInvitation(
         workspace.legacy_account_id,link.id,invitation.id
       FROM portal_v2_invitations invitation
       JOIN portal_v2_workspaces workspace ON workspace.id=invitation.workspace_id
-        AND workspace.status='active' AND workspace.legacy_account_id IS NOT NULL
+        AND workspace.status='active' AND workspace.project_alpha_source_id='project-alpha:primary'
+        AND workspace.legacy_account_id IS NOT NULL
       JOIN client_identity_links link ON link.account_id=workspace.legacy_account_id
         AND link.issuer='urn:ltds:portal-v2-bridge:' || invitation.workspace_id
         AND link.subject=invitation.accepted_by_identity_id
@@ -1442,6 +1551,9 @@ export async function acceptPortalWorkspaceInvitation(
       SELECT bridge.legacy_account_id,bridge.legacy_identity_id,grant_record.project_id,
         bridge.legacy_identity_id
       FROM portal_v2_legacy_member_bridges bridge
+      JOIN portal_v2_workspaces primary_workspace ON primary_workspace.id=bridge.workspace_id
+        AND primary_workspace.project_alpha_source_id='project-alpha:primary'
+        AND primary_workspace.legacy_account_id=bridge.legacy_account_id
       JOIN client_project_grants grant_record ON grant_record.account_id=bridge.legacy_account_id
         AND grant_record.revoked_at IS NULL
       JOIN projects project ON project.id=grant_record.project_id AND ${primaryAlphaReference("project")}

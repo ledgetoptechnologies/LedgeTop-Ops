@@ -210,6 +210,22 @@ describe('workspace invitation approval: real migrated D1',{concurrent:false,tim
   expect(grants).toEqual([{capability:'delivery.view',entitlement_version:2,access_terms_id:null},{capability:'workspace.view',entitlement_version:2,access_terms_id:null}]);
   const before=await count('portal_v2_entitlements',f.id);expect(await acceptPortalWorkspaceInvitation(env,guest,token)).toBe('replayed');expect(await count('portal_v2_entitlements',f.id)).toBe(before);
  });
+ it('does not accept a primary reinvitation through an inactive local membership',async()=>{
+  for(const state of ['suspended','revoked','expired'] as const){
+   const f=await fixture(),first=await submit(f,{type:'organization',publicId:f.root}),one=await stage(first);
+   const guest={issuer,subject:`inactive-${state}-${f.id}`,email:first.email};
+   const issued=await publishApprovedWorkspaceInvitation(env,{authorizationId:one.auth.id});
+   expect(await acceptPortalWorkspaceInvitation(env,guest,await enrolledToken(issued.invitationId!))).toBe('accepted');
+   const identity=await db.prepare('SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=?').bind(issuer,guest.subject).first<string>('id');
+   if(state==='suspended')await db.prepare(`UPDATE portal_v2_workspace_memberships SET status='suspended' WHERE workspace_id=? AND identity_id=?`).bind(f.id,identity).run();
+   if(state==='revoked')await db.prepare(`UPDATE portal_v2_workspace_memberships SET status='revoked',revoked_at=datetime('now') WHERE workspace_id=? AND identity_id=?`).bind(f.id,identity).run();
+   if(state==='expired')await db.prepare(`UPDATE portal_v2_workspace_memberships SET expires_at=datetime('now','-1 minute') WHERE workspace_id=? AND identity_id=?`).bind(f.id,identity).run();
+   const second=await submit(f,{type:'organization',publicId:f.root}),two=await stage(second);
+   const replacement=await publishApprovedWorkspaceInvitation(env,{authorizationId:two.auth.id});
+   expect(await acceptPortalWorkspaceInvitation(env,guest,await enrolledToken(replacement.invitationId!))).toBe('denied');
+   expect(await db.prepare('SELECT status FROM portal_v2_invitations WHERE id=?').bind(replacement.invitationId).first('status')).toBe('pending');
+  }
+ },180_000);
  it('keeps one key identity across request/direct policy changes even for old clients omitting the reviewed version',async()=>{
   const f=await fixture(),key=crypto.randomUUID(),input={email:'old-client@example.test',organizationWide:true,confirmOrganizationWide:true,capabilities:['delivery.view'] as const};
   const body={...input,capabilities:[...input.capabilities]};

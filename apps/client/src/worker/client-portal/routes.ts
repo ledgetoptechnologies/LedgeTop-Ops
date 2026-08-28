@@ -737,6 +737,7 @@ export function createClientPortalRouter(
     if (result.outcome === "rate_limited") throw new HTTPException(429, { message: "Too many invitations. Try again later." });
     if (result.outcome === "policy_disabled") throw new HTTPException(403, { message: "invitation_policy_disabled" });
     if (result.outcome === "approval_required") throw new HTTPException(409, { message: "invitation_approval_required" });
+    if (result.outcome === 'secondary_approval_unsupported') throw new HTTPException(409,{message:'secondary_invitation_approval_unsupported'});
     if (result.outcome === 'mail_unavailable') throw new HTTPException(503,{message:'Invitation email is not configured'});
     return c.json(result, result.outcome === "created" ? 201 : result.outcome==='approval_requested'?202:200);
   });
