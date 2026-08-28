@@ -25,6 +25,13 @@ export interface ClientAuditTimelineCoverage {
   reason: ClientAuditTimelineCoverageReason;
 }
 
+export const CLIENT_AUDIT_TIMELINE_ACCESS_ADAPTERS = [
+  "workspace_membership", "workspace_invitation_request", "workspace_peer_administrator",
+  "portal_identity_denial", "authenticated_delivery_grant", "delegated_client_share",
+  "viewer_client_grant", "project_access",
+] as const;
+export type ClientAuditTimelineAccessAdapter = (typeof CLIENT_AUDIT_TIMELINE_ACCESS_ADAPTERS)[number];
+
 export interface ClientAuditTimelineItem {
   /** Namespaced, opaque event key. It is not a storage key or authorization handle. */
   id: string;
@@ -54,6 +61,7 @@ export interface ClientAuditTimelinePage {
   refreshedAt: string;
   asOf: string;
   coverage: Record<ClientAuditTimelineCategory, ClientAuditTimelineCoverage>;
+  accessCoverage: Record<ClientAuditTimelineAccessAdapter, ClientAuditTimelineCoverage>;
   filters: ClientAuditTimelineFilters;
   items: ClientAuditTimelineItem[];
   page: { nextCursor: string | null; hasMore: boolean; returned: number; limit: number };

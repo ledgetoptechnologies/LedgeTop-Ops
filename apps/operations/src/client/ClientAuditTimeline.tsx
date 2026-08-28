@@ -10,6 +10,8 @@ const actorTypes = ["all", "staff", "client", "system", "integration", "public",
 const results = ["all", "succeeded", "failed", "denied", "informational"] as const;
 const coverageReasons = ["permission_required", "unsupported_source", "not_applicable", "not_collected"] as const;
 const producers = ["project_alpha", "service_requests", "portal_access", "client_delivery"] as const;
+const accessAdapters = ["workspace_membership", "workspace_invitation_request", "workspace_peer_administrator",
+  "portal_identity_denial", "authenticated_delivery_grant", "delegated_client_share", "viewer_client_grant", "project_access"] as const;
 type Category = (typeof categories)[number];
 type CoveredCategory = (typeof coveredCategories)[number];
 type ActorType = (typeof actorTypes)[number];
@@ -30,11 +32,14 @@ interface Coverage { available: boolean; reason: CoverageReason | null }
 interface AuditResponse {
   canonicalRoot: AuditRoot; projectId: string | null; contextVersion: string; refreshedAt: string; asOf: string;
   coverage: Record<CoveredCategory, Coverage>; filters: AuditFilters; items: AuditItem[];
+  accessCoverage: Record<(typeof accessAdapters)[number], Coverage>;
   page: { nextCursor: string | null; hasMore: boolean; returned: number; limit: number };
 }
 interface FilterDraft { category: Category; actorType: ActorType; result: AuditResult; from: string; to: string }
 
 const defaults: FilterDraft = { category: "all", actorType: "all", result: "all", from: "", to: "" };
+const accessDefaults: FilterDraft = { ...defaults, category: "access" };
+const auditParams = ["audit.active", "audit.category", "audit.actor", "audit.result", "audit.from", "audit.to"] as const;
 const labels: Record<CoveredCategory, string> = {
   project: "Projects", request: "Requests", feedback: "Feedback", access: "Access", delivery: "Delivery", notification: "Notifications",
 };
@@ -68,6 +73,27 @@ function validCoverage(value: unknown): value is Record<CoveredCategory, Coverag
     return typeof coverage.available === "boolean" && (coverage.available
       ? coverage.reason === null : isValue(coverageReasons, coverage.reason));
   });
+}
+
+function validAccessCoverage(value: unknown): value is AuditResponse["accessCoverage"] {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  return Object.keys(record).length === accessAdapters.length && accessAdapters.every(adapter => {
+    const entry = record[adapter];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const item = entry as Partial<Coverage>;
+    return typeof item.available === "boolean" && (item.available ? item.reason === null : isValue(coverageReasons, item.reason));
+  });
+}
+
+function draftFromUrl(): FilterDraft | null {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("audit.active") !== "1") return null;
+  const category = params.get("audit.category") ?? "all", actorType = params.get("audit.actor") ?? "all",
+    result = params.get("audit.result") ?? "all", from = params.get("audit.from") ?? "", to = params.get("audit.to") ?? "";
+  if (!isValue(categories, category) || !isValue(actorTypes, actorType) || !isValue(results, result)) return null;
+  const draft = { category, actorType, result, from, to };
+  return requestedFilters(draft) ? draft : null;
 }
 
 function sameFilters(left: AuditFilters, right: AuditFilters): boolean {
@@ -107,7 +133,8 @@ function detailHref(item: AuditItem): string | null {
   } catch { return null; }
 }
 
-function CoverageDisclosure({ coverage }: { coverage: Record<CoveredCategory, Coverage> }) {
+function CoverageDisclosure({ coverage, accessCoverage }: { coverage: Record<CoveredCategory, Coverage>;
+  accessCoverage: AuditResponse["accessCoverage"] }) {
   const available = coveredCategories.filter(category => coverage[category].available);
   const unavailable = coveredCategories.filter(category => !coverage[category].available);
   const reason = (value: CoverageReason) => value === "permission_required" ? "permission required"
@@ -119,6 +146,8 @@ function CoverageDisclosure({ coverage }: { coverage: Record<CoveredCategory, Co
     <dl>
       <div><dt>Available</dt><dd>{available.length ? available.map(category => labels[category]).join(", ") : "No categories"}</dd></div>
       {unavailable.map(category => <div key={category}><dt>{labels[category]}</dt><dd>{reason(coverage[category].reason!)}</dd></div>)}
+      {accessAdapters.map(adapter => <div key={adapter}><dt>Access · {adapter.replaceAll("_", " ")}</dt>
+        <dd>{accessCoverage[adapter].available ? "available" : reason(accessCoverage[adapter].reason!)}</dd></div>)}
     </dl>
   </details>;
 }
@@ -130,6 +159,7 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
 }) {
   const [draft, setDraft] = useState<FilterDraft>(defaults), [applied, setApplied] = useState<AuditFilters | null>(null);
   const [items, setItems] = useState<AuditItem[]>([]), [coverage, setCoverage] = useState<Record<CoveredCategory, Coverage> | null>(null);
+  const [accessCoverage, setAccessCoverage] = useState<AuditResponse["accessCoverage"] | null>(null);
   const [page, setPage] = useState<AuditResponse["page"] | null>(null), [busy, setBusy] = useState(false);
   const [requested, setRequested] = useState(false), [error, setError] = useState(""), [filterError, setFilterError] = useState("");
   const pending = useRef<AbortController | null>(null), sequence = useRef(0), failedCursor = useRef<string | null>(null);
@@ -138,20 +168,36 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
   const base = `/api/client-hub/sources/${encodeURIComponent(root.sourceId)}/${root.rootNamespace}/${routeKind}/${encodeURIComponent(root.publicId)}`;
   const endpoint = projectId === undefined ? `${base}/timeline` : `${base}/business-projects/${encodeURIComponent(projectId)}/timeline`;
   const title = projectId === undefined ? "Client audit timeline" : "Project audit timeline";
+  const syncUrl = (value: FilterDraft | null, mode: "push" | "replace" = "push") => {
+    const url = new URL(window.location.href);
+    for (const key of auditParams) url.searchParams.delete(key);
+    if (value) {
+      url.searchParams.set("audit.active", "1"); url.searchParams.set("audit.category", value.category);
+      url.searchParams.set("audit.actor", value.actorType); url.searchParams.set("audit.result", value.result);
+      if (value.from) url.searchParams.set("audit.from", value.from);
+      if (value.to) url.searchParams.set("audit.to", value.to);
+    }
+    window.history[mode === "push" ? "pushState" : "replaceState"](window.history.state, "", `${url.pathname}${url.search}${url.hash}`);
+  };
 
   useEffect(() => {
     const abort = () => { pending.current?.abort(); pending.current = null; sequence.current += 1; };
-    setDraft(defaults); setApplied(null); setItems([]); setCoverage(null); setPage(null); setBusy(false); setRequested(false);
-    setError(""); setFilterError(""); failedCursor.current = null;
+    const restore = () => {
+      abort(); const restored = draftFromUrl();
+      setDraft(restored ?? defaults); setApplied(null); setItems([]); setCoverage(null); setAccessCoverage(null);
+      setPage(null); setBusy(false); setRequested(false); setError(""); setFilterError(""); failedCursor.current = null;
+      if (restored) void load(requestedFilters(restored)!, null);
+    };
     contextSignal.addEventListener("abort", abort);
-    return () => { contextSignal.removeEventListener("abort", abort); abort(); };
+    window.addEventListener("popstate", restore); restore();
+    return () => { contextSignal.removeEventListener("abort", abort); window.removeEventListener("popstate", restore); abort(); };
   }, [identity, contextVersion, contextSignal, projectId]);
 
-  const load = async (filters: AuditFilters, cursor: string | null) => {
+  async function load(filters: AuditFilters, cursor: string | null) {
     if (contextSignal.aborted || pending.current || !contextVersion) return;
     const controller = new AbortController(), request = ++sequence.current; pending.current = controller;
     setRequested(true); setBusy(true); setError(""); setFilterError("");
-    if (!cursor) { setItems([]); setCoverage(null); setPage(null); }
+    if (!cursor) { setItems([]); setCoverage(null); setAccessCoverage(null); setPage(null); }
     try {
       const params = new URLSearchParams({ expectedContextVersion: contextVersion, category: filters.category,
         actorType: filters.actorType, result: filters.result, limit: "10" });
@@ -163,7 +209,8 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
       const asOf = businessTimestamp(response.asOf), next = response.page;
       if (!response.canonicalRoot || rootKey(response.canonicalRoot) !== identity || response.contextVersion !== contextVersion
         || response.projectId !== (projectId ?? null) || !businessTimestamp(response.refreshedAt) || !asOf
-        || !validCoverage(response.coverage) || !response.filters || !sameFilters(response.filters, filters)
+        || !validCoverage(response.coverage) || !validAccessCoverage(response.accessCoverage)
+        || !response.filters || !sameFilters(response.filters, filters)
         || !next || typeof next.hasMore !== "boolean" || !(next.nextCursor === null || scalar(next.nextCursor, 4096))
         || !Number.isInteger(next.returned) || !Number.isInteger(next.limit) || next.limit < 1 || next.limit > 100
         || !validItems(response.items, root, asOf, projectId) || next.returned !== response.items.length || response.items.length > next.limit
@@ -171,34 +218,43 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
         throw new Error("This audit timeline could not be verified. Retry this section.");
       }
       setItems(previous => [...new Map([...(cursor ? previous : []), ...response.items].map(item => [itemKey(item), item])).values()]);
-      setCoverage(response.coverage); setPage(next); setApplied(filters); failedCursor.current = null;
+      setCoverage(response.coverage); setAccessCoverage(response.accessCoverage); setPage(next); setApplied(filters); failedCursor.current = null;
     } catch (caught) {
       if (contextSignal.aborted || controller.signal.aborted || sequence.current !== request) return;
       const message = caught instanceof Error ? caught.message : "The audit timeline could not be loaded.";
       if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) {
-        setItems([]); setCoverage(null); setPage(null); onInvalidated(message, caught.status);
+        setItems([]); setCoverage(null); setAccessCoverage(null); setPage(null); onInvalidated(message, caught.status);
       } else { setError(message); failedCursor.current = cursor; }
     } finally {
       if (!contextSignal.aborted && !controller.signal.aborted && sequence.current === request) { pending.current = null; setBusy(false); }
     }
-  };
+  }
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const filters = requestedFilters(draft);
     if (!filters) { setFilterError("Choose valid dates with From on or before To."); return; }
     if (pending.current) return;
+    syncUrl(draft);
     setApplied(filters); void load(filters, null);
   };
   const reset = () => {
     if (pending.current) { pending.current.abort(); pending.current = null; sequence.current += 1; }
-    setDraft(defaults); setApplied(null); setItems([]); setCoverage(null); setPage(null); setRequested(false); setBusy(false);
+    setDraft(defaults); setApplied(null); setItems([]); setCoverage(null); setAccessCoverage(null); setPage(null); setRequested(false); setBusy(false);
     setError(""); setFilterError(""); failedCursor.current = null;
+    syncUrl(null);
+  };
+  const openAccessHistory = () => {
+    if (pending.current) return;
+    const filters = requestedFilters(accessDefaults)!;
+    syncUrl(accessDefaults); setDraft(accessDefaults); setApplied(filters); void load(filters, null);
   };
   const canContinue = Boolean(applied && page?.hasMore && page.nextCursor);
 
   return <Card title={title}><section className="client-audit-timeline" aria-label={title} aria-busy={busy}>
     <p className="client-audit-intro">Read-only events from the currently authorized client and project sources. Page views are not activity.</p>
+    <div className="client-audit-shortcuts"><button type="button" className="button-ghost" disabled={busy}
+      onClick={openAccessHistory}>View access history</button></div>
     <form onSubmit={submit} className="client-audit-filters">
       <label>Category<select value={draft.category} onChange={event => setDraft(value => ({ ...value, category: event.target.value as Category }))}>
         {categories.map(value => <option key={value} value={value}>{value === "all" ? "All categories" : labels[value]}</option>)}</select></label>
@@ -208,11 +264,11 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
         {results.map(value => <option key={value} value={value}>{value === "all" ? "All results" : value[0]!.toUpperCase() + value.slice(1)}</option>)}</select></label>
       <label>From date (UTC)<input type="date" value={draft.from} onChange={event => setDraft(value => ({ ...value, from: event.target.value }))} /></label>
       <label>To date (UTC)<input type="date" value={draft.to} onChange={event => setDraft(value => ({ ...value, to: event.target.value }))} /></label>
-      <div className="client-audit-filter-actions"><button type="submit" className="button-orange" aria-disabled={busy}>{busy && !page ? "Loading timeline…" : "Apply timeline filters"}</button>
-        <button type="button" className="button-ghost" aria-disabled={busy && !requested} onClick={reset}>Reset timeline</button></div>
+      <div className="client-audit-filter-actions"><button type="submit" className="button-orange" disabled={busy}>{busy && !page ? "Loading timeline…" : "Apply timeline filters"}</button>
+        <button type="button" className="button-ghost" disabled={busy && !requested} onClick={reset}>Reset timeline</button></div>
     </form>
     {filterError && <p role="alert">{filterError}</p>}
-    {coverage && <CoverageDisclosure coverage={coverage} />}
+    {coverage && accessCoverage && <CoverageDisclosure coverage={coverage} accessCoverage={accessCoverage} />}
     {items.length > 0 && <ol className="client-audit-events">{items.map(item => {
       const occurred = businessTimestamp(item.occurredAt)!, href = detailHref(item);
       return <li key={itemKey(item)}><div className="client-audit-event-heading"><div><strong>{item.resource.label}</strong><small>{labels[item.category]} · {item.action.replaceAll("_", " ")}</small></div>
@@ -227,7 +283,7 @@ export function ClientAuditTimeline({ root, contextVersion, contextSignal, proje
     {requested && <p role="status">{items.length.toLocaleString()} events shown{busy ? " · Loading…" : ""}</p>}
     {error && <p role="alert">{error}</p>}
     {requested && <div className="client-audit-actions">
-      {(error || canContinue) && <button type="button" className="button-ghost" aria-disabled={busy || (!error && !canContinue)} onClick={() => {
+      {(error || canContinue) && <button type="button" className="button-ghost" disabled={busy || (!error && !canContinue)} onClick={() => {
         if (!busy && applied && (error || canContinue)) void load(applied, error ? failedCursor.current : page?.nextCursor || null);
       }}>{busy ? "Loading audit events…" : error ? "Retry audit timeline" : "Load more audit events"}</button>}
       {!error && !canContinue && <span>All matching audit events loaded</span>}

@@ -1,6 +1,7 @@
 # Staff Client Hub audit timeline
 
-Status: backend checkpoint implemented locally, not deployed, August 26, 2026.
+Status: scoped access-history increment implemented locally, not deployed,
+August 28, 2026.
 
 The staff timeline is a bounded, read-only federation over existing event
 ledgers. It does not create a canonical event table, change producer retention,
@@ -31,8 +32,9 @@ Filters are `category`, `actorType`, `result`, optional canonical ISO `from` and
 `to`, `limit` from 1 through 100, and an opaque continuation `cursor`.
 `expectedContextVersion` binds the initial browser request to the current Client
 Hub workspace. The server echoes normalized filters and returns explicit
-coverage for all six categories; unavailable coverage is not an empty-history
-claim.
+coverage for all six categories. `accessCoverage` separately reports every
+access adapter, so one available ledger cannot hide permission-required,
+unsupported, not-applicable, or not-collected adapters.
 
 The AES-GCM cursor is actor-bound and includes the exact source-qualified root,
 optional project, normalized filters, current context and scope proofs, an
@@ -41,14 +43,44 @@ optional project, normalized filters, current context and scope proofs, an
 authorization. Items sort by event time descending, producer and immutable
 event ID, and each producer query is bounded to `limit + 1`.
 
-The first checkpoint includes:
+The checkpoint includes:
 
 - source organization/client/project activity for every readable business
   source;
 - request revisions for exact current primary/local account/project mappings;
-- primary workspace membership and authenticated delivery-grant lifecycle;
+- primary workspace membership, invitation-request decisions, peer-administrator
+  changes and workspace identity-denial lifecycle;
+- authenticated delivery-grant lifecycle, meaningful delegated-share
+  authorization lifecycle and Viewer client-grant lifecycle when the exact
+  current root/project mapping and the corresponding staff permission are
+  both present;
 - primary/local staff delivery-link lifecycle and its durable notification
   outcomes.
+
+Portal workspace access rows require exact current global `operations.manage`;
+its SQL-scope proof is cursor-bound and re-read after bounded ledger queries.
+Authenticated-delivery and delegated-share audit rows additionally
+require current global `delivery.share.audit`; Viewer client-grant audit rows
+require current global `viewer.manage`. Those permission proofs are bound into
+the encrypted cursor and checked again after each bounded read.
+
+Project adapters never infer ownership from names, emails, event payloads or
+display links. Invitation audit rows must match their request workspace.
+Identity-denial audit rows must match both denial identity and workspace; at
+project scope they also join the authoritative workspace source and exact
+active local source/project projection. Authenticated and delegated delivery
+events join their immutable
+folder binding. Viewer events join the exact local account/project grant.
+Workspace membership and peer-administrator events have no project key, so
+they appear only at client scope. Folder-target events also remain client-only
+because their event row has no project key. Public delegated-share session,
+manifest, preview, map and download events are intentionally excluded as noisy
+content reads rather than access-authority changes.
+
+`portal_project_access_terms` and deadline tables contain current immutable
+terms, but there is no project-access audit ledger in the current schema. This
+increment reports `project_access` as `not_collected`; it does not reconstruct
+history from present state.
 
 Feedback remains `not_collected` in this endpoint. The existing project
 feedback history keeps its stricter per-record scope checks until a bulk adapter
@@ -59,11 +91,20 @@ the meaningful-content and noise policy is unresolved.
 
 ## Redaction and retention boundary
 
-Adapters select only allowlisted columns. Responses never include raw
+Adapters select allowlisted actions and columns only. Responses never include raw
 `details_json`, request snapshots or notes, feedback text, identity IDs, email
 addresses, IP hashes, user agents, storage paths, item references, bearer URLs,
-tokens, legacy account IDs, or authorization proofs. Actor output is only a safe
-kind and generic label.
+tokens, reasons, idempotency keys, legacy account IDs, or authorization proofs.
+Access resources use generic labels and contain no subject, actor, invitation,
+grant, delegation, share or folder IDs. Actor output is only a safe kind and
+generic label.
+
+The existing timeline UI provides **View access history**. It applies the
+access category immediately. Applied state uses namespaced `audit.active`,
+`audit.category`, `audit.actor`, `audit.result`, `audit.from`, and `audit.to`
+query parameters. Refresh and browser back/forward restore all non-sensitive
+filters while preserving unrelated parameters. No cursor, identity, proof or
+authority key is placed in browser history.
 
 This route searches online D1 rows only. Existing retention archives
 `share_events` after 90 days and `audit_log`/`audit_events` after 365 days; other
@@ -73,9 +114,14 @@ describe the timeline as a complete lifetime record.
 
 ## Verification and release
 
-Focused D1 tests cover local multi-ledger merge, strict redaction, category/
-actor/result/date filters, actor/filter/scope-bound continuation and exact
-secondary source-only coverage through the real HTTP route. Operations
-type-checking must pass with the matching shared contract. Release still needs
+Focused D1 tests cover the seven available access ledgers, strict redaction,
+meaningful-event allowlists, exact project/sibling isolation, stable high-water
+pagination, malformed cross-workspace rejection, mid-read permission loss,
+per-adapter coverage, category/actor/result/date filters, actor/filter/scope-bound
+continuation and exact secondary source-only coverage. Focused browser tests
+cover refresh/back/forward restoration of every applied filter, preservation
+of unrelated query parameters, reset behavior, 44-pixel controls and
+desktop/mobile overflow. Operations type-checking must pass with the matching
+shared contract. Release still needs
 the ordinary coordinated Worker/browser gates and authorized live acceptance;
 this document is not deployment approval.

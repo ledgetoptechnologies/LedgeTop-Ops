@@ -1,6 +1,9 @@
 .client-audit-timeline { display: grid; gap: 1rem; min-width: 0; overflow-wrap: anywhere; }
 .client-audit-timeline p { margin: 0; }
 .client-audit-intro, .client-audit-prompt, .client-audit-timeline small, .client-audit-actions span { color: var(--muted); }
+.client-audit-shortcuts { display: flex; flex-wrap: wrap; gap: .65rem; }
+.client-audit-shortcuts button { min-height: 44px; max-width: 100%; white-space: normal; }
+.client-audit-shortcuts button[aria-disabled="true"] { opacity: .65; cursor: default; }
 .client-audit-filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: .8rem; align-items: end; }
 .client-audit-filters label { display: grid; gap: .35rem; min-width: 0; color: var(--muted); font-size: .82rem; font-weight: 700; }
 .client-audit-filters select, .client-audit-filters input { width: 100%; min-width: 0; min-height: 44px; }

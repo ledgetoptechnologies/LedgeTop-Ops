@@ -12,6 +12,13 @@ const coverage = {
   feedback: { available: false, reason: "not_collected" }, access: { available: true, reason: null },
   delivery: { available: false, reason: "permission_required" }, notification: { available: false, reason: "not_applicable" },
 };
+const accessCoverage = {
+  workspace_membership: { available: true, reason: null }, workspace_invitation_request: { available: true, reason: null },
+  workspace_peer_administrator: { available: true, reason: null }, portal_identity_denial: { available: true, reason: null },
+  authenticated_delivery_grant: { available: false, reason: "permission_required" },
+  delegated_client_share: { available: false, reason: "permission_required" },
+  viewer_client_grant: { available: false, reason: "permission_required" }, project_access: { available: false, reason: "not_collected" },
+};
 type Filters = { category: string; actorType: string; result: string; from: string | null; to: string | null };
 function item(id: string, overrides: Record<string, unknown> = {}) {
   return { id, sourceId: source, producer: "portal_access", producerEventId: `event-${id}`, category: "access", action: "member_denied",
@@ -23,7 +30,7 @@ function filters(url: URL): Filters {
     result: url.searchParams.get("result") || "all", from: url.searchParams.get("from"), to: url.searchParams.get("to") };
 }
 function timeline(url: URL, items = [item("one")], nextCursor: string | null = null, contextVersion = "client-context", projectId: string | null = null) {
-  return { canonicalRoot, projectId, contextVersion, refreshedAt: asOf, asOf, coverage, filters: filters(url), items,
+  return { canonicalRoot, projectId, contextVersion, refreshedAt: asOf, asOf, coverage, accessCoverage, filters: filters(url), items,
     page: { nextCursor, hasMore: Boolean(nextCursor), returned: items.length, limit: 10 } };
 }
 function clientDetail() {
@@ -75,8 +82,9 @@ test("client timeline applies exact server filters, discloses coverage, and retr
   await expect(section.getByText("Alex Client", { exact: true })).toBeVisible();
   await section.getByText("Timeline coverage", { exact: true }).click();
   await expect(section.getByText(/empty result does not prove/i)).toBeVisible();
-  await expect(section.getByText("not collected", { exact: true })).toBeVisible();
-  await expect(section.getByText("permission required", { exact: true })).toBeVisible();
+  await expect(section.getByText("not collected", { exact: true }).first()).toBeVisible();
+  await expect(section.getByText("Access · project access", { exact: true })).toBeVisible();
+  await expect(section.getByText("permission required", { exact: true }).first()).toBeVisible();
   const first = calls.find(url => url.pathname.endsWith("/timeline"))!;
   expect(Object.fromEntries(["category", "actorType", "result", "from", "to", "limit", "expectedContextVersion"].map(key => [key, first.searchParams.get(key)]))).toEqual({
     category: "access", actorType: "staff", result: "denied", from: "2026-08-01T00:00:00.000Z", to: "2026-08-26T23:59:59.999Z", limit: "10", expectedContextVersion: "client-context",
@@ -148,4 +156,47 @@ test("populated audit controls and events remain usable on mobile and desktop", 
     await section.screenshot({ path: testInfo.outputPath(`client-audit-${width}.png`) });
   }
   expect(errors).toEqual([]);
+});
+
+test("all applied filters survive refresh and browser history without exposing continuation state", async ({ page }) => {
+  await fixture(page, (route, url) => route.fulfill({ json: timeline(url, [item("access-shortcut")]) }));
+  await page.goto(`${clientPath}?panel=delivery`);
+  const section = clientTimeline(page);
+  await section.getByRole("button", { name: "View access history" }).click();
+  await expect(page).toHaveURL(/panel=delivery.*audit\.active=1.*audit\.category=access/);
+  await expect(section.getByRole("combobox", { name: "Category" })).toHaveValue("access");
+  await expect(section.getByText("Alex Client", { exact: true })).toBeVisible();
+
+  await section.getByRole("combobox", { name: "Actor" }).selectOption("staff");
+  await section.getByRole("combobox", { name: "Result" }).selectOption("denied");
+  await section.getByLabel("From date (UTC)").fill("2026-08-01");
+  await section.getByLabel("To date (UTC)").fill("2026-08-26");
+  await section.getByRole("button", { name: "Apply timeline filters" }).click();
+  const appliedUrl = new URL(page.url());
+  expect(Object.fromEntries(["panel", "audit.active", "audit.category", "audit.actor", "audit.result", "audit.from", "audit.to"]
+    .map(key => [key, appliedUrl.searchParams.get(key)]))).toEqual({ panel: "delivery", "audit.active": "1",
+      "audit.category": "access", "audit.actor": "staff", "audit.result": "denied",
+      "audit.from": "2026-08-01", "audit.to": "2026-08-26" });
+  expect(appliedUrl.searchParams.has("cursor")).toBe(false); expect(appliedUrl.searchParams.has("proof")).toBe(false);
+
+  await page.reload();
+  const refreshed = clientTimeline(page);
+  await expect(refreshed.getByRole("combobox", { name: "Category" })).toHaveValue("access");
+  await expect(refreshed.getByRole("combobox", { name: "Actor" })).toHaveValue("staff");
+  await expect(refreshed.getByRole("combobox", { name: "Result" })).toHaveValue("denied");
+  await expect(refreshed.getByLabel("From date (UTC)")).toHaveValue("2026-08-01");
+  await expect(refreshed.getByLabel("To date (UTC)")).toHaveValue("2026-08-26");
+  await expect(refreshed.getByText("Alex Client", { exact: true })).toBeVisible();
+  await page.setViewportSize({ width: 375, height: 800 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(376);
+  expect((await refreshed.getByRole("button", { name: "View access history" }).boundingBox())!.height).toBeGreaterThanOrEqual(44);
+
+  await refreshed.getByRole("button", { name: "Reset timeline" }).click();
+  await expect(page).toHaveURL(`${clientPath}?panel=delivery`);
+  await expect(refreshed.getByText("Apply filters to load the timeline.", { exact: true })).toBeVisible();
+  await page.goBack();
+  await expect(refreshed.getByRole("combobox", { name: "Actor" })).toHaveValue("staff");
+  await expect(refreshed.getByText("Alex Client", { exact: true })).toBeVisible();
+  await page.goForward();
+  await expect(refreshed.getByText("Apply filters to load the timeline.", { exact: true })).toBeVisible();
 });
