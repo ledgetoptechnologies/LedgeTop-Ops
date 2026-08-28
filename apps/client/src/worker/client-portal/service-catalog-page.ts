@@ -3,14 +3,22 @@ import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE, type CatalogSourceC
 import { base64Url, sha256 } from "../security";
 import type { Env } from "../types";
 import { mapServiceCatalogItem } from "./request-v2";
-import type { ClientServiceCatalogPage, ClientServiceCatalogPageInput } from "./types";
+import type { ClientPortalSession, ClientServiceCatalogPage, ClientServiceCatalogPageInput } from "./types";
+import {
+  readServiceAssignmentPolicy,
+  serviceAssignmentPolicyProofStillCurrent,
+  serviceAssignmentPolicyServiceSql,
+  serviceAssignmentRequestPolicyEnabled,
+  type ServiceAssignmentPolicyProof,
+} from "./service-assignment-policy";
 
 export class ServiceCatalogPageError extends Error {
-  constructor(readonly status: 400 | 409 | 503, readonly code: "catalog_cursor_invalid" | "catalog_changed" | "catalog_not_ready" | "catalog_unavailable") {
+  constructor(readonly status: 400 | 409 | 503, readonly code: "catalog_cursor_invalid" | "catalog_changed" | "catalog_not_ready" | "catalog_unavailable" | "service_assignments_unavailable") {
     super(code === "catalog_cursor_invalid" ? "The service library page is invalid."
       : code === "catalog_changed" ? "The service library changed. Refresh it before loading more."
         : code === "catalog_not_ready" ? "Versioned service library browsing is not ready."
-          : "The service library is temporarily unavailable.");
+          : code === "service_assignments_unavailable" ? "Assigned services are temporarily unavailable."
+            : "The service library is temporarily unavailable.");
   }
 }
 
@@ -20,6 +28,8 @@ const cursorSchema = z.object({
   v: z.literal(1), proof: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
   category: z.string().min(1).max(100), displayOrder: z.number().int().min(0).max(1_000_000),
   name: z.string().min(1).max(160), publicId: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/),
+  assignmentEvaluatedAt: z.string().datetime({ offset: true }).optional(),
+  assignmentExpiresAt: z.string().datetime({ offset: true }).optional(),
 }).strict();
 
 function parseCursor(encoded: string | undefined): z.infer<typeof cursorSchema> | null {
@@ -66,27 +76,40 @@ export async function listServiceCatalogPage(env: Env, input: ClientServiceCatal
  * The public compatibility endpoint deliberately exposes only the primary source.
  */
 export async function listServiceCatalogPageForSource(
-  env: Env, sourceContext: CatalogSourceContext, input: ClientServiceCatalogPageInput = {},
+  env: Env, sourceContext: CatalogSourceContext, input: ClientServiceCatalogPageInput = {}, session?: ClientPortalSession,
 ): Promise<ClientServiceCatalogPage> {
   const source = createCatalogSourceContext(sourceContext.sourceId);
   const limit = input.limit ?? 100;
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) throw new ServiceCatalogPageError(400, "catalog_cursor_invalid");
   const cursor = parseCursor(input.cursor);
   const database = env.DELIVERY_DB.withSession("first-primary");
+  let assignmentProof: ServiceAssignmentPolicyProof | null = null;
+  if (serviceAssignmentRequestPolicyEnabled(env)) {
+    if (!session) throw new ServiceCatalogPageError(503, "service_assignments_unavailable");
+    const assignmentWindow = cursor?.assignmentEvaluatedAt && cursor.assignmentExpiresAt
+      ? { evaluatedAt: cursor.assignmentEvaluatedAt, expiresAt: cursor.assignmentExpiresAt } : undefined;
+    if (cursor && !assignmentWindow) throw new ServiceCatalogPageError(409, "catalog_changed");
+    const assignment = await readServiceAssignmentPolicy(env, session, input.projectId ?? null, assignmentWindow);
+    if (assignment.state === "unavailable" || assignment.state === "disabled")
+      throw new ServiceCatalogPageError(503, "service_assignments_unavailable");
+    assignmentProof = assignment.proof;
+  }
   const before = await checkpoint(database, source).catch(error => {
     if (cursor && error instanceof ServiceCatalogPageError && error.code === "catalog_not_ready") {
       throw new ServiceCatalogPageError(409, "catalog_changed");
     }
     throw error;
   });
-  const proof = await sha256(JSON.stringify([source.sourceId, env.PROJECT_ALPHA_CATALOG_APPLICATION_KEY ?? null, before]));
+  const proof = await sha256(JSON.stringify([source.sourceId, env.PROJECT_ALPHA_CATALOG_APPLICATION_KEY ?? null,
+    before, assignmentProof, input.projectId ?? null, session?.workspaceId ?? null, session?.identityId ?? null]));
   if (cursor && cursor.proof !== proof) throw new ServiceCatalogPageError(409, "catalog_changed");
   const bindings: (string | number)[] = cursor ? [cursor.category, cursor.displayOrder, cursor.name, cursor.publicId] : [];
+  const assignmentGuard = assignmentProof ? serviceAssignmentPolicyServiceSql(assignmentProof, "catalog") : null;
   const rows = await database.prepare(`SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json
-    FROM pa_service_catalog_items WHERE source_id=? AND active=1${cursor ? ` AND
+    FROM pa_service_catalog_items catalog WHERE source_id=? AND active=1${assignmentGuard ? ` AND ${assignmentGuard.sql}` : ""}${cursor ? ` AND
       (category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id) > (? COLLATE NOCASE,?,? COLLATE NOCASE,?)` : ""}
     ORDER BY category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id LIMIT ?`)
-    .bind(source.sourceId, ...bindings, limit + 1).all<CatalogRow>();
+    .bind(source.sourceId, ...(assignmentGuard?.bindings ?? []), ...bindings, limit + 1).all<CatalogRow>();
   const after = await checkpoint(database, source).catch(error => {
     if (error instanceof ServiceCatalogPageError && error.code === "catalog_not_ready") {
       throw new ServiceCatalogPageError(409, "catalog_changed");
@@ -94,6 +117,8 @@ export async function listServiceCatalogPageForSource(
     throw error;
   });
   if (JSON.stringify(before) !== JSON.stringify(after)) throw new ServiceCatalogPageError(409, "catalog_changed");
+  if (assignmentProof && !await serviceAssignmentPolicyProofStillCurrent(env, assignmentProof))
+    throw new ServiceCatalogPageError(409, "catalog_changed");
   const visibleRows = rows.results.slice(0, limit);
   const services = visibleRows.map(mapServiceCatalogItem);
   if (services.some(service => service === null)) throw new ServiceCatalogPageError(503, "catalog_unavailable");
@@ -103,7 +128,12 @@ export async function listServiceCatalogPageForSource(
     services: services as ClientServiceCatalogPage["services"], complete: !hasMore,
     nextCursor: hasMore && last ? base64Url(new TextEncoder().encode(JSON.stringify({
       v: 1, proof, category: last.category, displayOrder: last.display_order, name: last.name, publicId: last.public_id,
+      ...(assignmentProof ? { assignmentEvaluatedAt: assignmentProof.evaluatedAt,
+        assignmentExpiresAt: assignmentProof.expiresAt } : {}),
     }))) : null,
     source: { generation: before.source_generation, sequence: before.source_sequence },
+    ...(assignmentProof ? { assignment: { sourceId: assignmentProof.sourceId, generation: assignmentProof.sourceGeneration,
+      sequence: assignmentProof.sourceSequence, subjectType: assignmentProof.subjectType,
+      subjectPublicId: assignmentProof.subjectPublicId } } : {}),
   };
 }

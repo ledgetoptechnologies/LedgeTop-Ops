@@ -30,6 +30,8 @@ export function canBeginRequest(readiness: RequestAvailability, projects: Portal
 }
 export function requestUnavailableReason(reason?: PortalRequestReadinessReason): string {
   if (reason === "catalog_unavailable") return "The service library is not ready for new requests. Your existing requests and saved drafts are unchanged.";
+  if (reason === "no_services_assigned") return "No services are currently assigned to this request context. Your existing requests and saved drafts are unchanged.";
+  if (reason === "service_assignments_unavailable") return "Assigned services cannot be verified right now. Your existing requests and saved drafts are unchanged; try again shortly.";
   if (reason === "project_unavailable") return "This project is no longer available for a new request in this workspace.";
   if (reason === "request_not_permitted") return "Your current access does not include starting a request for this context.";
   if (reason === "legacy_access_unavailable") return "Service requests are not connected for this workspace yet.";

@@ -38,6 +38,8 @@ export interface Env {
   PROJECT_ALPHA_PORTAL_PREVIOUS_HMAC_SECRET?: string;
   /** Default-off HMAC receiver for source-owned service facts. */
   PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED?: string;
+  /** Default-off exact-target filter for request service availability. Never grants access. */
+  CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED?: string;
   /** Deploy-managed existing-connector credential envelope; portal keys only. */
   PROJECT_ALPHA_CONNECTOR_CREDENTIALS?: string;
   /** Default-off, read-only Project Alpha planning guidance integration. */

@@ -76,6 +76,11 @@ source grant or individual receiver workspace is an additional fail-closed
 control. Retain stored facts and immutable receipts/audit records for diagnosis;
 this foundation defines no production cleanup or downstream policy behavior.
 
+A separately reviewed, default-off downstream consumer can now narrow service-
+request choices from these facts. It is not implied by the v1 wire contract and
+does not change this receiver's non-authorizing boundary. See
+[Project Alpha service assignments as request availability](client-service-assignment-request-policy.md).
+
 ## Staff Client Hub read model (local follow-on, not deployed)
 
 The prepared Operations follow-on adds a read-only **Project Alpha service

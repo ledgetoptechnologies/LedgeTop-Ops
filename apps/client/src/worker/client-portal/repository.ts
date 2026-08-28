@@ -2,6 +2,7 @@ import {
   aggregateDeliveryLocations,
   buildServiceRequestNotificationSnapshot,
   PRIMARY_ALPHA_SOURCE_ID,
+  PRIMARY_CATALOG_SOURCE,
   type DeliveryLocationCollection,
 } from "@ltds/shared";
 import { sha256 } from "../security";
@@ -31,7 +32,7 @@ import {
   submitServiceRequestDraft,
 } from "./request-v2";
 import { listAuthorizedAuthenticatedDeliveryPrefixes } from "./authenticated-delivery-grants";
-import { listServiceCatalogPage } from "./service-catalog-page";
+import { listServiceCatalogPageForSource } from "./service-catalog-page";
 
 const CLIENT_FILE_PAGE_SIZE = 150;
 const CLIENT_FILE_QUERY_LIMIT = CLIENT_FILE_PAGE_SIZE + 1;
@@ -734,12 +735,12 @@ async function getServiceRequestByIdempotency(
 }
 
 export const d1ClientPortalRepository: ClientPortalRepository = {
-  async listServiceCatalog(env) {
-    return listServiceCatalog(env);
+  async listServiceCatalog(env, session, input) {
+    return listServiceCatalog(env, session, input?.projectId ?? null);
   },
 
-  async listServiceCatalogPage(env, _session, input) {
-    return listServiceCatalogPage(env, input);
+  async listServiceCatalogPage(env, session, input) {
+    return listServiceCatalogPageForSource(env, PRIMARY_CATALOG_SOURCE, input, session);
   },
 
   async getServiceRequestDraft(env, session, draftId) {

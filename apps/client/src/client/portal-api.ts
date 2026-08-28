@@ -538,7 +538,7 @@ export async function changePortalWorkspacePeerAdministrator(workspaceId:string,
   });
 }
 
-export type PortalRequestReadinessReason = "ready" | "legacy_access_unavailable" | "request_not_permitted" | "project_unavailable" | "catalog_unavailable" | "request_unavailable";
+export type PortalRequestReadinessReason = "ready" | "legacy_access_unavailable" | "request_not_permitted" | "project_unavailable" | "catalog_unavailable" | "request_unavailable" | "no_services_assigned" | "service_assignments_unavailable";
 export interface PortalRequestReadiness {
   mode: "catalog" | "legacy";
   workspaceId: string | null;
@@ -552,7 +552,7 @@ export interface PortalRequestReadiness {
 
 export async function loadPortalRequestReadiness(projectId: string | null, signal?: AbortSignal, request: PortalRequest = requestJson): Promise<PortalRequestReadiness> {
   const result = await request<PortalRequestReadiness>(`/api/client/request-readiness${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`, { signal });
-  const reasons: PortalRequestReadinessReason[] = ["ready", "legacy_access_unavailable", "request_not_permitted", "project_unavailable", "catalog_unavailable", "request_unavailable"];
+  const reasons: PortalRequestReadinessReason[] = ["ready", "legacy_access_unavailable", "request_not_permitted", "project_unavailable", "catalog_unavailable", "request_unavailable", "no_services_assigned", "service_assignments_unavailable"];
   if (!result || !["catalog", "legacy"].includes(result.mode) || typeof result.canStartRequest !== "boolean"
     || !reasons.includes(result.reason) || !result.root || typeof result.root.canStartRequest !== "boolean" || !reasons.includes(result.root.reason)
     || typeof result.projectRequestsSupported !== "boolean" || !(result.workspaceId === null || typeof result.workspaceId === "string")
@@ -658,10 +658,12 @@ export async function createPortalServiceRequest(
 }
 
 export async function loadPortalServiceCatalog(
+  projectId: string | null,
   request: PortalRequest = requestJson,
   signal?: AbortSignal,
 ): Promise<PortalServiceCatalogItem[]> {
-  const response = await request<{ services: PortalServiceCatalogItem[] }>("/api/client/service-catalog", { signal });
+  const target = projectId ? `?projectId=${encodeURIComponent(projectId)}` : "";
+  const response = await request<{ services: PortalServiceCatalogItem[] }>(`/api/client/service-catalog${target}`, { signal });
   return response.services;
 }
 
@@ -670,23 +672,40 @@ export interface PortalServiceCatalogPage {
   nextCursor: string | null;
   complete: boolean;
   source: { generation: string; sequence: number } | null;
+  assignment?: {
+    sourceId: string;
+    generation: string;
+    sequence: number;
+    subjectType: "organization" | "standalone_client" | "project";
+    subjectPublicId: string;
+  };
   legacy?: boolean;
 }
-export async function loadPortalServiceCatalogPage(cursor: string | null, signal?: AbortSignal, request: PortalRequest = requestJson): Promise<PortalServiceCatalogPage> {
+export async function loadPortalServiceCatalogPage(projectId: string | null, cursor: string | null, signal?: AbortSignal, request: PortalRequest = requestJson): Promise<PortalServiceCatalogPage> {
   let response: PortalServiceCatalogPage;
+  const parameters = new URLSearchParams();
+  if (projectId) parameters.set("projectId", projectId);
+  if (cursor) parameters.set("cursor", cursor);
+  const query = parameters.size ? `?${parameters.toString()}` : "";
   try {
-    response = await request<PortalServiceCatalogPage>(`/api/client/service-catalog/page${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, { signal });
+    response = await request<PortalServiceCatalogPage>(`/api/client/service-catalog/page${query}`, { signal });
   } catch (caught) {
     const failure = caught as { status?: number; body?: { code?: string } };
     if (!cursor && failure.status === 503 && failure.body?.code === "catalog_not_ready") {
-      return { services: await loadPortalServiceCatalog(request, signal), nextCursor: null, complete: false, source: null, legacy: true };
+      return { services: await loadPortalServiceCatalog(projectId, request, signal), nextCursor: null, complete: false, source: null, legacy: true };
     }
     throw caught;
   }
+  const assignment = response?.assignment;
   if (!response || !Array.isArray(response.services) || typeof response.complete !== "boolean"
     || !(response.nextCursor === null || typeof response.nextCursor === "string" && response.nextCursor.length > 0)
     || response.complete !== (response.nextCursor === null) || !response.source || typeof response.source.generation !== "string"
-    || !Number.isSafeInteger(response.source.sequence) || response.source.sequence < 0) throw new Error("Service library records could not be verified.");
+    || !Number.isSafeInteger(response.source.sequence) || response.source.sequence < 0
+    || assignment !== undefined && (!assignment || typeof assignment.sourceId !== "string" || !assignment.sourceId
+      || typeof assignment.generation !== "string" || !assignment.generation
+      || !Number.isSafeInteger(assignment.sequence) || assignment.sequence < 0
+      || !["organization", "standalone_client", "project"].includes(assignment.subjectType)
+      || typeof assignment.subjectPublicId !== "string" || !assignment.subjectPublicId)) throw new Error("Service library records could not be verified.");
   return response;
 }
 

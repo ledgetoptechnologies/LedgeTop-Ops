@@ -1,9 +1,8 @@
 # Client service selection and request readiness
 
-Status: implemented and verified locally, August 25, 2026; not published.
-This increment is not a production deployment or completion of the client
-workspace roadmap. No new migration, service assignment, or access grant is
-introduced by this increment.
+Status: request-readiness base verified locally August 25, 2026; exact-target
+service-assignment narrowing added locally August 28 and not published. This is
+not a production deployment or completion of the client workspace roadmap.
 
 ## Authority before the form
 
@@ -29,6 +28,14 @@ target, `canStartRequest`, a bounded reason, root readiness, and
 `projectRequestsSupported`. That last field means only that common prerequisites
 are available. The UI must also find an authorized project in its scoped project
 list and check the exact selected project before mounting its form.
+
+When the default-off service-assignment request policy is enabled, readiness
+checks assignment availability only after the applicable request authority and
+catalog prerequisites pass. `no_services_assigned` means that the exact already-
+authorized root or project currently has no assigned catalog services;
+`request_not_permitted` and `project_unavailable` remain access failures.
+Assignments never turn either failure into access. See
+[the assignment consumer policy](client-service-assignment-request-policy.md).
 
 Project-only clients choose an authorized target before a new draft can
 autosave. Standalone is offered only when root readiness allows it. Saved drafts
@@ -76,7 +83,9 @@ and offers refresh. Search/category counts describe loaded services until the
 terminal page; Load more is explicit. Missing selections must not be labelled
 unpublished while more pages remain or a load failed.
 
-The old `/service-catalog` response remains compatible. A legacy catalog without
+The old `/service-catalog` response remains compatible. Under the default-off
+assignment policy it accepts the same exact project target and is filtered too;
+there is no global-list fallback. A legacy catalog without
 an initialized projection checkpoint returns `503 catalog_not_ready` from the
 paged endpoint. Only that typed response permits the UI to use the old bounded
 list on an initial page load, visibly marked legacy/incomplete (up to 500 services). It must not treat
@@ -112,10 +121,12 @@ keyboard navigation, narrow/desktop/ultrawide layouts, and paged completeness.
 Use synthetic local accounts and requests. Do not send invitations, actual
 client notifications, or production requests as UI tests.
 
-This is still the existing single-producer catalog contract. Multiple Alpha
-producers, per-client service assignments, generic feedback, and the broader
-client-workspace identity roadmap remain separate work. Viewer and thumbnail
-code are unchanged. See [the roadmap](client-workspace-roadmap.md) and
+This is still the existing single-producer catalog contract. The separately
+reviewed assignment consumer policy is exact-target and primary-source only;
+it does not establish a generic rules engine or assignment inheritance.
+Multiple Alpha producers, generic feedback, and the broader client-workspace
+identity roadmap remain separate work. Viewer and thumbnail code are unchanged.
+See [the roadmap](client-workspace-roadmap.md) and
 [the portal contract](../client-portal-v2-architecture.md).
 
 Local browser acceptance on August 25: all **138 Client Portal browser tests**

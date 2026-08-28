@@ -27,6 +27,9 @@ import {
 } from "./access-identity";
 import { validateRequestArea } from "./request-area";
 import { ServiceCatalogPageError } from "./service-catalog-page";
+import { changedAssignedServices, readServiceAssignmentPolicy, serviceAssignmentPolicyProofStillCurrent,
+  serviceAssignmentRequestPolicyEnabled, ServiceAssignmentPolicyUnavailableError,
+  type ServiceAssignmentPolicyProof } from "./service-assignment-policy";
 import {
   abortRequestAttachment,
   canonicalRequestAttachmentEtag,
@@ -443,6 +446,7 @@ export function createClientPortalRouter(
           workspaceId: workspace.workspaceId,
           principalIssuer: principal.issuer,
           principalSubject: principal.subject,
+          principalEmail: principal.email,
           displayName: workspace.displayName,
           role: workspace.role,
           canViewBilling: workspace.canViewBilling,
@@ -1397,14 +1401,29 @@ export function createClientPortalRouter(
   router.get("/service-catalog", async (c) => {
     if (!repository.listServiceCatalog)
       throw new HTTPException(503, { message: "The service catalog is not configured" });
-    return c.json({ services: await repository.listServiceCatalog(c.env, c.get("clientSession")) });
+    const projectIds = c.req.queries("projectId");
+    const parsedProject = projectIds === undefined ? null : opaqueId.safeParse(projectIds[0]);
+    if ([...new URL(c.req.url).searchParams.keys()].some(key => key !== "projectId")
+      || (projectIds && projectIds.length !== 1) || (parsedProject && !parsedProject.success))
+      throw new HTTPException(400, { message: "Request project target is invalid" });
+    const projectId = parsedProject?.success ? parsedProject.data : null;
+    if (serviceAssignmentRequestPolicyEnabled(c.env) && (projectId
+      ? !(await authorizeProject(c, "request.create", projectId))
+      : !(await authorizeRoot(c, "request.create")))) throw new HTTPException(404, { message: "Project not found" });
+    try {
+      return c.json({ services: await repository.listServiceCatalog(c.env, c.get("clientSession"), { projectId }) });
+    } catch (error) {
+      if (error instanceof ServiceAssignmentPolicyUnavailableError)
+        return c.json({ error: "Assigned services are temporarily unavailable.", code: "service_assignments_unavailable" }, 503);
+      throw error;
+    }
   });
 
   router.get("/service-catalog/page", async (c) => {
     c.header("Cache-Control", "private, no-store");
     const parameters = new URL(c.req.url).searchParams;
     const limit = parameters.get("limit");
-    if ([...parameters.keys()].some(key => key !== "cursor" && key !== "limit") ||
+    if ([...parameters.keys()].some(key => key !== "cursor" && key !== "limit" && key !== "projectId") ||
       parameters.getAll("limit").length > 1 || parameters.getAll("cursor").length > 1 ||
       (limit !== null && !/^(?:[1-9][0-9]?|100)$/.test(limit))) {
       return c.json({ error: "The service library page is invalid.", code: "catalog_cursor_invalid" }, 400);
@@ -1412,10 +1431,19 @@ export function createClientPortalRouter(
     if (!repository.listServiceCatalogPage) {
       return c.json({ error: "Versioned service library browsing is not ready.", code: "catalog_not_ready" }, 503);
     }
+    const projectValues = parameters.getAll("projectId");
+    const parsedProject = projectValues.length ? opaqueId.safeParse(projectValues[0]) : null;
+    if (projectValues.length > 1 || (parsedProject && !parsedProject.success))
+      return c.json({ error: "Request project target is invalid.", code: "catalog_cursor_invalid" }, 400);
+    const projectId = parsedProject?.success ? parsedProject.data : null;
+    if (serviceAssignmentRequestPolicyEnabled(c.env) && (projectId
+      ? !(await authorizeProject(c, "request.create", projectId))
+      : !(await authorizeRoot(c, "request.create")))) throw new HTTPException(404, { message: "Project not found" });
     try {
       return c.json(await repository.listServiceCatalogPage(c.env, c.get("clientSession"), {
         ...(parameters.has("cursor") ? { cursor: parameters.get("cursor")! } : {}),
         ...(limit !== null ? { limit: Number(limit) } : {}),
+        projectId,
       }));
     } catch (error) {
       if (error instanceof ServiceCatalogPageError) return c.json({ error: error.message, code: error.code }, error.status);
@@ -1461,6 +1489,12 @@ export function createClientPortalRouter(
       return c.json({
         error: "One or more selected services changed in the Project Alpha service library. Review and reselect them before continuing.",
         code: "catalog_changed" as const,
+        servicePublicIds: result.servicePublicIds,
+      }, 409);
+    if (result.kind === "service_assignments_changed")
+      return c.json({
+        error: "One or more selected services are no longer assigned to this exact request context. Refresh and review the available services.",
+        code: "service_assignments_changed" as const,
         servicePublicIds: result.servicePublicIds,
       }, 409);
     return c.json({ draft: result.draft }, result.kind === "created" ? 201 : 200);
@@ -1608,6 +1642,12 @@ export function createClientPortalRouter(
         code: "catalog_changed" as const,
         servicePublicIds: result.servicePublicIds,
       }, 409);
+    if (result.kind === "service_assignments_changed")
+      return c.json({
+        error: "One or more selected services are no longer assigned to this exact request context. Refresh and review the available services.",
+        code: "service_assignments_changed" as const,
+        servicePublicIds: result.servicePublicIds,
+      }, 409);
     return c.json({ draft: result.draft });
   });
 
@@ -1627,6 +1667,13 @@ export function createClientPortalRouter(
       const workspace = selectedWorkspace(c);
       if (!workspace || !draft.projectId || !(await authorizeProject(c, "request.create", draft.projectId)))
         return c.json({ available: false, hint: null });
+      let assignmentProof: ServiceAssignmentPolicyProof | null = null;
+      if (serviceAssignmentRequestPolicyEnabled(c.env)) {
+        const assignment = await readServiceAssignmentPolicy(c.env, c.get("clientSession"), draft.projectId);
+        if (assignment.state !== "ready" || (await changedAssignedServices(c.env, assignment.proof, draft.services)).length)
+          return c.json({ available: false, hint: null });
+        assignmentProof = assignment.proof;
+      }
       const resolvePricingContext = dependencies.pricingAuthorizationContextResolver ?? resolveProjectAlphaPricingAuthorizationContext;
       const pricingContext = await resolvePricingContext(c.env, workspace, draft.projectId, draft);
       if (!pricingContext) return c.json({ available: false, hint: null });
@@ -1643,6 +1690,9 @@ export function createClientPortalRouter(
       const currentDraft = await repository.getServiceRequestDraft(c.env, c.get("clientSession"), draftId.data);
       if (!currentDraft || currentDraft.version !== draft.version || currentDraft.projectId !== draft.projectId
         || !(await authorizeProject(c, "request.create", draft.projectId))) return c.json({ available: false, hint: null });
+      if (assignmentProof && (!await serviceAssignmentPolicyProofStillCurrent(c.env, assignmentProof)
+        || (await changedAssignedServices(c.env, assignmentProof, currentDraft.services)).length))
+        return c.json({ available: false, hint: null });
       const currentContext = await resolvePricingContext(c.env, workspace, draft.projectId, draft);
       if (!currentContext || currentContext.catalogSource.sourceId !== pricingContext.catalogSource.sourceId
         || currentContext.authorizationContext.sourceId !== pricingContext.authorizationContext.sourceId
@@ -1676,6 +1726,7 @@ export function createClientPortalRouter(
         answers_incomplete: "Answer every required question for the selected services before submitting.",
         geometry_required: "Draw the required work area before submitting.",
         catalog_changed: "One or more selected services changed in the Project Alpha service library. Review and reselect them before submitting.",
+        service_assignments_changed: "One or more selected services are no longer assigned to this exact request context. Refresh and review the available services before submitting.",
         attachments_pending: "Wait for every supporting file to finish its security scan, or remove it, before submitting.",
         attachments_rejected: "Remove every rejected supporting file and upload a safe replacement before submitting.",
         attachments_expired: "Remove every expired supporting file and upload it again before submitting.",

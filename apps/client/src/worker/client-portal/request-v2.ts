@@ -13,6 +13,23 @@ import type {
   ClientServiceRequestDraftInput,
   ClientServiceDraftSubmitResult,
 } from "./types";
+import {
+  readServiceAssignmentPolicy,
+  changedAssignedServices,
+  serializeServiceAssignmentPolicyProof,
+  serviceAssignmentPolicyCheckpointSql,
+  serviceAssignmentPolicyProofStillCurrent,
+  serviceAssignmentPolicyServiceSql,
+  serviceAssignmentRequestPolicyEnabled,
+  ServiceAssignmentPolicyUnavailableError,
+  type ServiceAssignmentPolicyProof,
+} from "./service-assignment-policy";
+import {
+  effectiveWorkspaceRequestMutationGuardSql,
+  portalHierarchyV2Enabled,
+  readEffectiveWorkspaceRequestProof,
+  type EffectiveWorkspaceRequestMutationProof,
+} from "./workspace-v2";
 
 const EARTH_RADIUS_METERS = 6_371_008.8;
 const SQUARE_METERS_PER_ACRE = 4_046.8564224;
@@ -224,6 +241,53 @@ type SelectionResolution =
   | { kind: "catalog_changed"; servicePublicIds: string[] }
   | { kind: "invalid" };
 
+type RequestPolicyResolution =
+  | { kind: "ready"; proof: ServiceAssignmentPolicyProof | null }
+  | { kind: "service_assignments_changed"; servicePublicIds: string[] };
+
+type RequestAuthorityResolution =
+  | { kind: "ready"; proof: EffectiveWorkspaceRequestMutationProof | null }
+  | { kind: "unavailable" };
+
+async function resolveRequestAuthority(
+  env: Env,
+  session: ClientPortalSession,
+  projectId: string | null,
+): Promise<RequestAuthorityResolution> {
+  // Compatibility is deliberately unchanged while hierarchy-v2 is off. Once
+  // it is on, retained legacy rows cannot substitute for the selected
+  // workspace, verified actor, exact target, or current request.create rule.
+  if (!portalHierarchyV2Enabled(env)) return { kind: "ready", proof: null };
+  if (!session.workspaceId || !session.principalIssuer || !session.principalSubject)
+    return { kind: "unavailable" };
+  const current = await readEffectiveWorkspaceRequestProof(env, {
+    issuer: session.principalIssuer,
+    subject: session.principalSubject,
+    email: session.principalEmail ?? "",
+  }, session.workspaceId, projectId);
+  if (!current || current.workspace.workspaceId !== session.workspaceId
+    || current.workspace.identityId !== current.mutationProof.identityId
+    || current.workspace.legacyAccountId !== session.accountId
+    || current.workspace.legacyIdentityId !== session.identityId
+    || (projectId === null ? !current.rootAllowed : !current.projectAllowed))
+    return { kind: "unavailable" };
+  return { kind: "ready", proof: current.mutationProof };
+}
+
+function reviewedRequestAuthorityGuard(proof: EffectiveWorkspaceRequestMutationProof | null) {
+  return proof ? effectiveWorkspaceRequestMutationGuardSql(proof) : { sql: "1=1", bindings: [] as unknown[] };
+}
+
+async function resolveRequestPolicy(env: Env, session: ClientPortalSession, projectId: string | null,
+  services: ReadonlyArray<{ publicId: string; sourceVersion: string }> = []): Promise<RequestPolicyResolution> {
+  if (!serviceAssignmentRequestPolicyEnabled(env)) return { kind: "ready", proof: null };
+  const decision = await readServiceAssignmentPolicy(env, session, projectId);
+  if (decision.state !== "ready") return { kind: "service_assignments_changed", servicePublicIds: services.map(service => service.publicId) };
+  const changed = await changedAssignedServices(env, decision.proof, services);
+  return changed.length ? { kind: "service_assignments_changed", servicePublicIds: changed }
+    : { kind: "ready", proof: decision.proof };
+}
+
 async function resolveSelections(env: Env, input: ClientServiceRequestDraftInput): Promise<SelectionResolution> {
   if (input.services.length > 10 || new Set(input.services.map(service => service.publicId)).size !== input.services.length)
     return { kind: "invalid" };
@@ -351,10 +415,55 @@ function reviewedCatalogVersions(services: ClientServiceDraftSelection[]): strin
   return JSON.stringify(services.map(({ publicId, sourceVersion }) => ({ publicId, sourceVersion })));
 }
 
-export async function listServiceCatalog(env: Env): Promise<ClientServiceCatalogItem[]> {
+async function currentAssignmentConflict(
+  env: Env,
+  proof: ServiceAssignmentPolicyProof | null,
+  services: ClientServiceDraftSelection[],
+): Promise<string[] | null> {
+  if (!serviceAssignmentRequestPolicyEnabled(env)) return null;
+  if (!proof || !await serviceAssignmentPolicyProofStillCurrent(env, proof))
+    return services.map(service => service.publicId);
+  const changed = await changedAssignedServices(env, proof, services);
+  return changed.length ? changed : null;
+}
+
+function reviewedServiceAssignmentGuard(
+  proof: ServiceAssignmentPolicyProof | null,
+  services: ClientServiceDraftSelection[],
+) {
+  if (!proof) return { sql: "1=1", bindings: [] as unknown[] };
+  const checkpoint = serviceAssignmentPolicyCheckpointSql(proof);
+  const assignment = serviceAssignmentPolicyServiceSql(proof, "catalog", true);
+  return {
+    sql: `${checkpoint.sql} AND NOT EXISTS (
+      SELECT 1 FROM json_each(?) reviewed WHERE NOT EXISTS (
+        SELECT 1 FROM pa_service_catalog_items catalog
+        WHERE catalog.source_id=? AND catalog.public_id=json_extract(reviewed.value,'$.publicId')
+          AND catalog.source_version=json_extract(reviewed.value,'$.sourceVersion') AND catalog.active=1
+          AND ${assignment.sql}
+      )
+    )`,
+    bindings: [
+      ...checkpoint.bindings,
+      reviewedCatalogVersions(services),
+      proof.sourceId,
+      ...assignment.bindings,
+    ] as unknown[],
+  };
+}
+
+export async function listServiceCatalog(env: Env, session?: ClientPortalSession, projectId: string | null = null): Promise<ClientServiceCatalogItem[]> {
+  let assignmentGuard: ReturnType<typeof serviceAssignmentPolicyServiceSql> | null = null;
+  if (serviceAssignmentRequestPolicyEnabled(env)) {
+    if (!session) throw new ServiceAssignmentPolicyUnavailableError();
+    const assignment = await readServiceAssignmentPolicy(env, session, projectId);
+    if (assignment.state === "unavailable" || assignment.state === "disabled") throw new ServiceAssignmentPolicyUnavailableError();
+    assignmentGuard = serviceAssignmentPolicyServiceSql(assignment.proof);
+  }
   const result = await db(env).prepare(`SELECT public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json
-    FROM pa_service_catalog_items WHERE source_id=? AND active=1
-    ORDER BY category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id LIMIT 500`).bind(PRIMARY_ALPHA_SOURCE_ID).all<CatalogRow>();
+    FROM pa_service_catalog_items catalog WHERE source_id=? AND active=1${assignmentGuard ? ` AND ${assignmentGuard.sql}` : ""}
+    ORDER BY category COLLATE NOCASE,display_order,name COLLATE NOCASE,public_id LIMIT 500`)
+    .bind(PRIMARY_ALPHA_SOURCE_ID,...(assignmentGuard?.bindings ?? [])).all<CatalogRow>();
   return result.results.map(mapServiceCatalogItem).filter((item): item is ClientServiceCatalogItem => item !== null);
 }
 
@@ -370,6 +479,10 @@ export async function createServiceRequestDraft(env: Env, session: ClientPortalS
     const draft = await loadDraft(env, session, existing.id);
     return draft ? { kind: "replayed", draft } : null;
   }
+  const policy = await resolveRequestPolicy(env, session, input.projectId, input.services);
+  if (policy.kind === "service_assignments_changed") return policy;
+  const authority = await resolveRequestAuthority(env, session, input.projectId);
+  if (authority.kind === "unavailable") return null;
   const resolution = await resolveSelections(env, input);
   if (resolution.kind === "invalid") return null;
   if (resolution.kind === "catalog_changed") return resolution;
@@ -377,9 +490,11 @@ export async function createServiceRequestDraft(env: Env, session: ClientPortalS
   const id = crypto.randomUUID();
   const areaSquareMeters = calculateRequestAreaSquareMeters(input.areaGeoJson);
   const database = db(env);
+  const assignmentGuard = reviewedServiceAssignmentGuard(policy.proof, services);
+  const authorityGuard = reviewedRequestAuthorityGuard(authority.proof);
   const insert = database.prepare(`INSERT INTO client_service_request_drafts
-    (id,account_id,project_id,created_by_identity_id,draft_json,area_geojson,area_square_meters,area_acres,create_idempotency_key,create_fingerprint,last_mutation_key,catalog_source_id)
-    SELECT ?,a.id,?,i.id,?,?,?,?,?,?,?,'${PRIMARY_ALPHA_SOURCE_ID}'
+    (id,account_id,project_id,created_by_identity_id,draft_json,area_geojson,area_square_meters,area_acres,create_idempotency_key,create_fingerprint,last_mutation_key,catalog_source_id,service_assignment_policy_json)
+    SELECT ?,a.id,?,i.id,?,?,?,?,?,?,?,'${PRIMARY_ALPHA_SOURCE_ID}',?
     FROM client_accounts a
     JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
     JOIN client_account_members m ON m.account_id=a.id AND m.identity_id=i.id AND m.revoked_at IS NULL
@@ -388,14 +503,18 @@ export async function createServiceRequestDraft(env: Env, session: ClientPortalS
         AND (p.project_alpha_source_id IS NULL OR p.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
       WHERE g.account_id=a.id AND g.project_id=? AND g.revoked_at IS NULL AND g.can_request_service=1
         AND (m.role='manager' OR EXISTS (SELECT 1 FROM client_member_project_grants mg WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=g.project_id AND mg.revoked_at IS NULL))
-    )) AND ${reviewedCatalogGuard}`).bind(id, input.projectId, JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, areaSquareMeters, areaSquareMeters === null ? null : areaSquareMeters / SQUARE_METERS_PER_ACRE, mutationKey, fingerprint, mutationKey, session.identityId, session.accountId, input.projectId, input.projectId, reviewedCatalogVersions(services));
+    )) AND ${reviewedCatalogGuard} AND ${assignmentGuard.sql} AND ${authorityGuard.sql}`).bind(id, input.projectId, JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, areaSquareMeters, areaSquareMeters === null ? null : areaSquareMeters / SQUARE_METERS_PER_ACRE, mutationKey, fingerprint, mutationKey,
+      serializeServiceAssignmentPolicyProof(policy.proof),session.identityId, session.accountId, input.projectId, input.projectId,
+      reviewedCatalogVersions(services),...assignmentGuard.bindings,...authorityGuard.bindings);
   const statements = [insert, ...services.map((service, ordinal) => database.prepare(`INSERT INTO client_service_request_draft_services(draft_id,ordinal,service_public_id,service_source_version,service_snapshot_json,answers_json,service_source_id)
     SELECT ?,?,?,?,?,?,'${PRIMARY_ALPHA_SOURCE_ID}' WHERE EXISTS (SELECT 1 FROM client_service_request_drafts WHERE id=? AND last_mutation_key=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}')`).bind(id, ordinal, service.publicId, service.sourceVersion, serviceSnapshot(service), JSON.stringify(service.answers), id, mutationKey))];
   try {
     const results = await database.batch(statements);
     if (!results[0]?.meta.changes) {
       const changed = await changedCatalogServices(env, services);
-      return changed.length ? { kind: "catalog_changed", servicePublicIds: changed } : null;
+      if (changed.length) return { kind: "catalog_changed", servicePublicIds: changed };
+      const assigned = await currentAssignmentConflict(env, policy.proof, services);
+      return assigned ? { kind: "service_assignments_changed", servicePublicIds: assigned } : null;
     }
   } catch {
     const raced = await db(env).prepare(`SELECT id,create_fingerprint FROM client_service_request_drafts WHERE account_id=? AND create_idempotency_key=? AND catalog_source_id=?`).bind(session.accountId, mutationKey, PRIMARY_ALPHA_SOURCE_ID).first<{ id: string; create_fingerprint: string }>();
@@ -418,13 +537,19 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
     const draft = await loadDraft(env, session, draftId);
     return draft ? { kind: "replayed", draft } : null;
   }
+  const policy = await resolveRequestPolicy(env, session, input.projectId, input.services);
+  if (policy.kind === "service_assignments_changed") return policy;
+  const authority = await resolveRequestAuthority(env, session, input.projectId);
+  if (authority.kind === "unavailable") return null;
   const resolution = await resolveSelections(env, input);
   if (resolution.kind === "invalid") return null;
   if (resolution.kind === "catalog_changed") return resolution;
   const services = resolution.services;
   const areaSquareMeters = calculateRequestAreaSquareMeters(input.areaGeoJson);
   const database = db(env);
-  const update = database.prepare(`UPDATE client_service_request_drafts AS d SET project_id=?,draft_json=?,area_geojson=?,area_square_meters=?,area_acres=?,version=version+1,last_mutation_key=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
+  const assignmentGuard = reviewedServiceAssignmentGuard(policy.proof, services);
+  const authorityGuard = reviewedRequestAuthorityGuard(authority.proof);
+  const update = database.prepare(`UPDATE client_service_request_drafts AS d SET project_id=?,draft_json=?,area_geojson=?,area_square_meters=?,area_acres=?,service_assignment_policy_json=?,version=version+1,last_mutation_key=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
     WHERE d.id=? AND d.account_id=? AND d.state='draft' AND d.version=? AND d.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
       AND EXISTS (SELECT 1 FROM client_accounts a
         JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
@@ -434,8 +559,11 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
             AND (p.project_alpha_source_id IS NULL OR p.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
           WHERE g.account_id=a.id AND g.project_id=? AND g.revoked_at IS NULL AND g.can_request_service=1
             AND (m.role='manager' OR EXISTS (SELECT 1 FROM client_member_project_grants mg WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=g.project_id AND mg.revoked_at IS NULL))
-        ))) AND ${reviewedCatalogGuard}`)
-    .bind(input.projectId, JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, areaSquareMeters, areaSquareMeters === null ? null : areaSquareMeters / SQUARE_METERS_PER_ACRE, mutationKey, draftId, session.accountId, expectedVersion, session.identityId, input.projectId, input.projectId, reviewedCatalogVersions(services));
+        ))) AND ${reviewedCatalogGuard} AND ${assignmentGuard.sql} AND ${authorityGuard.sql}`)
+    .bind(input.projectId, JSON.stringify(requestFields(input)), input.areaGeoJson ? JSON.stringify(input.areaGeoJson) : null, areaSquareMeters, areaSquareMeters === null ? null : areaSquareMeters / SQUARE_METERS_PER_ACRE,
+      serializeServiceAssignmentPolicyProof(policy.proof),mutationKey, draftId, session.accountId, expectedVersion,
+      session.identityId, input.projectId, input.projectId, reviewedCatalogVersions(services),
+      ...assignmentGuard.bindings,...authorityGuard.bindings);
   const statements = [
     update,
     database.prepare(`DELETE FROM client_service_request_draft_services WHERE draft_id=? AND service_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND EXISTS (SELECT 1 FROM client_service_request_drafts WHERE id=? AND last_mutation_key=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}')`).bind(draftId, draftId, mutationKey),
@@ -448,7 +576,9 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
     const results = await database.batch(statements);
     if (!results[0]?.meta.changes) {
       const changed = await changedCatalogServices(env, services);
-      return changed.length ? { kind: "catalog_changed", servicePublicIds: changed } : { kind: "conflict" };
+      if (changed.length) return { kind: "catalog_changed", servicePublicIds: changed };
+      const assigned = await currentAssignmentConflict(env, policy.proof, services);
+      return assigned ? { kind: "service_assignments_changed", servicePublicIds: assigned } : { kind: "conflict" };
     }
   } catch { return { kind: "conflict" }; }
   const draft = await loadDraft(env, session, draftId);
@@ -534,15 +664,22 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
   const changedServices = await changedCatalogServices(env, draft.services);
   if (changedServices.length)
     return { kind: "incomplete", reason: "catalog_changed", servicePublicIds: changedServices };
+  const policy = await resolveRequestPolicy(env, session, draft.projectId, draft.services);
+  if (policy.kind === "service_assignments_changed")
+    return { kind: "incomplete", reason: "service_assignments_changed", servicePublicIds: policy.servicePublicIds };
+  const authority = await resolveRequestAuthority(env, session, draft.projectId);
+  if (authority.kind === "unavailable") return { kind: "conflict" };
   const attachmentBlock = await attachmentSubmissionBlock(env, draftId);
   if (attachmentBlock) return { kind: "incomplete", ...attachmentBlock };
   const requestId = crypto.randomUUID();
   const serviceCategory = draft.services.length === 1 ? draft.services[0]!.name.slice(0, 100) : `Multiple services (${draft.services.length})`;
   const requestFingerprint = await sha256(JSON.stringify(draft));
   const database = db(env);
+  const assignmentGuard = reviewedServiceAssignmentGuard(policy.proof, draft.services);
+  const authorityGuard = reviewedRequestAuthorityGuard(authority.proof);
   const insert = database.prepare(`INSERT INTO client_service_requests
-    (id,account_id,project_id,parent_request_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,desired_completion_at,latitude,longitude,area_geojson,poi_points_json,idempotency_key,request_fingerprint,catalog_source_id)
-    SELECT ?,d.account_id,d.project_id,NULL,d.created_by_identity_id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,d.catalog_source_id
+    (id,account_id,project_id,parent_request_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,desired_completion_at,latitude,longitude,area_geojson,poi_points_json,idempotency_key,request_fingerprint,catalog_source_id,service_assignment_policy_json)
+    SELECT ?,d.account_id,d.project_id,NULL,d.created_by_identity_id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,d.catalog_source_id,?
     FROM client_service_request_drafts d
     JOIN client_accounts a ON a.id=d.account_id AND a.status='active'
       AND (a.project_alpha_source_id IS NULL OR a.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
@@ -554,8 +691,10 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
           AND (p.project_alpha_source_id IS NULL OR p.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
         WHERE g.account_id=a.id AND g.project_id=d.project_id AND g.revoked_at IS NULL AND g.can_request_service=1
           AND (m.role='manager' OR EXISTS (SELECT 1 FROM client_member_project_grants mg WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=g.project_id AND mg.revoked_at IS NULL))
-      )) AND ${reviewedCatalogGuard}`)
-    .bind(requestId, draft.requestType, draft.title, draft.details, draft.location, draft.preferredStartAt, serviceCategory, draft.deliverables, draft.siteContactName, draft.siteContactEmail, draft.siteContactPhone, draft.desiredCompletionAt, draft.latitude, draft.longitude, draft.areaGeoJson ? JSON.stringify(draft.areaGeoJson) : null, draft.poiPoints.length ? JSON.stringify(draft.poiPoints) : null, mutationKey, requestFingerprint, session.identityId, draftId, session.accountId, expectedVersion, reviewedCatalogVersions(draft.services));
+      )) AND ${reviewedCatalogGuard} AND ${assignmentGuard.sql} AND ${authorityGuard.sql}`)
+    .bind(requestId, draft.requestType, draft.title, draft.details, draft.location, draft.preferredStartAt, serviceCategory, draft.deliverables, draft.siteContactName, draft.siteContactEmail, draft.siteContactPhone, draft.desiredCompletionAt, draft.latitude, draft.longitude, draft.areaGeoJson ? JSON.stringify(draft.areaGeoJson) : null, draft.poiPoints.length ? JSON.stringify(draft.poiPoints) : null, mutationKey, requestFingerprint,
+      serializeServiceAssignmentPolicyProof(policy.proof),session.identityId, draftId, session.accountId, expectedVersion,
+      reviewedCatalogVersions(draft.services),...assignmentGuard.bindings,...authorityGuard.bindings);
   const snapshot = JSON.stringify({ ...draft, status: "submitted" });
   const statements = [
     insert,
@@ -567,13 +706,17 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
       SELECT ?,?,'request_submitted','submitted','staff_triage','request_submitted:submitted:staff_triage',json_object('title',?,'projectId',?,'serviceCount',?,'areaSquareMeters',?) WHERE EXISTS (SELECT 1 FROM client_service_requests WHERE id=?)`).bind(crypto.randomUUID(), requestId, draft.title, draft.projectId, draft.services.length, draft.areaSquareMeters, requestId),
     database.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
       SELECT 'client',?,'client.service_request.submitted','client_service_request',?,json_object('accountId',?,'draftId',?,'serviceCount',?) WHERE EXISTS (SELECT 1 FROM client_service_requests WHERE id=?)`).bind(session.identityId, requestId, session.accountId, draftId, draft.services.length, requestId),
-    database.prepare(`UPDATE client_service_request_drafts SET state='submitted',submitted_request_id=?,submit_idempotency_key=?,submit_fingerprint=?,submitted_at=datetime('now'),updated_at=datetime('now'),last_mutation_key=? WHERE id=? AND state='draft' AND version=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND EXISTS (SELECT 1 FROM client_service_requests WHERE id=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}')`).bind(requestId, mutationKey, fingerprint, mutationKey, draftId, expectedVersion, requestId),
+    database.prepare(`UPDATE client_service_request_drafts SET state='submitted',submitted_request_id=?,submit_idempotency_key=?,submit_fingerprint=?,service_assignment_policy_json=?,submitted_at=datetime('now'),updated_at=datetime('now'),last_mutation_key=? WHERE id=? AND state='draft' AND version=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND EXISTS (SELECT 1 FROM client_service_requests WHERE id=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}')`).bind(requestId, mutationKey, fingerprint, serializeServiceAssignmentPolicyProof(policy.proof),mutationKey, draftId, expectedVersion, requestId),
   ];
   try {
     const results = await database.batch(statements);
     if (!results[0]?.meta.changes) {
       const changed = await changedCatalogServices(env, draft.services);
-      return changed.length ? { kind: "incomplete", reason: "catalog_changed", servicePublicIds: changed } : { kind: "conflict" };
+      if (changed.length) return { kind: "incomplete", reason: "catalog_changed", servicePublicIds: changed };
+      const assigned = await currentAssignmentConflict(env, policy.proof, draft.services);
+      return assigned
+        ? { kind: "incomplete", reason: "service_assignments_changed", servicePublicIds: assigned }
+        : { kind: "conflict" };
     }
   } catch { return { kind: "conflict" }; }
   const request = await loadSubmittedRequest(env, session, requestId);

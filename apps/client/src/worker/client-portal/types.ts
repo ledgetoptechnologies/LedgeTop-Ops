@@ -14,6 +14,7 @@ export interface ClientPortalSession {
   workspaceId?: string;
   principalIssuer?: string;
   principalSubject?: string;
+  principalEmail?: string;
   displayName: string;
   role: "manager" | "member";
   canViewBilling: boolean;
@@ -152,11 +153,20 @@ export interface ClientServiceCatalogPage {
   nextCursor: string | null;
   complete: boolean;
   source: { generation: string; sequence: number };
+  assignment?: {
+    sourceId: string;
+    generation: string;
+    sequence: number;
+    subjectType: "organization" | "standalone_client" | "project";
+    subjectPublicId: string;
+  };
 }
 
 export interface ClientServiceCatalogPageInput {
   cursor?: string;
   limit?: number;
+  /** Local project ID resolved to an exact source-owned public target server-side. */
+  projectId?: string | null;
 }
 
 export interface ClientServiceDraftSelectionInput {
@@ -239,13 +249,15 @@ export interface ClientRequestAttachment {
 export type ClientServiceDraftMutationResult =
   | { kind: "created" | "updated" | "replayed"; draft: ClientServiceRequestDraft }
   | { kind: "conflict" }
-  | { kind: "catalog_changed"; servicePublicIds: string[] };
+  | { kind: "catalog_changed"; servicePublicIds: string[] }
+  | { kind: "service_assignments_changed"; servicePublicIds: string[] };
 
 export type ClientServiceDraftSubmitBlockReason =
   | "request_fields_incomplete"
   | "answers_incomplete"
   | "geometry_required"
   | "catalog_changed"
+  | "service_assignments_changed"
   | "attachments_pending"
   | "attachments_rejected"
   | "attachments_expired";
@@ -365,7 +377,7 @@ export interface ClientPortalRepository {
   createServiceRequest(env: Env, session: ClientPortalSession, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;
   updateServiceRequest(env: Env, session: ClientPortalSession, requestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequest | null>;
   createChangeRequest(env: Env, session: ClientPortalSession, parentRequestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;
-  listServiceCatalog?(env: Env, session: ClientPortalSession): Promise<ClientServiceCatalogItem[]>;
+  listServiceCatalog?(env: Env, session: ClientPortalSession, input?: { projectId?: string | null }): Promise<ClientServiceCatalogItem[]>;
   listServiceCatalogPage?(env: Env, session: ClientPortalSession, input: ClientServiceCatalogPageInput): Promise<ClientServiceCatalogPage>;
   listServiceRequestDrafts?(env: Env, session: ClientPortalSession): Promise<ClientServiceRequestDraftSummary[]>;
   getServiceRequestDraft?(env: Env, session: ClientPortalSession, draftId: string): Promise<ClientServiceRequestDraft | null>;

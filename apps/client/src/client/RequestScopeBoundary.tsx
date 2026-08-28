@@ -22,7 +22,7 @@ function SavedDraftSummary({ draft }: { draft: PortalServiceDraft }) {
 }
 function allowsReadOnlySnapshot(availability: RequestAvailability): boolean {
   return availability.state === "ready" && Boolean(availability.data
-    && ["catalog_unavailable", "request_unavailable"].includes(availability.data.reason));
+    && ["catalog_unavailable", "request_unavailable", "no_services_assigned", "service_assignments_unavailable"].includes(availability.data.reason));
 }
 export function RequestScopeBoundary({ contextKey, workspaceId, availability, projects, fixedProjectId, draftId, children }: {
   contextKey: string; workspaceId: string | null; availability: RequestAvailability; projects: PortalProject[];

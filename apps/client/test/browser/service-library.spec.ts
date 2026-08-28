@@ -189,6 +189,22 @@ test("saved answers remain read-only when every service is unavailable, without 
   expect(state.writes).toHaveLength(0);
 });
 
+for (const [reason, message] of [
+  ["no_services_assigned", "No services are currently assigned"],
+  ["service_assignments_unavailable", "Assigned services cannot be verified"],
+] as const) test(`assignment readiness ${reason} preserves a saved draft read only`, async ({ page }) => {
+  const state = await fixture(page, { draft: draftOf([mapping], { map: { notes: "Keep this saved answer" } }), handler: async (route, url) => {
+    if (url.pathname !== "/api/client/request-readiness") return false;
+    await route.fulfill({ json: readiness(null, { allowed: false, root: false, supported: false, reason }) }); return true;
+  } });
+  await page.goto("/portal/requests/new?draft=draft-library");
+  await expect(page.getByText(new RegExp(message))).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Saved draft — read only" })).toBeVisible();
+  await expect(page.getByText("Keep this saved answer")).toBeVisible();
+  expect(state.calls.some(call => call.includes("service-catalog"))).toBe(false);
+  expect(state.writes).toHaveLength(0);
+});
+
 test("denied saved-draft reads do not expose snapshots while readiness is unavailable", async ({ page }) => {
   const state = await fixture(page, { draft: draftOf([mapping]), handler: async (route, url) => {
     if (url.pathname === "/api/client/request-readiness") { await route.fulfill({ json: readiness(null, { allowed: false, root: false, supported: false, reason: "catalog_unavailable" }) }); return true; }

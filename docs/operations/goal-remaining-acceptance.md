@@ -1,11 +1,21 @@
 # Client workspace goal: remaining acceptance
 
-Audit date: August 26, 2026. Audit base: `ccba9c0` on
-`codex/client-workspace-foundation`. **The overall goal is not complete.**
+Original audit date: August 26, 2026. Original audit base: `ccba9c0` on
+`codex/client-workspace-foundation`. Reconciled through August 28 local
+checkpoint `31f86e4`. **The overall goal is not complete.**
 This is a remaining-work inventory, not a new authorization policy or release
 approval. It supersedes neither the [roadmap](client-workspace-roadmap.md) nor
 the narrower implementation runbooks. Historical passing gates verify their
 tested increments, not every workflow in the original handoff.
+
+> The first acceptance table below is preserved as the August 26 baseline.
+> Subsequent local increments now implement organization contacts, project
+> memory, selective recurrence, authoritative Project Alpha project routing,
+> named workspace memberships, peer administration, address-book contacts,
+> project-end expiration notices, and scoped authority history. Use the newer
+> runbooks and the current [goal acceptance checklist](client-portal-goal-acceptance.md)
+> for their status; remaining live rollout and joined-workflow acceptance still
+> apply.
 
 ## Acceptance map
 
@@ -39,10 +49,11 @@ that newer local fixes are missing, or that those fixes are deployed.
 
 Paths below are repository-relative evidence, not instructions to enable gates.
 
-- `apps/client/src/worker/client-portal/service-catalog-page.ts` explicitly
-  describes a global client-safe catalog, not per-client service entitlement.
-  `request-readiness.ts` checks current eligibility/request authority and catalog
-  readiness; it does not implement service assignments.
+- At the historical audit base, `service-catalog-page.ts` exposed a global
+  client-safe catalog. Migration `0174` and the default-off exact-target
+  assignment consumer now narrow both catalog paths, readiness, draft writes,
+  submission, and pricing hints without granting request or portal authority.
+  Production rollout and joined acceptance remain pending.
 - `apps/operations/src/worker/client-hub.ts` returns staff ACL capabilities such
   as directory/requests/delivery/viewer. Those are not purchased customer services.
 - `apps/operations/src/worker/client-hub-business-project-detail.ts` returns
@@ -148,11 +159,11 @@ independent projects/sources, missing lifecycle support and concurrent changes.
 
 ## Release and latest UI state
 
-- Navigation/scoped-link increment `28827c4` was previously recorded as released.
-  Current-view count `5e2ec18` and subsequent feature increments are local, not
-  evidence of deployed behavior. The counter shows the current listing's folder
-  and file count, not descendant totals; partial listings say **loaded** and
-  search/loading/error states are explicit.
+- Navigation/scoped-link increment `28827c4` and current-view count `5e2ec18`
+  are both on `origin/main`. The counter shows the current listing's folder and
+  file count, not descendant totals; partial listings say **loaded** and
+  search/loading/error states are explicit. Their presence on main is not a
+  substitute for current production smoke evidence.
 - The completed-history read correction is local and migration-free. It keeps
   the pre-terms 30-day fallback for rolling compatibility, applies identically
   to primary and secondary/native Project Alpha sources, and preserves deny,

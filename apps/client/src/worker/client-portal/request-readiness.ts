@@ -8,6 +8,7 @@ import {
   readEffectiveWorkspaceRequestProof,
   type EffectivePortalWorkspaceContext,
 } from "./workspace-v2";
+import { readServiceAssignmentPolicy, serviceAssignmentRequestPolicyEnabled } from "./service-assignment-policy";
 
 export type RequestReadinessReason =
   | "ready"
@@ -15,6 +16,8 @@ export type RequestReadinessReason =
   | "request_not_permitted"
   | "project_unavailable"
   | "catalog_unavailable"
+  | "no_services_assigned"
+  | "service_assignments_unavailable"
   | "request_unavailable";
 
 interface RequestReadinessDecision {
@@ -67,7 +70,10 @@ export async function readClientRequestReadiness(
   const readEnv: Env = { ...env, CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "false" };
   const expectedWorkspaceProof = workspaceProof(workspace);
 
-  async function snapshot() {
+  async function snapshot(assignmentWindows?: {
+    root?: { evaluatedAt: string; expiresAt: string };
+    project?: { evaluatedAt: string; expiresAt: string };
+  }) {
     const nativeProof = workspace
       ? await readEffectiveWorkspaceRequestProof(readEnv, principal, workspace.workspaceId, projectId)
       : null;
@@ -121,11 +127,26 @@ export async function readClientRequestReadiness(
         )) throw error;
       }
     }
-    return { currentProof, authorityProof: nativeProof?.authorityProof ?? null, local, localAllowed, rootAllowed, projectAllowed, catalogAvailable };
+    const assignmentPolicy = serviceAssignmentRequestPolicyEnabled(env);
+    const rootAssignment = assignmentPolicy && rootAllowed && catalogAvailable && backendConfigured && mode === "catalog"
+      ? await readServiceAssignmentPolicy(env, session, null, assignmentWindows?.root) : null;
+    const projectAssignment = assignmentPolicy && projectAllowed && catalogAvailable && backendConfigured && mode === "catalog" && projectId
+      ? await readServiceAssignmentPolicy(env, session, projectId, assignmentWindows?.project) : null;
+    return { currentProof, authorityProof: nativeProof?.authorityProof ?? null, local, localAllowed, rootAllowed,
+      projectAllowed, catalogAvailable, assignmentPolicy, rootAssignment, projectAssignment };
   }
 
   const before = await snapshot();
-  const after = await snapshot();
+  const after = await snapshot({
+    ...(before.rootAssignment?.proof ? { root: {
+      evaluatedAt: before.rootAssignment.proof.evaluatedAt,
+      expiresAt: before.rootAssignment.proof.expiresAt,
+    } } : {}),
+    ...(before.projectAssignment?.proof ? { project: {
+      evaluatedAt: before.projectAssignment.proof.evaluatedAt,
+      expiresAt: before.projectAssignment.proof.expiresAt,
+    } } : {}),
+  });
   if (JSON.stringify(before) !== JSON.stringify(after)) {
     throw new HTTPException(409, { message: "Request access changed. Refresh the client workspace." });
   }
@@ -134,12 +155,18 @@ export async function readClientRequestReadiness(
     : !backendConfigured ? "request_unavailable"
       : !after.catalogAvailable ? "catalog_unavailable" : null;
   const root: RequestReadinessDecision = {
-    canStartRequest: commonReason === null && after.rootAllowed,
-    reason: commonReason ?? (after.rootAllowed ? "ready" : "request_not_permitted"),
+    canStartRequest: commonReason === null && after.rootAllowed
+      && (!after.assignmentPolicy || after.rootAssignment?.state === "ready"),
+    reason: commonReason ?? (!after.rootAllowed ? "request_not_permitted"
+      : after.rootAssignment?.state === "no_services_assigned" ? "no_services_assigned"
+        : after.assignmentPolicy && after.rootAssignment?.state !== "ready" ? "service_assignments_unavailable" : "ready"),
   };
   const target: RequestReadinessDecision = projectId ? {
-    canStartRequest: commonReason === null && after.projectAllowed,
-    reason: commonReason ?? (after.projectAllowed ? "ready" : "project_unavailable"),
+    canStartRequest: commonReason === null && after.projectAllowed
+      && (!after.assignmentPolicy || after.projectAssignment?.state === "ready"),
+    reason: commonReason ?? (!after.projectAllowed ? "project_unavailable"
+      : after.projectAssignment?.state === "no_services_assigned" ? "no_services_assigned"
+        : after.assignmentPolicy && after.projectAssignment?.state !== "ready" ? "service_assignments_unavailable" : "ready"),
   } : root;
   return {
     mode,

@@ -4,7 +4,7 @@ import { HTTPException } from 'hono/http-exception';
 import { readPortalSourceAuthorityProof, portalSourceAuthoritiesReady, type PortalSourceAuthorityProof } from "../project-alpha-portal-authority";
 import { readNativeTargetScopes, type NativeTargetScopes } from "./native-portal-scopes";
 import { projectAccessReadColumns, projectAccessRowAllows, readExpiredScopeProjects, type ProjectAccessReadRow } from './project-access-read';
-import { projectAccessTermsReady,readWorkspaceInvitationPolicy } from './project-access-terms';
+import { projectAccessTermsReady,projectAccessTermsSql,readWorkspaceInvitationPolicy } from './project-access-terms';
 import {projectAccessAuthorityHistoryReady,projectAccessInvitationEvent} from './project-access-authority-history';
 import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 import { projectAccessCapacitySql } from './project-access-capacity';
@@ -82,6 +82,7 @@ interface WorkspaceRow {
   project_alpha_source_id?: string;
 }
 interface EntitlementRow extends ProjectAccessReadRow {
+  id?: string;
   effect: "allow" | "deny";
   scope_type: PortalWorkspaceScopeType;
   scope_public_id: string;
@@ -999,6 +1000,38 @@ export interface EffectiveWorkspaceRequestProof {
   projectAllowed: boolean;
   /** Server-only selected-generation proof, not an authorization token. */
   authorityProof: string;
+  /** Short-lived server-only facts used to repeat the effective request.create
+   * decision inside the first D1 write. Browser input never supplies these. */
+  mutationProof: EffectiveWorkspaceRequestMutationProof;
+}
+
+export interface EffectiveWorkspaceRequestMutationProof {
+  workspaceId: string;
+  identityId: string;
+  issuer: string;
+  subject: string;
+  legacyAccountId: string;
+  legacyIdentityId: string;
+  localProjectId: string | null;
+  projectPublicId: string | null;
+  rootType: "organization" | "standalone_client";
+  rootPublicId: string;
+  activeGenerationId: string;
+  sourceSequence: number;
+  rootSourceVersion: string;
+  membershipSourceVersion: string | null;
+  targetScopes: string[];
+  relationsEnabled: boolean;
+  denylistEnabled: boolean;
+  projectAccessTermsReady: boolean;
+  allowedRequestEntitlementIds: string[];
+  evaluatedAt: string;
+  expiresAt: string;
+}
+
+export interface EffectiveWorkspaceRequestMutationGuard {
+  sql: string;
+  bindings: unknown[];
 }
 
 /**
@@ -1013,6 +1046,8 @@ export async function readEffectiveWorkspaceRequestProof(
   workspaceId: string,
   localProjectId: string | null,
 ): Promise<EffectiveWorkspaceRequestProof | null> {
+  const evaluatedAt = new Date().toISOString();
+  const expiresAt = new Date(Date.parse(evaluatedAt) + 30_000).toISOString();
   if (!portalHierarchyV2Enabled(env) || !validPrincipalPart(principal.issuer) ||
     !validPrincipalPart(principal.subject) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceId)) return null;
   const database = env.DELIVERY_DB.withSession("first-primary");
@@ -1119,14 +1154,14 @@ export async function readEffectiveWorkspaceRequestProof(
 
   const requestTermsReady=await projectAccessTermsReady(database);
   const rules = await database.prepare(`SELECT * FROM (
-      SELECT capability,effect,scope_type,scope_public_id,${projectAccessReadColumns('entitlement',requestTermsReady)} FROM portal_v2_entitlements entitlement
+      SELECT id,capability,effect,scope_type,scope_public_id,${projectAccessReadColumns('entitlement',requestTermsReady)} FROM portal_v2_entitlements entitlement
       WHERE workspace_id=?1 AND identity_id=?2 AND capability='workspace.view'
         AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
         AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
         AND ${projectAccessCapacitySql('entitlement',requestTermsReady)}
       ORDER BY entitlement_version DESC,id LIMIT 201
     ) UNION ALL SELECT * FROM (
-      SELECT capability,effect,scope_type,scope_public_id,${projectAccessReadColumns('entitlement',requestTermsReady)} FROM portal_v2_entitlements entitlement
+      SELECT id,capability,effect,scope_type,scope_public_id,${projectAccessReadColumns('entitlement',requestTermsReady)} FROM portal_v2_entitlements entitlement
       WHERE workspace_id=?1 AND identity_id=?2 AND capability='request.create'
         AND status='active' AND revoked_at IS NULL AND datetime(valid_from)<=datetime('now')
         AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))
@@ -1157,6 +1192,8 @@ export async function readEffectiveWorkspaceRequestProof(
     ? await targetScopes(env, state, { scopeType: "project", publicId: local.project_public_id }, database, true,requestTermsReady?{retention:'structural'}:undefined)
     : null;
   if(projectScopes&&requestTermsReady)expiredRequestProjects=await readExpiredScopeProjects(database,workspaceId,projectScopes,portalHierarchyRelationsEnabled(env));
+  const targetScopesForMutation = localProjectId ? projectScopes : rootScopes;
+  if (!targetScopesForMutation) return null;
   return {
     workspace: {
       workspaceId, identityId: state.identity_id, rootType: state.root_type,
@@ -1171,6 +1208,190 @@ export async function readEffectiveWorkspaceRequestProof(
       state.active_generation_id, state.source_sequence, state.root_source_version, state.membership_source_version,
       rules.results, denials, rootScopes && [...rootScopes].sort(), projectScopes && [...projectScopes].sort(),
     ]),
+    mutationProof: {
+      workspaceId,
+      identityId: state.identity_id,
+      issuer: principal.issuer,
+      subject: principal.subject,
+      legacyAccountId: state.legacy_account_id,
+      legacyIdentityId: local.legacy_identity_id,
+      localProjectId,
+      projectPublicId: localProjectId ? local.project_public_id : null,
+      rootType: state.root_type,
+      rootPublicId: state.pa_organization_public_id ?? state.pa_client_public_id!,
+      activeGenerationId: state.active_generation_id,
+      sourceSequence: state.source_sequence,
+      rootSourceVersion: state.root_source_version,
+      membershipSourceVersion: state.membership_source_version,
+      targetScopes: [...targetScopesForMutation].sort(),
+      relationsEnabled: portalHierarchyRelationsEnabled(env),
+      denylistEnabled: portalIdentityDenylistEnabled(env),
+      projectAccessTermsReady: requestTermsReady,
+      allowedRequestEntitlementIds: rules.results.filter(rule => rule.id && rule.capability === "request.create"
+        && rule.effect === "allow" && targetScopesForMutation.has(`${rule.scope_type}:${rule.scope_public_id}`)
+        && projectAccessRowAllows(rule, targetScopesForMutation, localProjectId ? expiredRequestProjects : []))
+        .map(rule => rule.id!),
+      evaluatedAt,
+      expiresAt,
+    },
+  };
+}
+
+/**
+ * Repeats the bounded hierarchy-v2 request.create decision in the first D1
+ * mutation. This is deliberately an additional predicate on the legacy write
+ * guards: it cannot provision membership, infer a project, or turn an
+ * eligibility shell into request authority.
+ */
+export function effectiveWorkspaceRequestMutationGuardSql(
+  proof: EffectiveWorkspaceRequestMutationProof,
+): EffectiveWorkspaceRequestMutationGuard {
+  const scopesJson = JSON.stringify(proof.targetScopes);
+  const allowedEntitlementIdsJson = JSON.stringify(proof.allowedRequestEntitlementIds);
+  const lineageBindings: unknown[] = [];
+  let lineageSql = "1=1";
+  if (proof.localProjectId !== null && proof.projectPublicId !== null) {
+    if (proof.relationsEnabled) {
+      lineageSql = `EXISTS (
+        WITH RECURSIVE lineage(entity_type,public_id,depth) AS (
+          SELECT entity.entity_type,entity.public_id,0
+          FROM portal_v2_directory_entities entity
+          WHERE entity.workspace_id=? AND entity.generation_id=?
+            AND entity.entity_type='project' AND entity.public_id=? AND entity.active=1
+          UNION
+          SELECT relation.from_type,relation.from_public_id,lineage.depth+1
+          FROM lineage
+          JOIN portal_v2_directory_relations relation ON relation.workspace_id=?
+            AND relation.generation_id=? AND relation.active=1
+            AND relation.to_type=lineage.entity_type AND relation.to_public_id=lineage.public_id
+          JOIN portal_v2_directory_entities parent ON parent.workspace_id=relation.workspace_id
+            AND parent.generation_id=relation.generation_id AND parent.entity_type=relation.from_type
+            AND parent.public_id=relation.from_public_id AND parent.active=1
+          WHERE lineage.depth<12
+        ) SELECT 1 WHERE (SELECT COUNT(*) FROM lineage) BETWEEN 1 AND 64
+          AND (SELECT MAX(depth) FROM lineage)<12
+          AND EXISTS(SELECT 1 FROM lineage WHERE entity_type=? AND public_id=?)
+          AND NOT EXISTS(SELECT 1 FROM lineage WHERE (entity_type || ':' || public_id)
+            NOT IN (SELECT value FROM json_each(?)))
+          AND NOT EXISTS(SELECT 1 FROM json_each(?) expected
+            WHERE expected.value<>? AND NOT EXISTS(SELECT 1 FROM lineage
+              WHERE (entity_type || ':' || public_id)=expected.value))
+      )`;
+      lineageBindings.push(
+        proof.workspaceId, proof.activeGenerationId, proof.projectPublicId,
+        proof.workspaceId, proof.activeGenerationId, proof.rootType, proof.rootPublicId,
+        scopesJson, scopesJson, `workspace:${proof.workspaceId}`,
+      );
+    } else {
+      lineageSql = `EXISTS (
+        WITH RECURSIVE lineage(entity_type,public_id,parent_public_id,depth) AS (
+          SELECT entity.entity_type,entity.public_id,entity.parent_public_id,0
+          FROM portal_v2_directory_entities entity
+          WHERE entity.workspace_id=? AND entity.generation_id=?
+            AND entity.entity_type='project' AND entity.public_id=? AND entity.active=1
+          UNION ALL
+          SELECT parent.entity_type,parent.public_id,parent.parent_public_id,lineage.depth+1
+          FROM lineage JOIN portal_v2_directory_entities parent
+            ON parent.workspace_id=? AND parent.generation_id=?
+            AND parent.public_id=lineage.parent_public_id AND parent.active=1
+          WHERE lineage.parent_public_id IS NOT NULL AND lineage.depth<8
+        ) SELECT 1 WHERE (SELECT COUNT(*) FROM lineage) BETWEEN 1 AND 9
+          AND (SELECT MAX(depth) FROM lineage)<8
+          AND EXISTS(SELECT 1 FROM lineage WHERE entity_type=? AND public_id=?)
+          AND NOT EXISTS(SELECT 1 FROM lineage WHERE (entity_type || ':' || public_id)
+            NOT IN (SELECT value FROM json_each(?)))
+          AND NOT EXISTS(SELECT 1 FROM json_each(?) expected
+            WHERE expected.value<>? AND NOT EXISTS(SELECT 1 FROM lineage
+              WHERE (entity_type || ':' || public_id)=expected.value))
+      )`;
+      lineageBindings.push(
+        proof.workspaceId, proof.activeGenerationId, proof.projectPublicId,
+        proof.workspaceId, proof.activeGenerationId, proof.rootType, proof.rootPublicId,
+        scopesJson, scopesJson, `workspace:${proof.workspaceId}`,
+      );
+    }
+  }
+
+  const denialSql = proof.denylistEnabled ? `AND NOT EXISTS (
+      SELECT 1 FROM portal_v2_identity_denials denial
+      WHERE denial.identity_id=identity.id AND denial.status='active' AND denial.revoked_at IS NULL
+        AND datetime(denial.valid_from)<=datetime('now')
+        AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))
+        AND (denial.scope_type='global' OR (denial.workspace_id=workspace.id
+          AND denial.scope_public_id IS NOT NULL
+          AND (denial.scope_type || ':' || denial.scope_public_id) IN (SELECT value FROM json_each(?))))
+    )` : "";
+  const denialBindings = proof.denylistEnabled ? [scopesJson] : [];
+  const termsSql = proof.projectAccessTermsReady ? `AND ${projectAccessTermsSql({
+    termsId: "entitlement.access_terms_id",
+    workspaceId: "entitlement.workspace_id",
+    projectId: "(SELECT project_public_id FROM portal_project_access_terms WHERE id=entitlement.access_terms_id)",
+    legacyRetained: "1",
+  })} AND (entitlement.access_terms_id IS NULL OR EXISTS(
+    SELECT 1 FROM portal_project_access_terms access_target
+    WHERE access_target.id=entitlement.access_terms_id
+      AND ('project:' || access_target.project_public_id) IN (SELECT value FROM json_each(?))
+  ))` : "";
+  const termsBindings = proof.projectAccessTermsReady ? [scopesJson] : [];
+  const entitlementBase = `entitlement.workspace_id=workspace.id AND entitlement.identity_id=identity.id
+    AND entitlement.capability='request.create' AND entitlement.status='active' AND entitlement.revoked_at IS NULL
+    AND datetime(entitlement.valid_from)<=datetime('now')
+    AND (entitlement.expires_at IS NULL OR datetime(entitlement.expires_at)>datetime('now'))
+    AND (entitlement.scope_type || ':' || entitlement.scope_public_id) IN (SELECT value FROM json_each(?))`;
+
+  return {
+    sql: `EXISTS (
+      SELECT 1 FROM portal_v2_identities identity
+      JOIN portal_v2_workspace_memberships membership ON membership.identity_id=identity.id
+        AND membership.workspace_id=? AND membership.status='active' AND membership.revoked_at IS NULL
+        AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))
+      JOIN portal_v2_workspaces workspace ON workspace.id=membership.workspace_id
+        AND workspace.status='active' AND workspace.legacy_account_id=? AND ${primaryWorkspaceAccount("workspace")}
+      JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
+        AND checkpoint.active_generation_id=? AND checkpoint.source_sequence=?
+      JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
+        AND generation.workspace_id=workspace.id AND generation.status='active' AND generation.complete=1
+        AND generation.source_sequence=?
+      JOIN portal_v2_directory_entities root ON root.workspace_id=workspace.id
+        AND root.generation_id=checkpoint.active_generation_id AND root.entity_type=?
+        AND root.public_id=? AND root.source_version=? AND root.active=1
+      WHERE identity.id=? AND identity.issuer=? AND identity.subject=?
+        AND identity.status='active' AND identity.revoked_at IS NULL
+        AND membership.source_version IS ?
+        AND datetime(?)<=datetime('now') AND datetime(?)>datetime('now')
+        AND ${lineageSql}
+        AND (? IS NULL OR EXISTS(
+          SELECT 1 FROM projects local_project
+          JOIN client_project_grants local_grant ON local_grant.project_id=local_project.id
+            AND local_grant.account_id=workspace.legacy_account_id AND local_grant.revoked_at IS NULL
+            AND local_grant.can_request_service=1
+          WHERE local_project.id=? AND local_project.active=1
+            AND ${primaryAlphaReference("local_project")}
+            AND local_project.project_alpha_project_id=?
+        ))
+        ${denialSql}
+        AND (SELECT COUNT(*) FROM portal_v2_entitlements counted
+          WHERE counted.workspace_id=workspace.id AND counted.identity_id=identity.id
+            AND counted.capability='request.create' AND counted.status='active' AND counted.revoked_at IS NULL
+            AND datetime(counted.valid_from)<=datetime('now')
+            AND (counted.expires_at IS NULL OR datetime(counted.expires_at)>datetime('now')))<=200
+        AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements entitlement
+          WHERE ${entitlementBase} AND entitlement.effect='deny')
+        AND EXISTS(SELECT 1 FROM portal_v2_entitlements entitlement
+          WHERE ${entitlementBase} AND entitlement.effect='allow'
+            AND entitlement.id IN (SELECT value FROM json_each(?)) ${termsSql})
+    )`,
+    bindings: [
+      proof.workspaceId, proof.legacyAccountId, proof.activeGenerationId, proof.sourceSequence,
+      proof.sourceSequence, proof.rootType, proof.rootPublicId, proof.rootSourceVersion,
+      proof.identityId, proof.issuer, proof.subject, proof.membershipSourceVersion,
+      proof.evaluatedAt, proof.expiresAt,
+      ...lineageBindings,
+      proof.localProjectId, proof.localProjectId, proof.projectPublicId,
+      ...denialBindings,
+      scopesJson,
+      scopesJson, allowedEntitlementIdsJson, ...termsBindings,
+    ],
   };
 }
 

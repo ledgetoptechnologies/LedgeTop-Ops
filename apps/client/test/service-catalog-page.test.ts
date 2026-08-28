@@ -207,7 +207,7 @@ describe("service catalog page route", () => {
     const response = await app.request("https://client.example/service-catalog/page?limit=25&cursor=opaque", {}, env);
     expect(response.status).toBe(200);
     expect(response.headers.get("Cache-Control")).toBe("private, no-store");
-    expect(page).toHaveBeenCalledWith(expect.anything(), session, { limit: 25, cursor: "opaque" });
+    expect(page).toHaveBeenCalledWith(expect.anything(), session, { limit: 25, cursor: "opaque", projectId: null });
   });
 
   it.each(["limit=101", "limit=01", "limit=1.5", "limit=1&limit=2", "cursor=a&cursor=b", "price=true", "sourceId=project-alpha:secondary"])("rejects invalid page query %s before repository access", async query => {
