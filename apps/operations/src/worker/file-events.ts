@@ -6,6 +6,7 @@ import { canonicalThumbnailSourceKey, enqueueThumbnailJob, handleRemovedPrebuilt
 import { deleteImageLocation, enqueueImageLocationJob } from "./image-locations";
 import { isMovedSourceMarker } from "@ltds/shared";
 import { recordClientFolderFileChange } from "./client-folder-grants";
+import { recordAuthenticatedDeliveryObjectChange } from "./authenticated-delivery-change-notifications";
 
 export interface R2Notification {
   action: string;
@@ -50,6 +51,9 @@ export function hidden(key: string): boolean {
 function created(action: string): boolean { return ["PutObject", "CopyObject", "CompleteMultipartUpload"].some(value => action.includes(value)); }
 function removed(action: string): boolean { return action.includes("Delete") || action.includes("Lifecycle"); }
 function metadata(value: string): string { let binary = ""; for (const byte of new TextEncoder().encode(value)) binary += String.fromCharCode(byte); return btoa(binary); }
+function sameObjectVersion(left: string | undefined, right: string): boolean {
+  return !left || left.replace(/^"|"$/g, "") === right.replace(/^"|"$/g, "");
+}
 function databaseTimestampMillis(value: string): number {
   return Date.parse(/(?:Z|[+-]\d\d:\d\d)$/i.test(value) ? value : `${value.replace(" ", "T")}Z`);
 }
@@ -292,8 +296,15 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       }
       if (removed(event.action)) {
         if (!hidden(key)) {
+          const indexedVersion = await env.DELIVERY_DB.prepare("SELECT etag FROM file_index WHERE r2_key=?")
+            .bind(key).first<string>("etag");
+          const notificationVersionCurrent = !event.object?.eTag || !indexedVersion || sameObjectVersion(event.object.eTag,indexedVersion);
           const removal = await handleRemovedSource(env, key, event.object?.eTag);
-          if (removal === "removed") await recordClientFolderFileChange(env, key, false);
+          if (removal === "removed") {
+            await recordClientFolderFileChange(env, key, false);
+            if (notificationVersionCurrent)
+              await recordAuthenticatedDeliveryObjectChange(env,key,false,indexedVersion || event.object?.eTag,event.eventTime || new Date().toISOString());
+          }
         }
         else await env.DELIVERY_DB.prepare("DELETE FROM file_index WHERE r2_key=?").bind(key).run();
         message.ack(); continue;
@@ -319,6 +330,8 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
       if (existing?.etag === head.httpEtag && existing.stream_uid && !existing.stream_upload_url) {
         const thumbnailJob = thumbnailJobForCreatedObject(event.action, key, kind, head, event.eventTime);
         if (thumbnailJob) await enqueueThumbnailJob(env, thumbnailJob);
+        if (sameObjectVersion(event.object?.eTag,head.httpEtag))
+          await recordAuthenticatedDeliveryObjectChange(env,key,true,head.httpEtag,event.eventTime || head.uploaded.toISOString());
         message.ack(); continue;
       }
       let stream = { uid: existing?.stream_uid || null, status: existing?.stream_status || null, error: null as string | null };
@@ -330,6 +343,8 @@ export async function consumeFileEvents(batch: MessageBatch<R2Notification>, env
         env.DELIVERY_DB.prepare(`INSERT INTO delivery_sync_health (source,last_attempt_at,last_success_at,status,details_json) VALUES ('truenas',datetime('now'),datetime('now'),'healthy',?) ON CONFLICT(source) DO UPDATE SET last_attempt_at=datetime('now'),last_success_at=datetime('now'),status='healthy',details_json=excluded.details_json,updated_at=datetime('now')`).bind(JSON.stringify({ lastKey: key })),
       ]);
       await recordClientFolderFileChange(env, key, true);
+      if (sameObjectVersion(event.object?.eTag,head.httpEtag))
+        await recordAuthenticatedDeliveryObjectChange(env,key,true,head.httpEtag,event.eventTime || head.uploaded.toISOString());
       const thumbnailJob = thumbnailJobForCreatedObject(event.action, key, kind, head, event.eventTime);
       if (thumbnailJob) await enqueueThumbnailJob(env, thumbnailJob);
       else if (canonicalThumbnailSourceKey(key)) {
