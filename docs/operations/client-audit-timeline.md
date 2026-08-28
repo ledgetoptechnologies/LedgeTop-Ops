@@ -21,7 +21,8 @@ principal currently holds that adapter's permission. Each proof is checked
 again before the response is released; a concurrent ownership or permission
 change returns `409`.
 
-Secondary Project Alpha roots deliberately return only source-record activity.
+Secondary Project Alpha roots return source-record activity and exact
+Operations-owned project activity for their own source-qualified overlays.
 Their request, feedback, access, delivery and notification coverage is labeled
 `unsupported_source`. Matching public IDs, email addresses, names, or reviewed
 business-party links never combine sources, workspaces, identities or grants.
@@ -32,13 +33,15 @@ Filters are `category`, `actorType`, `result`, optional canonical ISO `from` and
 `to`, `limit` from 1 through 100, and an opaque continuation `cursor`.
 `expectedContextVersion` binds the initial browser request to the current Client
 Hub workspace. The server echoes normalized filters and returns explicit
-coverage for all six categories. `accessCoverage` separately reports every
-access adapter, while `notificationCoverage` distinguishes delivery-share,
+coverage for all six categories. `projectCoverage` distinguishes source-record
+activity from Operations-owned project contacts/memory activity,
+`accessCoverage` separately reports every access adapter, while
+`notificationCoverage` distinguishes delivery-share,
 project-access collaborator, and project-access companion notices. One available ledger therefore
 cannot hide permission-required, unsupported, not-applicable, or not-collected
 adapters.
 
-The version-five AES-GCM cursor is actor-bound and includes the exact source-qualified root,
+The version-six AES-GCM cursor is actor-bound and includes the exact source-qualified root,
 optional project, normalized filters, current context and scope proofs, an
 `asOf` time, bounded producer high-water marks, separate collaborator/companion notice schema
 readiness, the last global sort tuple and a 30-minute expiry. A cursor authorizes
@@ -50,6 +53,9 @@ The checkpoint includes:
 
 - source organization/client/project activity for every readable business
   source;
+- Operations-owned project contact saves, project-memory saves/amendments and
+  copy-forward outcomes, after exact current source, project ownership,
+  workspace-bound Client Hub context, overlay root and immutable revision joins;
 - request revisions for exact current primary/local account/project mappings;
 - primary workspace membership, invitation-request decisions, peer-administrator
   changes and workspace identity-denial lifecycle;
@@ -102,6 +108,19 @@ the meaningful-content and noise policy is unresolved.
 
 ## Redaction and retention boundary
 
+Operational project events select only allowlisted event kinds and the boolean
+copy-forward marker needed to choose a stable action. They return a generic
+staff actor, current project label and one of `project.contacts.saved`,
+`project.contacts.copied_forward`, `project.memory.saved`,
+`project.memory.copied_forward`, or `project.memory.amended`. The adapter never
+selects contact channels, instructions, memory snapshots, amendment reasons,
+source project IDs, selected contact IDs, raw counters or `details_json`.
+Malformed overlay roots, reassigned projects, wrong-source handles and events
+without their exact immutable revision are omitted before pagination.
+The adapter additionally requires current `projects.view`; when that policy is
+unavailable, `operational_project_activity` is explicitly reported as
+`permission_required` and no operational rows are queried or returned.
+
 Adapters rejoin each notice audit and outbox row to the exact authoritative
 `portal_project_access_terms` workspace/source/project tuple, then select
 allowlisted actions, recipient roles, event types and columns only. Project-access
@@ -130,12 +149,13 @@ describe the timeline as a complete lifetime record.
 
 ## Verification and release
 
-Focused D1 tests cover the seven available access ledgers, both migration-0169
+Focused D1 tests cover the two project adapters, seven available access ledgers, both migration-0169
 notification ledgers, authoritative-term mismatch rejection, strict redaction,
 meaningful-event allowlists, exact project/sibling isolation, stable high-water
 pagination, malformed cross-workspace rejection, mid-read permission loss,
 per-adapter coverage and pre-migration not-collected behavior, category/actor/result/date filters, actor/filter/scope-bound
-continuation and exact secondary source-only coverage. Focused browser tests
+continuation, operational-event project/source/root isolation, redaction and
+stable high-water behavior, and exact secondary source isolation. Focused browser tests
 cover refresh/back/forward restoration of every applied filter, preservation
 of unrelated query parameters, reset behavior, 44-pixel controls and
 desktop/mobile overflow. Operations type-checking must pass with the matching

@@ -3,6 +3,7 @@ import {
   CLIENT_AUDIT_TIMELINE_ACCESS_ADAPTERS,
   CLIENT_AUDIT_TIMELINE_CATEGORIES,
   CLIENT_AUDIT_TIMELINE_NOTIFICATION_ADAPTERS,
+  CLIENT_AUDIT_TIMELINE_PROJECT_ADAPTERS,
   CLIENT_AUDIT_TIMELINE_RESULTS,
   PRIMARY_ALPHA_SOURCE_ID,
   type ClientAuditTimelineActorType,
@@ -43,7 +44,7 @@ interface CandidateRow {
   resource_label?: string | null;
 }
 interface TimelineCursor {
-  v: 5;
+  v: 6;
   actor: string;
   root: [string, string, string, string];
   projectId: string | null;
@@ -58,6 +59,7 @@ interface TimelineCursor {
   noticeScope: string;
   collaboratorNoticeSchema: boolean;
   companionNoticeSchema: boolean;
+  operationalProjectSchema: boolean;
   viewerManagePolicy: string;
   filters: ClientAuditTimelineFilters;
   asOf: string;
@@ -80,15 +82,16 @@ const filtersSchema = z.object({
   to: timestamp.nullable(),
 }).strict();
 const cursorSchema = z.object({
-  v: z.literal(5), actor: identifier, root: z.tuple([identifier, identifier, identifier, identifier]),
+  v: z.literal(6), actor: identifier, root: z.tuple([identifier, identifier, identifier, identifier]),
   projectId: identifier.nullable(), context: proof, scope: proof, project: proof.nullable(),
   businessPolicy: proof, businessSource: proof, businessRevision: z.number().int().nonnegative(), deliveryAuditPolicy: proof,
   viewerManagePolicy: proof, portalPolicy: proof,
   noticeScope: proof,
   collaboratorNoticeSchema: z.boolean(), companionNoticeSchema: z.boolean(),
+  operationalProjectSchema: z.boolean(),
   filters: filtersSchema, asOf: timestamp,
   waters: z.record(z.string().min(1).max(80), z.number().int().nonnegative()),
-  after: z.tuple([timestamp, z.enum(["project_alpha", "service_requests", "portal_access", "client_delivery"]), identifier]).nullable(),
+  after: z.tuple([timestamp, z.enum(["project_alpha", "operations", "service_requests", "portal_access", "client_delivery"]), identifier]).nullable(),
   expires: z.number().int().positive(),
 }).strict();
 
@@ -112,7 +115,7 @@ const changed = (): never => { throw new HTTPException(409, { message: "Timeline
 async function cursorKey(env: Env): Promise<CryptoKey> {
   if (!env.OPERATIONS_SESSION_SECRET || env.OPERATIONS_SESSION_SECRET.length < 32)
     throw new Error("Client timeline cursor configuration unavailable");
-  const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`client-audit-timeline:v5:${env.OPERATIONS_SESSION_SECRET}`));
+  const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`client-audit-timeline:v6:${env.OPERATIONS_SESSION_SECRET}`));
   return crypto.subtle.importKey("raw", material, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
@@ -123,7 +126,7 @@ function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
 async function encodeCursor(env: Env, actor: StaffPrincipal, value: TimelineCursor): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const body = await crypto.subtle.encrypt({ name: "AES-GCM", iv,
-    additionalData: new TextEncoder().encode(`client-audit-timeline:v5:${actor.id}`) }, await cursorKey(env),
+    additionalData: new TextEncoder().encode(`client-audit-timeline:v6:${actor.id}`) }, await cursorKey(env),
   new TextEncoder().encode(JSON.stringify(value)));
   return `${base64Url(iv)}.${base64Url(new Uint8Array(body))}`;
 }
@@ -133,7 +136,7 @@ async function decodeCursor(env: Env, actor: StaffPrincipal, raw: string): Promi
     const parts = raw.split(".");
     if (parts.length !== 2) throw new Error();
     const body = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decodeBase64Url(parts[0]!),
-      additionalData: new TextEncoder().encode(`client-audit-timeline:v5:${actor.id}`) }, await cursorKey(env), decodeBase64Url(parts[1]!));
+      additionalData: new TextEncoder().encode(`client-audit-timeline:v6:${actor.id}`) }, await cursorKey(env), decodeBase64Url(parts[1]!));
     return cursorSchema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)));
   } catch { throw new HTTPException(400, { message: "Client timeline cursor is invalid" }); }
 }
@@ -484,6 +487,74 @@ async function accessCandidates(env: Env, context: ClientHubCollectionContext, s
   return candidates;
 }
 
+async function operationalProjectCandidates(env: Env, context: ClientHubCollectionContext,
+  filters: ClientAuditTimelineFilters, projectId: string | null, asOf: string,
+  after: TimelineCursor["after"], water: number, limit: number,
+  policy: Awaited<ReturnType<typeof readClientHubBusinessProjectPolicy>>, available: boolean,
+): Promise<ClientAuditTimelineItem[]> {
+  if (!available || context.root.root_namespace !== "business"
+    || !allowedByFilters(filters, "project", "staff", "succeeded")) return [];
+  const producer: Producer = "operations", at = timeExpression("event.created_at"),
+    bounds = timeBounds(filters, asOf, at),
+    continuation = seek(at, "'operational-project:'||event.id", producer, after),
+    rootKind = context.root.kind === "organization" ? "organization" : "client";
+  const ownership = context.root.kind === "organization"
+    ? "(p.organization_id=? OR (p.organization_id IS NULL AND owner.organization_id=?))"
+    : "p.client_id=? AND p.organization_id IS NULL AND owner.id IS NOT NULL AND owner.organization_id IS NULL";
+  const ownershipValues = context.root.kind === "organization"
+    ? [context.root.public_id, context.root.public_id] : [context.root.public_id];
+  const rows = await env.OPS_DB.withSession("first-primary").prepare(`SELECT event.rowid,event.id event_id,
+      event.event_kind,event.project_id resource_id,p.name resource_label,${at} occurred_at,
+      CASE WHEN json_valid(event.details_json) AND json_type(event.details_json,'$.copied')='true' THEN 1 ELSE 0 END copied
+    FROM project_operational_events event
+    JOIN pa_projection_record_ids handle ON handle.projection_source_id=event.projection_source_id
+      AND handle.record_kind='project' AND handle.local_id=event.project_id
+    JOIN pa_projects p ON p.id=event.project_id AND p.projection_source_id=event.projection_source_id AND p.active=1
+    LEFT JOIN pa_clients owner ON owner.id=p.client_id AND owner.projection_source_id=p.projection_source_id AND owner.active=1
+    JOIN staff_users event_actor ON event_actor.id=event.actor_id
+    WHERE event.rowid<=? AND event.projection_source_id=? AND event.project_record_kind='project'
+      AND event.event_kind IN ('contacts_saved','memory_saved','memory_amended')
+      AND (${ownership}) AND (${policy.filter.sql})
+      ${projectId ? "AND event.project_id=?" : ""}
+      AND ((event.event_kind='contacts_saved' AND EXISTS (
+        SELECT 1 FROM project_operational_contact_sets current
+        JOIN project_operational_contact_revisions revision
+          ON revision.projection_source_id=current.projection_source_id AND revision.project_id=current.project_id
+          AND revision.version=event.result_version AND revision.actor_id=event.actor_id
+        WHERE current.projection_source_id=event.projection_source_id AND current.project_id=event.project_id
+          AND current.project_record_kind='project' AND current.root_record_kind=? AND current.root_id=?
+          AND current.version>=event.result_version))
+      OR (event.event_kind IN ('memory_saved','memory_amended') AND EXISTS (
+        SELECT 1 FROM project_operational_memory current
+        JOIN project_operational_memory_revisions revision
+          ON revision.projection_source_id=current.projection_source_id AND revision.project_id=current.project_id
+          AND revision.version=event.result_version AND revision.actor_id=event.actor_id
+          AND revision.change_kind=CASE event.event_kind WHEN 'memory_amended' THEN 'post_completion_amendment' ELSE 'saved' END
+        WHERE current.projection_source_id=event.projection_source_id AND current.project_id=event.project_id
+          AND current.project_record_kind='project' AND current.root_record_kind=? AND current.root_id=?
+          AND current.version>=event.result_version)))
+      AND ${bounds.sql}${continuation.sql}
+    ORDER BY ${at} DESC,event.id ASC LIMIT ?`).bind(water, context.root.source_id,
+      ...ownershipValues, ...policy.filter.values, ...(projectId ? [projectId] : []),
+      rootKind, context.root.public_id, rootKind, context.root.public_id,
+      ...bounds.values, ...continuation.values, limit + 1)
+    .all<CandidateRow & { event_kind: "contacts_saved" | "memory_saved" | "memory_amended"; copied: number }>();
+  const path = rootPath(context);
+  return rows.results.map(row => {
+    const resourceId = identifier.safeParse(row.resource_id).success ? String(row.resource_id) : null;
+    const action = row.event_kind === "contacts_saved"
+      ? row.copied === 1 ? "project.contacts.copied_forward" : "project.contacts.saved"
+      : row.event_kind === "memory_amended" ? "project.memory.amended"
+        : row.copied === 1 ? "project.memory.copied_forward" : "project.memory.saved";
+    return item({ sourceId: context.root.source_id, producer,
+      producerEventId: `operational-project:${String(row.event_id)}`, category: "project", action,
+      actor: actor("staff"), resource: { type: "project_operational_record",
+        ...(resourceId ? { id: resourceId, detailPath: `${path}/projects/${encodeURIComponent(resourceId)}` } : {}),
+        label: safeText(row.resource_label, "Project", 180) },
+      result: "succeeded", occurredAt: normalizeTime(row.occurred_at)! });
+  });
+}
+
 async function deliveryCandidates(env: Env, context: ClientHubCollectionContext, scope: DeliveryScope,
   filters: ClientAuditTimelineFilters, asOf: string, after: TimelineCursor["after"], water: number,
   limit: number): Promise<ClientAuditTimelineItem[]> {
@@ -530,6 +601,10 @@ const PROJECT_ACCESS_COLLABORATOR_NOTICE_TABLES = [
 ] as const;
 const PROJECT_ACCESS_COMPANION_NOTICE_TABLES = [
   "portal_project_access_companion_notice_audit", "portal_project_access_companion_notice_outbox", "portal_project_access_terms",
+] as const;
+const OPERATIONAL_PROJECT_EVENT_TABLES = [
+  "project_operational_events", "project_operational_contact_sets", "project_operational_contact_revisions",
+  "project_operational_memory", "project_operational_memory_revisions",
 ] as const;
 
 async function projectAccessNoticeCandidates(env: Env, context: ClientHubCollectionContext,
@@ -619,7 +694,8 @@ async function projectAccessCompanionNoticeCandidates(env: Env, context: ClientH
 
 async function currentWatermarks(env: Env, context: ClientHubCollectionContext, scope: DeliveryScope,
   policies: { portal: boolean; deliveryAudit: boolean; viewerManage: boolean },
-  collaboratorNoticeSchema: boolean, companionNoticeSchema: boolean): Promise<Record<string, number>> {
+  collaboratorNoticeSchema: boolean, companionNoticeSchema: boolean,
+  operationalProjectSchema: boolean): Promise<Record<string, number>> {
   const ops = env.OPS_DB.withSession("first-primary"), delivery = env.DELIVERY_DB.withSession("first-primary");
   const waters: Record<string, number> = {};
   if (context.root.root_namespace === "business") waters.business = await ops.prepare("SELECT COALESCE(MAX(sequence),0) value FROM client_business_activity").first<number>("value") ?? 0;
@@ -640,6 +716,8 @@ async function currentWatermarks(env: Env, context: ClientHubCollectionContext, 
     waters.projectAccessNotices = await maxRowid(delivery, "portal_project_access_notice_audit");
   if (scope.workspaceId && policies.portal && companionNoticeSchema)
     waters.projectAccessCompanionNotices = await maxRowid(delivery, "portal_project_access_companion_notice_audit");
+  if (context.root.root_namespace === "business" && operationalProjectSchema)
+    waters.operationalProjects = await maxRowid(ops, "project_operational_events");
   return waters;
 }
 
@@ -667,6 +745,7 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     noticeScope = await projectAccessNoticeScopeProof(env, context),
     collaboratorNoticeSchema = await d1TablesPresent(env.DELIVERY_DB, PROJECT_ACCESS_COLLABORATOR_NOTICE_TABLES),
     companionNoticeSchema = await d1TablesPresent(env.DELIVERY_DB, PROJECT_ACCESS_COMPANION_NOTICE_TABLES),
+    operationalProjectSchema = await d1TablesPresent(env.OPS_DB, OPERATIONAL_PROJECT_EVENT_TABLES),
     source = context.root.root_namespace === "business" ? await clientHubBusinessProjectSourceProof(env, context)
       : await sha256(JSON.stringify([rootTuple(context), "not-business"]));
   const businessRevision = context.root.root_namespace === "business"
@@ -681,11 +760,13 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     || cursor.viewerManagePolicy !== viewerManagePolicy.proof || cursor.portalPolicy !== portalPolicy.proof
     || cursor.noticeScope !== noticeScope.proof
     || cursor.collaboratorNoticeSchema !== collaboratorNoticeSchema
-    || cursor.companionNoticeSchema !== companionNoticeSchema)) changed();
+    || cursor.companionNoticeSchema !== companionNoticeSchema
+    || cursor.operationalProjectSchema !== operationalProjectSchema)) changed();
   const accessPolicies = { portal: context.access.requests && portalPolicy.allowed, deliveryAudit: deliveryAuditPolicy.allowed,
     viewerManage: viewerManagePolicy.allowed };
   const asOf = cursor?.asOf ?? new Date().toISOString(), waters = cursor?.waters
-    ?? await currentWatermarks(env, context, scope, accessPolicies, collaboratorNoticeSchema, companionNoticeSchema);
+    ?? await currentWatermarks(env, context, scope, accessPolicies, collaboratorNoticeSchema, companionNoticeSchema,
+      operationalProjectSchema);
   const secondary = context.root.root_namespace === "business" && context.root.source_id !== PRIMARY_ALPHA_SOURCE_ID;
   const sourceAvailable = context.root.root_namespace === "business";
   const requestAvailable = !secondary && Boolean(scope.accountId) && context.access.requests;
@@ -696,6 +777,14 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     && accessPolicies.portal && collaboratorNoticeSchema;
   const projectAccessCompanionNoticeAvailable = !secondary && Boolean(scope.workspaceId) && noticeScope.available
     && accessPolicies.portal && companionNoticeSchema;
+  const sourceProjectAvailable = context.root.root_namespace === "business";
+  const operationalProjectAvailable = sourceProjectAvailable && operationalProjectSchema && policy.allowed;
+  const projectCoverage = Object.fromEntries(CLIENT_AUDIT_TIMELINE_PROJECT_ADAPTERS.map(adapter => {
+    const available = adapter === "source_record_activity" ? sourceProjectAvailable : operationalProjectAvailable;
+    const reason: CoverageReason = available ? null : context.root.root_namespace !== "business" ? "not_applicable"
+      : adapter === "operational_project_activity" && !policy.allowed ? "permission_required" : "not_collected";
+    return [adapter, coverage(available, reason)];
+  })) as ClientAuditTimelinePage["projectCoverage"];
   const adapterCoverage = Object.fromEntries(CLIENT_AUDIT_TIMELINE_ACCESS_ADAPTERS.map(adapter => {
     const portalAdapter = ["workspace_membership", "workspace_invitation_request", "workspace_peer_administrator", "portal_identity_denial"].includes(adapter);
     const deliveryAdapter = ["authenticated_delivery_grant", "delegated_client_share"].includes(adapter);
@@ -724,7 +813,7 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     : Object.values(notificationCoverage).some(value => value.reason === "permission_required") ? "permission_required"
       : Object.values(notificationCoverage).some(value => value.reason === "not_collected") ? "not_collected" : "not_applicable";
   const responseCoverage: ClientAuditTimelinePage["coverage"] = {
-    project: coverage(sourceAvailable, "not_applicable"),
+    project: coverage(Object.values(projectCoverage).some(value => value.available), "not_applicable"),
     request: coverage(requestAvailable, secondary ? "unsupported_source" : !scope.accountId ? "not_applicable" : "permission_required"),
     feedback: coverage(false, secondary ? "unsupported_source" : "not_collected"),
     access: coverage(accessAvailable, secondary ? "unsupported_source"
@@ -734,6 +823,8 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
   };
   const candidates = (await Promise.all([
     sourceAvailable ? businessCandidates(env, context, filters, projectId, asOf, cursor?.after ?? null, waters.business ?? 0, limit, policy) : [],
+    operationalProjectAvailable ? operationalProjectCandidates(env, context, filters, projectId, asOf,
+      cursor?.after ?? null, waters.operationalProjects ?? 0, limit, policy, operationalProjectAvailable) : [],
     requestAvailable ? requestCandidates(env, context, scope, filters, asOf, cursor?.after ?? null, waters.requests ?? 0, limit) : [],
     accessAvailable ? accessCandidates(env, context, scope, filters, projectId, asOf, cursor?.after ?? null, waters, limit, accessPolicies) : [],
     deliveryAvailable ? deliveryCandidates(env, context, scope, filters, asOf, cursor?.after ?? null, waters.deliveryAudit ?? 0, limit) : [],
@@ -744,7 +835,8 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
   ])).flat().filter(candidate => candidate.occurredAt && candidate.occurredAt <= asOf).sort(compare);
   const pageItems = candidates.slice(0, limit), hasMore = candidates.length > limit;
   const [currentScope, currentPolicy, currentSource, currentRevision, currentDetail, currentDeliveryAuditPolicy,
-    currentViewerManagePolicy, currentPortalPolicy, currentNoticeScope, currentCollaboratorNoticeSchema, currentCompanionNoticeSchema] = await Promise.all([
+    currentViewerManagePolicy, currentPortalPolicy, currentNoticeScope, currentCollaboratorNoticeSchema,
+    currentCompanionNoticeSchema, currentOperationalProjectSchema] = await Promise.all([
     deliveryScope(env, context, projectId), readClientHubBusinessProjectPolicy(env, principal),
     context.root.root_namespace === "business" ? clientHubBusinessProjectSourceProof(env, context) : Promise.resolve(source),
     context.root.root_namespace === "business" ? env.OPS_DB.withSession("first-primary")
@@ -755,6 +847,7 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     projectAccessNoticeScopeProof(env, context),
     d1TablesPresent(env.DELIVERY_DB, PROJECT_ACCESS_COLLABORATOR_NOTICE_TABLES),
     d1TablesPresent(env.DELIVERY_DB, PROJECT_ACCESS_COMPANION_NOTICE_TABLES),
+    d1TablesPresent(env.OPS_DB, OPERATIONAL_PROJECT_EVENT_TABLES),
   ]);
   if (currentScope.proof !== scope.proof || currentPolicy.proof !== policy.proof || currentSource !== source
     || currentRevision !== businessRevision || currentDeliveryAuditPolicy.proof !== deliveryAuditPolicy.proof
@@ -763,17 +856,19 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     || currentNoticeScope.proof !== noticeScope.proof
     || currentCollaboratorNoticeSchema !== collaboratorNoticeSchema
     || currentCompanionNoticeSchema !== companionNoticeSchema
+    || currentOperationalProjectSchema !== operationalProjectSchema
     || (currentDetail && await sha256(JSON.stringify(currentDetail.project)) !== projectProof)) changed();
   const last = pageItems.at(-1);
   return { canonicalRoot: context.canonicalRoot, projectId, contextVersion: context.contextVersion,
-    refreshedAt: new Date().toISOString(), asOf, coverage: responseCoverage, accessCoverage: adapterCoverage,
+    refreshedAt: new Date().toISOString(), asOf, coverage: responseCoverage, projectCoverage, accessCoverage: adapterCoverage,
     notificationCoverage,
     filters, items: pageItems,
     page: { returned: pageItems.length, limit, hasMore, nextCursor: hasMore && last ? await encodeCursor(env, principal, {
-      v: 5, actor: principal.id, root: rootTuple(context), projectId, context: context.contextVersion, scope: scope.proof,
+      v: 6, actor: principal.id, root: rootTuple(context), projectId, context: context.contextVersion, scope: scope.proof,
       project: projectProof, businessPolicy: policy.proof, businessSource: source, businessRevision,
       deliveryAuditPolicy: deliveryAuditPolicy.proof, viewerManagePolicy: viewerManagePolicy.proof,
       portalPolicy: portalPolicy.proof, noticeScope: noticeScope.proof, collaboratorNoticeSchema, companionNoticeSchema,
+      operationalProjectSchema,
       filters, asOf, waters, after: [last.occurredAt, last.producer, last.producerEventId], expires: Date.now() + 30 * 60_000,
     }) : null } };
 }

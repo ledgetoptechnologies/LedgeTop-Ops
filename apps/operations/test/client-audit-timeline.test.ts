@@ -4,7 +4,7 @@ import type { ClientHubCollectionContext } from "../src/worker/client-hub-collec
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const projectPolicy = vi.hoisted(() => ({ changed: false, deliveryAudit: true, viewerManage: true,
-  portal: true, portalReads: 0, losePortalAfterFirst: false }));
+  portal: true, projects: true, portalReads: 0, losePortalAfterFirst: false }));
 vi.mock("../src/worker/acl", () => ({
   sqlScope: vi.fn(async (_env: unknown, _actor: unknown, permission: string) => {
     let allowed = permission === "viewer.manage" ? projectPolicy.viewerManage : permission === "operations.manage"
@@ -14,8 +14,9 @@ vi.mock("../src/worker/acl", () => ({
   }),
 }));
 vi.mock("../src/worker/client-hub-project-policy", () => ({
-  readClientHubBusinessProjectPolicy: vi.fn(async () => ({ allowed: true,
-    proof: (projectPolicy.changed ? "q" : "p").repeat(43), filter: { sql: "1=1", values: [] } })),
+  readClientHubBusinessProjectPolicy: vi.fn(async () => ({ allowed: projectPolicy.projects,
+    proof: (projectPolicy.changed ? "q" : projectPolicy.projects ? "p" : "n").repeat(43),
+    filter: { sql: projectPolicy.projects ? "1=1" : "0=1", values: [] } })),
 }));
 vi.mock("../src/worker/client-hub-business-projects", () => ({
   clientHubBusinessProjectSourceProof: vi.fn(async () => "s".repeat(43)),
@@ -96,7 +97,31 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
     `.replace(/\s*\n\s*/g, " "));
     await ops.exec(`CREATE TABLE client_business_activity_state(singleton INTEGER PRIMARY KEY,revision INTEGER);
       INSERT INTO client_business_activity_state VALUES(1,1);
-      CREATE TABLE client_business_activity(sequence INTEGER PRIMARY KEY);`);
+      CREATE TABLE client_business_activity(sequence INTEGER PRIMARY KEY,projection_source_id TEXT,event_key TEXT,
+        origin TEXT,record_kind TEXT,record_id TEXT,root_kind TEXT,root_id TEXT,root_record_kind TEXT,
+        action TEXT,occurred_at TEXT,source_updated_at TEXT);
+      CREATE TABLE client_business_activity_records(projection_source_id TEXT,record_kind TEXT,record_id TEXT,
+        root_kind TEXT,root_id TEXT,record_name TEXT,readable INTEGER);
+      CREATE TABLE pa_connectors(source_id TEXT PRIMARY KEY,read_visible INTEGER);
+      CREATE TABLE staff_users(id TEXT PRIMARY KEY,status TEXT NOT NULL);
+      CREATE TABLE pa_projection_record_ids(projection_source_id TEXT,record_kind TEXT,local_id TEXT,
+        PRIMARY KEY(projection_source_id,record_kind,local_id));
+      CREATE TABLE pa_clients(id TEXT,projection_source_id TEXT,organization_id TEXT,active INTEGER,
+        PRIMARY KEY(id,projection_source_id));
+      CREATE TABLE pa_projects(id TEXT,projection_source_id TEXT,client_id TEXT,organization_id TEXT,name TEXT,
+        active INTEGER,PRIMARY KEY(id,projection_source_id));
+      CREATE TABLE project_operational_contact_sets(projection_source_id TEXT,project_record_kind TEXT,project_id TEXT,
+        root_record_kind TEXT,root_id TEXT,version INTEGER,PRIMARY KEY(projection_source_id,project_id));
+      CREATE TABLE project_operational_contact_revisions(id TEXT PRIMARY KEY,projection_source_id TEXT,project_id TEXT,
+        version INTEGER,actor_id TEXT);
+      CREATE TABLE project_operational_memory(projection_source_id TEXT,project_record_kind TEXT,project_id TEXT,
+        root_record_kind TEXT,root_id TEXT,version INTEGER,PRIMARY KEY(projection_source_id,project_id));
+      CREATE TABLE project_operational_memory_revisions(id TEXT PRIMARY KEY,projection_source_id TEXT,project_id TEXT,
+        version INTEGER,change_kind TEXT,actor_id TEXT);
+      CREATE TABLE project_operational_events(id TEXT PRIMARY KEY,projection_source_id TEXT,project_record_kind TEXT,
+        project_id TEXT,actor_id TEXT,event_kind TEXT,result_version INTEGER,details_json TEXT,created_at TEXT);`
+      .replace(/\s*\n\s*/g, " "));
+    await ops.prepare("INSERT INTO staff_users VALUES('operational-actor','active')").run();
     await delivery.batch([
       delivery.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace-one','project-alpha:primary','active')"),
       delivery.prepare("INSERT INTO portal_v2_workspaces VALUES('workspace-other','project-alpha:secondary','active')"),
@@ -321,6 +346,95 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
     expect(result.notificationCoverage.project_access_collaborator_notice).toEqual({ available: false, reason: "not_collected" });
     expect(result.notificationCoverage.project_access_companion_notice).toEqual({ available: false, reason: "not_collected" });
     expect(result.items).toEqual([]);
+  });
+
+  it("federates exact operational project events with stable pagination and strict redaction", async () => {
+    await ops.batch([
+      ops.prepare("INSERT INTO pa_clients VALUES('client-one','project-alpha:primary','organization-one',1)"),
+      ops.prepare("INSERT INTO pa_clients VALUES('client-other','project-alpha:primary','organization-other',1)"),
+      ops.prepare("INSERT INTO pa_projects VALUES('project-one','project-alpha:primary','client-one','organization-one','Church survey',1)"),
+      ops.prepare("INSERT INTO pa_projects VALUES('project-sibling','project-alpha:primary','client-one','organization-one','Sibling survey',1)"),
+      ops.prepare("INSERT INTO pa_projects VALUES('project-malformed','project-alpha:primary','client-one','organization-one','Malformed overlay',1)"),
+      ops.prepare("INSERT INTO pa_projects VALUES('project-reassigned','project-alpha:primary','client-other','organization-other','Reassigned project',1)"),
+      ops.prepare("INSERT INTO pa_projects VALUES('project-wrong-source','project-alpha:secondary','client-one','organization-one','Wrong source',1)"),
+      ...["project-one", "project-sibling", "project-malformed", "project-reassigned"].map(id =>
+        ops.prepare("INSERT INTO pa_projection_record_ids VALUES('project-alpha:primary','project',?)").bind(id)),
+      ops.prepare("INSERT INTO pa_projection_record_ids VALUES('project-alpha:secondary','project','project-wrong-source')"),
+      ops.prepare("INSERT INTO project_operational_contact_sets VALUES('project-alpha:primary','project','project-one','organization','organization-one',2)"),
+      ops.prepare("INSERT INTO project_operational_contact_revisions VALUES('contacts-one-v1','project-alpha:primary','project-one',1,'operational-actor')"),
+      ops.prepare("INSERT INTO project_operational_contact_revisions VALUES('contacts-one-v2','project-alpha:primary','project-one',2,'operational-actor')"),
+      ops.prepare("INSERT INTO project_operational_memory VALUES('project-alpha:primary','project','project-one','organization','organization-one',3)"),
+      ops.prepare("INSERT INTO project_operational_memory_revisions VALUES('memory-one-v1','project-alpha:primary','project-one',1,'saved','operational-actor')"),
+      ops.prepare("INSERT INTO project_operational_memory_revisions VALUES('memory-one-v2','project-alpha:primary','project-one',2,'post_completion_amendment','operational-actor')"),
+      ops.prepare("INSERT INTO project_operational_memory_revisions VALUES('memory-one-v3','project-alpha:primary','project-one',3,'saved','operational-actor')"),
+      ops.prepare("INSERT INTO project_operational_contact_sets VALUES('project-alpha:primary','project','project-sibling','organization','organization-one',1)"),
+      ops.prepare("INSERT INTO project_operational_contact_revisions VALUES('contacts-sibling-v1','project-alpha:primary','project-sibling',1,'operational-actor')"),
+      ops.prepare("INSERT INTO project_operational_contact_sets VALUES('project-alpha:primary','project','project-malformed','organization','organization-other',1)"),
+      ops.prepare("INSERT INTO project_operational_contact_revisions VALUES('contacts-malformed-v1','project-alpha:primary','project-malformed',1,'operational-actor')"),
+      ops.prepare("INSERT INTO project_operational_contact_sets VALUES('project-alpha:primary','project','project-reassigned','organization','organization-one',1)"),
+      ops.prepare("INSERT INTO project_operational_contact_revisions VALUES('contacts-reassigned-v1','project-alpha:primary','project-reassigned',1,'operational-actor')"),
+      ops.prepare("INSERT INTO project_operational_contact_sets VALUES('project-alpha:secondary','project','project-wrong-source','organization','organization-one',1)"),
+      ops.prepare("INSERT INTO project_operational_contact_revisions VALUES('contacts-wrong-source-v1','project-alpha:secondary','project-wrong-source',1,'operational-actor')"),
+      ops.prepare("INSERT INTO project_operational_events VALUES('event-contacts','project-alpha:primary','project','project-one','operational-actor','contacts_saved',1,?,'2026-08-25T10:00:00.000Z')")
+        .bind(JSON.stringify({ assignmentCount: 2, privateEmail: "never@example.test", instructions: "private instructions" })),
+      ops.prepare("INSERT INTO project_operational_events VALUES('event-contacts-copy','project-alpha:primary','project','project-one','operational-actor','contacts_saved',2,?,'2026-08-25T11:00:00.000Z')")
+        .bind(JSON.stringify({ copied: true, sourceProjectId: "secret-source-project", copiedContactIds: ["secret-contact"] })),
+      ops.prepare("INSERT INTO project_operational_events VALUES('event-memory','project-alpha:primary','project','project-one','operational-actor','memory_saved',1,?,'2026-08-25T12:00:00.000Z')")
+        .bind(JSON.stringify({ sectionCount: 4, plan: "private plan" })),
+      ops.prepare("INSERT INTO project_operational_events VALUES('event-memory-amended','project-alpha:primary','project','project-one','operational-actor','memory_amended',2,?,'2026-08-25T13:00:00.000Z')")
+        .bind(JSON.stringify({ sectionCount: 5, amendmentReason: "private reason" })),
+      ops.prepare("INSERT INTO project_operational_events VALUES('event-memory-copy','project-alpha:primary','project','project-one','operational-actor','memory_saved',3,?,'2026-08-25T13:30:00.000Z')")
+        .bind(JSON.stringify({ copied: true, sourceProjectId: "secret-memory-source", sections: ["private-plan"] })),
+      ops.prepare("INSERT INTO project_operational_events VALUES('event-sibling','project-alpha:primary','project','project-sibling','operational-actor','contacts_saved',1,'{}','2026-08-25T14:00:00.000Z')"),
+      ops.prepare("INSERT INTO project_operational_events VALUES('event-malformed','project-alpha:primary','project','project-malformed','operational-actor','contacts_saved',1,'{}','2026-08-25T15:00:00.000Z')"),
+      ops.prepare("INSERT INTO project_operational_events VALUES('event-reassigned','project-alpha:primary','project','project-reassigned','operational-actor','contacts_saved',1,'{}','2026-08-25T16:00:00.000Z')"),
+      ops.prepare("INSERT INTO project_operational_events VALUES('event-wrong-source','project-alpha:secondary','project','project-wrong-source','operational-actor','contacts_saved',1,'{}','2026-08-25T17:00:00.000Z')"),
+    ]);
+    const options = { projectId: "project-one", limit: 2,
+      filters: { category: "project", actorType: "staff", result: "succeeded", from: null, to: null } as const };
+    const first = await listClientAuditTimeline(env, staff, primaryContext(), options);
+    expect(first.projectCoverage).toEqual({ source_record_activity: { available: true, reason: null },
+      operational_project_activity: { available: true, reason: null } });
+    expect(first.page.hasMore).toBe(true);
+    await ops.batch([
+      ops.prepare("UPDATE project_operational_contact_sets SET version=3 WHERE projection_source_id='project-alpha:primary' AND project_id='project-one'"),
+      ops.prepare("INSERT INTO project_operational_contact_revisions VALUES('contacts-one-v3','project-alpha:primary','project-one',3,'operational-actor')"),
+      ops.prepare("INSERT INTO project_operational_events VALUES('event-after-watermark','project-alpha:primary','project','project-one','operational-actor','contacts_saved',3,'{}','2026-08-25T18:00:00.000Z')"),
+    ]);
+    const collected = [...first.items]; let cursor = first.page.nextCursor;
+    while (cursor) {
+      const page = await listClientAuditTimeline(env, staff, primaryContext(), { ...options, cursor });
+      collected.push(...page.items); cursor = page.page.nextCursor;
+    }
+    expect(collected.map(event => event.action)).toEqual([
+      "project.memory.copied_forward", "project.memory.amended", "project.memory.saved",
+      "project.contacts.copied_forward", "project.contacts.saved",
+    ]);
+    expect(collected.every(event => event.producer === "operations" && event.actor?.type === "staff"
+      && event.result === "succeeded" && event.resource.id === "project-one")).toBe(true);
+    expect(collected.some(event => event.producerEventId.includes("after-watermark"))).toBe(false);
+    expect(JSON.stringify(collected)).not.toMatch(/never@example|private|secret-source|secret-contact|details_json|result_version|actor_id/i);
+
+    const root = await listClientAuditTimeline(env, staff, primaryContext(), { limit: 100,
+      filters: { category: "project", actorType: "staff", result: "succeeded",
+        from: "2026-08-25T14:00:00.000Z", to: "2026-08-25T18:00:00.000Z" } });
+    expect(root.items.filter(event => event.producer === "operations").map(event => event.producerEventId))
+      .toEqual(["operational-project:event-after-watermark", "operational-project:event-sibling"]);
+    expect(JSON.stringify(root)).not.toMatch(/event-malformed|event-reassigned|event-wrong-source/);
+    const denied = await listClientAuditTimeline(env, staff, primaryContext(), { projectId: "project-one", limit: 1,
+      filters: { category: "project", actorType: "system", result: "succeeded", from: null, to: null } });
+    expect(denied.items).toEqual([]);
+  });
+
+  it("reports operational project activity as permission required without projects.view", async () => {
+    projectPolicy.projects = false;
+    try {
+      const result = await listClientAuditTimeline(env, staff, primaryContext(), { limit: 100,
+        filters: { category: "project", actorType: "staff", result: "succeeded", from: null, to: null } });
+      expect(result.projectCoverage).toEqual({ source_record_activity: { available: true, reason: null },
+        operational_project_activity: { available: false, reason: "permission_required" } });
+      expect(result.items.filter(event => event.producer === "operations")).toEqual([]);
+    } finally { projectPolicy.projects = true; }
   });
 
   it("federates redacted project-access notices with exact root/project scope and a stable high-water", async () => {

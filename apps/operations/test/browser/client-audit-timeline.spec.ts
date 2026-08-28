@@ -12,6 +12,10 @@ const coverage = {
   feedback: { available: false, reason: "not_collected" }, access: { available: true, reason: null },
   delivery: { available: false, reason: "permission_required" }, notification: { available: false, reason: "not_applicable" },
 };
+const projectCoverage = {
+  source_record_activity: { available: true, reason: null },
+  operational_project_activity: { available: true, reason: null },
+};
 const accessCoverage = {
   workspace_membership: { available: true, reason: null }, workspace_invitation_request: { available: true, reason: null },
   workspace_peer_administrator: { available: true, reason: null }, portal_identity_denial: { available: true, reason: null },
@@ -35,7 +39,7 @@ function filters(url: URL): Filters {
     result: url.searchParams.get("result") || "all", from: url.searchParams.get("from"), to: url.searchParams.get("to") };
 }
 function timeline(url: URL, items = [item("one")], nextCursor: string | null = null, contextVersion = "client-context", projectId: string | null = null) {
-  return { canonicalRoot, projectId, contextVersion, refreshedAt: asOf, asOf, coverage, accessCoverage, notificationCoverage,
+  return { canonicalRoot, projectId, contextVersion, refreshedAt: asOf, asOf, coverage, projectCoverage, accessCoverage, notificationCoverage,
     filters: filters(url), items,
     page: { nextCursor, hasMore: Boolean(nextCursor), returned: items.length, limit: 10 } };
 }
@@ -185,6 +189,31 @@ test("populated audit controls and events remain usable on mobile and desktop", 
     await section.screenshot({ path: testInfo.outputPath(`client-audit-${width}.png`) });
   }
   expect(errors).toEqual([]);
+});
+
+test("project timeline renders redacted operational activity without new authority controls", async ({ page }) => {
+  await fixture(page, (route, url) => route.fulfill({ json: timeline(url, [item("operational", {
+    producer: "operations", producerEventId: "operational-project:event-memory-amended", category: "project",
+    action: "project.memory.amended", actor: { type: "staff", label: "Team" },
+    resource: { type: "project_operational_record", id: "project-one", label: "Church survey", detailPath: projectPath },
+    result: "succeeded",
+  })], null, "project-context", "project-one") }));
+  await page.goto(projectPath);
+  const section = projectTimeline(page);
+  await section.getByRole("combobox", { name: "Category" }).selectOption("project");
+  await section.getByRole("combobox", { name: "Actor" }).selectOption("staff");
+  await section.getByRole("combobox", { name: "Result" }).selectOption("succeeded");
+  await section.getByRole("button", { name: "Apply timeline filters" }).click();
+  await expect(section.getByText("Church survey", { exact: true })).toBeVisible();
+  await expect(section.getByText("Projects · project.memory.amended", { exact: true })).toBeVisible();
+  await expect(section.getByText("Team · staff", { exact: true })).toBeVisible();
+  await expect(section.getByText("operations", { exact: true })).toBeVisible();
+  await section.getByText("Timeline coverage", { exact: true }).click();
+  await expect(section.getByText("Projects · operational project activity", { exact: true })).toBeVisible();
+  await expect(section.getByText("Projects · source record activity", { exact: true })).toBeVisible();
+  expect(await section.getByRole("button", { name: /grant|authorize|invite/i }).count()).toBe(0);
+  await page.setViewportSize({ width: 375, height: 850 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(376);
 });
 
 test("all applied filters survive refresh and browser history without exposing continuation state", async ({ page }) => {

@@ -25,6 +25,11 @@ export interface ClientAuditTimelineCoverage {
   reason: ClientAuditTimelineCoverageReason;
 }
 
+export const CLIENT_AUDIT_TIMELINE_PROJECT_ADAPTERS = [
+  "source_record_activity", "operational_project_activity",
+] as const;
+export type ClientAuditTimelineProjectAdapter = (typeof CLIENT_AUDIT_TIMELINE_PROJECT_ADAPTERS)[number];
+
 export const CLIENT_AUDIT_TIMELINE_ACCESS_ADAPTERS = [
   "workspace_membership", "workspace_invitation_request", "workspace_peer_administrator",
   "portal_identity_denial", "authenticated_delivery_grant", "delegated_client_share",
@@ -41,7 +46,7 @@ export interface ClientAuditTimelineItem {
   /** Namespaced, opaque event key. It is not a storage key or authorization handle. */
   id: string;
   sourceId: string;
-  producer: "project_alpha" | "service_requests" | "portal_access" | "client_delivery";
+  producer: "project_alpha" | "operations" | "service_requests" | "portal_access" | "client_delivery";
   producerEventId: string;
   category: ClientAuditTimelineCategory;
   action: string;
@@ -66,6 +71,7 @@ export interface ClientAuditTimelinePage {
   refreshedAt: string;
   asOf: string;
   coverage: Record<ClientAuditTimelineCategory, ClientAuditTimelineCoverage>;
+  projectCoverage: Record<ClientAuditTimelineProjectAdapter, ClientAuditTimelineCoverage>;
   accessCoverage: Record<ClientAuditTimelineAccessAdapter, ClientAuditTimelineCoverage>;
   notificationCoverage: Record<ClientAuditTimelineNotificationAdapter, ClientAuditTimelineCoverage>;
   filters: ClientAuditTimelineFilters;
