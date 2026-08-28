@@ -5,16 +5,17 @@ import "./OperationsNotifications.css";
 
 type BatchStatus = "pending" | "processing" | "sent" | "cancelled" | "suppressed" | "failed";
 type BatchAction = "send-now" | "cancel";
-type NotificationKind = "folder_changes" | "portal_delivery";
+type NotificationKind = "folder_changes" | "portal_delivery" | "authenticated_delivery";
 interface NotificationBase {
   id: string; revision: number; status: BatchStatus; folderLabel: string; recipientEmail: string | null;
   eligibleAt: string; createdAt: string; updatedAt: string; deliveredAt: string | null;
   errorCode: string | null; canSendNow: boolean; canCancel: boolean;
 }
 type NotificationBatch = NotificationBase & ({ kind: "folder_changes"; accountName: string; addedCount: number; removedCount: number }
-  | { kind: "portal_delivery"; sourceName: string; workspaceName: string; eventLabel: string; deliveryMode: "staged" | "direct_legacy" | "awaiting_staging" });
+  | { kind: "portal_delivery"; sourceName: string; workspaceName: string; eventLabel: string; deliveryMode: "staged" | "direct_legacy" | "awaiting_staging" }
+  | { kind: "authenticated_delivery"; workspaceName?: string; addedCount: number; removedCount: number });
 interface NotificationPage { items: NotificationBatch[]; nextCursor: string | null; serverNow: string; coverage: "delivery_notifications_v2";
-  availability: { folderChanges: true; nativeDeliveries: boolean } }
+  availability: { folderChanges: true; nativeDeliveries: boolean; authenticatedDeliveries?: boolean } }
 type NotificationRoute = { view: "pending" | "history"; q: string; batchId: string | null; kind: NotificationKind; invalid: boolean };
 type Mutation = { id: string; kind: NotificationKind; label: string; action: BatchAction; revision: number; key: string; busy: boolean; error: string };
 const statuses: BatchStatus[] = ["pending", "processing", "sent", "cancelled", "suppressed", "failed"];
@@ -22,16 +23,17 @@ const record = (value: unknown): value is Record<string, unknown> => Boolean(val
 const boundedText = (value: unknown, max = 4000): value is string => typeof value === "string" && value.length <= max;
 const textOrNull = (value: unknown) => value === null || boundedText(value);
 const notificationKey = (row: { kind: NotificationKind; id: string }) => `${row.kind}:${row.id}`;
-const notificationName = (row: NotificationBatch) => row.kind === "folder_changes" ? row.accountName : row.workspaceName;
-const notificationApi = (row: { kind: NotificationKind; id: string }) => `/api/notifications/deliveries/${row.kind === "portal_delivery" ? "portal_delivery/" : ""}${encodeURIComponent(row.id)}`;
+const notificationName = (row: NotificationBatch) => row.kind === "folder_changes" ? row.accountName
+  : row.kind === "authenticated_delivery" ? row.workspaceName || "Authenticated delivery" : row.workspaceName;
+const notificationApi = (row: { kind: NotificationKind; id: string }) => `/api/notifications/deliveries/${row.kind === "folder_changes" ? "" : `${row.kind}/`}${encodeURIComponent(row.id)}`;
 const isoTime = (value: unknown): value is string => typeof value === "string" && /Z$|[+-]\d{2}:\d{2}$/.test(value) && Number.isFinite(Date.parse(value));
 const readRoute = (): NotificationRoute => {
   const params = new URLSearchParams(location.search);
   const batchId = params.get("batchId"), kind = params.get("kind");
   return { view: params.get("view") === "history" ? "history" : "pending", q: (params.get("q") || "").trim().slice(0, 200), batchId,
-    kind: kind === "portal_delivery" ? "portal_delivery" : "folder_changes",
+    kind: kind === "portal_delivery" || kind === "authenticated_delivery" ? kind : "folder_changes",
     invalid: params.getAll("batchId").length > 1 || params.getAll("kind").length > 1
-      || (kind !== null && (batchId === null || !["folder_changes", "portal_delivery"].includes(kind)))
+      || (kind !== null && (batchId === null || !["folder_changes", "portal_delivery", "authenticated_delivery"].includes(kind)))
       || (batchId !== null && !/^[A-Za-z0-9_-]{1,128}$/.test(batchId)) };
 };
 function pageValid(value: unknown, requested: NotificationRoute): value is NotificationPage {
@@ -43,10 +45,13 @@ function pageValid(value: unknown, requested: NotificationRoute): value is Notif
       && (requested.batchId ? item.id === requested.batchId && item.kind === requested.kind : requested.view === "pending" ? item.status === "pending" || item.status === "processing" : item.status !== "pending" && item.status !== "processing")
       && boundedText(item.folderLabel) && (item.recipientEmail === null || boundedText(item.recipientEmail, 320))
       && (item.kind === "folder_changes" ? boundedText(item.accountName) && [item.addedCount, item.removedCount].every(count => Number.isSafeInteger(count) && Number(count) >= 0)
-        : item.kind === "portal_delivery" && (value.availability as Record<string, unknown>).nativeDeliveries === true
+        : item.kind === "portal_delivery" ? (value.availability as Record<string, unknown>).nativeDeliveries === true
           && [item.sourceName, item.workspaceName, item.eventLabel].every(name => boundedText(name))
           && ["staged", "direct_legacy", "awaiting_staging"].includes(String(item.deliveryMode))
-          && (item.deliveryMode === "staged" || item.canSendNow === false && item.canCancel === false))
+          && (item.deliveryMode === "staged" || item.canSendNow === false && item.canCancel === false)
+        : item.kind === "authenticated_delivery" && (value.availability as Record<string, unknown>).authenticatedDeliveries === true
+          && (item.workspaceName === undefined || boundedText(item.workspaceName))
+          && [item.addedCount, item.removedCount].every(count => Number.isSafeInteger(count) && Number(count) >= 0))
       && [item.eligibleAt, item.createdAt, item.updatedAt].every(isoTime) && (item.deliveredAt === null || isoTime(item.deliveredAt))
       && textOrNull(item.errorCode) && typeof item.canSendNow === "boolean" && typeof item.canCancel === "boolean");
 }
@@ -129,7 +134,7 @@ export function OperationsNotifications() {
         return [...merged.values()];
       });
       setNextCursor(result.nextCursor); setPageCount(previous => cursor ? previous + 1 : 1);
-      setAvailability(legacyExact ? null : result.availability);
+      setAvailability(legacyExact ? null : {...result.availability, authenticatedDeliveries: result.availability.authenticatedDeliveries === true});
       setLastUpdated(result.serverNow); serverClock.current = { at: Date.parse(result.serverNow), received: performance.now() };
       setClock(Date.parse(result.serverNow));
     } catch (caught) {
@@ -190,7 +195,7 @@ export function OperationsNotifications() {
     const params = new URLSearchParams();
     if (next.view === "history") params.set("view", "history");
     if (next.q) params.set("q", next.q);
-    if (next.batchId && next.kind === "portal_delivery") params.set("kind", next.kind);
+    if (next.batchId && next.kind !== "folder_changes") params.set("kind", next.kind);
     if (next.batchId) params.set("batchId", next.batchId);
     history.pushState(null, "", `/operations/notifications${params.size ? `?${params}` : ""}`);
     currentRoute.current = next; setRoute(next);
@@ -209,14 +214,14 @@ export function OperationsNotifications() {
       });
       if (!valid()) return;
       if (!record(result) || result.ok !== true || result.id !== active.id || result.action !== active.action
-        || (active.kind === "portal_delivery" ? result.kind !== "portal_delivery" : result.kind !== undefined && result.kind !== "folder_changes")
+        || (active.kind === "folder_changes" ? result.kind !== undefined && result.kind !== "folder_changes" : result.kind !== active.kind)
         || result.revision !== active.revision + 1
         || result.status !== (active.action === "cancel" ? "cancelled" : "pending")
         || typeof result.replayed !== "boolean") throw new Error("The action outcome could not be confirmed.");
       confirmed.current.set(notificationKey(active), { revision: Number(result.revision), status: result.status as BatchStatus });
       updateMutation(null);
       setRows(previous => previous.filter(row => notificationKey(row) !== notificationKey(active)));
-      setMessage(active.action === "cancel" ? `Notification cancelled. Files and access are unchanged; ${active.kind === "folder_changes" ? "later file changes can create a new notification" : "this does not revoke the delivery or recall earlier notices"}. Email already accepted for delivery and published inbox notices cannot be recalled.`
+      setMessage(active.action === "cancel" ? `Notification cancelled. Files and access are unchanged; ${active.kind === "folder_changes" ? "later file changes can create a new notification" : active.kind === "authenticated_delivery" ? "later eligible file changes can create a new notification while the exact-person policy remains enabled" : "this does not revoke the delivery or recall earlier notices"}. Email already accepted for delivery and published inbox notices cannot be recalled.`
         : active.kind === "folder_changes" ? "Notification made eligible for dispatch. This does not confirm delivery; a new file change before dispatch can restart the waiting period."
           : "Notification made eligible for dispatch. This does not confirm delivery or change recipient access. Eligibility is checked again before dispatch.");
       void load();
@@ -245,12 +250,13 @@ export function OperationsNotifications() {
       <button className="button-ghost" type="button" aria-disabled={loading || loadingMore || mutation?.busy} onClick={() => {
         if (!pending.current && !mutationRef.current?.busy) void load();
       }}>Refresh notifications</button></div>
-    <div className="notification-coverage"><strong>Folder changes and Project Alpha delivery notices</strong>
-      <p>Legacy folder subscriptions and delivery notices addressed to an explicit Project Alpha portal recipient.</p>
+    <div className="notification-coverage"><strong>Delivery and folder-change notifications</strong>
+      <p>Legacy folder subscriptions, explicit Project Alpha delivery notices, and opt-in summaries for exact authenticated recipients.</p>
       {availability?.nativeDeliveries === false && <p className="notification-availability" role="status">Native delivery notices are unavailable until the notification database upgrade is applied. Only folder-change notices are shown.</p>}
+      {availability?.authenticatedDeliveries === false && <p className="notification-availability" role="status">Exact authenticated-recipient change notices are unavailable until the notification database and feature are ready.</p>}
       <details><summary>About these notifications</summary>
         <p>The countdown shows the earliest dispatch time, not a delivery guarantee. Recipient eligibility is checked again before dispatch. New file changes can restart the waiting period.</p>
-        <p>Native delivery-ready notices may be staged; earlier direct-dispatch notices are read-only. Staff-created portal grants and uploads without an explicit recipient policy are not included.</p>
+        <p>Native delivery-ready notices may be staged; earlier direct-dispatch notices are read-only. Authenticated change summaries appear only for an active exact-person grant with an explicit opt-in policy. They do not change access or replace legacy subscriptions.</p>
         <p>Sent means accepted for delivery, not proof the recipient received or read the notice. Cancellation cannot recall email already accepted or inbox notices already published.</p>
       </details></div>
     <div className="notification-view-switch" role="group" aria-label="Notification views">
@@ -277,10 +283,10 @@ export function OperationsNotifications() {
       {loading && <p role="status">Loading notifications…</p>}
       <div className="notification-batch-list">
         {rows.map(row => <article key={notificationKey(row)} className="notification-batch" aria-label={`${notificationName(row)} · ${row.folderLabel}`} data-notification-kind={row.kind}>
-          <header><div><h3>{notificationName(row)}</h3><p>{row.folderLabel}</p><small className="notification-kind">{row.kind === "folder_changes" ? "Folder changes" : "Portal delivery"}</small></div>
+          <header><div><h3>{notificationName(row)}</h3><p>{row.folderLabel}</p><small className="notification-kind">{row.kind === "folder_changes" ? "Folder changes" : row.kind === "portal_delivery" ? "Portal delivery" : "Authenticated recipient changes"}</small></div>
             <StatusPill tone={row.status === "failed" ? "danger" : row.status === "sent" ? "success" : row.status === "pending" ? "warning" : "neutral"}>{statusLabel(row.status)}</StatusPill></header>
           <dl><div><dt>Recipient</dt><dd>{row.recipientEmail || "Recipient unavailable"}</dd></div>
-            {row.kind === "folder_changes" ? <div><dt>Net changes</dt><dd>{row.addedCount.toLocaleString()} added · {row.removedCount.toLocaleString()} removed</dd></div>
+            {row.kind === "folder_changes" || row.kind === "authenticated_delivery" ? <div><dt>Net changes</dt><dd>{row.addedCount.toLocaleString()} added · {row.removedCount.toLocaleString()} removed</dd></div>
               : <><div><dt>Source</dt><dd>{row.sourceName}</dd></div><div><dt>Workspace</dt><dd>{row.workspaceName}</dd></div><div><dt>Event</dt><dd>{row.eventLabel}</dd></div></>}
             <div><dt>Created</dt><dd>{shownTime(row.createdAt)}</dd></div>
             <div><dt>{row.deliveredAt ? "Sent" : "Last updated"}</dt><dd>{shownTime(row.deliveredAt || row.updatedAt)}</dd></div></dl>

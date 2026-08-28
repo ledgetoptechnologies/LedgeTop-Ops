@@ -41,6 +41,26 @@ interface Recipient {
   sourceVersion: string;
 }
 
+export interface AuthenticatedDeliveryGrantNotificationTarget {
+  grantId: string;
+  logicalGrantId: string;
+  grantVersion: number;
+  workspaceId: string;
+  folderBindingId: string;
+  bindingSourceVersion: string;
+  ownerScopeType: Exclude<AuthenticatedGrantAudienceType, "principal">;
+  ownerPublicId: string;
+  r2Prefix: string;
+  principalPublicId: string;
+  principalSourceVersion: string;
+  identityId: string;
+  divisionId: string;
+  workspaceLabel: string;
+  folderLabel: string;
+  sourceId: "project-alpha:primary";
+  active: boolean;
+}
+
 export interface AuthenticatedDeliveryGrantView {
   id: string;
   grantId: string;
@@ -154,6 +174,73 @@ async function bindingIdForFolderKey(env: Env, folderKey: string): Promise<strin
   return matches[0]!.id;
 }
 
+/** Resolve the one immutable recipient of an exact-principal grant. This is
+ * deliberately keyed only by the physical grant ID: staff policy routes must
+ * never accept a browser-supplied identity or recipient address. The binding
+ * lookup also proves the current primary source and exact Operations division. */
+export async function resolveAuthenticatedDeliveryGrantNotificationTarget(
+  env: Env,
+  grantId: string,
+): Promise<AuthenticatedDeliveryGrantNotificationTarget | null> {
+  requireEnabled(env);
+  if (!OPAQUE.test(grantId)) return null;
+  const rows = await deliveryDb(env).prepare(`SELECT grant_record.id,grant_record.logical_grant_id,
+      grant_record.grant_version,grant_record.workspace_id,grant_record.folder_binding_id,
+      grant_record.binding_source_version,grant_record.audience_public_id,grant_record.audience_source_version,
+      grant_record.status,grant_record.revoked_at,grant_record.expires_at,recipient.identity_id,
+      ${projectAccessTermsSql({termsId:'grant_record.access_terms_id',workspaceId:'grant_record.workspace_id',
+        projectId:'(SELECT project_public_id FROM portal_project_access_terms WHERE id=grant_record.access_terms_id)',legacyRetained:'1'})} terms_current
+    FROM portal_v2_authenticated_delivery_grants grant_record
+    JOIN portal_v2_workspaces workspace ON workspace.id=grant_record.workspace_id
+      AND workspace.status='active' AND workspace.project_alpha_source_id='project-alpha:primary'
+    JOIN portal_v2_authenticated_delivery_grant_recipients recipient ON recipient.grant_id=grant_record.id
+      AND recipient.workspace_id=grant_record.workspace_id
+      AND recipient.principal_public_id=grant_record.audience_public_id
+      AND recipient.principal_source_version=grant_record.audience_source_version
+    WHERE grant_record.id=? AND grant_record.audience_type='principal' LIMIT 2`)
+    .bind(grantId).all<{id:string;logical_grant_id:string;grant_version:number;workspace_id:string;
+      folder_binding_id:string;binding_source_version:string;audience_public_id:string;audience_source_version:string;
+      identity_id:string;status:string;revoked_at:string|null;expires_at:string|null;terms_current:number}>();
+  if (rows.results.length !== 1) return null;
+  const row = rows.results[0]!;
+  let context: BindingContext;
+  try { context = await bindingContext(env,row.folder_binding_id); }
+  catch (error) { if (error instanceof HTTPException) return null; throw error; }
+  if (context.workspaceId !== row.workspace_id || context.sourceVersion !== row.binding_source_version) return null;
+  if(!await primaryNotificationOwner(env,context))return null;
+  const active = row.status === "active" && row.revoked_at === null && row.terms_current === 1 &&
+    (row.expires_at === null || Date.parse(row.expires_at) > Date.now());
+  return {grantId:row.id,logicalGrantId:row.logical_grant_id,grantVersion:row.grant_version,
+    workspaceId:row.workspace_id,folderBindingId:row.folder_binding_id,bindingSourceVersion:row.binding_source_version,
+    ownerScopeType:context.ownerType,ownerPublicId:context.ownerPublicId,r2Prefix:context.prefix,
+    principalPublicId:row.audience_public_id,principalSourceVersion:row.audience_source_version,identityId:row.identity_id,
+    divisionId:context.divisionId,workspaceLabel:context.workspaceLabel,folderLabel:context.ownerName,
+    sourceId:"project-alpha:primary",active};
+}
+
+/** Current client-side eligibility for enabling delivery mail. This uses the
+ * same verified identity, membership, live target, entitlement and deny
+ * evaluation as a portal delivery request. */
+export async function authenticatedDeliveryGrantNotificationRecipientUsable(
+  env:Env,
+  target:AuthenticatedDeliveryGrantNotificationTarget,
+):Promise<boolean>{
+  if(!target.active)return false;
+  const person=await deliveryDb(env).prepare(`SELECT identity.issuer,identity.subject,identity.verified_email email
+    FROM pa_portal_principals principal JOIN portal_v2_identities identity ON identity.id=principal.identity_id
+    JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=principal.workspace_id AND membership.identity_id=identity.id
+    WHERE principal.workspace_id=? AND principal.public_id=? AND principal.identity_id=? AND principal.source_version=?
+      AND principal.status='active' AND identity.status='active' AND identity.revoked_at IS NULL AND identity.verified_email IS NOT NULL
+      AND membership.status='active' AND membership.revoked_at IS NULL
+      AND (membership.expires_at IS NULL OR datetime(membership.expires_at)>datetime('now'))`)
+    .bind(target.workspaceId,target.principalPublicId,target.identityId,target.principalSourceVersion)
+    .first<{issuer:string;subject:string;email:string}>();
+  if(!person)return false;
+  return authorizePortalWorkspaceCapability(env,person,target.workspaceId,'delivery.view',
+    {scopeType:'folder',publicId:target.folderBindingId},
+    target.ownerScopeType==='project'?{retainedProjectId:target.ownerPublicId}:undefined);
+}
+
 /** Exact primary public coordinates only. A longer inactive/foreign owner
  * shadows its ancestor instead of borrowing the ancestor's staff division. */
 async function primaryProjectOwner(env:Env,context:BindingContext){
@@ -171,6 +258,31 @@ async function primaryProjectOwner(env:Env,context:BindingContext){
   if(rows.results.length!==1)return null;const row=rows.results[0]!;
   return row.active===1&&row.division_active===1&&row.projection_source_id==='project-alpha:primary'&&row.source_visible===1
     &&row.public_id===context.ownerPublicId&&row.division_id===context.divisionId?row:null;
+}
+
+async function primaryNotificationOwner(env:Env,context:BindingContext):Promise<boolean>{
+  if(context.ownerType==='department'||!isAlphaPublicId(context.ownerPublicId))return false;
+  const prefixes:string[]=[];let prefix='';
+  for(const part of context.prefix.split('/').filter(Boolean)){prefix+=`${part}/`;prefixes.push(prefix,prefix.slice(0,-1));}
+  if(prefix!==context.prefix||!prefixes.length||prefixes.length>128)return false;
+  const rows=await env.OPS_DB.withSession('first-primary').prepare(`WITH matching AS(
+    SELECT pf.project_id,pf.division_id,pf.r2_prefix,length(rtrim(pf.r2_prefix,'/')||'/') prefix_length
+    FROM project_folders pf WHERE pf.r2_prefix IN(SELECT value FROM json_each(?)))
+    SELECT matching.division_id,p.active project_active,p.projection_source_id,division.active division_active,
+      ${validatedUniquePublicIdExpression('pa_projects','p')} project_public_id,
+      ${validatedUniquePublicIdExpression('pa_clients','client')} client_public_id,
+      ${validatedUniquePublicIdExpression('pa_organizations','org')} organization_public_id
+    FROM matching LEFT JOIN divisions division ON division.id=matching.division_id
+    LEFT JOIN pa_projects p ON p.id=matching.project_id
+    LEFT JOIN pa_clients client ON client.id=p.client_id AND client.projection_source_id=p.projection_source_id AND client.active=1
+    LEFT JOIN pa_organizations org ON org.id=p.organization_id AND org.projection_source_id=p.projection_source_id AND org.active=1
+    WHERE prefix_length=(SELECT max(prefix_length) FROM matching) LIMIT 2`).bind(JSON.stringify(prefixes))
+    .all<{division_id:string;project_active:number;projection_source_id:string;division_active:number;
+      project_public_id:string|null;client_public_id:string|null;organization_public_id:string|null}>();
+  if(rows.results.length!==1)return false;const row=rows.results[0]!;
+  const mapped=context.ownerType==='project'?row.project_public_id:context.ownerType==='client'?row.client_public_id:row.organization_public_id;
+  return row.project_active===1&&row.division_active===1&&row.projection_source_id==='project-alpha:primary'
+    &&row.division_id===context.divisionId&&mapped===context.ownerPublicId;
 }
 const primaryScopeExpressions=["json_extract((SELECT v FROM input),'$.targets')","json_extract((SELECT v FROM input),'$.workspaceId')",
   "json_extract((SELECT v FROM input),'$.generationId')","json_extract((SELECT v FROM input),'$.relations')",'66'];

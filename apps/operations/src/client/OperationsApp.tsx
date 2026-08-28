@@ -4611,6 +4611,101 @@ function AuthenticatedDeliveryGrantPanel({ folder, canRevoke }: { folder: { id: 
   </section>;
 }
 
+type AuthenticatedDeliveryNoticeMode = "off" | "added" | "removed" | "both";
+type AuthenticatedDeliveryNoticePolicy = { accessNoticeEnabled: boolean; changeMode: AuthenticatedDeliveryNoticeMode; version: number };
+type AuthenticatedDeliveryNoticePolicyResponse = { policy: AuthenticatedDeliveryNoticePolicy | null; available: boolean };
+
+function AuthenticatedDeliveryNoticePolicyEditor({ physicalGrantId, audienceLabel }: { physicalGrantId: string; audienceLabel: string }) {
+  type PendingPolicy = { key: string; body: string; enabled: boolean; mode: Exclude<AuthenticatedDeliveryNoticeMode, "off">; expectedVersion: number | null };
+  const endpoint = `/api/delivery/authenticated-grants/${encodeURIComponent(physicalGrantId)}/notification-policy`;
+  const [policy, setPolicy] = useState<AuthenticatedDeliveryNoticePolicy | null>(null);
+  const [available, setAvailable] = useState<boolean | null>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [mode, setMode] = useState<Exclude<AuthenticatedDeliveryNoticeMode, "off">>("both");
+  const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [uncertain, setUncertain] = useState(false);
+  const [error, setError] = useState(""), [message, setMessage] = useState("");
+  const alive = useRef(true), request = useRef<AbortController | null>(null), pending = useRef<PendingPolicy | null>(null);
+  const validPolicy = (value: unknown): value is AuthenticatedDeliveryNoticePolicy => {
+    if (!value || typeof value !== "object") return false;
+    const row = value as Record<string, unknown>;
+    return typeof row.accessNoticeEnabled === "boolean" && ["off", "added", "removed", "both"].includes(String(row.changeMode))
+      && Number.isSafeInteger(row.version) && Number(row.version) > 0
+      && (row.accessNoticeEnabled ? row.changeMode !== "off" : row.changeMode === "off");
+  };
+  const validResponse = (value: unknown): value is AuthenticatedDeliveryNoticePolicyResponse => {
+    if (!value || typeof value !== "object") return false;
+    const response = value as Record<string, unknown>;
+    return typeof response.available === "boolean" && (response.policy === null || validPolicy(response.policy))
+      && (response.available || response.policy === null);
+  };
+  const apply = (value: AuthenticatedDeliveryNoticePolicyResponse) => {
+    setAvailable(value.available); setPolicy(value.policy); setEnabled(value.policy?.accessNoticeEnabled === true);
+    if (value.policy && value.policy.changeMode !== "off") setMode(value.policy.changeMode);
+  };
+  const load = useCallback(async () => {
+    request.current?.abort(); const controller = new AbortController(); request.current = controller;
+    setLoading(true); setError(""); setMessage("");
+    try {
+      const value = await api<unknown>(endpoint, { signal: controller.signal });
+      if (!alive.current || controller.signal.aborted) return;
+      if (!validResponse(value)) throw new ApiError("Notification settings could not be verified.", 409, {});
+      apply(value);
+    } catch (caught) {
+      if (!alive.current || controller.signal.aborted) return;
+      setAvailable(false);
+      if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) {
+        setPolicy(null);
+      }
+      setError((caught as Error).message || "Notification settings could not be loaded.");
+    } finally { if (alive.current && !controller.signal.aborted) setLoading(false); }
+  }, [endpoint]);
+  useEffect(() => {
+    alive.current = true; void load();
+    return () => { alive.current = false; request.current?.abort(); };
+  }, [load]);
+  const save = async (operation?: PendingPolicy) => {
+    if (busy || !available || loading) return;
+    const active = operation ?? { key: crypto.randomUUID(), enabled, mode, expectedVersion: policy?.version ?? null,
+      body: JSON.stringify({ accessNoticeEnabled: enabled, changeMode: enabled ? mode : "off", expectedVersion: policy?.version ?? null }) };
+    pending.current = active; request.current?.abort(); const controller = new AbortController(); request.current = controller;
+    setBusy(true); setUncertain(false); setError(""); setMessage("");
+    try {
+      const value = await api<unknown>(endpoint, { method: "PUT", signal: controller.signal, headers: { "Idempotency-Key": active.key }, body: active.body });
+      if (!alive.current || controller.signal.aborted) return;
+      if (!validResponse(value) || !value.available || !value.policy
+        || value.policy.accessNoticeEnabled !== active.enabled || value.policy.changeMode !== (active.enabled ? active.mode : "off")
+        || value.policy.version !== (active.expectedVersion ?? 0) + 1) throw new ApiError("The notification setting outcome could not be verified.", 409, {});
+      pending.current = null; apply(value); setMessage(active.enabled
+        ? `Change notices enabled for ${audienceLabel}. Portal access was not changed.`
+        : `Change notices disabled for ${audienceLabel}. Portal access was not changed.`);
+    } catch (caught) {
+      if (!alive.current || controller.signal.aborted) return;
+      if (caught instanceof ApiError && caught.status < 500 && caught.status !== 429) {
+        pending.current = null; setUncertain(false);
+        if ([403, 404].includes(caught.status)) setAvailable(false);
+        setError(caught.status === 409 ? "Notification settings changed before this save. Refresh and review the current setting." : caught.message);
+      } else {
+        setUncertain(true);
+        setError("The notification setting outcome is not confirmed. Retry the same save safely; do not submit another change.");
+      }
+    } finally { if (alive.current && !controller.signal.aborted) setBusy(false); }
+  };
+  const dirty = enabled !== (policy?.accessNoticeEnabled ?? false)
+    || enabled && mode !== (policy?.changeMode === "off" || !policy ? "both" : policy.changeMode);
+  return <fieldset className="authenticated-delivery-notice-policy" aria-label={`Change notifications for ${audienceLabel}`} disabled={busy}>
+    <legend>Folder change notifications</legend>
+    <p>Optional and off by default. This setting only sends summaries to this exact verified person for this active grant version. It does not change access. Legacy folder subscriptions are separate.</p>
+    {loading ? <small role="status">Loading notification setting…</small> : available === false
+      ? <small role="status">Change notifications are unavailable until the notification database and feature are ready.</small>
+      : <><label className="authenticated-delivery-notice-toggle"><input type="checkbox" checked={enabled} disabled={uncertain} onChange={event => { setEnabled(event.target.checked); setMessage(""); setError(""); }} /> Send folder change summaries</label>
+        <label>Include<select aria-label={`Changes included for ${audienceLabel}`} value={mode} disabled={!enabled || busy || uncertain} onChange={event => { setMode(event.target.value as Exclude<AuthenticatedDeliveryNoticeMode, "off">); setMessage(""); setError(""); }}><option value="added">Added files</option><option value="removed">Removed files</option><option value="both">Added and removed files</option></select></label>
+        <div className="actions"><button type="button" className="button-orange button-small" disabled={!dirty || busy || uncertain} onClick={() => void save()}>Save notification setting</button><button type="button" className="button-ghost button-small" disabled={busy || uncertain} onClick={() => void load()}>Refresh setting</button></div></>}
+    {error && <small className="error" role="alert">{error}</small>}
+    {message && <small role="status">{message}</small>}
+    {uncertain && pending.current && <button type="button" className="button-orange button-small" disabled={busy} onClick={() => void save(pending.current!)}>Retry same notification setting</button>}
+  </fieldset>;
+}
+
 function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChange }: { folder: { id: string }; canRevoke: boolean; onBusyChange?: (busy: boolean) => void }) {
   type Context = { folderBindingId: string; sourceId: string; projectName: string | null; accessTermsSupported: boolean; projectEndSupported: boolean };
   type Input = {folderBindingId: string; audienceType: AuthenticatedGrantAudienceType; audiencePublicId: string; reasonCode: string; expiresAt: string | null; accessTerms?: PrimaryGrantTerms};
@@ -4791,6 +4886,8 @@ function PrimaryAuthenticatedDeliveryGrantPanel({ folder, canRevoke, onBusyChang
               <small>{termsLabel(grant.accessTerms)}</small><small>{grant.dynamicAudience ? "Dynamic current authorized members" : `${grant.recipientCount} exact verified person`} · {grant.effectiveAccessExpiresAt ? `expires ${date(grant.effectiveAccessExpiresAt)}` : grant.accessTerms?.mode === "project_end" ? "awaiting verified project completion, then 7 days" : grant.expiresAt ? `expires ${date(grant.expiresAt)}` : "no fixed expiry"}</small></span>
             {latest && grant.status === "active" && canRevoke && <button type="button" className="button-danger button-small" disabled={disabled} onClick={() => void mutate(grant, "revoke")}>Revoke</button>}
             {latest && grant.status !== "active" && <button type="button" className="button-ghost button-small" disabled={disabled} onClick={() => void mutate(grant, "restore")}>Restore as new version</button>}
+            {latest && grant.status === "active" && grant.audience.type === "principal" && !grant.dynamicAudience && grant.recipientCount === 1
+              && <AuthenticatedDeliveryNoticePolicyEditor physicalGrantId={grant.id} audienceLabel={grant.audienceLabel} />}
           </section>;
         })}
       </div>}

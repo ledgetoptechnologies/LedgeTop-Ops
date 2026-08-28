@@ -271,7 +271,7 @@ describe("folder notification center — real D1 authority and control receipts"
     for (let page=0;page<3;page+=1) {
       const result=await listCombinedDeliveryNotifications(env,staff,{cursor});
       expect(result.coverage).toBe("delivery_notifications_v2");
-      expect(result.availability).toEqual({folderChanges:true,nativeDeliveries:true});
+      expect(result.availability).toEqual({folderChanges:true,nativeDeliveries:true,authenticatedDeliveries:false});
       expect(result.items.length).toBeLessThanOrEqual(25);
       items.push(...result.items);
       cursor=result.nextCursor??undefined;
@@ -299,7 +299,7 @@ describe("folder notification center — real D1 authority and control receipts"
     await db.batch(Array.from({length:26},(_,i)=>batchStatement(`row-${i}`,"a","processing")));
     vi.spyOn(native,"nativeDeliveryNotificationsReady").mockResolvedValue(false);
     const page=await listCombinedDeliveryNotifications(env,staff,{});
-    expect(page.availability).toEqual({folderChanges:true,nativeDeliveries:false});
+    expect(page.availability).toEqual({folderChanges:true,nativeDeliveries:false,authenticatedDeliveries:false});
     expect(native.nativeNotificationCandidates).not.toHaveBeenCalled();
     vi.spyOn(native,"nativeDeliveryNotificationsReady").mockResolvedValue(true);
     await expect(listCombinedDeliveryNotifications(env,staff,{cursor:page.nextCursor!})).rejects.toMatchObject({status:409});

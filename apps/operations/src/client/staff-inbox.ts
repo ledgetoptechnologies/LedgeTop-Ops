@@ -49,9 +49,12 @@ const deliveryPage = z.object({ items: z.array(z.discriminatedUnion("kind", [
   z.object({ ...deliveryFields, kind: z.literal("folder_changes"), accountName: text, addedCount: z.number().int().nonnegative(), removedCount: z.number().int().nonnegative() }),
   z.object({ ...deliveryFields, kind: z.literal("portal_delivery"), sourceName: text, workspaceName: text, eventLabel: text,
     deliveryMode: z.enum(["staged", "direct_legacy", "awaiting_staging"]) }),
+  z.object({ ...deliveryFields, kind: z.literal("authenticated_delivery"), workspaceName: text.optional(),
+    addedCount: z.number().int().nonnegative(), removedCount: z.number().int().nonnegative() }),
 ])).max(25), nextCursor, coverage: z.literal("delivery_notifications_v2"),
-  availability: z.object({ folderChanges: z.literal(true), nativeDeliveries: z.boolean() })
-}).refine(value => value.availability.nativeDeliveries || value.items.every(item => item.kind === "folder_changes"));
+  availability: z.object({ folderChanges: z.literal(true), nativeDeliveries: z.boolean(), authenticatedDeliveries: z.boolean().optional().default(false) })
+}).refine(value => (value.availability.nativeDeliveries || value.items.every(item => item.kind !== "portal_delivery"))
+  && (value.availability.authenticatedDeliveries || value.items.every(item => item.kind !== "authenticated_delivery")));
 const connectionPage = z.object({ connectors: z.array(z.object({ sourceId: text, displayName: text,
   state: z.enum(["pending", "active", "suspended", "retired"]) })).max(32), legacyPrimary: z.boolean(),
   health: z.array(z.object({ sourceId: text, status: z.enum(["healthy", "error", "unknown", "disabled", "stale"]), lastAttemptAt: date.nullable() })).max(33) });
@@ -82,9 +85,12 @@ export function parseInboxPage(source: InboxSource, value: unknown, q: string): 
   }
   if (source === "deliveries") {
     const page = deliveryPage.parse(value);
-    return { nextCursor: page.nextCursor, ...(page.availability.nativeDeliveries ? {} : { notice: "Native delivery notices require a database upgrade. Only folder-change notices are shown." }),
+    const notices = [page.availability.nativeDeliveries ? "" : "Native delivery notices require a database upgrade.",
+      page.availability.authenticatedDeliveries ? "" : "Exact authenticated-recipient change notices require the notification database and feature."].filter(Boolean);
+    return { nextCursor: page.nextCursor, ...(notices.length ? { notice: `${notices.join(" ")} Available notification sources are still shown.` } : {}),
       items: page.items.map(row => ({ id: `${row.kind}:${row.id}`, title: row.folderLabel,
       detail: row.kind === "folder_changes" ? `${row.accountName} · ${row.addedCount.toLocaleString("en-US")} added · ${row.removedCount.toLocaleString("en-US")} removed`
+        : row.kind === "authenticated_delivery" ? `${row.workspaceName || "Authenticated delivery"} · ${row.addedCount.toLocaleString("en-US")} added · ${row.removedCount.toLocaleString("en-US")} removed`
         : `${row.workspaceName} · ${row.sourceName} · ${row.eventLabel}`,
       date: row.createdAt, status: row.status === "pending" ? "Pending" : "Processing",
       href: `/operations/notifications?${new URLSearchParams(row.kind === "folder_changes" ? { batchId: row.id } : { kind: row.kind, batchId: row.id })}`, action: "Review notice" })) };

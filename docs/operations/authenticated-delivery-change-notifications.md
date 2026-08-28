@@ -8,8 +8,13 @@ delivery-intent mail or the legacy client-folder subscription system.
 ## Rollout and ownership
 
 - `AUTHENTICATED_DELIVERY_NOTIFICATIONS_ENABLED` defaults to `false`.
-- Migration `0170_authenticated_delivery_change_notifications.sql` creates no
+- Migrations `0170_authenticated_delivery_change_notifications.sql` and
+  `0175_authenticated_delivery_notification_policy_consistency.sql` create no
   preference rows and performs no enabling backfill.
+- The reviewed Operations policy editor, notification-center lane, Inbox
+  projection, exact deep links, and Send Now/Cancel controls are implemented
+  locally. They report the feature as unavailable while either the flag or
+  migration is not ready; this does not silently enable any recipient.
 - A staff action must create an explicit preference for one immutable grant
   version and its exact identity/principal recipient.
 - Group, organization, department, client, project, contact, and dynamic
@@ -51,6 +56,34 @@ actor-scoped and idempotent, require an optimistic policy version, and append
 immutable audit. Staff batch `send-now` and `cancel` controls use the same
 actor-scoped replay and compare-and-swap pattern.
 
+## Staff workflow and authority
+
+Operations resolves the physical authenticated-grant ID to its single stored
+recipient. The browser never supplies an identity ID, recipient address, R2
+prefix, source, workspace, or division. Policy reads and writes require a
+current authenticated staff record plus division-scoped
+`delivery.share.create`; the route rechecks the exact source-qualified grant
+context and staff policy before returning. Enabling additionally requires a
+currently usable principal, verified identity, active membership, and current
+`delivery.view` authority. An existing policy can still be disabled after the
+recipient or grant becomes inactive.
+
+The combined notification center exposes this producer as
+`authenticated_delivery`, separately from `folder_changes` and
+`portal_delivery`. Combined pagination retains an independent encrypted scan
+position for each producer and binds the cursor to the current staff identity,
+permission proof, query, view, readiness flags, and expiry. Public rows contain
+only display labels, counts, bounded status data, and the currently verified
+recipient address; raw object keys, prefixes, provider failures, identities,
+and authority coordinates are not returned.
+
+Exact reads require `delivery.share.audit`. Send Now requires
+`delivery.share.create`; Cancel requires `delivery.share.revoke`. Both actions
+recheck the current scope and staff permission proof, use optimistic revisions
+and actor-scoped idempotency, and change only the notification batch. They do
+not add or revoke portal access, modify files, or recall a notice already
+accepted by a mail provider.
+
 ## Final authorization
 
 Before publication and again immediately before provider submission, dispatch
@@ -88,3 +121,12 @@ final authorization races, send-now/cancel serialization, and legacy/Project
 Alpha compatibility. Source ownership and grant-version mutation are tested as
 structurally rejected by the populated migration chain; the final authority SQL
 still independently requires those exact snapshots at dispatch.
+
+The staff integration also has focused API/D1 coverage for default-off
+readiness, exact grant/recipient resolution, division authority, policy replay
+and stale versions, three-source combined pagination, bounded redacted
+presentation, deep reads, and Send Now/Cancel replay. Operations browser tests
+cover the default-off exact-person editor and the third notification lane on
+the supported desktop and mobile projects. Production acceptance still
+requires migrations 0170 and 0175, deliberate flag enablement, and a real cron/mail smoke
+test with a rollback path.

@@ -2268,6 +2268,7 @@ tbody tr:last-child td { border: 0; }
 .authenticated-grant-list, .portal-denial-list { display: grid; gap: .6rem; margin-top: .35rem; }
 .authenticated-grant-row, .portal-denial-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: .8rem;
@@ -2276,6 +2277,14 @@ tbody tr:last-child td { border: 0; }
 }
 .authenticated-grant-row > span, .portal-denial-row > span { display: grid; min-width: 0; gap: .15rem; }
 .authenticated-grant-row small, .portal-denial-row small { color: var(--muted); overflow-wrap: anywhere; }
+.authenticated-delivery-notice-policy { flex: 1 0 100%; display: grid; gap: .65rem; min-width: 0; margin: 0; padding: .8rem; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--paper); }
+.authenticated-delivery-notice-policy legend { padding: 0 .35rem; font-weight: 760; }
+.authenticated-delivery-notice-policy p { max-width: 80ch; }
+.authenticated-delivery-notice-policy > label:not(.authenticated-delivery-notice-toggle) { display: grid; gap: .35rem; max-width: 24rem; font-size: .78rem; font-weight: 760; }
+.authenticated-delivery-notice-policy select { width: 100%; min-width: 0; }
+.authenticated-delivery-notice-toggle { display: flex; align-items: center; gap: .55rem; min-height: 44px; font-weight: 650; }
+.authenticated-delivery-notice-toggle input { min-height: 0; width: 1.15rem; height: 1.15rem; }
+.authenticated-delivery-notice-policy .actions { display: flex; flex-wrap: wrap; gap: .55rem; }
 .portal-denial-editor { display: grid; gap: .75rem; }
 .portal-denial-list > label { max-width: 28rem; }
 

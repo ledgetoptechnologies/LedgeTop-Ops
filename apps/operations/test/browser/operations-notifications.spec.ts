@@ -15,7 +15,12 @@ function nativeNotice(id = "nb_one", overrides: Record<string, unknown> = {}) {
   return { ...common, kind: "portal_delivery", sourceName: "Survey business source", workspaceName: "Acme portal workspace",
     eventLabel: "Delivery ready", deliveryMode: "staged", ...overrides };
 }
+function authenticatedNotice(id = "exact_one", overrides: Record<string, unknown> = {}) {
+  const { accountName: _accountName, ...common } = batch(id);
+  return { ...common, kind: "authenticated_delivery", addedCount: 3, removedCount: 1, ...overrides };
+}
 const nativeArticle = (page: Page) => center(page).locator('article[data-notification-kind="portal_delivery"]');
+const authenticatedArticle = (page: Page) => center(page).locator('article[data-notification-kind="authenticated_delivery"]');
 async function mock(page: Page, handler: (route: Route, url: URL) => Promise<unknown>, permissions = ["delivery.share.audit"]) {
   const requests: Array<{ path: string; query: URLSearchParams; method: string; key: string | undefined; body: unknown }> = [];
   await page.route("**/api/**", route => {
@@ -60,7 +65,7 @@ test("audit-only staff land on Notifications inside Operations without other ope
   await expect(page.getByRole("tab", { name: "Notifications", exact: true })).toHaveAttribute("aria-selected", "true");
   await expect(page.getByRole("tab", { name: "Operations", exact: true })).toHaveCount(0);
   await expect(article(page)).toBeVisible();
-  await expect(center(page).getByText(/Legacy folder subscriptions and delivery notices addressed to an explicit Project Alpha portal recipient/)).toBeVisible();
+  await expect(center(page).getByText(/Legacy folder subscriptions, explicit Project Alpha delivery notices, and opt-in summaries/)).toBeVisible();
   await expect(center(page).getByText("40 added · 2 removed", { exact: true })).toBeVisible();
   await expect(center(page).getByRole("button", { name: "Send now", exact: true })).toHaveCount(0);
   await expect(center(page).getByRole("button", { name: "Cancel notification", exact: true })).toHaveCount(0);
@@ -68,6 +73,26 @@ test("audit-only staff land on Notifications inside Operations without other ope
   await expect(article(page)).toBeVisible();
   expect(calls.filter(call => call.method !== "GET")).toHaveLength(0);
   expect(calls.every(call => call.path === "/api/session" || call.path === endpoint)).toBe(true);
+});
+
+test("exact authenticated change notices use a distinct deep link and action route without exposing storage paths", async ({page}) => {
+  const row = authenticatedNotice("exact-one", {canSendNow: true, canCancel: true, r2Prefix: "clients/acme/private/"});
+  const pageResult = {...result([row]), availability: {folderChanges: true, nativeDeliveries: true, authenticatedDeliveries: true}};
+  const calls = await mock(page, (route, url) => {
+    if (url.pathname === `${endpoint}/authenticated_delivery/exact-one/send-now`) return route.fulfill({json: {ok: true, kind: "authenticated_delivery", id: "exact-one", action: "send-now", revision: 2, status: "pending", replayed: false}});
+    if (url.pathname === `${endpoint}/authenticated_delivery/exact-one`) return route.fulfill({json: {item: row, serverNow: now, coverage: "delivery_notifications_v2", availability: pageResult.availability}});
+    return route.fulfill({json: pageResult});
+  });
+  await open(page, "?kind=authenticated_delivery&batchId=exact-one");
+  await expect(authenticatedArticle(page)).toContainText("Authenticated recipient changes");
+  await expect(authenticatedArticle(page)).toContainText("3 added · 1 removed");
+  await expect(center(page)).not.toContainText("clients/acme/private");
+  await authenticatedArticle(page).getByRole("button", {name: "Send now"}).click();
+  await expect(center(page).getByText(/Notification made eligible for dispatch\. This does not confirm delivery or change recipient access/)).toBeVisible();
+  const action = calls.find(call => call.path.endsWith("/authenticated_delivery/exact-one/send-now"));
+  expect(action?.method).toBe("POST");
+  expect(action?.body).toEqual({expectedRevision: 1});
+  expect(action?.key).toMatch(/^[0-9a-f-]{36}$/);
 });
 
 test("notifications remain an authorized subtab and preserve SOP navigation and browser history", async ({ page }) => {

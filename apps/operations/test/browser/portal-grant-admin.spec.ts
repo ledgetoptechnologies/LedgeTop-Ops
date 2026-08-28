@@ -65,6 +65,40 @@ test("an administrator without revoke permission can review primary grants but h
   expect(calls.some(call => call.path.endsWith("/revoke"))).toBe(false);
 });
 
+test("exact-person grants keep change notices default-off and retry the same optimistic policy save", async ({page}) => {
+  let attempts = 0;
+  const exact = primaryGrant({audience: {type: "principal", publicId: "principal-alex"}, audienceLabel: "Alex Client",
+    recipientCount: 1, dynamicAudience: false});
+  const calls = await mockPrimary(page, (route, call) => {
+    if (call.path === "/api/delivery/authenticated-grants" && call.method === "GET") return route.fulfill({json: {...primaryContext, grants: [exact]}});
+    if (call.path === "/api/delivery/authenticated-grants/grant-v1/notification-policy" && call.method === "GET") return route.fulfill({json: {policy: null, available: true}});
+    if (call.path === "/api/delivery/authenticated-grants/grant-v1/notification-policy" && call.method === "PUT") {
+      attempts += 1;
+      if (attempts === 1) return route.fulfill({status: 503, json: {error: "Unconfirmed policy save"}});
+      return route.fulfill({json: {available: true, policy: {accessNoticeEnabled: true, changeMode: "removed", version: 1}}});
+    }
+    return undefined;
+  });
+  await openPrimary(page);
+  const policy = page.getByRole("group", {name: "Change notifications for Alex Client"});
+  await expect(policy).toContainText("Optional and off by default");
+  await expect(policy).toContainText("It does not change access. Legacy folder subscriptions are separate.");
+  const enabled = policy.getByRole("checkbox", {name: "Send folder change summaries"});
+  await expect(enabled).not.toBeChecked();
+  await expect(policy.getByRole("combobox", {name: "Changes included for Alex Client"})).toBeDisabled();
+  await enabled.check();
+  await policy.getByRole("combobox", {name: "Changes included for Alex Client"}).selectOption("removed");
+  await policy.getByRole("button", {name: "Save notification setting"}).click();
+  await expect(policy.getByRole("alert")).toContainText("not confirmed");
+  await policy.getByRole("button", {name: "Retry same notification setting"}).click();
+  await expect(policy.getByRole("status")).toContainText("Portal access was not changed");
+  const writes = calls.filter(call => call.path.endsWith("/grant-v1/notification-policy") && call.method === "PUT");
+  expect(writes).toHaveLength(2);
+  expect(writes[0]?.key).toBe(writes[1]?.key);
+  expect(writes[0]?.body).toEqual({accessNoticeEnabled: true, changeMode: "removed", expectedVersion: null});
+  expect(writes[1]?.body).toEqual(writes[0]?.body);
+});
+
 test("primary collaborators default only to supported completion terms and confirm before creation", async ({page}) => {
   const calls = await mockPrimary(page); await openPrimary(page); await selectPrimary(page); await expect(page.getByRole("combobox", {name: "Recipient role"})).toHaveValue(""); await expect(page.getByRole("button", {name: "Review authenticated access"})).toBeDisabled();
   await page.getByRole("combobox", {name: "Recipient role"}).selectOption("collaborator"); await expect(page.getByRole("combobox", {name: "Collaborator access duration"})).toHaveValue("project_end"); await page.getByRole("button", {name: "Review authenticated access"}).click();

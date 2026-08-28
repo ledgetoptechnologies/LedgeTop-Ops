@@ -360,7 +360,7 @@ describe('source-owned native portal resources with real signed projection and l
   it('primary hierarchy route still falls through the mounted native router unchanged',async()=>{
     const h=new Hono<{Bindings:Env;Variables:{clientPrincipal:typeof principal}}>();
     h.use('*',async(c,next)=>{c.set('clientPrincipal',principal);await next();});
-    h.route('/v2/workspaces',createNativePortalWorkspaceRouter());
+    h.route('/v2/workspaces',createNativePortalWorkspaceRouter() as unknown as Hono<{Bindings:Env;Variables:{clientPrincipal:typeof principal}}>);
     h.get('/v2/workspaces/:workspaceId/hierarchy',c=>c.json({existingPrimary:true}));
     await db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,project_alpha_source_id)
       VALUES('existing-primary','organization','primary-root','Primary','project-alpha:primary')`).run();

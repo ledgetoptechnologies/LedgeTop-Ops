@@ -44,10 +44,22 @@ describe("staff inbox presentation contract", () => {
     expect(JSON.stringify(page)).not.toContain("private@");
     expect(new URL(inboxEndpoint("deliveries", "Acme", null), "https://ops.test").searchParams.get("format")).toBe("combined");
   });
+  it("keeps exact authenticated change notices separate, path-free, and deep-links to the reviewed batch", () => {
+    const page = parseInboxPage("deliveries", { coverage: "delivery_notifications_v2",
+      availability: { folderChanges: true, nativeDeliveries: true, authenticatedDeliveries: true },
+      items: [{ kind: "authenticated_delivery", id: "exact-one", workspaceName: "Acme workspace", folderLabel: "Edited photos",
+        status: "pending", createdAt, addedCount: 40, removedCount: 2, recipientEmail: "private@example.test", r2Prefix: "clients/acme/private/" }], nextCursor: null }, "");
+    expect(page.items).toEqual([{ id: "authenticated_delivery:exact-one", title: "Edited photos",
+      detail: "Acme workspace · 40 added · 2 removed", status: "Pending", date: createdAt,
+      href: "/operations/notifications?kind=authenticated_delivery&batchId=exact-one", action: "Review notice" }]);
+    expect(JSON.stringify(page)).not.toContain("private@");
+    expect(JSON.stringify(page)).not.toContain("clients/acme");
+  });
   it("keeps native upgrade-required coverage explicit and rejects native rows when their source is unavailable", () => {
     const page = { coverage: "delivery_notifications_v2", availability: { folderChanges: true, nativeDeliveries: false }, items: [], nextCursor: null };
     expect(parseInboxPage("deliveries", page, "").notice).toContain("database upgrade");
     expect(() => parseInboxPage("deliveries", { ...page, items: [{ kind: "portal_delivery", id: "nb_one", sourceName: "Source", workspaceName: "Workspace", eventLabel: "Ready", deliveryMode: "staged", folderLabel: "Folder", status: "pending", createdAt }] }, "")).toThrow();
+    expect(() => parseInboxPage("deliveries", { ...page, items: [{ kind: "authenticated_delivery", id: "exact-one", folderLabel: "Folder", status: "pending", createdAt, addedCount: 1, removedCount: 0 }] }, "")).toThrow();
     expect(() => parseInboxPage("deliveries", { ...page, coverage: "legacy_folder_changes" }, "")).toThrow();
   });
   it("reports only explicit failures from active registered or legacy-primary connections", () => {

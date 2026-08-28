@@ -11,6 +11,13 @@ import {
   presentNativeDeliveryNotification, readNativeDeliveryNotification,
   controlNativeDeliveryNotification,
 } from "./native-delivery-notification-center";
+import {
+  authenticatedDeliveryNotificationCenterReady, authenticatedDeliveryNotificationCandidates,
+  readAuthenticatedDeliveryNotificationScope, presentAuthenticatedDeliveryNotification,
+  readAuthenticatedDeliveryNotification, controlAuthenticatedDeliveryNotification,
+  readAuthenticatedDeliveryNotificationPolicy, updateAuthenticatedDeliveryNotificationPolicy,
+} from "./authenticated-delivery-notification-center";
+import { authorizeAuthenticatedDeliveryChangeBatch } from "./authenticated-delivery-change-notifications";
 import type { Env, GrantRow, StaffPrincipal } from "./types";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
@@ -27,8 +34,8 @@ interface Receipt { batch_id: string; action: Action; fingerprint: string; resul
 type Scope = NonNullable<Awaited<ReturnType<typeof readClientFolderNotificationBatchScope>>>;
 interface Cursor { v: 1; view: View; q: string; policy: string; after: [string,string]; expires: number }
 interface CombinedCursor {
-  v: 2; view: View; q: string; policy: string; nativeReady: boolean;
-  legacyAfter: [string,string] | null; nativeAfter: [string,string] | null; expires: number;
+  v: 3; view: View; q: string; policy: string; nativeReady: boolean; authenticatedReady:boolean;
+  legacyAfter: [string,string] | null; nativeAfter: [string,string] | null; authenticatedAfter:[string,string]|null; expires: number;
 }
 const selectBatch = `SELECT batch.*,association.r2_prefix,account.status account_status,account.project_alpha_client_id,account.project_alpha_organization_id
   FROM client_folder_notification_batches batch
@@ -37,6 +44,9 @@ const selectBatch = `SELECT batch.*,association.r2_prefix,account.status account
   JOIN client_accounts account ON account.id=batch.account_id AND account.project_alpha_source_id='project-alpha:primary'`;
 const tables = ["client_folder_notification_batches", "client_folder_notification_batch_items", "client_folder_notification_batch_controls"];
 const actions = z.object({ expectedRevision: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER - 1) }).strict();
+const notificationPolicy=z.object({accessNoticeEnabled:z.boolean(),changeMode:z.enum(["off","added","removed","both"]),
+  expectedVersion:z.number().int().min(1).max(Number.MAX_SAFE_INTEGER-1).nullable()}).strict()
+  .refine(value=>!value.accessNoticeEnabled||value.changeMode!=="off");
 
 function changed(): never { throw new HTTPException(409, { message: "Notification or permissions changed. Refresh before trying again." }); }
 async function ready(env: Env) {
@@ -85,7 +95,7 @@ async function encodeCursor(env: Env, principal: StaffPrincipal, value: Cursor |
   return `${base64Url(iv)}.${base64Url(new Uint8Array(data))}`;
 }
 
-async function decodeCombinedCursor(env: Env, principal: StaffPrincipal, value: string, view: View, q: string, proof: string, nativeReady: boolean): Promise<CombinedCursor> {
+async function decodeCombinedCursor(env: Env, principal: StaffPrincipal, value: string, view: View, q: string, proof: string, nativeReady: boolean, authenticatedReady:boolean): Promise<CombinedCursor> {
   let cursor: CombinedCursor;
   try {
     if (value.length > 4096) throw new Error();
@@ -93,11 +103,12 @@ async function decodeCombinedCursor(env: Env, principal: StaffPrincipal, value: 
     if (!iv || !data || extra !== undefined) throw new Error();
     const plain = await crypto.subtle.decrypt({ name: "AES-GCM", iv: unbase64(iv), additionalData: new TextEncoder().encode(principal.id) }, await cursorKey(env), unbase64(data));
     const after = z.tuple([z.string().min(1).max(64), z.string().min(1).max(128)]).nullable();
-    cursor = z.object({ v: z.literal(2), view: z.enum(["pending", "history"]), q: z.string().max(200), policy: z.string(),
-      nativeReady: z.boolean(), legacyAfter: after, nativeAfter: after, expires: z.number().int() }).strict()
+    cursor = z.object({ v: z.literal(3), view: z.enum(["pending", "history"]), q: z.string().max(200), policy: z.string(),
+      nativeReady: z.boolean(),authenticatedReady:z.boolean(), legacyAfter: after, nativeAfter: after,authenticatedAfter:after, expires: z.number().int() }).strict()
       .parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(plain)));
   } catch { throw new HTTPException(400, { message: "Notification cursor is invalid" }); }
-  if (cursor.view !== view || cursor.q !== q || cursor.policy !== proof || cursor.nativeReady !== nativeReady || cursor.expires < Date.now()) changed();
+  if (cursor.view !== view || cursor.q !== q || cursor.policy !== proof || cursor.nativeReady !== nativeReady
+    ||cursor.authenticatedReady!==authenticatedReady|| cursor.expires < Date.now()) changed();
   return cursor;
 }
 
@@ -108,27 +119,33 @@ export async function listCombinedDeliveryNotifications(env: Env, principal: Sta
   if (view !== "pending" && view !== "history") throw new HTTPException(400, { message: "Notification view is invalid" });
   const q = cleanQuery(query.q || ""), access = await combinedPolicy(env, principal);
   await ready(env);
-  const nativeReady = await nativeDeliveryNotificationsReady(env);
-  const cursor = query.cursor ? await decodeCombinedCursor(env, principal, query.cursor, view, q, access.proof, nativeReady) : null;
-  let legacyAfter = cursor?.legacyAfter ?? null, nativeAfter = cursor?.nativeAfter ?? null;
+  const [nativeReady,authenticatedReady]=await Promise.all([nativeDeliveryNotificationsReady(env),authenticatedDeliveryNotificationCenterReady(env)]);
+  const cursor = query.cursor ? await decodeCombinedCursor(env, principal, query.cursor, view, q, access.proof, nativeReady,authenticatedReady) : null;
+  let legacyAfter = cursor?.legacyAfter ?? null, nativeAfter = cursor?.nativeAfter ?? null,authenticatedAfter=cursor?.authenticatedAfter??null;
   const legacy = await env.DELIVERY_DB.withSession("first-primary").prepare(`${selectBatch}
     WHERE batch.status ${view === "pending" ? "IN ('pending','processing')" : "IN ('sent','cancelled','suppressed','failed')"}
     ${legacyAfter ? "AND (batch.created_at<? OR (batch.created_at=? AND batch.id<?))" : ""}
     ORDER BY batch.created_at DESC,batch.id DESC LIMIT 51`)
     .bind(...(legacyAfter ? [legacyAfter[0], legacyAfter[0], legacyAfter[1]] : [])).all<BatchRow>();
   const native = nativeReady ? await nativeNotificationCandidates(env, view, nativeAfter ?? undefined, 51) : [];
+  const authenticated=authenticatedReady?await authenticatedDeliveryNotificationCandidates(env,view,authenticatedAfter??undefined,51):[];
   type NativeRow = (typeof native)[number];
   type NativeScope = NonNullable<Awaited<ReturnType<typeof readNativeDeliveryNotificationScope>>>;
-  type Candidate = { kind: "folder_changes"; row: BatchRow; createdAt: string } | { kind: "portal_delivery"; row: NativeRow; createdAt: string };
+  type AuthenticatedRow=(typeof authenticated)[number];
+  type AuthenticatedScope=NonNullable<Awaited<ReturnType<typeof readAuthenticatedDeliveryNotificationScope>>>;
+  type Candidate = { kind: "folder_changes"; row: BatchRow; createdAt: string } | { kind: "portal_delivery"; row: NativeRow; createdAt: string }
+    |{kind:"authenticated_delivery";row:AuthenticatedRow;createdAt:string};
   const candidates: Candidate[] = [
     ...legacy.results.map(row => ({ kind: "folder_changes" as const, row, createdAt: iso(row.created_at) })),
     ...native.map(row => ({ kind: "portal_delivery" as const, row, createdAt: row.createdAt })),
+    ...authenticated.map(row=>({kind:"authenticated_delivery" as const,row,createdAt:row.createdAt})),
   ];
   const descending = (a: string, b: string) => a === b ? 0 : a > b ? -1 : 1;
   candidates.sort((a,b) => descending(a.createdAt,b.createdAt) || descending(a.kind,b.kind) || descending(a.row.id,b.row.id));
   const legacyKey = (row: BatchRow) => JSON.stringify([row.account_id,row.logical_grant_id,row.association_id,row.recipient_identity_id]);
-  const legacyScopes = new Map<string, Scope | null>(), nativeScopes = new Map<string, NativeScope | null>();
-  const selected: Array<{ kind: "folder_changes"; row: BatchRow; scope: Scope } | { kind: "portal_delivery"; row: NativeRow; scope: NativeScope }> = [];
+  const legacyScopes = new Map<string, Scope | null>(), nativeScopes = new Map<string, NativeScope | null>(),authenticatedScopes=new Map<string,AuthenticatedScope|null>();
+  const selected: Array<{ kind: "folder_changes"; row: BatchRow; scope: Scope } | { kind: "portal_delivery"; row: NativeRow; scope: NativeScope }
+    |{kind:"authenticated_delivery";row:AuthenticatedRow;scope:AuthenticatedScope}> = [];
   let examined = 0;
   for (const candidate of candidates.slice(0,50)) {
     examined += 1;
@@ -141,7 +158,7 @@ export async function listCombinedDeliveryNotifications(env: Env, principal: Sta
       const search = `${scope.accountName}\n${scope.prefix.split("/").filter(Boolean).at(-1) || ""}\n${scope.recipientEmail || ""}`.normalize("NFC").toLocaleLowerCase("en-US");
       if (q && !search.includes(q)) continue;
       selected.push({ kind: candidate.kind, row, scope });
-    } else {
+    } else if(candidate.kind==="portal_delivery") {
       const row = candidate.row;
       nativeAfter = [row.createdAt,row.id];
       if (!nativeScopes.has(row.scopeKey)) nativeScopes.set(row.scopeKey,await readNativeDeliveryNotificationScope(env,row));
@@ -150,6 +167,13 @@ export async function listCombinedDeliveryNotifications(env: Env, principal: Sta
       const search = `${scope.sourceName}\n${scope.workspaceName}\n${scope.folderLabel}\n${scope.recipientEmail || ""}`.normalize("NFC").toLocaleLowerCase("en-US");
       if (q && !search.includes(q)) continue;
       selected.push({ kind: candidate.kind, row, scope });
+    }else{
+      const row=candidate.row;authenticatedAfter=[row.createdAt,row.id];
+      if(!authenticatedScopes.has(row.scopeKey))authenticatedScopes.set(row.scopeKey,await readAuthenticatedDeliveryNotificationScope(env,row));
+      const scope=authenticatedScopes.get(row.scopeKey);
+      if(!scope||!allowed(access.grants,principal,"delivery.share.audit",scope.divisionId))continue;
+      const search=`${scope.sourceName}\n${scope.workspaceName}\n${scope.folderLabel}\n${scope.recipientEmail||""}`.normalize("NFC").toLocaleLowerCase("en-US");
+      if(q&&!search.includes(q))continue;selected.push({kind:candidate.kind,row,scope});
     }
     if (selected.length === 25) break;
   }
@@ -164,7 +188,7 @@ export async function listCombinedDeliveryNotifications(env: Env, principal: Sta
       }
       if (entry.row.status === "pending" && !legacySendable.has(key)) legacySendable.set(key,Boolean(await authorizeClientFolderNotificationBatch(env,entry.row)));
       items.push({ ...presentation(entry.row,entry.scope,access.grants,principal,legacySendable.get(key) === true), kind: "folder_changes" as const });
-    } else {
+    } else if(entry.kind==="portal_delivery") {
       const key = entry.row.scopeKey;
       const sendable = entry.row.status === "pending" ? Boolean(await authorizeNativeDeliveryNotification(env,entry.row)) : false;
       if (!checked.has(`native:${key}`)) {
@@ -172,13 +196,21 @@ export async function listCombinedDeliveryNotifications(env: Env, principal: Sta
         checked.add(`native:${key}`);
       }
       items.push(presentNativeDeliveryNotification(entry.row,entry.scope,sendable,access.grants,principal));
+    }else{
+      const key=entry.row.scopeKey,sendable=entry.row.status==="pending"?Boolean(await authorizeAuthenticatedDeliveryChangeBatch(env,entry.row)):false;
+      if(!checked.has(`authenticated:${key}`)){
+        if((await readAuthenticatedDeliveryNotificationScope(env,entry.row))?.contextProof!==entry.scope.contextProof)changed();
+        checked.add(`authenticated:${key}`);
+      }
+      items.push(presentAuthenticatedDeliveryNotification(entry.row,entry.scope,sendable,access.grants,principal));
     }
   }
-  if ((await combinedPolicy(env,principal)).proof !== access.proof || await nativeDeliveryNotificationsReady(env) !== nativeReady) changed();
-  return { items, nextCursor: examined < candidates.length ? await encodeCursor(env,principal,{ v:2, view,q,policy:access.proof,nativeReady,
-    legacyAfter,nativeAfter,expires:Date.now()+30*60_000 }) : null,
+  if ((await combinedPolicy(env,principal)).proof !== access.proof || await nativeDeliveryNotificationsReady(env) !== nativeReady
+    ||await authenticatedDeliveryNotificationCenterReady(env)!==authenticatedReady) changed();
+  return { items, nextCursor: examined < candidates.length ? await encodeCursor(env,principal,{ v:3, view,q,policy:access.proof,nativeReady,authenticatedReady,
+    legacyAfter,nativeAfter,authenticatedAfter,expires:Date.now()+30*60_000 }) : null,
     serverNow: new Date().toISOString(), coverage: "delivery_notifications_v2" as const,
-    availability: { folderChanges: true as const, nativeDeliveries: nativeReady } };
+    availability: { folderChanges: true as const, nativeDeliveries: nativeReady,authenticatedDeliveries:authenticatedReady } };
 }
 async function decodeCursor(env: Env, principal: StaffPrincipal, value: string, view: View, q: string, proof: string): Promise<Cursor> {
   let cursor: Cursor;
@@ -359,7 +391,29 @@ async function actionBody(request: Request): Promise<z.infer<typeof actions>> {
   catch { throw new HTTPException(400, { message: "Notification action requires the displayed revision" }); }
 }
 
+async function policyBody(request:Request):Promise<z.infer<typeof notificationPolicy>>{
+  if(!request.headers.get("Content-Type")?.toLowerCase().startsWith("application/json")||!request.body)
+    throw new HTTPException(400,{message:"Notification policy must be JSON"});
+  const reader=request.body.getReader(),bytes=new Uint8Array(2048);let length=0;
+  try{for(;;){const chunk=await reader.read();if(chunk.done)break;if(length+chunk.value.byteLength>bytes.byteLength){await reader.cancel();
+    throw new HTTPException(413,{message:"Notification policy is too large"});}bytes.set(chunk.value,length);length+=chunk.value.byteLength;}}
+  finally{reader.releaseLock();}
+  try{return notificationPolicy.parse(JSON.parse(new TextDecoder("utf-8",{fatal:true}).decode(bytes.subarray(0,length))));}
+  catch{throw new HTTPException(400,{message:"Notification policy is invalid"});}
+}
+
 export function registerNotificationCenterRoutes(app: App): void {
+  app.get("/api/delivery/authenticated-grants/:grantId/notification-policy",async c=>{
+    if(new URL(c.req.url).searchParams.size)throw new HTTPException(400,{message:"Notification policy query is invalid"});
+    c.header("Cache-Control","no-store");
+    return c.json(await readAuthenticatedDeliveryNotificationPolicy(c.env,c.get("principal"),c.req.param("grantId")));
+  });
+  app.put("/api/delivery/authenticated-grants/:grantId/notification-policy",async c=>{
+    if(new URL(c.req.url).searchParams.size)throw new HTTPException(400,{message:"Notification policy query is invalid"});
+    const parsed=await policyBody(c.req.raw);c.header("Cache-Control","no-store");
+    return c.json(await updateAuthenticatedDeliveryNotificationPolicy(c.env,c.get("principal"),c.req.param("grantId"),{
+      ...parsed,idempotencyKey:c.req.header("Idempotency-Key")||""}));
+  });
   app.get("/api/notifications/deliveries", async c => {
     const params = new URL(c.req.url).searchParams;
     for (const key of params.keys()) {
@@ -384,6 +438,21 @@ export function registerNotificationCenterRoutes(app: App): void {
     const parsed = await actionBody(c.req.raw);
     c.header("Cache-Control", "no-store");
     return c.json({ ...await controlNativeDeliveryNotification(c.env,c.get("principal"),c.req.param("id"),action,parsed.expectedRevision,c.req.header("Idempotency-Key") || ""),kind: "portal_delivery" as const });
+  });
+  app.get("/api/notifications/deliveries/authenticated_delivery/:id",async c=>{
+    if(new URL(c.req.url).searchParams.size)throw new HTTPException(400,{message:"Notification detail query is invalid"});
+    c.header("Cache-Control","no-store");
+    const [detail,nativeReady,authenticatedReady]=await Promise.all([readAuthenticatedDeliveryNotification(c.env,c.req.param("id"),c.get("principal")),
+      nativeDeliveryNotificationsReady(c.env),authenticatedDeliveryNotificationCenterReady(c.env)]);
+    return c.json({...detail,coverage:"delivery_notifications_v2" as const,
+      availability:{folderChanges:true,nativeDeliveries:nativeReady,authenticatedDeliveries:authenticatedReady}});
+  });
+  app.post("/api/notifications/deliveries/authenticated_delivery/:id/:action",async c=>{
+    const action=c.req.param("action");if(action!=="send-now"&&action!=="cancel")throw new HTTPException(404,{message:"Notification action not found"});
+    if(new URL(c.req.url).searchParams.size)throw new HTTPException(400,{message:"Notification action query is invalid"});
+    const parsed=await actionBody(c.req.raw);c.header("Cache-Control","no-store");
+    return c.json({...await controlAuthenticatedDeliveryNotification(c.env,c.get("principal"),c.req.param("id"),action,parsed.expectedRevision,
+      c.req.header("Idempotency-Key")||""),kind:"authenticated_delivery" as const});
   });
   app.get("/api/notifications/deliveries/:id", async c => {
     if (new URL(c.req.url).searchParams.size) throw new HTTPException(400, { message: "Notification detail query is invalid" });

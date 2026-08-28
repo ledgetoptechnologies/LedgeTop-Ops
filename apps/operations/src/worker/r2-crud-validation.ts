@@ -90,6 +90,8 @@ export function requiresAdministratorForMutation(method:string,path:string):bool
   // No other notification endpoint or method bypasses the administrator gate.
   const folderNotificationControl=normalizedMethod==="POST"&&parts.length===5&&parts[0]==="api"&&parts[1]==="notifications"&&parts[2]==="deliveries"&&delegatedRouteToken(parts[3])&&["send-now","cancel"].includes(parts[4]||"");
   const nativeNotificationControl=normalizedMethod==="POST"&&parts.length===6&&parts[0]==="api"&&parts[1]==="notifications"&&parts[2]==="deliveries"&&parts[3]==="portal_delivery"&&Boolean(parts[4]&&/^nb_[A-Za-z0-9_-]{1,125}$/.test(parts[4]))&&["send-now","cancel"].includes(parts[5]||"");
+  const authenticatedNotificationControl=normalizedMethod==="POST"&&parts.length===6&&parts[0]==="api"&&parts[1]==="notifications"&&parts[2]==="deliveries"&&parts[3]==="authenticated_delivery"&&delegatedRouteToken(parts[4])&&["send-now","cancel"].includes(parts[5]||"");
+  const authenticatedNotificationPolicy=normalizedMethod==="PUT"&&parts.length===5&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="authenticated-grants"&&delegatedRouteToken(parts[3])&&parts[4]==="notification-policy";
   // This exact endpoint independently checks current source/division authority.
   const feedbackTransition=normalizedMethod==="POST"&&parts.length===5&&parts[0]==="api"&&parts[1]==="operations"&&parts[2]==="feedback"&&delegatedRouteToken(parts[3])&&parts[4]==="status";
   const streamTicket=normalizedMethod==="POST"&&parts.length===5&&parts[0]==="api"&&parts[1]==="delivery"&&parts[2]==="items"&&delegatedRouteToken(parts[3])&&parts[4]==="stream-ticket";
@@ -102,5 +104,6 @@ export function requiresAdministratorForMutation(method:string,path:string):bool
     (normalizedMethod==="PUT"&&parts.length===5&&parts[4]==="sops")||
     (normalizedMethod==="POST"&&parts.length===6&&parts[4]==="attachments"&&["upload","reference"].includes(parts[5]||""))
   );
-  return !shareCreate&&!shareRevoke&&!internalFolderGrantCreate&&!internalFolderGrantRevoke&&!folderNotificationControl&&!nativeNotificationControl&&!feedbackTransition&&!streamTicket&&!incomingLink&&!dropboxImport&&!viewerPublicShareCreate&&!viewerPublicShareRevoke&&!jobBrief;
+  return !shareCreate&&!shareRevoke&&!internalFolderGrantCreate&&!internalFolderGrantRevoke&&!folderNotificationControl&&!nativeNotificationControl
+    &&!authenticatedNotificationControl&&!authenticatedNotificationPolicy&&!feedbackTransition&&!streamTicket&&!incomingLink&&!dropboxImport&&!viewerPublicShareCreate&&!viewerPublicShareRevoke&&!jobBrief;
 }

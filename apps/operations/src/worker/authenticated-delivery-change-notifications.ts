@@ -47,7 +47,7 @@ interface StageCandidate extends PolicyRow {
   r2_prefix: string;
 }
 
-interface BatchRow extends StageCandidate {
+export interface AuthenticatedDeliveryChangeBatchRow extends StageCandidate {
   id: string;
   revision: number;
   status: BatchStatus;
@@ -61,6 +61,7 @@ interface BatchRow extends StageCandidate {
   dispatch_fingerprint: string | null;
   published_recipient_email: string | null;
 }
+type BatchRow = AuthenticatedDeliveryChangeBatchRow;
 
 interface ObjectState {
   current_present: number;
@@ -132,10 +133,14 @@ export async function saveAuthenticatedDeliveryNotificationPolicy(
 ): Promise<PolicyRow> {
   if (!authenticatedDeliveryNotificationsEnabled(env)) throw new Error("authenticated-delivery-notifications-disabled");
   if (!(await authenticatedDeliveryChangeNotificationsReady(env))) throw new Error("authenticated-delivery-notifications-schema-unavailable");
-  if (!actorStaffId || input.idempotencyKey.length < 16 || input.idempotencyKey.length > 128)
+  if (!actorStaffId || !/^[A-Za-z0-9_-]{1,128}$/.test(input.grantId) || !/^[A-Za-z0-9_-]{1,128}$/.test(input.identityId)
+    || !/^[A-Za-z0-9._:-]{16,128}$/.test(input.idempotencyKey)
+    || input.expectedPolicyVersion !== null && (!Number.isSafeInteger(input.expectedPolicyVersion) || input.expectedPolicyVersion < 1))
     throw new Error("authenticated-delivery-notification-policy-invalid");
   const mode = input.accessNoticeEnabled ? input.changeMode : "off";
   if (!(["off", "added", "removed", "both"] as const).includes(mode))
+    throw new Error("authenticated-delivery-notification-policy-invalid");
+  if (input.accessNoticeEnabled && mode === "off")
     throw new Error("authenticated-delivery-notification-policy-invalid");
   const fingerprint = await sha256(JSON.stringify([input.grantId, input.identityId, input.expectedPolicyVersion,
     input.accessNoticeEnabled, mode]));
@@ -153,18 +158,23 @@ export async function saveAuthenticatedDeliveryNotificationPolicy(
     return {...row,policy_version:replay.result_policy_version,access_notice_enabled:replay.result_access_notice_enabled,
       change_mode:replay.result_change_mode};
   }
-  const authority = await db.prepare(`SELECT grant_record.id grant_id,grant_record.grant_version,grant_record.logical_grant_id,
+  const existing = await db.prepare(`SELECT * FROM portal_authenticated_delivery_notification_policies
+    WHERE grant_id=? AND identity_id=?`).bind(input.grantId,input.identityId).first<PolicyRow>();
+  const authority = !input.accessNoticeEnabled && existing ? existing : await db.prepare(`SELECT grant_record.id grant_id,grant_record.grant_version,grant_record.logical_grant_id,
       grant_record.workspace_id,workspace.project_alpha_source_id source_id,recipient.identity_id,
       recipient.principal_public_id,recipient.principal_source_version
     FROM portal_v2_authenticated_delivery_grants grant_record
     JOIN portal_v2_authenticated_delivery_grant_recipients recipient ON recipient.grant_id=grant_record.id
       AND recipient.workspace_id=grant_record.workspace_id AND recipient.identity_id=?
     JOIN portal_v2_workspaces workspace ON workspace.id=grant_record.workspace_id
-    WHERE grant_record.id=? AND grant_record.audience_type='principal' LIMIT 1`)
+    JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id
+      AND binding.workspace_id=grant_record.workspace_id AND binding.source_version=grant_record.binding_source_version
+      AND binding.status='active' AND binding.revoked_at IS NULL
+    WHERE grant_record.id=? AND grant_record.audience_type='principal' AND grant_record.status='active'
+      AND grant_record.revoked_at IS NULL AND (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))
+      AND workspace.status='active' AND workspace.project_alpha_source_id='project-alpha:primary' LIMIT 1`)
     .bind(input.identityId,input.grantId).first<PolicyAuthority>();
   if (!authority) throw new Error("authenticated-delivery-notification-policy-grant-unavailable");
-  const existing = await db.prepare(`SELECT * FROM portal_authenticated_delivery_notification_policies
-    WHERE grant_id=? AND identity_id=?`).bind(input.grantId,input.identityId).first<PolicyRow>();
   if ((existing?.policy_version ?? null) !== input.expectedPolicyVersion)
     throw new Error("authenticated-delivery-notification-policy-version-conflict");
   const resultVersion = (existing?.policy_version ?? 0) + 1;
@@ -483,7 +493,7 @@ function authoritySql(relationsEnabled = false): string {
     LIMIT 1`;
 }
 
-async function authorizeBatch(env: Env, batch: BatchRow): Promise<AuthorizedBatch | null> {
+export async function authorizeAuthenticatedDeliveryChangeBatch(env: Env, batch: BatchRow): Promise<AuthorizedBatch | null> {
   const authorized = await env.DELIVERY_DB.withSession("first-primary")
     .prepare(authoritySql(env.CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED === "true")).bind(batch.id).first<AuthorizedBatch>();
   if (!authorized) return null;
@@ -505,6 +515,8 @@ async function authorizeBatch(env: Env, batch: BatchRow): Promise<AuthorizedBatc
   }
   return authorized;
 }
+
+const authorizeBatch = authorizeAuthenticatedDeliveryChangeBatch;
 
 function batchMail(env: Env, batch: BatchRow, authorization: AuthorizedBatch): OutboundMail | null {
   try {
@@ -545,8 +557,13 @@ async function finish(env: Env, batch: BatchRow, token: string, status: Exclude<
 
 export async function controlAuthenticatedDeliveryChangeBatch(env: Env, actorStaffId: string, input: {
   batchId: string; action: "send-now" | "cancel"; expectedRevision: number; idempotencyKey: string;
-}): Promise<{status:"pending"|"cancelled";revision:number}> {
+},includeReplay=false): Promise<{status:"pending"|"cancelled";revision:number;replayed?:boolean}> {
   if (!authenticatedDeliveryNotificationsEnabled(env)) throw new Error("authenticated-delivery-notifications-disabled");
+  if (!(await authenticatedDeliveryChangeNotificationsReady(env))) throw new Error("authenticated-delivery-notifications-schema-unavailable");
+  if (!actorStaffId || !/^[A-Za-z0-9_-]{1,128}$/.test(input.batchId)
+    || !["send-now","cancel"].includes(input.action) || !/^[A-Za-z0-9._:-]{16,128}$/.test(input.idempotencyKey)
+    || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1 || input.expectedRevision >= Number.MAX_SAFE_INTEGER)
+    throw new Error("authenticated-delivery-notification-control-invalid");
   const fingerprint = await sha256(JSON.stringify([input.batchId,input.action,input.expectedRevision]));
   const db = env.DELIVERY_DB.withSession("first-primary");
   const replay = await db.prepare(`SELECT request_fingerprint,result_status,result_revision FROM portal_authenticated_delivery_change_controls
@@ -554,7 +571,7 @@ export async function controlAuthenticatedDeliveryChangeBatch(env: Env, actorSta
     .first<{request_fingerprint:string;result_status:"pending"|"cancelled";result_revision:number}>();
   if (replay) {
     if (replay.request_fingerprint !== fingerprint) throw new Error("authenticated-delivery-notification-control-idempotency-conflict");
-    return {status:replay.result_status,revision:replay.result_revision};
+    return {...(includeReplay?{replayed:true}:{}),status:replay.result_status,revision:replay.result_revision};
   }
   const status = input.action === "cancel" ? "cancelled" : "pending";
   const revision = input.expectedRevision + 1;
@@ -577,7 +594,7 @@ export async function controlAuthenticatedDeliveryChangeBatch(env: Env, actorSta
   ]);
   if (Number(result[0]?.meta.changes) !== 1 || Number(result[1]?.meta.changes) !== 1)
     throw new Error("authenticated-delivery-notification-control-conflict");
-  return {status,revision};
+  return {...(includeReplay?{replayed:false}:{}),status,revision};
 }
 
 export async function dispatchAuthenticatedDeliveryChangeNotifications(
