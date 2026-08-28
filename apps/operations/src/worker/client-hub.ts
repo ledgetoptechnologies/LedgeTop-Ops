@@ -20,6 +20,7 @@ import { requireProjectAlphaReadVisibility } from "./project-alpha-read-visibili
 import { readBusinessPartyForRoot } from "./business-parties";
 import { registerProjectOperationalRoutes } from "./project-operational-routes";
 import { registerOrganizationOperationalContactRoutes } from "./organization-operational-contact-routes";
+import { readClientHubProjectManagementAction } from "./project-alpha-project-management";
 
 type AppEnv = {
   Bindings: Env;
@@ -257,6 +258,20 @@ async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: Client
 export function registerClientHubRoutes(app: App): void {
   registerProjectOperationalRoutes(app, resolveDetailContext, verifyContext);
   registerOrganizationOperationalContactRoutes(app, resolveDetailContext, verifyContext);
+  app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/project-management", async c => {
+    const kind = routeKind(c.req.param("kind"));
+    if (!kind) throw new HTTPException(404, { message: "Client not found" });
+    const principal = c.get("principal");
+    const context = await resolveDetailContext(c.env, principal, kind, c.req.param("publicId"),
+      c.req.param("sourceId"), c.req.param("rootNamespace"));
+    const expected = c.req.query("expectedContextVersion");
+    if (expected !== undefined && expected !== context.contextVersion)
+      throw new HTTPException(409, { message: "Client context changed. Refresh the workspace to continue" });
+    const result = await readClientHubProjectManagementAction(c.env, principal, context, new URL(c.req.url).pathname);
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result);
+  });
   app.get("/api/client-hub/sources/:sourceId/:rootNamespace/:kind/:publicId/timeline", async c => {
     const kind = routeKind(c.req.param("kind"));
     if (!kind) throw new HTTPException(404, { message: "Client not found" });

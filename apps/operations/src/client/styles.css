@@ -1631,9 +1631,21 @@ tbody tr:last-child td { border: 0; }
 .client-hub-business-filter { display: grid; gap: .35rem; margin: .8rem 0; color: var(--muted); font-size: .85rem; }
 .client-hub-business-filter select { min-height: 44px; min-width: 0; max-width: 100%; padding: .6rem; border: 1px solid var(--line); border-radius: 8px; background: #fff; color: var(--ink); font: inherit; }
 .client-hub-project-link { display: inline-flex; align-items: center; min-height: 44px; max-width: 100%; text-underline-offset: .15em; }
+.client-project-management { display: grid; gap: .65rem; margin: 1rem 0; padding: .9rem; border: 1px solid var(--line); border-radius: 10px; background: #f7f9fa; min-width: 0; overflow-wrap: anywhere; }
+.client-project-management p { margin: 0; }
+.client-project-management-summary { display: flex; align-items: center; justify-content: space-between; gap: .8rem; min-width: 0; }
+.client-project-management-summary > div { display: grid; gap: .3rem; min-width: 0; }
+.client-project-management-summary a { flex: 0 0 auto; max-width: 100%; text-align: center; white-space: normal; }
+.client-project-management dl { display: grid; grid-template-columns: max-content minmax(0,1fr); gap: .25rem .7rem; margin: 0; font-size: .85rem; }
+.client-project-management dt { color: var(--muted); }
+.client-project-management dd { margin: 0; overflow-wrap: anywhere; }
+.client-project-management-actions { display: flex; flex-wrap: wrap; gap: .55rem; }
+.client-project-management button, .client-project-management a.button { min-height: 44px; }
 @media (max-width: 640px) {
   .client-hub-title { flex-wrap: wrap; }
   .client-hub-collection .simple-rows > div, .client-hub-collection .simple-rows > a { flex-wrap: wrap; }
+  .client-project-management-summary, .client-project-management-actions { align-items: stretch; flex-direction: column; }
+  .client-project-management-summary a, .client-project-management-actions button { width: 100%; }
 }
 .card-actions { display: inline-flex; align-items: center; gap: .4rem; }
 .client-portal-status { display: grid; gap: .55rem; margin: .8rem 0; }
@@ -2565,9 +2577,17 @@ ul { color: var(--muted); }
 .alpha-connection-form input { width: 100%; min-width: 0; box-sizing: border-box; }
 .alpha-connection-form button { justify-self: start; }
 .alpha-connection dd { margin-left: 0; margin-bottom: .7rem; }
+.alpha-project-management { display: grid; gap: .65rem; margin: 1rem 0; padding: .85rem; border: 1px solid var(--line); border-radius: 10px; background: #f7f9fa; min-width: 0; }
+.alpha-project-management p, .alpha-project-management small { margin: 0; overflow-wrap: anywhere; }
+.alpha-project-management form { display: grid; gap: .55rem; min-width: 0; }
+.alpha-project-management form > input { width: 100%; min-width: 0; min-height: 44px; box-sizing: border-box; }
+.alpha-project-management-toggle { display: flex; align-items: flex-start; gap: .55rem; }
+.alpha-project-management-toggle input { flex: 0 0 auto; width: 18px; height: 18px; margin-top: .1rem; }
+.alpha-project-management button { justify-self: start; }
 @media (max-width: 640px) {
   .alpha-connection-actions { display: grid; grid-template-columns: 1fr; }
   .alpha-connections button { min-height: 44px; white-space: normal; }
+  .alpha-project-management button { width: 100%; }
 }
 .delegated-share-admin-row { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding: .85rem 0; border-top: 1px solid var(--line); }
 .delegated-share-admin-row > span { display: grid; min-width: 0; gap: .25rem; }

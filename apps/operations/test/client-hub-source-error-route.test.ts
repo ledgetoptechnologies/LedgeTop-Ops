@@ -12,6 +12,7 @@ import worker from "../src/worker/index";
 import { createProjectAlphaSourceContext, prepareProjectAlphaSourceRecords } from "../src/worker/project-alpha-source";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 import type { ClientBusinessActivityPage } from "../src/worker/client-business-activity";
+import { setProjectAlphaProjectManagementRoute } from "../src/worker/project-alpha-project-management";
 
 const sourceId = "project-alpha:source-error-test";
 const actor: StaffPrincipal = { id: "source-error-admin", email: "admin@example.test", displayName: "Admin", accessSubject: "verified-subject", projectAlphaUserId: null };
@@ -26,6 +27,9 @@ async function activityRequest(id: string, query = "", namespace = "business") {
 async function timelineRequest(id: string, query = "", namespace = "business") {
   return worker.fetch(new Request(`https://ops.example/api/client-hub/sources/${encodeURIComponent(sourceId)}/${namespace}/standalone/${encodeURIComponent(id)}/timeline${query}`), env, execution);
 }
+async function projectManagementRequest(id: string, query = "", namespace = "business") {
+  return worker.fetch(new Request(`https://ops.example/api/client-hub/sources/${encodeURIComponent(sourceId)}/${namespace}/standalone/${encodeURIComponent(id)}/project-management${query}`), env, execution);
+}
 async function activityClient(times = ["2025-04-01T12:00:00.000Z", "2025-04-02T12:00:00.000Z"]) {
   const externalId = `activity-http-${crypto.randomUUID()}`;
   const mapping = await prepareProjectAlphaSourceRecords(db, createProjectAlphaSourceContext(sourceId), [{ kind: "client", externalId }]);
@@ -37,7 +41,7 @@ async function activityClient(times = ["2025-04-01T12:00:00.000Z", "2025-04-02T1
     .bind(JSON.stringify({ updated_at: time }), id).run();
   await db.prepare(`INSERT INTO client_hub_roots(source_id,root_namespace,kind,public_id,display_name,sort_name,status)
     VALUES(?,'business','standalone_client',?,?,?,'active')`).bind(sourceId, id, name, name.toLowerCase()).run();
-  return { id, name };
+  return { id, name, externalId };
 }
 
 describe("Client Hub source visibility errors through the Operations entrypoint", () => {
@@ -50,6 +54,8 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
     for (const file of readdirSync(directory).filter(file => /^\d{4}_.*\.sql$/.test(file) && file.slice(0, 4) <= "0037").sort()) {
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(file, directory), "utf8")).map(sql => db.prepare(sql)));
     }
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0046_project_alpha_project_management_routes.sql", import.meta.url), "utf8"))
+      .map(sql => db.prepare(sql)));
     // Use the current Delivery schema: exact secondary workspace resolution is
     // part of the shared root proof even when this fixture has no workspace.
     const clientMigrations = new URL("../../client/migrations/", import.meta.url);
@@ -61,6 +67,8 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
       db.prepare("INSERT INTO staff_users(id,email,display_name,status) VALUES(?,?,?,'active')").bind(actor.id, actor.email, actor.displayName),
       db.prepare("INSERT INTO staff_role_assignments(id,staff_id,role_id,scope,scope_key) VALUES('source-error-role',?,'role-admin','global','global')").bind(actor.id),
     ]);
+    await registerVisibleTestSource(db, "project-alpha:primary", "Primary source");
+    await db.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id='project-alpha:primary'").run();
     await registerVisibleTestSource(db, sourceId, "Private secondary source");
     const ids = await prepareProjectAlphaSourceRecords(db, createProjectAlphaSourceContext(sourceId),
       [{ kind: "client", externalId: "1" }, { kind: "client", externalId: "2" }]);
@@ -142,6 +150,56 @@ describe("Client Hub source visibility errors through the Operations entrypoint"
     expect(await db.prepare("SELECT count(*) count FROM client_business_activity").first<number>("count")).toBe(before);
     expect(await env.DELIVERY_DB.prepare("SELECT count(*) count FROM client_accounts").first<number>("count")).toBe(0);
   }, 30_000);
+
+  it("returns a read-only exact-source Project Alpha project action and safe synchronization affordances", async () => {
+    const client = await activityClient(), connector = await db.prepare("SELECT version FROM pa_connectors WHERE source_id=?").bind(sourceId).first<{version:number}>();
+    await db.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id=?").bind(sourceId).run();
+    const activeVersion = connector!.version + 1;
+    await setProjectAlphaProjectManagementRoute(env, sourceId, { expectedConnectorVersion: activeVersion, expectedVersion: null,
+      idempotencyKey: "source-action-route-key-0001", reviewedUrlTemplate: "https://alpha.example.test/customers/{recordId}/projects/new" }, actor.id);
+    await db.prepare(`INSERT INTO integration_health(integration,status,last_attempt_at,last_success_at,projection_source_id)
+      VALUES('project-alpha','healthy','2026-08-28 12:00:00','2026-08-28 11:59:00',?)
+      ON CONFLICT(projection_source_id,integration) DO UPDATE SET status=excluded.status,last_attempt_at=excluded.last_attempt_at,last_success_at=excluded.last_success_at`)
+      .bind(sourceId).run();
+    const before={projects:await db.prepare("SELECT count(*) count FROM pa_projects WHERE projection_source_id=?").bind(sourceId).first<number>("count"),
+      audit:await db.prepare("SELECT count(*) count FROM pa_connector_project_management_route_audit WHERE source_id=?").bind(sourceId).first<number>("count")};
+    const response=await projectManagementRequest(client.id);expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toContain("no-store");
+    const body=await response.json() as Record<string,any>;
+    expect(body).toMatchObject({
+      canonicalRoot:{sourceId,rootNamespace:"business",kind:"standalone_client",publicId:client.id},
+      source:{sourceId,displayName:"Private secondary source",state:"active"},
+      availability:{available:true,reason:"available"},
+      action:{label:"Create project in Project Alpha",external:true,
+        href:`https://alpha.example.test/customers/${encodeURIComponent(client.externalId)}/projects/new`},
+      sync:{status:"healthy",lastAttemptAt:"2026-08-28T12:00:00.000Z",lastSuccessAt:"2026-08-28T11:59:00.000Z",
+        refresh:{label:"Refresh synchronization status",href:`/api/client-hub/sources/${encodeURIComponent(sourceId)}/business/standalone/${encodeURIComponent(client.id)}/project-management`,method:"GET"},
+        requestSync:{label:"Sync source now",href:`/api/admin/integrations/project-alpha/connectors/${encodeURIComponent(sourceId)}/sync`,method:"POST"}},
+    });
+    expect(body.contextVersion).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(JSON.stringify(body)).not.toMatch(/payload_json|snapshot_origin|api.key|credential/i);
+    expect(await db.prepare("SELECT count(*) count FROM pa_projects WHERE projection_source_id=?").bind(sourceId).first<number>("count")).toBe(before.projects);
+    expect(await db.prepare("SELECT count(*) count FROM pa_connector_project_management_route_audit WHERE source_id=?").bind(sourceId).first<number>("count")).toBe(before.audit);
+    const stale=await projectManagementRequest(client.id,"?expectedContextVersion=stale-context");expect(stale.status).toBe(409);
+    expect(await stale.json()).toEqual({error:"Client context changed. Refresh the workspace to continue"});
+  }, 30_000);
+
+  it("fails the Project Alpha action closed when the exact source or reviewed route is inactive", async () => {
+    const client=await activityClient(), current=await db.prepare("SELECT version FROM pa_connectors WHERE source_id=?").bind(sourceId).first<number>("version");
+    await db.prepare("UPDATE pa_connectors SET state='suspended',version=version+1 WHERE source_id=?").bind(sourceId).run();
+    const suspended=await projectManagementRequest(client.id);expect(suspended.status).toBe(200);
+    expect(await suspended.json()).toMatchObject({availability:{available:false,reason:"source_inactive"},action:null,
+      sync:{requestSync:null}});
+    await db.prepare("UPDATE pa_connectors SET state='active',version=version+1 WHERE source_id=?").bind(sourceId).run();
+    const route=await db.prepare("SELECT version FROM pa_connector_project_management_routes WHERE source_id=?").bind(sourceId).first<number>("version");
+    const connectorVersion=(current??0)+2;
+    await setProjectAlphaProjectManagementRoute(env,sourceId,{expectedConnectorVersion:connectorVersion,expectedVersion:route,
+      idempotencyKey:"source-action-route-disable",reviewedUrlTemplate:null},actor.id);
+    const disabled=await projectManagementRequest(client.id);expect(disabled.status).toBe(200);
+    expect(await disabled.json()).toMatchObject({availability:{available:false,reason:"route_disabled"},action:null});
+    expect((await projectManagementRequest(client.id,"","portal")).status).toBe(404);
+    expect((await worker.fetch(new Request(`https://ops.example/api/client-hub/sources/${encodeURIComponent(sourceId)}/business/standalone/${encodeURIComponent("unknown")}/project-management`),env,execution)).status).toBe(404);
+  },30_000);
 
   it("exposes a source-qualified staff timeline while keeping every secondary portal category unavailable", async () => {
     const client = await activityClient(["2025-05-01T12:00:00.000Z", "2025-05-02T12:00:00.000Z"]);

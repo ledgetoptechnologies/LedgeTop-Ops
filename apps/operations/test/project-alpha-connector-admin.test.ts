@@ -59,6 +59,8 @@ describe("Project Alpha connector administration HTTP boundary",{timeout:60_000,
     for(const name of readdirSync(directory).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&name.slice(0,4)<="0038").sort()){
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,directory),"utf8")).map(sql=>db.prepare(sql)));
     }
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL("../migrations/0046_project_alpha_project_management_routes.sql",import.meta.url),"utf8"))
+      .map(sql=>db.prepare(sql)));
     await db.batch([
       db.prepare("INSERT INTO staff_users(id,email,display_name,status) VALUES(?,?,?,'active')").bind(principal.id,principal.email,principal.displayName),
       db.prepare("INSERT INTO divisions(id,name,code) VALUES('registry-route-division','Route division','registry-route-division')"),
@@ -149,6 +151,64 @@ describe("Project Alpha connector administration HTTP boundary",{timeout:60_000,
     const text=await response.text();expect(text).toContain("project-alpha:primary");
     for(const privateValue of ["private-primary-snapshot-key","private-secondary-snapshot-key",publicKey(1),"credentialRef","accessSubject","current_key_fingerprint"])
       expect(text).not.toContain(privateValue);
+  });
+  it("configures only a reviewed HTTPS project-management route with optimistic idempotent revisions",async()=>{
+    const path=`${ROOT}/${encodeURIComponent("project-alpha:primary")}/project-management`;
+    const initial=await send(ROOT);expect(initial.status).toBe(200);
+    expect((await initial.json() as {projectManagement:unknown[]}).projectManagement).toEqual([]);
+    const request={expectedConnectorVersion:2,expectedVersion:null,idempotencyKey:"route-operation-key-0001",
+      reviewedUrlTemplate:"https://alpha.example.test/clients/{recordId}/projects/new"};
+    const created=await send(path,"PUT",request);expect(created.status).toBe(200);
+    expect((await created.json() as {projectManagement:Record<string,unknown>}).projectManagement).toEqual({
+      sourceId:"project-alpha:primary",version:1,revision:1,enabled:true,
+      reviewedUrlTemplate:request.reviewedUrlTemplate,replayed:false,
+    });
+    const before={
+      revisions:await db.prepare("SELECT count(*) total FROM pa_connector_project_management_route_revisions").first<number>("total"),
+      audit:await db.prepare("SELECT count(*) total FROM pa_connector_project_management_route_audit").first<number>("total"),
+    };
+    const replay=await send(path,"PUT",request);expect(replay.status).toBe(200);
+    expect((await replay.json() as {projectManagement:{replayed:boolean}}).projectManagement.replayed).toBe(true);
+    expect(await db.prepare("SELECT count(*) total FROM pa_connector_project_management_route_revisions").first<number>("total")).toBe(before.revisions);
+    expect(await db.prepare("SELECT count(*) total FROM pa_connector_project_management_route_audit").first<number>("total")).toBe(before.audit);
+    expect((await send(path,"PUT",{...request,reviewedUrlTemplate:"https://other.example.test/projects"})).status).toBe(409);
+    expect((await send(path,"PUT",{...request,idempotencyKey:"route-operation-key-0002",expectedVersion:null})).status).toBe(409);
+    const updated=await send(path,"PUT",{...request,idempotencyKey:"route-operation-key-0003",expectedVersion:1,
+      reviewedUrlTemplate:"https://alpha.example.test/projects"});
+    expect(updated.status).toBe(200);
+    expect((await updated.json() as {projectManagement:Record<string,unknown>}).projectManagement).toMatchObject({version:2,revision:2,enabled:true,replayed:false});
+    const disabled=await send(path,"PUT",{...request,idempotencyKey:"route-operation-key-0004",expectedVersion:2,reviewedUrlTemplate:null});
+    expect(disabled.status).toBe(200);
+    expect((await disabled.json() as {projectManagement:Record<string,unknown>}).projectManagement).toMatchObject({version:3,revision:3,enabled:false,reviewedUrlTemplate:null});
+    const summary=await send(ROOT);expect(summary.status).toBe(200);
+    expect((await summary.json() as {projectManagement:Array<Record<string,unknown>>}).projectManagement).toEqual([
+      expect.objectContaining({sourceId:"project-alpha:primary",version:3,revision:3,enabled:false,reviewedUrlTemplate:null}),
+    ]);
+    const audit=await db.prepare("SELECT actor_id,action,details_json FROM pa_connector_project_management_route_audit ORDER BY route_version")
+      .all<{actor_id:string;action:string;details_json:string}>();
+    expect(audit.results.map(row=>({actor:row.actor_id,action:row.action,details:JSON.parse(row.details_json)}))).toEqual([
+      {actor:principal.id,action:"configured",details:{enabled:true,templateKind:"record_path"}},
+      {actor:principal.id,action:"configured",details:{enabled:true,templateKind:"base_url"}},
+      {actor:principal.id,action:"disabled",details:{enabled:false,templateKind:"disabled"}},
+    ]);
+    expect(JSON.stringify(audit.results)).not.toContain("alpha.example.test");
+  });
+  it("rejects unsafe destinations, browser secrets, inactive sources, and immutable-ledger changes",async()=>{
+    const value=await registerPending(),path=`${ROOT}/${encodeURIComponent(value.sourceId)}/project-management`;
+    const request={expectedConnectorVersion:1,expectedVersion:null,idempotencyKey:"route-operation-key-unsafe",reviewedUrlTemplate:"https://alpha.example.test/projects"};
+    expect((await send(path,"PUT",request)).status).toBe(409);
+    expect((await send(`${ROOT}/${value.sourceId}`,"PATCH",{expectedVersion:1,state:"active",readVisible:true})).status).toBe(200);
+    for(const reviewedUrlTemplate of ["http://alpha.example.test/projects","https://user:secret@alpha.example.test/projects",
+      "https://alpha.example.test/projects?token=secret","https://alpha.example.test/projects#fragment",
+      "https://alpha.example.test/clients/prefix-{recordId}/projects","https://alpha.example.test/clients/{recordId}/{recordId}"]){
+      const response=await send(path,"PUT",{...request,expectedConnectorVersion:2,idempotencyKey:`unsafe-${crypto.randomUUID()}`,reviewedUrlTemplate});
+      expect(response.status).toBe(400);
+    }
+    expect((await send(path,"PUT",{...request,expectedConnectorVersion:2,idempotencyKey:"route-operation-key-secret",credential:"browser-secret"})).status).toBe(400);
+    const good=await send(path,"PUT",{...request,expectedConnectorVersion:2,idempotencyKey:"route-operation-key-good"});expect(good.status).toBe(200);
+    await expect(db.prepare("UPDATE pa_connector_project_management_route_revisions SET reviewed_url_template='https://evil.example.test'").run()).rejects.toThrow(/immutable/);
+    await expect(db.prepare("DELETE FROM pa_connector_project_management_route_audit").run()).rejects.toThrow(/persistent/);
+    await expect(db.prepare("UPDATE pa_connector_project_management_route_mutations SET source_id='project-alpha:primary'").run()).rejects.toThrow(/immutable/);
   });
   it("reports recovery independently from connection health without scheduling or enabling a pending source",async()=>{
     const value=await registerPending();

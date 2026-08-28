@@ -15,6 +15,10 @@ import {
   reviseCoordinatedProjectAlphaConnector, setCoordinatedProjectAlphaConnectorState,
 } from "./project-alpha-portal-coordination";
 import type { Env, StaffPrincipal } from "./types";
+import {
+  listProjectAlphaProjectManagementRoutes, ProjectAlphaProjectManagementError,
+  setProjectAlphaProjectManagementRoute,
+} from "./project-alpha-project-management";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
 const ROOT = "/api/admin/integrations/project-alpha/connectors";
@@ -28,6 +32,16 @@ export function portalAuthorityErrorResponse(error: PortalSourceAuthorityError):
       : "Portal connection is unavailable. Refresh status and recover any unfinished connection update",
     code: `PROJECT_ALPHA_PORTAL_${error.code.toUpperCase()}`,
   };
+}
+function projectManagementHttpError(error: unknown): never {
+  if (error instanceof ProjectAlphaProjectManagementError || (error instanceof Error
+    && error.name === "ProjectAlphaProjectManagementError"
+    && ["invalid", "conflict", "changed", "unavailable"].includes(String((error as { code?: unknown }).code)))) {
+    const code = (error as ProjectAlphaProjectManagementError).code;
+    throw new HTTPException(code === "invalid" ? 400 : code === "conflict" || code === "changed" ? 409 : 503,
+      { message: (error as Error).message });
+  }
+  throw error;
 }
 const revision = z.object({ credentialRef: z.string().min(1).max(64), snapshotBasePath: z.string().min(1).max(1024),
   accessIssuer: z.string().min(1).max(2048), accessAudience: z.string().min(1).max(512), accessSubject: z.string().min(1).max(512) }).strict();
@@ -95,6 +109,11 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
         const response = portalAuthorityErrorResponse(error);
         throw new HTTPException(response.status, { message: response.error });
       }
+      // Miniflare can evaluate Worker module boundaries in separate realms, so
+      // retain the named, bounded domain-error fallback instead of relying only
+      // on instanceof when translating this non-secret administration error.
+      if (error instanceof ProjectAlphaProjectManagementError || (error instanceof Error
+        && error.name === "ProjectAlphaProjectManagementError")) projectManagementHttpError(error);
       throw error;
     }
   });
@@ -109,7 +128,9 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
       : typeof row.lastErrorCode === "string" && /^[a-z][a-z0-9-]{0,119}$/.test(row.lastErrorCode) ? row.lastErrorCode : "project-alpha-sync-failed" }));
     const recovery = await getProjectAlphaSnapshotRecoveryStatus(c.env.OPS_DB);
     const portal = await getConnectorPortalStatus(c.env);
-    return c.json({ connectors, health: safeHealth, recovery, portal, legacyPrimary: !connectors.some(row => row.sourceId === "project-alpha:primary") });
+    const projectManagement = await listProjectAlphaProjectManagementRoutes(c.env);
+    return c.json({ connectors, health: safeHealth, recovery, portal, projectManagement,
+      legacyPrimary: !connectors.some(row => row.sourceId === "project-alpha:primary") });
   });
   app.post(ROOT, async c => c.json({ connector: await registerProjectAlphaConnector(c.env,
     await json(c.req.raw, registration), c.get("principal").id) }, 201));
@@ -144,5 +165,16 @@ export function registerProjectAlphaConnectorAdminRoutes(app: App): void {
     const result = await syncRegisteredProjectAlpha(c.env, sourceId);
     if (result.changedCollections.some(name => name === "operations" || name === "service_locations")) await rebuildOperationAirspaceMatches(c.env);
     return c.json({ sourceId, ...result });
+  });
+  app.put(`${ROOT}/:sourceId/project-management`, async c => {
+    const value = await json(c.req.raw, z.object({
+      expectedConnectorVersion: z.number().int().positive(), expectedVersion: z.number().int().positive().nullable(),
+      idempotencyKey: z.string().min(16).max(128).regex(/^[A-Za-z0-9_-]+$/),
+      reviewedUrlTemplate: z.string().min(9).max(2048).nullable(),
+    }).strict());
+    try {
+      return c.json({ projectManagement: await setProjectAlphaProjectManagementRoute(c.env,
+        c.req.param("sourceId"), value, c.get("principal").id) });
+    } catch (error) { return projectManagementHttpError(error); }
   });
 }

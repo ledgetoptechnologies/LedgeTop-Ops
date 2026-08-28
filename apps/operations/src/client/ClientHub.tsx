@@ -44,6 +44,16 @@ interface ClientDetailResponse {
   canManageBusinessParties?: boolean;
 }
 interface BusinessProject extends CollectionItem { id: string; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null; created_at: string | null }
+interface ProjectManagementResult {
+  canonicalRoot: CanonicalClientRoot;
+  contextVersion: string;
+  source: { sourceId: string; displayName: string; state: string };
+  availability: { available: boolean; reason: string | null; explanation: string };
+  action: null | { label: "Create project in Project Alpha"; href: string; external: true };
+  sync: { status: string; lastAttemptAt: string | null; lastSuccessAt: string | null; explanation: string;
+    refresh: { label: string; href: string; method: "GET" };
+    requestSync: null | { label: string; href: string; method: "POST" } };
+}
 type ClientCollectionName = "businessContacts" | "businessProjects" | "accounts" | "projects" | "requests" | "deliveryGrants" | "authenticatedDeliveryGrants" | "viewerGrants";
 interface ClientCollectionPage {
   available: boolean;
@@ -119,6 +129,119 @@ function collectionKey(collection: ClientCollectionName, item: CollectionItem): 
 
 function rootIdentity(root: CanonicalClientRoot): string {
   return JSON.stringify([root.sourceId, root.rootNamespace, root.kind, root.publicId]);
+}
+function syncDate(value: string | null): string {
+  if (!value) return "Not yet";
+  const parsed = utcDate(value);
+  return Number.isNaN(parsed.valueOf()) ? "Unavailable" : parsed.toLocaleString([], { dateStyle: "medium", timeStyle: "short" });
+}
+
+function object(value: unknown): value is Record<string, unknown> { return Boolean(value && typeof value === "object" && !Array.isArray(value)); }
+function safeHttpsExternal(href: unknown): string | null {
+  if (typeof href !== "string" || href.length > 4096) return null;
+  try {
+    const value = new URL(href);
+    return value.protocol === "https:" && !value.username && !value.password ? value.href : null;
+  } catch { return null; }
+}
+function sameOriginAction(value: unknown, sourceId: string, method: "GET" | "POST", currentPath: string): string | null {
+  if (!object(value) || value.method !== method || typeof value.href !== "string") return null;
+  try {
+    const candidate = new URL(value.href, location.origin);
+    if (candidate.origin !== location.origin || candidate.hash || candidate.search) return null;
+    const expected = method === "GET" ? currentPath
+      : `/api/admin/integrations/project-alpha/connectors/${encodeURIComponent(sourceId)}/sync`;
+    return candidate.pathname === expected ? candidate.pathname : null;
+  } catch { return null; }
+}
+function verifiedProjectManagement(value: unknown, expectedRoot: CanonicalClientRoot, expectedContext: string, endpoint: string): ProjectManagementResult {
+  if (!object(value) || !object(value.canonicalRoot) || rootIdentity(value.canonicalRoot as unknown as CanonicalClientRoot) !== rootIdentity(expectedRoot)
+    || value.contextVersion !== expectedContext || !object(value.source) || value.source.sourceId !== expectedRoot.sourceId
+    || typeof value.source.displayName !== "string" || !value.source.displayName || typeof value.source.state !== "string"
+    || !object(value.availability) || typeof value.availability.available !== "boolean"
+    || !(value.availability.reason === null || typeof value.availability.reason === "string")
+    || typeof value.availability.explanation !== "string" || !object(value.sync) || typeof value.sync.status !== "string"
+    || !(value.sync.lastAttemptAt === null || typeof value.sync.lastAttemptAt === "string")
+    || !(value.sync.lastSuccessAt === null || typeof value.sync.lastSuccessAt === "string") || typeof value.sync.explanation !== "string")
+    throw new ApiError("The Project Alpha project context changed. Refresh this client workspace.", 409, {});
+  const refresh = sameOriginAction(value.sync.refresh, expectedRoot.sourceId, "GET", endpoint);
+  const requestSync = value.sync.requestSync === null ? null : sameOriginAction(value.sync.requestSync, expectedRoot.sourceId, "POST", endpoint);
+  if (!refresh || (value.sync.requestSync !== null && !requestSync))
+    throw new Error("Project Alpha synchronization controls could not be verified. Refresh this client workspace.");
+  if (value.action !== null) {
+    if (!object(value.action) || value.action.label !== "Create project in Project Alpha" || value.action.external !== true
+      || !safeHttpsExternal(value.action.href) || value.availability.available !== true)
+      throw new Error("The Project Alpha project link could not be verified. Refresh this client workspace.");
+  } else if (value.availability.available) throw new Error("The Project Alpha project link is incomplete. Refresh this client workspace.");
+  return value as unknown as ProjectManagementResult;
+}
+
+function ProjectManagementRouting({ client, contextVersion, contextSignal, onInvalidated, onWorkspaceRefresh }: {
+  client: ClientSummary; contextVersion?: string; contextSignal: AbortSignal; onInvalidated: (message: string) => void; onWorkspaceRefresh: () => void;
+}) {
+  const exactRoot = client.source_id && client.root_namespace === "business" && contextVersion
+    ? { sourceId: client.source_id, rootNamespace: "business" as const, kind: client.kind, publicId: client.public_id } : null;
+  const endpoint = exactRoot ? `/api/client-hub/sources/${encodeURIComponent(exactRoot.sourceId)}/business/${client.route_kind}/${encodeURIComponent(exactRoot.publicId)}/project-management` : null;
+  const [state, setState] = useState<{ data: ProjectManagementResult | null; busy: boolean; error: string; syncBusy: boolean }>({ data: null, busy: Boolean(endpoint), error: "", syncBusy: false });
+  const pending = useRef<AbortController | null>(null), sequence = useRef(0), active = useRef(true);
+  const load = async (href = endpoint, refreshWorkspace = false) => {
+    if (!endpoint || !exactRoot || !contextVersion || !href || contextSignal.aborted) return;
+    pending.current?.abort(); const controller = new AbortController(), request = ++sequence.current; pending.current = controller;
+    setState(value => ({ ...value, data: null, busy: true, error: "" }));
+    try {
+      const result = verifiedProjectManagement(await api<unknown>(href, { signal: controller.signal }), exactRoot, contextVersion, endpoint);
+      if (!active.current || controller.signal.aborted || contextSignal.aborted || request !== sequence.current) return;
+      setState({ data: result, busy: false, error: "", syncBusy: false });
+      if (refreshWorkspace) onWorkspaceRefresh();
+    } catch (caught) {
+      if (!active.current || controller.signal.aborted || contextSignal.aborted || request !== sequence.current) return;
+      const message = caught instanceof Error ? caught.message : "Project Alpha project creation is unavailable.";
+      setState({ data: null, busy: false, error: message, syncBusy: false });
+      if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) onInvalidated(message);
+    } finally { if (pending.current === controller) pending.current = null; }
+  };
+  useEffect(() => {
+    active.current = true;
+    const abort = () => { sequence.current += 1; pending.current?.abort(); };
+    contextSignal.addEventListener("abort", abort);
+    if (endpoint) void load(endpoint);
+    return () => { active.current = false; contextSignal.removeEventListener("abort", abort); abort(); };
+  }, [endpoint, contextVersion, contextSignal]);
+  if (!endpoint || !exactRoot) return null;
+  const requestSync = async () => {
+    const action = state.data?.sync.requestSync;
+    if (!action || state.busy || state.syncBusy || contextSignal.aborted) return;
+    const href = sameOriginAction(action, exactRoot.sourceId, "POST", endpoint);
+    if (!href || !window.confirm(`Request an immediate synchronization from ${state.data!.source.displayName}? Project Alpha remains the project owner.`)) return;
+    const controller = new AbortController(), request = ++sequence.current; pending.current = controller;
+    setState(value => ({ ...value, syncBusy: true, error: "" }));
+    try {
+      await api(href, { method: "POST", body: JSON.stringify({}), signal: controller.signal });
+      if (!active.current || controller.signal.aborted || contextSignal.aborted || request !== sequence.current) return;
+      await load(state.data!.sync.refresh.href, true);
+    } catch (caught) {
+      if (!active.current || controller.signal.aborted || contextSignal.aborted || request !== sequence.current) return;
+      const message = caught instanceof Error ? caught.message : "Project Alpha synchronization could not be requested.";
+      setState(value => ({ ...value, syncBusy: false, error: message }));
+      if (caught instanceof ApiError && [401, 403, 404, 409].includes(caught.status)) onInvalidated(message);
+    } finally { if (pending.current === controller) pending.current = null; }
+  };
+  const result = state.data, externalHref = result?.action ? safeHttpsExternal(result.action.href) : null;
+  return <section className="client-project-management" aria-label="Project creation" aria-busy={state.busy || state.syncBusy}>
+    {state.busy && <p role="status">Loading Project Alpha project creation…</p>}
+    {state.error && <div role="alert"><p>{state.error}</p><button type="button" className="button-ghost" onClick={() => void load(endpoint)}>Retry project creation status</button></div>}
+    {result && <>
+      <div className="client-project-management-summary"><div><strong>Project creation</strong><p>{result.availability.explanation}</p></div>
+        {externalHref && result.action && <a className="button button-orange" href={externalHref} target="_blank" rel="noopener noreferrer">{result.action.label}<span className="visually-hidden"> (opens in a new tab)</span></a>}</div>
+      {externalHref && <p>Complete the project in {result.source.displayName}. It will appear here after Project Alpha synchronizes.</p>}
+      <dl><dt>Synchronization</dt><dd>{result.sync.status}</dd><dt>Last attempt</dt><dd>{syncDate(result.sync.lastAttemptAt)}</dd><dt>Last success</dt><dd>{syncDate(result.sync.lastSuccessAt)}</dd></dl>
+      <p>{result.sync.explanation}</p>
+      <div className="client-project-management-actions">
+        <button type="button" className="button-ghost" disabled={state.syncBusy} onClick={() => void load(result.sync.refresh.href, true)}>{result.sync.refresh.label}</button>
+        {result.sync.requestSync && <button type="button" className="button-ghost" disabled={state.syncBusy} onClick={() => void requestSync()}>{state.syncBusy ? "Requesting synchronization…" : result.sync.requestSync.label}</button>}
+      </div>
+    </>}
+  </section>;
 }
 
 function ClientCollection<T extends CollectionItem>({ collection, label, initial, page: initialPage, client, contextVersion,
@@ -210,9 +333,9 @@ function ContactList({ contacts }: { contacts: ClientContact[] }) {
   })}</div>;
 }
 
-function BusinessProjects({ initial, page, client, contextVersion, contextSignal, onInvalidated }: {
+function BusinessProjects({ initial, page, client, contextVersion, contextSignal, onInvalidated, onWorkspaceRefresh }: {
   initial: BusinessProject[]; page?: ClientCollectionPage; client: ClientSummary; contextVersion?: string;
-  contextSignal: AbortSignal; onInvalidated: (message: string) => void;
+  contextSignal: AbortSignal; onInvalidated: (message: string) => void; onWorkspaceRefresh: () => void;
 }) {
   const readFilter = () => {
     const value = new URLSearchParams(location.search).get("business_status");
@@ -269,6 +392,8 @@ function BusinessProjects({ initial, page, client, contextVersion, contextSignal
   const calendarDate = (value: string | null) => value && /^\d{4}-\d{2}-\d{2}$/.test(value) ? value : value ? date(value) : "Not set";
   return <Card title="Business projects">
     <p>Projects recorded for this client in Project Alpha. This list does not grant portal or delivery access.</p>
+    <ProjectManagementRouting client={client} contextVersion={contextVersion} contextSignal={contextSignal}
+      onInvalidated={onInvalidated} onWorkspaceRefresh={onWorkspaceRefresh} />
     {page?.available !== false && <label className="client-hub-business-filter">Project status<select value={filter} onChange={event => selectFilter(event.target.value)}>
       <option value="all">All projects</option><option value="current">Current projects</option><option value="completed">Completed</option><option value="cancelled">Cancelled</option>
     </select></label>}
@@ -365,7 +490,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
         emptyTitle="No accounts" emptyDetail="No linked portal account is active.">
         {items => <div className="simple-rows">{items.map(account => <div key={collectionKey("accounts", account)}><div><strong>{account.display_name}</strong><small>Explicit account record</small>{canReviewFeedback && <a href={`/operations/feedback?accountId=${encodeURIComponent(account.id)}`}>View client feedback</a>}</div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div>}
       </ClientCollection></Card>
-      {data.businessProjects && <BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects} />}
+      {data.businessProjects && <BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects} onWorkspaceRefresh={refresh} />}
       {data.client.root_namespace === "business" && data.client.source_id && data.contextVersion && <ClientBusinessActivity
         root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: data.client.kind, publicId: data.client.public_id }}
         contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}

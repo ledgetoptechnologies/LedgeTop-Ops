@@ -14,6 +14,7 @@ interface Directory {
     status: "never" | "running" | "success" | "failed" | "deferred"; errorCode: string | null; failureCount: number }> | null;
   portal?: { available: boolean; authorities: Array<{ sourceId: string; state: Connector["state"]; version: number; activeRevision: number; connectorRevision: number }>;
     recovery: { version: number; sourceId: string; action: string; startedAt: string } | null };
+  projectManagement?: Array<{ sourceId: string; version: number; revision: number; enabled: boolean; reviewedUrlTemplate: string | null }>;
 }
 function connector(sourceId = secondary, state: Connector["state"] = "active"): Connector {
   return { sourceId, displayName: sourceId === primary ? "Primary company" : "Business B", producerBindingId: sourceId === primary ? "producer-primary" : "producer-business-b",
@@ -105,6 +106,55 @@ test("initial loading and read failure offer an explicit retry without fabricate
   await expect(page.getByRole("heading", { name: "Primary connection", exact: true })).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.locator(".alpha-connections")).toContainText("Sync: Not yet run");
+});
+
+test("project management config is exact-source, reviewed, versioned and never creates a local project", async ({ page }) => {
+  const data: Directory = { ...directory([connector(primary), connector()]), projectManagement: [] };
+  const requests = await fixture(page, data, async (route, path) => {
+    if (route.request().method() !== "PUT" || !path.endsWith("/project-management")) return false;
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+    expect(path).toBe(`${endpoint}/${encodeURIComponent(secondary)}/project-management`);
+    expect(body.expectedConnectorVersion).toBe(3); expect(body.expectedVersion).toBeNull();
+    expect(body.reviewedUrlTemplate).toBe("https://business-b.example.test/clients/{recordId}/projects/create");
+    expect(body.idempotencyKey).toMatch(/^[A-Za-z0-9_-]{16,128}$/);
+    const saved = { sourceId: secondary, version: 1, revision: 1, enabled: true, reviewedUrlTemplate: body.reviewedUrlTemplate as string };
+    data.projectManagement = [saved];
+    await route.fulfill({ json: { projectManagement: { ...saved, replayed: false } } }); return true;
+  });
+  await page.goto("/administration");
+  const primaryCard = page.getByRole("region", { name: "Primary company connection" });
+  const secondaryCard = page.getByRole("region", { name: "Business B connection" });
+  await expect(primaryCard.getByRole("group", { name: "Project management" })).toContainText("Not configured");
+  const projectManagement = secondaryCard.getByRole("group", { name: "Project management" });
+  await projectManagement.getByRole("checkbox", { name: "Enable external project creation" }).check();
+  await projectManagement.getByLabel("Reviewed Project Alpha URL template").fill("https://business-b.example.test/clients/{recordId}/projects/create");
+  await confirmation(page, () => projectManagement.getByRole("button", { name: "Save project route" }).click(), /exact source.*does not grant Project Alpha access or create a project in Operations/i, true);
+  await expect(projectManagement).toContainText("Enabled");
+  expect(requests.filter(row => row.method === "PUT")).toHaveLength(1);
+  expect(requests.filter(row => row.method === "PUT")[0]!.csrf).toBe("csrf-fixture");
+  expect(requests.some(row => row.path === "/api/projects" || row.path.includes("/create-project"))).toBe(false);
+});
+
+test("project management rejects unsafe templates locally and reports unavailable registry and source state", async ({ page }) => {
+  const data: Directory = { ...directory([connector(primary), { ...connector(), state: "suspended", readVisible: true }]) };
+  const requests = await fixture(page, data);
+  await page.goto("/administration");
+  await expect(page.getByRole("region", { name: "Primary company connection" }).getByRole("group", { name: "Project management" }))
+    .toContainText("Requires coordinated database upgrade");
+  expect(requests.filter(row => row.method === "PUT")).toHaveLength(0);
+
+  data.projectManagement = [];
+  await page.getByRole("button", { name: "Refresh connection status" }).click();
+  await expect(page.getByRole("region", { name: "Business B connection" }).getByRole("group", { name: "Project management" }))
+    .toContainText("Activate this connection");
+  data.connectors[1]!.state = "active";
+  await page.getByRole("button", { name: "Refresh connection status" }).click();
+  const projectManagement = page.getByRole("region", { name: "Business B connection" }).getByRole("group", { name: "Project management" });
+  await projectManagement.getByRole("checkbox", { name: "Enable external project creation" }).check();
+  await projectManagement.getByLabel("Reviewed Project Alpha URL template").fill("http://user:secret@example.test/projects?token=secret");
+  await projectManagement.getByRole("button", { name: "Save project route" }).click();
+  await expect(projectManagement.getByRole("alert")).toContainText("must use HTTPS");
+  expect(requests.filter(row => row.method === "PUT")).toHaveLength(0);
 });
 
 test("state and visibility changes require confirmation and preserve their separate consequences", async ({ page }) => {

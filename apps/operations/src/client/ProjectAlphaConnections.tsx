@@ -14,7 +14,9 @@ type Recovery = { sourceId: string; lastAttemptAt: string | null; lastSuccessAt:
 type PortalAuthority = { sourceId: string; state: Connector["state"]; version: number; activeRevision: number; connectorRevision: number };
 type PortalStatus = { available: boolean; authorities: PortalAuthority[];
   recovery: { version: number; sourceId: string; action: string; startedAt: string } | null };
-type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null; portal?: PortalStatus };
+type ProjectManagementRoute = { sourceId: string; version: number; revision: number; enabled: boolean; reviewedUrlTemplate: string | null };
+type Directory = { connectors: Connector[]; health: Health[]; legacyPrimary: boolean; recovery?: Recovery[] | null; portal?: PortalStatus;
+  projectManagement?: ProjectManagementRoute[] };
 const PRIMARY = "project-alpha:primary";
 const field = (form: FormData, name: string) => String(form.get(name) ?? "").trim();
 function revision(form: FormData, path: string) {
@@ -30,6 +32,81 @@ function CredentialFields() {
   </>;
 }
 function date(value: string | null) { return value ? new Date(value.includes("T") ? value : `${value.replace(" ", "T")}Z`).toLocaleString() : "Not yet"; }
+
+function projectManagementTemplateError(value: string): string | null {
+  const template = value.trim();
+  if (!template) return "Enter the reviewed Project Alpha project URL template.";
+  let parsed: URL;
+  try { parsed = new URL(template); } catch { return "Enter a complete HTTPS URL."; }
+  if (parsed.protocol !== "https:") return "The project URL template must use HTTPS.";
+  if (parsed.username || parsed.password) return "The project URL template cannot contain credentials.";
+  if (parsed.search || parsed.hash) return "The project URL template cannot contain a query or fragment.";
+  const placeholders = template.match(/\{recordId\}/g) ?? [];
+  if (placeholders.length > 1) return "Use {recordId} at most once.";
+  if (/[{}]/.test(template.replace("{recordId}", ""))) return "Only the {recordId} placeholder is supported.";
+  if (placeholders.length) {
+    const index = template.indexOf("{recordId}"), before = template[index - 1], after = template[index + "{recordId}".length];
+    if (before !== "/" || (after !== undefined && after !== "/")) return "{recordId} must be one complete path segment.";
+  }
+  return null;
+}
+
+function ProjectManagementConfiguration({ connector, route, registryAvailable, disabled, onRefresh }: {
+  connector: Connector; route?: ProjectManagementRoute; registryAvailable: boolean; disabled: boolean; onRefresh: () => void;
+}) {
+  const [enabled, setEnabled] = useState(Boolean(route?.enabled));
+  const [template, setTemplate] = useState(route?.reviewedUrlTemplate ?? "");
+  const [dirty, setDirty] = useState(false), [busy, setBusy] = useState(false);
+  const [error, setError] = useState(""), [message, setMessage] = useState("");
+  useEffect(() => {
+    if (dirty) return;
+    setEnabled(Boolean(route?.enabled)); setTemplate(route?.reviewedUrlTemplate ?? "");
+  }, [route?.enabled, route?.reviewedUrlTemplate, route?.version, dirty]);
+  if (!registryAvailable) return <div className="alpha-project-management" role="group" aria-label="Project management">
+    <p><strong>Project creation</strong> · Requires coordinated database upgrade</p>
+    <p>Operations will not create a local project or guess an external Project Alpha route.</p>
+  </div>;
+  const editable = connector.state === "active" && connector.readVisible;
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (busy || disabled || !editable || !dirty) return;
+    const nextTemplate = template.trim(), validation = enabled ? projectManagementTemplateError(nextTemplate) : null;
+    if (validation) { setError(validation); return; }
+    const action = enabled ? "enable" : "disable";
+    if (!window.confirm(`${connector.displayName}: ${action === "enable" ? "Enable" : "Disable"} the external Project Alpha project-creation link for this exact source? This does not grant Project Alpha access or create a project in Operations.`)) return;
+    setBusy(true); setError(""); setMessage("");
+    try {
+      const result = await api<{ projectManagement: ProjectManagementRoute }>(
+        `${ENDPOINT}/${encodeURIComponent(connector.sourceId)}/project-management`, {
+          method: "PUT", body: JSON.stringify({ expectedConnectorVersion: connector.version, expectedVersion: route?.version ?? null,
+            idempotencyKey: crypto.randomUUID(), reviewedUrlTemplate: enabled ? nextTemplate : null }),
+        });
+      if (!result.projectManagement || result.projectManagement.sourceId !== connector.sourceId
+        || result.projectManagement.enabled !== enabled || result.projectManagement.reviewedUrlTemplate !== (enabled ? nextTemplate : null))
+        throw new Error("The project-management response could not be verified. Refresh the connection before retrying.");
+      setDirty(false); setMessage(enabled ? "Project creation link enabled." : "Project creation link disabled."); onRefresh();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Project management could not be updated.");
+      onRefresh();
+    } finally { setBusy(false); }
+  };
+  return <div className="alpha-project-management" role="group" aria-label="Project management">
+    <p><strong>Project creation</strong> · {route?.enabled ? "Enabled" : "Not configured"}</p>
+    {!editable ? <p>{connector.state === "retired" ? "This retired connection cannot expose project creation."
+      : "Activate this connection and show its business records before configuring project creation."}</p> : <form onSubmit={submit} aria-busy={busy}>
+      <label className="alpha-project-management-toggle"><input type="checkbox" checked={enabled} disabled={busy || disabled}
+        onChange={event => { setEnabled(event.target.checked); setDirty(true); setError(""); setMessage(""); }} /> Enable external project creation</label>
+      <label htmlFor={`project-management-${connector.sourceId}`}>Reviewed Project Alpha URL template</label>
+      <input id={`project-management-${connector.sourceId}`} type="text" inputMode="url" autoCapitalize="none" autoCorrect="off" spellCheck={false}
+        maxLength={2048} value={template} disabled={!enabled || busy || disabled} aria-describedby={`project-management-help-${connector.sourceId}`}
+        onChange={event => { setTemplate(event.target.value); setDirty(true); setError(""); setMessage(""); }} />
+      <small id={`project-management-help-${connector.sourceId}`}>HTTPS only. No credentials, query, or fragment. Optionally use one whole <code>{"{recordId}"}</code> path segment. Project Alpha still authorizes creation.</small>
+      {error && <p role="alert">{error}</p>}
+      {message && <p role="status">{message}</p>}
+      <button type="submit" className="button-ghost button-small" disabled={busy || disabled || !dirty}>{busy ? "Saving project route…" : "Save project route"}</button>
+    </form>}
+  </div>;
+}
 
 export function ProjectAlphaConnections() {
   const [data, setData] = useState<Directory | null>(null);
@@ -148,6 +225,10 @@ export function ProjectAlphaConnections() {
               { expectedVersion: connector.version, expectedPortalVersion: authority?.version ?? null, action },
               action === "configure" ? "Client portal configuration staged. Review and activate when ready." : action === "activate" ? "Client portal enabled for independently authorized workspaces." : "Client portal paused.");
           }} />}
+        <ProjectManagementConfiguration connector={connector}
+          route={data.projectManagement?.find(row => row.sourceId === connector.sourceId)}
+          registryAvailable={Array.isArray(data.projectManagement)} disabled={controlsBusy}
+          onRefresh={() => { setLoading(true); setRevisionToken(value => value + 1); }} />
         <details><summary>Connection details</summary>
           <dl><dt>Source</dt><dd>{connector.sourceId}</dd><dt>Producer</dt><dd>{connector.producerBindingId}</dd>
             <dt>Destination</dt><dd>{connector.snapshotOrigin}{connector.snapshotBasePath}</dd><dt>Application</dt><dd>{connector.applicationKey}</dd>
