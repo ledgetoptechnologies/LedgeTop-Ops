@@ -92,6 +92,7 @@ import {
   registerR2CrudRoutes,
 } from "./r2-crud";
 import { requiresAdministratorForMutation } from "./r2-crud-validation";
+import { listAdminAuditEvents } from "./admin-audit";
 import { registerClientFeedbackRoutes, staffFeedbackEntryEnabled } from "./client-feedback";
 import { processClientFeedbackNotifications } from "./client-feedback-notifications";
 import { processProjectAccessExpiryNotifications } from "./project-access-expiry-notifications";
@@ -3000,14 +3001,11 @@ app.put("/api/admin/roles/:id", async (c) => {
   return c.json({ success: true });
 });
 app.get("/api/admin/audit", async (c) => {
-  await requireGlobal(c.env, c.get("principal"), "audit.view");
-  return c.json({
-    events: (
-      await c.env.OPS_DB.prepare(
-        "SELECT id,actor_type,actor_email,actor_display_name,action,entity_type,entity_id,division_id,details_json,created_at FROM audit_events ORDER BY created_at DESC LIMIT 500",
-      ).all()
-    ).results,
-  });
+  return c.json(await listAdminAuditEvents(c.env, c.get("principal"), {
+    actor: c.req.query("actor"), action: c.req.query("action"), category: c.req.query("category"),
+    entity: c.req.query("entity"), division: c.req.query("division"), result: c.req.query("result"),
+    from: c.req.query("from"), to: c.req.query("to"), cursor: c.req.query("cursor"), limit: c.req.query("limit"),
+  }));
 });
 registerProjectAlphaConnectorAdminRoutes(app);
 app.post("/api/admin/integrations/project-alpha/sync", async (c) => {

@@ -28,6 +28,7 @@ import { DropboxImportDialog } from "./DropboxImportDialog";
 import { ClientHubWorkspaceRouter } from "./BusinessProjectWorkspace";
 import { DeliveryLinksPage } from "./DeliveryLinksPage";
 import { ProjectAlphaConnections } from "./ProjectAlphaConnections";
+import { AdminAuditHistory } from "./AdminAuditHistory";
 import { RecentDeliveryLinks } from "./RecentDeliveryLinks";
 import { NativeDeliveryGrantPanel } from "./NativeDeliveryGrantPanel";
 import { deliveryViewCountText } from "./delivery-view-count";
@@ -6510,13 +6511,6 @@ function Configurations({ session }: { session: Session }) {
 
 function Administration({ session }: { session: Session }) {
   const canManageConnections = session.user.isAdministrator && allowed(session.user, "integrations.manage");
-  const audit = useLoad(
-    () =>
-      allowed(session.user, "audit.view")
-        ? api<{ events: any[] }>("/api/admin/audit")
-        : Promise.resolve({ events: [] }),
-    [],
-  );
   return (
     <>
       <div className="dashboard-grid">
@@ -6539,46 +6533,7 @@ function Administration({ session }: { session: Session }) {
       {session.capabilities?.clientWorkspaceManagerRecovery?.enabled === true && allowed(session.user, "operations.manage") && <ClientWorkspaceManagerRecovery />}
       {session.capabilities?.delegatedShareProvisioning?.enabled === true && session.user.isAdministrator && allowed(session.user, "delivery.share.audit") && <DelegatedShareAdministration />}
       {session.capabilities?.portalIdentityDenials?.enabled === true && session.user.isAdministrator && <PortalIdentityDenyAdministration />}
-      {allowed(session.user, "audit.view") && (
-        <Card title="Audit history">
-          <ErrorLine error={audit.error} />
-          {audit.data?.events.length ? (
-            <table>
-              <thead>
-                <tr>
-                  <th>Time</th>
-                  <th>Actor</th>
-                  <th>Action</th>
-                  <th>Resource</th>
-                </tr>
-              </thead>
-              <tbody>
-                {audit.data.events.map((event) => (
-                  <tr key={event.id}>
-                    <td>{date(event.created_at)}</td>
-                    <td>
-                      {event.actor_display_name ||
-                        event.actor_email ||
-                        event.actor_type}
-                    </td>
-                    <td>
-                      <code>{event.action}</code>
-                    </td>
-                    <td>
-                      {event.entity_type} · {event.entity_id}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          ) : (
-            <EmptyState
-              title="No audit events"
-              detail="Privileged changes will be recorded here."
-            />
-          )}
-        </Card>
-      )}
+      {session.user.isAdministrator && allowed(session.user, "audit.view") && <AdminAuditHistory />}
     </>
   );
 }

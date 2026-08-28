@@ -1,0 +1,21 @@
+.admin-audit { display: grid; gap: 1rem; min-width: 0; overflow-wrap: anywhere; }
+.admin-audit-intro, .admin-audit small, .admin-audit-complete, .admin-audit-actions span { color: var(--muted); }
+.admin-audit-intro, .admin-audit-complete { margin: 0; }
+.admin-audit-filters { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .8rem; align-items: end; }
+.admin-audit-filters label { display: grid; gap: .35rem; min-width: 0; color: var(--muted); font-size: .82rem; font-weight: 700; }
+.admin-audit-filters input, .admin-audit-filters select { width: 100%; min-width: 0; min-height: 44px; }
+.admin-audit-filter-actions, .admin-audit-actions { display: flex; flex-wrap: wrap; gap: .65rem; align-items: center; }
+.admin-audit-filter-actions { grid-column: span 4; }
+.admin-audit-filter-actions button, .admin-audit-actions button { min-height: 44px; white-space: normal; }
+.admin-audit .notice { display: flex; flex-wrap: wrap; gap: .75rem; align-items: center; justify-content: space-between; }
+.admin-audit-events { display: grid; gap: .75rem; list-style: none; margin: 0; padding: 0; }
+.admin-audit-events > li { display: grid; gap: .65rem; min-width: 0; padding: .9rem 0; border-bottom: 1px solid var(--line); }
+.admin-audit-event-heading { display: flex; justify-content: space-between; align-items: start; gap: .75rem; min-width: 0; }
+.admin-audit-event-heading > div { display: grid; gap: .25rem; min-width: 0; }
+.admin-audit-events dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .55rem; margin: 0; }
+.admin-audit-events dl > div { display: grid; gap: .2rem; min-width: 0; }
+.admin-audit-events dt { color: var(--muted); font-size: .75rem; font-weight: 750; }
+.admin-audit-events dd { margin: 0; }
+@media (min-width: 1800px) { .admin-audit-filters { grid-template-columns: repeat(8, minmax(0, 1fr)); } .admin-audit-filter-actions { grid-column: span 8; } }
+@media (max-width: 1000px) { .admin-audit-filters { grid-template-columns: repeat(2, minmax(0, 1fr)); } .admin-audit-filter-actions { grid-column: span 2; } .admin-audit-events dl { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .admin-audit-filters, .admin-audit-events dl { grid-template-columns: minmax(0, 1fr); } .admin-audit-filter-actions { grid-column: auto; flex-direction: column; align-items: stretch; } .admin-audit-actions { flex-direction: column; align-items: stretch; } }
