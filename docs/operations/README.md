@@ -8,6 +8,10 @@ See [Staff Client Hub audit timeline](client-audit-timeline.md) for the bounded,
 source-qualified event federation, per-adapter authorization and coverage,
 cursor/redaction contract, and online-retention boundary.
 
+See [Project Alpha service-assignment receiver foundation](project-alpha-service-assignment-receiver.md)
+for the default-off DELIVERY_DB ingress, explicit source/workspace admission,
+tenant-containment fences, and the later coordinated enrollment boundary.
+
 This runbook records operator-owned controls that are not safely expressible in the application repository.
 
 ## Staging

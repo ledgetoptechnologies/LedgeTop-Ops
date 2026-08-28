@@ -19,6 +19,7 @@ const projectAlphaCompatibilityFixtures = [
   "packages/shared/fixtures/project-alpha-draft-quote-v1.json",
 ];
 const portalWireFixture = "packages/shared/fixtures/portal-integration-wire-v1.json";
+const serviceAssignmentFixture = "packages/shared/fixtures/project-alpha-service-assignments-v1.json";
 
 const expectedRateLimits = [
   ["ACCESS_CODE_RATE_LIMITER", "19462026", 10],
@@ -54,6 +55,9 @@ const expectedPublicRoutes = [
   "POST /api/internal/client-request-attachments/:attachmentId/scanned",
   "POST /api/internal/project-alpha/catalog-v2",
   "POST /api/internal/project-alpha/portal-v2",
+  "POST /api/internal/project-alpha/service-assignments-v1",
+  "POST /api/internal/project-alpha/sources/:sourceId/portal-v2",
+  "POST /api/internal/project-alpha/sources/:sourceId/service-assignments-v1",
   "POST /api/public/shares/:publicId/bulk-download",
   "POST /api/public/shares/:publicId/cloud-transfers",
   "POST /api/public/shares/:publicId/cloud-transfers/:jobId/cancel",
@@ -90,7 +94,7 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "67f04e02cda0c73a52596fb85839842db7d5010e82510617b904caf9aec51a83");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "db665d926993bd852b88b7fe214d7eb3611bec53ff80fcaf61df0267d5a3b0d3");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -126,6 +130,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.CLIENT_DELEGATED_SHARES_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_SYNC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PRICING_HINTS_ENABLED, "false");
   assert.equal(config.vars.R2_BUCKET_NAME, "client-data");
   assert.deepEqual(config.r2_buckets, [{ binding: "DATA_BUCKET", bucket_name: "client-data" }]);
@@ -237,6 +242,17 @@ test("the neutral Project Alpha wire contract stays byte-pinned across every rou
   assert(!runtime.includes("X-LTDS-Scope"));
 });
 
+test("the PA service-assignment producer fixture stays contract-pinned", () => {
+  assert.equal(normalizedSha256(serviceAssignmentFixture), "6a85706e5ac2cc82a48ed58a993e3dd7f3308704bf0b897cd475106330f59fd9");
+  const fixture = readJson(serviceAssignmentFixture);
+  assert.equal(fixture.schemaVersion, 1);
+  assert.equal(fixture.requiredCapability, "portal.service-assignments.publish");
+  assert.equal(fixture.snapshotPage.schemaVersion, 1);
+  assert.equal(fixture.snapshotActivate.schemaVersion, 1);
+  assert.equal(fixture.tombstoneEvent.schemaVersion, 1);
+  assert.equal("workspacePublicId" in fixture.snapshotPage.items[0], false);
+});
+
 test("the TrueNAS thumbnail runbooks retain the production edge and lease contract", () => {
   const config = readJson("apps/operations/wrangler.jsonc");
   const renderer = read("apps/operations/src/worker/thumbnail-renderer-api.ts");
@@ -277,8 +293,8 @@ test("the TrueNAS thumbnail runbooks retain the production edge and lease contra
   assert(flatRunbook.includes("A stale or reclaimed attempt receives `404`"));
   assert(flatRunbook.includes("Video eligibility is at most `10 * 1024 * 1024 * 1024` bytes"));
   assert(flatRunbook.includes("`r2PresignedUrl` valid for 900 seconds"));
-  assert(flatRunbook.includes("Do not pass either network URL or any authentication header to FFmpeg"));
-  assert(flatRunbook.includes("`file,pipe` protocols enabled"));
+  assert(flatRunbook.includes("Do not pass either remote URL or any authentication header directly to FFmpeg"));
+  assert(flatRunbook.includes("loopback-only range proxy; FFprobe and FFmpeg see only that loopback endpoint"));
   assert(flatRunbook.includes("This repository has no `.github/workflows/deploy-workers.yml`"));
   assert(!runbook.includes("`.github/workflows/deploy-workers.yml` auto-deploys"));
   assert(flatSetup.includes("Explicitly block or Access-protect the ingest prefix there, but allow the exact renderer prefix"));

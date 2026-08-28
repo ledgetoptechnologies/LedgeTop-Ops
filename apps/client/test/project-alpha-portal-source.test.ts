@@ -17,6 +17,9 @@ function databaseAdapter(sqlite: DatabaseSync): D1Database {
       };
       return statement;
     },
+    async batch(statements: D1PreparedStatement[]) {
+      return Promise.all(statements.map(statement => statement.run()));
+    },
   };
   return adapter as unknown as D1Database;
 }
