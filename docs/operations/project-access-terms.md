@@ -76,6 +76,44 @@ If creation must be rolled back, stop new term issuance while retaining a
 terms-aware reader for every already-issued grant; deleting terms or reverting
 the consumer to pre-terms code is not a rollback strategy.
 
+Migration `0172_project_access_authority_history.sql` adds the append-only
+authority lifecycle that follows these terms. It marks collection start when
+applied and deliberately performs no guessed backfill for existing terms,
+invitations, requests or authenticated grants. New explicit term creation now
+requires the complete 0172 schema so every new authority can be recorded
+atomically. Exact event replays are idempotent; conflicting reuse fails, and the
+bounded expiry reconciler records only qualifying boundaries on or after the
+immutable collection start. Staff coverage must say **available since** that
+timestamp rather than implying lifetime history.
+
+Unlike the original 0164 rollout, writer-first alone is not a safe 0172 rollout.
+An in-flight request can read history as absent, retain a mutation batch without
+an event, and commit it after the migration starts coverage. First freeze every
+project-access authority mutation: request/invitation create, approve/publish,
+accept and revoke; authenticated-grant create/publish, revoke and restore; and
+expiry reconciliation or notification work that calls reconciliation. Drain
+all in-flight HTTP requests, leases, queues, scheduled jobs and reconciliation
+batches before continuing. Both new writer builds must default
+`PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED=false`. That flag keeps the barrier
+closed after cutover, but cannot stop an old build that does not recognize it;
+close external mutation ingress/schedulers, move **100% of traffic** to both
+flag-false writers, and drain every old-version and in-flight request/job before
+migration. Existing access reads remain live throughout.
+
+With that barrier still closed, deploy and verify both schema-tolerant Client
+and Operations writers. Confirm history is `not_collected`, existing reads keep
+enforcing terms, and new explicit-term writes fail `503` while the schema is
+absent. Then apply 0172 to the shared Delivery D1 database. Verify the two
+tables, singleton start row, foreign keys, exact replay, expiry reconciliation,
+cross-source/project rejection, and at least one canonical lifecycle event plus
+the Client Hub coverage start before unfreezing mutations. After schema
+verification, enable the flag in both Workers together while general mutation
+ingress remains frozen, run the isolated lifecycle test, and reopen ingress and
+schedulers only after its event is verified. A partial schema is
+a hard error. Rollback must keep history-aware readers/writers, the immutable
+start row and `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED=false`; fix forward rather than reverting to a
+writer that omits events.
+
 ## Remaining full-goal requirements
 
 - Primary and secondary staff grant creation now have the same explicit

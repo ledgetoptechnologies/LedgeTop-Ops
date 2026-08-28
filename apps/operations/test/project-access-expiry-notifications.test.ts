@@ -4,6 +4,7 @@ import { Miniflare } from "miniflare";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "../src/worker/types";
 import { buildSmtpMessage } from "../src/worker/mailer";
+import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
 import {
   dispatchProjectAccessExpiryNotices,
   processProjectAccessExpiryNotifications,
@@ -12,6 +13,7 @@ import {
 } from "../src/worker/project-access-expiry-notifications";
 
 const migration = readFileSync(new URL("../../client/migrations/0169_project_access_expiry_notifications.sql", import.meta.url), "utf8");
+const authorityHistoryMigration = readFileSync(new URL("../../client/migrations/0172_project_access_authority_history.sql", import.meta.url), "utf8");
 
 const baseSchema = `
   PRAGMA foreign_keys=ON;
@@ -88,6 +90,7 @@ describe("project access expiry processor", {timeout: 90_000}, () => {
     await db.exec(baseSchema.replace(/\s*\n\s*/g," "));
     await db.exec(migration.replace(/--.*$/gm,"").replace(/\s*\n\s*/g," "));
     env = {DELIVERY_DB:db,DELIVERY_BASE_URL:"https://client.example.test",
+      PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:"true",
       PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED:"true",CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:"true",
       SMTP_NOTIFICATIONS_ENABLED:"true",SMTP_HOST:"smtp.example.test",SMTP_USERNAME:"smtp@example.test",
       SMTP_PASSWORD:"test-only-password",SMTP_FROM:"notify@example.test",
@@ -148,10 +151,45 @@ describe("project access expiry processor", {timeout: 90_000}, () => {
 
   const rows = () => db.prepare("SELECT event_type,status,attempt_count,error_code,message_id_key FROM portal_project_access_notice_outbox ORDER BY event_type").all();
 
-  it("is inert by default and does not inspect an unavailable database", async () => {
-    const off = {PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED:"false",
-      DELIVERY_DB:new Proxy({}, {get(){throw new Error("database touched");}})} as unknown as Env;
-    await expect(processProjectAccessExpiryNotifications(off)).resolves.toEqual({enabled:false,staged:0,suppressed:0,processed:0});
+  it("is inert and writes no history when authority mutations are absent or disabled", async () => {
+    const {PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED: _enabled,...absent}=env;
+    for(const target of [absent,{...env,PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:"false"}] as Env[])
+      await expect(processProjectAccessExpiryNotifications(target)).resolves.toEqual({enabled:false,staged:0,suppressed:0,processed:0});
+    expect(await db.prepare("SELECT count(*) n FROM portal_project_access_notice_outbox").first<number>("n")).toBe(0);
+    expect(await db.prepare("SELECT count(*) n FROM sqlite_master WHERE type='table' AND name='portal_project_access_authority_events'").first<number>("n")).toBe(0);
+  });
+
+  it('fails loudly for a partial authority-history schema even when notifications are off',async()=>{
+    await db.prepare(`CREATE TABLE portal_project_access_authority_history_state(singleton INTEGER PRIMARY KEY,collection_started_at TEXT)`).run();
+    env.PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED='false';
+    await expect(processProjectAccessExpiryNotifications(env)).rejects.toThrow(/schema is incomplete/);
+  });
+
+  it("records exact authority expiry with notifications off and replays without duplication",async()=>{
+    await db.exec(`ALTER TABLE portal_v2_invitations ADD COLUMN revoked_at TEXT;
+      ALTER TABLE portal_v2_invitations ADD COLUMN accepted_by_identity_id TEXT;
+      ALTER TABLE portal_v2_invitations ADD COLUMN accepted_at TEXT;
+      ALTER TABLE portal_v2_invitations ADD COLUMN created_at TEXT;
+      ALTER TABLE portal_v2_authenticated_delivery_grants ADD COLUMN folder_binding_id TEXT;
+      ALTER TABLE portal_v2_authenticated_delivery_grants ADD COLUMN created_at TEXT;
+      CREATE TABLE portal_v2_folder_bindings(id TEXT PRIMARY KEY,workspace_id TEXT,owner_scope_type TEXT,owner_public_id TEXT);
+      CREATE TABLE portal_workspace_invitation_requests(id TEXT PRIMARY KEY,workspace_id TEXT,source_id TEXT,scope_type TEXT,scope_public_id TEXT,access_terms_id TEXT);
+      CREATE TABLE portal_v2_authenticated_delivery_grant_audit(id TEXT PRIMARY KEY,grant_id TEXT);
+      CREATE TABLE portal_native_staff_grant_events(id TEXT PRIMARY KEY,grant_id TEXT,authorization_id TEXT,action TEXT);`);
+    await db.batch(splitD1MigrationStatements(authorityHistoryMigration).map(sql=>db.prepare(sql)));
+    const expiry=new Date().toISOString(),createdAt=new Date(Date.now()-100).toISOString();
+    await db.batch([
+      db.prepare(`INSERT INTO portal_project_access_terms VALUES('history-terms','workspace-a','project-alpha:one','project-a','collaborator','specific_date',?)`).bind(expiry),
+      db.prepare(`INSERT INTO portal_v2_folder_bindings VALUES('history-binding','workspace-a','project','project-a')`),
+      db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grants
+        (id,workspace_id,audience_type,status,expires_at,revoked_at,access_terms_id,folder_binding_id,created_at)
+        VALUES('history-grant','workspace-a','principal','active',NULL,NULL,'history-terms','history-binding',?)`).bind(createdAt),
+    ]);
+    env.PROJECT_ACCESS_EXPIRY_NOTIFICATIONS_ENABLED='false';
+    expect(await processProjectAccessExpiryNotifications(env)).toEqual({enabled:false,staged:0,suppressed:0,processed:0});
+    expect(await processProjectAccessExpiryNotifications(env)).toEqual({enabled:false,staged:0,suppressed:0,processed:0});
+    expect(await db.prepare(`SELECT event_kind,actor_type,count(*) n FROM portal_project_access_authority_events GROUP BY event_kind,actor_type`).first())
+      .toEqual({event_kind:'access_expired',actor_type:'system',n:1});
   });
 
   it("stages only exact identity authorities and keeps tenants isolated", async () => {

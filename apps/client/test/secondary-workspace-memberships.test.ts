@@ -83,8 +83,9 @@ describe('secondary source-owned collaborator memberships',{timeout:90_000,concu
           'workspace','primary-existing','["workspace.view"]','preserved-hash',1)`),
     ]);
     await migrate('0171_secondary_workspace_membership_management.sql');
+    await migrate('0172_project_access_authority_history.sql');
     env={DELIVERY_DB:db,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true',
-      CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true'} as Env;
+      CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true'} as Env;
     a=await secondary(sourceA);b=await secondary(sourceB);
   },240_000);
   afterAll(async()=>mf.dispose());

@@ -98,15 +98,18 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
   beforeAll(async()=>{
     runtime=new Miniflare({modules:true,compatibilityDate:'2026-07-22',script:"export default {fetch(){return new Response('native-producer')}}",d1Databases:['OPS_DB','DELIVERY_DB','EMPTY_DB']});
     ops=await runtime.getD1Database('OPS_DB') as D1Database;delivery=await runtime.getD1Database('DELIVERY_DB') as D1Database;
-    for(const [db,path,cap] of [[ops,new URL('../migrations/',import.meta.url),'0040'],[delivery,new URL('../../client/migrations/',import.meta.url),'0164']] as const)
+    for(const [db,path,cap] of [[ops,new URL('../migrations/',import.meta.url),'0040'],[delivery,new URL('../../client/migrations/',import.meta.url),'0165']] as const)
       for(const name of readdirSync(path).filter(n=>/^\d{4}_.*\.sql$/.test(n)&&n.slice(0,4)<=cap).sort())
         await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,path),'utf8')).map(sql=>db.prepare(sql)));
+    await delivery.batch(splitD1MigrationStatements(readFileSync(
+      new URL('../../client/migrations/0172_project_access_authority_history.sql',import.meta.url),'utf8')).map(sql=>delivery.prepare(sql)));
     const primaryCredential={snapshotApiKey:'primary-snapshot-key',eventCurrent:{keyId:'primary-key',algorithm:'ed25519',value:key(1)}},
       secondaryCredential={snapshotApiKey:'secondary-snapshot-key',eventCurrent:{keyId:'secondary-key',algorithm:'ed25519',value:key(2)},
         portalCurrent:{keyId:'portal-key',value:'secondary-portal-secret-at-least-thirty-two-bytes'}};
     const configured:Partial<Env>&ProjectAlphaConnectorEnvironment={OPS_DB:ops,DELIVERY_DB:delivery,PROJECT_ALPHA_BASE_URL:'https://primary.example.test/',PROJECT_ALPHA_API_KEY:primaryCredential.snapshotApiKey,
       APPLICATION_KEY:'ltds_ops',PROJECT_ALPHA_WEBHOOK_ED25519_PUBLIC_KEY:key(1),PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets:{primary:primaryCredential,secondary:secondaryCredential}}),
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',
+      PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true',
       PUBLIC_BASE_URL:'https://operations.example.test',OPERATIONS_SESSION_SECRET:'fixture-session-secret-at-least-32-bytes'};
     // This focused fixture supplies only bindings exercised by the producer.
     env=configured as Env;
@@ -147,6 +150,22 @@ describe('real D1 native staff folder binding and exact principal delegation',{t
     expect(targets.targets).toContainEqual({sourceId,sourceName:'Secondary Alpha',workspaceId:f.operation.workspaceId,workspaceName:`Workspace ${counter}`,projectId:f.project,projectName:`Native Project ${counter}`,projectEndSupported:false});
     const recipients=await searchNativeDeliveryRecipients(env,principal,{...f.operation,q:`Person ${counter}`});expect(recipients.recipients[0]?.principalPublicId).toBe('exact-person');
     const preview=await previewNativeDeliveryGrant(env,principal,f.operation);expect(preview.operation).toEqual(f.operation);expect(preview.contextVersion).toMatch(/^[a-f0-9]{64}$/);
+  });
+  it.each([undefined,'false'] as const)('blocks native create and revoke without writes when the authority mutation flag is %s',async flag=>{
+    const f=await fixture(),body=await input(f),target={...env,PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:flag} as Env;
+    if(flag===undefined)delete (target as Partial<Env>).PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED;
+    const createKey=`native-gate-create-${flag??'absent'}-${counter}`;
+    await expect(createNativeDeliveryGrant(target,principal,body,createKey)).rejects.toMatchObject({status:503});
+    expect(await ops.prepare('SELECT count(*) n FROM native_delivery_authorizations WHERE idempotency_key=?').bind(createKey).first<number>('n')).toBe(0);
+    expect(await delivery.prepare('SELECT count(*) n FROM portal_native_staff_bindings WHERE workspace_id=?').bind(f.operation.workspaceId).first<number>('n')).toBe(0);
+    expect(await delivery.prepare('SELECT count(*) n FROM portal_project_access_terms WHERE workspace_id=?').bind(f.operation.workspaceId).first<number>('n')).toBe(0);
+
+    const created=await create(f,`native-gate-seed-${flag??'absent'}-${counter}`),revokeKey=`native-gate-revoke-${flag??'absent'}-${counter}`;
+    await expect(revokeNativeDeliveryGrant(target,principal,created.grant.id,
+      {folderRef:f.operation.folderRef,expectedVersion:1,reasonCode:'gate_test'},revokeKey)).rejects.toMatchObject({status:503});
+    expect(await ops.prepare('SELECT count(*) n FROM native_delivery_authorizations WHERE idempotency_key=?').bind(revokeKey).first<number>('n')).toBe(0);
+    expect(await delivery.prepare('SELECT status FROM portal_v2_authenticated_delivery_grants WHERE id=?').bind(created.grant.id).first<string>('status')).toBe('active');
+    expect(await delivery.prepare("SELECT count(*) n FROM portal_native_staff_grant_events WHERE grant_id=? AND action='revoked'").bind(created.grant.id).first<number>('n')).toBe(0);
   });
   it('publishes exactly once, replays and preserves all legacy accounts',async()=>{
     const f=await fixture(),before=await delivery.prepare('SELECT count(*) n FROM client_accounts').first('n'),body=await input(f);

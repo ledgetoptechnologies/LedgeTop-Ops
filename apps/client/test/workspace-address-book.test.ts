@@ -60,7 +60,7 @@ describe('workspace address book: real migrated D1',{concurrent:false,timeout:60
   for(const name of readdirSync(path).filter(n=>/^\d{4}_.*\.sql$/.test(n)&&n.slice(0,4)<='0166').sort())
    await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,path),'utf8')).map(sql=>db.prepare(sql)));
   env={DELIVERY_DB:db,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true',
-   CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED:'true',CLIENT_PORTAL_ADDRESS_BOOK_ENABLED:'true',
+   CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED:'true',CLIENT_PORTAL_ADDRESS_BOOK_ENABLED:'true',PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true',
    CLIENT_PORTAL_ADDRESS_BOOK_FINGERPRINT_SECRET:'f'.repeat(64),DELIVERY_SESSION_SECRET:'s'.repeat(64)};
  },180_000);
  afterAll(async()=>mf.dispose());

@@ -4,9 +4,11 @@ import {authorizePortalWorkspaceCapability,type PortalAuthorizationEnv,type Port
 import type {VerifiedClientPrincipal} from './types';
 import {captureWorkspaceInvitationDelegation} from './project-invitation-delegation';
 import {prepareProjectAccessTerms,readProjectAccessTerms,projectAccessTermsSql,type ProjectAccessTermsInput,type ProjectAccessTermsView} from './project-access-terms';
+import {projectAccessAuthorityEvent,projectAccessAuthorityHistoryReady} from './project-access-authority-history';
 import {invitationRecipientEmailHash} from './access-enrollment-receipts';
 import {invitationRequestsReady} from './invitation-approval-policy';
 import {prepareAddressBookContactSelection,type AddressBookContactSelection} from './workspace-address-book';
+import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 export {invitationRequestsReady} from './invitation-approval-policy';
 
 export type WorkspaceInvitationPolicy='allowed'|'disabled'|'require_approval';
@@ -183,6 +185,7 @@ function requestFence(db:InvitationApprovalDatabase,r:RequestRow){return fence(d
 
 export async function submitWorkspaceInvitationRequest(env:PortalAuthorizationEnv,principal:VerifiedClientPrincipal,input:{workspaceId:string;requesterIdentityId:string;
  email:string;target:PortalWorkspaceTarget;capabilities:PortalWorkspaceCapability[];accessTerms?:ProjectAccessTermsInput;addressContact?:AddressBookContactSelection;requestHash:string;idempotencyKey:string}){
+ requireProjectAccessAuthorityMutations(env);
  const db=env.DELIVERY_DB;await ready(db);
  const saved=await command(db,input.workspaceId,input.requesterIdentityId,input.idempotencyKey,'submit',input.requestHash);
  const coordinates={sourceId:PRIMARY_PROJECT_ALPHA_SOURCE_ID,workspaceId:input.workspaceId};
@@ -207,6 +210,9 @@ export async function submitWorkspaceInvitationRequest(env:PortalAuthorizationEn
   ...(terms?[terms.statement,fence(db,`EXISTS(SELECT 1 FROM portal_project_access_terms submitted_term WHERE submitted_term.id=?
     AND ${projectAccessTermsSql({termsId:'submitted_term.id',workspaceId:'submitted_term.workspace_id',projectId:'submitted_term.project_public_id',legacyRetained:'0'})})`,[terms.id])]:[]),db.prepare(`INSERT INTO portal_workspace_invitation_requests(id,workspace_id,source_id,requester_identity_id,recipient_email,scope_type,scope_public_id,capabilities_json,access_terms_id,request_hash,policy_version)
    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).bind(id,input.workspaceId,coordinates.sourceId,input.requesterIdentityId,input.email,input.target.scopeType,input.target.publicId,JSON.stringify(input.capabilities),terms?.id??null,input.requestHash,policy.version),
+   ...(terms?[projectAccessAuthorityEvent(db,{workspaceId:input.workspaceId,sourceId:coordinates.sourceId,projectPublicId:input.target.publicId,
+    accessTermsId:terms.id,authorityType:'invitation_request',authorityId:id,eventKind:'request_submitted',
+    producerEventKey:`invitation-request:submitted:${id}`,actor:{type:'identity',id:input.requesterIdentityId}})]:[]),
   commandInsert(db,input.workspaceId,input.requesterIdentityId,input.idempotencyKey,'submit',input.requestHash,id,null,{requestId:id}),
   db.prepare(`INSERT INTO portal_v2_invitation_rate_limits(workspace_id,actor_identity_id,window_started_at,request_count) VALUES(?,?,datetime('now'),1)
    ON CONFLICT(workspace_id,actor_identity_id) DO UPDATE SET window_started_at=CASE WHEN datetime(window_started_at,'+1 hour')<=datetime('now') THEN datetime('now') ELSE window_started_at END,
@@ -219,6 +225,7 @@ export async function submitWorkspaceInvitationRequest(env:PortalAuthorizationEn
 }
 
 export async function stageApprovedWorkspaceInvitation(env:PortalAuthorizationEnv,input:InvitationReviewInput&{expectedPolicyVersion:number}){
+ requireProjectAccessAuthorityMutations(env);
  const db=env.DELIVERY_DB;await ready(db);const hash=await invitationApprovalDigest(JSON.stringify({sourceId:input.sourceId,workspaceId:input.workspaceId,requestId:input.requestId,
   version:input.expectedVersion,policy:input.expectedPolicyVersion,context:input.expectedContextVersion}));
  const saved=await command(db,input.workspaceId,input.authorization.actorStaffId,input.idempotencyKey,'approve',hash);
@@ -230,6 +237,7 @@ export async function stageApprovedWorkspaceInvitation(env:PortalAuthorizationEn
   fail(409,prepared.unavailableReason??'invitation_request_changed');
  }
  const r=prepared.r,invitationId=crypto.randomUUID(),tokenBytes=crypto.getRandomValues(new Uint8Array(32));
+ const historyReady=await projectAccessAuthorityHistoryReady(db);
  const token=btoa(String.fromCharCode(...tokenBytes)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
  const tokenDigest=new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(token)));
  const tokenHash=btoa(String.fromCharCode(...tokenDigest)).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'');
@@ -240,8 +248,11 @@ export async function stageApprovedWorkspaceInvitation(env:PortalAuthorizationEn
    VALUES(?,?,?,?,?,?,?,?,?)`).bind(input.authorization.id,r.id,r.version,invitationId,input.authorization.actorStaffId,input.authorization.fingerprint,input.expectedContextVersion,prepared.proof.proof,input.authorization.publicationDeadline),
   db.prepare(`UPDATE portal_workspace_invitation_requests SET status='approving',current_approval_id=?,version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND version=? AND status='pending'`).bind(input.authorization.id,r.id,r.version),
   db.prepare(`INSERT INTO portal_v2_invitations(id,workspace_id,token_hash,invited_email,invited_by_identity_id,expires_at) VALUES(?,?,?,?,?,?)`).bind(invitationId,r.workspace_id,tokenHash,r.recipient_email,r.requester_identity_id,expiresAt),
-  ...[...caps].map(capability=>db.prepare(`INSERT INTO portal_v2_invitation_entitlements(invitation_id,capability,scope_type,scope_public_id,access_terms_id) VALUES(?,?,?,?,?)`)
-   .bind(invitationId,capability,capability==='workspace.view'?'workspace':r.scope_type,capability==='workspace.view'?r.workspace_id:r.scope_public_id,r.access_terms_id)),
+   ...[...caps].map(capability=>db.prepare(`INSERT INTO portal_v2_invitation_entitlements(invitation_id,capability,scope_type,scope_public_id,access_terms_id) VALUES(?,?,?,?,?)`)
+    .bind(invitationId,capability,capability==='workspace.view'?'workspace':r.scope_type,capability==='workspace.view'?r.workspace_id:r.scope_public_id,r.access_terms_id)),
+   ...(historyReady&&r.access_terms_id?[projectAccessAuthorityEvent(db,{workspaceId:r.workspace_id,sourceId:r.source_id,projectPublicId:r.scope_public_id,
+    accessTermsId:r.access_terms_id,authorityType:'invitation',authorityId:invitationId,eventKind:'invitation_created',
+    producerEventKey:`invitation-approval:created:${input.authorization.id}`,actor:{type:'staff',id:input.authorization.actorStaffId}})]:[]),
   db.prepare(`INSERT INTO portal_v2_invitation_email_outbox(id,invitation_id,recipient_email,payload_json,recipient_email_hash) VALUES(?,?,?,?,?)`)
    .bind(crypto.randomUUID(),invitationId,r.recipient_email,JSON.stringify({invitationId,token,expiresAt}),recipientHash),
   commandInsert(db,r.workspace_id,input.authorization.actorStaffId,input.idempotencyKey,'approve',hash,r.id,input.authorization.id,{requestId:r.id}),
@@ -250,39 +261,53 @@ export async function stageApprovedWorkspaceInvitation(env:PortalAuthorizationEn
  return {request:(await readWorkspaceInvitationRequest(db,input))!,replayed:false};
 }
 export async function publishApprovedWorkspaceInvitation(env:PortalAuthorizationEnv,input:{authorizationId:string}){
+ requireProjectAccessAuthorityMutations(env);
  const db=env.DELIVERY_DB;await ready(db);const a=await db.prepare('SELECT * FROM portal_workspace_invitation_approvals WHERE id=?').bind(input.authorizationId).first<ApprovalRow>();
  if(!a)fail(404,'invitation_approval_unavailable');
  const r=await db.prepare(`${requestSelect} WHERE r.id=?`).bind(a.request_id).first<RequestRow>();if(!r)fail(404,'invitation_request_unavailable');
  if(a.status==='published'&&r.status==='approved'&&r.current_approval_id===a.id)return view(db,r);
  if(a.status!=='staged'||r.status!=='approving'||r.current_approval_id!==a.id)fail(409,'invitation_approval_changed');
  try{const prepared=await review(env,{sourceId:r.source_id,workspaceId:r.workspace_id,requestId:r.id});
+ const historyReady=await projectAccessAuthorityHistoryReady(db);
  if(!prepared.canApprove||!prepared.proof||prepared.proof.proof!==a.delegation_proof)fail(409,'invitation_requester_authority_changed');
  await db.batch([prepared.proof.fence(`publication-${a.id}`),requestFence(db,r),
   db.prepare(`UPDATE portal_workspace_invitation_approvals SET status='published',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='staged'`).bind(a.id),
   db.prepare(`UPDATE portal_workspace_invitation_requests SET status='approved',version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND version=? AND status='approving' AND current_approval_id=?`).bind(r.id,r.version,a.id),
-  audit(db,r.workspace_id,r.id,'staff',a.actor_staff_id,'request.approved',a.id,{invitationId:a.invitation_id})]);
+   audit(db,r.workspace_id,r.id,'staff',a.actor_staff_id,'request.approved',a.id,{invitationId:a.invitation_id}),
+   ...(historyReady&&r.access_terms_id?[projectAccessAuthorityEvent(db,{workspaceId:r.workspace_id,sourceId:r.source_id,projectPublicId:r.scope_public_id,
+    accessTermsId:r.access_terms_id,authorityType:'invitation',authorityId:a.invitation_id,eventKind:'invitation_approved',
+    producerEventKey:`invitation-approval:published:${a.id}`,actor:{type:'staff',id:a.actor_staff_id}})]:[])]);
  }catch(error){
   const winner=await db.prepare(`${requestSelect} WHERE r.id=? AND r.current_approval_id=? AND r.status='approved' AND a.status='published'`).bind(r.id,a.id).first<RequestRow>();
   if(winner)return view(db,winner);throw error;
  }
  return (await readWorkspaceInvitationRequest(db,{sourceId:r.source_id,workspaceId:r.workspace_id,requestId:r.id}))!;
 }
-export async function abandonStagedWorkspaceInvitation(db:InvitationApprovalDatabase,input:{authorizationId:string}){
+export async function abandonStagedWorkspaceInvitation(db:InvitationApprovalDatabase,input:{authorizationId:string;actor?:{type:'staff';id:string}|{type:'system';id:null}},mutationsEnabled=false){
+ if(!mutationsEnabled)fail(503,'project_access_authority_mutations_paused');
  await ready(db);const a=await db.prepare('SELECT * FROM portal_workspace_invitation_approvals WHERE id=?').bind(input.authorizationId).first<ApprovalRow>();
  if(!a)return null;const r=await db.prepare(`${requestSelect} WHERE r.id=?`).bind(a.request_id).first<RequestRow>();if(!r)fail(404,'invitation_request_unavailable');
  if(a.status==='published')return view(db,r);
  if(a.status==='closed')return view(db,r);if(a.status!=='staged'||r.current_approval_id!==a.id||r.status!=='approving')fail(409,'invitation_approval_changed');
+ const historyReady=await projectAccessAuthorityHistoryReady(db),actor=input.actor??{type:'system' as const,id:null};
  await db.batch([fence(db,`EXISTS(SELECT 1 FROM portal_workspace_invitation_requests WHERE id=? AND version=? AND status='approving' AND current_approval_id=?)`,[r.id,r.version,a.id]),
+  fence(db,`EXISTS(SELECT 1 FROM portal_v2_invitations invitation WHERE invitation.id=? AND invitation.workspace_id=? AND invitation.status='pending'
+    AND (? IS NULL OR EXISTS(SELECT 1 FROM portal_v2_invitation_entitlements entitlement WHERE entitlement.invitation_id=invitation.id AND entitlement.access_terms_id=?)))`,
+    [a.invitation_id,r.workspace_id,r.access_terms_id,r.access_terms_id]),
   db.prepare(`UPDATE portal_workspace_invitation_approvals SET status='closed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='staged'`).bind(a.id),
   db.prepare(`UPDATE portal_v2_invitations SET status='revoked',revoked_at=datetime('now') WHERE id=? AND status='pending'`).bind(a.invitation_id),
   db.prepare(`UPDATE portal_v2_invitation_email_outbox SET status='cancelled',payload_json='{"redacted":true}',lease_expires_at=NULL,updated_at=datetime('now') WHERE invitation_id=? AND status<>'sent'`).bind(a.invitation_id),
   db.prepare(`UPDATE portal_workspace_invitation_requests SET status='pending',current_approval_id=NULL,reason_code='approval_not_published',version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND version=?`).bind(r.id,r.version),
+  ...(historyReady&&r.access_terms_id?[projectAccessAuthorityEvent(db,{workspaceId:r.workspace_id,sourceId:r.source_id,projectPublicId:r.scope_public_id,
+    accessTermsId:r.access_terms_id,authorityType:'invitation',authorityId:a.invitation_id,eventKind:'invitation_revoked',
+    producerEventKey:`invitation-approval:abandoned:${a.id}`,actor})]:[]),
   audit(db,r.workspace_id,r.id,'staff',a.actor_staff_id,'request.approval_abandoned',a.id,{})]);
  return (await readWorkspaceInvitationRequest(db,{sourceId:r.source_id,workspaceId:r.workspace_id,requestId:r.id}))!;
 }
 /** Bounded cleanup only: it never issues, publishes, approves or renews terms.
  * Expired staging reservations can be reviewed again with a new staff receipt. */
-export async function reconcileExpiredWorkspaceInvitationApprovals(db:InvitationApprovalDatabase,now=new Date()):Promise<number>{
+export async function reconcileExpiredWorkspaceInvitationApprovals(db:InvitationApprovalDatabase,now=new Date(),mutationsEnabled=false):Promise<number>{
+ if(!mutationsEnabled)return 0;
  if(!await invitationRequestsReady(db))return 0;
  const cutoff=now.toISOString();
  const candidates=(await db.prepare(`SELECT a.id FROM portal_workspace_invitation_approvals a
@@ -291,7 +316,7 @@ export async function reconcileExpiredWorkspaceInvitationApprovals(db:Invitation
   WHERE a.status='staged' AND a.publication_deadline<=? ORDER BY a.publication_deadline,a.id LIMIT 10`).bind(cutoff).all<{id:string}>()).results;
  let changed=0;
  for(const candidate of candidates){
-  try{const result=await abandonStagedWorkspaceInvitation(db,{authorizationId:candidate.id});if(result?.status==='pending'||result?.status==='stale')changed++;}
+  try{const result=await abandonStagedWorkspaceInvitation(db,{authorizationId:candidate.id},true);if(result?.status==='pending'||result?.status==='stale')changed++;}
   catch(error){if(!(error instanceof HTTPException&&error.status===409))throw error;}
  }
  return changed;
@@ -335,6 +360,7 @@ export async function readWorkspaceInvitationReviewReplay(db:InvitationApprovalD
  return published?{request,replayed:true}:null;
 }
 export async function cancelWorkspaceInvitationRequest(env:PortalAuthorizationEnv,principal:VerifiedClientPrincipal,input:{workspaceId:string;requestId:string;expectedVersion:number;idempotencyKey:string}){
+ requireProjectAccessAuthorityMutations(env);
  const db=env.DELIVERY_DB;await ready(db);const identity=await db.prepare(`SELECT id FROM portal_v2_identities WHERE issuer=? AND subject=? AND verified_email=? AND status='active' AND revoked_at IS NULL`)
   .bind(principal.issuer,principal.subject,principal.email.trim().toLowerCase()).first<string>('id');if(!identity)fail(403,'invitation_request_unavailable');
  const coordinates={workspaceId:input.workspaceId,sourceId:PRIMARY_PROJECT_ALPHA_SOURCE_ID,requestId:input.requestId};
@@ -343,13 +369,20 @@ export async function cancelWorkspaceInvitationRequest(env:PortalAuthorizationEn
  const r=await row(db,coordinates);if(!r||r.requester_identity_id!==identity)fail(404,'invitation_request_unavailable');
  if(saved)return {request:await view(db,r),replayed:true};
  if(r.version!==input.expectedVersion||!['pending','approving'].includes(r.status))fail(409,'invitation_request_changed');
+ const historyReady=await projectAccessAuthorityHistoryReady(db);
  const statements:D1PreparedStatement[]=[fence(db,`EXISTS(SELECT 1 FROM portal_workspace_invitation_requests r JOIN portal_v2_identities i ON i.id=r.requester_identity_id
   JOIN portal_v2_workspaces w ON w.id=r.workspace_id AND w.project_alpha_source_id=r.source_id WHERE r.id=? AND r.version=? AND r.requester_identity_id=?
   AND r.status IN ('pending','approving') AND i.status='active' AND i.revoked_at IS NULL AND i.issuer=? AND i.subject=? AND i.verified_email=? AND w.status='active')`,
   [r.id,r.version,identity,principal.issuer,principal.subject,principal.email.trim().toLowerCase()])];
- if(r.current_approval_id){statements.push(db.prepare(`UPDATE portal_workspace_invitation_approvals SET status='closed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='staged'`).bind(r.current_approval_id),
-  db.prepare(`UPDATE portal_v2_invitations SET status='revoked',revoked_at=datetime('now') WHERE id=? AND status='pending'`).bind(r.invitation_id),
-  db.prepare(`UPDATE portal_v2_invitation_email_outbox SET status='cancelled',payload_json='{"redacted":true}',lease_expires_at=NULL,updated_at=datetime('now') WHERE invitation_id=? AND status<>'sent'`).bind(r.invitation_id));}
+ if(r.current_approval_id){statements.push(fence(db,`EXISTS(SELECT 1 FROM portal_v2_invitations invitation WHERE invitation.id=? AND invitation.workspace_id=? AND invitation.status='pending'
+    AND (? IS NULL OR EXISTS(SELECT 1 FROM portal_v2_invitation_entitlements entitlement WHERE entitlement.invitation_id=invitation.id AND entitlement.access_terms_id=?)))`,
+    [r.invitation_id,r.workspace_id,r.access_terms_id,r.access_terms_id]),
+  db.prepare(`UPDATE portal_workspace_invitation_approvals SET status='closed',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND status='staged'`).bind(r.current_approval_id),
+ db.prepare(`UPDATE portal_v2_invitations SET status='revoked',revoked_at=datetime('now') WHERE id=? AND status='pending'`).bind(r.invitation_id),
+  db.prepare(`UPDATE portal_v2_invitation_email_outbox SET status='cancelled',payload_json='{"redacted":true}',lease_expires_at=NULL,updated_at=datetime('now') WHERE invitation_id=? AND status<>'sent'`).bind(r.invitation_id),
+  ...(historyReady&&r.access_terms_id&&r.invitation_id?[projectAccessAuthorityEvent(db,{workspaceId:r.workspace_id,sourceId:r.source_id,projectPublicId:r.scope_public_id,
+    accessTermsId:r.access_terms_id,authorityType:'invitation',authorityId:r.invitation_id,eventKind:'invitation_revoked',
+    producerEventKey:`invitation-request:cancelled:${r.current_approval_id}`,actor:{type:'identity',id:identity}})]:[]));}
  await db.batch([...statements,db.prepare(`UPDATE portal_workspace_invitation_requests SET status='cancelled',version=version+1,updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id=? AND version=?`).bind(r.id,r.version),
   commandInsert(db,r.workspace_id,identity,input.idempotencyKey,'cancel',hash,r.id,null,{requestId:r.id}),audit(db,r.workspace_id,r.id,'identity',identity,'request.cancelled',null,{})]);
  return {request:(await readWorkspaceInvitationRequest(db,coordinates))!,replayed:false};

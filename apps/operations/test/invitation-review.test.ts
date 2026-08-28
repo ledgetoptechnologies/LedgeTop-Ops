@@ -140,6 +140,8 @@ describe('Joined Client invitation request and Operations review', { timeout: 12
         await database.batch(splitD1MigrationStatements(readFileSync(new URL(name, path), 'utf8')).map(sql => database.prepare(sql)));
       }
     }
+    await delivery.batch(splitD1MigrationStatements(readFileSync(
+      new URL('../../client/migrations/0172_project_access_authority_history.sql',import.meta.url),'utf8')).map(sql=>delivery.prepare(sql)));
     await ops.batch([
       ops.prepare("INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,?,?,?,'active')")
         .bind(actor.id, actor.email, actor.displayName, actor.accessSubject),
@@ -148,6 +150,7 @@ describe('Joined Client invitation request and Operations review', { timeout: 12
     ]);
     env = { OPS_DB: ops, DELIVERY_DB: delivery, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: 'true',
       CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: 'true', CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: 'true',
+      PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED: 'true',
       OPERATIONS_SESSION_SECRET: 'joined-review-session-secret-at-least-thirty-two-characters' } as Env;
     client = { ...env, CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: 'true', CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: 'true',
       CLIENT_PORTAL_INVITATION_EMAIL: { send }, CLIENT_PORTAL_INVITATION_FROM: 'invitations@example.test',
@@ -192,6 +195,23 @@ describe('Joined Client invitation request and Operations review', { timeout: 12
       JOIN portal_v2_identities i ON i.id=e.identity_id WHERE i.issuer=? AND i.subject=? AND e.workspace_id=? AND e.capability='delivery.view'`)
       .bind(guest.issuer, guest.subject, f.id).all();
     expect(grants.results).toEqual([{ access_terms_id: request.accessTerms!.id, scope_type: 'project', scope_public_id: f.project }]);
+  });
+
+  it.each([undefined,'false'] as const)('blocks approval without writes but keeps rejection live when the authority mutation flag is %s',async flag=>{
+    const f=await fixture(),request=await submit(f),approve=await prepared(f,request,'approve');
+    const target={...env,PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:flag} as Env;
+    if(flag===undefined)delete (target as Partial<Env>).PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED;
+    const approveKey=next('joined-gated-approve');
+    await expect(decideStaffInvitationRequest(target,actor,request.id,approve,approveKey)).rejects.toMatchObject({status:503});
+    expect(await records(f.id)).toEqual({invitations:0,outbox:0,approvals:0});
+    expect(await delivery.prepare('SELECT status FROM portal_workspace_invitation_requests WHERE id=?').bind(request.id).first<string>('status')).toBe('pending');
+    expect(await ops.prepare('SELECT count(*) n FROM invitation_review_authorizations WHERE idempotency_key=?').bind(approveKey).first<number>('n')).toBe(0);
+
+    const reject=await prepared(f,request,'reject',target),rejectKey=next('joined-live-reject');
+    const result=await decideStaffInvitationRequest(target,actor,request.id,reject,rejectKey);
+    expect(result.request.status).toBe('rejected');
+    expect(await records(f.id)).toEqual({invitations:0,outbox:0,approvals:0});
+    expect(await ops.prepare('SELECT count(*) n FROM invitation_review_authorizations WHERE idempotency_key=?').bind(rejectKey).first<number>('n')).toBe(1);
   });
 
   it('keeps read/capability calls free of authorization receipts and invitation side effects', async () => {

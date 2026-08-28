@@ -23,10 +23,12 @@ export type ClientAuditTimelineCoverageReason =
 export interface ClientAuditTimelineCoverage {
   available: boolean;
   reason: ClientAuditTimelineCoverageReason;
+  /** Present for append-only adapters whose truthful coverage begins after rollout. */
+  collectedSince?: string | null;
 }
 
 export const CLIENT_AUDIT_TIMELINE_PROJECT_ADAPTERS = [
-  "source_record_activity", "operational_project_activity",
+  "source_record_activity", "operational_project_activity", "organization_contact_activity",
 ] as const;
 export type ClientAuditTimelineProjectAdapter = (typeof CLIENT_AUDIT_TIMELINE_PROJECT_ADAPTERS)[number];
 

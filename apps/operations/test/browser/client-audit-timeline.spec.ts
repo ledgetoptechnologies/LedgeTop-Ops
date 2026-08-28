@@ -15,6 +15,7 @@ const coverage = {
 const projectCoverage = {
   source_record_activity: { available: true, reason: null },
   operational_project_activity: { available: true, reason: null },
+  organization_contact_activity: { available: true, reason: null },
 };
 const accessCoverage = {
   workspace_membership: { available: true, reason: null }, workspace_invitation_request: { available: true, reason: null },
@@ -76,6 +77,13 @@ async function fixture(page: Page, timelineHandler: Handler) {
     if (url.pathname === clientApi) return route.fulfill({ json: clientDetail() });
     if (url.pathname === projectApi) return route.fulfill({ json: projectDetail() });
     if (url.pathname === `${projectApi}/operational-workspace`) return route.fulfill({ json: operationalWorkspace() });
+    if (url.pathname === `${clientApi}/organization-operational-contacts`) return route.fulfill({ json: {
+      canonicalRoot, contextVersion: "client-context",
+      organization: { id: "42", sourceId: source, revision: "organization-revision" },
+      contacts: { version: 0, assignments: [], revisions: [] },
+      capabilities: { canManageOrganizationContacts: false }, contactOptions: [],
+      contactPage: { available: false, reason: "permission_required", nextCursor: null, hasMore: false, returned: 0, limit: 25 },
+    } });
     if (url.pathname === `${clientApi}/collections/businessProjects`) return route.fulfill({ json: { canonicalRoot,
       contextVersion: "project-context", items: [{ id: "project-one", name: "Church survey", status: "active", row_key: "business:project-one" }],
       page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 25 } } });
@@ -189,6 +197,19 @@ test("populated audit controls and events remain usable on mobile and desktop", 
     await section.screenshot({ path: testInfo.outputPath(`client-audit-${width}.png`) });
   }
   expect(errors).toEqual([]);
+});
+
+test("project access coverage discloses its collection boundary and rejects available history without one",async({page})=>{
+  let malformed=false;
+  await fixture(page,(route,url)=>{const response=timeline(url,[]);return route.fulfill({json:{...response,accessCoverage:{...response.accessCoverage,
+    project_access:malformed?{available:true,reason:null,collectedSince:null}
+      :{available:true,reason:null,collectedSince:'2026-08-27T12:00:00.000Z'}}}});});
+  await page.goto(clientPath);const section=clientTimeline(page);
+  await section.getByRole('button',{name:'Apply timeline filters'}).click();
+  await section.getByText('Timeline coverage',{exact:true}).click();
+  await expect(section.getByText(/available since/i)).toBeVisible();
+  malformed=true;await section.getByRole('button',{name:'Apply timeline filters'}).click();
+  await expect(section.getByRole('alert')).toContainText('could not be verified');
 });
 
 test("project timeline renders redacted operational activity without new authority controls", async ({ page }) => {

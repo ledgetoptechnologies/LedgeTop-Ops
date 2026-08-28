@@ -108,6 +108,8 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
         PRIMARY KEY(projection_source_id,record_kind,local_id));
       CREATE TABLE pa_clients(id TEXT,projection_source_id TEXT,organization_id TEXT,active INTEGER,
         PRIMARY KEY(id,projection_source_id));
+      CREATE TABLE pa_organizations(id TEXT,projection_source_id TEXT,name TEXT,active INTEGER,
+        PRIMARY KEY(id,projection_source_id));
       CREATE TABLE pa_projects(id TEXT,projection_source_id TEXT,client_id TEXT,organization_id TEXT,name TEXT,
         active INTEGER,PRIMARY KEY(id,projection_source_id));
       CREATE TABLE project_operational_contact_sets(projection_source_id TEXT,project_record_kind TEXT,project_id TEXT,
@@ -119,7 +121,14 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
       CREATE TABLE project_operational_memory_revisions(id TEXT PRIMARY KEY,projection_source_id TEXT,project_id TEXT,
         version INTEGER,change_kind TEXT,actor_id TEXT);
       CREATE TABLE project_operational_events(id TEXT PRIMARY KEY,projection_source_id TEXT,project_record_kind TEXT,
-        project_id TEXT,actor_id TEXT,event_kind TEXT,result_version INTEGER,details_json TEXT,created_at TEXT);`
+        project_id TEXT,actor_id TEXT,event_kind TEXT,result_version INTEGER,details_json TEXT,created_at TEXT);
+      CREATE TABLE organization_operational_contact_sets(projection_source_id TEXT,organization_record_kind TEXT,
+        organization_id TEXT,version INTEGER,PRIMARY KEY(projection_source_id,organization_id));
+      CREATE TABLE organization_operational_contact_revisions(id TEXT PRIMARY KEY,projection_source_id TEXT,
+        organization_id TEXT,version INTEGER,snapshot_json TEXT,actor_id TEXT,created_at TEXT);
+      CREATE TABLE organization_operational_events(id TEXT PRIMARY KEY,projection_source_id TEXT,
+        organization_record_kind TEXT,organization_id TEXT,actor_id TEXT,event_kind TEXT,result_version INTEGER,
+        details_json TEXT,created_at TEXT);`
       .replace(/\s*\n\s*/g, " "));
     await ops.prepare("INSERT INTO staff_users VALUES('operational-actor','active')").run();
     await delivery.batch([
@@ -336,7 +345,7 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
       expect(result.accessCoverage.workspace_invitation_request).toEqual({ available: true, reason: null });
       expect(result.accessCoverage.authenticated_delivery_grant).toEqual({ available: false, reason: "permission_required" });
       expect(result.accessCoverage.viewer_client_grant).toEqual({ available: false, reason: "permission_required" });
-      expect(result.accessCoverage.project_access).toEqual({ available: false, reason: "not_collected" });
+      expect(result.accessCoverage.project_access).toEqual({ available: false, reason: "not_collected", collectedSince: null });
     } finally { projectPolicy.deliveryAudit = true; projectPolicy.viewerManage = true; }
   });
 
@@ -394,7 +403,8 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
       filters: { category: "project", actorType: "staff", result: "succeeded", from: null, to: null } as const };
     const first = await listClientAuditTimeline(env, staff, primaryContext(), options);
     expect(first.projectCoverage).toEqual({ source_record_activity: { available: true, reason: null },
-      operational_project_activity: { available: true, reason: null } });
+      operational_project_activity: { available: true, reason: null },
+      organization_contact_activity: { available: false, reason: "not_applicable" } });
     expect(first.page.hasMore).toBe(true);
     await ops.batch([
       ops.prepare("UPDATE project_operational_contact_sets SET version=3 WHERE projection_source_id='project-alpha:primary' AND project_id='project-one'"),
@@ -426,13 +436,70 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
     expect(denied.items).toEqual([]);
   });
 
+  it("federates exact organization contact history with stable pagination and strict redaction", async () => {
+    const occurredAt = "2026-08-27T19:00:00.000Z";
+    await ops.batch([
+      ops.prepare("INSERT INTO pa_organizations VALUES('organization-one','project-alpha:primary','Greenwood Project Management LLC',1)"),
+      ops.prepare("INSERT INTO pa_organizations VALUES('organization-other','project-alpha:primary','Other organization',1)"),
+      ops.prepare("INSERT INTO pa_organizations VALUES('organization-one','project-alpha:secondary','Wrong-source organization',1)"),
+      ops.prepare("INSERT INTO pa_projection_record_ids VALUES('project-alpha:primary','organization','organization-one')"),
+      ops.prepare("INSERT INTO pa_projection_record_ids VALUES('project-alpha:primary','organization','organization-other')"),
+      ops.prepare("INSERT INTO pa_projection_record_ids VALUES('project-alpha:secondary','organization','organization-one')"),
+      ops.prepare("INSERT INTO organization_operational_contact_sets VALUES('project-alpha:primary','organization','organization-one',3)"),
+      ops.prepare("INSERT INTO organization_operational_contact_sets VALUES('project-alpha:primary','organization','organization-other',1)"),
+      ops.prepare("INSERT INTO organization_operational_contact_sets VALUES('project-alpha:secondary','organization','organization-one',1)"),
+      ...[1, 2, 3].map(version => ops.prepare(`INSERT INTO organization_operational_contact_revisions
+        VALUES(?,?,?,?,?,?,?)`).bind(`organization-one-v${version}`, "project-alpha:primary", "organization-one", version,
+          JSON.stringify({ assignments: [{ contactId: `private-contact-${version}`, email: `private-${version}@example.test` }] }),
+          "operational-actor", occurredAt)),
+      ops.prepare(`INSERT INTO organization_operational_contact_revisions VALUES('organization-other-v1','project-alpha:primary',
+        'organization-other',1,?,'operational-actor',?)`).bind(JSON.stringify({ private: "sibling snapshot" }), occurredAt),
+      ops.prepare(`INSERT INTO organization_operational_contact_revisions VALUES('organization-wrong-source-v1','project-alpha:secondary',
+        'organization-one',1,?,'operational-actor',?)`).bind(JSON.stringify({ private: "wrong source snapshot" }), occurredAt),
+      ...["a", "b", "c"].map((suffix, index) => ops.prepare(`INSERT INTO organization_operational_events
+        VALUES(?,?,?,?,?,'contacts_saved',?,?,?)`).bind(`event-org-${suffix}`, "project-alpha:primary", "organization",
+          "organization-one", "operational-actor", index + 1,
+          JSON.stringify({ privateContactIds: [`private-contact-${index + 1}`], secretChannel: "private@example.test" }), occurredAt)),
+      ops.prepare(`INSERT INTO organization_operational_events VALUES('event-org-sibling','project-alpha:primary','organization',
+        'organization-other','operational-actor','contacts_saved',1,?,?)`).bind(JSON.stringify({ private: "sibling event" }), occurredAt),
+      ops.prepare(`INSERT INTO organization_operational_events VALUES('event-org-wrong-source','project-alpha:secondary','organization',
+        'organization-one','operational-actor','contacts_saved',1,?,?)`).bind(JSON.stringify({ private: "wrong source event" }), occurredAt),
+    ]);
+    const options = { limit: 1,
+      filters: { category: "project", actorType: "staff", result: "succeeded", from: occurredAt, to: occurredAt } as const };
+    const first = await listClientAuditTimeline(env, staff, primaryContext(), options);
+    expect(first.projectCoverage.organization_contact_activity).toEqual({ available: true, reason: null });
+    expect(first.page.hasMore).toBe(true);
+    await ops.batch([
+      ops.prepare(`UPDATE organization_operational_contact_sets SET version=4
+        WHERE projection_source_id='project-alpha:primary' AND organization_id='organization-one'`),
+      ops.prepare(`INSERT INTO organization_operational_contact_revisions VALUES('organization-one-v4','project-alpha:primary',
+        'organization-one',4,?,'operational-actor',?)`).bind(JSON.stringify({ private: "late snapshot" }), occurredAt),
+      ops.prepare(`INSERT INTO organization_operational_events VALUES('event-org-late','project-alpha:primary','organization',
+        'organization-one','operational-actor','contacts_saved',4,?,?)`).bind(JSON.stringify({ private: "late event" }), occurredAt),
+    ]);
+    const collected = [...first.items]; let cursor = first.page.nextCursor;
+    while (cursor) {
+      const page = await listClientAuditTimeline(env, staff, primaryContext(), { ...options, cursor });
+      collected.push(...page.items); cursor = page.page.nextCursor;
+    }
+    expect(collected.map(event => event.producerEventId)).toEqual([
+      "organization-contacts:event-org-a", "organization-contacts:event-org-b", "organization-contacts:event-org-c",
+    ]);
+    expect(collected.every(event => event.action === "organization.contacts.saved" && event.producer === "operations"
+      && event.actor?.type === "staff" && event.resource.type === "organization_operational_contacts"
+      && event.resource.label === "Greenwood Project Management LLC")).toBe(true);
+    expect(JSON.stringify(collected)).not.toMatch(/late|sibling|wrong-source|private-contact|private@example|snapshot_json|details_json|actor_id/i);
+  });
+
   it("reports operational project activity as permission required without projects.view", async () => {
     projectPolicy.projects = false;
     try {
       const result = await listClientAuditTimeline(env, staff, primaryContext(), { limit: 100,
         filters: { category: "project", actorType: "staff", result: "succeeded", from: null, to: null } });
       expect(result.projectCoverage).toEqual({ source_record_activity: { available: true, reason: null },
-        operational_project_activity: { available: false, reason: "permission_required" } });
+        operational_project_activity: { available: false, reason: "permission_required" },
+        organization_contact_activity: { available: false, reason: "permission_required" } });
       expect(result.items.filter(event => event.producer === "operations")).toEqual([]);
     } finally { projectPolicy.projects = true; }
   });
@@ -524,5 +591,63 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
       expect(denied.notificationCoverage.project_access_companion_notice).toEqual({ available: false, reason: "permission_required" });
       expect(denied.items).toEqual([]);
     } finally { projectPolicy.portal = true; }
+  });
+
+  it("paginates canonical project access exactly once and suppresses only authorized snapshot duplicates",async()=>{
+    await delivery.exec(`CREATE TABLE portal_project_access_authority_history_state(singleton INTEGER PRIMARY KEY,collection_started_at TEXT);
+      INSERT INTO portal_project_access_authority_history_state VALUES(1,'2026-08-27T12:00:00.000Z');
+      CREATE TABLE portal_project_access_authority_events(recorded_sequence INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT UNIQUE,
+        workspace_id TEXT,source_id TEXT,project_public_id TEXT,authority_type TEXT,authority_id TEXT,producer_event_key TEXT UNIQUE,
+        event_kind TEXT,actor_type TEXT,occurred_at TEXT);`
+      .replace(/\s*\n\s*/g,' '));
+    const at='2026-08-27T20:00:00.000Z';
+    await delivery.batch([
+      ...Array.from({length:5},(_,index)=>delivery.prepare(`INSERT INTO portal_project_access_authority_events
+        (id,workspace_id,source_id,project_public_id,authority_type,authority_id,producer_event_key,event_kind,actor_type,occurred_at)
+        VALUES(?,?,?,?,?,?,?,'grant_created','staff',?)`).bind(`canonical-${index}`,'workspace-one','project-alpha:primary','project-one',
+          'authenticated_delivery_grant',`canonical-grant-${index}`,`canonical-key-${index}`,at)),
+      delivery.prepare("INSERT INTO portal_v2_folder_bindings VALUES('binding-post','workspace-one','project','project-one')"),
+      delivery.prepare("INSERT INTO portal_v2_authenticated_delivery_grants VALUES('grant-post','workspace-one','binding-post')"),
+      delivery.prepare("INSERT INTO portal_v2_authenticated_delivery_grant_audit VALUES('audit-post','grant-post','workspace-one','grant.created','2026-08-27T18:00:00.000Z')"),
+      delivery.prepare(`INSERT INTO portal_project_access_authority_events(id,workspace_id,source_id,project_public_id,authority_type,authority_id,producer_event_key,event_kind,actor_type,occurred_at)
+        VALUES('canonical-post','workspace-one','project-alpha:primary','project-one','authenticated_delivery_grant','grant-post','authenticated-grant-audit:audit-post','grant_created','staff','2026-08-27T18:00:00.000Z')`),
+      delivery.prepare("INSERT INTO portal_v2_folder_bindings VALUES('binding-wrong-source','workspace-one','project','project-one')"),
+      delivery.prepare("INSERT INTO portal_v2_authenticated_delivery_grants VALUES('grant-wrong-source','workspace-one','binding-wrong-source')"),
+      delivery.prepare("INSERT INTO portal_v2_authenticated_delivery_grant_audit VALUES('audit-wrong-source','grant-wrong-source','workspace-one','grant.created','2026-08-27T17:00:00.000Z')"),
+      delivery.prepare(`INSERT INTO portal_project_access_authority_events(id,workspace_id,source_id,project_public_id,authority_type,authority_id,producer_event_key,event_kind,actor_type,occurred_at)
+        VALUES('canonical-wrong-source','workspace-one','project-alpha:secondary','project-one','authenticated_delivery_grant','grant-wrong-source','authenticated-grant-audit:audit-wrong-source','grant_created','staff','2026-08-27T17:00:00.000Z')`),
+      delivery.prepare("INSERT INTO portal_v2_folder_bindings VALUES('binding-late','workspace-one','project','project-one')"),
+      delivery.prepare("INSERT INTO portal_v2_authenticated_delivery_grants VALUES('grant-late','workspace-one','binding-late')"),
+      delivery.prepare("INSERT INTO portal_v2_authenticated_delivery_grant_audit VALUES('audit-late','grant-late','workspace-one','grant.created','2026-08-27T16:30:00.000Z')"),
+    ]);
+    const filters={category:'access',actorType:'staff',result:'succeeded',from:'2026-08-27T19:00:00.000Z',to:'2026-08-27T21:00:00.000Z'} as const;
+    const options={projectId:'project-one',limit:2,filters},first=await listClientAuditTimeline(env,staff,primaryContext(),options);
+    expect(first.accessCoverage.project_access).toEqual({available:true,reason:null,collectedSince:'2026-08-27T12:00:00.000Z'});
+    const collected=[...first.items];let cursor=first.page.nextCursor;
+    while(cursor){const page=await listClientAuditTimeline(env,staff,primaryContext(),{...options,cursor});collected.push(...page.items);cursor=page.page.nextCursor;}
+    const canonical=collected.filter(item=>item.action==='project_access.grant_created');
+    expect(canonical.map(item=>item.producerEventId.replace(/^project-access:\d{20}:/,''))).toEqual([
+      'canonical-0','canonical-1','canonical-2','canonical-3','canonical-4',
+    ]);
+    expect(new Set(canonical.map(item=>item.id)).size).toBe(5);
+    const duplicateWindow=await listClientAuditTimeline(env,staff,primaryContext(),{projectId:'project-one',limit:20,
+      filters:{...filters,from:'2026-08-27T16:00:00.000Z',to:'2026-08-27T18:30:00.000Z'}});
+    expect(duplicateWindow.items.filter(item=>item.action==='grant.created'&&item.producerEventId.includes('audit-post'))).toEqual([]);
+    expect(duplicateWindow.items.some(item=>item.producerEventId==='authenticated-grant:audit-wrong-source')).toBe(true);
+    projectPolicy.portal=false;
+    try{
+      const legacy=await listClientAuditTimeline(env,staff,primaryContext(),{projectId:'project-one',limit:20,
+        filters:{...filters,from:'2026-08-27T17:30:00.000Z',to:'2026-08-27T18:30:00.000Z'}});
+      expect(legacy.accessCoverage.project_access).toMatchObject({available:false,reason:'permission_required'});
+      expect(legacy.items.some(item=>item.producerEventId==='authenticated-grant:audit-post')).toBe(true);
+    }finally{projectPolicy.portal=true;}
+
+    const snapshot=await listClientAuditTimeline(env,staff,primaryContext(),{projectId:'project-one',limit:1,
+      filters:{...filters,from:'2026-08-27T16:00:00.000Z',to:'2026-08-27T21:00:00.000Z'}});
+    await delivery.prepare(`INSERT INTO portal_project_access_authority_events(id,workspace_id,source_id,project_public_id,authority_type,authority_id,producer_event_key,event_kind,actor_type,occurred_at)
+      VALUES('canonical-late','workspace-one','project-alpha:primary','project-one','authenticated_delivery_grant','grant-late','authenticated-grant-audit:audit-late','grant_created','staff','2026-08-27T16:30:00.000Z')`).run();
+    const later:typeof snapshot.items=[];let next=snapshot.page.nextCursor;
+    while(next){const page=await listClientAuditTimeline(env,staff,primaryContext(),{projectId:'project-one',limit:1,filters:{...filters,from:'2026-08-27T16:00:00.000Z',to:'2026-08-27T21:00:00.000Z'},cursor:next});later.push(...page.items);next=page.page.nextCursor;}
+    expect(later.some(item=>item.producerEventId==='authenticated-grant:audit-late')).toBe(true);
   });
 });

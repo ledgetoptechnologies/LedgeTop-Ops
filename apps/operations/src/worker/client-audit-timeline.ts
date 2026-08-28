@@ -44,7 +44,7 @@ interface CandidateRow {
   resource_label?: string | null;
 }
 interface TimelineCursor {
-  v: 6;
+  v: 7;
   actor: string;
   root: [string, string, string, string];
   projectId: string | null;
@@ -60,6 +60,8 @@ interface TimelineCursor {
   collaboratorNoticeSchema: boolean;
   companionNoticeSchema: boolean;
   operationalProjectSchema: boolean;
+  organizationContactSchema:boolean;
+  projectAccessHistory: string | null;
   viewerManagePolicy: string;
   filters: ClientAuditTimelineFilters;
   asOf: string;
@@ -82,13 +84,15 @@ const filtersSchema = z.object({
   to: timestamp.nullable(),
 }).strict();
 const cursorSchema = z.object({
-  v: z.literal(6), actor: identifier, root: z.tuple([identifier, identifier, identifier, identifier]),
+  v: z.literal(7), actor: identifier, root: z.tuple([identifier, identifier, identifier, identifier]),
   projectId: identifier.nullable(), context: proof, scope: proof, project: proof.nullable(),
   businessPolicy: proof, businessSource: proof, businessRevision: z.number().int().nonnegative(), deliveryAuditPolicy: proof,
   viewerManagePolicy: proof, portalPolicy: proof,
   noticeScope: proof,
   collaboratorNoticeSchema: z.boolean(), companionNoticeSchema: z.boolean(),
   operationalProjectSchema: z.boolean(),
+  organizationContactSchema:z.boolean(),
+  projectAccessHistory: timestamp.nullable(),
   filters: filtersSchema, asOf: timestamp,
   waters: z.record(z.string().min(1).max(80), z.number().int().nonnegative()),
   after: z.tuple([timestamp, z.enum(["project_alpha", "operations", "service_requests", "portal_access", "client_delivery"]), identifier]).nullable(),
@@ -115,7 +119,7 @@ const changed = (): never => { throw new HTTPException(409, { message: "Timeline
 async function cursorKey(env: Env): Promise<CryptoKey> {
   if (!env.OPERATIONS_SESSION_SECRET || env.OPERATIONS_SESSION_SECRET.length < 32)
     throw new Error("Client timeline cursor configuration unavailable");
-  const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`client-audit-timeline:v6:${env.OPERATIONS_SESSION_SECRET}`));
+  const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`client-audit-timeline:v7:${env.OPERATIONS_SESSION_SECRET}`));
   return crypto.subtle.importKey("raw", material, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
@@ -126,7 +130,7 @@ function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
 async function encodeCursor(env: Env, actor: StaffPrincipal, value: TimelineCursor): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const body = await crypto.subtle.encrypt({ name: "AES-GCM", iv,
-    additionalData: new TextEncoder().encode(`client-audit-timeline:v6:${actor.id}`) }, await cursorKey(env),
+    additionalData: new TextEncoder().encode(`client-audit-timeline:v7:${actor.id}`) }, await cursorKey(env),
   new TextEncoder().encode(JSON.stringify(value)));
   return `${base64Url(iv)}.${base64Url(new Uint8Array(body))}`;
 }
@@ -136,7 +140,7 @@ async function decodeCursor(env: Env, actor: StaffPrincipal, raw: string): Promi
     const parts = raw.split(".");
     if (parts.length !== 2) throw new Error();
     const body = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decodeBase64Url(parts[0]!),
-      additionalData: new TextEncoder().encode(`client-audit-timeline:v6:${actor.id}`) }, await cursorKey(env), decodeBase64Url(parts[1]!));
+      additionalData: new TextEncoder().encode(`client-audit-timeline:v7:${actor.id}`) }, await cursorKey(env), decodeBase64Url(parts[1]!));
     return cursorSchema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)));
   } catch { throw new HTTPException(400, { message: "Client timeline cursor is invalid" }); }
 }
@@ -151,6 +155,15 @@ export function parseClientAuditTimelineFilters(params: URLSearchParams): Client
 }
 
 function coverage(available: boolean, reason: CoverageReason = null) { return { available, reason: available ? null : reason }; }
+async function projectAccessHistoryState(env:Env):Promise<{collectedSince:string|null;proof:string}>{
+  const db=env.DELIVERY_DB.withSession('first-primary'),names=['portal_project_access_authority_history_state','portal_project_access_authority_events'];
+  const rows=(await db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN (?,?) ORDER BY name`).bind(...names).all<{name:string}>()).results;
+  if(rows.length===0)return {collectedSince:null,proof:await sha256('project-access-history:absent')};
+  if(rows.length!==2)throw new Error('Project access authority history schema is incomplete');
+  const raw=await db.prepare(`SELECT collection_started_at FROM portal_project_access_authority_history_state WHERE singleton=1`).first<string>('collection_started_at');
+  const collectedSince=normalizeTime(raw);if(!collectedSince)throw new Error('Project access authority history coverage is invalid');
+  return {collectedSince,proof:await sha256(JSON.stringify([rows.map(row=>row.name),collectedSince]))};
+}
 function actor(value: string | null | undefined): ClientAuditTimelineItem["actor"] {
   switch (value) {
     case "staff": return { type: "staff", label: "Team" };
@@ -315,6 +328,7 @@ async function requestCandidates(env: Env, context: ClientHubCollectionContext, 
 async function accessCandidates(env: Env, context: ClientHubCollectionContext, scope: DeliveryScope,
   filters: ClientAuditTimelineFilters, projectId: string | null, asOf: string, after: TimelineCursor["after"],
   waters: Record<string, number>, limit: number, policies: { portal: boolean; deliveryAudit: boolean; viewerManage: boolean },
+  canonicalHistoryStart:string|null,
 ): Promise<ClientAuditTimelineItem[]> {
   if (filters.category !== "all" && filters.category !== "access") return [];
   const producer: Producer = "portal_access", db = env.DELIVERY_DB.withSession("first-primary"),
@@ -328,11 +342,19 @@ async function accessCandidates(env: Env, context: ClientHubCollectionContext, s
     const at = timeExpression("created_at"), bounds = timeBounds(filters, asOf, at),
       continuation = seek(at, "'membership:'||id", producer, after),
       actorPredicate = filters.actorType === "all" ? "" : " AND CASE WHEN actor_identity_id IS NULL THEN 'system' ELSE 'client' END=?";
-    const rows = await db.prepare(`SELECT rowid,id event_id,action,CASE WHEN actor_identity_id IS NULL THEN 'system' ELSE 'client' END actor_type,
-      ${at} occurred_at FROM portal_v2_membership_audit WHERE rowid<=? AND workspace_id=?
+    const rows = await db.prepare(`SELECT audit.rowid,audit.id event_id,audit.action,CASE WHEN audit.actor_identity_id IS NULL THEN 'system' ELSE 'client' END actor_type,
+      ${at} occurred_at FROM portal_v2_membership_audit audit WHERE audit.rowid<=? AND audit.workspace_id=?
       AND action IN ('invitation.created','invitation.revoked','invitation.accepted','membership.suspended','membership.reactivated','manager.transferred')
+      ${canonicalHistoryStart?`AND NOT EXISTS(SELECT 1 FROM portal_project_access_authority_events canonical
+        WHERE canonical.recorded_sequence<=? AND canonical.workspace_id=audit.workspace_id AND canonical.source_id=?
+          AND canonical.authority_type='invitation'
+          AND canonical.authority_id=audit.invitation_id
+          AND canonical.event_kind=CASE audit.action WHEN 'invitation.created' THEN 'invitation_created'
+            WHEN 'invitation.revoked' THEN 'invitation_revoked' WHEN 'invitation.accepted' THEN 'invitation_accepted' ELSE '' END
+          AND canonical.producer_event_key='membership:'||audit.id)`:''}
       ${actorPredicate} AND ${bounds.sql}${continuation.sql} ORDER BY ${at} DESC,id ASC LIMIT ?`)
-      .bind(waters.memberships ?? 0, scope.workspaceId, ...(filters.actorType === "all" ? [] : [filters.actorType]),
+      .bind(waters.memberships ?? 0, scope.workspaceId,...(canonicalHistoryStart?[waters.projectAccessHistory??0,context.root.source_id]:[]),
+        ...(filters.actorType === "all" ? [] : [filters.actorType]),
         ...bounds.values, ...continuation.values, limit + 1).all<CandidateRow>();
     for (const row of rows.results) candidates.push(item({ sourceId: context.root.source_id, producer,
       producerEventId: `membership:${String(row.event_id)}`, category: "access", action: row.action,
@@ -357,10 +379,18 @@ async function accessCandidates(env: Env, context: ClientHubCollectionContext, s
       AND audit.action IN ('policy.changed','request.submitted','request.approval_staged','request.approved','request.approval_abandoned','request.rejected','request.cancelled')
       AND ((audit.action='policy.changed' AND audit.request_id IS NULL) OR request.id IS NOT NULL)
       ${projectId ? "AND request.source_id=? AND request.scope_type='project' AND request.scope_public_id=?" : ""}
+      ${canonicalHistoryStart?`AND NOT (audit.action='request.submitted' AND EXISTS(SELECT 1 FROM portal_project_access_authority_events canonical
+        WHERE canonical.recorded_sequence<=? AND canonical.workspace_id=audit.workspace_id AND canonical.source_id=?
+          AND canonical.authority_type='invitation_request'
+          AND canonical.authority_id=audit.request_id AND canonical.event_kind='request_submitted'
+          AND canonical.producer_event_key='invitation-request:submitted:'||audit.request_id
+        ))`:''}
       ${actorPredicate}${resultPredicate} AND ${bounds.sql}${continuation.sql}
       ORDER BY ${at} DESC,audit.id ASC LIMIT ?`).bind(waters.invitationRequests ?? 0, scope.workspaceId,
-      ...(projectId ? [context.root.source_id, projectId] : []), ...(filters.actorType === "all" ? [] : [filters.actorType]),
-      ...(filters.result === "all" ? [] : [filters.result]), ...bounds.values, ...continuation.values, limit + 1).all<CandidateRow>();
+      ...(projectId ? [context.root.source_id, projectId] : []),
+      ...(canonicalHistoryStart?[waters.projectAccessHistory??0,context.root.source_id]:[]),
+      ...(filters.actorType === "all" ? [] : [filters.actorType]),...(filters.result === "all" ? [] : [filters.result]),
+      ...bounds.values, ...continuation.values, limit + 1).all<CandidateRow>();
     for (const row of rows.results) {
       const result: ClientAuditTimelineResult = ["request.rejected", "request.cancelled"].includes(row.action) ? "denied"
         : ["request.approval_abandoned", "policy.changed"].includes(row.action) ? "informational" : "succeeded";
@@ -428,9 +458,18 @@ async function accessCandidates(env: Env, context: ClientHubCollectionContext, s
         AND project_record.project_alpha_project_id=binding.owner_public_id` : ""}
       WHERE audit.rowid<=? AND audit.workspace_id=? AND audit.action IN ('grant.created','grant.revoked','grant.restored')
       ${projectId ? "AND binding.owner_scope_type='project' AND binding.owner_public_id=?" : ""}
+      ${canonicalHistoryStart?`AND NOT EXISTS(SELECT 1 FROM portal_project_access_authority_events canonical
+        WHERE canonical.recorded_sequence<=? AND canonical.workspace_id=audit.workspace_id AND canonical.source_id=?
+          ${projectId?'AND canonical.project_public_id=?':''} AND canonical.authority_type='authenticated_delivery_grant'
+          AND canonical.authority_id=audit.grant_id
+          AND canonical.event_kind=CASE audit.action WHEN 'grant.created' THEN 'grant_created'
+            WHEN 'grant.revoked' THEN 'grant_revoked' WHEN 'grant.restored' THEN 'grant_restored' ELSE '' END
+          AND canonical.producer_event_key='authenticated-grant-audit:'||audit.id)`:''}
       AND ${bounds.sql}${continuation.sql} ORDER BY ${at} DESC,audit.id ASC LIMIT ?`).bind(
       ...(projectId ? [context.root.source_id, scope.projectId] : []), waters.authenticatedGrants ?? 0,
-      scope.workspaceId, ...(projectId ? [projectId] : []), ...bounds.values, ...continuation.values, limit + 1).all<CandidateRow>();
+      scope.workspaceId, ...(projectId ? [projectId] : []),
+      ...(canonicalHistoryStart?[waters.projectAccessHistory??0,context.root.source_id,...(projectId?[projectId]:[])]:[]),
+      ...bounds.values, ...continuation.values, limit + 1).all<CandidateRow>();
     for (const row of rows.results) candidates.push(item({ sourceId: context.root.source_id, producer,
       producerEventId: `authenticated-grant:${String(row.event_id)}`, category: "access", action: row.action,
       actor: actor("staff"), resource: { type: "authenticated_delivery_grant", label: "Authenticated delivery access" },
@@ -485,6 +524,26 @@ async function accessCandidates(env: Env, context: ClientHubCollectionContext, s
       result: "succeeded", occurredAt: normalizeTime(row.occurred_at)! }));
   }
   return candidates;
+}
+
+async function projectAccessHistoryCandidates(env:Env,context:ClientHubCollectionContext,filters:ClientAuditTimelineFilters,
+  projectId:string|null,asOf:string,after:TimelineCursor['after'],water:number,limit:number):Promise<ClientAuditTimelineItem[]>{
+  if(filters.category!=='all'&&filters.category!=='access')return [];
+  const actorExpression=`CASE actor_type WHEN 'identity' THEN 'client' WHEN 'staff' THEN 'staff' ELSE 'system' END`,
+    resultExpression=`CASE WHEN event_kind='access_expired' THEN 'informational' ELSE 'succeeded' END`,at='occurred_at',
+    bounds=timeBounds(filters,asOf,at),eventId=`'project-access:'||printf('%020d',recorded_sequence)||':'||id`,
+    continuation=seek(at,eventId,'portal_access',after),actorPredicate=filters.actorType==='all'?'':` AND ${actorExpression}=?`,
+    resultPredicate=filters.result==='all'?'':` AND ${resultExpression}=?`;
+  const rows=await env.DELIVERY_DB.withSession('first-primary').prepare(`SELECT recorded_sequence rowid,${eventId} event_id,event_kind action,
+      ${actorExpression} actor_type,occurred_at FROM portal_project_access_authority_events
+    WHERE recorded_sequence<=? AND workspace_id=? AND source_id=? ${projectId?'AND project_public_id=?':''}
+      ${actorPredicate}${resultPredicate} AND ${bounds.sql}${continuation.sql}
+    ORDER BY julianday(occurred_at) DESC,recorded_sequence ASC LIMIT ?`).bind(water,context.root.workspace_id,context.root.source_id,
+      ...(projectId?[projectId]:[]),...(filters.actorType==='all'?[]:[filters.actorType]),...(filters.result==='all'?[]:[filters.result]),
+      ...bounds.values,...continuation.values,limit+1).all<CandidateRow>();
+  return rows.results.map(row=>item({sourceId:context.root.source_id,producer:'portal_access',producerEventId:String(row.event_id),category:'access',
+    action:`project_access.${safeText(row.action,'changed',80)}`,actor:actor(row.actor_type),resource:{type:'project_access',label:'Project access'},
+    result:row.action==='access_expired'?'informational':'succeeded',occurredAt:normalizeTime(row.occurred_at)!}));
 }
 
 async function operationalProjectCandidates(env: Env, context: ClientHubCollectionContext,
@@ -606,6 +665,35 @@ const OPERATIONAL_PROJECT_EVENT_TABLES = [
   "project_operational_events", "project_operational_contact_sets", "project_operational_contact_revisions",
   "project_operational_memory", "project_operational_memory_revisions",
 ] as const;
+const ORGANIZATION_CONTACT_EVENT_TABLES=[
+  'organization_operational_events','organization_operational_contact_sets','organization_operational_contact_revisions',
+] as const;
+
+async function organizationContactCandidates(env:Env,context:ClientHubCollectionContext,filters:ClientAuditTimelineFilters,
+  projectId:string|null,asOf:string,after:TimelineCursor['after'],water:number,limit:number,available:boolean):Promise<ClientAuditTimelineItem[]>{
+  if(!available||projectId||!allowedByFilters(filters,'project','staff','succeeded'))return [];
+  const producer:Producer='operations',at=timeExpression('event.created_at'),bounds=timeBounds(filters,asOf,at),
+    continuation=seek(at,"'organization-contacts:'||event.id",producer,after);
+  const rows=await env.OPS_DB.withSession('first-primary').prepare(`SELECT event.rowid,event.id event_id,event.event_kind action,
+      'staff' actor_type,${at} occurred_at,organization.name resource_label
+    FROM organization_operational_events event
+    JOIN organization_operational_contact_sets current ON current.projection_source_id=event.projection_source_id
+      AND current.organization_id=event.organization_id AND current.version>=event.result_version
+    JOIN organization_operational_contact_revisions revision ON revision.projection_source_id=event.projection_source_id
+      AND revision.organization_id=event.organization_id AND revision.version=event.result_version AND revision.actor_id=event.actor_id
+    JOIN pa_projection_record_ids handle ON handle.projection_source_id=event.projection_source_id
+      AND handle.record_kind='organization' AND handle.local_id=event.organization_id
+    JOIN pa_organizations organization ON organization.id=event.organization_id
+      AND organization.projection_source_id=event.projection_source_id AND organization.active=1
+    JOIN staff_users actor_record ON actor_record.id=event.actor_id
+    WHERE event.rowid<=? AND event.projection_source_id=? AND event.organization_record_kind='organization'
+      AND event.organization_id=? AND event.event_kind='contacts_saved' AND ${bounds.sql}${continuation.sql}
+    ORDER BY ${at} DESC,event.id ASC LIMIT ?`).bind(water,context.root.source_id,context.root.public_id,
+      ...bounds.values,...continuation.values,limit+1).all<CandidateRow>();
+  return rows.results.map(row=>item({sourceId:context.root.source_id,producer,producerEventId:`organization-contacts:${String(row.event_id)}`,
+    category:'project',action:'organization.contacts.saved',actor:actor('staff'),resource:{type:'organization_operational_contacts',
+      label:safeText(row.resource_label,'Organization operational contacts',180)},result:'succeeded',occurredAt:normalizeTime(row.occurred_at)!}));
+}
 
 async function projectAccessNoticeCandidates(env: Env, context: ClientHubCollectionContext,
   filters: ClientAuditTimelineFilters, projectId: string | null, asOf: string, after: TimelineCursor["after"],
@@ -695,7 +783,7 @@ async function projectAccessCompanionNoticeCandidates(env: Env, context: ClientH
 async function currentWatermarks(env: Env, context: ClientHubCollectionContext, scope: DeliveryScope,
   policies: { portal: boolean; deliveryAudit: boolean; viewerManage: boolean },
   collaboratorNoticeSchema: boolean, companionNoticeSchema: boolean,
-  operationalProjectSchema: boolean): Promise<Record<string, number>> {
+  operationalProjectSchema: boolean,organizationContactSchema:boolean,projectAccessHistoryAvailable:boolean,projectPublicId:string|null): Promise<Record<string, number>> {
   const ops = env.OPS_DB.withSession("first-primary"), delivery = env.DELIVERY_DB.withSession("first-primary");
   const waters: Record<string, number> = {};
   if (context.root.root_namespace === "business") waters.business = await ops.prepare("SELECT COALESCE(MAX(sequence),0) value FROM client_business_activity").first<number>("value") ?? 0;
@@ -718,6 +806,12 @@ async function currentWatermarks(env: Env, context: ClientHubCollectionContext, 
     waters.projectAccessCompanionNotices = await maxRowid(delivery, "portal_project_access_companion_notice_audit");
   if (context.root.root_namespace === "business" && operationalProjectSchema)
     waters.operationalProjects = await maxRowid(ops, "project_operational_events");
+  if(organizationContactSchema&&context.root.root_namespace==='business'&&context.root.kind==='organization')
+    waters.organizationContacts=await ops.prepare(`SELECT COALESCE(MAX(rowid),0) value FROM organization_operational_events
+      WHERE projection_source_id=? AND organization_id=?`).bind(context.root.source_id,context.root.public_id).first<number>('value')??0;
+  if(projectAccessHistoryAvailable)waters.projectAccessHistory=await delivery.prepare(`SELECT COALESCE(MAX(recorded_sequence),0) value
+    FROM portal_project_access_authority_events WHERE workspace_id=? AND source_id=? ${projectPublicId?'AND project_public_id=?':''}`)
+    .bind(context.root.workspace_id,context.root.source_id,...(projectPublicId?[projectPublicId]:[])).first<number>('value')??0;
   return waters;
 }
 
@@ -746,6 +840,8 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     collaboratorNoticeSchema = await d1TablesPresent(env.DELIVERY_DB, PROJECT_ACCESS_COLLABORATOR_NOTICE_TABLES),
     companionNoticeSchema = await d1TablesPresent(env.DELIVERY_DB, PROJECT_ACCESS_COMPANION_NOTICE_TABLES),
     operationalProjectSchema = await d1TablesPresent(env.OPS_DB, OPERATIONAL_PROJECT_EVENT_TABLES),
+    organizationContactSchema=await d1TablesPresent(env.OPS_DB,ORGANIZATION_CONTACT_EVENT_TABLES),
+    projectAccessHistory=await projectAccessHistoryState(env),
     source = context.root.root_namespace === "business" ? await clientHubBusinessProjectSourceProof(env, context)
       : await sha256(JSON.stringify([rootTuple(context), "not-business"]));
   const businessRevision = context.root.root_namespace === "business"
@@ -761,12 +857,14 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     || cursor.noticeScope !== noticeScope.proof
     || cursor.collaboratorNoticeSchema !== collaboratorNoticeSchema
     || cursor.companionNoticeSchema !== companionNoticeSchema
-    || cursor.operationalProjectSchema !== operationalProjectSchema)) changed();
+    || cursor.operationalProjectSchema !== operationalProjectSchema
+    || cursor.organizationContactSchema!==organizationContactSchema
+    || cursor.projectAccessHistory !== projectAccessHistory.collectedSince)) changed();
   const accessPolicies = { portal: context.access.requests && portalPolicy.allowed, deliveryAudit: deliveryAuditPolicy.allowed,
     viewerManage: viewerManagePolicy.allowed };
   const asOf = cursor?.asOf ?? new Date().toISOString(), waters = cursor?.waters
     ?? await currentWatermarks(env, context, scope, accessPolicies, collaboratorNoticeSchema, companionNoticeSchema,
-      operationalProjectSchema);
+      operationalProjectSchema,organizationContactSchema,projectAccessHistory.collectedSince!==null,projectId);
   const secondary = context.root.root_namespace === "business" && context.root.source_id !== PRIMARY_ALPHA_SOURCE_ID;
   const sourceAvailable = context.root.root_namespace === "business";
   const requestAvailable = !secondary && Boolean(scope.accountId) && context.access.requests;
@@ -779,10 +877,15 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     && accessPolicies.portal && companionNoticeSchema;
   const sourceProjectAvailable = context.root.root_namespace === "business";
   const operationalProjectAvailable = sourceProjectAvailable && operationalProjectSchema && policy.allowed;
+  const organizationContactAvailable=sourceProjectAvailable&&context.root.kind==='organization'&&organizationContactSchema&&policy.allowed&&!projectId;
+  const projectAccessAvailable=context.root.root_namespace==='business'&&Boolean(context.root.workspace_id)&&noticeScope.available
+    &&projectAccessHistory.collectedSince!==null&&portalPolicy.allowed;
   const projectCoverage = Object.fromEntries(CLIENT_AUDIT_TIMELINE_PROJECT_ADAPTERS.map(adapter => {
-    const available = adapter === "source_record_activity" ? sourceProjectAvailable : operationalProjectAvailable;
+    const available = adapter === "source_record_activity" ? sourceProjectAvailable
+      :adapter==='organization_contact_activity'?organizationContactAvailable:operationalProjectAvailable;
     const reason: CoverageReason = available ? null : context.root.root_namespace !== "business" ? "not_applicable"
-      : adapter === "operational_project_activity" && !policy.allowed ? "permission_required" : "not_collected";
+      :adapter==='organization_contact_activity'&&(context.root.kind!=='organization'||projectId)?'not_applicable'
+        :!policy.allowed?'permission_required':'not_collected';
     return [adapter, coverage(available, reason)];
   })) as ClientAuditTimelinePage["projectCoverage"];
   const adapterCoverage = Object.fromEntries(CLIENT_AUDIT_TIMELINE_ACCESS_ADAPTERS.map(adapter => {
@@ -790,14 +893,17 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     const deliveryAdapter = ["authenticated_delivery_grant", "delegated_client_share"].includes(adapter);
     const viewerAdapter = adapter === "viewer_client_grant";
     const clientOnly = adapter === "workspace_membership" || adapter === "workspace_peer_administrator";
-    const available = !secondary && !(projectId && clientOnly) && (portalAdapter ? Boolean(scope.workspaceId) && accessPolicies.portal
+    const available = adapter==='project_access'?projectAccessAvailable:!secondary && !(projectId && clientOnly) && (portalAdapter ? Boolean(scope.workspaceId) && accessPolicies.portal
       : deliveryAdapter ? Boolean(scope.workspaceId) && accessPolicies.deliveryAudit
         : viewerAdapter ? Boolean(scope.accountId) && accessPolicies.viewerManage : false);
-    const reason: CoverageReason = available ? null : secondary ? "unsupported_source"
-      : projectId && clientOnly ? "not_applicable" : adapter === "project_access" ? "not_collected"
+    const reason: CoverageReason = available ? null : adapter==='project_access'
+      ? context.root.root_namespace!=='business'||!context.root.workspace_id||!noticeScope.available?'not_applicable'
+        : projectAccessHistory.collectedSince===null?'not_collected':!portalPolicy.allowed?'permission_required':'not_collected'
+      : secondary ? "unsupported_source"
+      : projectId && clientOnly ? "not_applicable"
         : portalAdapter || deliveryAdapter ? !scope.workspaceId ? "not_applicable" : "permission_required"
           : !scope.accountId ? "not_applicable" : "permission_required";
-    return [adapter, coverage(available, reason)];
+    return [adapter,adapter==='project_access'?{...coverage(available,reason),collectedSince:projectAccessHistory.collectedSince}:coverage(available, reason)];
   })) as ClientAuditTimelinePage["accessCoverage"];
   const notificationCoverage = Object.fromEntries(CLIENT_AUDIT_TIMELINE_NOTIFICATION_ADAPTERS.map(adapter => {
     const available = adapter === "delivery_share_notification" ? deliveryAvailable
@@ -812,12 +918,15 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
   const notificationUnavailableReason: CoverageReason = secondary ? "unsupported_source"
     : Object.values(notificationCoverage).some(value => value.reason === "permission_required") ? "permission_required"
       : Object.values(notificationCoverage).some(value => value.reason === "not_collected") ? "not_collected" : "not_applicable";
+  const accessAdapterValues=Object.values(adapterCoverage),responseAccessAvailable=accessAdapterValues.some(value=>value.available);
+  const responseAccessReason:CoverageReason=responseAccessAvailable?null:accessAdapterValues.some(value=>value.reason==='permission_required')?'permission_required'
+    :accessAdapterValues.some(value=>value.reason==='not_collected')?'not_collected'
+      :accessAdapterValues.some(value=>value.reason==='unsupported_source')?'unsupported_source':'not_applicable';
   const responseCoverage: ClientAuditTimelinePage["coverage"] = {
     project: coverage(Object.values(projectCoverage).some(value => value.available), "not_applicable"),
     request: coverage(requestAvailable, secondary ? "unsupported_source" : !scope.accountId ? "not_applicable" : "permission_required"),
     feedback: coverage(false, secondary ? "unsupported_source" : "not_collected"),
-    access: coverage(accessAvailable, secondary ? "unsupported_source"
-      : !scope.workspaceId && !scope.accountId ? "not_applicable" : "permission_required"),
+    access: coverage(responseAccessAvailable,responseAccessReason),
     delivery: coverage(deliveryAvailable, secondary ? "unsupported_source" : !scope.accountId ? "not_applicable" : "permission_required"),
     notification: coverage(notificationAvailable, notificationUnavailableReason),
   };
@@ -825,8 +934,12 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     sourceAvailable ? businessCandidates(env, context, filters, projectId, asOf, cursor?.after ?? null, waters.business ?? 0, limit, policy) : [],
     operationalProjectAvailable ? operationalProjectCandidates(env, context, filters, projectId, asOf,
       cursor?.after ?? null, waters.operationalProjects ?? 0, limit, policy, operationalProjectAvailable) : [],
+    organizationContactAvailable?organizationContactCandidates(env,context,filters,projectId,asOf,cursor?.after??null,
+      waters.organizationContacts??0,limit,organizationContactAvailable):[],
     requestAvailable ? requestCandidates(env, context, scope, filters, asOf, cursor?.after ?? null, waters.requests ?? 0, limit) : [],
-    accessAvailable ? accessCandidates(env, context, scope, filters, projectId, asOf, cursor?.after ?? null, waters, limit, accessPolicies) : [],
+    accessAvailable ? accessCandidates(env, context, scope, filters, projectId, asOf, cursor?.after ?? null, waters, limit, accessPolicies,
+      projectAccessAvailable?projectAccessHistory.collectedSince:null) : [],
+    projectAccessAvailable ? projectAccessHistoryCandidates(env,context,filters,projectId,asOf,cursor?.after??null,waters.projectAccessHistory??0,limit):[],
     deliveryAvailable ? deliveryCandidates(env, context, scope, filters, asOf, cursor?.after ?? null, waters.deliveryAudit ?? 0, limit) : [],
     projectAccessCollaboratorNoticeAvailable ? projectAccessNoticeCandidates(env, context, filters, projectId, asOf,
       cursor?.after ?? null, waters.projectAccessNotices ?? 0, limit, projectAccessCollaboratorNoticeAvailable) : [],
@@ -836,7 +949,7 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
   const pageItems = candidates.slice(0, limit), hasMore = candidates.length > limit;
   const [currentScope, currentPolicy, currentSource, currentRevision, currentDetail, currentDeliveryAuditPolicy,
     currentViewerManagePolicy, currentPortalPolicy, currentNoticeScope, currentCollaboratorNoticeSchema,
-    currentCompanionNoticeSchema, currentOperationalProjectSchema] = await Promise.all([
+    currentCompanionNoticeSchema, currentOperationalProjectSchema,currentOrganizationContactSchema,currentProjectAccessHistory] = await Promise.all([
     deliveryScope(env, context, projectId), readClientHubBusinessProjectPolicy(env, principal),
     context.root.root_namespace === "business" ? clientHubBusinessProjectSourceProof(env, context) : Promise.resolve(source),
     context.root.root_namespace === "business" ? env.OPS_DB.withSession("first-primary")
@@ -848,6 +961,8 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     d1TablesPresent(env.DELIVERY_DB, PROJECT_ACCESS_COLLABORATOR_NOTICE_TABLES),
     d1TablesPresent(env.DELIVERY_DB, PROJECT_ACCESS_COMPANION_NOTICE_TABLES),
     d1TablesPresent(env.OPS_DB, OPERATIONAL_PROJECT_EVENT_TABLES),
+    d1TablesPresent(env.OPS_DB,ORGANIZATION_CONTACT_EVENT_TABLES),
+    projectAccessHistoryState(env),
   ]);
   if (currentScope.proof !== scope.proof || currentPolicy.proof !== policy.proof || currentSource !== source
     || currentRevision !== businessRevision || currentDeliveryAuditPolicy.proof !== deliveryAuditPolicy.proof
@@ -857,6 +972,8 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     || currentCollaboratorNoticeSchema !== collaboratorNoticeSchema
     || currentCompanionNoticeSchema !== companionNoticeSchema
     || currentOperationalProjectSchema !== operationalProjectSchema
+    || currentOrganizationContactSchema!==organizationContactSchema
+    || currentProjectAccessHistory.proof!==projectAccessHistory.proof
     || (currentDetail && await sha256(JSON.stringify(currentDetail.project)) !== projectProof)) changed();
   const last = pageItems.at(-1);
   return { canonicalRoot: context.canonicalRoot, projectId, contextVersion: context.contextVersion,
@@ -864,11 +981,11 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     notificationCoverage,
     filters, items: pageItems,
     page: { returned: pageItems.length, limit, hasMore, nextCursor: hasMore && last ? await encodeCursor(env, principal, {
-      v: 6, actor: principal.id, root: rootTuple(context), projectId, context: context.contextVersion, scope: scope.proof,
+      v: 7, actor: principal.id, root: rootTuple(context), projectId, context: context.contextVersion, scope: scope.proof,
       project: projectProof, businessPolicy: policy.proof, businessSource: source, businessRevision,
       deliveryAuditPolicy: deliveryAuditPolicy.proof, viewerManagePolicy: viewerManagePolicy.proof,
       portalPolicy: portalPolicy.proof, noticeScope: noticeScope.proof, collaboratorNoticeSchema, companionNoticeSchema,
-      operationalProjectSchema,
+      operationalProjectSchema,organizationContactSchema,projectAccessHistory:projectAccessHistory.collectedSince,
       filters, asOf, waters, after: [last.occurredAt, last.producer, last.producerEventId], expires: Date.now() + 30 * 60_000,
     }) : null } };
 }

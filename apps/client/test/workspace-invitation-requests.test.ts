@@ -2,7 +2,7 @@ import {readFileSync,readdirSync} from 'node:fs';
 import {Miniflare} from 'miniflare';
 import {beforeAll,afterAll,describe,it,expect} from 'vitest';
 import {splitD1MigrationStatements} from './helpers/d1-migrations';
-import {createWorkspaceInvitation,listWorkspaceAccess} from '../src/worker/client-portal/workspace-memberships';
+import {createWorkspaceInvitation,listWorkspaceAccess,type WorkspaceInvitationInput} from '../src/worker/client-portal/workspace-memberships';
 import {acceptPortalWorkspaceInvitation,type PortalAuthorizationEnv} from '../src/worker/client-portal/workspace-v2';
 import {invitationPublicationAllowed,invitationRequestsReady} from '../src/worker/client-portal/invitation-approval-policy';
 import {prepareWorkspaceInvitationDecision,stageApprovedWorkspaceInvitation,publishApprovedWorkspaceInvitation,
@@ -84,18 +84,31 @@ describe('workspace invitation approval: real migrated D1',{concurrent:false,tim
   const path=new URL('../migrations/',import.meta.url);
   for(const name of readdirSync(path).filter(n=>/^\d{4}_.*\.sql$/.test(n)&&n.slice(0,4)<='0164').sort())
    await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,path),'utf8')).map(sql=>db.prepare(sql)));
-  env={DELIVERY_DB:db,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true',CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED:'true'};
+  env={DELIVERY_DB:db,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true',CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED:'true',PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true'};
   const old=await fixture();
   await db.prepare(`UPDATE portal_workspace_invitation_policies SET policy='allowed',version=2 WHERE workspace_id=?`).bind(old.id).run();
-  const legacy=await createWorkspaceInvitation(env,old.principal,old.id,{email:'preserved@example.test',projectPublicId:old.project,capabilities:['delivery.view'],accessTerms:collaborator},crypto.randomUUID());
+  const legacy=await createWorkspaceInvitation(env,old.principal,old.id,{email:'preserved@example.test',projectPublicId:old.project,capabilities:['delivery.view']},crypto.randomUUID());
   expect(legacy.outcome).toBe('created');
   const before=await db.prepare('SELECT * FROM portal_v2_invitations').all();
   expect(await invitationRequestsReady(db)).toBe(false);
   await db.batch(splitD1MigrationStatements(readFileSync(new URL('0165_workspace_invitation_approvals.sql',path),'utf8')).map(sql=>db.prepare(sql)));
+  for(const name of readdirSync(path).filter(n=>/^\d{4}_.*\.sql$/.test(n)&&n.slice(0,4)>='0166'&&n.slice(0,4)<='0173').sort())
+   await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,path),'utf8')).map(sql=>db.prepare(sql)));
   expect((await db.prepare('SELECT * FROM portal_v2_invitations').all()).results).toEqual(before.results);
   expect(await invitationRequestsReady(db)).toBe(true);
  },180_000);
  afterAll(async()=>mf.dispose());
+ it('keeps reads live while absent or false authority-mutation gates fail closed without writes',async()=>{
+  const f=await fixture(),before=await count('portal_v2_invitations',f.id);
+  const input:WorkspaceInvitationInput={email:`paused-${f.id}@example.test`,projectPublicId:f.project,capabilities:['delivery.view'],accessTerms:collaborator};
+  await expect(createWorkspaceInvitation({...env,PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:undefined},f.principal,f.id,input,crypto.randomUUID()))
+    .rejects.toMatchObject({status:503});
+  await expect(createWorkspaceInvitation({...env,PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'false'},f.principal,f.id,input,crypto.randomUUID()))
+    .rejects.toMatchObject({status:503});
+  expect(await count('portal_v2_invitations',f.id)).toBe(before);
+  await expect(readWorkspaceInvitationPolicyContext(db,{sourceId:source,workspaceId:f.id}))
+    .resolves.toMatchObject({workspaceId:f.id,policy:'require_approval'});
+ });
  it('submits without email readiness and creates zero invitation, token, grants or outbox; same key replays',async()=>{
   const f=await fixture(),key=crypto.randomUUID(),before=await count('portal_v2_entitlements',f.id),r=await submit(f,undefined,key);
   expect(r.status).toBe('pending');expect(r.invitationId).toBeNull();expect(await count('portal_v2_invitations',f.id)).toBe(0);
@@ -134,13 +147,13 @@ describe('workspace invitation approval: real migrated D1',{concurrent:false,tim
   await db.prepare(`UPDATE portal_v2_entitlements SET status='revoked' WHERE workspace_id=? AND capability='delivery.view'`).bind(f.id).run();
   await expect(publishApprovedWorkspaceInvitation(env,{authorizationId:s.auth.id})).rejects.toMatchObject({status:409});
   expect((await readWorkspaceInvitationRequest(db,{sourceId:source,workspaceId:f.id,requestId:r.id}))?.status).toBe('approving');
-  expect((await abandonStagedWorkspaceInvitation(db,{authorizationId:s.auth.id}))?.status).toBe('pending');
+  expect((await abandonStagedWorkspaceInvitation(db,{authorizationId:s.auth.id},true))?.status).toBe('pending');
  });
  it('recovers an expired crashed stage without send, once, and permits a fresh review',async()=>{
   const f=await fixture(),r=await submit(f),s=await stage(r);
-  expect(await reconcileExpiredWorkspaceInvitationApprovals(db,new Date(Date.now()+300_000))).toBeGreaterThan(0);
+  expect(await reconcileExpiredWorkspaceInvitationApprovals(db,new Date(Date.now()+300_000),true)).toBeGreaterThan(0);
   const after=await readWorkspaceInvitationRequest(db,{sourceId:source,workspaceId:f.id,requestId:r.id});expect(after?.status).toBe('pending');expect(after?.version).toBe(3);
-  await reconcileExpiredWorkspaceInvitationApprovals(db,new Date(Date.now()+300_000));
+  await reconcileExpiredWorkspaceInvitationApprovals(db,new Date(Date.now()+300_000),true);
   expect((await readWorkspaceInvitationRequest(db,{sourceId:source,workspaceId:f.id,requestId:r.id}))?.version).toBe(3);
   expect(await db.prepare('SELECT payload_json FROM portal_v2_invitation_email_outbox WHERE invitation_id=(SELECT invitation_id FROM portal_workspace_invitation_approvals WHERE id=?)').bind(s.auth.id).first('payload_json')).toBe('{"redacted":true}');
   const fresh=await stage(after!);expect(fresh.result.request.status).toBe('approving');

@@ -3,6 +3,7 @@ import {Miniflare} from 'miniflare';
 import {beforeAll,afterAll,describe,it,expect} from 'vitest';
 import {splitD1MigrationStatements} from './helpers/d1-migrations';
 import {prepareProjectAccessTerms,readProjectAccessTerms,projectAccessTermsSql,projectAccessTermsReady,parseProjectAccessTerms} from '../src/worker/client-portal/project-access-terms';
+import {projectAccessAuthorityHistoryReady} from '../src/worker/client-portal/project-access-authority-history';
 import {createWorkspaceInvitation} from '../src/worker/client-portal/workspace-memberships';
 import {acceptPortalWorkspaceInvitation,authorizePortalWorkspaceCapability} from '../src/worker/client-portal/workspace-v2';
 import type {Env} from '../src/worker/types';
@@ -77,7 +78,17 @@ describe('explicit project access terms: populated migration and invitation life
     await db.batch(splitD1MigrationStatements(readFileSync(new URL('0164_project_access_terms.sql',path),'utf8')).map(sql=>db.prepare(sql)));
     const after=await db.prepare("SELECT * FROM portal_v2_authenticated_delivery_grants WHERE id='old-grant'").first<Record<string,unknown>>();
     expect(after?.access_terms_id).toBeNull();delete after!.access_terms_id;expect(after).toEqual(before);
-    const partial:Partial<Env>={DELIVERY_DB:db,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true',CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED:'true'};
+    expect(await projectAccessTermsReady(db)).toBe(true);
+    expect(await projectAccessAuthorityHistoryReady(db)).toBe(false);
+    await db.prepare(`INSERT INTO portal_project_access_terms(id,workspace_id,source_id,project_public_id,kind,mode,created_by_actor_type,created_by_actor_id)
+      VALUES('pre-history-terms',?,?,?,'customer','until_revoked','staff','operator')`).bind(old.id,source,old.project).run();
+    expect(await permitted('pre-history-terms',old)).toBe(1);
+    await expect(prepareProjectAccessTerms(db,old.scope,{kind:'customer',mode:'until_revoked',expiresAt:null},{type:'staff',id:'operator'}))
+      .rejects.toMatchObject({status:503});
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL('0165_workspace_invitation_approvals.sql',path),'utf8')).map(sql=>db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL('0172_project_access_authority_history.sql',path),'utf8')).map(sql=>db.prepare(sql)));
+    expect(await projectAccessAuthorityHistoryReady(db)).toBe(true);
+    const partial:Partial<Env>={DELIVERY_DB:db,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true',CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED:'true',PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true'};
     env=partial as Env;
   },180_000);
   afterAll(async()=>mf.dispose());
@@ -195,7 +206,7 @@ describe('explicit project access terms: populated migration and invitation life
     const json=await db.prepare('SELECT payload_json FROM portal_v2_invitation_email_outbox WHERE invitation_id=?').bind(created.invitation.id).first<string>('payload_json');
     await db.prepare('INSERT INTO portal_workspace_invitation_policies(workspace_id,policy,version,updated_by_staff_id) VALUES(?,?,1,?)').bind(f.id,policy,'operator').run();
     expect((await createWorkspaceInvitation(env,f.principal,f.id,{email:'new@example.test',projectPublicId:f.project,capabilities:['delivery.view'],accessTerms:collaborator},`after-policy-invite-${n}`)).outcome)
-      .toBe(policy==='disabled'?'policy_disabled':'approval_required');
+      .toBe(policy==='disabled'?'policy_disabled':'approval_requested');
     expect(await acceptPortalWorkspaceInvitation(env,{issuer,subject:`blocked-${n}`,email},(JSON.parse(json!) as {token:string}).token)).toBe('denied');
     expect(await db.prepare('SELECT status FROM portal_v2_invitations WHERE id=?').bind(created.invitation.id).first('status')).toBe('pending');
   });

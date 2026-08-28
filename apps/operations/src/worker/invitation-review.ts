@@ -14,6 +14,7 @@ import {
   type InvitationReviewAuthorization, type InvitationReviewProof,
 } from './invitation-review-authority';
 import type { Env, StaffPrincipal } from './types';
+import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 
 const opaque = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
 const source = z.string().regex(/^project-alpha:[a-z0-9][a-z0-9_-]{0,63}$/);
@@ -190,6 +191,7 @@ export async function decideStaffInvitationRequest(env: Env, actor: StaffPrincip
       return { request: { ...completed.request, sourceName: proof.sourceName }, replayed: true };
     }
   }
+  if(input.decision==='approve')requireProjectAccessAuthorityMutations(env);
   const prepared = await prepareWorkspaceInvitationDecision(env, { sourceId: input.sourceId, workspaceId: input.workspaceId,
     requestId, decision: input.decision });
   if (!receipt) {
@@ -219,7 +221,8 @@ export async function decideStaffInvitationRequest(env: Env, actor: StaffPrincip
     // Delivery helper closes only this authorization's unpublished invitation;
     // another reviewer's operation is not affected.
     try {
-      await abandonStagedWorkspaceInvitation(database(env), { authorizationId: receipt.id });
+      await abandonStagedWorkspaceInvitation(database(env), { authorizationId: receipt.id,actor:{type:'staff',id:receipt.actor_id} },
+        env.PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED==='true');
     } catch {
       // Retain the original failure if cleanup is unavailable. An unpublished
       // stage remains unusable, including after the publication deadline.

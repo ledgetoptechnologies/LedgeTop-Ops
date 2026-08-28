@@ -5,6 +5,8 @@ import { readPortalSourceAuthorityProof, portalSourceAuthoritiesReady, type Port
 import { readNativeTargetScopes, type NativeTargetScopes } from "./native-portal-scopes";
 import { projectAccessReadColumns, projectAccessRowAllows, readExpiredScopeProjects, type ProjectAccessReadRow } from './project-access-read';
 import { projectAccessTermsReady,readWorkspaceInvitationPolicy } from './project-access-terms';
+import {projectAccessAuthorityHistoryReady,projectAccessInvitationEvent} from './project-access-authority-history';
+import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 import { projectAccessCapacitySql } from './project-access-capacity';
 import { d1TablesPresent } from "../schema-readiness";
 import { bindNativePortalEligibility } from "./native-portal-eligibility";
@@ -13,7 +15,8 @@ import { localOrPrimaryAlphaReference, primaryAlphaReference, primaryWorkspaceAc
 export type PortalAuthorizationEnv = Pick<ClientEnv, "DELIVERY_DB" | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED" |
   "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED" | "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED" |
   "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED" | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED" |
-  "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY" | "AUTHENTICATED_DELIVERY_GRANTS_ENABLED">;
+  "CLIENT_PORTAL_ACCESS_ENROLLMENT_READY" | "AUTHENTICATED_DELIVERY_GRANTS_ENABLED" |
+  "PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED">;
 type Env = PortalAuthorizationEnv;
 import type { VerifiedClientPrincipal } from "./types";
 import {
@@ -1313,6 +1316,7 @@ export async function acceptPortalWorkspaceInvitation(
   principal: VerifiedClientPrincipal,
   token: string,
 ): Promise<InvitationAcceptance> {
+  requireProjectAccessAuthorityMutations(env);
   if (!portalHierarchyV2Enabled(env) || env.CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED !== "true") return "denied";
   const tokenHash = await hashPortalInvitationToken(token);
   const normalizedEmail = principal.email?.trim().toLocaleLowerCase("en-US");
@@ -1355,6 +1359,7 @@ export async function acceptPortalWorkspaceInvitation(
   }
   if (!invitation) return "denied";
   const accessTermsReady=await projectAccessTermsReady(portalDb(env));
+  const accessHistoryReady=await projectAccessAuthorityHistoryReady(portalDb(env));
   const approvalReady=await invitationRequestsReady(portalDb(env));
   if(approvalReady){if(!await invitationPublicationAllowed(portalDb(env),invitation.id))return 'denied';}
   else if(accessTermsReady&&(await readWorkspaceInvitationPolicy(portalDb(env),invitation.workspace_id)).mode!=='allowed')return 'denied';
@@ -1424,6 +1429,7 @@ export async function acceptPortalWorkspaceInvitation(
   if (!acceptanceScopes || await identityDeniedForScopes(
     env, identity.id, invitation.workspace_id, acceptanceScopes,
   )) return "denied";
+  const membershipAuditId=crypto.randomUUID();
   const enrollmentAcceptanceGuard=requireEnrollmentReceipt?`AND EXISTS (
     SELECT 1 FROM portal_v2_invitation_access_enrollment_receipts receipt
     JOIN portal_v2_invitation_email_outbox outbox ON outbox.invitation_id=invitation.id
@@ -1564,10 +1570,17 @@ export async function acceptPortalWorkspaceInvitation(
       SELECT ?,workspace_id,?,'invitation.accepted',?,id FROM portal_v2_invitations
       WHERE id=? AND status='accepted' AND accepted_by_identity_id=?
         AND NOT EXISTS (SELECT 1 FROM portal_v2_membership_audit audit WHERE audit.invitation_id=? AND audit.action='invitation.accepted')`)
-      .bind(crypto.randomUUID(), identity.id, identity.id, invitation.id, identity.id, invitation.id),
+       .bind(membershipAuditId, identity.id, identity.id, invitation.id, identity.id, invitation.id),
+    ...(accessHistoryReady?[projectAccessInvitationEvent(portalDb(env),{invitationId:invitation.id,eventKind:'invitation_accepted',
+      producerEventKey:`membership:${membershipAuditId}`,actor:{type:'identity',id:identity.id},subjectIdentityId:identity.id,
+      requiredMembershipAuditId:membershipAuditId})]:[]),
   ]);}catch(error){
     if(error instanceof Error&&/portal invitation policy|portal access terms|portal project access terms/.test(error.message))return 'denied';
-    throw error;
+    const current=await portalDb(env).prepare(`SELECT status,accepted_by_identity_id,expires_at FROM portal_v2_invitations WHERE id=?`)
+      .bind(invitation.id).first<{status:string;accepted_by_identity_id:string|null;expires_at:string}>();
+    if(current?.status==='accepted')return current.accepted_by_identity_id===identity.id?'accepted':'denied';
+    if(!current||current.status!=='pending'||Date.parse(current.expires_at)<=Date.now())return 'denied';
+    throw new HTTPException(503,{message:'Invitation acceptance could not be recorded',cause:error});
   }
   const acceptedBy = await portalDb(env).prepare("SELECT accepted_by_identity_id FROM portal_v2_invitations WHERE id=?")
     .bind(invitation.id).first("accepted_by_identity_id");

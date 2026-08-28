@@ -11,7 +11,9 @@ import { eligiblePortalShellQuery } from '../../../client/src/worker/client-port
 import { projectAccessCapacitySql } from '../../../client/src/worker/client-portal/project-access-capacity';
 import { prepareProjectAccessTerms, projectAccessTermsSql, projectAccessTermsExpirySql, projectAccessTermsReady,
   type ProjectAccessTermsView } from '../../../client/src/worker/client-portal/project-access-terms';
+import { projectAccessAuthorityHistoryReady,projectAccessGrantEvent } from '../../../client/src/worker/client-portal/project-access-authority-history';
 import type { Env, StaffPrincipal } from './types';
+import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 
 type Database = Pick<D1Database,'prepare'|'batch'>;
 const opaque = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/);
@@ -362,7 +364,9 @@ async function historyPrepared(env:Env,principal:StaffPrincipal,row:StoredGrant,
 function event(db:Database,id:string,receipt:string,action:string,actor:string){return db.prepare(`INSERT INTO portal_native_staff_grant_events(id,grant_id,authorization_id,action,actor_id)
   SELECT ?,?,?,?,? WHERE NOT EXISTS(SELECT 1 FROM portal_native_staff_grant_events WHERE authorization_id=? AND action=?)`)
   .bind(crypto.randomUUID(),id,receipt,action,actor,receipt,action);}
-async function suspend(env:Env,auth:Authorization){const db=primary(env.DELIVERY_DB);await db.batch([
+async function suspend(env:Env,auth:Authorization){const db=primary(env.DELIVERY_DB),historyReady=await projectAccessAuthorityHistoryReady(db),
+  published=Boolean(await db.prepare(`SELECT 1 ok FROM portal_native_staff_grant_events WHERE grant_id=? AND authorization_id=? AND action='published'`)
+    .bind(auth.grant_id,auth.id).first('ok'));try{await db.batch([
   db.prepare(`UPDATE portal_native_staff_grants SET state='suspended',updated_at=datetime('now') WHERE grant_id=? AND authorization_id=? AND state IN('pending','active')`).bind(auth.grant_id,auth.id),
   db.prepare(`UPDATE portal_v2_authenticated_delivery_grants SET status='revoked',revoked_at=datetime('now'),revoked_by_staff_id=?,
     revoke_reason_code='publication_uncertain',updated_at=datetime('now') WHERE id=? AND status='active'
@@ -371,7 +375,17 @@ async function suspend(env:Env,auth:Authorization){const db=primary(env.DELIVERY
   db.prepare(`INSERT INTO portal_native_staff_grant_events(id,grant_id,authorization_id,action,actor_id)
     SELECT ?,grant_id,authorization_id,'suspended',? FROM portal_native_staff_grants WHERE grant_id=? AND authorization_id=? AND state='suspended'
       AND NOT EXISTS(SELECT 1 FROM portal_native_staff_grant_events WHERE authorization_id=? AND action='suspended')`)
-    .bind(crypto.randomUUID(),auth.actor_id,auth.grant_id,auth.id,auth.id)]);}
+    .bind(crypto.randomUUID(),auth.actor_id,auth.grant_id,auth.id,auth.id),
+  ...(historyReady&&published?[projectAccessGrantEvent(db,{grantId:auth.grant_id,eventKind:'grant_revoked',
+    producerEventKey:`native-grant-event:${auth.id}:suspended`,actor:{type:'staff',id:auth.actor_id},
+    requiredNativeEvent:{authorizationId:auth.id,action:'suspended',requirePublished:true}})]:[])]);}catch(cause){
+  const terminal=await db.prepare(`SELECT publication.state,grant_record.status FROM portal_native_staff_grants publication
+    JOIN portal_v2_authenticated_delivery_grants grant_record ON grant_record.id=publication.grant_id
+    WHERE publication.grant_id=? AND publication.authorization_id=?`).bind(auth.grant_id,auth.id)
+    .first<{state:string;status:string}>();
+  if(terminal&&(terminal.state==='revoked'||terminal.state==='suspended')&&terminal.status==='revoked')return;
+  throw cause;
+}}
 function view(row:StoredGrant,p:Prepared,canRevoke:boolean):NativeDeliveryGrantView{return {id:row.id,grantId:row.logical_grant_id,version:row.grant_version,
   sourceId:row.source_id,sourceName:display(p.ops.sourceName),workspaceId:row.workspace_id,workspaceName:display(p.delivery.workspaceName),projectId:row.project_id,
   projectName:display(p.ops.projectName),principalPublicId:row.audience_public_id,recipientName:display(p.delivery.recipientName),recipientEmail:p.delivery.recipientEmail,
@@ -385,6 +399,7 @@ async function mayRevoke(env:Env,principal:StaffPrincipal,p:Prepared):Promise<bo
   catch(cause){if(cause instanceof HTTPException&&cause.status===404)return false;throw cause;}}
 
 export async function createNativeDeliveryGrant(env:Env,principal:StaffPrincipal,value:unknown,keyValue:string):Promise<{grant:NativeDeliveryGrantView;replayed:boolean}>{
+  requireProjectAccessAuthorityMutations(env);
   const schema=selectionSchema.extend({expectedContextVersion:z.string().regex(/^[a-f0-9]{64}$/)}).strict(),parsed=schema.safeParse(value);
   if(!parsed.success)return error(400,'native_delivery_invalid');const {expectedContextVersion,...raw}=parsed.data;
   const operation=parse(raw),key=idempotency(keyValue),fingerprint=await digest(['create',operation,expectedContextVersion]);
@@ -425,6 +440,7 @@ export async function createNativeDeliveryGrant(env:Env,principal:StaffPrincipal
       try{await db.batch(statements);}catch(cause){const winner=await stored(env,auth.grant_id);if(!winner||winner.authorization_id!==auth.id)throw cause;}
     }
     await assertOps(env,p);
+    const historyReady=await projectAccessAuthorityHistoryReady(db);
     await db.batch([deliveryFence(db,auth.id,p,`EXISTS(SELECT 1 FROM portal_native_staff_grants publication
       JOIN portal_v2_authenticated_delivery_grants grant_record ON grant_record.id=publication.grant_id
       JOIN portal_v2_folder_bindings binding ON binding.id=publication.binding_id
@@ -434,7 +450,10 @@ export async function createNativeDeliveryGrant(env:Env,principal:StaffPrincipal
         AND ${projectAccessTermsSql({termsId:'grant_record.access_terms_id',workspaceId:'grant_record.workspace_id',projectId:'binding.owner_public_id',legacyRetained:'1'})}
         AND binding.status='active' AND binding.revoked_at IS NULL AND binding.source_version=?)`,[auth.grant_id,auth.id,p.delivery.ownerVersion]),
       db.prepare(`UPDATE portal_native_staff_grants SET state='active',updated_at=datetime('now') WHERE grant_id=? AND authorization_id=? AND state='pending'`).bind(auth.grant_id,auth.id),
-      event(db,auth.grant_id,auth.id,'published',principal.id)]);
+      event(db,auth.grant_id,auth.id,'published',principal.id),
+      ...(historyReady?[projectAccessGrantEvent(db,{grantId:auth.grant_id,eventKind:'grant_created',
+        producerEventKey:`native-grant-event:${auth.id}:published`,actor:{type:'staff',id:principal.id},
+        requiredNativeEvent:{authorizationId:auth.id,action:'published'}})]:[])]);
     await assertOps(env,p);await assertDelivery(env,p);
   } catch(cause) {
     const winner=await stored(env,auth.grant_id);
@@ -455,6 +474,7 @@ export async function createNativeDeliveryGrant(env:Env,principal:StaffPrincipal
 }
 
 export async function revokeNativeDeliveryGrant(env:Env,principal:StaffPrincipal,id:string,value:unknown,keyValue:string):Promise<{grant:NativeDeliveryGrantView;replayed:boolean}>{
+  requireProjectAccessAuthorityMutations(env);
   const parsed=z.object({folderRef:selectionSchema.shape.folderRef,expectedVersion:z.number().int().positive(),reasonCode:selectionSchema.shape.reasonCode}).strict().safeParse(value);
   if(!parsed.success||!opaque.safeParse(id).success)return error(400,'native_delivery_invalid');
   await ready(env);const key=idempotency(keyValue),row=await stored(env,id);if(!row)return error(404,'native_delivery_not_found');
@@ -466,13 +486,23 @@ export async function revokeNativeDeliveryGrant(env:Env,principal:StaffPrincipal
   if(row.status!=='active'||!['active','pending'].includes(row.state))return changed();
   auth??=await reserve(env,principal,p,key,'revoke',fingerprint,id,row.folder_binding_id);
   if(auth.ops_proof_json!==p.opsJson||auth.delivery_proof_json!==p.deliveryJson||Date.parse(auth.publication_deadline)<=Date.now())return changed();
-  const db=primary(env.DELIVERY_DB);
+  const db=primary(env.DELIVERY_DB),historyReady=await projectAccessAuthorityHistoryReady(primary(env.DELIVERY_DB));
   try {await assertOps(env,p);await db.batch([deliveryFence(db,auth.id,p,`EXISTS(SELECT 1 FROM portal_v2_authenticated_delivery_grants
-      WHERE id=? AND grant_version=? AND status='active') AND datetime(?)>datetime('now')`,[id,parsed.data.expectedVersion,auth.publication_deadline]),
+      WHERE id=? AND grant_version=? AND status='active') AND datetime(?)>datetime('now')
+      AND EXISTS(SELECT 1 FROM portal_native_staff_grants publication
+        WHERE publication.grant_id=? AND publication.state=?
+          AND ((?='pending' AND NOT EXISTS(SELECT 1 FROM portal_native_staff_grant_events published
+              WHERE published.grant_id=publication.grant_id AND published.authorization_id=publication.authorization_id AND published.action='published'))
+            OR (?='active' AND EXISTS(SELECT 1 FROM portal_native_staff_grant_events published
+              WHERE published.grant_id=publication.grant_id AND published.authorization_id=publication.authorization_id AND published.action='published'))))`,
+      [id,parsed.data.expectedVersion,auth.publication_deadline,id,row.state,row.state,row.state]),
     db.prepare(`UPDATE portal_v2_authenticated_delivery_grants SET status='revoked',revoked_at=datetime('now'),revoked_by_staff_id=?,
       revoke_reason_code=?,updated_at=datetime('now') WHERE id=? AND status='active'`).bind(principal.id,parsed.data.reasonCode,id),
-    db.prepare(`UPDATE portal_native_staff_grants SET state='revoked',updated_at=datetime('now') WHERE grant_id=? AND state IN('active','pending')`).bind(id),
-    event(db,id,auth.id,'revoked',principal.id)]);
+    db.prepare(`UPDATE portal_native_staff_grants SET state='revoked',updated_at=datetime('now') WHERE grant_id=? AND state=?`).bind(id,row.state),
+    event(db,id,auth.id,'revoked',principal.id),
+    ...(historyReady&&row.state==='active'?[projectAccessGrantEvent(db,{grantId:id,eventKind:'grant_revoked',
+      producerEventKey:`native-grant-event:${auth.id}:revoked`,actor:{type:'staff',id:principal.id},
+      requiredNativeEvent:{authorizationId:auth.id,action:'revoked',requirePublished:true}})]:[])]);
     await assertOps(env,p);await assertDelivery(env,p);
   } catch(cause){const winner=await stored(env,id);if(winner?.status==='revoked'){
       await assertOps(env,p);await assertDelivery(env,p);return {grant:view(winner,p,false),replayed:true};}

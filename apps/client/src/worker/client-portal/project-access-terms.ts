@@ -1,5 +1,6 @@
 import { HTTPException } from 'hono/http-exception';
 import { z } from 'zod';
+import {projectAccessAuthorityHistoryReady} from './project-access-authority-history';
 
 export const projectAccessTermsInputSchema=z.object({
   kind:z.enum(['customer','collaborator']),mode:z.enum(['specific_date','project_end','until_revoked']),
@@ -83,6 +84,7 @@ export async function readProjectAccessTerms(db:Database,id:string):Promise<Proj
 }
 export async function prepareProjectAccessTerms(db:Database,scope:ProjectAccessTermsScope,value:unknown,actor:ProjectAccessTermsActor,id:string=crypto.randomUUID()){
   if(!await projectAccessTermsReady(db))throw new HTTPException(503,{message:'project_access_terms_unavailable'});
+  if(!await projectAccessAuthorityHistoryReady(db))throw new HTTPException(503,{message:'project_access_authority_history_unavailable'});
   const input=parseProjectAccessTerms(value);
   if(input.kind==='customer'&&actor.type!=='staff')throw new HTTPException(403,{message:'project_access_customer_staff_required'});
   if(input.expiresAt&&Date.parse(input.expiresAt)<=Date.now())throw new HTTPException(400,{message:'project_access_expiry_elapsed'});

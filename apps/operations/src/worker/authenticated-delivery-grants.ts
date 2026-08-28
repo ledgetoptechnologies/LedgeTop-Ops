@@ -8,8 +8,10 @@ import { projectAlphaReadVisibleSql } from './project-alpha-read-visibility';
 import { prepareProjectAccessTerms,parseProjectAccessTerms,projectAccessTermsReady,projectAccessTermsSql,projectAccessTermsExpirySql,
   type ProjectAccessTermsInput } from '../../../client/src/worker/client-portal/project-access-terms';
 import { projectAccessReadColumns } from '../../../client/src/worker/client-portal/project-access-read';
+import { projectAccessAuthorityHistoryReady,projectAccessGrantEvent } from '../../../client/src/worker/client-portal/project-access-authority-history';
 import { NATIVE_PORTAL_TARGET_SCOPES_SQL,readNativeTargetScopes } from '../../../client/src/worker/client-portal/native-portal-scopes';
 import { authorizePortalWorkspaceCapability } from '../../../client/src/worker/client-portal/workspace-v2';
+import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 
 const OPAQUE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 const IDEMPOTENCY = /^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/;
@@ -577,6 +579,7 @@ async function insertGrant(env: Env, principal: StaffPrincipal, context: Binding
   const selectedRecipients = input.review?.recipients??await recipients(env, context, input.audienceType, input.audiencePublicId);
   const id = crypto.randomUUID();
   const db = deliveryDb(env);
+  const historyReady=await projectAccessAuthorityHistoryReady(db),auditId=crypto.randomUUID();
   const terms=input.review?.terms?await prepareProjectAccessTerms(db,{sourceId:'project-alpha:primary',workspaceId:context.workspaceId,projectPublicId:context.ownerPublicId},
     input.review.terms,{type:'staff',id:principal.id},`primary-grant-${id}`):null;
   if(input.review&&(await reviewOpsProof(env,principal,context,input.review.terms)).json!==input.review.opsProof)throw new HTTPException(409,{message:'Grant context changed; review again'});
@@ -606,10 +609,12 @@ async function insertGrant(env: Env, principal: StaffPrincipal, context: Binding
       id, input.logicalGrantId, input.version),
     db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grant_audit
       (id,logical_grant_id,grant_id,grant_version,workspace_id,action,actor_staff_id,details_json)
-      VALUES (?,?,?,?,?,?,?,?)`).bind(crypto.randomUUID(), input.logicalGrantId, id, input.version,
+       VALUES (?,?,?,?,?,?,?,?)`).bind(auditId, input.logicalGrantId, id, input.version,
       context.workspaceId, input.auditAction, principal.id, JSON.stringify({ folderBindingId: context.id,
         audienceType: input.audienceType, audiencePublicId: input.audiencePublicId,
-        recipientCount: selectedRecipients.length, reasonCode: input.reasonCode,...(terms?{accessTerms:input.review!.terms,accessTermsId:terms.id}:{} ) })),
+         recipientCount: selectedRecipients.length, reasonCode: input.reasonCode,...(terms?{accessTerms:input.review!.terms,accessTermsId:terms.id}:{} ) })),
+    ...(historyReady?[projectAccessGrantEvent(db,{grantId:id,eventKind:input.auditAction==='grant.restored'?'grant_restored':'grant_created',
+      producerEventKey:`authenticated-grant-audit:${auditId}`,actor:{type:'staff',id:principal.id},requiredGrantAuditId:auditId})]:[]),
   ]);
   if(input.review){
     try{if((await reviewOpsProof(env,principal,context,input.review.terms)).json!==input.review.opsProof||await readPrimaryProof(env,input.review.input)!==input.review.proof)
@@ -618,10 +623,18 @@ async function insertGrant(env: Env, principal: StaffPrincipal, context: Binding
       // OPS and Delivery are separate databases. Close this exact new grant if
       // the post-write staff/owner proof cannot be established; never claim a
       // cross-database atomic transaction or reactivate a historical grant.
-      await db.batch([db.prepare(`UPDATE portal_v2_authenticated_delivery_grants SET status='revoked',revoked_at=datetime('now'),
+      const revokeAuditId=crypto.randomUUID();
+      try{await db.batch([db.prepare(`UPDATE portal_v2_authenticated_delivery_grants SET status='revoked',revoked_at=datetime('now'),
         revoked_by_staff_id=?,revoke_reason_code='authority_changed',updated_at=datetime('now') WHERE id=? AND status='active'`).bind(principal.id,id),
         db.prepare(`INSERT INTO portal_v2_authenticated_delivery_grant_audit(id,logical_grant_id,grant_id,grant_version,workspace_id,action,actor_staff_id,details_json)
-          VALUES(?,?,?,?,?,'grant.revoked',?,'{"reasonCode":"authority_changed"}')`).bind(crypto.randomUUID(),input.logicalGrantId,id,input.version,context.workspaceId,principal.id)]);
+          SELECT ?,logical_grant_id,id,grant_version,workspace_id,'grant.revoked',?,'{"reasonCode":"authority_changed"}'
+          FROM portal_v2_authenticated_delivery_grants WHERE id=? AND status='revoked' AND changes()=1`)
+          .bind(revokeAuditId,principal.id,id),
+        ...(historyReady?[projectAccessGrantEvent(db,{grantId:id,eventKind:'grant_revoked',producerEventKey:`authenticated-grant-audit:${revokeAuditId}`,
+          actor:{type:'staff',id:principal.id},requiredGrantAuditId:revokeAuditId})]:[])]);}catch(cleanupError){
+        const status=await db.prepare(`SELECT status FROM portal_v2_authenticated_delivery_grants WHERE id=?`).bind(id).first<string>('status');
+        if(status!=='revoked')throw cleanupError;
+      }
       throw error;
     }
   }
@@ -630,6 +643,7 @@ async function insertGrant(env: Env, principal: StaffPrincipal, context: Binding
 
 export async function createAuthenticatedDeliveryGrant(env: Env, principal: StaffPrincipal, input:AuthenticatedDeliveryGrantInput,
   idempotencyKey: string): Promise<{ grant: AuthenticatedDeliveryGrantView; replayed: boolean }> {
+  requireProjectAccessAuthorityMutations(env);
   requireEnabled(env);
   if (!IDEMPOTENCY.test(idempotencyKey) || !OPAQUE.test(input.audiencePublicId) || !REASON.test(input.reasonCode))
     throw new HTTPException(400, { message: "Authenticated grant request is invalid" });
@@ -663,6 +677,7 @@ export async function createAuthenticatedDeliveryGrant(env: Env, principal: Staf
 export async function revokeAuthenticatedDeliveryGrant(env: Env, principal: StaffPrincipal,
   logicalGrantId: string, expectedVersion: number, reasonCode: string, idempotencyKey: string,
 ): Promise<{ grant: AuthenticatedDeliveryGrantView; replayed: boolean }> {
+  requireProjectAccessAuthorityMutations(env);
   requireEnabled(env);
   if (!OPAQUE.test(logicalGrantId) || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 ||
       !REASON.test(reasonCode) || !IDEMPOTENCY.test(idempotencyKey))
@@ -673,6 +688,7 @@ export async function revokeAuthenticatedDeliveryGrant(env: Env, principal: Staf
     await requirePermission(env,principal,'delivery.share.revoke',{divisionId:scope.divisionId},true);
     return { grant: prior, replayed: true };}
   const db = deliveryDb(env);
+  const historyReady=await projectAccessAuthorityHistoryReady(db),auditId=crypto.randomUUID();
   const current = await db.prepare(`SELECT id,folder_binding_id FROM portal_v2_authenticated_delivery_grants
     WHERE logical_grant_id=? AND grant_version=? AND status='active' AND revoked_at IS NULL
       AND (expires_at IS NULL OR datetime(expires_at)>datetime('now'))`)
@@ -680,7 +696,8 @@ export async function revokeAuthenticatedDeliveryGrant(env: Env, principal: Staf
   if (!current) throw new HTTPException(409, { message: "Grant changed; refresh and try again" });
   const context = await bindingContext(env, current.folder_binding_id);
   await requirePermission(env, principal, "delivery.share.revoke", { divisionId: context.divisionId }, true);
-  const results = await db.batch([
+  let results:D1Result[];
+  try{results = await db.batch([
     db.prepare(`UPDATE portal_v2_authenticated_delivery_grants SET status='revoked',revoked_at=datetime('now'),
       revoked_by_staff_id=?,revoke_reason_code=?,updated_at=datetime('now')
       WHERE id=? AND grant_version=? AND status='active' AND revoked_at IS NULL`)
@@ -697,9 +714,19 @@ export async function revokeAuthenticatedDeliveryGrant(env: Env, principal: Staf
         AND EXISTS (SELECT 1 FROM portal_v2_authenticated_delivery_grant_mutations mutation
           WHERE mutation.actor_staff_id=? AND mutation.idempotency_key=?
             AND mutation.action='grant.revoke' AND mutation.grant_id=grant_record.id)`)
-      .bind(crypto.randomUUID(), principal.id, JSON.stringify({ reasonCode }), current.id,
-        principal.id, idempotencyKey),
-  ]);
+      .bind(auditId, principal.id, JSON.stringify({ reasonCode }), current.id,
+         principal.id, idempotencyKey),
+    ...(historyReady?[projectAccessGrantEvent(db,{grantId:current.id,eventKind:'grant_revoked',
+      producerEventKey:`authenticated-grant-audit:${auditId}`,actor:{type:'staff',id:principal.id},requiredGrantAuditId:auditId})]:[]),
+  ]);}catch(cause){
+    const raced=await replay(env,principal,idempotencyKey,'grant.revoke',fingerprint);
+    if(raced){const scope=await bindingContext(env,raced.folderBindingId);
+      await requirePermission(env,principal,'delivery.share.revoke',{divisionId:scope.divisionId},true);
+      return {grant:raced,replayed:true};}
+    const status=await db.prepare(`SELECT status FROM portal_v2_authenticated_delivery_grants WHERE id=?`).bind(current.id).first<string>('status');
+    if(status!=='active')throw new HTTPException(409,{message:'Grant changed; refresh and try again'});
+    throw new HTTPException(503,{message:'Grant revocation could not be recorded',cause});
+  }
   if (results[0]?.meta.changes !== 1) throw new HTTPException(409, { message: "Grant changed; refresh and try again" });
   return { grant: (await grantView(db, current.id))!, replayed: false };
 }
@@ -708,6 +735,7 @@ export async function restoreAuthenticatedDeliveryGrant(env: Env, principal: Sta
   logicalGrantId: string, expectedVersion: number, reasonCode: string, expiresAtValue: string | null | undefined,
   idempotencyKey: string,options?:{accessTerms?:ProjectAccessTermsInput;expectedContextVersion?:string},
 ): Promise<{ grant: AuthenticatedDeliveryGrantView; replayed: boolean }> {
+  requireProjectAccessAuthorityMutations(env);
   requireEnabled(env);
   if (!OPAQUE.test(logicalGrantId) || !Number.isSafeInteger(expectedVersion) || expectedVersion < 1 ||
       !REASON.test(reasonCode) || !IDEMPOTENCY.test(idempotencyKey))

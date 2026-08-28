@@ -10,6 +10,14 @@ alias. `/configurations` is the generic connection hub for Project Alpha,
 Viewer, delivery, and future providers, while detailed security and audit
 controls remain in Administration.
 
+## 2026-08-28 — Client Delivery current-view counts
+
+Every Client Delivery folder view reports the items visible directly in that
+folder as total items, folders, and files. The count includes folders and files
+in the current view only; it never includes files or folders inside descendant
+subfolders. Map totals and search-result totals are separate concepts and must
+not be substituted for this direct-child count.
+
 ## 2026-08-02 — Zebra Striping and Airspace Spacing
 
 A second CSS pass focused on list readability and airspace page spacing.

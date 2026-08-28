@@ -4,6 +4,8 @@ import {
   reconcileProjectAccessExpiryCompanionNotices,
 } from "./project-access-expiry-companion-notifications";
 import { d1TablesPresent } from "./schema-readiness";
+import { reconcileProjectAccessAuthorityExpiries } from "../../../client/src/worker/client-portal/project-access-authority-history";
+import { projectAccessAuthorityMutationsEnabled } from "./project-access-mutation-gate";
 import type { Env } from "./types";
 
 type NoticeEvent = "warning_7d" | "warning_24h" | "expired";
@@ -350,10 +352,15 @@ export async function dispatchProjectAccessExpiryNotices(env: Env, dependencies:
   return processed;
 }
 
-/** Scheduled entry point. Reconciliation and dispatch are both bounded and
- * remain completely inert unless the deployment flag is exactly `true`. */
+/** Scheduled entry point. Immutable authority-expiry history is reconciled
+ * whenever its schema exists. Email reconciliation and delivery remain inert
+ * unless the notification deployment flag is exactly `true`. */
 export async function processProjectAccessExpiryNotifications(env: Env): Promise<{enabled:boolean;staged:number;suppressed:number;processed:number}> {
-  if (!enabled(env)) return {enabled:false,staged:0,suppressed:0,processed:0};
+  if(!projectAccessAuthorityMutationsEnabled(env))return {enabled:false,staged:0,suppressed:0,processed:0};
+  const notificationEnabled=enabled(env);
+  const historyRecorded=await reconcileProjectAccessAuthorityExpiries(env.DELIVERY_DB.withSession("first-primary"),Date.now(),100,true);
+  if(historyRecorded>0)console.log(JSON.stringify({event:"project_access.authority_expiry_recorded",count:historyRecorded}));
+  if (!notificationEnabled) return {enabled:false,staged:0,suppressed:0,processed:0};
   const reconciliation = await reconcileProjectAccessExpiryNotices(env);
   const companionReconciliation = await reconcileProjectAccessExpiryCompanionNotices(env);
   const processed = await dispatchProjectAccessExpiryNotices(env)

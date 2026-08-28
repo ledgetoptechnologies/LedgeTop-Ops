@@ -10,7 +10,7 @@ const actorTypes = ["all", "staff", "client", "system", "integration", "public",
 const results = ["all", "succeeded", "failed", "denied", "informational"] as const;
 const coverageReasons = ["permission_required", "unsupported_source", "not_applicable", "not_collected"] as const;
 const producers = ["project_alpha", "operations", "service_requests", "portal_access", "client_delivery"] as const;
-const projectAdapters = ["source_record_activity", "operational_project_activity"] as const;
+const projectAdapters = ["source_record_activity", "operational_project_activity", "organization_contact_activity"] as const;
 const accessAdapters = ["workspace_membership", "workspace_invitation_request", "workspace_peer_administrator",
   "portal_identity_denial", "authenticated_delivery_grant", "delegated_client_share", "viewer_client_grant", "project_access"] as const;
 const notificationAdapters = ["delivery_share_notification", "project_access_collaborator_notice", "project_access_companion_notice"] as const;
@@ -30,7 +30,7 @@ interface AuditItem {
   resource: { type: string; id?: string; label: string; detailPath?: string };
   result: EventResult; occurredAt: string;
 }
-interface Coverage { available: boolean; reason: CoverageReason | null }
+interface Coverage { available: boolean; reason: CoverageReason | null; collectedSince?: string | null }
 interface AuditResponse {
   canonicalRoot: AuditRoot; projectId: string | null; contextVersion: string; refreshedAt: string; asOf: string;
   coverage: Record<CoveredCategory, Coverage>; filters: AuditFilters; items: AuditItem[];
@@ -86,7 +86,11 @@ function validAccessCoverage(value: unknown): value is AuditResponse["accessCove
     const entry = record[adapter];
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
     const item = entry as Partial<Coverage>;
-    return typeof item.available === "boolean" && (item.available ? item.reason === null : isValue(coverageReasons, item.reason));
+    const collectedSince=item.collectedSince===undefined||item.collectedSince===null?item.collectedSince:businessTimestamp(item.collectedSince);
+    return typeof item.available === "boolean" && (item.available ? item.reason === null : isValue(coverageReasons, item.reason))
+      && (adapter==='project_access'?(item.available?typeof collectedSince==='string'
+        :item.collectedSince===undefined||item.collectedSince===null||typeof collectedSince==='string')
+        :item.collectedSince===undefined);
   });
 }
 
@@ -176,7 +180,12 @@ function CoverageDisclosure({ coverage, projectCoverage, accessCoverage, notific
       {projectAdapters.map(adapter => <div key={adapter}><dt>Projects · {adapter.replaceAll("_", " ")}</dt>
         <dd>{projectCoverage[adapter].available ? "available" : reason(projectCoverage[adapter].reason!)}</dd></div>)}
       {accessAdapters.map(adapter => <div key={adapter}><dt>Access · {adapter.replaceAll("_", " ")}</dt>
-        <dd>{accessCoverage[adapter].available ? "available" : reason(accessCoverage[adapter].reason!)}</dd></div>)}
+        <dd>{accessCoverage[adapter].available
+          ? adapter==='project_access'&&accessCoverage[adapter].collectedSince
+            ? <>available since <time dateTime={businessTimestamp(accessCoverage[adapter].collectedSince!)!}>
+              {new Date(businessTimestamp(accessCoverage[adapter].collectedSince!)!).toLocaleString()}</time></>
+            : "available"
+          : reason(accessCoverage[adapter].reason!)}</dd></div>)}
       {notificationAdapters.map(adapter => <div key={adapter}><dt>Notifications · {adapter.replaceAll("_", " ")}</dt>
         <dd>{notificationCoverage[adapter].available ? "available" : reason(notificationCoverage[adapter].reason!)}</dd></div>)}
     </dl>

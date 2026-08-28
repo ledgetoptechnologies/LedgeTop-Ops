@@ -60,6 +60,8 @@ export interface Env {
   CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED?: string;
   /** Client invitation/member mutations. Independent from read-only hierarchy rollout. */
   CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED?: string;
+  /** Coordinated release barrier for every project-access authority mutation. Default off. */
+  PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED?: string;
   /** Client promotion/demotion of existing local workspace members. Default off. */
   CLIENT_PORTAL_PEER_ADMIN_ENABLED?: string;
   /** Client-local reusable contacts. Default-off; records never grant portal access. */

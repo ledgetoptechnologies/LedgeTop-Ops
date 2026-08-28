@@ -80,10 +80,13 @@ describe('primary staff project access terms and real customer history',{timeout
   beforeAll(async()=>{
     runtime=new Miniflare({modules:true,compatibilityDate:'2026-07-22',script:"export default {fetch(){return new Response('primary-terms')}}",d1Databases:['OPS_DB','DELIVERY_DB']});
     ops=await runtime.getD1Database('OPS_DB') as D1Database;delivery=await runtime.getD1Database('DELIVERY_DB') as D1Database;
-    for(const [db,path,cap] of [[ops,new URL('../migrations/',import.meta.url),'0040'],[delivery,new URL('../../client/migrations/',import.meta.url),'0164']] as const)
+    for(const [db,path,cap] of [[ops,new URL('../migrations/',import.meta.url),'0040'],[delivery,new URL('../../client/migrations/',import.meta.url),'0165']] as const)
       for(const name of readdirSync(path).filter(n=>/^\d{4}_.*\.sql$/.test(n)&&n.slice(0,4)<=cap).sort())
         await db.batch(splitD1MigrationStatements(readFileSync(new URL(name,path),'utf8')).map(sql=>db.prepare(sql)));
-    env={OPS_DB:ops,DELIVERY_DB:delivery,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true'} as Env;
+    await delivery.batch(splitD1MigrationStatements(readFileSync(
+      new URL('../../client/migrations/0172_project_access_authority_history.sql',import.meta.url),'utf8')).map(sql=>delivery.prepare(sql)));
+    env={OPS_DB:ops,DELIVERY_DB:delivery,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',
+      PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true'} as Env;
     await ops.batch([
       ops.prepare(`INSERT INTO staff_users(id,email,display_name,access_subject,status) VALUES(?,?,?,?,'active')`).bind(staff.id,staff.email,staff.displayName,staff.accessSubject),
       ops.prepare(`INSERT INTO divisions(id,name,code,active) VALUES('primary-division','Primary division','PRIMARY',1)`),
@@ -100,6 +103,26 @@ describe('primary staff project access terms and real customer history',{timeout
     expect(first.grant.accessTerms).toEqual(f.operation.accessTerms);expect(first.grant.status).toBe('active');
     expect(await createAuthenticatedDeliveryGrant(env,staff,input,`primary-create-key-${f.n}`)).toEqual({...first,replayed:true});
     expect(await delivery.prepare('SELECT count(*) n FROM portal_project_access_terms WHERE workspace_id=?').bind(f.workspace).first('n')).toBe(1);
+  });
+  it.each([undefined,'false'] as const)('blocks authenticated create, revoke and restore without writes when the authority mutation flag is %s',async flag=>{
+    const f=await fixture(),input=await reviewed(f),target={...env,PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:flag} as Env;
+    if(flag===undefined)delete (target as Partial<Env>).PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED;
+    const suffix=`${flag??'absent'}-${f.n}`,createKey=`gate-create-${suffix}`;
+    await expect(createAuthenticatedDeliveryGrant(target,staff,input,createKey)).rejects.toMatchObject({status:503});
+    expect(await delivery.prepare('SELECT count(*) n FROM portal_v2_authenticated_delivery_grants WHERE workspace_id=?').bind(f.workspace).first<number>('n')).toBe(0);
+    expect(await delivery.prepare('SELECT count(*) n FROM portal_project_access_terms WHERE workspace_id=?').bind(f.workspace).first<number>('n')).toBe(0);
+    expect(await delivery.prepare('SELECT count(*) n FROM portal_v2_authenticated_delivery_grant_mutations WHERE idempotency_key=?').bind(createKey).first<number>('n')).toBe(0);
+
+    const created=await create(f),revokeKey=`gate-revoke-${suffix}`;
+    await expect(revokeAuthenticatedDeliveryGrant(target,staff,created.grant.grantId,1,'gate_test',revokeKey)).rejects.toMatchObject({status:503});
+    expect(await delivery.prepare('SELECT status FROM portal_v2_authenticated_delivery_grants WHERE logical_grant_id=?').bind(created.grant.grantId).first<string>('status')).toBe('active');
+    expect(await delivery.prepare('SELECT count(*) n FROM portal_v2_authenticated_delivery_grant_mutations WHERE idempotency_key=?').bind(revokeKey).first<number>('n')).toBe(0);
+
+    await revokeAuthenticatedDeliveryGrant(env,staff,created.grant.grantId,1,'gate_seed',`gate-seed-revoke-${suffix}`);
+    const restoreKey=`gate-restore-${suffix}`;
+    await expect(restoreAuthenticatedDeliveryGrant(target,staff,created.grant.grantId,1,'gate_test',null,restoreKey)).rejects.toMatchObject({status:503});
+    expect(await delivery.prepare('SELECT count(*) n FROM portal_v2_authenticated_delivery_grants WHERE logical_grant_id=?').bind(created.grant.grantId).first<number>('n')).toBe(1);
+    expect(await delivery.prepare('SELECT count(*) n FROM portal_v2_authenticated_delivery_grant_mutations WHERE idempotency_key=?').bind(restoreKey).first<number>('n')).toBe(0);
   });
   it('requires explicit project review, rejects invalid classifications and date mismatches',async()=>{
     const f=await fixture();await expect(createAuthenticatedDeliveryGrant(env,staff,f.operation,`missing-review-${f.n}`)).rejects.toMatchObject({status:409});

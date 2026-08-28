@@ -100,10 +100,37 @@ production migrations; deploy the same pinned commit with optional capabilities
 still disabled; run baseline smoke tests; and only then request separate
 approval for each capability rollout. A branch push alone is never a release.
 
+Project-access authority migration
+`0172_project_access_authority_history.sql` is an explicit exception to that
+general migration-before-code ordering. It creates the immutable timestamp from
+which append-only coverage is claimed and performs no guessed historical
+backfill. Writer-first alone is insufficient: an existing request or job can
+read history as absent, migration can establish the timestamp, and its already
+built mutation can then commit without a canonical event.
+
+Before deploying either writer, freeze all project-access authority mutations:
+request/invitation create, approve/publish, accept and revoke;
+authenticated-grant create/publish, revoke and restore; and expiry
+reconciliation or notification paths that invoke reconciliation. Drain every
+in-flight HTTP request, lease, queue item, scheduled job and reconciliation
+batch capable of such a write. The new Client and Operations versions must both
+ship `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED=false` by default. This flag is
+the post-cutover application barrier; it does not freeze an old version that
+does not understand it. Close external mutation ingress and schedulers, deploy
+both compatible writers, shift **100% of traffic** to those flag-false versions,
+then drain every old-version and in-flight request/job before migration. Reads
+remain live throughout. Before 0172 the new writers must fail new
+explicit-term writes with `503`, keep existing access reads and term enforcement
+working, and report project-access history as `not_collected`; pre-collection
+mutations are truthfully outside coverage. Apply 0172 only after both writer
+versions are active and the drain is proven, then unfreeze only after the schema
+and canonical-event checks below pass.
+
 The current combined schema gate requires Delivery migrations `0096`–`0112`
-and `0114`–`0135` (`0113` is the reserved production-ledger gap), plus
-Operations `0014`–`0025`, with fresh staging exports and exact list/apply
-evidence. Operations `0019` follows `0018` for server-detected, per-file upload
+and `0114`–`0172` (`0113` is the reserved production-ledger gap), plus
+Operations `0014`–`0046`, with fresh staging exports and exact list/apply
+evidence. Migration 0172 follows the writer-first barrier above rather than the
+ordinary sequence. Operations `0019` follows `0018` for server-detected, per-file upload
 collision resolution; `0020` adds the SOP library, `0021` hardens Project Alpha
 ordering, `0022` adds bounded, leased file-operation retries, `0023` adds
 direct, immutable Project/Task SOP revision links, `0024` restores the
@@ -139,6 +166,22 @@ local staff, client-team, account, project, delivery, request, or billing ACLs.
 After separately approved staging activation tests, restore the false flag and
 record that state before production review. Follow
 [the client portal staging packet](staging/client-portal-rollout.md).
+
+For 0172 verification, record both history tables, exactly one immutable state
+row, its canonical UTC `collection_started_at`, and an empty
+`PRAGMA foreign_key_check`. Prove exact invitation-request/invitation and
+authenticated-grant lifecycle events, same-key replay, conflicting-key
+rejection, bounded expiry reconciliation, sibling workspace/source/project
+exclusion, at least one canonical lifecycle event recorded after the collection
+start, and the Client Hub **available since** label. After schema verification,
+enable `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED` in both Workers together
+while general mutation ingress remains frozen, run the isolated canonical test,
+and reopen ingress/schedulers only after its event and coverage evidence pass.
+A partial schema is a hard error.
+Do not edit or backfill the start row. Rollback must retain the
+history-aware readers and writers, keep every authority mutation and reconciling
+job frozen with `PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED=false`, and fix
+forward; never restore a pre-history writer after collection has started.
 
 Rollback means disabling the affected capability, rolling the Worker back to
 the recorded version, allowing in-flight Workflows to reach a safe terminal

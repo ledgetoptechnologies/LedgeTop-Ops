@@ -14,6 +14,7 @@ import {
 import { portalHierarchyRelationsEnabled,resolvePortalRelationAuthorizedTargets } from "./hierarchy-relations";
 import { parseProjectAccessTerms,prepareProjectAccessTerms,projectAccessTermsReady,readProjectAccessTerms,readWorkspaceInvitationPolicy,
   type ProjectAccessTermsInput,type ProjectAccessTermsView } from './project-access-terms';
+import {projectAccessAuthorityEvent,projectAccessAuthorityHistoryReady,projectAccessInvitationEvent} from './project-access-authority-history';
 import {captureProjectInvitationDelegation,captureWorkspaceInvitationDelegation} from './project-invitation-delegation';
 import {invitationRequestsReady,submitWorkspaceInvitationRequest,replaySubmittedWorkspaceInvitationRequest,type WorkspaceInvitationRequestView} from './workspace-invitation-requests';
 import {PRIMARY_ALPHA_SOURCE_ID} from '@ltds/shared';
@@ -22,6 +23,7 @@ import {canManageWorkspaceAddressBook,workspaceAddressBookAvailableFor} from './
 import {prepareAddressBookContactSelection,type AddressBookContactSelection} from './workspace-address-book';
 import {primaryWorkspaceAccount} from './project-alpha-source';
 import {projectAccessCapacitySql} from './project-access-capacity';
+import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 import {readPortalSourceAuthorityProof,type PortalSourceAuthorityProof} from '../project-alpha-portal-authority';
 
 type AddressBookAccessEnv=Env&Partial<Pick<ClientEnv,'CLIENT_PORTAL_ADDRESS_BOOK_ENABLED'|'CLIENT_PORTAL_ADDRESS_BOOK_FINGERPRINT_SECRET'|'DELIVERY_SESSION_SECRET'|'DELIVERY_PREVIOUS_SESSION_SECRET'|'CLIENT_PORTAL_PEER_ADMIN_ENABLED'>>;
@@ -374,6 +376,7 @@ export async function createWorkspaceInvitation(
   idempotencyKey: string,
   options?:{emailDeliveryAvailable:boolean},
 ): Promise<CreateWorkspaceInvitationResult> {
+  requireProjectAccessAuthorityMutations(env);
   if (!workspaceMembershipManagementEnabled(env) || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(workspaceId) || !/^[A-Za-z0-9][A-Za-z0-9._:-]{15,127}$/.test(idempotencyKey)) return { outcome: "invalid" };
   const actor = await actorIdentity(env, principal);
   if (!actor) return { outcome: "denied" };
@@ -442,6 +445,7 @@ export async function createWorkspaceInvitation(
   if (rate?.current_window === 1 && rate.count >= 10) return { outcome: "rate_limited" };
 
   const invitationId = crypto.randomUUID();
+  const membershipAuditId = crypto.randomUUID();
   const sourceId=accessTerms?workspaceSource.source_id:null;
   const preparedTerms=accessTerms?await prepareProjectAccessTerms(db(env),{workspaceId,sourceId:sourceId??'',projectPublicId:selectedTarget.publicId},accessTerms,
     {type:'identity',id:actor.id},`invitation-${invitationId}`):null;
@@ -494,6 +498,12 @@ export async function createWorkspaceInvitation(
         (invitation_id,capability,scope_type,scope_public_id${termsReady?',access_terms_id':''}) VALUES (?,?,?,?${termsReady?',?':''})`)
         .bind(invitationId, capability, capability === "workspace.view" ? "workspace" : scopeType, capability === "workspace.view" ? workspaceId : scopePublicId,
           ...(termsReady?[preparedTerms?.id??null]:[]))),
+      database.prepare(`INSERT INTO portal_v2_membership_audit
+        (id,workspace_id,actor_identity_id,action,invitation_id,details_json) VALUES (?,?,?,'invitation.created',?,?)`)
+        .bind(membershipAuditId, workspaceId, actor.id, invitationId, JSON.stringify({ scopeType, scopePublicId, capabilities: grants,
+          ...(preparedTerms?{accessTerms:preparedTerms.view}:{}),invitationPolicyVersion:policy.version })),
+      ...(preparedTerms?[projectAccessInvitationEvent(database,{invitationId,eventKind:'invitation_created',
+        producerEventKey:`membership:${membershipAuditId}`,actor:{type:'identity',id:actor.id},requiredMembershipAuditId:membershipAuditId})]:[]),
       database.prepare(`INSERT INTO portal_v2_invitation_commands
         (workspace_id,actor_identity_id,idempotency_key,request_hash,invitation_id) VALUES (?,?,?,?,?)`)
         .bind(workspaceId, actor.id, idempotencyKey, requestHash, invitationId),
@@ -504,10 +514,6 @@ export async function createWorkspaceInvitation(
         .bind(workspaceId, actor.id),
       database.prepare(`INSERT INTO portal_v2_invitation_email_outbox(id,invitation_id,recipient_email,payload_json,recipient_email_hash)
         VALUES (?,?,?,?,?)`).bind(crypto.randomUUID(), invitationId, email, JSON.stringify({ invitationId, token, expiresAt }), recipientEmailHash),
-      database.prepare(`INSERT INTO portal_v2_membership_audit
-        (id,workspace_id,actor_identity_id,action,invitation_id,details_json) VALUES (?,?,?,'invitation.created',?,?)`)
-        .bind(crypto.randomUUID(), workspaceId, actor.id, invitationId, JSON.stringify({ scopeType, scopePublicId, capabilities: grants,
-          ...(preparedTerms?{accessTerms:preparedTerms.view}:{}),invitationPolicyVersion:policy.version })),
     ]);
   } catch (error) {
     if(requestsReady){const requested=await replaySubmittedWorkspaceInvitationRequest(database,{workspaceId,actorId:actor.id,idempotencyKey,requestHash});
@@ -784,6 +790,7 @@ export async function changeWorkspacePeerAdministrator(env:AddressBookAccessEnv,
 }
 
 export async function revokeWorkspaceInvitation(env: Env, principal: VerifiedClientPrincipal, workspaceId: string, invitationId: string): Promise<boolean> {
+  requireProjectAccessAuthorityMutations(env);
   const actor = await actorIdentity(env, principal);
   if (!actor) return false;
   const secondary=await secondaryManagerContext(env,principal,workspaceId);
@@ -806,10 +813,21 @@ export async function revokeWorkspaceInvitation(env: Env, principal: VerifiedCli
     issuer:principal.issuer,subject:principal.subject,email:principal.email.trim().toLowerCase()},[],null);}catch{return false;}}
   const revoke=database.prepare(`UPDATE portal_v2_invitations SET status='revoked',revoked_at=datetime('now')
     WHERE id=? AND workspace_id=? AND status='pending' AND revoked_at IS NULL`).bind(invitationId, workspaceId);
-  const changed = secondary
-    ?(await database.batch([secondaryFreshFence(database,secondary,principal,workspaceId,`secondary-revoke-${crypto.randomUUID()}`),
-      secondaryDelegation!.fence(`secondary-revoke-delegation-${crypto.randomUUID()}`),revoke]))[2]
-    :await revoke.run();
+  const auditId=crypto.randomUUID(),historyReady=await projectAccessAuthorityHistoryReady(database);
+  const statements=[...(secondary?[secondaryFreshFence(database,secondary,principal,workspaceId,`secondary-revoke-${crypto.randomUUID()}`),
+    secondaryDelegation!.fence(`secondary-revoke-delegation-${crypto.randomUUID()}`)]:[]),revoke,
+    database.prepare(`INSERT INTO portal_v2_membership_audit(id,workspace_id,actor_identity_id,action,invitation_id)
+      SELECT ?,?,?,'invitation.revoked',? WHERE changes()>0`).bind(auditId,workspaceId,actor.id,invitationId),
+    ...(historyReady?[projectAccessInvitationEvent(database,{invitationId,eventKind:'invitation_revoked',
+      producerEventKey:`membership:${auditId}`,actor:{type:'identity',id:actor.id},requiredMembershipAuditId:auditId})]:[])];
+  let results:D1Result[];
+  try{results=await database.batch(statements);}catch(cause){
+    const status=await database.prepare(`SELECT status FROM portal_v2_invitations WHERE id=? AND workspace_id=?`)
+      .bind(invitationId,workspaceId).first<string>('status');
+    if(status!=='pending')return false;
+    throw new HTTPException(503,{message:'Invitation revocation could not be recorded',cause});
+  }
+  const changed=results[secondary?2:0];
   // D1 includes the terminal-secret scrub trigger's outbox update in changes.
   // Zero is the only failure signal for the guarded invitation transition.
   if (!changed || changed.meta.changes < 1) return false;
@@ -817,8 +835,6 @@ export async function revokeWorkspaceInvitation(env: Env, principal: VerifiedCli
     database.prepare(`UPDATE portal_v2_invitation_email_outbox SET
       status=CASE WHEN status='sent' THEN 'sent' ELSE 'cancelled' END,payload_json='{"redacted":true}',
       lease_expires_at=NULL,last_error_code=NULL,updated_at=datetime('now') WHERE invitation_id=?`).bind(invitationId),
-    database.prepare(`INSERT INTO portal_v2_membership_audit(id,workspace_id,actor_identity_id,action,invitation_id)
-      VALUES (?,?,?,'invitation.revoked',?)`).bind(crypto.randomUUID(), workspaceId, actor.id, invitationId),
   ]);
   return true;
 }

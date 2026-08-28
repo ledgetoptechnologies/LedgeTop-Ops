@@ -88,6 +88,7 @@ describe("bounded staff grant and denial reads", () => {
     };
     env = { DELIVERY_DB: db, OPS_DB: opsDb, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
       AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true", CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED: "true",
+      PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED: "true",
       CLIENT_PORTAL_DENY_POLICY_MANAGEMENT_ENABLED: "true" } as unknown as Env;
   });
 

@@ -280,14 +280,40 @@ npm.cmd run staging:check
 & '.\apps\operations\node_modules\.bin\wrangler.cmd' d1 migrations apply ltds-ops-staging --remote --config apps/operations/wrangler.staging.json
 ```
 
+If the Delivery list includes
+`0172_project_access_authority_history.sql`, stop before the generic Delivery
+`migrations apply` command above. Migration 0172 starts append-only coverage at
+apply time and is the explicit exception to this packet's normal
+migration-first order. Confirm every predecessor is already applied; otherwise
+resolve those predecessors in a separately reviewed release.
+
+Writer-first alone is not a sufficient barrier. Freeze request/invitation
+create, approve/publish, accept and revoke; authenticated-grant create/publish,
+revoke and restore; and every expiry reconciliation or notification path that
+invokes reconciliation. Drain in-flight HTTP requests, leases, queue items,
+scheduled jobs and reconciliation batches so no operation that observed
+history as absent can commit after activation. Both new versions must have
+`PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED=false`; this default-false flag is
+the post-cutover barrier and cannot replace the external freeze needed for old
+versions. Close external mutation ingress/schedulers, upload both compatible
+writers, shift **100% of traffic** to the flag-false versions, then drain every
+old-version and in-flight request/job. Reads remain live throughout.
+Before 0172, verify new explicit-term writes fail `503`, existing
+reads/enforcement remain available, and the Client Hub reports project-access
+history as `not_collected`. Only after both writers and the drain are proven may
+the operator take the final shared-Delivery backup and apply 0172. An old or
+already-running pre-history writer must never commit after
+`collection_started_at` exists.
+
 Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
 `0112_public_share_location_privacy.sql`, then `0114_delivery_share_prefix_lookup.sql`
-through `0150_delivery_share_history_index.sql` (`0113` is intentionally
-reserved), and Operations
+through `0171_secondary_workspace_membership_management.sql` (`0113` is
+intentionally reserved), then apply `0172_project_access_authority_history.sql`
+only at the writer-first barrier above. Confirm Operations
 `0014_staff_acl_controls.sql` through
-`0031_project_alpha_delivery_intent_rate_limits.sql`. Migration `0100` removes
+`0046_project_alpha_project_management_routes.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any
@@ -361,6 +387,20 @@ deployed `queue-worker` image digest, startup capability record, configured
 `LTDSTHUMB_WORKER_CONCURRENCY`, RAM-backed `/scratch` and `/cache`, and show that
 it treats `leaseId` as opaque. Repository tests cannot substitute for this live
 TrueNAS-to-Cloudflare check.
+
+After applying 0172, record both authority-history tables, exactly one immutable
+state row, canonical UTC `collection_started_at`, and an empty
+`PRAGMA foreign_key_check`. Prove exact invitation and authenticated-grant
+lifecycle events, exact replay and conflicting replay rejection, bounded expiry
+reconciliation, sibling workspace/source/project exclusion, and the Client Hub
+**available since** label. Record at least one canonical test lifecycle event
+after the collection start. After schema verification, enable
+`PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED` in both Workers together while
+general mutation ingress remains frozen; run the isolated test, then reopen
+ingress/schedulers only after the event and coverage evidence pass. A partial schema is a
+hard failure. Retain the new writers, immutable start row and
+`PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED=false` during rollback; fix forward
+instead of restoring an older writer or guessing a backfill.
 
 ## Separately approved version and deployment sequence
 

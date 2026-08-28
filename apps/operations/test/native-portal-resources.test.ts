@@ -101,8 +101,10 @@ describe('source-owned native portal resources with real signed projection and l
   beforeAll(async()=>{
     runtime=new Miniflare({compatibilityDate:'2026-07-22',modules:true,script:"export default {fetch(){return new Response('native')}}",d1Databases:{DELIVERY_DB:'native-resources',OPS_DB:'native-operations'}});
     db=await runtime.getD1Database('DELIVERY_DB') as D1Database;
-    for(const name of readdirSync(new URL('../../client/migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0165_').sort())
+    for(const name of readdirSync(new URL('../../client/migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0166_').sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../../client/migrations/${name}`,import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(
+      new URL('../../client/migrations/0172_project_access_authority_history.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
     opsDb=await runtime.getD1Database('OPS_DB') as D1Database;
     for(const name of readdirSync(new URL('../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0041_').sort())
       await opsDb.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),'utf8')).map(sql=>opsDb.prepare(sql)));
@@ -112,6 +114,7 @@ describe('source-owned native portal resources with real signed projection and l
     a=fixture('a');b=fixture('b');
     env={DELIVERY_DB:db,CLIENT_PORTAL_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED:'true',
       CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true',CLIENT_PORTAL_ORIGIN:'https://client.test',
+      PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true',
       CLIENT_ACCESS_TEAM_DOMAIN:issuer,CLIENT_ACCESS_AUD:'native-client-aud',DELIVERY_SESSION_SECRET:'native-handle-secret-at-least-thirty-two-bytes',
       PROJECT_ALPHA_PORTAL_SYNC_ENABLED:'true',PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets:Object.fromEntries([a,b].map(f=>[f.name,{portalCurrent:{keyId:f.keyId,value:f.secret}}]))}),
       DATA_BUCKET:{

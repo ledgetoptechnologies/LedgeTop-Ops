@@ -23,9 +23,12 @@ change returns `409`.
 
 Secondary Project Alpha roots return source-record activity and exact
 Operations-owned project activity for their own source-qualified overlays.
-Their request, feedback, access, delivery and notification coverage is labeled
-`unsupported_source`. Matching public IDs, email addresses, names, or reviewed
-business-party links never combine sources, workspaces, identities or grants.
+Their request, feedback, legacy access, delivery and notification coverage is
+labeled `unsupported_source`. The canonical project-access authority adapter is
+the exception: it can be available for a secondary root only through that
+root's exact workspace/source/project mapping and current portal permission.
+Matching public IDs, email addresses, names, or reviewed business-party links
+never combine sources, workspaces, identities or grants.
 
 ## Query and response contract
 
@@ -41,10 +44,11 @@ project-access collaborator, and project-access companion notices. One available
 cannot hide permission-required, unsupported, not-applicable, or not-collected
 adapters.
 
-The version-six AES-GCM cursor is actor-bound and includes the exact source-qualified root,
+The version-seven AES-GCM cursor is actor-bound and includes the exact source-qualified root,
 optional project, normalized filters, current context and scope proofs, an
 `asOf` time, bounded producer high-water marks, separate collaborator/companion notice schema
-readiness, the last global sort tuple and a 30-minute expiry. A cursor authorizes
+readiness, the project-access authority collection start, the last global sort
+tuple and a 30-minute expiry. A cursor authorizes
 nothing. Every continuation repeats live authorization and schema-readiness
 checks. Items sort by event time descending, producer and immutable event ID,
 and each producer query is bounded to `limit + 1`.
@@ -63,6 +67,8 @@ The checkpoint includes:
   authorization lifecycle and Viewer client-grant lifecycle when the exact
   current root/project mapping and the corresponding staff permission are
   both present;
+- migration-0172 term-backed invitation-request, invitation and authenticated
+  grant authority lifecycle beginning at its immutable collection start;
 - primary/local staff delivery-link lifecycle and its durable notification
   outcomes;
 - migration-0169 collaborator, inviter, and access-creator project-access notice
@@ -90,14 +96,41 @@ because their event row has no project key. Public delegated-share session,
 manifest, preview, map and download events are intentionally excluded as noisy
 content reads rather than access-authority changes.
 
-`portal_project_access_terms` and deadline tables contain current immutable
-terms, but they are current authority rather than an authority-event ledger.
-`project_access` therefore remains honestly `not_collected`. Migration 0169's
-collaborator and companion notice audits are exposed separately as notification history and never presented
-as proof that access was granted, revoked, expired or received. Before the two
-collaborator or companion tables are present, their respective notification
-coverage is `not_collected`; deploy-before-migration and partially applied
-upgrades remain honest and safe.
+Migration `0172_project_access_authority_history.sql` begins append-only
+project-access authority collection. Its immutable singleton records the exact
+`collection_started_at`; the migration intentionally does not infer or backfill
+events from pre-existing terms, invitations, requests, grants or notice rows.
+The timeline UI therefore labels this adapter **available since** that timestamp.
+An empty result is never presented as complete lifetime history.
+
+Each authority event is bound to the exact workspace, Project Alpha source,
+project public ID and immutable access-terms ID. Invitation-request events must
+match the exact request scope; invitation events derive coordinates through the
+invitation's term binding; authenticated-delivery events derive them through
+the exact project folder binding. The Client Hub adapter repeats the current
+root/workspace/source/project and `operations.manage` checks before release.
+Matching public IDs in another workspace or source never join the timeline.
+
+`producer_event_key` provides exact replay. Retrying the same event is a no-op;
+reusing the key with different coordinates, authority, actor, subject, kind or
+expiry timestamp aborts. The bounded expiry reconciler records only accepted or
+otherwise live term-backed invitations and authenticated grants whose exact
+effective boundary elapsed on or after `collection_started_at`. It preserves
+that boundary as `occurred_at`, skips authorities revoked before the boundary,
+and can be retried without duplicates. It does not manufacture expired events
+for older authorities.
+
+Migration 0169's collaborator and companion notice audits remain separate
+notification history and are never presented as proof that access was granted,
+revoked, expired or received. Before their respective tables are present,
+notification coverage is `not_collected`.
+
+Rolling schema behavior is fail-closed and explicit: neither 0172 table means
+`project_access` coverage is `not_collected`; exactly one table or an invalid
+singleton is an incomplete-schema error; both valid tables enable collection
+and bind that start value into continuation cursors. New explicit access-term
+writes require the complete history schema. Existing access readers continue
+to enforce terms independently of the history UI.
 
 Feedback remains `not_collected` in this endpoint. The existing project
 feedback history keeps its stricter per-record scope checks until a bulk adapter
@@ -149,7 +182,8 @@ describe the timeline as a complete lifetime record.
 
 ## Verification and release
 
-Focused D1 tests cover the two project adapters, seven available access ledgers, both migration-0169
+Focused D1 tests cover the two project adapters, eight available access ledgers
+including project-access authority history, both migration-0169
 notification ledgers, authoritative-term mismatch rejection, strict redaction,
 meaningful-event allowlists, exact project/sibling isolation, stable high-water
 pagination, malformed cross-workspace rejection, mid-read permission loss,
@@ -158,7 +192,39 @@ continuation, operational-event project/source/root isolation, redaction and
 stable high-water behavior, and exact secondary source isolation. Focused browser tests
 cover refresh/back/forward restoration of every applied filter, preservation
 of unrelated query parameters, reset behavior, 44-pixel controls and
-desktop/mobile overflow. Operations type-checking must pass with the matching
-shared contract. Release still needs
+desktop/mobile overflow, plus the **available since** coverage label.
+
+For a coordinated release, writer-first is necessary but not sufficient. An
+already-running mutation can read `historyReady=false`, migration 0172 can then
+establish `collection_started_at`, and that previously built batch can commit
+without its canonical event. Before deploying or migrating, freeze **all**
+project-access authority mutations: request and invitation create/submit,
+approve/publish, accept and revoke; authenticated-grant create/publish, revoke
+and restore; and every expiry reconciliation or notification path that invokes
+reconciliation. Drain in-flight HTTP requests, leases, queues, scheduled jobs
+and reconciliation batches, and prove no old mutation can still commit. Both
+new writer builds must default
+`PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED=false`; it holds the application
+barrier after cutover but cannot replace the external freeze for old builds.
+Close external mutation ingress/schedulers, shift **100% of traffic** to both
+flag-false writers, then drain every old-version and in-flight request/job.
+Reads remain live throughout.
+
+While that barrier remains closed, deploy and verify both schema-tolerant Client
+and Operations writers. Confirm the pre-migration timeline reports
+`not_collected`, protected access reads still work, and new explicit-term writes
+fail `503`. Then apply 0172 to the shared Delivery D1 database and verify both
+tables, the one immutable singleton, `PRAGMA foreign_key_check`, and the recorded
+start timestamp. Before unfreezing, exercise a canonical test invitation or
+authenticated-grant lifecycle event, exact replay, expiry reconciliation,
+sibling-source/project denial, cursor invalidation on schema/start change, and
+the UI's **available since** label. Do not reset or edit the singleton during
+rollback; retain the history-aware writers, keep
+`PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED=false`, and fix forward. Keep
+general ingress frozen; after schema verification, enable the flag in both
+Workers together, run the isolated canonical test, then reopen
+ingress/schedulers only after every check passes.
+
+Operations type-checking must pass with the matching shared contract. Release still needs
 the ordinary coordinated Worker/browser gates and authorized live acceptance;
 this document is not deployment approval.

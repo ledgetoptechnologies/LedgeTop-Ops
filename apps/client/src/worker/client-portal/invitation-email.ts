@@ -195,7 +195,11 @@ export async function processInvitationEmailBatch(
   const result: InvitationEmailBatchResult = { claimed: 0, sent: 0, retried: 0, failed: 0, cancelled: 0 };
   // Existing scheduled maintenance also recovers expired unsendable stages,
   // even when no mail provider is enabled. This grants or sends nothing.
-  await reconcileExpiredWorkspaceInvitationApprovals(env.DELIVERY_DB);
+  await reconcileExpiredWorkspaceInvitationApprovals(
+    env.DELIVERY_DB,
+    new Date(),
+    env.PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED === "true",
+  );
   if (!invitationEmailDeliveryEnabled(env)) return result;
   const now = options.now ?? new Date();
   const nowIso = now.toISOString();

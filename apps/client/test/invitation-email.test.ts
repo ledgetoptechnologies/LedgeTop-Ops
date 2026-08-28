@@ -57,6 +57,7 @@ describe("workspace invitation email delivery", () => {
       CLIENT_PORTAL_ENABLED: "true",
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
       CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED: "true",
+      PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED: "true",
       CLIENT_PORTAL_ACCESS_ENROLLMENT_READY: "true",
       CLIENT_PORTAL_INVITATION_EMAIL_ENABLED: "true",
       CLIENT_PORTAL_INVITATION_FROM: "portal@ledgetopdroneservices.com",
