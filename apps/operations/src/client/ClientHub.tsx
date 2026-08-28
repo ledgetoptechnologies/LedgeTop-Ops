@@ -12,6 +12,7 @@ import { ClientBusinessParty, SourceBusinessParty, type BusinessPartyReference }
 import { ClientBusinessActivity } from "./ClientBusinessActivity";
 import { ClientAuditTimeline } from "./ClientAuditTimeline";
 import { ClientInvitationPolicy } from "./ClientInvitationPolicy";
+import { OrganizationOperationalContacts } from "./OrganizationOperationalContacts";
 import type { InvitationAdministrationAccess } from "./invitation-administration-api";
 
 interface CollectionItem { row_key?: string }
@@ -339,6 +340,9 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
           {items => <ContactList contacts={items} />}
         </ClientCollection>
       </Card>
+      {data.client.source_id && data.client.root_namespace === "business" && data.client.kind === "organization" && data.contextVersion &&
+        <OrganizationOperationalContacts root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: "organization", publicId: data.client.public_id }}
+          contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
       {data.externalAccess && portalBasePath && data.client.source_id && data.client.root_namespace && <div className="client-hub-audit-panel">
         <ClientExternalAccessRoster initialPage={data.externalAccess} basePath={portalBasePath}
           contextVersion={data.contextVersion || data.externalAccess.contextVersion}

@@ -1,0 +1,35 @@
+.organization-operational-contacts { min-width: 0; overflow-wrap: anywhere; }
+.organization-operational-contacts button,
+.organization-operational-contacts select,
+.organization-operational-contacts summary { min-height: 44px; }
+.organization-operational-contacts select { width: 100%; max-width: 100%; }
+.organization-operational-contacts label { display: grid; gap: .35rem; min-width: 0; font-weight: 700; }
+.organization-operational-contacts label small,
+.organization-operational-contacts fieldset > small { color: var(--muted); font-weight: 500; }
+.organization-operational-groups,
+.organization-operational-editor { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .8rem; margin-bottom: 1rem; }
+.organization-operational-groups > section,
+.organization-operational-editor fieldset { min-width: 0; margin: 0; padding: .8rem; border: 1px solid var(--border); border-radius: .5rem; }
+.organization-operational-groups h3 { margin: 0 0 .65rem; font-size: .95rem; }
+.organization-operational-list,
+.organization-operational-delivery-editor { display: grid; gap: .65rem; }
+.organization-operational-groups article { display: flex; justify-content: space-between; align-items: start; gap: .75rem; min-width: 0; padding: .7rem; border: 1px solid var(--border); border-radius: .5rem; }
+.organization-operational-groups article > div { display: grid; gap: .25rem; min-width: 0; }
+.organization-operational-groups article small { color: var(--muted); }
+.organization-operational-editor fieldset { display: grid; align-content: start; gap: .7rem; }
+.organization-operational-editor legend { padding: 0 .35rem; font-weight: 750; }
+.organization-operational-delivery-editor > div { display: grid; gap: .6rem; min-width: 0; padding: .7rem; border: 1px solid var(--border); border-radius: .5rem; }
+.organization-operational-banner { display: flex; gap: .75rem; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: .75rem; border: 1px solid var(--warning); border-radius: .5rem; }
+.organization-operational-actions { display: flex; flex-wrap: wrap; gap: .65rem; margin-top: .85rem; }
+.organization-operational-error { color: var(--danger); }
+.organization-operational-contacts details { margin-top: .8rem; }
+.organization-operational-contacts summary { display: flex; align-items: center; cursor: pointer; color: var(--accent); }
+.organization-operational-contacts ol { margin: .35rem 0 0; padding-left: 1.4rem; }
+@media (max-width: 800px) {
+  .organization-operational-groups,
+  .organization-operational-editor { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 480px) {
+  .organization-operational-groups article { flex-direction: column; }
+  .organization-operational-actions > * { width: 100%; }
+}

@@ -46,6 +46,14 @@ async function fixture(page: Page, options: { linked?: number; manage?: boolean;
       }
       return route.fulfill({ json: { clients, nextCursor: null, capabilities, sources: activeRoots.map(root => ({ source_id: root.sourceId, display_name: sourceName(root.sourceId) })) } });
     }
+    if (path.endsWith("/organization-operational-contacts")) {
+      const root = roots.find(row => `/api/client-hub${sourcePath(row).slice("/clients".length)}/organization-operational-contacts` === path);
+      if (!root) return route.fulfill({ status: 404, json: { error: "Source record unavailable" } });
+      return route.fulfill({ json: { canonicalRoot: { sourceId: root.sourceId, rootNamespace: "business", kind: root.kind, publicId: root.recordId },
+        contextVersion: `source-${root.sourceId}`, organization: { id: root.recordId, sourceId: root.sourceId, revision: "organization-r1" },
+        contacts: { version: 0, assignments: [], revisions: [] }, capabilities: { canManageOrganizationContacts: false }, contactOptions: [],
+        contactPage: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 0, limit: 25 } } });
+    }
     if (path.startsWith("/api/client-hub/sources/")) {
       const root = roots.find(row => `/api/client-hub${sourcePath(row).slice("/clients".length)}` === path);
       if (!root) return route.fulfill({ status: 404, json: { error: "Source record unavailable" } });
@@ -103,6 +111,7 @@ test("reviewed linking collapses records into one directory identity without mer
   await createPreview(page); await confirm(page);
   await expect(page).toHaveURL(`/clients/parties/${partyId}`);
   await expect(page.getByRole("heading", { name: "Acme combined customer", exact: true })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Organization contacts", exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: "Open Technologies workspace" })).toHaveAttribute("href", sourcePath(roots[1]!));
   await page.getByRole("link", { name: "← Client Hub" }).click();
   await expect(page.locator(".client-directory-card")).toHaveCount(1);
