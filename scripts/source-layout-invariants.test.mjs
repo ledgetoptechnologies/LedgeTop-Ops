@@ -94,7 +94,7 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "db665d926993bd852b88b7fe214d7eb3611bec53ff80fcaf61df0267d5a3b0d3");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "950495b576058522809450b55e5232ca05220a72cb65b0017c99314e495a5b3b");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -131,6 +131,8 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.equal(config.vars.PROJECT_ALPHA_CATALOG_SYNC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PORTAL_SYNC_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED, "false");
+  assert.equal(config.vars.CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED, "false");
+  assert.equal(config.vars.PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED, "false");
   assert.equal(config.vars.PROJECT_ALPHA_PRICING_HINTS_ENABLED, "false");
   assert.equal(config.vars.R2_BUCKET_NAME, "client-data");
   assert.deepEqual(config.r2_buckets, [{ binding: "DATA_BUCKET", bucket_name: "client-data" }]);
