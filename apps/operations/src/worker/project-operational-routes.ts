@@ -3,6 +3,7 @@ import { HTTPException } from "hono/http-exception";
 import { isBusinessProjectionSource } from "./client-hub-source";
 import { listClientHubCollection, type ClientHubCollectionContext } from "./client-hub-collections";
 import { readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts } from "./project-operational-memory";
+import { serveProjectMemoryAttachment, uploadProjectMemoryAttachment } from "./project-memory-attachments";
 import { commitRecurringProjectCopy, previewRecurringProjectCopy } from "./project-recurring-copy-forward";
 import type { Env, StaffPrincipal } from "./types";
 
@@ -49,7 +50,10 @@ export function registerProjectOperationalRoutes(app: App, resolveContext: Resol
     ]);
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
-    return c.json({ ...workspace, contactOptions: contacts.items, contactPage: contacts.page });
+    return c.json({ ...workspace, capabilities: {
+      canManageContacts: c.get("administrator") && workspace.capabilities.canManageContacts,
+      canManageMemory: c.get("administrator") && workspace.capabilities.canManageMemory,
+    }, contactOptions: contacts.items, contactPage: contacts.page });
   });
   app.post(`${base}/operational-contacts`, async c => {
     const clientKind = routeKind(c, "Project operational contacts are unavailable for this source"), principal = c.get("principal");
@@ -68,6 +72,23 @@ export function registerProjectOperationalRoutes(app: App, resolveContext: Resol
     await verifyContext(c.env, principal, context);
     c.header("Cache-Control", "no-store");
     return c.json(result);
+  });
+  app.post(`${base}/operational-memory/attachments/upload`, async c => {
+    const clientKind = routeKind(c, "Project-memory attachments are unavailable for this source"), principal = c.get("principal");
+    if (!c.get("administrator")) throw new HTTPException(403, { message: "Administrator access required" });
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const result = await uploadProjectMemoryAttachment(c.env, principal, context, c.req.param("projectId"), c.req.raw);
+    await verifyContext(c.env, principal, context);
+    c.header("Cache-Control", "no-store");
+    return c.json(result, result.replayed ? 200 : 201);
+  });
+  app.on(["GET", "HEAD"], `${base}/operational-memory/attachments/:attachmentId/content`, async c => {
+    const clientKind = routeKind(c, "Project-memory attachments are unavailable for this source"), principal = c.get("principal");
+    const context = await resolveContext(c.env, principal, clientKind, c.req.param("publicId"), c.req.param("sourceId"), "business");
+    const response = await serveProjectMemoryAttachment(c.env, principal, context, c.req.param("projectId"),
+      c.req.param("attachmentId"), c.req.raw);
+    await verifyContext(c.env, principal, context);
+    return response;
   });
   app.post(`${base}/recurring-copy/preview`, async c => {
     const clientKind = routeKind(c, "Recurring-project copy is unavailable for this source"), principal = c.get("principal");

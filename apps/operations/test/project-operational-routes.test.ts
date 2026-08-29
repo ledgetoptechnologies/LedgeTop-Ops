@@ -6,6 +6,8 @@ const services = vi.hoisted(() => ({
   readProjectOperationalWorkspace: vi.fn(),
   saveProjectOperationalContacts: vi.fn(),
   saveProjectMemory: vi.fn(),
+  uploadProjectMemoryAttachment: vi.fn(),
+  serveProjectMemoryAttachment: vi.fn(),
   listClientHubCollection: vi.fn(),
   previewRecurringProjectCopy: vi.fn(),
   commitRecurringProjectCopy: vi.fn(),
@@ -14,6 +16,10 @@ vi.mock("../src/worker/project-operational-memory", () => ({
   readProjectOperationalWorkspace: services.readProjectOperationalWorkspace,
   saveProjectOperationalContacts: services.saveProjectOperationalContacts,
   saveProjectMemory: services.saveProjectMemory,
+}));
+vi.mock("../src/worker/project-memory-attachments", () => ({
+  uploadProjectMemoryAttachment: services.uploadProjectMemoryAttachment,
+  serveProjectMemoryAttachment: services.serveProjectMemoryAttachment,
 }));
 vi.mock("../src/worker/client-hub-collections", async importOriginal => ({
   ...await importOriginal<typeof import("../src/worker/client-hub-collections")>(),
@@ -39,14 +45,14 @@ const context: ClientHubCollectionContext = { root: { source_id: "project-alpha:
 const workspace = { canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion,
   project: { id: "project-one", sourceId: "project-alpha:primary", status: "active", revision: "project-revision-one" },
   contacts: { version: 0, assignments: [], revisions: [] }, memory: { version: 0,
-    snapshot: { plan: "", actualOutcome: "", deviationsAndReasons: "", observations: "", problems: "", successes: "", recommendations: "", nextTimeRequests: "" }, revisions: [] },
+    snapshot: { plan: "", actualOutcome: "", deviationsAndReasons: "", observations: "", problems: "", successes: "", recommendations: "", nextTimeRequests: "" }, revisions: [], attachments: [] },
   capabilities: { canManageContacts: true, canManageMemory: true } };
 const path = "/api/client-hub/sources/project-alpha%3Aprimary/business/organizations/org-one/business-projects/project-one";
 
-function fixture() {
+function fixture(administrator = false) {
   const resolve = vi.fn(async () => context), verify = vi.fn(async () => undefined);
   const app = new Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>();
-  app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", false); await next(); });
+  app.use("*", async (c, next) => { c.set("principal", principal); c.set("administrator", administrator); await next(); });
   registerProjectOperationalRoutes(app, resolve, verify);
   return { app, resolve, verify, env: {} as Env };
 }
@@ -57,6 +63,11 @@ beforeEach(() => {
     page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 25 }, canonicalRoot: context.canonicalRoot, contextVersion: context.contextVersion });
   services.saveProjectOperationalContacts.mockResolvedValue({ sourceId: "project-alpha:primary", projectId: "project-one", version: 1, replayed: false });
   services.saveProjectMemory.mockResolvedValue({ sourceId: "project-alpha:primary", projectId: "project-one", version: 1, replayed: false });
+  services.uploadProjectMemoryAttachment.mockResolvedValue({ sourceId: "project-alpha:primary", projectId: "project-one", version: 1,
+    replayed: false, attachment: { id: "00000000-0000-4000-8000-000000000001", name: "现场.jpg", contentType: "image/jpeg", size: 4,
+      sourceKind: "staff_upload", versionAdded: 1, createdAt: "2026-08-28T12:00:00Z", downloadPath: "/opaque/content" } });
+  services.serveProjectMemoryAttachment.mockResolvedValue(new Response(new Uint8Array([1, 2, 3]), { status: 200,
+    headers: { "Content-Type": "image/jpeg", "Cache-Control": "private, no-store" } }));
   services.previewRecurringProjectCopy.mockResolvedValue({ fingerprint: "f".repeat(64),
     source: { projectId: "project-zero", projectRevision: "source-revision", contactsVersion: 1, memoryVersion: 2 },
     destination: { projectId: "project-one", projectRevision: "destination-revision", contactsVersion: 0, memoryVersion: 0 },
@@ -75,11 +86,33 @@ describe("project operational routes", () => {
     const response = await app.request(`${path}/operational-workspace?expectedContextVersion=${context.contextVersion}`, {}, env);
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ canonicalRoot: context.canonicalRoot,
+      capabilities: { canManageContacts: false, canManageMemory: false },
       contactOptions: [{ public_id: "contact-one", display_name: "Exact root contact" }], contactPage: { limit: 25 } });
     expect(resolve).toHaveBeenCalledWith(env, principal, "organization", "org-one", "project-alpha:primary", "business");
     expect(services.listClientHubCollection).toHaveBeenCalledWith(env, context, "businessContacts", { limit: 25 });
     expect(verify).toHaveBeenCalledWith(env, principal, context);
     expect(response.headers.get("Cache-Control")).toBe("no-store");
+  });
+
+  it("keeps attachment writes administrator-only while allowing authorized exact-scope reads", async () => {
+    const denied = fixture(false), body = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+    const deniedResponse = await denied.app.request(`${path}/operational-memory/attachments/upload`, { method: "POST",
+      headers: { "Content-Type": "image/jpeg", "X-File-Name": encodeURIComponent("现场.jpg") }, body }, denied.env);
+    expect(deniedResponse.status).toBe(403); expect(denied.resolve).not.toHaveBeenCalled();
+    expect(services.uploadProjectMemoryAttachment).not.toHaveBeenCalled();
+
+    const allowed = fixture(true);
+    const uploaded = await allowed.app.request(`${path}/operational-memory/attachments/upload`, { method: "POST",
+      headers: { "Content-Type": "image/jpeg", "X-File-Name": encodeURIComponent("现场.jpg") }, body }, allowed.env);
+    expect(uploaded.status).toBe(201); expect(uploaded.headers.get("Cache-Control")).toBe("no-store");
+    expect(services.uploadProjectMemoryAttachment).toHaveBeenCalledWith(allowed.env, principal, context, "project-one", expect.any(Request));
+    expect(allowed.verify).toHaveBeenCalledWith(allowed.env, principal, context);
+
+    const attachmentId = "00000000-0000-4000-8000-000000000001";
+    const content = await denied.app.request(`${path}/operational-memory/attachments/${attachmentId}/content`, {}, denied.env);
+    expect(content.status).toBe(200); expect(content.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(services.serveProjectMemoryAttachment).toHaveBeenCalledWith(denied.env, principal, context, "project-one", attachmentId, expect.any(Request));
+    expect(denied.verify).toHaveBeenCalledWith(denied.env, principal, context);
   });
 
   it("binds progressive contact cursors to the existing bounded collection service", async () => {

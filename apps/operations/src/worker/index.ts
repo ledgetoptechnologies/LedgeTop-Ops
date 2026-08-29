@@ -92,6 +92,7 @@ import {
   registerR2CrudRoutes,
 } from "./r2-crud";
 import { requiresAdministratorForMutation } from "./r2-crud-validation";
+import { cleanupProjectMemoryAttachmentUploads } from "./project-memory-attachments";
 import { listAdminAuditEvents } from "./admin-audit";
 import { registerClientFeedbackRoutes, staffFeedbackEntryEnabled } from "./client-feedback";
 import { processClientFeedbackNotifications } from "./client-feedback-notifications";
@@ -3187,6 +3188,7 @@ async function scheduled(
   ctx.waitUntil(purgeReplacementRecovery(env));
   ctx.waitUntil(expireBrowserUploadSessions(env));
   ctx.waitUntil(cleanupBrowserUploadSessions(env));
+  ctx.waitUntil(cleanupProjectMemoryAttachmentUploads(env));
   ctx.waitUntil(drainThumbnailCleanup(env));
   ctx.waitUntil(reconcileThumbnailRegistrations(env));
   ctx.waitUntil(reconcileManagedThumbnailOrphans(env));

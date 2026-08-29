@@ -31,6 +31,7 @@ function operational(status = "completed", projectId = "project-one") {
       revisions: [{ version: 1, actorId: "hidden-staff-id", createdAt: "2026-08-26T12:00:00Z" }] },
     memory: { version: 1, snapshot: { plan: "Photograph the roof.", actualOutcome: "Roof captured.", deviationsAndReasons: "", observations: "", problems: "",
       successes: "Good coverage.", recommendations: "Return in spring.", nextTimeRequests: "Call before arrival." },
+      attachments: [] as unknown[],
       revisions: [{ version: 1, changeKind: "saved", amendmentReason: null, actorId: "hidden-staff-id", createdAt: "2026-08-26T12:05:00Z" }] },
     capabilities: { canManageContacts: true, canManageMemory: true },
     contactOptions: [{ public_id: "contact-one", display_name: "Bailey Contact", email: "bailey@example.test" as string | null, phone: "+1 920 555 0123" as string | null, record_type: "business_contact" as const },
@@ -46,13 +47,31 @@ async function mock(page: Page, handler: (route: Route, url: URL) => Promise<unk
     const request = route.request(), url = new URL(request.url()); requests.push({ url, method: request.method() });
     if (url.pathname === "/api/session") return route.fulfill({ json: { user: { id: "staff-one", email: "staff@example.test", displayName: "Staff", status: "Active", profileType: "Employee",
       isAdministrator: false, permissions, divisions: [] }, csrfToken: "test", timezone: "America/Chicago", mapStyleUrl: null, mapboxPublicToken: null, capabilities: {} } });
+    if (url.pathname === `${apiBase}/organization-operational-contacts`) return route.fulfill({ json: {
+      canonicalRoot: detail().canonicalRoot, contextVersion: "client-context",
+      organization: { id: "42", sourceId: "project-alpha:primary", revision: "organization-revision" },
+      contacts: { version: 0, assignments: [], revisions: [] },
+      capabilities: { canManageOrganizationContacts: false },
+      contactOptions: [],
+      contactPage: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 0, limit: 25 },
+    } });
+    if (url.pathname === `${apiBase}/project-management`) return route.fulfill({ json: {
+      canonicalRoot: detail().canonicalRoot, contextVersion: "client-context",
+      source: { sourceId: "project-alpha:primary", displayName: "Project Alpha", state: "active" },
+      availability: { available: false, reason: "not_configured", explanation: "Project creation is not configured in this fixture." },
+      action: null,
+      sync: { status: "healthy", lastAttemptAt: null, lastSuccessAt: null, explanation: "Synchronization is healthy.",
+        refresh: { label: "Refresh synchronization status", href: `${apiBase}/project-management`, method: "GET" },
+        requestSync: null },
+    } });
     if (url.pathname === apiBase) return route.fulfill({ json: clientDetail() });
     if (url.pathname === `${apiBase}/collections/businessProjects`) return route.fulfill({ json: { items: projectItems,
       page: { ...clientDetail().pages.businessProjects, returned: projectItems.length, limit: Number(url.searchParams.get("limit") || 5) },
       canonicalRoot: detail().canonicalRoot, contextVersion: url.searchParams.get("expectedContextVersion") || "client-context" } });
     if (url.pathname.endsWith("/operational-workspace")) return operationalHandler ? operationalHandler(route, url)
       : route.fulfill({ json: operational("completed", decodeURIComponent(url.pathname.split("/").at(-2)!)) });
-    if (url.pathname.endsWith("/operational-contacts") || url.pathname.endsWith("/operational-memory"))
+    if (url.pathname.endsWith("/operational-contacts") || url.pathname.endsWith("/operational-memory")
+      || url.pathname.endsWith("/operational-memory/attachments/upload"))
       return operationalHandler ? operationalHandler(route, url) : route.fulfill({ status: 500, json: { error: "Unexpected operational write" } });
     if (url.pathname.endsWith("/recurring-copy/preview") || url.pathname.endsWith("/recurring-copy/commit"))
       return operationalHandler ? operationalHandler(route, url) : route.fulfill({ status: 500, json: { error: "Unexpected recurring-project copy" } });
@@ -67,6 +86,7 @@ async function open(page: Page, suffix = "") {
 }
 
 test("business project links open a scoped workspace and preserve client filters through breadcrumbs, Back and refresh", async ({ page }) => {
+  test.slow();
   const requests = await mock(page, route => route.fulfill({ json: detail() }));
   await page.goto(`${clientPath}${filters}`);
   const link = page.getByRole("region", { name: "Business projects", exact: true }).getByRole("link", { name: "Church survey", exact: true });
@@ -198,6 +218,105 @@ test("explicit contact and memory saves preserve expected versions and never sen
   }
 });
 
+test("manager attachment upload encodes Unicode filenames and preserves an unsaved memory draft through refresh", async ({ page }) => {
+  const writes: Array<{ headers: Record<string, string>; body: Buffer }> = [];
+  let memoryVersion = 1;
+  const attachment = { id: "attachment-one", name: "屋根 📷.jpg", contentType: "image/jpeg", size: 4,
+    sha256: "a".repeat(64), sourceKind: "staff_upload", versionAdded: 2, createdAt: "2026-08-28T12:00:00Z",
+    downloadPath: `${apiPath}/operational-memory/attachments/attachment-one/download` };
+  await mock(page, route => route.fulfill({ json: detail() }), ["team.view", "projects.view", "project.memory.manage"], async (route, url) => {
+    if (url.pathname.endsWith("/operational-workspace")) {
+      const value = operational("active"); value.memory.version = memoryVersion;
+      value.memory.attachments = memoryVersion === 2 ? [attachment] : [];
+      return route.fulfill({ json: value });
+    }
+    if (url.pathname.endsWith("/operational-memory/attachments/upload")) {
+      writes.push({ headers: await route.request().allHeaders(), body: route.request().postDataBuffer()! }); memoryVersion = 2;
+      return route.fulfill({ json: { sourceId: "project-alpha:primary", projectId: "project-one", version: 2, attachment, replayed: false } });
+    }
+    return route.fulfill({ status: 500, json: { error: "Unexpected attachment request" } });
+  });
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByRole("button", { name: "Edit project memory", exact: true }).click();
+  const plan = operations.getByRole("textbox", { name: "Plan", exact: true });
+  await plan.fill("Keep this unsaved field note while the attachment list refreshes.");
+  await operations.getByLabel("Choose an image or PDF").setInputFiles({ name: "屋根 📷.jpg", mimeType: "image/jpeg", buffer: Buffer.from("roof") });
+  await operations.getByRole("button", { name: "Upload attachment", exact: true }).click();
+  await expect(operations.getByText("屋根 📷.jpg attached. Project memory is refreshing.", { exact: true })).toBeVisible();
+  await expect(operations.getByRole("link", { name: "Download", exact: true })).toHaveAttribute("href", attachment.downloadPath);
+  await expect(plan).toHaveValue("Keep this unsaved field note while the attachment list refreshes.");
+  await expect(operations.getByText(attachment.sha256, { exact: true })).toHaveCount(0);
+  expect(writes).toHaveLength(1);
+  expect(writes[0]!.headers).toMatchObject({ "content-type": "image/jpeg", "x-expected-context-version": "project-context",
+    "x-expected-version": "1", "x-file-name": encodeURIComponent("屋根 📷.jpg") });
+  expect(writes[0]!.headers["x-idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/i);
+  expect(writes[0]!.headers["x-amendment-reason"]).toBeUndefined();
+  expect(writes[0]!.body.toString()).toBe("roof");
+});
+
+test("terminal attachment upload requires an amendment reason and retries with one idempotency key", async ({ page }) => {
+  const attempts: Record<string, string>[] = []; let completed = false;
+  const attachment = { id: "attachment-pdf", name: "closeout.pdf", contentType: "application/pdf", size: 5,
+    sourceKind: "staff_upload", versionAdded: 2, createdAt: "2026-08-28T12:00:00Z",
+    downloadPath: `${apiPath}/operational-memory/attachments/attachment-pdf/download` };
+  await mock(page, route => route.fulfill({ json: detail() }), ["team.view", "projects.view", "project.memory.manage"], async (route, url) => {
+    if (url.pathname.endsWith("/operational-workspace")) {
+      const value = operational("completed"); if (completed) { value.memory.version = 2; value.memory.attachments = [attachment]; }
+      return route.fulfill({ json: value });
+    }
+    attempts.push(await route.request().allHeaders());
+    if (attempts.length === 1) return route.fulfill({ status: 503, json: { error: "Temporary attachment storage interruption" } });
+    completed = true;
+    return route.fulfill({ json: { sourceId: "project-alpha:primary", projectId: "project-one", version: 2, attachment, replayed: true } });
+  });
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await operations.getByLabel("Choose an image or PDF").setInputFiles({ name: "closeout.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-") });
+  await operations.getByRole("button", { name: "Upload attachment", exact: true }).click();
+  await expect(operations.getByRole("alert")).toContainText("Explain why"); expect(attempts).toHaveLength(0);
+  await operations.getByRole("textbox", { name: "Attachment amendment reason", exact: true }).fill("Added the signed closeout after completion.");
+  await operations.getByRole("button", { name: "Upload attachment", exact: true }).click();
+  await expect(operations.getByRole("alert")).toContainText("Temporary attachment storage interruption");
+  await operations.getByRole("button", { name: "Retry attachment upload", exact: true }).click();
+  await expect(operations.getByText("closeout.pdf was already attached. Project memory is refreshing.", { exact: true })).toBeVisible();
+  expect(attempts).toHaveLength(2);
+  expect(attempts[0]!["x-idempotency-key"]).toBe(attempts[1]!["x-idempotency-key"]);
+  expect(attempts[0]!["x-amendment-reason"]).toBe("Added the signed closeout after completion.");
+});
+
+test("authorized readers can download attachments but cannot see manager upload controls", async ({ page }) => {
+  const attachment = { id: "reader-attachment", name: "site-map.png", contentType: "image/png", size: 2048,
+    sourceKind: "staff_upload", versionAdded: 1, createdAt: "2026-08-28T12:00:00Z",
+    downloadPath: `${apiPath}/operational-memory/attachments/reader-attachment/download` };
+  await mock(page, route => route.fulfill({ json: detail() }), ["team.view", "projects.view"], async (route, url) => {
+    const value = operational("active"); value.capabilities.canManageMemory = false; value.memory.attachments = [attachment];
+    return route.fulfill({ json: value });
+  });
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  await expect(operations.getByText("site-map.png", { exact: true })).toBeVisible();
+  await expect(operations.getByRole("link", { name: "Download", exact: true })).toHaveAttribute("href", attachment.downloadPath);
+  await expect(operations.getByLabel("Choose an image or PDF")).toHaveCount(0);
+  await expect(operations.getByRole("button", { name: /Upload attachment/ })).toHaveCount(0);
+});
+
+test("manager upload rejects unsupported image MIME types before sending data", async ({ page }) => {
+  let writes = 0;
+  await mock(page, route => route.fulfill({ json: detail() }), ["team.view", "projects.view", "project.memory.manage"], async (route, url) => {
+    if (url.pathname.endsWith("/operational-workspace")) return route.fulfill({ json: operational("active") });
+    writes += 1; return route.fulfill({ status: 500, json: { error: "Unsupported upload should not reach the server" } });
+  });
+  await open(page);
+  const operations = workspace(page).getByRole("region", { name: "Operational project details", exact: true });
+  const picker = operations.getByLabel("Choose an image or PDF");
+  await expect(picker).toHaveAttribute("accept", "image/jpeg,image/png,image/webp,image/gif,image/tiff,application/pdf");
+  await picker.setInputFiles({ name: "unsafe.svg", mimeType: "image/svg+xml", buffer: Buffer.from("<svg/>") });
+  await operations.getByRole("button", { name: "Upload attachment", exact: true }).click();
+  await expect(operations.getByRole("alert")).toContainText("Choose a JPEG, PNG, WebP, GIF, TIFF, or PDF attachment.");
+  expect(writes).toBe(0);
+});
+
 test("transient contact-save errors preserve edits and retry with the same idempotency key", async ({ page }) => {
   const attempts: Array<Record<string, unknown>> = [];
   await mock(page, route => route.fulfill({ json: detail() }), undefined, async (route, url) => {
@@ -220,6 +339,7 @@ test("transient contact-save errors preserve edits and retry with the same idemp
 });
 
 test("an ownership-change conflict clears the entire protected project workspace", async ({ page }) => {
+  test.slow();
   await mock(page, route => route.fulfill({ json: detail() }), undefined, async (route, url) => url.pathname.endsWith("/operational-workspace")
     ? route.fulfill({ json: operational("active") }) : route.fulfill({ status: 409, json: { error: "Project ownership changed. Refresh before continuing." } }));
   await open(page);
@@ -348,6 +468,7 @@ test("request-only staff cannot fetch a business project workspace", async ({ pa
 });
 
 test("project workspace layout supports mobile, narrow, laptop and ultrawide with usable keyboard controls", async ({ page }, testInfo) => {
+  test.slow();
   const value = detail(); value.project.name = "Acme Construction Services — Long Regional Church Survey Project";
   value.linkedContact!.email = "long-project-contact-name@regional-construction-services.example.test";
   value.project.description = "First line with context.\nSecond line with a practical delivery requirement.";
@@ -366,7 +487,7 @@ test("project workspace layout supports mobile, narrow, laptop and ultrawide wit
     for (const action of await workspace(page).getByRole("link").all()) {
       const bounds = await action.boundingBox(); expect(bounds!.height).toBeGreaterThanOrEqual(44); expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width + 1);
     }
-    for (const control of await operations.locator("button, select, textarea, summary").all()) {
+    for (const control of await operations.locator("button, select, textarea, input[type=file], summary").all()) {
       const bounds = await control.boundingBox(); expect(bounds!.height).toBeGreaterThanOrEqual(44); expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width + 1);
     }
     await page.evaluate(() => scrollTo(0, 0));

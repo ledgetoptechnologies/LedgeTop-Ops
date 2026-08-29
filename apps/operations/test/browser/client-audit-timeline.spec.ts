@@ -62,7 +62,7 @@ function operationalWorkspace() {
     project: { id: "project-one", sourceId: source, status: "active", revision: "project-one-revision" },
     contacts: { version: 0, assignments: [], revisions: [] },
     memory: { version: 0, snapshot: { plan: "", actualOutcome: "", deviationsAndReasons: "", observations: "", problems: "",
-      successes: "", recommendations: "", nextTimeRequests: "" }, revisions: [] },
+      successes: "", recommendations: "", nextTimeRequests: "" }, attachments: [], revisions: [] },
     capabilities: { canManageContacts: false, canManageMemory: false }, contactOptions: [],
     contactPage: { available: false, reason: "permission_required", nextCursor: null, hasMore: false, returned: 0, limit: 25 } };
 }

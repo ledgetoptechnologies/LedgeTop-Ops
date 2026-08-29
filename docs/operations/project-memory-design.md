@@ -1,9 +1,12 @@
 # Operational contacts, project memory, and selective copy-forward
 
-Status: proposed design, not implemented. Reviewed against Operations checkpoint
-`537310f`. The current follow-on slice is a read-only business-project workspace
-and factual contact-channel display. It introduces no notes-writing permission,
-contact mutation, project creation, copy operation, or client notification.
+Status: incrementally implemented and locally verified through migration `0047`.
+Project contacts, fixed-section Project Memory, selective copy-forward, and
+manager-only private staff-upload attachments now exist. Crew contribution,
+client attachment access, attachment copy/delete, and attachment notifications
+remain deliberately unimplemented. See the
+[staff attachment runbook](project-memory-staff-attachments.md) for the exact
+storage, authority, recovery, and rollout contract.
 
 This document complements [the client-workspace roadmap](client-workspace-roadmap.md),
 not replaces it. Organization and project contacts, multiple site contacts, rich
@@ -135,17 +138,18 @@ stay in Alpha. An Ops-local operational role must be distinguishable from an
 authoritative Alpha billing/department role; it cannot silently change billing,
 delivery, or access behavior.
 
-Memory should retain separately understandable sections for plan, actual
+Memory retains separately understandable sections for plan, actual
 outcome, deviations/reasons, observations, problems, successes, recommendations,
-and requests for next time. Use a versioned current record with immutable
+and requests for next time. It uses a versioned current record with immutable
 revision content, actor, timestamp, and provenance. Text is the first useful
 increment; private images, screenshots, PDFs, annotation authoring, SOPs, and
-other field material remain explicit subsequent increments.
+other field material remain explicit subsequent increments. Migration `0047`
+adds private manager-only JPEG, PNG, WebP, GIF, TIFF, and PDF uploads without
+turning them into project files, portal assets, or copy-forward inputs.
 
-Until a narrower write policy is approved, a conservative candidate is an
-administrator with effective global `operations.manage` plus verified project
-visibility. This is a proposed boundary, not authorization to implement writes
-now. If delegated writes are approved, add a purpose-specific permission and a
+The implemented write boundary is an administrator with effective global
+`project.memory.manage` plus verified project visibility. If delegated writes
+are approved, add a purpose-specific permission and a
 narrow route exception, using an actual project management context. Do not
 derive write access from `manager_user_id` or assignment alone.
 

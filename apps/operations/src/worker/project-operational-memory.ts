@@ -36,12 +36,12 @@ export type SaveProjectOperationalContactsInput = z.infer<typeof saveProjectOper
 export type SaveProjectMemoryInput = z.infer<typeof saveProjectMemorySchema>;
 export type ProjectMemorySnapshot = z.infer<typeof memorySchema>;
 
-interface ProjectRow {
+export interface ProjectRow {
   id: string; projection_source_id: string; client_id: string | null; organization_id: string | null;
   status: string | null; active: number; last_sync_id: string;
 }
-interface RootRow { id: string; projection_source_id: string; organization_id: string | null; active: number; last_sync_id: string }
-interface PreparedProject {
+export interface RootRow { id: string; projection_source_id: string; organization_id: string | null; active: number; last_sync_id: string }
+export interface PreparedProject {
   context: ClientHubCollectionContext; project: ProjectRow; root: RootRow;
   policy: ClientHubBusinessProjectPolicy; sourceProof: string;
 }
@@ -64,14 +64,16 @@ export interface ProjectOperationalWorkspace {
   canonicalRoot: ClientHubCollectionContext["canonicalRoot"]; contextVersion: string;
   project: { id: string; sourceId: string; status: string | null; revision: string };
   contacts: { version: number; assignments: ProjectOperationalContact[]; revisions: Array<{ version: number; actorId: string; createdAt: string }> };
-  memory: { version: number; snapshot: ProjectMemorySnapshot; revisions: Array<{ version: number; changeKind: "saved" | "post_completion_amendment"; amendmentReason: string | null; actorId: string; createdAt: string }> };
+  memory: { version: number; snapshot: ProjectMemorySnapshot; attachments: Array<{ id: string; name: string;
+    contentType: string; size: number; sourceKind: "staff_upload"; versionAdded: number; createdAt: string; downloadPath: string }>;
+    revisions: Array<{ version: number; changeKind: "saved" | "post_completion_amendment"; amendmentReason: string | null; actorId: string; createdAt: string }> };
   capabilities: { canManageContacts: boolean; canManageMemory: boolean };
 }
 export interface ProjectOperationalMutationResult {
   sourceId: string; projectId: string; version: number; replayed: boolean;
 }
 
-const emptyMemory = (): ProjectMemorySnapshot => Object.fromEntries(PROJECT_MEMORY_SECTIONS.map(key => [key, ""])) as ProjectMemorySnapshot;
+export const emptyMemory = (): ProjectMemorySnapshot => Object.fromEntries(PROJECT_MEMORY_SECTIONS.map(key => [key, ""])) as ProjectMemorySnapshot;
 const db = (env: Environment): Database => env.OPS_DB.withSession("first-primary");
 const unavailable = (): never => { throw new HTTPException(404, { message: "Business project is unavailable" }); };
 const changed = (): never => { throw new HTTPException(409, { message: "Project ownership, permissions, or operational records changed. Refresh before continuing." }); };
@@ -96,7 +98,7 @@ function globalPermissionSql(permission: "team.view" | "projects.view" | "projec
     AND NOT EXISTS(SELECT 1 FROM staff_permission_overrides permission WHERE permission.staff_id=actor.id
       AND permission.permission_key='${permission}' AND permission.scope='global' AND permission.effect='deny'))`;
 }
-function rootRecordKind(context: ClientHubCollectionContext): "organization" | "client" {
+export function rootRecordKind(context: ClientHubCollectionContext): "organization" | "client" {
   return context.root.kind === "organization" ? "organization" : "client";
 }
 function validateContext(context: ClientHubCollectionContext, expected?: string): void {
@@ -120,7 +122,7 @@ async function rootRow(database: Database, context: ClientHubCollectionContext):
       AND ${projectAlphaReadVisibleSql("projection_source_id")} LIMIT 1`)
     .bind(context.root.public_id, context.root.source_id).first<RootRow>();
 }
-async function prepareProject(env: Environment, principal: StaffPrincipal, context: ClientHubCollectionContext,
+export async function prepareProject(env: Environment, principal: StaffPrincipal, context: ClientHubCollectionContext,
   projectId: string, manage?: "project.contacts.manage" | "project.memory.manage", expectedContextVersion?: string): Promise<PreparedProject> {
   validateContext(context, expectedContextVersion);
   if (!identifier.safeParse(projectId).success) throw new HTTPException(400, { message: "Project identifier is invalid" });
@@ -143,7 +145,7 @@ async function prepareProject(env: Environment, principal: StaffPrincipal, conte
     || JSON.stringify(currentRoot) !== JSON.stringify(root)) return changed();
   return { context, project, root, policy, sourceProof };
 }
-function projectGuard(prepared: PreparedProject, principal: StaffPrincipal,
+export function projectGuard(prepared: PreparedProject, principal: StaffPrincipal,
   permission: "project.contacts.manage" | "project.memory.manage", expectedVersion: number,
   table: "project_operational_contact_sets" | "project_operational_memory", contacts: string[] = []): { sql: string; values: unknown[] } {
   const { context, project, root, policy } = prepared, owner = clientHubBusinessProjectOwnership(context);
@@ -176,16 +178,17 @@ function projectGuard(prepared: PreparedProject, principal: StaffPrincipal,
   }
   return { sql, values };
 }
-function guardedFence(database: Database, prepared: PreparedProject, principal: StaffPrincipal,
+export function guardedFence(database: Database, prepared: PreparedProject, principal: StaffPrincipal,
   permission: "project.contacts.manage" | "project.memory.manage", recordKind: "contacts" | "memory",
   expectedVersion: number, assignmentDeletes: number, assignmentInserts: number,
-  guard: { sql: string; values: unknown[] }): D1PreparedStatement {
+  guard: { sql: string; values: unknown[] }, revisionWrites = 1, eventWrites = 1,
+  mutationWrites = 1): D1PreparedStatement {
   const { context, project, root } = prepared;
   return database.prepare(`INSERT INTO project_operational_write_fences
       (projection_source_id,project_id,actor_id,permission_key,record_kind,root_record_kind,root_id,root_last_sync_id,
        project_client_id,project_organization_id,project_status,project_last_sync_id,expected_version,
        current_writes,assignment_deletes,assignment_inserts,revision_writes,event_writes,mutation_writes,write_guard)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,1,1,1,CASE WHEN ${guard.sql} THEN 1 ELSE 0 END)
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?,?,?,CASE WHEN ${guard.sql} THEN 1 ELSE 0 END)
     ON CONFLICT(projection_source_id,project_id) DO UPDATE SET actor_id=excluded.actor_id,
       permission_key=excluded.permission_key,record_kind=excluded.record_kind,root_record_kind=excluded.root_record_kind,
       root_id=excluded.root_id,root_last_sync_id=excluded.root_last_sync_id,project_client_id=excluded.project_client_id,
@@ -196,7 +199,7 @@ function guardedFence(database: Database, prepared: PreparedProject, principal: 
       event_writes=excluded.event_writes,mutation_writes=excluded.mutation_writes,write_guard=excluded.write_guard`)
     .bind(project.projection_source_id, project.id, principal.id, permission, recordKind, rootRecordKind(context), context.root.public_id,
       root.last_sync_id, project.client_id, project.organization_id, project.status, project.last_sync_id, expectedVersion,
-      assignmentDeletes, assignmentInserts, ...guard.values);
+      assignmentDeletes, assignmentInserts, revisionWrites, eventWrites, mutationWrites, ...guard.values);
 }
 async function currentReceipt(database: Database, actorId: string, key: string): Promise<ReceiptRow | null> {
   return database.prepare(`SELECT operation_kind,request_fingerprint,projection_source_id,project_id,result_version,result_json
@@ -222,12 +225,12 @@ function contactSnapshot(assignments: Array<{ id: string; contactId: string; rol
   preferredContactMethod: "email" | "phone" | "text" | null; instructions: string; sortOrder: number }>) {
   return { schemaVersion: 1, assignments };
 }
-function parseMemory(value: string | null): ProjectMemorySnapshot {
+export function parseMemory(value: string | null): ProjectMemorySnapshot {
   if (value === null) return emptyMemory();
   try { return parse(memorySchema, JSON.parse(value), "Saved project memory is invalid"); }
   catch (error) { if (error instanceof HTTPException) throw new HTTPException(503, { message: "Saved project memory requires administrative review" }); throw error; }
 }
-function assertOverlayRoot(context: ClientHubCollectionContext,
+export function assertOverlayRoot(context: ClientHubCollectionContext,
   value: Pick<ContactSetRow, "root_record_kind" | "root_id"> | null | undefined): void {
   if (value && (value.root_record_kind !== rootRecordKind(context) || value.root_id !== context.root.public_id)) ownershipChanged();
 }
@@ -246,7 +249,7 @@ export async function readProjectOperationalWorkspace(env: Environment, principa
   const firstMetadata = await metadata();
   assertOverlayRoot(context, firstMetadata[0]); assertOverlayRoot(context, firstMetadata[1]);
   const read = async () => {
-    const [rows, memory, contactRevisions, memoryRevisions] = await Promise.all([
+    const [rows, memory, contactRevisions, memoryRevisions, attachments] = await Promise.all([
       database.prepare(`SELECT assignment.id,assignment.contact_id,assignment.role,assignment.preferred_contact_method,
           assignment.instructions,assignment.sort_order,contact.name contact_name,${businessContactChannelsSql("contact.payload_json")}
         FROM project_operational_contact_assignments assignment
@@ -262,8 +265,18 @@ export async function readProjectOperationalWorkspace(env: Environment, principa
       database.prepare(`SELECT version,change_kind,amendment_reason,actor_id,created_at FROM project_operational_memory_revisions
         WHERE projection_source_id=? AND project_id=? ORDER BY version DESC LIMIT 50`).bind(source, projectId)
         .all<{ version: number; change_kind: "saved" | "post_completion_amendment"; amendment_reason: string | null; actor_id: string; created_at: string }>(),
+      database.prepare(`SELECT id,root_record_kind,root_id,display_name,content_type,size_bytes,source_kind,version_added,created_at
+        FROM project_memory_attachments WHERE projection_source_id=? AND project_id=?
+        ORDER BY created_at DESC,id DESC LIMIT 101`).bind(source, projectId)
+        .all<{ id: string; root_record_kind: "organization" | "client"; root_id: string; display_name: string;
+          content_type: string; size_bytes: number; source_kind: "staff_upload";
+          version_added: number; created_at: string }>(),
     ]);
-    return { rows: rows.results, memory, contactRevisions: contactRevisions.results, memoryRevisions: memoryRevisions.results };
+    if (attachments.results.length > 100 || attachments.results.reduce((sum, item) => sum + item.size_bytes, 0) > 512 * 1024 * 1024)
+      throw new HTTPException(503, { message: "Project-memory attachments require administrative review" });
+    for (const attachment of attachments.results) assertOverlayRoot(context, attachment);
+    return { rows: rows.results, memory, contactRevisions: contactRevisions.results, memoryRevisions: memoryRevisions.results,
+      attachments: attachments.results };
   };
   const first = await read(), current = await prepareProject(env, principal, context, projectId);
   const secondMetadata = await metadata();
@@ -285,6 +298,11 @@ export async function readProjectOperationalWorkspace(env: Environment, principa
         : { id: row.contact_id, displayName: row.contact_name, ...businessContactChannels(row) } })),
       revisions: first.contactRevisions.map(row => ({ version: row.version, actorId: row.actor_id, createdAt: row.created_at })) },
     memory: { version: first.memory?.version ?? 0, snapshot: parseMemory(first.memory?.snapshot_json ?? null),
+      attachments: first.attachments.map(row => { const routeKind = context.root.kind === "organization" ? "organizations" : "standalone";
+        return { id: row.id, name: row.display_name, contentType: row.content_type, size: row.size_bytes,
+          sourceKind: row.source_kind, versionAdded: row.version_added, createdAt: row.created_at,
+          downloadPath: `/api/client-hub/sources/${encodeURIComponent(context.root.source_id)}/business/${routeKind}/${encodeURIComponent(context.root.public_id)}`
+            + `/business-projects/${encodeURIComponent(projectId)}/operational-memory/attachments/${encodeURIComponent(row.id)}/content` }; }),
       revisions: first.memoryRevisions.map(row => ({ version: row.version, changeKind: row.change_kind,
         amendmentReason: row.amendment_reason, actorId: row.actor_id, createdAt: row.created_at })) },
     capabilities: { canManageContacts, canManageMemory },

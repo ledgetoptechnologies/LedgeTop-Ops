@@ -2,8 +2,10 @@ import { readFileSync, readdirSync } from "node:fs";
 import { Miniflare } from "miniflare";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
-import { readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts,
+import { guardedFence, prepareProject, projectGuard, readProjectOperationalWorkspace, saveProjectMemory, saveProjectOperationalContacts,
   type ProjectMemorySnapshot } from "../src/worker/project-operational-memory";
+import { cleanupProjectMemoryAttachmentUploads, serveProjectMemoryAttachment, uploadProjectMemoryAttachment }
+  from "../src/worker/project-memory-attachments";
 import type { ClientHubCollectionContext } from "../src/worker/client-hub-collections";
 import type { Env, StaffPrincipal } from "../src/worker/types";
 
@@ -15,7 +17,36 @@ const operationKey = () => `project_memory_${crypto.randomUUID()}`;
 const memory = (suffix = ""): ProjectMemorySnapshot => ({ plan: `Plan${suffix}`, actualOutcome: `Outcome${suffix}`,
   deviationsAndReasons: "", observations: "Observed", problems: "", successes: "Worked", recommendations: "",
   nextTimeRequests: "" });
-let runtime: Miniflare, database: D1Database, environment: Pick<Env, "OPS_DB">, sequence = 0;
+class AttachmentBucket {
+  objects = new Map<string, { bytes: Uint8Array; etag: string; httpEtag: string; size: number;
+    customMetadata: Record<string, string>; httpMetadata: R2HTTPMetadata | Headers }>();
+  heads = 0; gets = 0; deletes = 0; bodyless = false;
+  async put(key: string, value: ReadableStream | ArrayBuffer | ArrayBufferView | string | null,
+    options?: R2PutOptions): Promise<R2Object | null> {
+    if (options?.onlyIf && "etagDoesNotMatch" in options.onlyIf && options.onlyIf.etagDoesNotMatch === "*" && this.objects.has(key)) return null;
+    const bytes = value instanceof Uint8Array ? value : value instanceof ArrayBuffer ? new Uint8Array(value)
+      : typeof value === "string" ? new TextEncoder().encode(value) : new Uint8Array(await new Response(value as BodyInit).arrayBuffer());
+    const etag = `raw-${crypto.randomUUID()}`, item = { bytes: new Uint8Array(bytes), etag, httpEtag: `"${etag}"`, size: bytes.byteLength,
+      customMetadata: options?.customMetadata ?? {}, httpMetadata: options?.httpMetadata ?? {} };
+    this.objects.set(key, item); return item as unknown as R2Object;
+  }
+  async head(key: string): Promise<R2Object | null> { this.heads += 1; return (this.objects.get(key) ?? null) as unknown as R2Object | null; }
+  async get(key: string, options?: R2GetOptions): Promise<R2ObjectBody | R2Object | null> {
+    this.gets += 1; const item = this.objects.get(key); if (!item) return null;
+    if (this.bodyless || (options?.onlyIf && "etagMatches" in options.onlyIf && options.onlyIf.etagMatches !== item.etag))
+      return item as unknown as R2Object;
+    const range = options?.range && "offset" in options.range && typeof options.range.offset === "number"
+      && typeof options.range.length === "number" ? { offset: options.range.offset, length: options.range.length } : null;
+    const bytes = range ? item.bytes.slice(range.offset, range.offset + range.length) : item.bytes;
+    const buffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
+    return { ...item, body: new Blob([buffer]).stream(), bodyUsed: false, arrayBuffer: async () => buffer,
+      text: async () => new TextDecoder().decode(bytes), json: async () => JSON.parse(new TextDecoder().decode(bytes)),
+      blob: async () => new Blob([buffer]) } as unknown as R2ObjectBody;
+  }
+  async delete(key: string): Promise<void> { this.deletes += 1; this.objects.delete(key); }
+}
+let runtime: Miniflare, database: D1Database, bucket: AttachmentBucket,
+  environment: Pick<Env, "OPS_DB" | "DATA_BUCKET">, sequence = 0;
 let beforeMigration: unknown, afterMigration: unknown;
 
 async function stableAuthority() {
@@ -77,11 +108,23 @@ function raceDatabase(action: () => Promise<void>): D1Database {
   } });
   return proxy;
 }
+function jpeg(seed = 1): Uint8Array {
+  return new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 0, 0, 0, seed, 1, 2, 3, 4, 5, 6, 7, 8, 0xff, 0xd9]);
+}
+function uploadRequest(item: Fixture, expectedVersion: number, key: string, bytes: Uint8Array,
+  name = "field-note.jpg", contentType = "image/jpeg", reason?: string): Request {
+  const headers: Record<string, string> = { "Content-Type": contentType, "X-Expected-Context-Version": item.context.contextVersion,
+    "X-Expected-Version": String(expectedVersion), "X-Idempotency-Key": key, "X-File-Name": encodeURIComponent(name) };
+  if (reason) headers["X-Amendment-Reason"] = reason;
+  return new Request("https://ops.example.test/upload", { method: "POST", headers,
+    body: bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer });
+}
 
 beforeAll(async () => {
   runtime = new Miniflare({ modules: true, compatibilityDate: "2026-07-22",
     script: "export default {fetch(){return new Response('memory')}}", d1Databases: ["OPS_DB"] });
-  database = await runtime.getD1Database("OPS_DB") as D1Database; environment = { OPS_DB: database };
+  database = await runtime.getD1Database("OPS_DB") as D1Database; bucket = new AttachmentBucket();
+  environment = { OPS_DB: database, DATA_BUCKET: bucket as unknown as R2Bucket };
   const directory = new URL("../migrations/", import.meta.url);
   for (const filename of readdirSync(directory).filter(name => name.endsWith(".sql") && name < "0043_").sort())
     await database.batch(splitD1MigrationStatements(readFileSync(new URL(filename, directory), "utf8")).map(sql => database.prepare(sql)));
@@ -92,6 +135,8 @@ beforeAll(async () => {
   ]);
   beforeMigration = await stableAuthority();
   await database.batch(splitD1MigrationStatements(readFileSync(new URL("0043_project_operational_memory.sql", directory), "utf8"))
+    .map(sql => database.prepare(sql)));
+  await database.batch(splitD1MigrationStatements(readFileSync(new URL("0047_project_memory_staff_attachments.sql", directory), "utf8"))
     .map(sql => database.prepare(sql)));
   afterMigration = await stableAuthority();
 }, 120_000);
@@ -227,6 +272,7 @@ describe("source-qualified operational contacts and project memory", () => {
       (id,projection_source_id,project_id,actor_id,event_kind,result_version,details_json) VALUES(?,?,?,?,?,?,?)`)
       .bind(crypto.randomUUID(), source, item.projectId, "staff-kollins-stirn", "memory_saved", 2, "{}").run())
       .rejects.toThrow(/current context/);
+    await database.prepare("UPDATE project_operational_write_fences SET event_writes=0 WHERE project_id=?").bind(item.projectId).run();
     await database.prepare("DELETE FROM project_operational_write_fences WHERE project_id=?").bind(item.projectId).run();
     await database.prepare(`INSERT INTO project_operational_write_fences(projection_source_id,project_id,actor_id,permission_key,record_kind,
       root_record_kind,root_id,root_last_sync_id,project_client_id,project_organization_id,project_status,project_last_sync_id,expected_version,
@@ -236,6 +282,7 @@ describe("source-qualified operational contacts and project memory", () => {
     await expect(database.prepare(`UPDATE project_operational_memory SET version=version+1,updated_by=?
       WHERE projection_source_id=? AND project_id=? AND version=1`).bind("staff-kollins-stirn", source, item.projectId).run())
       .rejects.toThrow(/current context/);
+    await database.prepare("UPDATE project_operational_write_fences SET current_writes=0 WHERE project_id=?").bind(item.projectId).run();
     await database.prepare("DELETE FROM project_operational_write_fences WHERE project_id=?").bind(item.projectId).run();
   }, TEST_TIMEOUT_MS);
 
@@ -250,4 +297,177 @@ describe("source-qualified operational contacts and project memory", () => {
     expect(await database.prepare("SELECT count(*) count FROM project_operational_memory_revisions WHERE project_id=?").bind(item.projectId).first("count")).toBe(0);
     expect(await database.prepare("SELECT count(*) count FROM project_operational_write_fences").first("count")).toBe(0);
   }, TEST_TIMEOUT_MS);
+
+  it("uploads a verified opaque staff attachment exactly once and returns only public metadata", async () => {
+    const item = await fixture(), key = operationKey(), bytes = jpeg();
+    const result = await uploadProjectMemoryAttachment(environment, owner, item.context, item.projectId,
+      uploadRequest(item, 0, key, bytes, "现场 résumé's.jpg"));
+    expect(result).toMatchObject({ sourceId: source, projectId: item.projectId, version: 1, replayed: false,
+      attachment: { name: "现场 résumé's.jpg", contentType: "image/jpeg", size: bytes.length, sourceKind: "staff_upload", versionAdded: 1 } });
+    expect(JSON.stringify(result)).not.toMatch(/sha256|object_key|objectKey|etag/i);
+    const stored = await database.prepare("SELECT object_key,object_etag,sha256 FROM project_memory_attachments WHERE id=?")
+      .bind(result.attachment.id).first<{ object_key: string; object_etag: string; sha256: string }>();
+    expect(stored?.object_key).toMatch(/^_ltds\/ProjectMemory\/[0-9a-f-]+\/content$/);
+    expect(stored?.object_key).not.toContain("résumé");
+    const workspace = await readProjectOperationalWorkspace(environment, owner, item.context, item.projectId);
+    expect(workspace.memory.attachments).toEqual([result.attachment]);
+    expect(JSON.stringify(workspace.memory.attachments)).not.toMatch(/sha256|object_key|objectKey|etag/i);
+    await expect(uploadProjectMemoryAttachment(environment, owner, item.context, item.projectId,
+      uploadRequest(item, 0, key, bytes, "现场 résumé's.jpg"))).resolves.toEqual({ ...result, replayed: true });
+    await expect(uploadProjectMemoryAttachment(environment, owner, item.context, item.projectId,
+      uploadRequest(item, 0, key, jpeg(2), "现场 résumé's.jpg"))).rejects.toMatchObject({ status: 409 });
+    expect(await database.prepare("SELECT count(*) count FROM project_memory_attachments WHERE project_id=?")
+      .bind(item.projectId).first("count")).toBe(1);
+    const persisted = JSON.stringify((await database.prepare(`SELECT details_json FROM project_memory_attachment_events WHERE project_id=?
+      UNION ALL SELECT result_json FROM project_memory_attachment_mutations WHERE project_id=?`).bind(item.projectId, item.projectId).all()).results);
+    expect(persisted).not.toMatch(/résumé|object|etag|sha256/i);
+  }, TEST_TIMEOUT_MS);
+
+  it("serves authorized HEAD and ranges with pinned metadata and rejects a bodyless R2 precondition result", async () => {
+    const item = await fixture(), result = await uploadProjectMemoryAttachment(environment, owner, item.context, item.projectId,
+      uploadRequest(item, 0, operationKey(), jpeg(), "résumé's.jpg"));
+    const head = await serveProjectMemoryAttachment(environment, owner, item.context, item.projectId, result.attachment.id,
+      new Request("https://ops.example.test/content", { method: "HEAD" }));
+    expect(head.status).toBe(200); expect(head.headers.get("Content-Length")).toBe(String(jpeg().length));
+    expect(head.headers.get("Content-Disposition")).toContain("filename*=UTF-8''r%C3%A9sum%C3%A9%27s.jpg");
+    expect(head.headers.get("Cache-Control")).toBe("private, no-store"); expect(head.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    const range = await serveProjectMemoryAttachment(environment, owner, item.context, item.projectId, result.attachment.id,
+      new Request("https://ops.example.test/content", { headers: { Range: "bytes=2-5" } }));
+    expect(range.status).toBe(206); expect(new Uint8Array(await range.arrayBuffer())).toEqual(jpeg().slice(2, 6));
+    bucket.bodyless = true;
+    await expect(serveProjectMemoryAttachment(environment, owner, item.context, item.projectId, result.attachment.id,
+      new Request("https://ops.example.test/content"))).rejects.toMatchObject({ status: 409 });
+    bucket.bodyless = false;
+    const before = bucket.heads;
+    await expect(serveProjectMemoryAttachment(environment, owner, item.context, "sibling-project", result.attachment.id,
+      new Request("https://ops.example.test/content"))).rejects.toMatchObject({ status: 404 });
+    expect(bucket.heads).toBe(before);
+  }, TEST_TIMEOUT_MS);
+
+  it("rejects unauthorized/stale calls before reading bodies and rejects hostile or mismatched content", async () => {
+    const item = await fixture(); let pulls = 0; const deniedKey = operationKey();
+    const stream = new ReadableStream<Uint8Array>({ pull(controller) { pulls += 1; controller.enqueue(jpeg()); controller.close(); } });
+    const request = uploadRequest(item, 0, deniedKey, jpeg());
+    const guarded = new Request(request.url, { method: "POST", headers: request.headers, body: stream, duplex: "half" } as RequestInit);
+    const objectsBefore = bucket.objects.size;
+    await expect(uploadProjectMemoryAttachment(environment, { ...owner, id: "staff-kollins-stirn" }, item.context, item.projectId, guarded))
+      .rejects.toMatchObject({ status: 403 });
+    expect(bucket.objects.size).toBe(objectsBefore);
+    expect(await database.prepare("SELECT count(*) count FROM project_memory_attachment_upload_intents WHERE idempotency_key=?")
+      .bind(deniedKey).first("count")).toBe(0);
+    await saveProjectMemory(environment, owner, item.context, item.projectId, { expectedContextVersion: item.context.contextVersion,
+      expectedVersion: 0, idempotencyKey: operationKey(), memory: memory() });
+    pulls = 0;
+    const stale = new Request(request.url, { method: "POST", headers: request.headers,
+      body: new ReadableStream<Uint8Array>({ pull(controller) { pulls += 1; controller.enqueue(jpeg()); controller.close(); } }), duplex: "half" } as RequestInit);
+    const staleObjects = bucket.objects.size;
+    await expect(uploadProjectMemoryAttachment(environment, owner, item.context, item.projectId, stale)).rejects.toMatchObject({ status: 409 });
+    expect(bucket.objects.size).toBe(staleObjects);
+    expect(await database.prepare("SELECT count(*) count FROM project_memory_attachment_upload_intents WHERE idempotency_key=?")
+      .bind(deniedKey).first("count")).toBe(0);
+    const fresh = await fixture();
+    await expect(uploadProjectMemoryAttachment(environment, owner, fresh.context, fresh.projectId,
+      uploadRequest(fresh, 0, operationKey(), new TextEncoder().encode("<svg><script>alert(1)</script></svg>"), "note.jpg")))
+      .rejects.toMatchObject({ status: 415 });
+    await expect(uploadProjectMemoryAttachment(environment, owner, fresh.context, fresh.projectId,
+      uploadRequest(fresh, 0, operationKey(), jpeg(), "note.png", "image/png"))).rejects.toMatchObject({ status: 415 });
+    await expect(uploadProjectMemoryAttachment(environment, owner, fresh.context, fresh.projectId,
+      uploadRequest(fresh, 0, operationKey(), jpeg(), "safe\u202Egpj.jpg"))).rejects.toMatchObject({ status: 400 });
+  }, TEST_TIMEOUT_MS);
+
+  it("enforces terminal amendment reasons and the atomic pending-upload budget", async () => {
+    const terminalItem = await fixture("completed");
+    await expect(uploadProjectMemoryAttachment(environment, owner, terminalItem.context, terminalItem.projectId,
+      uploadRequest(terminalItem, 0, operationKey(), jpeg()))).rejects.toMatchObject({ status: 409 });
+    await expect(uploadProjectMemoryAttachment(environment, owner, terminalItem.context, terminalItem.projectId,
+      uploadRequest(terminalItem, 0, operationKey(), jpeg(), "amend.jpg", "image/jpeg", "Post-completion field evidence")))
+      .resolves.toMatchObject({ version: 1 });
+
+    const item = await fixture();
+    for (let index = 0; index < 5; index += 1) await database.prepare(`INSERT INTO project_memory_attachment_upload_intents
+      (actor_id,idempotency_key,request_fingerprint,projection_source_id,project_id,root_record_kind,root_id,attachment_id,object_key,
+       display_name,content_type,size_bytes,sha256,expected_context_version,expected_memory_version,status)
+      VALUES(?,?,?,?,?,'organization',?,?,?,?, 'image/jpeg',?,?,?,0,'prepared')`)
+      .bind(owner.id, `pending_${crypto.randomUUID()}`, "a".repeat(64), source, item.projectId, item.context.root.public_id,
+        crypto.randomUUID(), `_ltds/ProjectMemory/${crypto.randomUUID()}/content`, `pending-${index}.jpg`, 1024, "b".repeat(64), item.context.contextVersion).run();
+    const puts = bucket.objects.size;
+    await expect(uploadProjectMemoryAttachment(environment, owner, item.context, item.projectId,
+      uploadRequest(item, 0, operationKey(), jpeg()))).rejects.toMatchObject({ status: 429 });
+    expect(bucket.objects.size).toBe(puts);
+    await database.prepare(`UPDATE project_memory_attachment_upload_intents SET updated_at=datetime('now','-2 hours')
+      WHERE project_id=? AND status='prepared'`).bind(item.projectId).run();
+    await expect(uploadProjectMemoryAttachment(environment, owner, item.context, item.projectId,
+      uploadRequest(item, 0, operationKey(), jpeg(), "after-recovery.jpg"))).resolves.toMatchObject({ version: 1 });
+  }, TEST_TIMEOUT_MS);
+
+  it("schedules ambiguous precommit objects for reference-safe cleanup and never deletes committed bytes", async () => {
+    const item = await fixture(), raced = raceDatabase(() => database.prepare("UPDATE pa_organizations SET last_sync_id='attachment-race' WHERE id=?")
+      .bind(item.context.root.public_id).run().then(() => undefined));
+    await expect(uploadProjectMemoryAttachment({ OPS_DB: raced, DATA_BUCKET: bucket as unknown as R2Bucket }, owner,
+      item.context, item.projectId, uploadRequest(item, 0, operationKey(), jpeg()))).rejects.toMatchObject({ status: 409 });
+    const orphan = await database.prepare(`SELECT object_key,status FROM project_memory_attachment_upload_intents
+      WHERE project_id=?`).bind(item.projectId).first<{ object_key: string; status: string }>();
+    expect(orphan?.status).toBe("cleanup_pending"); expect(bucket.objects.has(orphan!.object_key)).toBe(true);
+    await cleanupProjectMemoryAttachmentUploads(environment, 10);
+    expect(bucket.objects.has(orphan!.object_key)).toBe(false);
+
+    const committedItem = await fixture(), committed = await uploadProjectMemoryAttachment(environment, owner, committedItem.context,
+      committedItem.projectId, uploadRequest(committedItem, 0, operationKey(), jpeg()));
+    const objectKey = await database.prepare("SELECT object_key FROM project_memory_attachments WHERE id=?")
+      .bind(committed.attachment.id).first<string>("object_key");
+    await expect(database.prepare(`UPDATE project_memory_attachment_upload_intents SET status='cleanup_pending'
+      WHERE attachment_id=?`).bind(committed.attachment.id).run()).rejects.toThrow(/transition|current context/);
+    await cleanupProjectMemoryAttachmentUploads(environment, 10);
+    expect(bucket.objects.has(objectKey!)).toBe(true);
+  }, TEST_TIMEOUT_MS);
+
+  it("rejects oversized chunked input and direct SQL stage, provenance, and intent-state bypasses", async () => {
+    const item = await fixture(), request = uploadRequest(item, 0, operationKey(), jpeg());
+    const oversized = new ReadableStream<Uint8Array>({ start(controller) {
+      controller.enqueue(new Uint8Array(20 * 1024 * 1024)); controller.enqueue(new Uint8Array(6 * 1024 * 1024)); controller.close();
+    } });
+    await expect(uploadProjectMemoryAttachment(environment, owner, item.context, item.projectId,
+      new Request(request.url, { method: "POST", headers: request.headers, body: oversized, duplex: "half" } as RequestInit)))
+      .rejects.toMatchObject({ status: 413 });
+    await expect(database.prepare(`INSERT INTO project_memory_attachment_upload_intents
+      (actor_id,idempotency_key,request_fingerprint,projection_source_id,project_id,root_record_kind,root_id,attachment_id,object_key,
+       display_name,content_type,size_bytes,sha256,expected_context_version,expected_memory_version,status,object_etag)
+      VALUES(?,?,?,?,?,'organization',?,?,?,?, 'image/jpeg',?,?,?,0,'completed','forged')`).bind(owner.id, operationKey(), "a".repeat(64), source,
+        item.projectId, item.context.root.public_id, crypto.randomUUID(), `_ltds/ProjectMemory/${crypto.randomUUID()}/content`, "forged.jpg", 10,
+        "b".repeat(64), item.context.contextVersion).run()).rejects.toThrow(/start prepared/);
+    await expect(database.prepare(`INSERT INTO project_memory_attachment_events
+      (id,projection_source_id,project_id,attachment_id,actor_id,event_kind,result_version,details_json)
+      VALUES(?,?,?,?,?,'attachment_added',1,?)`).bind(crypto.randomUUID(), source, item.projectId, crypto.randomUUID(), owner.id,
+        JSON.stringify({ schemaVersion: 1, sourceKind: "staff_upload", size: 1, object_key: "secret" })).run()).rejects.toThrow();
+
+    const directKey = operationKey(), directAttachment = crypto.randomUUID(), directEtag = `raw-${crypto.randomUUID()}`;
+    await database.batch([
+      database.prepare(`INSERT INTO project_memory_attachment_upload_intents
+        (actor_id,idempotency_key,request_fingerprint,projection_source_id,project_id,root_record_kind,root_id,attachment_id,object_key,
+         display_name,content_type,size_bytes,sha256,expected_context_version,expected_memory_version,status)
+        VALUES(?,?,?,?,?,'organization',?,?,?,?, 'image/jpeg',?,?,?,0,'prepared')`)
+        .bind(owner.id, directKey, "c".repeat(64), source, item.projectId, item.context.root.public_id, directAttachment,
+          `_ltds/ProjectMemory/${directAttachment}/content`, "direct.jpg", jpeg().byteLength, "d".repeat(64), item.context.contextVersion),
+      database.prepare(`UPDATE project_memory_attachment_upload_intents SET status='object_written',object_etag=?,
+        updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE actor_id=? AND idempotency_key=?`)
+        .bind(directEtag, owner.id, directKey),
+    ]);
+    const directPrepared = await prepareProject(environment, owner, item.context, item.projectId, "project.memory.manage");
+    const directGuard = projectGuard(directPrepared, owner, "project.memory.manage", 0, "project_operational_memory");
+    await expect(database.batch([
+      guardedFence(database, directPrepared, owner, "project.memory.manage", "memory", 0, 0, 0, directGuard, 1, 0, 0),
+      database.prepare(`INSERT INTO project_memory_attachment_write_fences
+        (projection_source_id,project_id,actor_id,idempotency_key,attachment_id,root_record_kind,root_id,expected_memory_version,incoming_size_bytes,
+         memory_writes,revision_writes,attachment_writes,event_writes,mutation_writes,intent_writes,write_guard)
+        VALUES(?,?,?,?,?,'organization',?,0,?,1,1,1,1,1,1,1)`)
+        .bind(source, item.projectId, owner.id, directKey, directAttachment, item.context.root.public_id, jpeg().byteLength),
+      database.prepare(`UPDATE project_memory_attachment_write_fences SET memory_writes=0
+        WHERE projection_source_id=? AND project_id=?`).bind(source, item.projectId),
+    ])).rejects.toThrow(/fence transition/);
+    expect(await database.prepare("SELECT count(*) count FROM project_memory_attachment_write_fences WHERE project_id=?")
+      .bind(item.projectId).first("count")).toBe(0);
+    expect(await database.prepare("SELECT count(*) count FROM project_operational_write_fences WHERE project_id=?")
+      .bind(item.projectId).first("count")).toBe(0);
+    expect((await database.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
+  }, 60_000);
 });
