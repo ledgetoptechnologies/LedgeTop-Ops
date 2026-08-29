@@ -6,6 +6,7 @@ import { authorizeNativePortalReadTarget,authorizePortalWorkspaceCapability,list
   type NativePortalReadContext,type PortalAuthorizationEnv } from '../src/worker/client-portal/workspace-v2';
 import { authorizeAuthenticatedDeliveryGrant,listAuthorizedAuthenticatedDeliveryPrefixes } from '../src/worker/client-portal/authenticated-delivery-grants';
 import { prepareProjectAccessTerms,projectAccessTermsSql,type ProjectAccessTermsInput } from '../src/worker/client-portal/project-access-terms';
+import { projectAccessAuthorityHistoryReady } from '../src/worker/client-portal/project-access-authority-history';
 import { readNativeTargetScopes } from '../src/worker/client-portal/native-portal-scopes';
 
 const principal={issuer:'https://terms.example.test',subject:'verified-person',email:'person@example.test'};
@@ -14,8 +15,9 @@ describe('per-grant project terms on current authorization reads',{timeout:60_00
   beforeAll(async()=>{
     runtime=new Miniflare({compatibilityDate:'2026-07-22',modules:true,script:"export default {fetch(){return new Response('terms')}}",d1Databases:{DELIVERY_DB:'project-access-reads'}});
     db=await runtime.getD1Database('DELIVERY_DB') as D1Database;
-    for(const name of readdirSync(new URL('../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0165_').sort())
+    for(const name of readdirSync(new URL('../migrations/',import.meta.url)).filter(n=>n.endsWith('.sql')&&n<'0173_').sort())
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    expect(await projectAccessAuthorityHistoryReady(db)).toBe(true);
     await db.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status) VALUES('terms-person',?,?,?,'active')`).bind(principal.issuer,principal.subject,principal.email).run();
     env={DELIVERY_DB:db,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true',AUTHENTICATED_DELIVERY_GRANTS_ENABLED:'true'};
   },120_000);
