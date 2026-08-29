@@ -1142,6 +1142,21 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     if(releaseScope.proof!==scope.proof||releaseFeedbackSchema!==feedbackSchema
       ||releaseFeedbackPolicy.proof!==feedbackPolicy.proof
       ||(releaseDetail&&await sha256(JSON.stringify(releaseDetail.project))!==projectProof))changed();
+    const releaseFeedbackAccess=releaseFeedbackPolicy.access;
+    if(!releaseFeedbackPolicy.allowed||!releaseFeedbackAccess)throw new HTTPException(409,
+      {message:"Timeline scope or access changed. Refresh the client workspace to continue"});
+    // The global fence above cannot prove record-specific workspace and legacy
+    // bridge authority. Re-read every selected record after it so a bridge
+    // revocation between the earlier record check and response release fails
+    // closed instead of leaking a now-inaccessible feedback event.
+    for(const candidate of selectedFeedback.values()){
+      const record=await readFeedbackRecord(database,candidate.record.id);
+      if(!record)throw new HTTPException(409,
+        {message:"Timeline scope or access changed. Refresh the client workspace to continue"});
+      if(await feedbackRecordProof(record)!==candidate.recordProof)changed();
+      const authorized=await readStaffFeedbackScope(env,principal,record,releaseFeedbackAccess);
+      if(!authorized||authorized.proof!==candidate.scopeProof||(projectId&&authorized.projectId!==projectId))changed();
+    }
   }
   const last = pageItems.at(-1);
   return { canonicalRoot: context.canonicalRoot, projectId, contextVersion: context.contextVersion,

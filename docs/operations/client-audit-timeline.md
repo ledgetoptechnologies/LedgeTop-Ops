@@ -44,7 +44,7 @@ project-access collaborator, and project-access companion notices. One available
 cannot hide permission-required, unsupported, not-applicable, or not-collected
 adapters.
 
-The version-seven AES-GCM cursor is actor-bound and includes the exact source-qualified root,
+The version-eight AES-GCM cursor is actor-bound and includes the exact source-qualified root,
 optional project, normalized filters, current context and scope proofs, an
 `asOf` time, bounded producer high-water marks, separate collaborator/companion notice schema
 readiness, the project-access authority collection start, the last global sort

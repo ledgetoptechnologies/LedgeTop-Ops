@@ -711,5 +711,9 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
     try{
       await expect(listClientAuditTimeline(env,staff,primaryContext(),options)).rejects.toMatchObject({status:409});
     }finally{feedbackScopeRace.calls=0;feedbackScopeRace.failAfter=null;}
+    feedbackScopeRace.calls=0;feedbackScopeRace.failAfter=2;
+    try{
+      await expect(listClientAuditTimeline(env,staff,primaryContext(),options)).rejects.toMatchObject({status:409});
+    }finally{feedbackScopeRace.calls=0;feedbackScopeRace.failAfter=null;}
   });
 });
