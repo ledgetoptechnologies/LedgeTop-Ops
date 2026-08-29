@@ -5,6 +5,7 @@ import type { Env, StaffPrincipal } from "../src/worker/types";
 
 const projectPolicy = vi.hoisted(() => ({ changed: false, deliveryAudit: true, viewerManage: true,
   portal: true, projects: true, portalReads: 0, losePortalAfterFirst: false }));
+const feedbackScopeRace=vi.hoisted(()=>({calls:0,failAfter:null as number|null}));
 vi.mock("../src/worker/acl", () => ({
   sqlScope: vi.fn(async (_env: unknown, _actor: unknown, permission: string) => {
     let allowed = permission === "viewer.manage" ? projectPolicy.viewerManage : permission === "operations.manage"
@@ -26,6 +27,18 @@ vi.mock("../src/worker/client-hub-business-project-detail", () => ({
     context: ClientHubCollectionContext, projectId: string) => ({ canonicalRoot: context.canonicalRoot,
     contextVersion: context.contextVersion, project: { id: projectId, name: "Project", status: "active" } })),
 }));
+vi.mock("../src/worker/client-feedback", async importOriginal => {
+  const original=await importOriginal<typeof import("../src/worker/client-feedback")>();
+  return {...original,
+    readStaffFeedbackPolicy:vi.fn(async()=>({grants:[],administrator:true,proof:"f".repeat(43)})),
+    readStaffFeedbackScope:vi.fn(async(_env:unknown,_actor:unknown,record:{id:string;targetFingerprint:string;
+      target:{sourceOwner:{project:{projectAlphaProjectId:string|null}|null}}})=>{
+      feedbackScopeRace.calls+=1;
+      return feedbackScopeRace.failAfter!==null&&feedbackScopeRace.calls>feedbackScopeRace.failAfter?null
+        :{projectId:record.target.sourceOwner.project?.projectAlphaProjectId??"",proof:`feedback:${record.id}:${record.targetFingerprint}`};
+    }),
+  };
+});
 import { listClientAuditTimeline } from "../src/worker/client-audit-timeline";
 
 const staff: StaffPrincipal = { id: "timeline-staff", email: "staff@example.test", displayName: "Timeline Staff",
@@ -649,5 +662,54 @@ describe("staff Client Hub audit timeline", { timeout: 60_000 }, () => {
     const later:typeof snapshot.items=[];let next=snapshot.page.nextCursor;
     while(next){const page=await listClientAuditTimeline(env,staff,primaryContext(),{projectId:'project-one',limit:1,filters:{...filters,from:'2026-08-27T16:00:00.000Z',to:'2026-08-27T21:00:00.000Z'},cursor:next});later.push(...page.items);next=page.page.nextCursor;}
     expect(later.some(item=>item.producerEventId==='authenticated-grant:audit-late')).toBe(true);
+  });
+
+  it("federates redacted project feedback lifecycle events and excludes other target kinds",async()=>{
+    await delivery.exec(`CREATE TABLE client_feedback(id TEXT PRIMARY KEY,account_id TEXT,scope_key TEXT,workspace_id TEXT,
+      creator_identity_id TEXT,creator_workspace_identity_id TEXT,principal_issuer TEXT,principal_subject TEXT,target_kind TEXT,
+      project_id TEXT,target_json TEXT,target_fingerprint TEXT,message TEXT,status TEXT,revision INTEGER,completion_note TEXT,
+      completed_at TEXT,completed_by_staff_id TEXT,mutation_key TEXT,request_fingerprint TEXT,created_at TEXT,updated_at TEXT);
+      CREATE TABLE client_feedback_events(id TEXT PRIMARY KEY,feedback_id TEXT,revision INTEGER,actor_type TEXT,actor_id TEXT,
+        status TEXT,note TEXT,created_at TEXT);
+      CREATE TABLE client_feedback_mutations(id TEXT);CREATE TABLE client_feedback_notifications(id TEXT);
+      CREATE TABLE client_feedback_notification_outbox(id TEXT);`.replace(/\s*\n\s*/g," "));
+    const target=(label:string)=>JSON.stringify({kind:"project",projectId:"project-alpha-local",associationId:null,
+      relativePath:null,storageKey:null,label,projectName:"Private project name",sourceOwner:{version:2,
+        account:{projectAlphaClientId:null,projectAlphaOrganizationId:"organization-one",projectAlphaSourceId:"project-alpha:primary"},
+        project:{projectAlphaProjectId:"project-one",sourceUpdatedAt:"private-source-version",projectAlphaSourceId:"project-alpha:primary"},
+        workspace:null,association:null,file:null}});
+    await delivery.batch([
+      delivery.prepare("INSERT OR IGNORE INTO client_accounts VALUES('account-alpha','active','project-alpha:primary',NULL,'organization-one')"),
+      delivery.prepare("INSERT OR IGNORE INTO projects VALUES('project-alpha-local',1,'project-alpha:primary','project-one','Private project label')"),
+      delivery.prepare("INSERT OR IGNORE INTO client_project_grants VALUES('account-alpha','project-alpha-local','2026-08-01T00:00:00.000Z',NULL)"),
+      delivery.prepare(`INSERT INTO client_feedback VALUES('feedback-authorized','account-alpha','account:account-alpha',NULL,
+        'private-client-identity',NULL,'private-issuer','private-subject','project','project-alpha-local',?,?,'private message',
+        'done',3,'private completion note','2026-08-28T12:00:00.000Z','private-staff','private-mutation-key-123',?,
+        '2026-08-28T10:00:00.000Z','2026-08-28T12:00:00.000Z')`).bind(target("Secret target label"),"a".repeat(64),"b".repeat(64)),
+      delivery.prepare(`INSERT INTO client_feedback VALUES('feedback-unauthorized','account-alpha','account:account-alpha',NULL,
+        'private-other-identity',NULL,'private-issuer','private-other-subject','folder','project-alpha-local',?,?,'other secret',
+        'new',1,NULL,NULL,NULL,'private-mutation-key-456',?,'2026-08-28T13:00:00.000Z','2026-08-28T13:00:00.000Z')`)
+        .bind(target("Unauthorized"),"c".repeat(64),"d".repeat(64)),
+      delivery.prepare("INSERT INTO client_feedback_events VALUES('feedback-event-unauthorized','feedback-unauthorized',1,'client','private-client','new','private note','2026-08-28T13:00:00.000Z')"),
+      delivery.prepare("INSERT INTO client_feedback_events VALUES('feedback-event-3','feedback-authorized',3,'staff','private-staff','done','private done note','2026-08-28T12:00:00.000Z')"),
+      delivery.prepare("INSERT INTO client_feedback_events VALUES('feedback-event-2','feedback-authorized',2,'staff','private-staff','in_progress','private progress note','2026-08-28T11:00:00.000Z')"),
+      delivery.prepare("INSERT INTO client_feedback_events VALUES('feedback-event-1','feedback-authorized',1,'client','private-client','new','private submitted note','2026-08-28T10:00:00.000Z')"),
+    ]);
+    const options={projectId:"project-one",limit:1,filters:{category:"feedback",actorType:"all",result:"succeeded",
+      from:null,to:null}} as const;
+    const first=await listClientAuditTimeline(env,staff,primaryContext(),options);
+    expect(first.coverage.feedback).toEqual({available:true,reason:null});
+    expect(first.items[0]).toMatchObject({producer:"client_feedback",action:"feedback.completed",
+      actor:{type:"staff",label:"Team"},resource:{type:"client_feedback",id:"feedback-authorized",label:"Client feedback"}});
+    await delivery.prepare("INSERT INTO client_feedback_events VALUES('feedback-event-late','feedback-authorized',4,'staff','private-staff','done',NULL,'2026-08-28T14:00:00.000Z')").run();
+    const events=[...first.items];let cursor=first.page.nextCursor;
+    while(cursor){const page=await listClientAuditTimeline(env,staff,primaryContext(),{...options,cursor});events.push(...page.items);cursor=page.page.nextCursor;}
+    expect(events.map(event=>event.action)).toEqual(["feedback.completed","feedback.started","feedback.submitted"]);
+    expect(JSON.stringify(events)).not.toMatch(/Unauthorized|Secret target|Private project|private message|private note|identity|issuer|subject|source-version|completion/i);
+    await delivery.prepare("DELETE FROM client_feedback_events WHERE id='feedback-event-late'").run();
+    feedbackScopeRace.calls=0;feedbackScopeRace.failAfter=1;
+    try{
+      await expect(listClientAuditTimeline(env,staff,primaryContext(),options)).rejects.toMatchObject({status:409});
+    }finally{feedbackScopeRace.calls=0;feedbackScopeRace.failAfter=null;}
   });
 });

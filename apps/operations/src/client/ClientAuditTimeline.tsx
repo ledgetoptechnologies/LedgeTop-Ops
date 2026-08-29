@@ -9,7 +9,7 @@ const coveredCategories = categories.slice(1) as Exclude<(typeof categories)[num
 const actorTypes = ["all", "staff", "client", "system", "integration", "public", "source"] as const;
 const results = ["all", "succeeded", "failed", "denied", "informational"] as const;
 const coverageReasons = ["permission_required", "unsupported_source", "not_applicable", "not_collected"] as const;
-const producers = ["project_alpha", "operations", "service_requests", "portal_access", "client_delivery"] as const;
+const producers = ["project_alpha", "operations", "service_requests", "portal_access", "client_delivery", "client_feedback"] as const;
 const projectAdapters = ["source_record_activity", "operational_project_activity", "organization_contact_activity"] as const;
 const accessAdapters = ["workspace_membership", "workspace_invitation_request", "workspace_peer_administrator",
   "portal_identity_denial", "authenticated_delivery_grant", "delegated_client_share", "viewer_client_grant", "project_access"] as const;

@@ -15,12 +15,15 @@ import {
 } from "@ltds/shared";
 import { HTTPException } from "hono/http-exception";
 import { z } from "zod";
+import { readFeedbackRecord, type FeedbackRecord } from "../../../client/src/worker/client-portal/feedback-store";
 import { sqlScope } from "./acl";
 import { eligibleBusinessActivitySql } from "./client-business-activity";
 import { readClientHubBusinessProjectDetail } from "./client-hub-business-project-detail";
 import { clientHubBusinessProjectSourceProof } from "./client-hub-business-projects";
 import { readClientHubBusinessProjectPolicy } from "./client-hub-project-policy";
 import type { ClientHubCollectionContext } from "./client-hub-collections";
+import { readStaffFeedbackEvents, readStaffFeedbackPolicy, readStaffFeedbackScope,
+  type StaffFeedbackPolicy } from "./client-feedback";
 import { base64Url, sha256 } from "./crypto";
 import { d1TablesPresent } from "./schema-readiness";
 import type { Env, StaffPrincipal } from "./types";
@@ -43,8 +46,28 @@ interface CandidateRow {
   resource_id?: string | null;
   resource_label?: string | null;
 }
+interface FeedbackTimelinePolicy {
+  allowed: boolean;
+  proof: string;
+  access: StaffFeedbackPolicy | null;
+}
+interface VerifiedFeedbackCandidate {
+  item: ClientAuditTimelineItem;
+  record: FeedbackRecord;
+  recordProof: string;
+  scopeProof: string;
+}
+interface FeedbackScanEntry {
+  position: [string, string];
+  itemId: string | null;
+}
+interface FeedbackCandidatePage {
+  candidates: VerifiedFeedbackCandidate[];
+  scan: FeedbackScanEntry[];
+  hasMore: boolean;
+}
 interface TimelineCursor {
-  v: 7;
+  v: 8;
   actor: string;
   root: [string, string, string, string];
   projectId: string | null;
@@ -62,6 +85,9 @@ interface TimelineCursor {
   operationalProjectSchema: boolean;
   organizationContactSchema:boolean;
   projectAccessHistory: string | null;
+  feedbackSchema: boolean;
+  feedbackPolicy: string;
+  feedbackAfter: [string, string] | null;
   viewerManagePolicy: string;
   filters: ClientAuditTimelineFilters;
   asOf: string;
@@ -84,7 +110,7 @@ const filtersSchema = z.object({
   to: timestamp.nullable(),
 }).strict();
 const cursorSchema = z.object({
-  v: z.literal(7), actor: identifier, root: z.tuple([identifier, identifier, identifier, identifier]),
+  v: z.literal(8), actor: identifier, root: z.tuple([identifier, identifier, identifier, identifier]),
   projectId: identifier.nullable(), context: proof, scope: proof, project: proof.nullable(),
   businessPolicy: proof, businessSource: proof, businessRevision: z.number().int().nonnegative(), deliveryAuditPolicy: proof,
   viewerManagePolicy: proof, portalPolicy: proof,
@@ -93,9 +119,11 @@ const cursorSchema = z.object({
   operationalProjectSchema: z.boolean(),
   organizationContactSchema:z.boolean(),
   projectAccessHistory: timestamp.nullable(),
+  feedbackSchema: z.boolean(), feedbackPolicy: proof,
+  feedbackAfter: z.tuple([timestamp, identifier]).nullable(),
   filters: filtersSchema, asOf: timestamp,
   waters: z.record(z.string().min(1).max(80), z.number().int().nonnegative()),
-  after: z.tuple([timestamp, z.enum(["project_alpha", "operations", "service_requests", "portal_access", "client_delivery"]), identifier]).nullable(),
+  after: z.tuple([timestamp, z.enum(["project_alpha", "operations", "service_requests", "portal_access", "client_delivery", "client_feedback"]), identifier]).nullable(),
   expires: z.number().int().positive(),
 }).strict();
 
@@ -119,7 +147,7 @@ const changed = (): never => { throw new HTTPException(409, { message: "Timeline
 async function cursorKey(env: Env): Promise<CryptoKey> {
   if (!env.OPERATIONS_SESSION_SECRET || env.OPERATIONS_SESSION_SECRET.length < 32)
     throw new Error("Client timeline cursor configuration unavailable");
-  const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`client-audit-timeline:v7:${env.OPERATIONS_SESSION_SECRET}`));
+  const material = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`client-audit-timeline:v8:${env.OPERATIONS_SESSION_SECRET}`));
   return crypto.subtle.importKey("raw", material, "AES-GCM", false, ["encrypt", "decrypt"]);
 }
 function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
@@ -130,7 +158,7 @@ function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
 async function encodeCursor(env: Env, actor: StaffPrincipal, value: TimelineCursor): Promise<string> {
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const body = await crypto.subtle.encrypt({ name: "AES-GCM", iv,
-    additionalData: new TextEncoder().encode(`client-audit-timeline:v7:${actor.id}`) }, await cursorKey(env),
+    additionalData: new TextEncoder().encode(`client-audit-timeline:v8:${actor.id}`) }, await cursorKey(env),
   new TextEncoder().encode(JSON.stringify(value)));
   return `${base64Url(iv)}.${base64Url(new Uint8Array(body))}`;
 }
@@ -140,7 +168,7 @@ async function decodeCursor(env: Env, actor: StaffPrincipal, raw: string): Promi
     const parts = raw.split(".");
     if (parts.length !== 2) throw new Error();
     const body = await crypto.subtle.decrypt({ name: "AES-GCM", iv: decodeBase64Url(parts[0]!),
-      additionalData: new TextEncoder().encode(`client-audit-timeline:v7:${actor.id}`) }, await cursorKey(env), decodeBase64Url(parts[1]!));
+      additionalData: new TextEncoder().encode(`client-audit-timeline:v8:${actor.id}`) }, await cursorKey(env), decodeBase64Url(parts[1]!));
     return cursorSchema.parse(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body)));
   } catch { throw new HTTPException(400, { message: "Client timeline cursor is invalid" }); }
 }
@@ -251,6 +279,19 @@ async function readPortalPolicy(env: Env, principal: StaffPrincipal): Promise<{ 
   const scope = await sqlScope(env, principal, "operations.manage");
   const allowed = scope.global && !scope.deniedGlobal;
   return { allowed, proof: await sha256(JSON.stringify([principal.id, "operations.manage", allowed, scope])) };
+}
+
+async function readFeedbackTimelinePolicy(env: Env, principal: StaffPrincipal, schemaReady: boolean): Promise<FeedbackTimelinePolicy> {
+  if (!schemaReady) return { allowed: false,
+    proof: await sha256(JSON.stringify([principal.id, "client-feedback", "schema-unavailable"])), access: null };
+  try {
+    const access = await readStaffFeedbackPolicy(env, principal);
+    return { allowed: true, proof: await sha256(JSON.stringify([principal.id, "client-feedback", access.proof])), access };
+  } catch (error) {
+    if (!(error instanceof HTTPException) || error.status !== 403) throw error;
+    const scope = await sqlScope(env, principal, "operations.manage");
+    return { allowed: false, proof: await sha256(JSON.stringify([principal.id, "client-feedback", scope])), access: null };
+  }
 }
 
 async function projectAccessNoticeScopeProof(env: Env, context: ClientHubCollectionContext): Promise<{ available: boolean; proof: string }> {
@@ -526,6 +567,73 @@ async function accessCandidates(env: Env, context: ClientHubCollectionContext, s
   return candidates;
 }
 
+function feedbackRecordProof(record: FeedbackRecord): Promise<string> {
+  return sha256(JSON.stringify([record.id, record.context, record.targetFingerprint, record.status, record.revision,
+    record.completedAt, record.createdAt, record.updatedAt]));
+}
+
+async function feedbackCandidates(env: Env, principal: StaffPrincipal, context: ClientHubCollectionContext,
+  scope: DeliveryScope, filters: ClientAuditTimelineFilters, projectId: string | null, asOf: string,
+  after: TimelineCursor["after"], feedbackAfter: TimelineCursor["feedbackAfter"], water: number,
+  limit: number, policy: FeedbackTimelinePolicy): Promise<FeedbackCandidatePage> {
+  const empty = (): FeedbackCandidatePage => ({ candidates: [], scan: [], hasMore: false });
+  if (!policy.allowed || !policy.access || !scope.accountId || (projectId && !scope.projectId)) return empty();
+  if (filters.category !== "all" && filters.category !== "feedback"
+    || filters.result !== "all" && filters.result !== "succeeded") return empty();
+  const producer: Producer = "client_feedback", at = timeExpression("event.created_at"),
+    eventKey = "'feedback:'||event.id", bounds = timeBounds(filters, asOf, at),
+    continuation = seek(at, eventKey, producer, after),
+    localContinuation = feedbackAfter
+      ? { sql: ` AND (${at}<? OR (${at}=? AND ${eventKey}>?))`, values: [feedbackAfter[0], feedbackAfter[0], feedbackAfter[1]] }
+      : { sql: "", values: [] as string[] },
+    actorPredicate = filters.actorType === "all" ? "" : " AND event.actor_type=?",
+    scanLimit = Math.min(Math.max(limit + 1, 25), 100);
+  const rows = await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT event.rowid,event.id event_id,
+      event.feedback_id,event.revision,event.actor_type,event.status,${at} occurred_at
+    FROM client_feedback_events event JOIN client_feedback feedback ON feedback.id=event.feedback_id
+    JOIN client_accounts account ON account.id=feedback.account_id AND account.status='active'
+    WHERE event.rowid<=? AND feedback.account_id=? AND feedback.target_kind='project'
+      ${projectId ? "AND feedback.project_id=?" : ""}
+      ${actorPredicate} AND ${bounds.sql}${continuation.sql}${localContinuation.sql}
+    ORDER BY ${at} DESC,${eventKey} ASC LIMIT ?`).bind(water, scope.accountId,
+      ...(projectId ? [scope.projectId] : []), ...(filters.actorType === "all" ? [] : [filters.actorType]),
+      ...bounds.values, ...continuation.values, ...localContinuation.values, scanLimit + 1)
+    .all<{ rowid: number; event_id: string; feedback_id: string; revision: number;
+      actor_type: "client" | "staff"; status: "new" | "in_progress" | "done"; occurred_at: string }>();
+  const database = env.DELIVERY_DB.withSession("first-primary"), candidates: VerifiedFeedbackCandidate[] = [],
+    scan: FeedbackScanEntry[] = [],records=new Map<string,{record:FeedbackRecord;scopeProof:string;
+      history:Awaited<ReturnType<typeof readStaffFeedbackEvents>>;recordProof:string}>();
+  for (const row of rows.results.slice(0, scanLimit)) {
+    const occurredAt = normalizeTime(row.occurred_at), producerEventId = `feedback:${row.event_id}`;
+    if (!occurredAt || !identifier.safeParse(producerEventId).success) throw new HTTPException(503, { message: "Feedback history is unavailable" });
+    let verified=records.get(row.feedback_id);
+    if(!verified){
+      const record=await readFeedbackRecord(database,row.feedback_id);
+      if(!record||record.target.kind!=="project"||record.context.accountId!==scope.accountId
+        ||(projectId&&record.target.projectId!==scope.projectId))
+        throw new HTTPException(503,{message:"Feedback history is unavailable"});
+      const authorized=await readStaffFeedbackScope(env,principal,record,policy.access);
+      if(!authorized||projectId&&authorized.projectId!==projectId)
+        throw new HTTPException(409,{message:"Timeline scope or access changed. Refresh the client workspace to continue"});
+      verified={record,scopeProof:authorized.proof,history:await readStaffFeedbackEvents(env,record.id),
+        recordProof:await feedbackRecordProof(record)};
+      records.set(row.feedback_id,verified);
+    }
+    const {record,history}=verified,event = history.find(value => value.revision === row.revision);
+    if (!event || event.actor !== row.actor_type || event.status !== row.status || normalizeTime(event.createdAt) !== occurredAt)
+      throw new HTTPException(503, { message: "Feedback history is unavailable" });
+    const action = row.status === "new" ? "feedback.submitted" : row.status === "in_progress"
+      ? "feedback.started" : "feedback.completed";
+    const timelineItem = item({ sourceId: context.root.source_id, producer, producerEventId, category: "feedback",
+      action, actor: actor(row.actor_type), resource: { type: "client_feedback", id: record.id,
+        label: "Client feedback", detailPath: `/operations/feedback/${encodeURIComponent(record.id)}?status=all` },
+      result: "succeeded", occurredAt });
+    candidates.push({item:timelineItem,record,recordProof:verified.recordProof,scopeProof:verified.scopeProof});
+    scan.push({ position: [occurredAt, producerEventId], itemId: timelineItem.id });
+  }
+  return { candidates, scan, hasMore: rows.results.length > scanLimit };
+}
+
 async function projectAccessHistoryCandidates(env:Env,context:ClientHubCollectionContext,filters:ClientAuditTimelineFilters,
   projectId:string|null,asOf:string,after:TimelineCursor['after'],water:number,limit:number):Promise<ClientAuditTimelineItem[]>{
   if(filters.category!=='all'&&filters.category!=='access')return [];
@@ -668,6 +776,10 @@ const OPERATIONAL_PROJECT_EVENT_TABLES = [
 const ORGANIZATION_CONTACT_EVENT_TABLES=[
   'organization_operational_events','organization_operational_contact_sets','organization_operational_contact_revisions',
 ] as const;
+const FEEDBACK_TABLES = [
+  "client_feedback", "client_feedback_events", "client_feedback_mutations",
+  "client_feedback_notifications", "client_feedback_notification_outbox",
+] as const;
 
 async function organizationContactCandidates(env:Env,context:ClientHubCollectionContext,filters:ClientAuditTimelineFilters,
   projectId:string|null,asOf:string,after:TimelineCursor['after'],water:number,limit:number,available:boolean):Promise<ClientAuditTimelineItem[]>{
@@ -783,7 +895,8 @@ async function projectAccessCompanionNoticeCandidates(env: Env, context: ClientH
 async function currentWatermarks(env: Env, context: ClientHubCollectionContext, scope: DeliveryScope,
   policies: { portal: boolean; deliveryAudit: boolean; viewerManage: boolean },
   collaboratorNoticeSchema: boolean, companionNoticeSchema: boolean,
-  operationalProjectSchema: boolean,organizationContactSchema:boolean,projectAccessHistoryAvailable:boolean,projectPublicId:string|null): Promise<Record<string, number>> {
+  operationalProjectSchema: boolean,organizationContactSchema:boolean,projectAccessHistoryAvailable:boolean,
+  projectPublicId:string|null,feedbackAvailable:boolean): Promise<Record<string, number>> {
   const ops = env.OPS_DB.withSession("first-primary"), delivery = env.DELIVERY_DB.withSession("first-primary");
   const waters: Record<string, number> = {};
   if (context.root.root_namespace === "business") waters.business = await ops.prepare("SELECT COALESCE(MAX(sequence),0) value FROM client_business_activity").first<number>("value") ?? 0;
@@ -812,6 +925,7 @@ async function currentWatermarks(env: Env, context: ClientHubCollectionContext, 
   if(projectAccessHistoryAvailable)waters.projectAccessHistory=await delivery.prepare(`SELECT COALESCE(MAX(recorded_sequence),0) value
     FROM portal_project_access_authority_events WHERE workspace_id=? AND source_id=? ${projectPublicId?'AND project_public_id=?':''}`)
     .bind(context.root.workspace_id,context.root.source_id,...(projectPublicId?[projectPublicId]:[])).first<number>('value')??0;
+  if (feedbackAvailable) waters.feedbackEvents = await maxRowid(delivery, "client_feedback_events");
   return waters;
 }
 
@@ -841,6 +955,8 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     companionNoticeSchema = await d1TablesPresent(env.DELIVERY_DB, PROJECT_ACCESS_COMPANION_NOTICE_TABLES),
     operationalProjectSchema = await d1TablesPresent(env.OPS_DB, OPERATIONAL_PROJECT_EVENT_TABLES),
     organizationContactSchema=await d1TablesPresent(env.OPS_DB,ORGANIZATION_CONTACT_EVENT_TABLES),
+    feedbackSchema=await d1TablesPresent(env.DELIVERY_DB,FEEDBACK_TABLES),
+    feedbackPolicy=await readFeedbackTimelinePolicy(env,principal,feedbackSchema),
     projectAccessHistory=await projectAccessHistoryState(env),
     source = context.root.root_namespace === "business" ? await clientHubBusinessProjectSourceProof(env, context)
       : await sha256(JSON.stringify([rootTuple(context), "not-business"]));
@@ -859,12 +975,20 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     || cursor.companionNoticeSchema !== companionNoticeSchema
     || cursor.operationalProjectSchema !== operationalProjectSchema
     || cursor.organizationContactSchema!==organizationContactSchema
+    || cursor.feedbackSchema!==feedbackSchema
+    || cursor.feedbackPolicy!==feedbackPolicy.proof
     || cursor.projectAccessHistory !== projectAccessHistory.collectedSince)) changed();
   const accessPolicies = { portal: context.access.requests && portalPolicy.allowed, deliveryAudit: deliveryAuditPolicy.allowed,
     viewerManage: viewerManagePolicy.allowed };
+  const feedbackSupported=context.root.root_namespace==='business'&&context.root.source_id===PRIMARY_ALPHA_SOURCE_ID;
+  // The merged stream cannot disclose skipped-only pages. Until visibility can
+  // be expressed wholly in SQL, collect feedback only for one exact project
+  // and a policy that proves complete project + delivery-target coverage.
+  const feedbackAvailable=feedbackSupported&&feedbackSchema&&Boolean(projectId)&&Boolean(scope.accountId)&&Boolean(scope.projectId)
+    &&feedbackPolicy.allowed;
   const asOf = cursor?.asOf ?? new Date().toISOString(), waters = cursor?.waters
     ?? await currentWatermarks(env, context, scope, accessPolicies, collaboratorNoticeSchema, companionNoticeSchema,
-      operationalProjectSchema,organizationContactSchema,projectAccessHistory.collectedSince!==null,projectId);
+      operationalProjectSchema,organizationContactSchema,projectAccessHistory.collectedSince!==null,projectId,feedbackAvailable);
   const secondary = context.root.root_namespace === "business" && context.root.source_id !== PRIMARY_ALPHA_SOURCE_ID;
   const sourceAvailable = context.root.root_namespace === "business";
   const requestAvailable = !secondary && Boolean(scope.accountId) && context.access.requests;
@@ -925,11 +1049,17 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
   const responseCoverage: ClientAuditTimelinePage["coverage"] = {
     project: coverage(Object.values(projectCoverage).some(value => value.available), "not_applicable"),
     request: coverage(requestAvailable, secondary ? "unsupported_source" : !scope.accountId ? "not_applicable" : "permission_required"),
-    feedback: coverage(false, secondary ? "unsupported_source" : "not_collected"),
+    feedback: coverage(feedbackAvailable, secondary ? "unsupported_source"
+      : context.root.root_namespace!=="business"||!projectId||!feedbackSchema ? "not_collected"
+        : !scope.accountId||!scope.projectId ? "not_applicable" : "permission_required"),
     access: coverage(responseAccessAvailable,responseAccessReason),
     delivery: coverage(deliveryAvailable, secondary ? "unsupported_source" : !scope.accountId ? "not_applicable" : "permission_required"),
     notification: coverage(notificationAvailable, notificationUnavailableReason),
   };
+  const feedbackPage=feedbackAvailable&&feedbackPolicy.access
+    ?await feedbackCandidates(env,principal,context,scope,filters,projectId,asOf,cursor?.after??null,
+      cursor?.feedbackAfter??null,waters.feedbackEvents??0,limit,feedbackPolicy)
+    :{candidates:[],scan:[],hasMore:false} satisfies FeedbackCandidatePage;
   const candidates = (await Promise.all([
     sourceAvailable ? businessCandidates(env, context, filters, projectId, asOf, cursor?.after ?? null, waters.business ?? 0, limit, policy) : [],
     operationalProjectAvailable ? operationalProjectCandidates(env, context, filters, projectId, asOf,
@@ -945,11 +1075,19 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
       cursor?.after ?? null, waters.projectAccessNotices ?? 0, limit, projectAccessCollaboratorNoticeAvailable) : [],
     projectAccessCompanionNoticeAvailable ? projectAccessCompanionNoticeCandidates(env, context, filters, projectId, asOf,
       cursor?.after ?? null, waters.projectAccessCompanionNotices ?? 0, limit, projectAccessCompanionNoticeAvailable) : [],
+    feedbackPage.candidates.map(candidate=>candidate.item),
   ])).flat().filter(candidate => candidate.occurredAt && candidate.occurredAt <= asOf).sort(compare);
-  const pageItems = candidates.slice(0, limit), hasMore = candidates.length > limit;
+  const pageItems = candidates.slice(0, limit),returnedIds=new Set(pageItems.map(candidate=>candidate.id));
+  let feedbackAfter=cursor?.feedbackAfter??null;
+  for(const scanned of feedbackPage.scan){
+    if(scanned.itemId&&!returnedIds.has(scanned.itemId))break;
+    feedbackAfter=scanned.position;
+  }
+  const hasMore = candidates.length > limit||feedbackPage.hasMore;
   const [currentScope, currentPolicy, currentSource, currentRevision, currentDetail, currentDeliveryAuditPolicy,
     currentViewerManagePolicy, currentPortalPolicy, currentNoticeScope, currentCollaboratorNoticeSchema,
-    currentCompanionNoticeSchema, currentOperationalProjectSchema,currentOrganizationContactSchema,currentProjectAccessHistory] = await Promise.all([
+    currentCompanionNoticeSchema, currentOperationalProjectSchema,currentOrganizationContactSchema,currentProjectAccessHistory,
+    currentFeedbackSchema,currentFeedbackPolicy] = await Promise.all([
     deliveryScope(env, context, projectId), readClientHubBusinessProjectPolicy(env, principal),
     context.root.root_namespace === "business" ? clientHubBusinessProjectSourceProof(env, context) : Promise.resolve(source),
     context.root.root_namespace === "business" ? env.OPS_DB.withSession("first-primary")
@@ -963,6 +1101,8 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     d1TablesPresent(env.OPS_DB, OPERATIONAL_PROJECT_EVENT_TABLES),
     d1TablesPresent(env.OPS_DB,ORGANIZATION_CONTACT_EVENT_TABLES),
     projectAccessHistoryState(env),
+    d1TablesPresent(env.DELIVERY_DB,FEEDBACK_TABLES),
+    readFeedbackTimelinePolicy(env,principal,feedbackSchema),
   ]);
   if (currentScope.proof !== scope.proof || currentPolicy.proof !== policy.proof || currentSource !== source
     || currentRevision !== businessRevision || currentDeliveryAuditPolicy.proof !== deliveryAuditPolicy.proof
@@ -974,18 +1114,48 @@ export async function listClientAuditTimeline(env: Env, principal: StaffPrincipa
     || currentOperationalProjectSchema !== operationalProjectSchema
     || currentOrganizationContactSchema!==organizationContactSchema
     || currentProjectAccessHistory.proof!==projectAccessHistory.proof
+    || currentFeedbackSchema!==feedbackSchema
+    || currentFeedbackPolicy.proof!==feedbackPolicy.proof
     || (currentDetail && await sha256(JSON.stringify(currentDetail.project)) !== projectProof)) changed();
+  if(feedbackAvailable){
+    const currentFeedbackAccess=currentFeedbackPolicy.access;
+    if(!currentFeedbackPolicy.allowed||!currentFeedbackAccess)changed();
+    const database=env.DELIVERY_DB.withSession("first-primary");
+    const selectedFeedback=new Map(feedbackPage.candidates.filter(candidate=>returnedIds.has(candidate.item.id))
+      .map(candidate=>[candidate.record.id,candidate]));
+    for(const candidate of selectedFeedback.values()){
+      const record=await readFeedbackRecord(database,candidate.record.id);
+      if(!record)throw new HTTPException(409,{message:"Timeline scope or access changed. Refresh the client workspace to continue"});
+      if(await feedbackRecordProof(record)!==candidate.recordProof)changed();
+      const authorized=await readStaffFeedbackScope(env,principal,record,currentFeedbackAccess??undefined);
+      if(!authorized||authorized.proof!==candidate.scopeProof||(projectId&&authorized.projectId!==projectId))changed();
+    }
+    // Per-record authorization can span both D1 databases. Fence the complete
+    // loop so a policy, root/project mapping, schema, or project change that
+    // lands after an earlier row was checked cannot release the page.
+    const [releaseScope,releaseFeedbackSchema,releaseFeedbackPolicy,releaseDetail]=await Promise.all([
+      deliveryScope(env,context,projectId),d1TablesPresent(env.DELIVERY_DB,FEEDBACK_TABLES),
+      readFeedbackTimelinePolicy(env,principal,feedbackSchema),
+      projectId?readClientHubBusinessProjectDetail(env,principal,context,projectId,
+        {expectedContextVersion:options.expectedContextVersion}):Promise.resolve(null),
+    ]);
+    if(releaseScope.proof!==scope.proof||releaseFeedbackSchema!==feedbackSchema
+      ||releaseFeedbackPolicy.proof!==feedbackPolicy.proof
+      ||(releaseDetail&&await sha256(JSON.stringify(releaseDetail.project))!==projectProof))changed();
+  }
   const last = pageItems.at(-1);
   return { canonicalRoot: context.canonicalRoot, projectId, contextVersion: context.contextVersion,
     refreshedAt: new Date().toISOString(), asOf, coverage: responseCoverage, projectCoverage, accessCoverage: adapterCoverage,
     notificationCoverage,
     filters, items: pageItems,
-    page: { returned: pageItems.length, limit, hasMore, nextCursor: hasMore && last ? await encodeCursor(env, principal, {
-      v: 7, actor: principal.id, root: rootTuple(context), projectId, context: context.contextVersion, scope: scope.proof,
+    page: { returned: pageItems.length, limit, hasMore, nextCursor: hasMore ? await encodeCursor(env, principal, {
+      v: 8, actor: principal.id, root: rootTuple(context), projectId, context: context.contextVersion, scope: scope.proof,
       project: projectProof, businessPolicy: policy.proof, businessSource: source, businessRevision,
       deliveryAuditPolicy: deliveryAuditPolicy.proof, viewerManagePolicy: viewerManagePolicy.proof,
       portalPolicy: portalPolicy.proof, noticeScope: noticeScope.proof, collaboratorNoticeSchema, companionNoticeSchema,
       operationalProjectSchema,organizationContactSchema,projectAccessHistory:projectAccessHistory.collectedSince,
-      filters, asOf, waters, after: [last.occurredAt, last.producer, last.producerEventId], expires: Date.now() + 30 * 60_000,
+      feedbackSchema,feedbackPolicy:feedbackPolicy.proof,feedbackAfter,
+      filters, asOf, waters, after:last?[last.occurredAt,last.producer,last.producerEventId]:cursor?.after??null,
+      expires: Date.now() + 30 * 60_000,
     }) : null } };
 }

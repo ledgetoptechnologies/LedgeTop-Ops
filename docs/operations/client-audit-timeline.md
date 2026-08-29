@@ -132,9 +132,19 @@ and bind that start value into continuation cursors. New explicit access-term
 writes require the complete history schema. Existing access readers continue
 to enforce terms independently of the history UI.
 
-Feedback remains `not_collected` in this endpoint. The existing project
-feedback history keeps its stricter per-record scope checks until a bulk adapter
-can preserve those checks without weakening privacy. Ordinary authenticated
+An exact primary-source project timeline now contributes only immutable
+submitted, started and completed lifecycle events for project-target feedback.
+Folder/file feedback and client-wide rollups remain `not_collected`: their
+per-record visibility cannot yet be expressed wholly in the bounded SQL seek,
+so including them could leak skipped-only pages or strand authorized older
+events. Every collected candidate is re-read through the existing staff
+feedback policy and exact current record scope before release; an unexpected
+revoked, reassigned or unauthorized row fails with a refresh-required conflict
+rather than being exposed or skipped. Native/local feedback remains `not_collected`, and secondary-source
+feedback remains `unsupported_source` until its own authoritative routing
+exists. Cursor v8 binds the feedback schema and policy proofs, the event-row
+high-water mark, and a bounded adapter seek position so project-feedback
+pagination cannot cross a policy, schema, or snapshot boundary. Ordinary authenticated
 preview/download events are not inferred from page loads and are not yet
 produced. Public share session/manifest/preview events remain excluded because
 the meaningful-content and noise policy is unresolved.
@@ -163,6 +173,9 @@ or delivery receipt. Responses never include raw
 `details_json`, request snapshots or notes, feedback text, identity IDs, email
 addresses, IP hashes, user agents, storage paths, item references, bearer URLs,
 tokens, outbox IDs, errors, reasons, idempotency keys, legacy account IDs, or authorization proofs.
+Feedback resources are always labeled `Client feedback`; the adapter never
+selects submission text, completion notes, target labels, identities or stored
+ownership snapshots.
 Access resources use generic labels and contain no subject, actor, invitation,
 grant, delegation, share or folder IDs. Actor output is only a safe kind and
 generic label.
@@ -182,7 +195,7 @@ describe the timeline as a complete lifetime record.
 
 ## Verification and release
 
-Focused D1 tests cover the two project adapters, eight available access ledgers
+Focused D1 tests cover the two project adapters, primary feedback lifecycle events, eight available access ledgers
 including project-access authority history, both migration-0169
 notification ledgers, authoritative-term mismatch rejection, strict redaction,
 meaningful-event allowlists, exact project/sibling isolation, stable high-water

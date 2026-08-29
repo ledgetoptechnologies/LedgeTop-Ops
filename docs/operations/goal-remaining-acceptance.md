@@ -315,6 +315,6 @@ reconciliation, authoritative per-customer service assignments, legacy grant
 reclassification, expiry notices, project memory and copy-forward remain open.
 The subsequent staff-only Client Hub timeline backend federates existing
 source-record, request, portal-access, delivery-link and notification ledgers;
-feedback bulk history, authenticated content-read production, global filters,
-client visibility and common retention still remain. No production migration,
+primary-source feedback lifecycle history, authenticated content-read production, global filters,
+client visibility and common retention are now distinct: the feedback adapter is locally verified, while the latter items still remain. No production migration,
 flag change, deployment or push is included in either checkpoint.

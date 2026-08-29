@@ -48,7 +48,7 @@ export interface ClientAuditTimelineItem {
   /** Namespaced, opaque event key. It is not a storage key or authorization handle. */
   id: string;
   sourceId: string;
-  producer: "project_alpha" | "operations" | "service_requests" | "portal_access" | "client_delivery";
+  producer: "project_alpha" | "operations" | "service_requests" | "portal_access" | "client_delivery" | "client_feedback";
   producerEventId: string;
   category: ClientAuditTimelineCategory;
   action: string;
