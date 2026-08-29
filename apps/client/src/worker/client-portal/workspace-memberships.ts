@@ -385,6 +385,12 @@ export async function createWorkspaceInvitation(
   if(!workspaceSource)return {outcome:'denied'};
   const secondary=workspaceSource.source_id===PRIMARY_ALPHA_SOURCE_ID?null:await secondaryManagerContext(env,principal,workspaceId);
   if(workspaceSource.source_id!==PRIMARY_ALPHA_SOURCE_ID&&!secondary)return {outcome:'denied'};
+  if(secondary){
+    const columns=(await db(env).withSession('first-primary').prepare(
+      'PRAGMA table_info(portal_secondary_workspace_invitation_authority)',
+    ).all<{name:string}>()).results;
+    if(!columns.some(column=>column.name==='grant_manifest_json'))return {outcome:'denied'};
+  }
   if(secondary&&input.addressContact)return {outcome:'invalid'};
   const email = normalizeEmail(input.email);
   const capabilities = [...new Set(input.capabilities)].sort();
@@ -470,6 +476,12 @@ export async function createWorkspaceInvitation(
   const scopeType = selectedTarget.scopeType;
   const scopePublicId = selectedTarget.publicId;
   const grants = [...new Set<PortalWorkspaceCapability>(["workspace.view", ...capabilities])];
+  const grantManifest=JSON.stringify(grants.map(capability=>({capability,
+    scope_type:capability==='workspace.view'?'workspace':scopeType,
+    scope_public_id:capability==='workspace.view'?workspaceId:scopePublicId,
+    access_terms_id:preparedTerms?.id??null,
+  })).sort((left,right)=>left.capability.localeCompare(right.capability)
+    ||left.scope_type.localeCompare(right.scope_type)||left.scope_public_id.localeCompare(right.scope_public_id)));
   const database = db(env);
   const secondaryContextHash=secondary?await hexDigest(JSON.stringify({workspaceId,sourceId:secondary.sourceId,identityId:secondary.identityId,
     issuer:principal.issuer,subject:principal.subject,email,authority:secondary.authority,generationId:secondary.generationId,
@@ -479,11 +491,11 @@ export async function createWorkspaceInvitation(
       ...(secondary?[secondaryFreshFence(database,secondary,principal,workspaceId,`secondary-invitation-${invitationId}`),
         database.prepare(`INSERT INTO portal_secondary_workspace_invitation_authority
           (invitation_id,workspace_id,source_id,inviter_identity_id,inviter_issuer,inviter_subject,inviter_email,
-           authority_revision,authority_version,connector_revision,connector_version,generation_id,source_sequence,context_hash)
-          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(invitationId,workspaceId,secondary.sourceId,secondary.identityId,
+           authority_revision,authority_version,connector_revision,connector_version,generation_id,source_sequence,context_hash,grant_manifest_json)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(invitationId,workspaceId,secondary.sourceId,secondary.identityId,
             principal.issuer,principal.subject,principal.email.trim().toLowerCase(),secondary.authority.revision,secondary.authority.version,
             secondary.authority.connectorRevision,secondary.authority.connectorVersion,secondary.generationId,
-            secondary.sourceSequence,secondaryContextHash)]:[]),
+            secondary.sourceSequence,secondaryContextHash,grantManifest)]:[]),
       ...(termsReady&&input.expectedInvitationPolicyVersion!==undefined?[database.prepare(`INSERT INTO portal_project_invitation_fences(id,write_guard)
         VALUES(?,CASE WHEN COALESCE((SELECT version FROM portal_workspace_invitation_policies WHERE workspace_id=?),0)=?
           AND COALESCE((SELECT policy FROM portal_workspace_invitation_policies WHERE workspace_id=?),'allowed')='allowed' THEN 1 ELSE 0 END)`)

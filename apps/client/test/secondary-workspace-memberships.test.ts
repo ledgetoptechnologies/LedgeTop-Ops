@@ -84,6 +84,7 @@ describe('secondary source-owned collaborator memberships',{timeout:90_000,concu
     ]);
     await migrate('0171_secondary_workspace_membership_management.sql');
     await migrate('0172_project_access_authority_history.sql');
+    await migrate('0176_secondary_invitation_delegation_recheck.sql');
     env={DELIVERY_DB:db,CLIENT_PORTAL_HIERARCHY_V2_ENABLED:'true',CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED:'true',
       CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED:'true',CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED:'true',PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED:'true'} as Env;
     a=await secondary(sourceA);b=await secondary(sourceB);
@@ -169,6 +170,122 @@ describe('secondary source-owned collaborator memberships',{timeout:90_000,concu
         SELECT id FROM portal_v2_identities WHERE subject IN ('issuer-denied','issuer-suspended'))`).bind(a.workspace).first('n')).toBe(0);
   });
 
+  it('denies stale target capabilities, target denies, grant mutation and direct SQL acceptance',async()=>{
+    const revokedCapability=await invite(a,'capability-revoked@example.test');
+    expect(revokedCapability.result.outcome).toBe('created');
+    await db.prepare(`UPDATE portal_v2_entitlements SET status='suspended'
+      WHERE workspace_id=? AND identity_id=? AND capability='delivery.view' AND effect='allow'`)
+      .bind(a.workspace,a.manager).run();
+    expect(await acceptPortalWorkspaceInvitation(env,principal('capability-revoked','capability-revoked@example.test'),revokedCapability.token!)).toBe('denied');
+    await db.prepare(`UPDATE portal_v2_entitlements SET status='active'
+      WHERE workspace_id=? AND identity_id=? AND capability='delivery.view' AND effect='allow'`)
+      .bind(a.workspace,a.manager).run();
+
+    const targetDenied=await invite(a,'capability-denied@example.test');
+    expect(targetDenied.result.outcome).toBe('created');
+    await db.prepare(`INSERT INTO portal_v2_entitlements
+      (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,source_type,status)
+      VALUES('deny-secondary-delivery',?,?,'delivery.view','deny','project',?,'operations','active')`)
+      .bind(a.workspace,a.manager,a.project).run();
+    expect(await acceptPortalWorkspaceInvitation(env,principal('capability-denied','capability-denied@example.test'),targetDenied.token!)).toBe('denied');
+    await db.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now')
+      WHERE id='deny-secondary-delivery'`).run();
+
+    const immutableGrant=await invite(a,'grant-mutation@example.test');
+    expect(immutableGrant.result.outcome).toBe('created');
+    const immutableInvitationId='invitation' in immutableGrant.result?immutableGrant.result.invitation.id:'';
+    await expect(db.prepare(`UPDATE portal_v2_invitation_entitlements SET scope_public_id='other-project'
+      WHERE invitation_id=? AND capability='delivery.view'`).bind(immutableInvitationId).run()).rejects.toThrow(/immutable/);
+
+    await db.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status)
+      VALUES('direct-recipient',?,'direct-recipient','direct-recipient@example.test','active')`).bind(issuer).run();
+    await db.prepare(`UPDATE portal_v2_entitlements SET status='suspended'
+      WHERE workspace_id=? AND identity_id=? AND capability='delivery.view' AND effect='allow'`)
+      .bind(a.workspace,a.manager).run();
+    await db.batch([
+      db.prepare(`INSERT INTO portal_project_access_terms
+        (id,workspace_id,source_id,project_public_id,kind,mode,expires_at,created_by_actor_type,created_by_actor_id)
+        VALUES('secondary-short-ceiling',?,?,?,'collaborator','specific_date','2099-01-01T00:00:00.000Z','identity',?)`)
+        .bind(a.workspace,sourceA,a.project,a.manager),
+      db.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,
+          source_type,source_version,status,access_terms_id)
+        VALUES('secondary-short-delivery',?,?,'delivery.view','allow','project',?,1,
+          'operations',NULL,'active','secondary-short-ceiling')`).bind(a.workspace,a.manager,a.project),
+      db.prepare(`INSERT INTO portal_v2_directory_entities
+        (workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version,active)
+        VALUES(?,?,'department','inactive-ceiling-department',?,'Inactive department','inactive-v1',0)`)
+        .bind(a.workspace,a.generation,a.root),
+      db.prepare(`INSERT INTO portal_v2_directory_relations
+        (workspace_id,generation_id,public_id,relation_type,from_type,from_public_id,to_type,to_public_id,source_version,active)
+        VALUES(?,?,'inactive-department-project','contains','department','inactive-ceiling-department','project',?,'inactive-v1',1)`)
+        .bind(a.workspace,a.generation,a.project),
+      db.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,
+          source_type,source_version,status)
+        VALUES('secondary-inactive-department-delivery',?,?,'delivery.view','allow','department',
+          'inactive-ceiling-department',1,'operations',NULL,'active')`).bind(a.workspace,a.manager),
+    ]);
+    await expect(db.prepare(`UPDATE portal_v2_invitations SET status='accepted',accepted_at=datetime('now'),
+      accepted_by_identity_id='direct-recipient' WHERE id=?`).bind(immutableInvitationId).run()).rejects.toThrow(/authority changed|delegation ceiling changed/);
+    expect(await db.prepare('SELECT status FROM portal_v2_invitations WHERE id=?').bind(immutableInvitationId).first('status')).toBe('pending');
+    await db.prepare(`UPDATE portal_v2_entitlements SET status='active'
+      WHERE workspace_id=? AND identity_id=? AND capability='delivery.view' AND effect='allow'`)
+      .bind(a.workspace,a.manager).run();
+    await db.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now')
+      WHERE id IN ('secondary-short-delivery','secondary-inactive-department-delivery')`).run();
+
+    const revokedManage=await invite(a,'manage-revoked@example.test');
+    expect(revokedManage.result.outcome).toBe('created');
+    const revokedManageInvitationId='invitation' in revokedManage.result?revokedManage.result.invitation.id:'';
+    await db.batch([
+      db.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status)
+        VALUES('direct-manage-recipient',?,'direct-manage-recipient','manage-revoked@example.test','active')`).bind(issuer),
+      db.prepare(`UPDATE portal_v2_entitlements SET status='suspended'
+        WHERE workspace_id=? AND identity_id=? AND capability='member.manage' AND effect='allow'`)
+        .bind(a.workspace,a.manager),
+    ]);
+    await expect(db.prepare(`UPDATE portal_v2_invitations SET status='accepted',accepted_at=datetime('now'),
+      accepted_by_identity_id='direct-manage-recipient' WHERE id=?`).bind(revokedManageInvitationId).run()).rejects.toThrow(/authority changed|delegation ceiling changed/);
+    await db.prepare(`UPDATE portal_v2_entitlements SET status='active'
+      WHERE workspace_id=? AND identity_id=? AND capability='member.manage' AND effect='allow'`)
+      .bind(a.workspace,a.manager).run();
+
+    const broadResult=await createWorkspaceInvitation(env,a.principal,a.workspace,{
+      email:'broad-direct@example.test',organizationWide:true,confirmOrganizationWide:true,
+      capabilities:['delivery.view'],
+    },`broad-direct-${crypto.randomUUID()}`,{emailDeliveryAvailable:true});
+    expect(broadResult.outcome).toBe('created');
+    const broadInvitationId='invitation' in broadResult?broadResult.invitation.id:'';
+    await db.batch([
+      db.prepare(`INSERT INTO portal_v2_identities(id,issuer,subject,verified_email,status)
+        VALUES('broad-direct-recipient',?,'broad-direct-recipient','broad-direct@example.test','active')`).bind(issuer),
+      db.prepare(`INSERT INTO portal_project_access_terms
+        (id,workspace_id,source_id,project_public_id,kind,mode,expires_at,created_by_actor_type,created_by_actor_id)
+        VALUES('secondary-project-only-ceiling',?,?,?,'collaborator','until_revoked',NULL,'identity',?)`)
+        .bind(a.workspace,sourceA,a.project,a.manager),
+      db.prepare(`INSERT INTO portal_v2_entitlements
+        (id,workspace_id,identity_id,capability,effect,scope_type,scope_public_id,entitlement_version,
+          source_type,source_version,status,access_terms_id)
+        VALUES('secondary-project-only-delivery',?,?,'delivery.view','allow','project',?,2,
+          'operations',NULL,'active','secondary-project-only-ceiling')`).bind(a.workspace,a.manager,a.project),
+      db.prepare(`UPDATE portal_v2_entitlements SET status='suspended'
+        WHERE workspace_id=? AND identity_id=? AND capability='delivery.view' AND effect='allow' AND scope_type='workspace'`)
+        .bind(a.workspace,a.manager),
+    ]);
+    await expect(db.prepare(`UPDATE portal_v2_invitations SET status='accepted',accepted_at=datetime('now'),
+      accepted_by_identity_id='broad-direct-recipient' WHERE id=?`).bind(broadInvitationId).run()).rejects.toThrow(/authority changed|delegation ceiling changed/);
+    await db.batch([
+      db.prepare(`UPDATE portal_v2_entitlements SET status='active'
+        WHERE workspace_id=? AND identity_id=? AND capability='delivery.view' AND effect='allow' AND scope_type='workspace'`)
+        .bind(a.workspace,a.manager),
+      db.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now')
+        WHERE id='secondary-project-only-delivery'`),
+    ]);
+    await db.prepare(`DELETE FROM portal_v2_invitation_rate_limits
+      WHERE workspace_id=? AND actor_identity_id=?`).bind(a.workspace,a.manager).run();
+  });
+
   it('accepts only the exact recipient, replays only that identity and writes no legacy rows',async()=>{
     const created=await invite(a,'accepted@example.test');expect(created.result.outcome).toBe('created');
     const recipient=principal('accepted','accepted@example.test');
@@ -181,6 +298,15 @@ describe('secondary source-owned collaborator memberships',{timeout:90_000,concu
     expect(await db.prepare(`SELECT count(*) n FROM portal_v2_legacy_member_bridges WHERE workspace_id=?`).bind(a.workspace).first('n')).toBe(0);
     expect(await db.prepare(`SELECT count(*) n FROM client_identity_links WHERE subject=?`).bind(identity).first('n')).toBe(0);
     expect(await db.prepare(`SELECT count(*) n FROM client_member_project_grants WHERE identity_id=?`).bind(identity).first('n')).toBe(0);
+    await db.prepare(`UPDATE portal_v2_entitlements SET status='suspended'
+      WHERE workspace_id=? AND identity_id=? AND capability='delivery.view' AND effect='allow'`)
+      .bind(a.workspace,a.manager).run();
+    expect(await db.prepare(`SELECT count(*) n FROM portal_v2_entitlements WHERE workspace_id=? AND identity_id=?
+      AND source_type='client_invitation' AND capability='delivery.view' AND status='active'`)
+      .bind(a.workspace,identity).first('n')).toBe(1);
+    await db.prepare(`UPDATE portal_v2_entitlements SET status='active'
+      WHERE workspace_id=? AND identity_id=? AND capability='delivery.view' AND effect='allow'`)
+      .bind(a.workspace,a.manager).run();
   });
 
   it('does not convert projected members, keeps source-managed rows immutable through local APIs and scopes revoke/suspend exactly',async()=>{

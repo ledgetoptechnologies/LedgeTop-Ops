@@ -77,7 +77,14 @@ export async function readClientRequestReadiness(
     const nativeProof = workspace
       ? await readEffectiveWorkspaceRequestProof(readEnv, principal, workspace.workspaceId, projectId)
       : null;
-    const currentWorkspace = nativeProof?.workspace ?? null;
+    // A missing project proof means the selected project is unavailable, not
+    // necessarily that the signed-in workspace disappeared. Recheck the root
+    // independently so readiness can return a stable unavailable decision;
+    // request mutation still requires the exact project proof below.
+    const workspaceAuthority = workspace && projectId && !nativeProof
+      ? await readEffectiveWorkspaceRequestProof(readEnv, principal, workspace.workspaceId, null)
+      : nativeProof;
+    const currentWorkspace = workspaceAuthority?.workspace ?? null;
     const currentProof = workspaceProof(currentWorkspace);
     if (currentProof !== expectedWorkspaceProof ||
       (portalHierarchyV2Enabled(env) && !currentWorkspace) ||
@@ -132,7 +139,7 @@ export async function readClientRequestReadiness(
       ? await readServiceAssignmentPolicy(env, session, null, assignmentWindows?.root) : null;
     const projectAssignment = assignmentPolicy && projectAllowed && catalogAvailable && backendConfigured && mode === "catalog" && projectId
       ? await readServiceAssignmentPolicy(env, session, projectId, assignmentWindows?.project) : null;
-    return { currentProof, authorityProof: nativeProof?.authorityProof ?? null, local, localAllowed, rootAllowed,
+    return { currentProof, authorityProof: nativeProof?.authorityProof ?? workspaceAuthority?.authorityProof ?? null, local, localAllowed, rootAllowed,
       projectAllowed, catalogAvailable, assignmentPolicy, rootAssignment, projectAssignment };
   }
 

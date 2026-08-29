@@ -4,7 +4,7 @@ import { HTTPException } from 'hono/http-exception';
 import { readPortalSourceAuthorityProof, portalSourceAuthoritiesReady, type PortalSourceAuthorityProof } from "../project-alpha-portal-authority";
 import { readNativeTargetScopes, type NativeTargetScopes } from "./native-portal-scopes";
 import { projectAccessReadColumns, projectAccessRowAllows, readExpiredScopeProjects, type ProjectAccessReadRow } from './project-access-read';
-import { projectAccessTermsReady,projectAccessTermsSql,readWorkspaceInvitationPolicy } from './project-access-terms';
+import { projectAccessTermsReady,projectAccessTermsSql,readProjectAccessTerms,readWorkspaceInvitationPolicy } from './project-access-terms';
 import {projectAccessAuthorityHistoryReady,projectAccessInvitationEvent} from './project-access-authority-history';
 import {requireProjectAccessAuthorityMutations} from './project-access-mutation-gate';
 import { projectAccessCapacitySql } from './project-access-capacity';
@@ -12,6 +12,7 @@ import { d1TablesPresent } from "../schema-readiness";
 import { bindNativePortalEligibility } from "./native-portal-eligibility";
 import { readPrimaryTermRetentionGrants } from './authenticated-delivery-grants';
 import { localOrPrimaryAlphaReference, primaryAlphaReference, primaryWorkspaceAccount } from "./project-alpha-source";
+import {captureWorkspaceInvitationDelegation} from './project-invitation-delegation';
 export type PortalAuthorizationEnv = Pick<ClientEnv, "DELIVERY_DB" | "CLIENT_PORTAL_HIERARCHY_V2_ENABLED" |
   "CLIENT_PORTAL_IDENTITY_DENYLIST_ENABLED" | "CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED" |
   "CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED" | "CLIENT_PORTAL_MEMBERSHIP_MANAGEMENT_ENABLED" |
@@ -237,7 +238,7 @@ function isPreLegacyBridgeDatabase(error: unknown): boolean {
 
 function isMissingSecondaryMembershipSchema(error:unknown):boolean{
   const message=error instanceof Error?error.message:String(error);
-  return /no such table:\s*(?:main\.)?(?:portal_secondary_workspace_invitation_authority|portal_secondary_workspace_membership_fences|pa_portal_source_authorities|pa_portal_source_authority_revisions)\b/i.test(message);
+  return /no such table:\s*(?:main\.)?(?:portal_secondary_workspace_invitation_authority|portal_secondary_workspace_membership_fences|pa_portal_source_authorities|pa_portal_source_authority_revisions)\b|no such column:\s*(?:binding\.)?grant_manifest_json\b/i.test(message);
 }
 
 // A pending invitation proves what the issuing manager was allowed to do when
@@ -1579,6 +1580,79 @@ export async function hashPortalInvitationToken(token: string): Promise<string |
 
 export type InvitationAcceptance = "accepted" | "replayed" | "denied";
 
+type SecondaryAcceptanceDelegation=Awaited<ReturnType<typeof captureWorkspaceInvitationDelegation>>;
+async function captureSecondaryInvitationAcceptanceDelegation(
+  env:Env,invitationId:string,
+):Promise<SecondaryAcceptanceDelegation|null>{
+  const context=await portalDb(env).prepare(`SELECT binding.inviter_identity_id,binding.inviter_issuer,
+      binding.inviter_subject,binding.inviter_email,binding.grant_manifest_json,workspace.id workspace_id,
+      workspace.root_type,COALESCE(workspace.pa_organization_public_id,workspace.pa_client_public_id) root_public_id,
+      membership.source_version
+    FROM portal_secondary_workspace_invitation_authority binding
+    JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id
+      AND workspace.project_alpha_source_id=binding.source_id AND workspace.status='active'
+    JOIN portal_v2_workspace_memberships membership ON membership.workspace_id=workspace.id
+      AND membership.identity_id=binding.inviter_identity_id AND membership.source_type='project_alpha'
+    WHERE binding.invitation_id=?`).bind(invitationId).first<{inviter_identity_id:string;inviter_issuer:string;
+      inviter_subject:string;inviter_email:string;grant_manifest_json:string|null;workspace_id:string;
+      root_type:'organization'|'standalone_client';root_public_id:string;source_version:string}>();
+  if(!context)return null;
+  const grants=(await portalDb(env).prepare(`SELECT capability,scope_type,scope_public_id,access_terms_id
+    FROM portal_v2_invitation_entitlements WHERE invitation_id=?
+    ORDER BY capability,scope_type,scope_public_id LIMIT 6`).bind(invitationId)
+    .all<{capability:PortalWorkspaceCapability;scope_type:PortalWorkspaceScopeType;scope_public_id:string;access_terms_id:string|null}>()).results;
+  if(grants.length<1||grants.length>4)return null;
+  if(context.grant_manifest_json!==JSON.stringify(grants))return null;
+  const shell=grants.filter(grant=>grant.capability==='workspace.view'&&grant.scope_type==='workspace'
+    &&grant.scope_public_id===context.workspace_id);
+  if(shell.length!==1)return null;
+  const delegated=grants.filter(grant=>grant!==shell[0]);
+  const targets=new Set(delegated.map(grant=>`${grant.scope_type}:${grant.scope_public_id}`));
+  if(targets.size>1)return null;
+  const target=delegated[0]
+    ?{scopeType:delegated[0].scope_type,publicId:delegated[0].scope_public_id}
+    :{scopeType:'workspace' as const,publicId:context.workspace_id};
+  const termIds=[...new Set(grants.map(grant=>grant.access_terms_id).filter((id):id is string=>Boolean(id)))];
+  if(termIds.length>1)return null;
+  const terms=termIds[0]?await readProjectAccessTerms(portalDb(env),termIds[0]):null;
+  if(termIds[0]&&!terms)return null;
+  const required=[{capability:'member.manage' as PortalWorkspaceCapability,
+      target:{scopeType:'workspace' as const,publicId:context.workspace_id}},
+    ...grants.map(grant=>({capability:grant.capability,
+    target:{scopeType:grant.scope_type,publicId:grant.scope_public_id}})),
+    ...[...new Map(grants.filter(grant=>grant.scope_type!=='workspace')
+      .map(grant=>[`${grant.scope_type}:${grant.scope_public_id}`,{scopeType:grant.scope_type,publicId:grant.scope_public_id}])).values()]
+      .map(target=>({capability:'member.manage' as PortalWorkspaceCapability,target}))];
+  for(const requirement of required){
+    if(requirement.target.scopeType==='workspace'){
+      if(requirement.target.publicId!==context.workspace_id)return null;
+      const allowed=await portalDb(env).prepare(`SELECT 1 ok FROM portal_v2_entitlements allow_record
+        WHERE allow_record.workspace_id=? AND allow_record.identity_id=? AND allow_record.capability=?
+          AND allow_record.effect='allow' AND allow_record.scope_type='workspace' AND allow_record.scope_public_id=?
+          AND allow_record.source_type='project_alpha' AND allow_record.source_version=?
+          AND allow_record.status='active' AND allow_record.revoked_at IS NULL
+          AND datetime(allow_record.valid_from)<=datetime('now') AND allow_record.expires_at IS NULL
+          AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements deny_record
+            WHERE deny_record.workspace_id=allow_record.workspace_id AND deny_record.identity_id=allow_record.identity_id
+              AND deny_record.capability=allow_record.capability AND deny_record.effect='deny'
+              AND deny_record.scope_type='workspace' AND deny_record.scope_public_id=allow_record.workspace_id
+              AND deny_record.status='active' AND deny_record.revoked_at IS NULL
+              AND datetime(deny_record.valid_from)<=datetime('now')
+              AND (deny_record.expires_at IS NULL OR datetime(deny_record.expires_at)>datetime('now'))) LIMIT 1`)
+        .bind(context.workspace_id,context.inviter_identity_id,requirement.capability,context.workspace_id,context.source_version).first('ok');
+      if(allowed===null)return null;
+    }else{
+      const authorized=await resolvePortalRelationAuthorizedTargets(env,{id:context.workspace_id,rootType:context.root_type,
+        rootPublicId:context.root_public_id},context.inviter_identity_id,requirement.capability,[requirement.target]);
+      if(!authorized?.has(`${requirement.target.scopeType}:${requirement.target.publicId}`))return null;
+    }
+  }
+  try{return await captureWorkspaceInvitationDelegation(env,{workspaceId:context.workspace_id,target,
+      identityId:context.inviter_identity_id,issuer:context.inviter_issuer,subject:context.inviter_subject,
+      email:context.inviter_email},delegated.map(grant=>grant.capability),terms);}
+  catch(error){if(error instanceof HTTPException&&error.status===403)return null;throw error;}
+}
+
 /** Accepts only for the authenticated verified email. Replays by the same
  * identity are idempotent; a different identity cannot take over the token. */
 export async function acceptPortalWorkspaceInvitation(
@@ -1650,6 +1724,11 @@ export async function acceptPortalWorkspaceInvitation(
   if (invitation.status === "accepted")
     return identity && invitation.accepted_by_identity_id === identity.id ? "replayed" : "denied";
   if (invitation.status !== "pending") return "denied";
+  let secondaryDelegation:SecondaryAcceptanceDelegation|null=null;
+  try{secondaryDelegation=invitation.secondary_context_hash
+    ?await captureSecondaryInvitationAcceptanceDelegation(env,invitation.id):null;}
+  catch(error){if(isMissingSecondaryMembershipSchema(error))return 'denied';throw error;}
+  if(invitation.secondary_context_hash&&!secondaryDelegation)return 'denied';
 
   const trackedApproval=approvalReady&&(await portalDb(env).prepare('SELECT 1 ok FROM portal_workspace_invitation_approvals WHERE invitation_id=?').bind(invitation.id).first('ok'))!==null;
   const requireEnrollmentReceipt = trackedApproval || env.CLIENT_PORTAL_ACCESS_ENROLLMENT_READY === "true";
@@ -1701,6 +1780,7 @@ export async function acceptPortalWorkspaceInvitation(
     env, identity.id, invitation.workspace_id, acceptanceScopes,
   )) return "denied";
   const membershipAuditId=crypto.randomUUID();
+  const secondaryDelegationFenceId=secondaryDelegation?`secondary-accept-delegation-${invitation.id}`:null;
   const enrollmentAcceptanceGuard=requireEnrollmentReceipt?`AND EXISTS (
     SELECT 1 FROM portal_v2_invitation_access_enrollment_receipts receipt
     JOIN portal_v2_invitation_email_outbox outbox ON outbox.invitation_id=invitation.id
@@ -1726,9 +1806,10 @@ export async function acceptPortalWorkspaceInvitation(
             AND generation.source_sequence=checkpoint.source_sequence
           WHERE workspace.id=invitation.workspace_id AND workspace.status='active' AND workspace.legacy_account_id IS NULL
             AND ${secondaryInvitationInviterIsCurrent})
+        AND EXISTS(SELECT 1 FROM portal_project_invitation_fences delegation_fence WHERE delegation_fence.id=?)
         AND NOT EXISTS(SELECT 1 FROM portal_v2_workspace_memberships membership
           WHERE membership.workspace_id=invitation.workspace_id AND membership.identity_id=?)
-        ${enrollmentAcceptanceGuard}`).bind(identity.id,invitation.id,identity.id)
+        ${enrollmentAcceptanceGuard}`).bind(identity.id,invitation.id,secondaryDelegationFenceId,identity.id)
     :database.prepare(`UPDATE portal_v2_invitations AS invitation
       SET status='accepted',accepted_at=datetime('now'),accepted_by_identity_id=?
       WHERE id=? AND status='pending' AND revoked_at IS NULL AND datetime(expires_at)>datetime('now')
@@ -1755,6 +1836,7 @@ export async function acceptPortalWorkspaceInvitation(
       WHERE invitation.id=? AND invitation.status='accepted' AND invitation.accepted_by_identity_id=?
       ON CONFLICT(workspace_id,identity_id) DO NOTHING`).bind(identity.id,invitation.id,identity.id);
   try{await database.batch([
+    ...(secondaryDelegation?[secondaryDelegation.fence(secondaryDelegationFenceId!)]:[]),
     ...(invitation.secondary_context_hash?[database.prepare(`INSERT INTO portal_secondary_workspace_membership_fences(id,write_guard)
       VALUES(?,CASE WHEN EXISTS(SELECT 1 FROM portal_secondary_workspace_invitation_authority binding
         JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'
