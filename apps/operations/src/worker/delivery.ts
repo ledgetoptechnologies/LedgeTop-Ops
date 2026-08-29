@@ -733,6 +733,7 @@ export async function revokeProjectAlphaDeliveryGuestShare(env:Env,input:{shareI
 export interface DeliveryShareHistoryQuery {
   q?:string;
   prefix?:string;
+  folderScope?:"tree"|"exact";
   cursor?:string;
   limit?:number;
 }
@@ -772,6 +773,9 @@ export async function listDeliveryShares(env:Env,principal:StaffPrincipal,option
   if(options.prefix!==undefined&&(options.prefix.length>1024||/[\0-\x1f\x7f]/.test(options.prefix)))
     throw new HTTPException(400,{message:"Folder prefix is invalid"});
   const prefix=options.prefix===undefined?null:normalizePrefix(options.prefix);
+  const folderScope=options.folderScope??"tree";
+  if(folderScope!=="tree"&&folderScope!=="exact")throw new HTTPException(400,{message:"Share-history folder scope is invalid"});
+  if(folderScope==="exact"&&!prefix)throw new HTTPException(400,{message:"Exact folder scope requires a folder prefix"});
   const submittedQuery=(options.q||"").normalize("NFC").trim();
   const pathMode=/^path\s*:/i.test(submittedQuery);
   const query=(pathMode?submittedQuery.replace(/^path\s*:/i,""):submittedQuery).trim();
@@ -787,8 +791,14 @@ export async function listDeliveryShares(env:Env,principal:StaffPrincipal,option
   const targetExpression="COALESCE(s.r2_object_key,s.r2_prefix,p.r2_prefix)";
   // Match the share's actual target, not just its project/parent folder. Binary
   // bounds preserve case and treat SQL wildcard characters as literal names.
-  const prefixWhere=prefix?`AND ${targetExpression} COLLATE BINARY>=? AND ${targetExpression} COLLATE BINARY<?`:"";
-  const prefixValues=prefix?[prefix,prefixUpperBound(prefix)]:[];
+  const prefixWhere=prefix?(folderScope==="exact"
+    ?`AND (${targetExpression} COLLATE BINARY=? OR
+      (${targetExpression} COLLATE BINARY>=? AND ${targetExpression} COLLATE BINARY<?
+        AND instr(rtrim(substr(${targetExpression},length(?)+1),'/'),'/')=0))`
+    :`AND ${targetExpression} COLLATE BINARY>=? AND ${targetExpression} COLLATE BINARY<?`):"";
+  const prefixValues=prefix?(folderScope==="exact"
+    ?[prefix,prefix,prefixUpperBound(prefix),prefix]
+    :[prefix,prefixUpperBound(prefix)]):[];
   const searchWhere=query?`AND (
     lower(COALESCE(s.label,'')) LIKE ? ESCAPE '\\' OR
     lower(p.client_name) LIKE ? ESCAPE '\\' OR

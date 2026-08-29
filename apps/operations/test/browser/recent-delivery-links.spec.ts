@@ -26,6 +26,7 @@ async function fixture(page: Page, options: { audit?: boolean; failFirst?: boole
       const prefix = url.searchParams.get("prefix") || "UNSCOPED";
       requests.push(prefix);
       expect(url.searchParams.get("limit")).toBe("8");
+      expect(url.searchParams.get("folderScope")).toBe("exact");
       if (fail) { fail = false; return route.fulfill({ status: 503, json: { error: "Link history temporarily unavailable" } }); }
       if (prefix === acme && options.delayAcme) await options.delayAcme;
       const name = prefix === edited ? "Edited photo link" : prefix === acme ? "Acme folder link" : "All clients recent link";
@@ -44,6 +45,7 @@ test("recent links follow folders, Back and refresh; Trash has breathing room", 
   await expect(page.getByText("All clients recent link", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Open Acme", exact: true }).click();
   await expect(page.getByText("Acme folder link", { exact: true })).toBeVisible();
+  await expect(page.getByText("Latest eight links for Acme and the items directly inside it.", { exact: true })).toBeVisible();
   await expect(page.getByText("All clients recent link", { exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "Open Edited", exact: true }).click();
   await expect(page.getByText("Edited photo link", { exact: true })).toBeVisible();

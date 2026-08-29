@@ -2618,6 +2618,7 @@ app.get("/api/delivery/shares", async (c) => {
   return c.json(await listDeliveryShares(c.env,c.get("principal"),{
     q:c.req.query("q"),
     prefix:c.req.query("prefix"),
+    folderScope:c.req.query("folderScope") as "tree"|"exact"|undefined,
     cursor:c.req.query("cursor"),
     limit,
   }));

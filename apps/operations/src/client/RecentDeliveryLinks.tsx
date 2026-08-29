@@ -14,6 +14,15 @@ interface RecentLink {
   unavailable_since: string | null;
 }
 
+export function recentDeliveryLinksQuery(prefix?: string): string {
+  const query = new URLSearchParams({ limit: "8" });
+  if (prefix) {
+    query.set("prefix", prefix);
+    query.set("folderScope", "exact");
+  }
+  return query.toString();
+}
+
 export function RecentDeliveryLinks({ prefix, revision, canRevoke }: {
   prefix?: string;
   revision: number;
@@ -32,8 +41,7 @@ export function RecentDeliveryLinks({ prefix, revision, canRevoke }: {
     request.current = controller;
     setState({ prefix, rows: [], loading: true, error: "" });
     try {
-      const query = new URLSearchParams({ limit: "8" });
-      if (prefix) query.set("prefix", prefix);
+      const query = recentDeliveryLinksQuery(prefix);
       const data = await api<{ shares: RecentLink[] }>(`/api/delivery/shares?${query}`, { signal: controller.signal });
       if (!controller.signal.aborted) setState({ prefix, rows: data.shares, loading: false, error: "" });
     } catch (error) {
@@ -66,7 +74,7 @@ export function RecentDeliveryLinks({ prefix, revision, canRevoke }: {
     <a className="button button-ghost button-small" href={href}>{prefix ? "View folder links" : "View all"}</a>
     <button type="button" className="button-ghost button-small" disabled={loading} onClick={() => void load()}>Refresh</button>
   </span>}>
-    <p className="delivery-links-scope">{prefix ? <>Latest eight links for <strong>{folder}</strong> and its subfolders.</> : "Latest eight client links."}</p>
+    <p className="delivery-links-scope">{prefix ? <>Latest eight links for <strong>{folder}</strong> and the items directly inside it.</> : "Latest eight client links."}</p>
     {actionError && <div className="notice error" role="alert">{actionError}</div>}
     {loading ? <Loading /> : state.error ? <div className="notice error" role="alert">
       <p>{state.error}</p><button type="button" className="button-ghost button-small" onClick={() => void load()}>Retry client links</button>
@@ -81,6 +89,6 @@ export function RecentDeliveryLinks({ prefix, revision, canRevoke }: {
           {canRevoke && <td>{!row.revoked_at && <button type="button" className="button-danger button-small" disabled={busy !== null} onClick={() => void revoke(row)}>{busy === row.id ? "Unsharing…" : "Unshare"}</button>}</td>}
         </tr>;
       })}</tbody>
-    </table></div> : <EmptyState title={prefix ? "No links for this folder" : "No delivery links"} detail={prefix ? "Links for this folder, its files, and its subfolders will appear here." : "Links created from the file browser appear here."} />}
+    </table></div> : <EmptyState title={prefix ? "No links for this folder" : "No delivery links"} detail={prefix ? "Links for this folder and its direct files and folders will appear here; nested contents stay with their own folder." : "Links created from the file browser appear here."} />}
   </Card>;
 }

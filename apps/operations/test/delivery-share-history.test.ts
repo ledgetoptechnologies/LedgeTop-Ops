@@ -93,6 +93,28 @@ describe("Delivery share history folder scope", () => {
     expect((await listDeliveryShares(environment(), principal)).shares).toHaveLength(9);
   });
 
+  it("can scope recent links to the current folder and its direct items without descendant contents", async () => {
+    await seed([
+      { id: "folder", prefix: "Jobs/Clients/Acme/" },
+      { id: "direct-file", prefix: "Jobs/Clients/Acme/", objectKey: "Jobs/Clients/Acme/photo.jpg" },
+      { id: "direct-folder", prefix: "Jobs/Clients/Acme/Edited/" },
+      { id: "nested-file", prefix: "Jobs/Clients/Acme/Edited/", objectKey: "Jobs/Clients/Acme/Edited/photo.jpg" },
+      { id: "deeper-folder", prefix: "Jobs/Clients/Acme/Edited/Final/" },
+      { id: "deeper-file", prefix: "Jobs/Clients/Acme/Edited/Final/", objectKey: "Jobs/Clients/Acme/Edited/Final/photo.jpg" },
+    ]);
+    expect((await listDeliveryShares(environment(), principal, {
+      prefix: "Jobs/Clients/Acme/", folderScope: "exact",
+    })).shares.map(share => share.id).sort()).toEqual(["direct-file", "direct-folder", "folder"]);
+    expect((await listDeliveryShares(environment(), principal, {
+      prefix: "Jobs/Clients/Acme/Edited/", folderScope: "exact",
+    })).shares.map(share => share.id).sort()).toEqual(["deeper-folder", "direct-folder", "nested-file"]);
+  });
+
+  it("rejects exact folder scope without a concrete folder", async () => {
+    await expect(listDeliveryShares(environment(), principal, { folderScope: "exact" }))
+      .rejects.toMatchObject({ status: 400 });
+  });
+
   it("treats wildcard, quote and Unicode characters literally and preserves storage-key case", async () => {
     const prefix = "Jobs/Clients/Café's 100%_Done/";
     await seed([
