@@ -154,7 +154,50 @@ WHEN NEW.status='accepted' AND OLD.status<>'accepted'
      AND checkpoint.active_generation_id=binding.generation_id AND checkpoint.source_sequence=binding.source_sequence
    JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id AND generation.workspace_id=w.id
      AND generation.status='active' AND generation.complete=1 AND generation.source_sequence=checkpoint.source_sequence
-   WHERE binding.invitation_id=NEW.id AND binding.workspace_id=NEW.workspace_id)
+   WHERE binding.invitation_id=NEW.id AND binding.workspace_id=NEW.workspace_id
+     AND EXISTS(SELECT 1 FROM portal_v2_identities inviter
+       JOIN portal_v2_workspace_memberships inviter_membership
+         ON inviter_membership.workspace_id=w.id AND inviter_membership.identity_id=inviter.id
+         AND inviter_membership.source_type='project_alpha' AND inviter_membership.status='active'
+         AND inviter_membership.revoked_at IS NULL AND inviter_membership.expires_at IS NULL
+       JOIN pa_portal_principals inviter_principal
+         ON inviter_principal.workspace_id=w.id AND inviter_principal.identity_id=inviter.id
+         AND inviter_principal.status='active' AND inviter_principal.source_version=inviter_membership.source_version
+         AND lower(inviter_principal.email_hint)=lower(inviter.verified_email)
+       JOIN portal_v2_directory_entities inviter_root
+         ON inviter_root.workspace_id=w.id AND inviter_root.generation_id=generation.id
+         AND inviter_root.entity_type=w.root_type
+         AND inviter_root.public_id=COALESCE(w.pa_organization_public_id,w.pa_client_public_id)
+         AND inviter_root.active=1
+       WHERE inviter.id=binding.inviter_identity_id AND inviter.issuer=binding.inviter_issuer
+         AND inviter.subject=binding.inviter_subject AND lower(inviter.verified_email)=lower(binding.inviter_email)
+         AND inviter.status='active' AND inviter.revoked_at IS NULL
+         AND NOT EXISTS(SELECT 1 FROM portal_v2_identity_denials denial
+           WHERE denial.identity_id=inviter.id AND denial.status='active' AND denial.revoked_at IS NULL
+             AND datetime(denial.valid_from)<=datetime('now')
+             AND (denial.expires_at IS NULL OR datetime(denial.expires_at)>datetime('now'))
+             AND (denial.scope_type='global' OR denial.workspace_id=w.id))
+         AND EXISTS(SELECT 1 FROM portal_v2_entitlements view_allow
+           WHERE view_allow.workspace_id=w.id AND view_allow.identity_id=inviter.id
+             AND view_allow.capability='workspace.view' AND view_allow.effect='allow'
+             AND view_allow.scope_type='workspace' AND view_allow.scope_public_id=w.id
+             AND view_allow.source_type='project_alpha' AND view_allow.source_version=inviter_membership.source_version
+             AND view_allow.status='active' AND view_allow.revoked_at IS NULL
+             AND datetime(view_allow.valid_from)<=datetime('now') AND view_allow.expires_at IS NULL)
+         AND EXISTS(SELECT 1 FROM portal_v2_entitlements manage_allow
+           WHERE manage_allow.workspace_id=w.id AND manage_allow.identity_id=inviter.id
+             AND manage_allow.capability='member.manage' AND manage_allow.effect='allow'
+             AND manage_allow.scope_type='workspace' AND manage_allow.scope_public_id=w.id
+             AND manage_allow.source_type='project_alpha' AND manage_allow.source_version=inviter_membership.source_version
+             AND manage_allow.status='active' AND manage_allow.revoked_at IS NULL
+             AND datetime(manage_allow.valid_from)<=datetime('now') AND manage_allow.expires_at IS NULL)
+         AND NOT EXISTS(SELECT 1 FROM portal_v2_entitlements deny
+           WHERE deny.workspace_id=w.id AND deny.identity_id=inviter.id
+             AND deny.capability IN ('workspace.view','member.manage') AND deny.effect='deny'
+             AND deny.scope_type='workspace' AND deny.scope_public_id=w.id
+             AND deny.status='active' AND deny.revoked_at IS NULL
+             AND datetime(deny.valid_from)<=datetime('now')
+             AND (deny.expires_at IS NULL OR datetime(deny.expires_at)>datetime('now')))))
 BEGIN SELECT RAISE(ABORT,'secondary invitation authority changed'); END;
 
 -- Source-projected people and locally invited collaborators are disjoint. A

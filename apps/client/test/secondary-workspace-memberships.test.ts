@@ -142,6 +142,33 @@ describe('secondary source-owned collaborator memberships',{timeout:90_000,concu
       .bind(a.workspace,a.generation,a.project).run();
   });
 
+  it('denies pending invitations after the issuing manager loses local authority',async()=>{
+    const deniedIssuer=await invite(a,'issuer-denied@example.test');
+    const suspendedIssuer=await invite(a,'issuer-suspended@example.test');
+    expect(deniedIssuer.result.outcome).toBe('created');expect(suspendedIssuer.result.outcome).toBe('created');
+
+    await db.prepare(`INSERT INTO portal_v2_identity_denials
+      (id,identity_id,workspace_id,scope_type,scope_public_id,reason_code,status,created_by_actor_type,created_by_actor_id)
+      VALUES('deny-secondary-inviter',?,?,'workspace',?,'authority-revoked','active','system','test')`)
+      .bind(a.manager,a.workspace,a.workspace).run();
+    expect(await acceptPortalWorkspaceInvitation(env,principal('issuer-denied','issuer-denied@example.test'),deniedIssuer.token!)).toBe('denied');
+    await db.prepare(`UPDATE portal_v2_identity_denials SET status='revoked',revoked_at=datetime('now'),
+      revoked_by_actor_type='system',revoked_by_actor_id='test' WHERE id='deny-secondary-inviter'`).run();
+
+    await db.prepare(`UPDATE portal_v2_workspace_memberships SET status='suspended'
+      WHERE workspace_id=? AND identity_id=? AND source_type='project_alpha'`).bind(a.workspace,a.manager).run();
+    expect(await acceptPortalWorkspaceInvitation(env,principal('issuer-suspended','issuer-suspended@example.test'),suspendedIssuer.token!)).toBe('denied');
+    await db.prepare(`UPDATE portal_v2_workspace_memberships SET status='active'
+      WHERE workspace_id=? AND identity_id=? AND source_type='project_alpha'`).bind(a.workspace,a.manager).run();
+
+    expect(await db.prepare(`SELECT count(*) n FROM portal_v2_workspace_memberships
+      WHERE workspace_id=? AND source_type='client_invitation' AND identity_id IN (
+        SELECT id FROM portal_v2_identities WHERE subject IN ('issuer-denied','issuer-suspended'))`).bind(a.workspace).first('n')).toBe(0);
+    expect(await db.prepare(`SELECT count(*) n FROM portal_v2_entitlements
+      WHERE workspace_id=? AND source_type='client_invitation' AND identity_id IN (
+        SELECT id FROM portal_v2_identities WHERE subject IN ('issuer-denied','issuer-suspended'))`).bind(a.workspace).first('n')).toBe(0);
+  });
+
   it('accepts only the exact recipient, replays only that identity and writes no legacy rows',async()=>{
     const created=await invite(a,'accepted@example.test');expect(created.result.outcome).toBe('created');
     const recipient=principal('accepted','accepted@example.test');
