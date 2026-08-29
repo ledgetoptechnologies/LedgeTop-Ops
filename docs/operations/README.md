@@ -75,8 +75,8 @@ failures correctly remain on their local file-type icon.
 - Local tests and dry-run configuration checks do not prove Cloudflare Container
   entitlement, decoder behavior, queue/DLQ existence, R2 event subscriptions,
   cron installation, or production bindings. Verify each in isolated staging.
-- Delivery migrations through `0151` (with reserved ledger gap `0113`), plus
-  Operations migrations through `0031`, are
+- Delivery migrations through `0175` (with reserved ledger gap `0113`), plus
+  Operations migrations through `0047`, are
   additive and remain after a Worker version rollback. Preserve verified D1
   exports and prior Worker version IDs before rollout.
 - Folder-grant mail is at-least-once. Revocation before the final authorization

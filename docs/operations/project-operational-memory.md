@@ -58,7 +58,7 @@ Completed or cancelled projects remain amendable because operational history som
 
 There is no auto-save. Each explicit save receives a new idempotency key, while an exact retry after a transient failure reuses that key and preserves the draft. An ownership/context `409` clears the whole project workspace; transient failures remain local. Revision lists show version, time, change kind, and amendment reason without displaying raw staff actor IDs. All interactive controls have a 44-pixel minimum target and collapse to a single-column mobile layout.
 
-Attachments, portal exposure, and Project Alpha writes are deliberately out of scope for this slice. Operational roles still do not create any access, recipient, billing, or notification authority.
+Private staff attachments are supported through the separately reviewed project-memory attachment contract. They remain Operations-owned, append-only project evidence; they are not exposed in the client portal and do not create access, recipient, billing, or notification authority. Project Alpha writes remain out of scope for this slice.
 
 ## Verification
 
