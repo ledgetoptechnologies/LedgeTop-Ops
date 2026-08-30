@@ -21,6 +21,8 @@ export async function applyBusinessPartySchema(db: D1Database): Promise<void> {
   await db.batch(mapping.map(statement => db.prepare(statement)));
   const parties = readFileSync(new URL("../../migrations/0036_business_parties.sql", import.meta.url), "utf8");
   await db.batch(splitD1MigrationStatements(parties).map(statement => db.prepare(statement)));
+  const lifecycle = readFileSync(new URL("../../migrations/0048_business_party_lifecycle.sql", import.meta.url), "utf8");
+  await db.batch(splitD1MigrationStatements(lifecycle).map(statement => db.prepare(statement)));
 }
 
 /** Real staff-policy tables for route fixtures whose older ACL paths are mocked.

@@ -3,3 +3,4 @@ packages/shared/test-fixtures/viewer-processing-contract-v1.json text eol=lf
 packages/shared/test-fixtures/viewer-processing-route-responses-v1.json text eol=lf
 *.sh text eol=lf
 apps/client/migrations/*.sql text eol=lf
+apps/operations/migrations/*.sql text eol=lf

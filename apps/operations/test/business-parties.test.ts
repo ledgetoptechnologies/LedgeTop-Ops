@@ -89,14 +89,18 @@ beforeAll(async () => {
       revision: { credentialRef: name, snapshotBasePath: "/", accessIssuer: "https://access.example.test", accessAudience: "audience", accessSubject: "subject" } }, administrator.id);
     await setProjectAlphaConnectorState(config, `project-alpha:${name}`, { expectedVersion: 1, state: "active", readVisible: true }, administrator.id);
   }
-  await root(primary); before = await stableRows();
+  await root(primary);
   await database.batch(splitD1MigrationStatements(readFileSync(new URL("0036_business_parties.sql", directory), "utf8")).map(sql => database.prepare(sql)));
+  for (const filename of readdirSync(directory).filter(name => name.endsWith(".sql") && name >= "0037_" && name < "0048_").sort())
+    await database.batch(splitD1MigrationStatements(readFileSync(new URL(filename, directory), "utf8")).map(sql => database.prepare(sql)));
+  before = await stableRows();
+  await database.batch(splitD1MigrationStatements(readFileSync(new URL("0048_business_party_lifecycle.sql", directory), "utf8")).map(sql => database.prepare(sql)));
   after = await stableRows();
 }, 120_000);
 afterAll(async () => { await runtime?.dispose(); });
 
 describe("explicit Operations business-party linking", () => {
-  it("preserves populated sources/staff exactly and creates no inferred business links during migration", async () => {
+  it("preserves populated sources/staff exactly and creates no inferred business links during lifecycle migration", async () => {
     expect(after).toEqual(before); expect(await database.prepare("SELECT count(*) count FROM business_parties").first("count")).toBe(0);
     expect((await database.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     for (const table of ["business_parties", "business_party_links", "business_party_events", "business_party_mutations"])
@@ -114,7 +118,7 @@ describe("explicit Operations business-party linking", () => {
     expect((await readBusinessParty(environment, viewer, saved.result.partyId)).canManage).toBe(false);
     expect((await readBusinessPartyForRoot(environment, administrator, roots[0]!)).businessParty?.id).toBe(saved.result.partyId);
   }, 20_000);
-  it("adds a source and unlinks down to one stable survivor, then closes the final member without deleting history", async () => {
+  it("adds a source and unlinks down to one stable survivor, then recoverably archives the final member without deleting history", async () => {
     const saved = await create(), added = await root(third);
     const add: BusinessPartyOperation = { action: "add", partyId: saved.result.partyId, expectedVersion: 1, root: added };
     const preview = await previewBusinessParty(environment, administrator, add);
@@ -126,10 +130,13 @@ describe("explicit Operations business-party linking", () => {
       expect(preview.members).toHaveLength(remaining - 1); expect(preview.removedMember?.linkId).toBe(operation.linkId);
       const input = { operation, previewContextVersion: preview.contextVersion, idempotencyKey: key() };
       const result = await mutateBusinessParty(environment, administrator, input);
-      expect(result.status).toBe(remaining === 1 ? "closed" : "active");
+      expect(result.status).toBe(remaining === 1 ? "archived" : "active");
       expect(await mutateBusinessParty(environment, administrator, input)).toEqual({ ...result, replayed: true });
     }
-    await expect(readBusinessParty(environment, administrator, saved.result.partyId)).rejects.toMatchObject({ status: 404 });
+    expect(await readBusinessParty(environment, administrator, saved.result.partyId)).toMatchObject({
+      status: "archived", archiveCause: "operator_closed", members: [],
+    });
+    await expect(readBusinessParty(environment, viewer, saved.result.partyId)).rejects.toMatchObject({ status: 404 });
     expect(await database.prepare("SELECT count(*) count FROM business_party_links WHERE party_id=?").bind(saved.result.partyId).first("count")).toBe(3);
     expect(await database.prepare("SELECT count(*) count FROM business_party_events WHERE party_id=?").bind(saved.result.partyId).first("count")).toBe(5);
   }, 30_000);
@@ -186,7 +193,7 @@ describe("explicit Operations business-party linking", () => {
       expect(await database.prepare(`SELECT 1 visible FROM business_parties party WHERE party.id=? AND ${readableBusinessPartySql("party.id")}`).bind(saved.result.partyId).first()).toBeNull();
     } finally { await database.prepare("UPDATE pa_connectors SET read_visible=1,version=version+1 WHERE source_id=?").bind(secondary).run(); }
   }, 15_000);
-  it("can sequentially repair two unavailable members and close the party, including exact unlink replay", async () => {
+  it("can sequentially repair two unavailable members on an archived party, including exact unlink replay", async () => {
     const roots = [await root(primary), await root(secondary)], saved = await create(roots);
     await database.batch(roots.map(root => database.prepare("UPDATE pa_organizations SET active=0 WHERE id=?").bind(root.recordId)));
     for (let remaining = 2; remaining > 0; remaining -= 1) {
@@ -197,11 +204,96 @@ describe("explicit Operations business-party linking", () => {
       expect(preview.members).toHaveLength(remaining - 1);
       const input = { operation, previewContextVersion: preview.contextVersion, idempotencyKey: key() };
       const result = await mutateBusinessParty(environment, administrator, input);
-      expect(result.status).toBe(remaining === 1 ? "closed" : "active");
+      expect(result.status).toBe("archived");
+      const beforeReplay = await database.prepare(`SELECT status,lifecycle_state,lifecycle_cause,version
+        FROM business_parties WHERE id=?`).bind(saved.result.partyId).first();
       expect(await mutateBusinessParty(environment, administrator, input)).toEqual({ ...result, replayed: true });
+      expect(await database.prepare(`SELECT status,lifecycle_state,lifecycle_cause,version
+        FROM business_parties WHERE id=?`).bind(saved.result.partyId).first()).toEqual(beforeReplay);
     }
     expect(await database.prepare("SELECT status FROM business_parties WHERE id=?").bind(saved.result.partyId).first("status")).toBe("closed");
   }, 20_000);
+  it("archives only after the final live immutable source mapping disappears and restores on an exact return", async () => {
+    const roots = [await root(primary), await root(secondary)], saved = await create(roots);
+    const linkRows = await database.prepare(`SELECT id,source_id,record_id,unlinked_at FROM business_party_links
+      WHERE party_id=? ORDER BY id`).bind(saved.result.partyId).all();
+    await database.prepare("UPDATE pa_organizations SET active=0 WHERE id=? AND projection_source_id=?")
+      .bind(roots[0]!.recordId, roots[0]!.sourceId).run();
+    expect((await readBusinessParty(environment, administrator, saved.result.partyId)).status).toBe("active");
+    await database.prepare("UPDATE pa_organizations SET active=0 WHERE id=? AND projection_source_id=?")
+      .bind(roots[1]!.recordId, roots[1]!.sourceId).run();
+    await expect(readBusinessParty(environment, viewer, saved.result.partyId)).rejects.toMatchObject({ status: 404 });
+    const archived = await readBusinessParty(environment, administrator, saved.result.partyId);
+    expect(archived).toMatchObject({ id: saved.result.partyId, status: "archived", archiveCause: "source_unavailable", lifecycleOrigin: "source_backed" });
+    expect(archived.members.every(member => member.availability === "unavailable")).toBe(true);
+    expect((await database.prepare(`SELECT id,source_id,record_id,unlinked_at FROM business_party_links
+      WHERE party_id=? ORDER BY id`).bind(saved.result.partyId).all()).results).toEqual(linkRows.results);
+    await database.prepare("UPDATE pa_organizations SET active=1 WHERE id=? AND projection_source_id=?")
+      .bind(roots[0]!.recordId, roots[0]!.sourceId).run();
+    const restored = await readBusinessParty(environment, administrator, saved.result.partyId);
+    expect(restored).toMatchObject({ id: saved.result.partyId, status: "active", archiveCause: null, lifecycleOrigin: "source_backed" });
+    const history = (await database.prepare(`SELECT lifecycle_state,cause FROM business_party_lifecycle_events
+      WHERE party_id=? ORDER BY party_version`).bind(saved.result.partyId).all()).results;
+    expect(history).toEqual([
+      { lifecycle_state: "active", cause: "created" },
+      { lifecycle_state: "archived", cause: "source_unavailable" },
+      { lifecycle_state: "active", cause: "exact_source_return" },
+    ]);
+  }, 20_000);
+  it("never reopens an operator-closed party on source return and requires an explicit reviewed relink", async () => {
+    const roots = [await root(primary), await root(secondary)], saved = await create(roots);
+    for (let remaining = 2; remaining > 0; remaining -= 1) {
+      const party = await readBusinessParty(environment, administrator, saved.result.partyId);
+      const operation: BusinessPartyOperation = { action: "unlink", partyId: party.id, expectedVersion: party.version, linkId: party.members[0]!.linkId! };
+      const preview = await previewBusinessParty(environment, administrator, operation);
+      await mutateBusinessParty(environment, administrator, { operation, previewContextVersion: preview.contextVersion, idempotencyKey: key() });
+    }
+    const closed = await readBusinessParty(environment, administrator, saved.result.partyId);
+    expect(closed).toMatchObject({ status: "archived", archiveCause: "operator_closed" });
+    await expect(database.prepare(`UPDATE business_parties SET status='active',lifecycle_state='active',
+      lifecycle_cause='exact_source_return',archived_at=NULL,version=version+1 WHERE id=?`).bind(saved.result.partyId).run()).rejects.toThrow();
+    await database.prepare("UPDATE pa_organizations SET active=0 WHERE id=? AND projection_source_id=?")
+      .bind(roots[0]!.recordId, roots[0]!.sourceId).run();
+    await database.prepare("UPDATE pa_organizations SET active=1 WHERE id=? AND projection_source_id=?")
+      .bind(roots[0]!.recordId, roots[0]!.sourceId).run();
+    expect((await readBusinessParty(environment, administrator, saved.result.partyId)).status).toBe("archived");
+    const operation: BusinessPartyOperation = { action: "add", partyId: saved.result.partyId, expectedVersion: closed.version, root: roots[0]! };
+    const preview = await previewBusinessParty(environment, administrator, operation);
+    expect(preview.resultStatus).toBe("active");
+    const result = await mutateBusinessParty(environment, administrator,
+      { operation, previewContextVersion: preview.contextVersion, idempotencyKey: key() });
+    expect(result.status).toBe("active");
+    expect((await readBusinessParty(environment, administrator, saved.result.partyId)).members).toHaveLength(1);
+    expect(await database.prepare("SELECT count(*) count FROM business_party_relink_fences").first("count")).toBe(0);
+    expect(await database.prepare(`SELECT cause FROM business_party_lifecycle_events WHERE party_id=?
+      ORDER BY party_version DESC LIMIT 1`).bind(saved.result.partyId).first("cause")).toBe("reviewed_relink");
+  }, 25_000);
+  it("keeps a legitimate Operations-only party active without source mappings", async () => {
+    const id = key();
+    await database.prepare(`INSERT INTO business_parties
+      (id,kind,display_name,sort_name,created_by,updated_by,lifecycle_origin)
+      VALUES(?,'organization','Operations customer','operations customer',?,?,'operations')`)
+      .bind(id, administrator.id, administrator.id).run();
+    expect(await readBusinessParty(environment, administrator, id)).toMatchObject({
+      id, status: "active", lifecycleOrigin: "operations", members: [],
+    });
+    await expect(database.prepare(`UPDATE business_parties SET status='closed',lifecycle_state='archived',
+      lifecycle_cause='source_unavailable',archived_at=datetime('now'),version=version+1 WHERE id=?`).bind(id).run()).rejects.toThrow();
+    expect(await database.prepare("SELECT lifecycle_state FROM business_parties WHERE id=?").bind(id).first("lifecycle_state")).toBe("active");
+  }, 15_000);
+  it("invalidates the Client Hub directory once when one client mapping becomes unavailable but the party remains active", async () => {
+    const roots = [await root(primary, "standalone_client"), await root(secondary, "standalone_client")];
+    const saved = await create(roots);
+    const organization = await root(secondary);
+    const beforeRevision = Number(await database.prepare("SELECT revision FROM client_hub_directory_state WHERE id='directory'").first("revision"));
+    await database.prepare("UPDATE pa_clients SET organization_id=? WHERE id=? AND projection_source_id=?")
+      .bind(organization.recordId, roots[1]!.recordId, roots[1]!.sourceId).run();
+    expect(Number(await database.prepare("SELECT revision FROM client_hub_directory_state WHERE id='directory'").first("revision")))
+      .toBe(beforeRevision + 1);
+    expect(await readBusinessParty(environment, administrator, saved.result.partyId)).toMatchObject({
+      status: "active", archiveCause: null, lifecycleOrigin: "source_backed",
+    });
+  }, 15_000);
   it("persists long exact local handles without truncation or rewriting their source identity", async () => {
     const roots = [await root(primary, "organization", 1, "a".repeat(512)), await root(secondary, "organization", 1, "b".repeat(480))];
     const saved = await create(roots);
@@ -268,6 +360,8 @@ describe("explicit Operations business-party linking", () => {
       "DELETE FROM business_party_links WHERE party_id=?",
       "INSERT OR REPLACE INTO business_party_events SELECT * FROM business_party_events WHERE party_id=?",
       "UPDATE business_party_events SET actor_id='changed' WHERE party_id=?",
+      "UPDATE business_party_lifecycle_events SET actor_id='changed' WHERE party_id=?",
+      "DELETE FROM business_party_lifecycle_events WHERE party_id=?",
       "DELETE FROM business_party_mutations WHERE party_id=?",
     ]) await expect(database.prepare(sql).bind(saved.result.partyId).run()).rejects.toThrow();
     await expect(database.prepare(`INSERT INTO business_party_links(id,party_id,source_id,record_kind,record_id,linked_by)

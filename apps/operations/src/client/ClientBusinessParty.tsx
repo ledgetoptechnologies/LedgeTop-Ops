@@ -6,7 +6,10 @@ import { clientDirectoryReturnPath, type ClientKind, type ClientSummary } from "
 interface BusinessRoot { sourceId: string; kind: ClientKind; recordId: string }
 interface PartyMember { linkId: string | null; root: BusinessRoot; displayName: string; sourceName: string; detailPath: string | null; availability: "available" | "unavailable" }
 export interface BusinessPartyReference { id: string; displayName: string; version: number; canManage: boolean; needsReview?: boolean }
-interface BusinessParty extends BusinessPartyReference { kind: ClientKind; status: "active"; members: PartyMember[] }
+interface BusinessParty extends BusinessPartyReference {
+  kind: ClientKind; status: "active" | "archived"; lifecycleOrigin: "source_backed" | "operations";
+  archiveCause: "source_unavailable" | "operator_closed" | null; archivedAt: string | null; members: PartyMember[];
+}
 interface SourceProject { row_key?: string; id: string; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null }
 interface SourceContact { row_key?: string; public_id: string; display_name: string; email: string | null; phone: string | null }
 interface SourcePage { available: boolean; reason: string | null; hasMore: boolean; returned: number; limit: number; nextCursor: string | null }
@@ -25,7 +28,7 @@ type Operation = { action: "create"; displayName: string; roots: BusinessRoot[] 
   | { action: "add"; partyId: string; expectedVersion: number; root: BusinessRoot }
   | { action: "unlink"; partyId: string; expectedVersion: number; linkId: string };
 interface Preview { action: Operation["action"]; partyId: string | null; partyVersion: number | null; displayName: string;
-  kind: ClientKind; members: PartyMember[]; removedMember: PartyMember | null; contextVersion: string }
+  kind: ClientKind; members: PartyMember[]; removedMember: PartyMember | null; resultStatus: "active" | "archived"; contextVersion: string }
 const ENDPOINT = "/api/business-parties";
 const errorText = (error: unknown) => error instanceof Error ? error.message : "Customer links could not be loaded.";
 const isContextError = (error: unknown) => error instanceof ApiError && [401, 403, 404, 409].includes(error.status);
@@ -105,8 +108,8 @@ function sourceEntryPath(path: string): string {
   return `${base}${directoryFilters()}${hash}`;
 }
 export function businessPartyHref(id: string): string { return `/clients/parties/${encodeURIComponent(id)}${directoryFilters()}`; }
-function goToParty(id: string, status: "active" | "closed") {
-  history.pushState(null, "", status === "closed" ? clientDirectoryReturnPath() : businessPartyHref(id));
+function goToParty(id: string, _status: "active" | "archived") {
+  history.pushState(null, "", businessPartyHref(id));
   dispatchEvent(new PopStateEvent("popstate"));
 }
 function MemberList({ members, removing = false }: { members: PartyMember[]; removing?: boolean }) {
@@ -118,7 +121,7 @@ function MemberList({ members, removing = false }: { members: PartyMember[]; rem
 
 /** One reviewed operation, with an unchanged idempotency body on uncertain retries. */
 function PartyReview({ operation, contextSignal, onCancel, onInvalidated, onSaved }: {
-  operation: Operation; onCancel: () => void; onInvalidated: (message: string) => void; onSaved: (id: string, status: "active" | "closed") => void;
+  operation: Operation; onCancel: () => void; onInvalidated: (message: string) => void; onSaved: (id: string, status: "active" | "archived") => void;
   contextSignal: AbortSignal;
 }) {
   const [preview, setPreview] = useState<Preview | null>(null), [error, setError] = useState("");
@@ -136,7 +139,7 @@ function PartyReview({ operation, contextSignal, onCancel, onInvalidated, onSave
       if (controller.signal.aborted || contextSignal.aborted) return;
       const next = result.preview;
       if (!next || next.action !== operation.action || typeof next.contextVersion !== "string" || !next.contextVersion
-        || typeof next.displayName !== "string" || !validMembers(next.members)
+        || typeof next.displayName !== "string" || !["active", "archived"].includes(next.resultStatus) || !validMembers(next.members)
         || (operation.action === "create" ? next.partyId !== null : next.partyId !== operation.partyId || next.partyVersion !== operation.expectedVersion)
         || (operation.action === "unlink" && (!next.removedMember || !validMembers([next.removedMember]) || next.removedMember.linkId !== operation.linkId))
         || !previewMatchesOperation(next, operation))
@@ -156,12 +159,11 @@ function PartyReview({ operation, contextSignal, onCancel, onInvalidated, onSave
     const controller = new AbortController(); write.current = controller;
     setPhase("submitting"); setError("");
     try {
-      const result = await api<{ partyId: string; version: number; status: "active" | "closed"; replayed: boolean }>(ENDPOINT,
+      const result = await api<{ partyId: string; version: number; status: "active" | "archived"; replayed: boolean }>(ENDPOINT,
         { method: "POST", body: body.current, signal: controller.signal });
       if (controller.signal.aborted || contextSignal.aborted) return;
-      const expectedStatus = operation.action === "unlink" && preview.members.length === 0 ? "closed" : "active";
       if (!result || typeof result.partyId !== "string" || !result.partyId || !Number.isInteger(result.version) || result.version < 1
-        || result.status !== expectedStatus || (operation.action !== "create" && result.partyId !== operation.partyId))
+        || result.status !== preview.resultStatus || (operation.action !== "create" && result.partyId !== operation.partyId))
         throw new Error("The response could not be verified. Retry this same operation to check its outcome.");
       onSaved(result.partyId, result.status);
     } catch (caught) {
@@ -179,7 +181,7 @@ function PartyReview({ operation, contextSignal, onCancel, onInvalidated, onSave
       <p><strong>{preview.displayName}</strong></p>
       {preview.removedMember && <div><h4>Record to unlink</h4><MemberList members={[preview.removedMember]} removing /></div>}
       <h4>{operation.action === "unlink" ? "Records remaining together" : "Records shown as one customer"}</h4>
-      {preview.members.length ? <MemberList members={preview.members} /> : <p>No records will remain. This linked customer page will close; its source record remains in the directory.</p>}
+      {preview.members.length ? <MemberList members={preview.members} /> : <p>No records will remain. This linked customer will be archived and can be relinked later; its source record remains in the directory.</p>}
       <p>Only the Client Hub grouping changes. Source records, project history, portal logins, permissions, billing, invitations and notifications are unchanged.</p>
       {operation.action === "unlink" && <p>The unlinked record will appear separately in the directory. This does not delete any source data.</p>}
       <label className="business-party-confirm"><input type="checkbox" checked={acknowledged} disabled={busy || phase === "uncertain"}
@@ -265,7 +267,7 @@ function RecordPicker({ kind, excludedSources, contextSignal, onSelect, onInvali
 }
 
 function LinkEditor({ anchor, party, contextSignal, onCancel, onInvalidated, onSaved }: {
-  anchor?: ClientSummary; party?: BusinessParty; onCancel: () => void; onInvalidated: (message: string) => void; onSaved: (id: string, status: "active" | "closed") => void;
+  anchor?: ClientSummary; party?: BusinessParty; onCancel: () => void; onInvalidated: (message: string) => void; onSaved: (id: string, status: "active" | "archived") => void;
   contextSignal: AbortSignal;
 }) {
   const [selected, setSelected] = useState<ClientSummary | null>(null), [name, setName] = useState(party?.displayName || anchor?.display_name || "");
@@ -306,8 +308,10 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
     void api<{ party: BusinessParty }>(`${ENDPOINT}/${encodeURIComponent(partyId)}`, { signal: controller.signal }).then(result => {
       if (controller.signal.aborted) return;
       const next = result.party;
-      if (!next || next.id !== partyId || next.status !== "active" || typeof next.displayName !== "string" || !Number.isInteger(next.version)
-        || !validMembers(next.members) || !next.members.length || next.members.some(member => !member.linkId
+      if (!next || next.id !== partyId || !["active", "archived"].includes(next.status) || typeof next.displayName !== "string"
+        || !["source_backed", "operations"].includes(next.lifecycleOrigin) || !Number.isInteger(next.version)
+        || !validMembers(next.members) || (next.status === "active" && next.lifecycleOrigin === "source_backed" && !next.members.length)
+        || next.members.some(member => !member.linkId
           || (member.availability === "unavailable" && !(next.canManage && next.needsReview === true && member.detailPath === null)))
         || typeof next.canManage !== "boolean") throw new Error("This customer grouping could not be verified. Refresh to try again.");
       setParty(next);
@@ -346,7 +350,7 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
     const target = document.getElementById(location.hash.slice(1));
     if (target) requestAnimationFrame(() => target.scrollIntoView({ block: "start" }));
   }, [party]);
-  const saved = (id: string, status: "active" | "closed") => { if (status === "closed") goToParty(id, status); else refresh(); };
+  const saved = (_id: string, _status: "active" | "archived") => refresh();
   const loaded = Object.values(sourceStates).filter(state => state.data).map(state => state.data!);
   const sectionHref = (section: string) => `${location.pathname}${location.search}#${section}`;
   return <section className="business-party-workspace" aria-label="Linked customer workspace">
@@ -355,8 +359,11 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
     {error && <Card><div role="alert"><h2>Linked customer unavailable</h2><p>{error}</p></div>
       <button type="button" className="button-orange" onClick={refresh}>Refresh linked customer</button></Card>}
     {party && <>
-      <header><div><small>{party.kind === "organization" ? "Organization" : "Individual client"} · Linked customer</small><h2>{party.displayName}</h2></div>
+      <header><div><small>{party.kind === "organization" ? "Organization" : "Individual client"} · {party.status === "archived" ? "Archived linked customer" : "Linked customer"}</small><h2>{party.displayName}</h2></div>
         <button type="button" className="button-ghost" onClick={refresh}>Refresh customer</button></header>
+      {party.status === "archived" && <p role="status">{party.archiveCause === "source_unavailable"
+        ? "Archived because no linked source record is currently available. An exact source return restores it automatically; changing the link still requires review."
+        : "Archived after a reviewed unlink. A source returning will not reopen it; an administrator must review a new link."}</p>}
       <p>This customer combines reviewed source records for day-to-day navigation. Project Alpha still owns each record, and access is checked independently for every source.</p>
       <dl className="business-party-summary" aria-label="Customer summary">
         <div><dt>Source records</dt><dd>{party.members.length}</dd></div>

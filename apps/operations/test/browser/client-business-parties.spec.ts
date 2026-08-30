@@ -20,11 +20,14 @@ const summary = (root: Root) => ({ workspace_id: null, kind: root.kind, route_ki
 type Call = { path: string; query: URLSearchParams; method: string; body: Record<string, unknown> | null; csrf?: string };
 type Handler = (route: Route, call: Call) => Promise<boolean>;
 async function fixture(page: Page, options: { linked?: number; manage?: boolean; handler?: Handler; label?: string; rootCount?: number;
-  contactsPage?: boolean; projectsUnavailableSource?: string } = {}) {
+  contactsPage?: boolean; projectsUnavailableSource?: string; archived?: "source_unavailable" | "operator_closed" } = {}) {
   const state = { members: roots.slice(0, options.linked || 0).map(root => member(root)), version: 1,
-    name: options.label || "Acme combined customer", status: "active", calls: [] as Call[] };
+    name: options.label || "Acme combined customer", status: options.archived ? "archived" : "active",
+    archiveCause: options.archived ?? null as "source_unavailable" | "operator_closed" | null, calls: [] as Call[] };
   const manage = options.manage !== false, activeRoots = roots.slice(0, options.rootCount || 3);
-  const party = () => ({ id: partyId, displayName: state.name, kind: "organization", version: state.version, status: state.status, members: state.members, canManage: manage });
+  const party = () => ({ id: partyId, displayName: state.name, kind: "organization", version: state.version, status: state.status,
+    lifecycleOrigin: "source_backed", archiveCause: state.archiveCause, archivedAt: state.status === "archived" ? "2026-08-30T12:00:00Z" : null,
+    members: state.members, canManage: manage });
   await page.route("**/api/**", async route => {
     const request = route.request(), url = new URL(request.url()), path = url.pathname;
     if (path === "/api/session") return route.fulfill({ json: { user: { id: "staff-a", email: "staff@example.test", displayName: "Staff", status: "Active",
@@ -87,23 +90,26 @@ async function fixture(page: Page, options: { linked?: number; manage?: boolean;
         portalIdentities: { items: [], page: { available: false, reason: "workspace_unavailable", nextCursor: null, hasMore: false, returned: 0, limit: 5 },
           contextVersion: `source-${root.sourceId}`, refreshedAt: "2026-08-25T12:00:00Z", capabilities: { canManagePortal: false, canManageEligibilityBlocks: false } }, capabilities } });
     }
-    if (path === `${apiBase}/${partyId}` && call.method === "GET") return state.status === "active" && state.members.length
+    if (path === `${apiBase}/${partyId}` && call.method === "GET") return state.status === "archived" ? (manage
+      ? route.fulfill({ json: { party: party() } }) : route.fulfill({ status: 404, json: { error: "Linked customer unavailable" } })) : state.members.length
       ? route.fulfill({ json: { party: party() } }) : route.fulfill({ status: 404, json: { error: "Linked customer unavailable" } });
     if (path === `${apiBase}/preview` && call.method === "POST") {
       const operation = call.body as unknown as Operation;
       const members = operation.action === "create" ? operation.roots.map(root => member(root, false))
         : operation.action === "add" ? [...state.members, member(operation.root, false)] : state.members.filter(row => row.linkId !== operation.linkId);
+      const resultStatus = operation.action === "create" || operation.action === "add" ? "active"
+        : members.length === 0 ? "archived" : state.status;
       return route.fulfill({ json: { preview: { action: operation.action, partyId: operation.action === "create" ? null : partyId,
         partyVersion: operation.action === "create" ? null : state.version, displayName: operation.action === "create" ? operation.displayName : state.name,
         kind: "organization", members, removedMember: operation.action === "unlink" ? state.members.find(row => row.linkId === operation.linkId) : null,
-        contextVersion: "a".repeat(64) } } });
+        resultStatus, contextVersion: "a".repeat(64) } } });
     }
     if (path === apiBase && call.method === "POST") {
       const operation = call.body!.operation as Operation;
-      if (operation.action === "create") { state.name = operation.displayName; state.members = operation.roots.map(root => member(root)); }
-      else if (operation.action === "add") state.members.push(member(operation.root));
-      else state.members = state.members.filter(row => row.linkId !== operation.linkId);
-      state.version += 1; state.status = state.members.length ? "active" : "closed";
+      if (operation.action === "create") { state.name = operation.displayName; state.members = operation.roots.map(root => member(root)); state.archiveCause = null; }
+      else if (operation.action === "add") { state.members.push(member(operation.root)); state.archiveCause = null; }
+      else { state.members = state.members.filter(row => row.linkId !== operation.linkId); state.archiveCause = state.members.length ? state.archiveCause : "operator_closed"; }
+      state.version += 1; state.status = state.members.length ? "active" : "archived";
       return route.fulfill({ json: { partyId, version: state.version, status: state.status, replayed: false } });
     }
     return route.fulfill({ status: 404, json: { error: `Unsupported fixture endpoint: ${path}` } });
@@ -223,13 +229,23 @@ test("add and unlink each require a fresh preview while keeping all source recor
   await expect(page.getByRole("link", { name: "Open Acme technology customer client workspace" })).toBeVisible();
 });
 
-test("unlinking the final member closes the party page without deleting its source record", async ({ page }) => {
+test("unlinking the final member keeps an administrator on the archived recovery page without deleting its source record", async ({ page }) => {
   await fixture(page, { linked: 1, rootCount: 1 });
   await page.goto(`/clients/parties/${partyId}`);
   await page.getByRole("button", { name: "Unlink Drone Services record" }).click();
   await expect(page.getByText(/No records will remain/)).toBeVisible(); await confirm(page, true);
-  await expect(page).toHaveURL("/clients");
+  await expect(page).toHaveURL(`/clients/parties/${partyId}`);
+  await expect(page.getByText("Archived after a reviewed unlink. A source returning will not reopen it; an administrator must review a new link.")).toBeVisible();
+  await expect(page.getByText("0 business records belong to this customer.")).toBeVisible();
+  await page.getByRole("link", { name: "← Client Hub" }).click();
   await expect(page.getByRole("link", { name: "Open Acme aerial customer client workspace" })).toBeVisible();
+});
+
+test("an unprivileged reader cannot open an archived party recovery page", async ({ page }) => {
+  await fixture(page, { manage: false, archived: "operator_closed" });
+  await page.goto(`/clients/parties/${partyId}`);
+  await expect(page.getByRole("heading", { name: "Linked customer unavailable" })).toBeVisible();
+  await expect(page.getByText("Archived after a reviewed unlink.", { exact: false })).toHaveCount(0);
 });
 
 test("read-only members have source links but no management or mutation probes", async ({ page }) => {
@@ -305,7 +321,7 @@ test("a cancelled pending preview cannot resurface after navigating to the direc
   await expect.poll(() => Boolean(delayed)).toBe(true);
   await page.getByRole("button", { name: "Cancel review" }).click(); await page.getByRole("link", { name: "← Client Hub" }).click();
   await delayed!.fulfill({ json: { preview: { action: "create", partyId: null, partyVersion: null, displayName: "Old preview", kind: "organization",
-    members: roots.slice(0, 2).map(root => member(root, false)), removedMember: null, contextVersion: "a".repeat(64) } } }).catch(() => undefined);
+    members: roots.slice(0, 2).map(root => member(root, false)), removedMember: null, resultStatus: "active", contextVersion: "a".repeat(64) } } }).catch(() => undefined);
   await expect(page.getByRole("heading", { name: "Review customer link" })).toHaveCount(0);
   await expect(page.locator(".client-directory-card")).toHaveCount(3);
 });
@@ -326,7 +342,7 @@ for (const stage of ["preview", "mutation"] as const) test(`another section's au
   await expect(page.getByText("Client workspace needs refreshing", { exact: true })).toBeVisible();
   const response = stage === "mutation" ? { partyId, version: 1, status: "active", replayed: false }
     : { preview: { action: "create", partyId: null, partyVersion: null, displayName: "Obsolete review", kind: "organization",
-      members: roots.slice(0, 2).map(root => member(root, false)), removedMember: null, contextVersion: "a".repeat(64) } };
+      members: roots.slice(0, 2).map(root => member(root, false)), removedMember: null, resultStatus: "active", contextVersion: "a".repeat(64) } };
   await pending!.fulfill({ json: response }).catch(() => undefined);
   await expect(page).toHaveURL(sourcePath(roots[0]!));
   await expect(page.getByRole("region", { name: "Review customer link" })).toHaveCount(0);
@@ -338,7 +354,7 @@ test("a preview for different source records cannot be confirmed", async ({ page
   const state = await fixture(page, { handler: async (route, call) => {
     if (call.path !== `${apiBase}/preview`) return false;
     await route.fulfill({ json: { preview: { action: "create", partyId: null, partyVersion: null, displayName: "Wrong preview", kind: "organization",
-      members: [member(roots[0]!, false), member(roots[2]!, false)], removedMember: null, contextVersion: "a".repeat(64) } } }); return true;
+      members: [member(roots[0]!, false), member(roots[2]!, false)], removedMember: null, resultStatus: "active", contextVersion: "a".repeat(64) } } }); return true;
   } });
   await createPreview(page);
   await expect(page.getByRole("alert")).toContainText("The link preview could not be verified");
@@ -377,11 +393,12 @@ test("a manager can review a redacted unavailable member without opening it or a
   await fixture(page, { linked: 2, handler: async (route, call) => {
     if (call.path === `${apiBase}/${partyId}`) {
       await route.fulfill({ json: { party: { id: partyId, displayName: "Acme combined customer", kind: "organization", version: 1,
-        status: "active", canManage: true, needsReview: true, members: [member(roots[0]!), redacted] } } }); return true;
+        status: "active", lifecycleOrigin: "source_backed", archiveCause: null, archivedAt: null,
+        canManage: true, needsReview: true, members: [member(roots[0]!), redacted] } } }); return true;
     }
     if (call.path === `${apiBase}/preview`) {
       await route.fulfill({ json: { preview: { action: "unlink", partyId, partyVersion: 1, displayName: "Acme combined customer", kind: "organization",
-        members: [member(roots[0]!)], removedMember: redacted, contextVersion: "a".repeat(64) } } }); return true;
+        members: [member(roots[0]!)], removedMember: redacted, resultStatus: "active", contextVersion: "a".repeat(64) } } }); return true;
     }
     return false;
   } });
@@ -409,12 +426,14 @@ test("two unavailable members can be repaired one explicit unlink at a time", as
     const members = state.members.map(redact);
     if (call.path === `${apiBase}/${partyId}`) {
       await route.fulfill({ json: { party: { id: partyId, displayName: state.name, kind: "organization", version: state.version,
-        status: "active", canManage: true, needsReview: members.some(item => item.availability === "unavailable"), members } } }); return true;
+        status: "active", lifecycleOrigin: "source_backed", archiveCause: null, archivedAt: null,
+        canManage: true, needsReview: members.some(item => item.availability === "unavailable"), members } } }); return true;
     }
     if (call.path === `${apiBase}/preview`) {
       const operation = call.body as unknown as Extract<Operation, { action: "unlink" }>;
       await route.fulfill({ json: { preview: { action: "unlink", partyId, partyVersion: state.version, displayName: state.name, kind: "organization",
-        members: members.filter(item => item.linkId !== operation.linkId), removedMember: members.find(item => item.linkId === operation.linkId), contextVersion: "a".repeat(64) } } }); return true;
+        members: members.filter(item => item.linkId !== operation.linkId), removedMember: members.find(item => item.linkId === operation.linkId),
+        resultStatus: "active", contextVersion: "a".repeat(64) } } }); return true;
     }
     return false;
   } });
@@ -441,7 +460,8 @@ test("a pending party read cannot paint the previous customer after a route chan
   await page.getByRole("link", { name: "Open Acme combined customer client workspace" }).click();
   await expect(page.getByRole("heading", { name: "Acme combined customer", exact: true })).toBeVisible();
   await old!.fulfill({ json: { party: { id: "old-party", displayName: "Obsolete customer", kind: "organization", version: 1,
-    status: "active", canManage: true, members: roots.slice(0, 2).map(root => member(root)) } } }).catch(() => undefined);
+    status: "active", lifecycleOrigin: "source_backed", archiveCause: null, archivedAt: null,
+    canManage: true, members: roots.slice(0, 2).map(root => member(root)) } } }).catch(() => undefined);
   await expect(page.getByText("Obsolete customer", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Acme combined customer", exact: true })).toBeVisible();
 });

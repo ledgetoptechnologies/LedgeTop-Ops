@@ -72,6 +72,8 @@ describe("business-party Operations HTTP boundary", () => {
     for (const name of readdirSync(directory).filter(name => /^\d{4}_.*\.sql$/.test(name) && name.slice(0, 4) <= "0036").sort()) {
       await db.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")).map(sql => db.prepare(sql)));
     }
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL("0048_business_party_lifecycle.sql", directory), "utf8"))
+      .map(sql => db.prepare(sql)));
     await db.batch([
       db.prepare("INSERT INTO staff_users(id,email,display_name,status) VALUES(?,?,?,'active')").bind(principal.id, principal.email, principal.displayName),
       db.prepare("INSERT INTO divisions(id,name,code) VALUES('party-route-division','Party fixture division','party-route-division')"),

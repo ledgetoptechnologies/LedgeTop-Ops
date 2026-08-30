@@ -32,8 +32,38 @@ merged: the operator must review and unlink the relevant source record first.
 - Expected context/version, actor-scoped idempotency receipts, membership
   changes and immutable audit events belong to the same Operations transaction.
 - Unlinking restores independent presentation without changing historical source
-  data. The party survives with one member; removing the final member closes it.
-  Retained link/event history is not deleted or reused for another customer.
+  data. The party survives with one member; removing the final member archives
+  it as an operator-closed record. Retained link and event history is immutable,
+  is not deleted, and is never reused for another customer.
+
+## Recoverable presentation lifecycle
+
+`0048_business_party_lifecycle.sql` adds an explicit lifecycle to the existing
+`business_parties` presentation umbrella. It does not introduce a second client
+system. The compatible storage status remains `active`/`closed`; the API and UI
+use `active`/`archived` and record whether a party is source-backed or was
+created only in Operations.
+
+- A source-backed active party is automatically archived with cause
+  `source_unavailable` only after it has no live exact source-qualified mapping.
+  Its links are retained; source deletion or deactivation never rewrites them.
+- An Operations-only party is not governed by source availability and is never
+  automatically archived because it has no mappings.
+- An exact immutable source return reactivates only a `source_unavailable`
+  archive and reuses the same party ID. Similar names, email addresses, public
+  IDs, or a different source-qualified handle cannot reactivate it.
+- An operator-closed party never reopens just because a source returns. It
+  requires an administrator to preview and confirm an exact reviewed relink.
+  That one-transaction relink fence is removed before commit.
+- Every lifecycle transition appends an immutable, versioned lifecycle event.
+  The database rejects updates and deletes of this history. Idempotent mutation
+  replay returns the original result without changing status or version.
+
+Archived party details are available only to a currently authorized manager for
+recovery. Ordinary readers receive the same not-found response as for any
+unreadable party. The lifecycle, mapping and grouping data remain
+presentation-only: they do not create a login, grant portal/resource access,
+assign eligibility, or widen independently authorized source visibility.
 
 ## Read, search and pagination contract
 
@@ -80,7 +110,7 @@ outdated review or navigating to a stale customer workspace.
 | `GET /api/client-hub?grouping=records` | Authorized, paginated source records for the linking picker. Default `grouping=customers` returns reviewed groups. |
 | `POST /api/business-parties/preview` | Validate the explicit `create`, `add`, or `unlink` operation and return current members plus a context fingerprint. |
 | `POST /api/business-parties` | Commit `{ operation, previewContextVersion, idempotencyKey }` after current-authority and version checks. |
-| `GET /api/business-parties/:partyId` | Read a fully authorized linked customer or an administrator's bounded repair view. |
+| `GET /api/business-parties/:partyId` | Read a fully authorized linked customer or an administrator's bounded repair/archive recovery view. |
 
 `add` and `unlink` require `expectedVersion`. A retry after an uncertain result
 must reuse the same operation and idempotency key. Conflicts require a refreshed
@@ -128,14 +158,26 @@ claim. The preceding connector checkpoint's full-suite results remain separately
 recorded. Its pre-existing thumbnail-runbook source-layout invariant is not
 changed by this increment, and the existing bundle-size warning remains.
 
+The recoverable-lifecycle increment was verified against the populated
+Operations migration chain through `0047` and then `0048`: all **27 lifecycle
+domain tests** passed. The combined lifecycle/route run passed **40 tests**, the
+three linked Client Hub suites passed **104 tests**, and the focused
+business-party browser spec passed **40 desktop/mobile cases** at bounded
+concurrency. Operations type checking and production build passed. All **9
+source-layout invariants** passed, including the LF-only D1 trigger migration
+guard. These checks remain local and do not authorize a migration or deploy.
+
 ## Remaining boundaries
 
 ### Coordinated release and rollback
 
-Apply the approved preceding provenance/registry migrations and Operations
-`0036_business_parties.sql` before publishing the paired Worker and browser
-bundle. The new directory query requires these tables even when no customers
-are linked. Do not publish this UI independently against an older API.
+Apply the approved preceding provenance/registry migrations, Operations
+`0036_business_parties.sql`, and then `0048_business_party_lifecycle.sql` before
+publishing the paired Worker and browser bundle. Operations migration SQL is
+forced to LF by `.gitattributes`; preserve that rule because CRLF inside D1
+trigger bodies can fail Cloudflare's migration parser. The new directory query
+requires these tables even when no customers are linked. Do not publish this UI
+independently against an older API.
 
 The migration is additive and does not create inferred links or change source
 records. Check populated-upgrade evidence and take the normal database backup
@@ -144,10 +186,11 @@ after release before linking real customers. No source enrollment or credentials
 are created by this slice.
 
 Application rollback to the preceding connector-registry checkpoint can retain
-the new tables and audit history. The old directory will show source records
-separately; it cannot manage grouping. Do not reverse the migration by deleting
-parties, links or immutable receipts. Re-enable the paired application only after
-the failed acceptance check is understood.
+the new lifecycle columns, tables, and audit history. The old directory will
+show source records separately; it cannot manage grouping or recover archived
+parties. Do not reverse the migration by deleting parties, links, lifecycle
+events, or immutable receipts. Re-enable the paired application only after the
+failed acceptance check is understood.
 
 ### Deferred functionality
 

@@ -26,9 +26,15 @@ export interface BusinessPartyMember {
 export interface BusinessPartyPreview {
   action: BusinessPartyOperation["action"]; partyId: string | null; partyVersion: number | null;
   displayName: string; kind: BusinessPartyRoot["kind"]; members: BusinessPartyMember[];
-  removedMember: BusinessPartyMember | null; contextVersion: string;
+  removedMember: BusinessPartyMember | null; resultStatus: "active" | "archived"; contextVersion: string;
 }
-interface PartyRow { id: string; kind: BusinessPartyRoot["kind"]; display_name: string; sort_name: string; status: "active" | "closed"; version: number }
+interface PartyRow {
+  id: string; kind: BusinessPartyRoot["kind"]; display_name: string; sort_name: string;
+  status: "active" | "closed"; version: number; lifecycle_origin: "source_backed" | "operations";
+  lifecycle_state: "active" | "archived";
+  lifecycle_cause: "created" | "source_unavailable" | "operator_closed" | "exact_source_return" | "reviewed_relink";
+  archived_at: string | null;
+}
 interface LinkRow { id: string; party_id: string; source_id: string; record_kind: "organization" | "client"; record_id: string; unlinked_at: string | null }
 interface RootFact {
   root: BusinessPartyRoot; externalId: string; name: string | null; sourceName: string;
@@ -92,7 +98,8 @@ async function epoch(database: Database): Promise<number> {
 }
 async function partyRows(database: Database, id: string): Promise<{ party: PartyRow; links: LinkRow[] }> {
   if (!identifier.safeParse(id).success) return unavailable();
-  const party = await database.prepare("SELECT id,kind,display_name,sort_name,status,version FROM business_parties WHERE id=?").bind(id).first<PartyRow>();
+  const party = await database.prepare(`SELECT id,kind,display_name,sort_name,status,version,lifecycle_origin,lifecycle_state,lifecycle_cause,archived_at
+    FROM business_parties WHERE id=?`).bind(id).first<PartyRow>();
   if (!party) return unavailable();
   const links = (await database.prepare(`SELECT id,party_id,source_id,record_kind,record_id,unlinked_at FROM business_party_links
     WHERE party_id=? AND unlinked_at IS NULL ORDER BY source_id,record_kind,record_id LIMIT 33`).bind(id).all<LinkRow>()).results;
@@ -140,7 +147,7 @@ async function prepare(database: Database, principal: StaffPrincipal, raw: unkno
   if (operation.action === "create") roots = operation.roots;
   else {
     ({ party, links } = await partyRows(database, operation.partyId));
-    if (party.status !== "active" || party.version !== operation.expectedVersion) return changed();
+    if (party.version !== operation.expectedVersion) return changed();
     roots = links.map(linkRoot);
     if (operation.action === "add") roots.push(operation.root);
     else {
@@ -165,17 +172,20 @@ async function prepare(database: Database, principal: StaffPrincipal, raw: unkno
       WHERE link.unlinked_at IS NULL LIMIT 1`).bind(JSON.stringify(additions)).first();
     if (existing) throw new HTTPException(409, { message: "A source record is already linked. Review its existing business party first." });
   }
+  const remainingCount = operation.action === "unlink" ? links.length - 1 : links.length + (operation.action === "add" ? 1 : 0);
+  const resultStatus: BusinessPartyPreview["resultStatus"] = operation.action === "create" || operation.action === "add"
+    ? "active" : remainingCount === 0 && party?.lifecycle_origin === "source_backed" ? "archived" : party?.lifecycle_state ?? "active";
   const preview: BusinessPartyPreview = { action: operation.action, partyId: party?.id ?? null, partyVersion: party?.version ?? null,
     displayName: party?.display_name ?? (operation.action === "create" ? operation.displayName : ""), kind: roots[0]!.kind,
     members: facts.filter(fact => fact.linkId !== removedId).map(member),
     removedMember: facts.find(fact => fact.linkId === removedId) ? member(facts.find(fact => fact.linkId === removedId)!) : null,
-    contextVersion: await digest({ operation, party, links, facts, epoch: currentEpoch, policy: currentPolicy }) };
+    resultStatus, contextVersion: await digest({ operation, party, links, facts, epoch: currentEpoch, policy: currentPolicy, resultStatus }) };
   return { operation, party, links, facts, epoch: currentEpoch, policy: currentPolicy, preview };
 }
 function currentGuard(prepared: Pick<Prepared, "facts" | "party" | "links" | "epoch" | "policy" | "operation">,
-  requireManage = true): { sql: string; values: (string | number)[] } {
+  requireManage = true): { sql: string; values: (string | number | null)[] } {
   const { facts, party, links, epoch: revision, policy: currentPolicy, operation } = prepared;
-  const values: (string | number)[] = [currentPolicy.actorId, revision, JSON.stringify(facts)];
+  const values: (string | number | null)[] = [currentPolicy.actorId, revision, JSON.stringify(facts)];
   let sql = `EXISTS(SELECT 1 FROM staff_users actor WHERE actor.id=? AND actor.status='active'
       AND ${requireManage ? manageSql : `${globalPermission("team.view")} AND (${manageSql})=${currentPolicy.canManage ? 1 : 0}`})
     AND EXISTS(SELECT 1 FROM pa_connector_directory_state WHERE id='directory' AND read_revision=?)
@@ -190,11 +200,14 @@ function currentGuard(prepared: Pick<Prepared, "facts" | "party" | "links" | "ep
           OR (mapping.record_kind='client' AND EXISTS(SELECT 1 FROM pa_clients client WHERE client.id=mapping.local_id
             AND client.projection_source_id=mapping.projection_source_id AND client.active=1 AND client.organization_id IS NULL AND client.name=json_extract(fact.value,'$.name')))))))`;
   if (party) {
-    sql += ` AND EXISTS(SELECT 1 FROM business_parties WHERE id=? AND version=? AND status=? AND display_name=? AND sort_name=? AND kind=?)
+    sql += ` AND EXISTS(SELECT 1 FROM business_parties WHERE id=? AND version=? AND status=? AND display_name=? AND sort_name=? AND kind=?
+        AND lifecycle_origin=? AND lifecycle_state=? AND lifecycle_cause=? AND archived_at IS ?)
       AND (SELECT count(*) FROM business_party_links WHERE party_id=? AND unlinked_at IS NULL)=?
       AND NOT EXISTS(SELECT 1 FROM business_party_links link WHERE link.party_id=? AND link.unlinked_at IS NULL
         AND NOT EXISTS(SELECT 1 FROM json_each(?) expected WHERE json_extract(expected.value,'$.id')=link.id))`;
-    values.push(party.id, party.version, party.status, party.display_name, party.sort_name, party.kind, party.id, links.length, party.id, JSON.stringify(links));
+    values.push(party.id, party.version, party.status, party.display_name, party.sort_name, party.kind,
+      party.lifecycle_origin, party.lifecycle_state, party.lifecycle_cause, party.archived_at,
+      party.id, links.length, party.id, JSON.stringify(links));
   }
   if (operation.action !== "unlink") {
     sql += ` AND NOT EXISTS(SELECT 1 FROM business_party_links link JOIN json_each(?) added ON link.source_id=json_extract(added.value,'$.sourceId')
@@ -216,7 +229,8 @@ export async function previewBusinessParty(env: Environment, principal: StaffPri
 export async function readBusinessParty(env: Environment, principal: StaffPrincipal, partyId: string) {
   const database = db(env), currentPolicy = await policy(database, principal), currentEpoch = await epoch(database);
   const { party, links } = await partyRows(database, partyId);
-  if (party.status !== "active" || !links.length) return unavailable();
+  if (party.lifecycle_state === "archived" && !currentPolicy.canManage) return unavailable();
+  if (!links.length && party.lifecycle_origin === "source_backed" && party.lifecycle_state === "active") return unavailable();
   const facts = await rootFacts(database, links.map(linkRoot), links, currentPolicy.canManage ? new Set(links.map(link => link.id)) : undefined);
   // Available members remain name/ownership-fenced even in repair mode. Only
   // already-unavailable members may use the redacted immutable-map proof.
@@ -226,12 +240,15 @@ export async function readBusinessParty(env: Environment, principal: StaffPrinci
   const stillCurrent = await database.prepare(`SELECT 1 current WHERE ${guard.sql}`).bind(...guard.values).first();
   if (!stillCurrent) return changed();
   return { id: party.id, kind: party.kind, displayName: party.display_name, version: party.version,
-    status: "active" as const, members: facts.map(member), canManage: currentPolicy.canManage, needsReview: facts.some(fact => fact.name === null) };
+    status: party.lifecycle_state, lifecycleOrigin: party.lifecycle_origin, archiveCause: party.lifecycle_state === "archived" ? party.lifecycle_cause : null,
+    archivedAt: party.archived_at, members: facts.map(member), canManage: currentPolicy.canManage,
+    needsReview: facts.some(fact => fact.name === null) };
 }
 export async function readBusinessPartyForRoot(env: Environment, principal: StaffPrincipal, root: BusinessPartyRoot) {
   const database = db(env); await policy(database, principal);
   const row = await database.prepare(`SELECT party.id FROM business_party_links link JOIN business_parties party ON party.id=link.party_id
-    WHERE link.source_id=? AND link.record_kind=? AND link.record_id=? AND link.unlinked_at IS NULL AND party.status='active'`)
+    WHERE link.source_id=? AND link.record_kind=? AND link.record_id=? AND link.unlinked_at IS NULL
+      AND party.status='active' AND party.lifecycle_state='active'`)
     .bind(root.sourceId, recordKind(root.kind), root.recordId).first<{ id: string }>();
   if (!row) return { businessParty: null, canManageBusinessParties: (await policy(database, principal)).canManage };
   try {
@@ -262,7 +279,7 @@ async function replay(database: Database, principal: StaffPrincipal, operation: 
   for (const fact of facts) if (fact.name !== null) fact.requireLive = true;
   const guard = currentGuard({ operation, party, links, facts, epoch: currentEpoch, policy: currentPolicy });
   if (!await database.prepare(`SELECT 1 current WHERE ${guard.sql}`).bind(...guard.values).first()) return changed();
-  return { partyId: saved.party_id, version: saved.result_version, status: saved.result_status, replayed: true };
+  return { partyId: saved.party_id, version: saved.result_version, status: party.lifecycle_state, replayed: true };
 }
 export async function mutateBusinessParty(env: Environment, principal: StaffPrincipal, raw: unknown) {
   const parsed = businessPartyMutationSchema.safeParse(raw);
@@ -283,24 +300,35 @@ export async function mutateBusinessParty(env: Environment, principal: StaffPrin
     throw error;
   }
   const partyId = prepared.party?.id ?? crypto.randomUUID(), version = (prepared.party?.version ?? 0) + 1;
-  const status = operation.action === "unlink" && prepared.links.length === 1 ? "closed" : "active";
+  const storageStatus = prepared.preview.resultStatus === "archived" ? "closed" : "active";
+  const relinking = operation.action === "add" && prepared.party?.lifecycle_state === "archived";
+  const lifecycleCause = prepared.preview.resultStatus === "archived"
+    ? (operation.action === "unlink" && prepared.links.length === 1 ? "operator_closed" : prepared.party?.lifecycle_cause ?? "source_unavailable")
+    : relinking ? "reviewed_relink" : prepared.party?.lifecycle_cause ?? "created";
   const guard = currentGuard(prepared);
   const statements = [database.prepare(`INSERT INTO business_party_write_fences(party_id,write_guard)
     VALUES(?,CASE WHEN ${guard.sql} THEN 1 ELSE 0 END) ON CONFLICT(party_id) DO UPDATE SET write_guard=excluded.write_guard`)
     .bind(partyId, ...guard.values)];
   if (operation.action === "create") statements.push(database.prepare(`INSERT INTO business_parties(id,kind,display_name,sort_name,created_by,updated_by)
     VALUES(?,?,?,?,?,?)`).bind(partyId, prepared.preview.kind, operation.displayName, operation.displayName.toLocaleLowerCase("en-US"), principal.id, principal.id));
+  if (relinking && operation.action === "add") statements.push(database.prepare(`INSERT INTO business_party_relink_fences
+    (party_id,source_id,record_kind,record_id,actor_id,write_guard)
+    SELECT ?,?,?,?,?,write_guard FROM business_party_write_fences WHERE party_id=? AND write_guard=1`)
+    .bind(partyId, operation.root.sourceId, recordKind(operation.root.kind), operation.root.recordId, principal.id, partyId));
   if (operation.action === "unlink") statements.push(database.prepare(`UPDATE business_party_links SET unlinked_at=datetime('now'),unlinked_by=?
     WHERE id=? AND party_id=? AND unlinked_at IS NULL`).bind(principal.id, operation.linkId, partyId));
   else for (const fact of prepared.facts.filter(fact => fact.linkId === null)) statements.push(database.prepare(`INSERT INTO business_party_links
     (id,party_id,source_id,record_kind,record_id,linked_by) VALUES(?,?,?,?,?,?)`)
     .bind(crypto.randomUUID(), partyId, fact.root.sourceId, recordKind(fact.root.kind), fact.root.recordId, principal.id));
-  if (operation.action !== "create") statements.push(database.prepare(`UPDATE business_parties SET version=version+1,status=?,updated_by=?,updated_at=datetime('now')
-    WHERE id=? AND version=?`).bind(status, principal.id, partyId, operation.expectedVersion));
+  if (operation.action !== "create") statements.push(database.prepare(`UPDATE business_parties SET version=version+1,status=?,
+    lifecycle_state=?,lifecycle_cause=?,archived_at=CASE WHEN ?='closed' THEN COALESCE(archived_at,datetime('now')) ELSE NULL END,
+    updated_by=?,updated_at=datetime('now') WHERE id=? AND version=?`)
+    .bind(storageStatus, prepared.preview.resultStatus, lifecycleCause, storageStatus, principal.id, partyId, operation.expectedVersion));
   statements.push(database.prepare(`INSERT INTO business_party_events(id,party_id,version,actor_id,action,details_json) VALUES(?,?,?,?,?,?)`)
-    .bind(crypto.randomUUID(), partyId, version, principal.id, operation.action, JSON.stringify({ operation })),
+    .bind(crypto.randomUUID(), partyId, version, principal.id, operation.action, JSON.stringify({ operation, resultStatus: prepared.preview.resultStatus })),
   database.prepare(`INSERT INTO business_party_mutations(actor_id,idempotency_key,fingerprint,party_id,result_version,result_status) VALUES(?,?,?,?,?,?)`)
-    .bind(principal.id, input.idempotencyKey, fingerprint, partyId, version, status));
+    .bind(principal.id, input.idempotencyKey, fingerprint, partyId, version, storageStatus));
+  if (relinking) statements.push(database.prepare("DELETE FROM business_party_relink_fences WHERE party_id=?").bind(partyId));
   try { await database.batch(statements); }
   catch (error) {
     const winner = await receipt(database, principal.id, input.idempotencyKey);
@@ -308,6 +336,7 @@ export async function mutateBusinessParty(env: Environment, principal: StaffPrin
     if (error instanceof Error && /business.party|UNIQUE constraint|FOREIGN KEY constraint/i.test(error.message)) return changed();
     throw new HTTPException(503, { message: "Business links could not be saved. Retry with the same operation key." });
   }
-  const result = await replay(database, principal, operation, { fingerprint, party_id: partyId, result_version: version, result_status: status }, fingerprint);
+  const result = await replay(database, principal, operation,
+    { fingerprint, party_id: partyId, result_version: version, result_status: storageStatus }, fingerprint);
   return { ...result, replayed: false };
 }

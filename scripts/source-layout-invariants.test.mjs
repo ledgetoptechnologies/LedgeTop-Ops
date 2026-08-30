@@ -197,6 +197,12 @@ test("Operations and staging find the canonical client migration history", () =>
   assert(read("docs/staging/operations.wrangler.json.example").includes('"migrations_dir": "../client/migrations"'));
 });
 
+test("the Operations business-party lifecycle migration stays LF-only for D1 trigger parsing", () => {
+  assert.match(read(".gitattributes"), /^apps\/operations\/migrations\/\*\.sql text eol=lf$/m);
+  const bytes = fs.readFileSync(path.join(root, "apps/operations/migrations/0048_business_party_lifecycle.sql"));
+  assert.equal(bytes.includes(13), false);
+});
+
 test("the Project Alpha handoff stays pinned to the reviewed compatibility corpus", () => {
   const prompt = read("docs/project-alpha-client-portal-agent-prompt.md").replaceAll("\r\n", "\n");
   assert(prompt.includes("Project Alpha commit `60e735265e0d50ef880fde33e058d213a8b70c4b`"));
