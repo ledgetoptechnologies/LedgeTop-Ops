@@ -92,6 +92,13 @@ function sourceStatus(value: string): "neutral" | "success" | "warning" | "dange
   if (["projection_pending", "mapping_unavailable", "pending"].includes(value)) return "warning";
   return "neutral";
 }
+function unavailablePageMessage(page: SourcePage, subject: "Projects" | "Contacts"): string | null {
+  if (page.available) return null;
+  if (page.reason === "permission_required") return `${subject} are unavailable because your current role does not grant access.`;
+  if (page.reason === "workspace_unavailable") return `${subject} are unavailable until this source workspace is ready.`;
+  if (page.reason === "not_applicable") return `${subject} are not provided by this source.`;
+  return `${subject} are currently unavailable from this source.`;
+}
 function directoryFilters(): string { return clientDirectoryReturnPath().replace(/^\/clients/, ""); }
 function sourceEntryPath(path: string): string {
   const hashAt = path.indexOf("#"), base = hashAt === -1 ? path : path.slice(0, hashAt), hash = hashAt === -1 ? "" : path.slice(hashAt);
@@ -385,7 +392,9 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
                 {member.availability === "unavailable" ? <p>Project history is unavailable until this source link is reviewed.</p>
                   : state?.busy ? <p role="status">Loading {member.sourceName} projects…</p>
                     : state?.error ? <div role="alert"><p>{state.error}</p><button type="button" className="button-ghost" onClick={() => setSourceRevision(value => value + 1)}>Retry source details</button></div>
-                      : state?.data ? <><ul className="business-party-preview-list">{state.data.projects.items.map(project => <li key={project.row_key || project.id}>
+                      : state?.data ? unavailablePageMessage(state.data.projects.page, "Projects")
+                        ? <p>{unavailablePageMessage(state.data.projects.page, "Projects")}</p>
+                        : <><ul className="business-party-preview-list">{state.data.projects.items.map(project => <li key={project.row_key || project.id}>
                         <div><strong>{project.name}</strong><small>{member.sourceName}{project.manager_name ? ` · Manager: ${project.manager_name}` : ""}</small></div>
                         <StatusPill tone={project.status === "active" ? "success" : sourceStatus(project.status || "")}>{project.status?.replaceAll("_", " ") || "Status not recorded"}</StatusPill>
                       </li>)}</ul>{!state.data.projects.items.length && <p>No projects are visible from this source.</p>}
@@ -401,7 +410,9 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
                 {member.availability === "unavailable" ? <p>Contacts are unavailable until this source link is reviewed.</p>
                   : state?.busy ? <p role="status">Loading {member.sourceName} contacts…</p>
                     : state?.error ? <p role="alert">{state.error}</p>
-                      : state?.data ? <><ul className="business-party-preview-list">{state.data.contacts.items.map(contact => <li key={contact.row_key || contact.public_id}>
+                    : state?.data ? unavailablePageMessage(state.data.contacts.page, "Contacts")
+                      ? <p>{unavailablePageMessage(state.data.contacts.page, "Contacts")}</p>
+                      : <><ul className="business-party-preview-list">{state.data.contacts.items.map(contact => <li key={contact.row_key || contact.public_id}>
                         <div><strong>{contact.display_name}</strong><small>{contact.email || contact.phone || "No contact details provided"}</small></div>
                       </li>)}</ul>{!state.data.contacts.items.length && <p>No business contacts are visible from this source.</p>}
                         <a className="button button-ghost" href={sourceEntryPath(state.data.entryPoints.contacts)}>Open {member.sourceName} contacts</a></> : null}

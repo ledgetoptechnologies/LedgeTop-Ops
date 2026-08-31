@@ -43,6 +43,9 @@ export async function readBusinessPartySourceWorkspace(env: Env, principal: Staf
   const currentParty = await readBusinessParty(env, principal, partyId);
   const currentMember = currentParty.members.find(candidate => candidate.linkId === linkId);
   if (currentParty.version !== expectedVersion || !currentMember || !sameMember(member, currentMember)) changed();
+  // Recheck the exact source context after the final membership read so a
+  // workspace remap or authority change during that read fails closed.
+  await verifyClientHubDetailContext(env, principal, context);
 
   const sourcePath = member.detailPath;
   return {

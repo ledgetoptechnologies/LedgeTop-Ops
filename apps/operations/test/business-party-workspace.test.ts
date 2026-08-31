@@ -59,7 +59,9 @@ describe("unified business-party source workspace", () => {
     expect(mocks.resolveContext).toHaveBeenCalledWith(env, principal, "organization", "org-2", "project-alpha:secondary", "business");
     expect(mocks.listProjects).toHaveBeenCalledWith(env, principal, context, { initial: true, limit: 5 });
     expect(mocks.listCollection).toHaveBeenCalledWith(env, context, "businessContacts", { initial: true, limit: 5 });
-    expect(mocks.verifyContext).toHaveBeenCalledWith(env, principal, context);
+    expect(mocks.verifyContext).toHaveBeenCalledTimes(2);
+    expect(mocks.verifyContext).toHaveBeenNthCalledWith(1, env, principal, context);
+    expect(mocks.verifyContext).toHaveBeenNthCalledWith(2, env, principal, context);
     expect(mocks.readBusinessParty).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ partyId: "party-a", partyVersion: 4, canonicalRoot: context.canonicalRoot,
       projects, contacts, source: { workspaceAvailable: true, capabilities: context.access },
@@ -97,5 +99,15 @@ describe("unified business-party source workspace", () => {
     expect(mocks.verifyContext).toHaveBeenCalled();
     expect(mocks.listProjects).toHaveBeenCalled();
     expect(mocks.listCollection).toHaveBeenCalled();
+  });
+
+  it("discards hydrated data when the source context changes during the final membership read", async () => {
+    mocks.verifyContext
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new HTTPException(409, { message: "Client mapping changed" }));
+    await expect(readBusinessPartySourceWorkspace(env, principal, "party-a", "link-secondary", 4))
+      .rejects.toMatchObject({ status: 409 } satisfies Partial<HTTPException>);
+    expect(mocks.readBusinessParty).toHaveBeenCalledTimes(2);
+    expect(mocks.verifyContext).toHaveBeenCalledTimes(2);
   });
 });

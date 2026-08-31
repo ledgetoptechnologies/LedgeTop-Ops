@@ -19,7 +19,8 @@ const summary = (root: Root) => ({ workspace_id: null, kind: root.kind, route_ki
   root_namespace: "business", pa_public_id: null });
 type Call = { path: string; query: URLSearchParams; method: string; body: Record<string, unknown> | null; csrf?: string };
 type Handler = (route: Route, call: Call) => Promise<boolean>;
-async function fixture(page: Page, options: { linked?: number; manage?: boolean; handler?: Handler; label?: string; rootCount?: number; contactsPage?: boolean } = {}) {
+async function fixture(page: Page, options: { linked?: number; manage?: boolean; handler?: Handler; label?: string; rootCount?: number;
+  contactsPage?: boolean; projectsUnavailableSource?: string } = {}) {
   const state = { members: roots.slice(0, options.linked || 0).map(root => member(root)), version: 1,
     name: options.label || "Acme combined customer", status: "active", calls: [] as Call[] };
   const manage = options.manage !== false, activeRoots = roots.slice(0, options.rootCount || 3);
@@ -36,15 +37,17 @@ async function fixture(page: Page, options: { linked?: number; manage?: boolean;
       && path === `${apiBase}/${partyId}/sources/${encodeURIComponent(row.linkId)}`);
     if (sourceMember) {
       const base = sourcePath(sourceMember.root);
+      const projectsAvailable = options.projectsUnavailableSource !== sourceMember.root.sourceId;
       return route.fulfill({ json: {
         partyId, partyVersion: state.version, member: sourceMember,
         canonicalRoot: { sourceId: sourceMember.root.sourceId, rootNamespace: "business", kind: sourceMember.root.kind, publicId: sourceMember.root.recordId },
         contextVersion: `source-${sourceMember.root.sourceId}`,
         source: { portalStatus: sourceMember.root.sourceId === primary ? "active" : "not_supported", mappingStatus: "mapped",
           workspaceAvailable: sourceMember.root.sourceId === primary, capabilities },
-        projects: { items: [{ row_key: `project:${sourceMember.root.sourceId}`, id: `project-${sourceMember.root.sourceId}`,
-          name: `${sourceName(sourceMember.root.sourceId)} project`, status: "active", start_date: null, end_date: null, manager_name: null }],
-          page: { available: true, reason: null, nextCursor: "more-projects", hasMore: true, returned: 1, limit: 5 } },
+        projects: { items: projectsAvailable ? [{ row_key: `project:${sourceMember.root.sourceId}`, id: `project-${sourceMember.root.sourceId}`,
+          name: `${sourceName(sourceMember.root.sourceId)} project`, status: "active", start_date: null, end_date: null, manager_name: null }] : [],
+          page: { available: projectsAvailable, reason: projectsAvailable ? null : "permission_required",
+            nextCursor: projectsAvailable ? "more-projects" : null, hasMore: projectsAvailable, returned: projectsAvailable ? 1 : 0, limit: 5 } },
         contacts: { items: [{ row_key: `contact:${sourceMember.root.sourceId}`, public_id: `contact-${sourceMember.root.sourceId}`,
           display_name: `${sourceName(sourceMember.root.sourceId)} contact`, email: `${sourceMember.root.sourceId.split(":").at(-1)}@example.test`, phone: null }],
           page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 } },
@@ -184,6 +187,16 @@ test("linked customer progressively combines exact-source projects and contacts 
   await expect(page).toHaveURL(new RegExp("#customer-contacts$"));
   await page.goBack();
   await expect(page).toHaveURL(new RegExp("#customer-projects$"));
+});
+
+test("an unavailable source project page is not mislabeled as an empty project history", async ({ page }) => {
+  await fixture(page, { linked: 2, projectsUnavailableSource: secondary });
+  await page.goto(`/clients/parties/${partyId}#customer-projects`);
+  const projects = page.locator("#customer-projects");
+  await expect(projects.getByText("Projects are unavailable because your current role does not grant access.", { exact: true })).toBeVisible();
+  await expect(projects.getByText("No projects are visible from this source.", { exact: true })).toHaveCount(0);
+  await expect(projects.getByRole("link", { name: "Open Technologies projects" })).toHaveCount(0);
+  await expect(projects.getByRole("link", { name: "Open Drone Services projects" })).toBeVisible();
 });
 
 test("add and unlink each require a fresh preview while keeping all source records", async ({ page }) => {
