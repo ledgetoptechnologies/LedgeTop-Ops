@@ -1,5 +1,6 @@
-import { PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
+import { createCatalogSourceContext } from "@ltds/shared";
 import type { Env } from "../types";
+import { portalSourceReadableSql } from "../project-alpha-portal-authority";
 import type { ClientPortalSession } from "./types";
 
 export const SERVICE_ASSIGNMENT_REQUEST_POLICY_FLAG = "CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED";
@@ -11,7 +12,9 @@ export type ServiceAssignmentPolicySubjectType = "organization" | "standalone_cl
 
 export interface ServiceAssignmentPolicyProof {
   version: 1;
-  sourceId: typeof PRIMARY_ALPHA_SOURCE_ID;
+  sourceId: string;
+  reviewId: string;
+  reviewRevision: number;
   workspaceId: string;
   localProjectId: string | null;
   subjectType: ServiceAssignmentPolicySubjectType;
@@ -43,6 +46,8 @@ interface CheckpointRow {
   active_generation_id: string;
   source_generation: string;
   source_sequence: number;
+  review_id: string;
+  review_revision: number;
 }
 
 function database(env: Env): D1Database {
@@ -63,7 +68,7 @@ function serviceAssignmentRequestPolicyPrerequisitesReady(env: Env): boolean {
 }
 
 function unavailableSchema(error: unknown): boolean {
-  return /no such (?:table|column):\s*(?:main\.)?(?:pa_service_assignment_|portal_v2_workspaces|pa_portal_workspace_sources|projects|service_assignment_policy_json)/i
+  return /no such (?:table|column):\s*(?:main\.)?(?:pa_service_assignment_|pa_portal_source_authorit|portal_v2_workspaces|pa_portal_workspace_sources|projects|service_assignment_policy_json)/i
     .test(error instanceof Error ? error.message : String(error));
 }
 
@@ -83,7 +88,8 @@ async function exactTarget(env: Env, session: ClientPortalSession, projectId: st
         JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
           AND generation.workspace_id=checkpoint.workspace_id AND generation.source_sequence=checkpoint.source_sequence
           AND generation.status='active' AND generation.complete=1
-        WHERE workspace.id=? AND workspace.status='active' AND workspace.project_alpha_source_id=?
+        WHERE workspace.id=? AND workspace.status='active'
+          AND ${portalSourceReadableSql("workspace.project_alpha_source_id")}
       ), lineage(entity_type,public_id,depth) AS (
         SELECT entity.entity_type,entity.public_id,0
         FROM context JOIN portal_v2_directory_entities entity
@@ -110,7 +116,7 @@ async function exactTarget(env: Env, session: ClientPortalSession, projectId: st
       WHERE EXISTS(SELECT 1 FROM lineage GROUP BY 1
         HAVING COUNT(*)<=64 AND MAX(depth)<12
           AND MAX(CASE WHEN entity_type=context.root_type AND public_id=context.root_public_id THEN 1 ELSE 0 END)=1)`)
-      .bind(session.workspaceId, PRIMARY_ALPHA_SOURCE_ID, projectId, projectId).first<TargetRow>();
+      .bind(session.workspaceId, projectId, projectId).first<TargetRow>();
   }
   return db.prepare(`SELECT workspace.project_alpha_source_id source_id,workspace.root_type subject_type,
       CASE workspace.root_type WHEN 'organization' THEN workspace.pa_organization_public_id
@@ -128,15 +134,16 @@ async function exactTarget(env: Env, session: ClientPortalSession, projectId: st
       AND entity.entity_type=workspace.root_type AND entity.public_id=CASE workspace.root_type
         WHEN 'organization' THEN workspace.pa_organization_public_id ELSE workspace.pa_client_public_id END AND entity.active=1
     WHERE workspace.id=? AND workspace.status='active'
-      AND workspace.project_alpha_source_id=?
+      AND ${portalSourceReadableSql("workspace.project_alpha_source_id")}
       AND workspace.root_type IN ('organization','standalone_client')
       AND CASE workspace.root_type WHEN 'organization' THEN workspace.pa_organization_public_id
         ELSE workspace.pa_client_public_id END IS NOT NULL`)
-    .bind(session.workspaceId, PRIMARY_ALPHA_SOURCE_ID).first<TargetRow>();
+    .bind(session.workspaceId).first<TargetRow>();
 }
 
-async function activeCheckpoint(env: Env, workspaceId: string): Promise<CheckpointRow | null> {
-  return database(env).prepare(`SELECT checkpoint.active_generation_id,checkpoint.source_generation,checkpoint.source_sequence
+async function activeCheckpoint(env: Env, workspaceId: string, sourceId: string): Promise<CheckpointRow | null> {
+  return database(env).prepare(`SELECT checkpoint.active_generation_id,checkpoint.source_generation,checkpoint.source_sequence,
+      review.review_id,review.revision review_revision
     FROM pa_service_assignment_checkpoints checkpoint
     JOIN pa_service_assignment_generations generation ON generation.id=checkpoint.active_generation_id
       AND generation.source_id=checkpoint.source_id AND generation.status='active' AND generation.complete=1
@@ -145,10 +152,14 @@ async function activeCheckpoint(env: Env, workspaceId: string): Promise<Checkpoi
       AND receiver.capability='portal.service-assignments.publish' AND receiver.contract_version=1 AND receiver.state='active'
     JOIN pa_service_assignment_receiver_workspaces enrollment ON enrollment.source_id=checkpoint.source_id
       AND enrollment.workspace_id=? AND enrollment.state='active'
+    JOIN pa_service_assignment_request_policy_reviews review ON review.source_id=checkpoint.source_id
+      AND review.revision=(SELECT MAX(latest.revision) FROM pa_service_assignment_request_policy_reviews latest
+        WHERE latest.source_id=checkpoint.source_id)
+      AND review.state='enabled'
     JOIN pa_portal_workspace_sources owner ON owner.workspace_id=enrollment.workspace_id
       AND owner.projection_source_id=checkpoint.source_id
-    WHERE checkpoint.source_id=?`)
-    .bind(workspaceId, PRIMARY_ALPHA_SOURCE_ID).first<CheckpointRow>();
+    WHERE checkpoint.source_id=? AND ${portalSourceReadableSql("checkpoint.source_id")}`)
+    .bind(workspaceId, sourceId).first<CheckpointRow>();
 }
 
 export function serviceAssignmentPolicyServiceSql(
@@ -183,6 +194,11 @@ export function serviceAssignmentPolicyCheckpointSql(
         AND receiver.capability='portal.service-assignments.publish' AND receiver.contract_version=1 AND receiver.state='active'
       JOIN pa_service_assignment_receiver_workspaces enrollment ON enrollment.source_id=checkpoint.source_id
         AND enrollment.workspace_id=? AND enrollment.state='active'
+      JOIN pa_service_assignment_request_policy_reviews review ON review.source_id=checkpoint.source_id
+        AND review.review_id=? AND review.revision=?
+        AND review.revision=(SELECT MAX(latest.revision) FROM pa_service_assignment_request_policy_reviews latest
+          WHERE latest.source_id=checkpoint.source_id)
+        AND review.state='enabled'
       JOIN pa_portal_workspace_sources owner ON owner.workspace_id=enrollment.workspace_id
         AND owner.projection_source_id=checkpoint.source_id
       JOIN portal_v2_directory_checkpoints directory_checkpoint ON directory_checkpoint.workspace_id=enrollment.workspace_id
@@ -195,7 +211,8 @@ export function serviceAssignmentPolicyCheckpointSql(
         AND target.entity_type=? AND target.public_id=? AND target.active=1
       JOIN portal_v2_workspaces workspace ON workspace.id=enrollment.workspace_id
         AND workspace.status='active' AND workspace.project_alpha_source_id=checkpoint.source_id
-      WHERE checkpoint.source_id=? AND checkpoint.active_generation_id=?
+      WHERE checkpoint.source_id=? AND ${portalSourceReadableSql("checkpoint.source_id")}
+        AND checkpoint.active_generation_id=?
         AND checkpoint.source_generation=? AND checkpoint.source_sequence=?
         AND (
           (target.entity_type IN ('organization','standalone_client')
@@ -221,7 +238,8 @@ export function serviceAssignmentPolicyCheckpointSql(
           ))
         ) AND (? IS NULL OR EXISTS(SELECT 1 FROM projects project WHERE project.id=? AND project.active=1
           AND project.project_alpha_source_id=checkpoint.source_id AND project.project_alpha_project_id=target.public_id)))`,
-    bindings: [proof.workspaceId, proof.directoryGenerationId, proof.directorySourceSequence,
+    bindings: [proof.workspaceId, proof.reviewId, proof.reviewRevision,
+      proof.directoryGenerationId, proof.directorySourceSequence,
       proof.subjectType, proof.subjectPublicId, proof.sourceId, proof.generationId, proof.sourceGeneration, proof.sourceSequence,
       proof.localProjectId, proof.localProjectId],
   };
@@ -249,8 +267,14 @@ export function serializeServiceAssignmentPolicyProof(proof: ServiceAssignmentPo
 function wellFormedProof(proof: ServiceAssignmentPolicyProof): boolean {
   const evaluatedAt = Date.parse(proof.evaluatedAt);
   const expiresAt = Date.parse(proof.expiresAt);
+  let sourceId: string;
+  try { sourceId = createCatalogSourceContext(proof.sourceId).sourceId; }
+  catch { return false; }
   return proof.version === 1
-    && proof.sourceId === PRIMARY_ALPHA_SOURCE_ID
+    && proof.sourceId === sourceId
+    && typeof proof.reviewId === "string"
+    && proof.reviewId.length >= 1 && proof.reviewId.length <= 128
+    && Number.isSafeInteger(proof.reviewRevision) && proof.reviewRevision >= 1
     && proof.workspaceId.length >= 1 && proof.workspaceId.length <= 128
     && proof.subjectPublicId.length >= 1 && proof.subjectPublicId.length <= 128
     && proof.generationId.length >= 1 && proof.generationId.length <= 128
@@ -282,10 +306,13 @@ export async function readServiceAssignmentPolicy(
   if (!serviceAssignmentRequestPolicyPrerequisitesReady(env)) return { state: "unavailable", proof: null, assignedServiceCount: null };
   try {
     const target = await exactTarget(env, session, projectId);
-    if (!target || target.source_id !== PRIMARY_ALPHA_SOURCE_ID || !target.subject_public_id) {
+    if (!target || !target.source_id || !target.subject_public_id) {
       return { state: "unavailable", proof: null, assignedServiceCount: null };
     }
-    const checkpoint = await activeCheckpoint(env, session.workspaceId!);
+    let sourceId: string;
+    try { sourceId = createCatalogSourceContext(target.source_id).sourceId; }
+    catch { return { state: "unavailable", proof: null, assignedServiceCount: null }; }
+    const checkpoint = await activeCheckpoint(env, session.workspaceId!, sourceId);
     if (!checkpoint) return { state: "unavailable", proof: null, assignedServiceCount: null };
     const now = Date.now();
     const evaluatedAt = window?.evaluatedAt ?? new Date(now).toISOString();
@@ -304,8 +331,8 @@ export async function readServiceAssignmentPolicy(
         SELECT effective_until boundary FROM pa_service_assignments WHERE source_id=? AND subject_type=?
           AND subject_public_id=? AND source_generation=? AND source_sequence<=? AND effective_until IS NOT NULL
           AND datetime(effective_until)>datetime(?)
-      )`).bind(PRIMARY_ALPHA_SOURCE_ID,target.subject_type,target.subject_public_id,checkpoint.source_generation,
-        checkpoint.source_sequence,evaluatedAt,PRIMARY_ALPHA_SOURCE_ID,target.subject_type,target.subject_public_id,
+      )`).bind(sourceId,target.subject_type,target.subject_public_id,checkpoint.source_generation,
+        checkpoint.source_sequence,evaluatedAt,sourceId,target.subject_type,target.subject_public_id,
         checkpoint.source_generation,checkpoint.source_sequence,evaluatedAt).first<string>("boundary");
     const calculatedExpiry = Math.min(evaluatedAtMs + 5 * 60_000,
       boundary && Number.isFinite(Date.parse(boundary)) ? Date.parse(boundary) : Number.POSITIVE_INFINITY);
@@ -313,7 +340,9 @@ export async function readServiceAssignmentPolicy(
     if (Date.parse(expiresAt) > calculatedExpiry) return { state: "unavailable", proof: null, assignedServiceCount: null };
     const proof: ServiceAssignmentPolicyProof = {
       version: 1,
-      sourceId: PRIMARY_ALPHA_SOURCE_ID,
+      sourceId,
+      reviewId: checkpoint.review_id,
+      reviewRevision: checkpoint.review_revision,
       workspaceId: session.workspaceId!,
       localProjectId: target.local_project_id,
       subjectType: target.subject_type,
@@ -331,7 +360,7 @@ export async function readServiceAssignmentPolicy(
     const row = await database(env).prepare(`SELECT COUNT(DISTINCT catalog.public_id) count
       FROM pa_service_catalog_items catalog
       WHERE catalog.source_id=? AND catalog.active=1 AND ${service.sql} AND ${checkpointGuard.sql}`)
-      .bind(PRIMARY_ALPHA_SOURCE_ID, ...service.bindings, ...checkpointGuard.bindings).first<{ count: number }>();
+      .bind(sourceId, ...service.bindings, ...checkpointGuard.bindings).first<{ count: number }>();
     if (!row || !Number.isSafeInteger(Number(row.count))) return { state: "unavailable", proof: null, assignedServiceCount: null };
     const count = Number(row.count);
     if (!await serviceAssignmentPolicyProofStillCurrent(env, proof)) {
