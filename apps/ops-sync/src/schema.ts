@@ -33,24 +33,14 @@ export function parseEntitlementEvent(value: unknown, applicationKey: string): E
   return event;
 }
 
-const projectionEntityType = z.enum(["client","organization","project","project_assignment","business_unit","operation","operation_assignment","task","task_assignment"]);
-const projectionEnvelope = {
-  event_id: z.string().uuid(), event_type: z.literal("projection.changed"), occurred_at: z.string().datetime({ offset: true }),
+const projectionEventSchema = z.object({
+  event_id: z.string().uuid(), event_type: z.literal("projection.changed"), occurred_at: z.string().datetime({ offset: true }), schema_version: z.literal(1),
   application_key: z.string().trim().min(2).max(64).regex(/^[a-z0-9][a-z0-9_-]+$/),
-};
-const projectionEventSchema = z.discriminatedUnion("schema_version", [
-  z.object({ ...projectionEnvelope, schema_version: z.literal(1), projection: z.object({
-    entity_type: projectionEntityType, entity_id: identifier, action: z.enum(["upsert","revoke"]),
-    source_updated_at: z.string().datetime({ offset: true }), data: z.record(z.string(),z.unknown()),
-  }).strict() }).strict(),
-  // Deletion is a distinct, intentionally data-free protocol event. An
-  // inactive v1 projection remains reversible source state and is never
-  // inferred to be a tombstone.
-  z.object({ ...projectionEnvelope, schema_version: z.literal(2), projection: z.object({
-    entity_type: projectionEntityType, entity_id: identifier, action: z.literal("tombstone"),
-    source_updated_at: z.string().datetime({ offset: true }), data: z.object({}).strict(),
-  }).strict() }).strict(),
-]);
+  projection: z.object({
+    entity_type: z.enum(["client","organization","project","project_assignment","business_unit","operation","operation_assignment","task","task_assignment"]),
+    entity_id: identifier, action: z.enum(["upsert","revoke"]), source_updated_at: z.string().datetime({ offset: true }), data: z.record(z.string(),z.unknown()),
+  }).strict(),
+}).strict();
 
 export function parseIntegrationEvent(value: unknown, applicationKey: string): IntegrationEvent {
   if (value && typeof value === "object" && (value as {event_type?:unknown}).event_type === "projection.changed") {

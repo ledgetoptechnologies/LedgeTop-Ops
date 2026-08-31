@@ -28,8 +28,7 @@ function event(overrides: Partial<EntitlementEvent> = {}): EntitlementEvent {
 function env(deliveryDb?: D1Database): Env { return {OPS_DB:db,DELIVERY_DB:deliveryDb} as Env; }
 
 const secondary=createProjectAlphaSourceContext("project-alpha:secondary");
-type ProjectionV1Event=Extract<ProjectionEvent,{schema_version:1}>;
-function projection(entityType:ProjectionEvent["projection"]["entity_type"],entityId:string,data:Record<string,unknown>,at="2026-08-26T12:00:00Z"):ProjectionV1Event {
+function projection(entityType:ProjectionEvent["projection"]["entity_type"],entityId:string,data:Record<string,unknown>,at="2026-08-26T12:00:00Z"):ProjectionEvent {
   return {event_id:crypto.randomUUID(),event_type:"projection.changed",occurred_at:at,schema_version:1,application_key:"ltds_ops",
     projection:{entity_type:entityType,entity_id:entityId,action:"upsert",source_updated_at:at,data}};
 }

@@ -71,24 +71,6 @@ describe("Project Alpha webhook validation", () => {
     expect(parseIntegrationEvent({...projection,projection:{...projection.projection,entity_type:"client",entity_id:"70"}},"community_operations").event_type).toBe("projection.changed");
   });
 
-  it("accepts only explicit, data-free schema-v2 tombstones", () => {
-    const tombstone={event_id:"8db76af1-d6c8-41b3-a717-6517a8f50509",event_type:"projection.changed",
-      occurred_at:"2026-08-30T19:00:00.000Z",schema_version:2,application_key:"community_operations",
-      projection:{entity_type:"client",entity_id:"70",action:"tombstone",
-        source_updated_at:"2026-08-30T18:59:00.000Z",data:{}}};
-    const parsed=parseIntegrationEvent(tombstone,"community_operations");
-    expect(parsed.event_type).toBe("projection.changed");
-    if(parsed.event_type==="projection.changed"){
-      expect(parsed.schema_version).toBe(2);
-      expect(parsed.projection).toEqual(tombstone.projection);
-    }
-    expect(()=>parseIntegrationEvent({...tombstone,projection:{...tombstone.projection,action:"upsert"}},"community_operations")).toThrow();
-    expect(()=>parseIntegrationEvent({...tombstone,projection:{...tombstone.projection,data:{name:"Private Client"}}},"community_operations")).toThrow();
-    expect(()=>parseIntegrationEvent({...tombstone,projection:{...tombstone.projection,data:{email:"private@example.test"}}},"community_operations")).toThrow();
-    expect(()=>parseIntegrationEvent({...tombstone,schema_version:1},"community_operations")).toThrow();
-    expect(()=>parseIntegrationEvent({...tombstone,application_key:"other"},"community_operations")).toThrow("application-key-mismatch");
-  });
-
   it("verifies the timestamp and raw body HMAC", async () => {
     const body = new TextEncoder().encode(JSON.stringify(baseEvent));
     const timestamp = "2026-07-17T20:00:00Z";
