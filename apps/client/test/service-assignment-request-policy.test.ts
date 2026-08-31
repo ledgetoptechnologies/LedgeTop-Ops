@@ -424,18 +424,31 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
     expect(await db.prepare(`SELECT ${requestGuard.sql} allowed`).bind(...requestGuard.bindings).first<number>("allowed")).toBe(1);
     const created = await createServiceRequestDraft(env, session, input, "policy-create-key-0001");
     expect(created?.kind).toBe("created");
-    const stored = await db.prepare(`SELECT service_assignment_policy_json proof
+    const stored = await db.prepare(`SELECT service_assignment_policy_v2_json proof
       FROM client_service_request_drafts WHERE create_idempotency_key='policy-create-key-0001'`)
       .first<string>("proof");
-    expect(JSON.parse(stored!)).toMatchObject({
-      sourceId, workspaceId, localProjectId: "project-a", subjectType: "project",
-      subjectPublicId: "pa-project-a", directoryGenerationId: "directory-1",
+    const persistedProof = JSON.parse(stored!);
+    expect(persistedProof).toEqual({
+      version: 2, sourceId, reviewId: "policy-review-primary", reviewRevision: 1,
+      workspaceId, localProjectId: "project-a", subjectType: "project",
+      subjectPublicId: "pa-project-a", generationId: "assignment-generation",
+      sourceGeneration: "assignments-v1", sourceSequence: 1,
+      directoryGenerationId: "directory-1", directorySourceSequence: 1,
+      evaluatedAt: expect.any(String), expiresAt: expect.any(String),
     });
+    expect(Object.keys(persistedProof)).toEqual([
+      "version", "sourceId", "reviewId", "reviewRevision", "workspaceId", "localProjectId",
+      "subjectType", "subjectPublicId", "generationId", "sourceGeneration", "sourceSequence",
+      "directoryGenerationId", "directorySourceSequence", "evaluatedAt", "expiresAt",
+    ]);
+    expect(await db.prepare(`SELECT service_assignment_policy_json FROM client_service_request_drafts
+      WHERE create_idempotency_key='policy-create-key-0001'`).first<string>("service_assignment_policy_json"))
+      .toBeNull();
     await expect(db.prepare(`UPDATE client_service_request_drafts
-      SET service_assignment_policy_json=json_remove(service_assignment_policy_json,'$.workspaceId')
+      SET service_assignment_policy_v2_json=json_remove(service_assignment_policy_v2_json,'$.reviewId')
       WHERE create_idempotency_key='policy-create-key-0001'`).run()).rejects.toThrow();
     await expect(db.prepare(`UPDATE client_service_request_drafts
-      SET service_assignment_policy_json=json_set(service_assignment_policy_json,'$.localProjectId',NULL)
+      SET service_assignment_policy_v2_json=json_set(service_assignment_policy_v2_json,'$.localProjectId',NULL)
       WHERE create_idempotency_key='policy-create-key-0001'`).run()).rejects.toThrow();
     if (!created || !("draft" in created)) throw new Error("expected created draft");
     const saved = await saveServiceRequestDraft(env, session, created.draft.id, created.draft.version,
@@ -446,7 +459,12 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       "policy-submit-key-0001");
     expect(submitted?.kind).toBe("submitted");
     expect(await db.prepare(`SELECT count(*) count FROM client_service_requests
-      WHERE service_assignment_policy_json IS NOT NULL`).first<number>("count")).toBe(1);
+      WHERE service_assignment_policy_v2_json IS NOT NULL AND service_assignment_policy_json IS NULL`)
+      .first<number>("count")).toBe(1);
+    expect(JSON.parse((await db.prepare(`SELECT service_assignment_policy_v2_json proof
+      FROM client_service_requests`).first<string>("proof"))!)).toMatchObject({
+        version: 2, sourceId, reviewId: "policy-review-primary", reviewRevision: 1,
+      });
 
     let pending = true;
     const wrapped = new Proxy(db, {

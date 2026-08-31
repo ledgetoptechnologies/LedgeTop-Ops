@@ -11,7 +11,7 @@ export class ServiceAssignmentPolicyUnavailableError extends Error {
 export type ServiceAssignmentPolicySubjectType = "organization" | "standalone_client" | "project";
 
 export interface ServiceAssignmentPolicyProof {
-  version: 1;
+  version: 2;
   sourceId: string;
   reviewId: string;
   reviewRevision: number;
@@ -68,7 +68,7 @@ function serviceAssignmentRequestPolicyPrerequisitesReady(env: Env): boolean {
 }
 
 function unavailableSchema(error: unknown): boolean {
-  return /no such (?:table|column):\s*(?:main\.)?(?:pa_service_assignment_|pa_portal_source_authorit|portal_v2_workspaces|pa_portal_workspace_sources|projects|service_assignment_policy_json)/i
+  return /no such (?:table|column):\s*(?:main\.)?(?:pa_service_assignment_|pa_portal_source_authorit|portal_v2_workspaces|pa_portal_workspace_sources|projects|service_assignment_policy_v2_json)/i
     .test(error instanceof Error ? error.message : String(error));
 }
 
@@ -250,6 +250,8 @@ export function serializeServiceAssignmentPolicyProof(proof: ServiceAssignmentPo
   return JSON.stringify({
     version: proof.version,
     sourceId: proof.sourceId,
+    reviewId: proof.reviewId,
+    reviewRevision: proof.reviewRevision,
     workspaceId: proof.workspaceId,
     localProjectId: proof.localProjectId,
     subjectType: proof.subjectType,
@@ -270,7 +272,7 @@ function wellFormedProof(proof: ServiceAssignmentPolicyProof): boolean {
   let sourceId: string;
   try { sourceId = createCatalogSourceContext(proof.sourceId).sourceId; }
   catch { return false; }
-  return proof.version === 1
+  return proof.version === 2
     && proof.sourceId === sourceId
     && typeof proof.reviewId === "string"
     && proof.reviewId.length >= 1 && proof.reviewId.length <= 128
@@ -339,7 +341,7 @@ export async function readServiceAssignmentPolicy(
     const expiresAt = window?.expiresAt ?? new Date(calculatedExpiry).toISOString();
     if (Date.parse(expiresAt) > calculatedExpiry) return { state: "unavailable", proof: null, assignedServiceCount: null };
     const proof: ServiceAssignmentPolicyProof = {
-      version: 1,
+      version: 2,
       sourceId,
       reviewId: checkpoint.review_id,
       reviewRevision: checkpoint.review_revision,

@@ -493,7 +493,7 @@ export async function createServiceRequestDraft(env: Env, session: ClientPortalS
   const assignmentGuard = reviewedServiceAssignmentGuard(policy.proof, services);
   const authorityGuard = reviewedRequestAuthorityGuard(authority.proof);
   const insert = database.prepare(`INSERT INTO client_service_request_drafts
-    (id,account_id,project_id,created_by_identity_id,draft_json,area_geojson,area_square_meters,area_acres,create_idempotency_key,create_fingerprint,last_mutation_key,catalog_source_id,service_assignment_policy_json)
+    (id,account_id,project_id,created_by_identity_id,draft_json,area_geojson,area_square_meters,area_acres,create_idempotency_key,create_fingerprint,last_mutation_key,catalog_source_id,service_assignment_policy_v2_json)
     SELECT ?,a.id,?,i.id,?,?,?,?,?,?,?,'${PRIMARY_ALPHA_SOURCE_ID}',?
     FROM client_accounts a
     JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
@@ -549,7 +549,7 @@ export async function saveServiceRequestDraft(env: Env, session: ClientPortalSes
   const database = db(env);
   const assignmentGuard = reviewedServiceAssignmentGuard(policy.proof, services);
   const authorityGuard = reviewedRequestAuthorityGuard(authority.proof);
-  const update = database.prepare(`UPDATE client_service_request_drafts AS d SET project_id=?,draft_json=?,area_geojson=?,area_square_meters=?,area_acres=?,service_assignment_policy_json=?,version=version+1,last_mutation_key=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
+  const update = database.prepare(`UPDATE client_service_request_drafts AS d SET project_id=?,draft_json=?,area_geojson=?,area_square_meters=?,area_acres=?,service_assignment_policy_v2_json=?,version=version+1,last_mutation_key=?,updated_at=strftime('%Y-%m-%d %H:%M:%f','now')
     WHERE d.id=? AND d.account_id=? AND d.state='draft' AND d.version=? AND d.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
       AND EXISTS (SELECT 1 FROM client_accounts a
         JOIN client_identity_links i ON i.id=? AND i.account_id=a.id AND i.revoked_at IS NULL
@@ -863,7 +863,7 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
   const assignmentGuard = reviewedServiceAssignmentGuard(policy.proof, draft.services);
   const authorityGuard = reviewedRequestAuthorityGuard(authority.proof);
   const insert = database.prepare(`INSERT INTO client_service_requests
-    (id,account_id,project_id,parent_request_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,desired_completion_at,latitude,longitude,area_geojson,poi_points_json,idempotency_key,request_fingerprint,catalog_source_id,service_assignment_policy_json)
+    (id,account_id,project_id,parent_request_id,created_by_identity_id,request_type,title,details,location_text,preferred_start_at,service_category,deliverables_text,site_contact_name,site_contact_email,site_contact_phone,desired_completion_at,latitude,longitude,area_geojson,poi_points_json,idempotency_key,request_fingerprint,catalog_source_id,service_assignment_policy_v2_json)
     SELECT ?,d.account_id,d.project_id,NULL,d.created_by_identity_id,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,d.catalog_source_id,?
     FROM client_service_request_drafts d
     JOIN client_accounts a ON a.id=d.account_id AND a.status='active'
@@ -891,7 +891,7 @@ export async function submitServiceRequestDraft(env: Env, session: ClientPortalS
       SELECT ?,?,'request_submitted','submitted','staff_triage','request_submitted:submitted:staff_triage',json_object('title',?,'projectId',?,'serviceCount',?,'areaSquareMeters',?) WHERE EXISTS (SELECT 1 FROM client_service_requests WHERE id=?)`).bind(crypto.randomUUID(), requestId, draft.title, draft.projectId, draft.services.length, draft.areaSquareMeters, requestId),
     database.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
       SELECT 'client',?,'client.service_request.submitted','client_service_request',?,json_object('accountId',?,'draftId',?,'serviceCount',?) WHERE EXISTS (SELECT 1 FROM client_service_requests WHERE id=?)`).bind(session.identityId, requestId, session.accountId, draftId, draft.services.length, requestId),
-    database.prepare(`UPDATE client_service_request_drafts SET state='submitted',submitted_request_id=?,submit_idempotency_key=?,submit_fingerprint=?,service_assignment_policy_json=?,submitted_at=datetime('now'),updated_at=datetime('now'),last_mutation_key=? WHERE id=? AND state='draft' AND version=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND EXISTS (SELECT 1 FROM client_service_requests WHERE id=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}')`).bind(requestId, mutationKey, fingerprint, serializeServiceAssignmentPolicyProof(policy.proof),mutationKey, draftId, expectedVersion, requestId),
+    database.prepare(`UPDATE client_service_request_drafts SET state='submitted',submitted_request_id=?,submit_idempotency_key=?,submit_fingerprint=?,service_assignment_policy_v2_json=?,submitted_at=datetime('now'),updated_at=datetime('now'),last_mutation_key=? WHERE id=? AND state='draft' AND version=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' AND EXISTS (SELECT 1 FROM client_service_requests WHERE id=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}')`).bind(requestId, mutationKey, fingerprint, serializeServiceAssignmentPolicyProof(policy.proof),mutationKey, draftId, expectedVersion, requestId),
   ];
   try {
     const results = await database.batch(statements);
