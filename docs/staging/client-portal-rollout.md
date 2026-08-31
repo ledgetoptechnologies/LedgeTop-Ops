@@ -62,7 +62,8 @@ and warns that Bypass disables Access enforcement in
 2. Export both staging D1 databases. List migrations and confirm the exact
    filename sets in `REQUIRED_STAGING_MIGRATIONS`, including
    `0177_domain_neutral_delivery_notifications.sql` and
-   `0178_domain_neutral_delivery_notification_contract.sql`. Migration `0113` is
+   `0178_domain_neutral_delivery_notification_contract.sql`, plus the later
+   `0179`-`0183` assignment/notification sequence. Migration `0113` is
    intentionally reserved and absent. The
    release evidence validator compares the complete filename sets; do not
    shorten them to a range or infer success from a local migration run.
@@ -78,8 +79,8 @@ and warns that Bypass disables Access enforcement in
    preflight aborts before deleting any active legacy URL whose referenced
    share lacks encrypted secret material. It then removes stored fragments and
    rejects old writers. Do not roll application code back to an old writer
-   after `0178`; use a compatible fix-forward build. Apply the remaining
-   approved Delivery migrations and Operations `0014`-`0023`, record the
+   after `0178`; use a compatible fix-forward build. Apply approved migrations
+   only through `0179` from an immutable expand-only input, record the
    list/apply output, and confirm production migration state was not touched.
    In this release packet, `idempotentReapplyPassed` means rerunning
    `wrangler d1 migrations apply` against the same database and migration
@@ -88,10 +89,16 @@ and warns that Bypass disables Access enforcement in
    ledger-once because SQLite does not support idempotent forms for every
    `ALTER TABLE` or `CREATE TABLE` operation. Never bypass `d1_migrations` to
    manufacture reapply evidence.
-5. Upload a version with the portal false and inspect routes, bindings, vars,
+5. With service-assignment sync and policy still false, upload the compatible
+   Client writer after `0179`, shift all Client traffic to that version, and
+   drain every old draft/submission writer. Record the immutable version and
+   drain proof. Only then apply `0180`-`0183` from the final input and Operations
+   through `0049`. The combined candidate is not an expand-only input; do not
+   run one all-pending apply or execute raw migration SQL.
+6. Upload a final version with the portal false and inspect routes, bindings, vars,
    and secret names. Deploy only that reviewed version after deployment
    approval.
-6. Atomically apply the reviewed hostname/origin set from prerequisite 5 with
+7. Atomically apply the reviewed hostname/origin set from prerequisite 5 with
    the corresponding DNS, routes, and Access applications. Verify both staging
    hosts' DNS/TLS and `/health`, then verify a `404` for
    disabled `/api/client/*`. Prove public namespaces fail on `client-staging`
@@ -99,20 +106,20 @@ and warns that Bypass disables Access enforcement in
    reachable without Access, an Access assertion is
    absent, a password-protected share still requires its password, and revoked
    or expired shares remain denied.
-7. Verify `/assets/*` is Worker-first on both exact hosts because both SPAs use
+8. Verify `/assets/*` is Worker-first on both exact hosts because both SPAs use
    the same immutable build assets. Encoded traversal must be rejected, and an
    asset-shaped path must not reach `/portal`, `/api/client`, `/s`,
    `/client-share`, or `/api/public`. Verify the Access cookie remains
    host-local (no `Domain` attribute), the single human Access audience is used
    only on the authenticated host, and persisted notification payloads contain
    no fragment-bearing share URL.
-8. Only after a separate temporary-activation approval, create a new reviewed
+9. Only after a separate temporary-activation approval, create a new reviewed
    staging version with the portal true. Test valid client login, invalid
    audience, unprovisioned identity, revoked membership, cross-account/project
    denial, staff/client ACL separation, team-manager restrictions, request
    idempotency/rate limiting, request status notification outbox, delivery
    handoff, logout/session expiry, and public-share isolation.
-9. Restore the reviewed false configuration in a new staging version. Re-run
+10. Restore the reviewed false configuration in a new staging version. Re-run
    the disabled `404` and public-share checks. Complete
    `release-evidence.json.example`; it cannot pass until the final false state,
    exact Access/public-path contract, migration evidence, and test evidence are

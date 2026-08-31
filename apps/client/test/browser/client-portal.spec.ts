@@ -35,7 +35,8 @@ async function mockAuthorizedPortal(
   page: Page,
   mapboxPublicToken: string | null = null,
   fixtureRequests = requests,
-  workflowEvents?: { edited?: boolean; changeRequested?: boolean; estimateAccepted?: boolean; cancelled?: boolean },
+  workflowEvents?: { edited?: boolean; changeRequested?: boolean; estimateAccepted?: boolean; cancelled?: boolean;
+    cancellationKeys?: string[]; failFirstCancellation?: boolean },
   locationFixtures: { project: DeliveryLocationCollection; past: DeliveryLocationCollection } = {
     project: { points: [], imageCount: 0, truncated: false },
     past: { points: [], imageCount: 0, truncated: false },
@@ -140,8 +141,12 @@ async function mockAuthorizedPortal(
       if (workflowEvents) workflowEvents.estimateAccepted = true;
       await route.fulfill({ json: { request: { ...fixtureRequests[1], operationalEstimate: { ...fixtureRequests[1]?.operationalEstimate, status: "accepted" } } } });
     } else if (request.method() === "POST" && path === "/api/client/service-requests/request-a/cancel") {
-      expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+      const cancellationKey = request.headers()["idempotency-key"];
+      expect(cancellationKey).toMatch(/^[0-9a-f-]{36}$/);
       expect(request.postData()).toBeNull();
+      workflowEvents?.cancellationKeys?.push(cancellationKey!);
+      if (workflowEvents?.failFirstCancellation && workflowEvents.cancellationKeys?.length === 1)
+        return route.fulfill({ status: 503, json: { error: "Cancellation response was interrupted" } });
       if (workflowEvents) workflowEvents.cancelled = true;
       await route.fulfill({ json: { request: { ...fixtureRequests[0], status: "cancelled", updatedAt: "2026-08-01T14:00:00.000Z" } } });
     } else {
@@ -1602,4 +1607,19 @@ test("client can cancel pre-work requests and sees PA draft creation without an 
   await expect(submitted.getByText("Cancelled", { exact: true })).toBeVisible();
   await expect(submitted.getByRole("button", { name: "Cancel request" })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("client cancellation reuses its idempotency key after an uncertain response", async ({ page }) => {
+  const workflowEvents = { cancellationKeys: [] as string[], failFirstCancellation: true, cancelled: false };
+  await mockAuthorizedPortal(page, null, requests, workflowEvents);
+  await page.goto("/portal/projects/project-a?tab=requests");
+  const request = page.locator("article").filter({ hasText: requests[0]!.title });
+  page.on("dialog", async dialog => dialog.type() === "confirm" ? dialog.accept() : dialog.dismiss());
+  await request.getByRole("button", { name: "Cancel request" }).click();
+  await expect(request.getByRole("button", { name: "Retry cancellation" })).toBeVisible();
+  await request.getByRole("button", { name: "Retry cancellation" }).click();
+  await expect.poll(() => workflowEvents.cancelled).toBe(true);
+  expect(workflowEvents.cancellationKeys).toHaveLength(2);
+  expect(workflowEvents.cancellationKeys[1]).toBe(workflowEvents.cancellationKeys[0]);
+  await expect(request.getByText("Cancelled", { exact: true })).toBeVisible();
 });

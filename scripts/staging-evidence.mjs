@@ -284,6 +284,13 @@ export function validateEvidence(evidence, options = {}) {
   for (const proof of ["videoRecoveryCompleted", "videoRowsPendingForTrueNas", "legacyBridgeAcceptanceMatrixPassed"]) {
     if (deliveryMigration[proof] !== true) errors.push(`delivery staging migrations must prove ${proof}`);
   }
+  for (const proof of ["serviceAssignmentV2ExpandApplied", "serviceAssignmentOldWritersDrained", "serviceAssignmentContractMigrationsApplied"]) {
+    if (deliveryMigration[proof] !== true) errors.push(`delivery staging migration barrier must prove ${proof}`);
+  }
+  if (!populated(deliveryMigration.serviceAssignmentCompatibleWriterVersionId))
+    errors.push("delivery staging migration barrier needs the immutable compatible-writer version deployed after 0179");
+  if (!populated(deliveryMigration.serviceAssignmentBarrierEvidenceRef))
+    errors.push("delivery staging migration barrier needs referenced 0179/deploy/drain/0180-0183 evidence");
   if (migrations.productionUnchanged !== true) errors.push("production migrations must be confirmed unchanged");
 
   const externalGates = evidence.externalGates ?? {};

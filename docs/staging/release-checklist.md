@@ -150,6 +150,8 @@ Delivery:
 - `CLIENT_REQUEST_ATTACHMENT_R2_ACCESS_KEY_ID`
 - `CLIENT_REQUEST_ATTACHMENT_R2_SECRET_ACCESS_KEY`
 - `CLIENT_DELEGATED_SHARE_SESSION_SECRET`
+- `PROJECT_ALPHA_CONNECTOR_CREDENTIALS` (the same reviewed source-key envelope
+  provisioned independently to Delivery, Operations, and Ops Sync)
 
 Operations:
 
@@ -172,11 +174,13 @@ Operations:
 - `THUMBNAIL_INGEST_SECRET`
 - `VIEWER_SERVICE_HMAC_SECRET`
 - `VIEWER_EVENT_HMAC_SECRET`
+- `PROJECT_ALPHA_CONNECTOR_CREDENTIALS`
 
 Ops Sync:
 
 - `CF_ACCESS_GROUP_API_TOKEN`
 - `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET`
+- `PROJECT_ALPHA_CONNECTOR_CREDENTIALS`
 
 Self-hosted Viewer (record names in `viewer.configuration.secretNames`, not in
 the Wrangler manifest):
@@ -278,13 +282,17 @@ npm.cmd run staging:check
 ```powershell
 & '.\apps\client\node_modules\.bin\wrangler.cmd' d1 migrations list client-data-staging --remote --config apps/client/wrangler.staging.json
 & '.\apps\operations\node_modules\.bin\wrangler.cmd' d1 migrations list ltds-ops-staging --remote --config apps/operations/wrangler.staging.json
-& '.\apps\client\node_modules\.bin\wrangler.cmd' d1 migrations apply client-data-staging --remote --config apps/client/wrangler.staging.json
-& '.\apps\operations\node_modules\.bin\wrangler.cmd' d1 migrations apply ltds-ops-staging --remote --config apps/operations/wrangler.staging.json
 ```
+
+These are list-only commands. Do **not** run a generic all-pending Delivery
+apply from the combined candidate when `0172` or any of `0179`-`0183` is
+pending. Both ranges contain deployment barriers described below. A passing
+preflight proves configuration shape; it does not make a combined migration
+apply safe.
 
 If the Delivery list includes
 `0172_project_access_authority_history.sql`, stop before the generic Delivery
-`migrations apply` command above. Migration 0172 starts append-only coverage at
+`migrations apply` action. Migration 0172 starts append-only coverage at
 apply time and is the explicit exception to this packet's normal
 migration-first order. Confirm every predecessor is already applied; otherwise
 resolve those predecessors in a separately reviewed release.
@@ -307,15 +315,54 @@ the operator take the final shared-Delivery backup and apply 0172. An old or
 already-running pre-history writer must never commit after
 `collection_started_at` exists.
 
+Migration `0179_service_assignment_policy_proof_v2.sql` is a second mandatory
+split-release barrier. Generate the ignored expand config from the already
+validated Client staging config with
+`npm run staging:client:expand-0179:generate`, then verify it with
+`npm run staging:client:expand-0179:check`. The generator preserves the whole
+staging config and exact D1 ID/bindings, and adds the literal Wrangler pattern
+`migrations/0179_service_assignment_policy_proof_v2.sql`; it refuses a stale
+or broadened output and never copies SQL. Record that derived config as the
+immutable expand input, then retain the ordinary staging config as the final
+input containing `0180`-`0183`. Never copy files out of the combined tree ad
+hoc, edit the migration ledger, or execute these files as raw SQL.
+
+1. Keep `PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED` and
+   `CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED` false.
+2. With explicit `--config apps/client/wrangler.staging.expand-0179.json`, list
+   pending migrations and stop unless the only listed migration is `0179`.
+   Apply it with the same config; verify the ledger, foreign keys, and additive
+   v2 proof columns. A later list with this config must report no migrations.
+3. Upload the compatible Client writer, record its immutable version ID, shift
+   100% of Client traffic to it, and drain every old Client request/job that can
+   write service-request drafts or submissions. Confirm new writes populate
+   only the strict v2 proof and include `reviewId`/`reviewRevision`.
+4. Only after the drain is evidenced may the final input apply
+   `0180_service_assignment_policy_v1_contract.sql`,
+   `0181_service_assignment_request_policy_reviews.sql`, and notification
+   migrations `0182`/`0183` in order. Then apply Operations through `0049` and
+   deploy the paired final applications.
+5. Record `serviceAssignmentV2ExpandApplied`, the compatible writer version,
+   `serviceAssignmentOldWritersDrained`,
+   `serviceAssignmentContractMigrationsApplied`, and the barrier evidence
+   reference in the release evidence. The second Wrangler list/reapply must
+   return `No migrations to apply` only after the final phase.
+
+If no independently reviewed expand-only migration input exists, stop. The
+presence of all five files in one checkout is not permission to apply them in
+one command.
+
 Apply Delivery first because Operations binds the Delivery database. Record
 every migration result. For this milestone, explicitly confirm Delivery
 `0096_client_portal_foundation.sql` through
 `0112_public_share_location_privacy.sql`, then `0114_delivery_share_prefix_lookup.sql`
 through `0171_secondary_workspace_membership_management.sql` (`0113` is
-intentionally reserved), then apply `0172_project_access_authority_history.sql`
-only at the writer-first barrier above. Confirm Operations
+intentionally reserved), apply `0172_project_access_authority_history.sql`
+only at its writer-first barrier, then `0173`-`0179` with `0179` as the final
+expand step. Apply `0180`-`0183` only after the compatible-writer drain above.
+Confirm Operations
 `0014_staff_acl_controls.sql` through
-`0046_project_alpha_project_management_routes.sql`. Migration `0100` removes
+`0049_project_alpha_delivery_source_rate_limits.sql`. Migration `0100` removes
 `share_version` from the delivery-grant parent key so existing share
 rotation/revocation updates cannot be blocked by a portal grant; the grant
 still records the approved version for authorization checks. Reject any
@@ -352,8 +399,10 @@ Before version upload, verify rather than infer the remaining operator-owned
 media prerequisites: the staging thumbnail queue and DLQ exist, Operations has
 the exact `THUMBNAIL_QUEUE` producer, main consumer and DLQ consumer; the
 private `THUMBNAIL_RENDERER` Container binding resolves with four maximum
-instances, internet disabled and no SSH/public route; and the 15-minute and
-5-minute crons are both present. Confirm the
+instances, internet disabled and no SSH/public route; and all five Operations
+crons are present: consolidated 15-minute work, five-minute request processing,
+Client Hub indexing, hourly source recovery, and the offset native-delivery
+notification scheduler. Confirm the
 existing R2 object-create notification still feeds only the staging file-event
 queue; do not add an overlapping notification rule. Confirm the path-specific
 Cloudflare Access Service Auth policy and `THUMBNAIL_INGEST_SECRET` before a

@@ -713,6 +713,7 @@ function RequestList({
   onCancel,
   onEstimateRespond,
   cancellingRequestId,
+  retryingCancellationRequestIds,
 }: {
   requests: PortalServiceRequest[];
   projects: PortalProject[];
@@ -725,6 +726,7 @@ function RequestList({
     response: "accept" | "request_change",
   ) => void;
   cancellingRequestId?: string | null;
+  retryingCancellationRequestIds?: ReadonlySet<string>;
 }) {
   const projectNames = useMemo(
     () => new Map(projects.map((project) => [project.id, project.projectName])),
@@ -799,7 +801,11 @@ function RequestList({
                   disabled={cancellingRequestId === request.id}
                   onClick={() => onCancel(request)}
                 >
-                  {cancellingRequestId === request.id ? "Cancelling…" : "Cancel request"}
+                  {cancellingRequestId === request.id
+                    ? "Cancelling…"
+                    : retryingCancellationRequestIds?.has(request.id)
+                      ? "Retry cancellation"
+                      : "Cancel request"}
                 </button>
               )}
             </div>
@@ -2007,6 +2013,9 @@ function ProjectWorkspace({
   viewer,
   viewerDisplayUnits,
   onSaved,
+  onCancelRequest,
+  cancellingRequestId,
+  retryingCancellationRequestIds,
   onBack,
 }: {
   project: PortalProject;
@@ -2021,6 +2030,9 @@ function ProjectWorkspace({
   viewer: boolean;
   viewerDisplayUnits: "imperial" | "metric";
   onSaved: (request: PortalServiceRequest) => void;
+  onCancelRequest: (request: PortalServiceRequest) => void;
+  cancellingRequestId: string | null;
+  retryingCancellationRequestIds: ReadonlySet<string>;
   onBack: () => void;
 }) {
   const readLocation = () => {
@@ -2157,6 +2169,9 @@ function ProjectWorkspace({
               requests={projectRequests}
               projects={[project]}
               limit={3}
+              onCancel={onCancelRequest}
+              cancellingRequestId={cancellingRequestId}
+              retryingCancellationRequestIds={retryingCancellationRequestIds}
             />
           </Card>
         </div>
@@ -2196,7 +2211,13 @@ function ProjectWorkspace({
             />
           </Card>
           <Card title="Project request history">
-            <RequestList requests={projectRequests} projects={[project]} />
+            <RequestList
+              requests={projectRequests}
+              projects={[project]}
+              onCancel={onCancelRequest}
+              cancellingRequestId={cancellingRequestId}
+              retryingCancellationRequestIds={retryingCancellationRequestIds}
+            />
           </Card>
         </>
       )}
@@ -2603,6 +2624,8 @@ export function ClientPortalApp({
   } | null>(null);
   const [requestNotice, setRequestNotice] = useState<string | null>(null);
   const [cancellingRequestId, setCancellingRequestId] = useState<string | null>(null);
+  const cancellationKeys = useRef(new Map<string, string>());
+  const [retryingCancellationRequestIds, setRetryingCancellationRequestIds] = useState<ReadonlySet<string>>(() => new Set());
   const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [bootstrapRevision, setBootstrapRevision] = useState(0);
@@ -2824,12 +2847,30 @@ export function ClientPortalApp({
   };
   const onCancelRequest = async (request: PortalServiceRequest) => {
     if (cancellingRequestId || !cancellableStatuses.has(request.status)) return;
-    if (!window.confirm(`Cancel “${request.title}”? This closes the request before work begins.`)) return;
+    const retrying = cancellationKeys.current.has(request.id);
+    if (!window.confirm(`${retrying ? "Retry cancelling" : "Cancel"} “${request.title}”? This closes the request before work begins.`)) return;
+    const key = cancellationKeys.current.get(request.id) ?? crypto.randomUUID();
+    cancellationKeys.current.set(request.id, key);
     setCancellingRequestId(request.id);
     try {
-      onSaved(await cancelPortalServiceRequest(request.id, crypto.randomUUID()));
+      onSaved(await cancelPortalServiceRequest(request.id, key));
+      cancellationKeys.current.delete(request.id);
+      setRetryingCancellationRequestIds(current => {
+        const next = new Set(current); next.delete(request.id); return next;
+      });
       setRequestNotice("The service request was cancelled.");
     } catch (caught) {
+      const status = (caught as RequestError).status;
+      const uncertain = status === undefined || status === 408 || status === 425 || status === 429 || status >= 500;
+      if (uncertain) {
+        setRetryingCancellationRequestIds(current => new Set(current).add(request.id));
+        setRequestNotice("Cancellation may have completed. Retry cancellation to safely check the same request.");
+      } else {
+        cancellationKeys.current.delete(request.id);
+        setRetryingCancellationRequestIds(current => {
+          const next = new Set(current); next.delete(request.id); return next;
+        });
+      }
       window.alert((caught as Error).message);
     } finally {
       setCancellingRequestId(null);
@@ -2859,6 +2900,9 @@ export function ClientPortalApp({
         viewer={capabilities.viewer}
         viewerDisplayUnits={gate.data.resourceMode === "native" ? "imperial" : gate.data.viewerDisplayUnits}
         onSaved={onSaved}
+        onCancelRequest={onCancelRequest}
+        cancellingRequestId={cancellingRequestId}
+        retryingCancellationRequestIds={retryingCancellationRequestIds}
         onBack={() => navigate("projects")}
       />
     ) : (
@@ -3105,6 +3149,7 @@ export function ClientPortalApp({
             onCancel={onCancelRequest}
             onEstimateRespond={onEstimateRespond}
             cancellingRequestId={cancellingRequestId}
+            retryingCancellationRequestIds={retryingCancellationRequestIds}
           />
         </Card>
       </>

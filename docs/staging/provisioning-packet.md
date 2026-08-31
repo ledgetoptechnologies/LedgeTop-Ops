@@ -140,9 +140,11 @@ controls and the direct-upload capability gate are separately approved.
 ## Deferred actions
 
 Do not create the three Workers or five Workflows merely to reserve their names.
-Deployment would create or update Workflows and activate hourly, 15-minute, and
-5-minute cron schedules plus the Operations queue consumers and thumbnail
-producer binding. Queue resources themselves must already exist.
+Deployment would create or update Workflows and activate the five reviewed
+Operations schedules: consolidated 15-minute work, five-minute request work,
+offset five-minute Client Hub indexing, hourly source recovery, and offset
+15-minute native-delivery notifications, plus the Operations queue consumers
+and thumbnail producer binding. Queue resources themselves must already exist.
 
 Also defer the `client-staging` custom-domain route and DNS, additional Access applications or
 policies, D1 migrations, R2 event notifications, Queue/DLQ consumer

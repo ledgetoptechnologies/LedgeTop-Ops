@@ -236,7 +236,8 @@ test("unlinking the final member keeps an administrator on the archived recovery
   await expect(page.getByText(/No records will remain/)).toBeVisible(); await confirm(page, true);
   await expect(page).toHaveURL(`/clients/parties/${partyId}`);
   await expect(page.getByText("Archived after a reviewed unlink. A source returning will not reopen it; an administrator must review a new link.")).toBeVisible();
-  await expect(page.getByText("0 business records belong to this customer.")).toBeVisible();
+  const sourceSummary = page.locator(".business-party-summary div").filter({ hasText: "Source records" });
+  await expect(sourceSummary.locator("dd")).toHaveText("0");
   await page.getByRole("link", { name: "← Client Hub" }).click();
   await expect(page.getByRole("link", { name: "Open Acme aerial customer client workspace" })).toBeVisible();
 });

@@ -16,3 +16,4 @@ strix_runs/
 
 # Operator-created Cloudflare staging configs. Copy from docs/staging/*.example.
 apps/*/wrangler.staging.json
+apps/*/wrangler.staging.*.json

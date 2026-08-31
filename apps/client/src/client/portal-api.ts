@@ -866,6 +866,9 @@ export async function cancelPortalServiceRequest(
       headers: { "Idempotency-Key": idempotencyKey },
     },
   );
+  if (response.request?.id !== requestId || response.request.status !== "cancelled") {
+    throw new Error("The cancellation response could not be verified. Retry cancellation to safely confirm the request state.");
+  }
   return response.request;
 }
 

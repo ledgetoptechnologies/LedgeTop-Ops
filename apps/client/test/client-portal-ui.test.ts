@@ -166,12 +166,21 @@ describe("client portal browser API boundary", () => {
   });
 
   it("cancels an exact request with caller-owned retry idempotency and no body", async () => {
-    const request = vi.fn(async <T>(): Promise<T> => ({ request: { id: "request-a", status: "cancelled" } }) as T) as PortalRequest;
+    const request = vi.fn(async <T>(): Promise<T> => ({ request: { id: "request a", status: "cancelled" } }) as T) as PortalRequest;
     await cancelPortalServiceRequest("request a", "cancel-key-00000001", request);
     expect(request).toHaveBeenCalledWith(
       "/api/client/service-requests/request%20a/cancel",
       { method: "POST", headers: { "Idempotency-Key": "cancel-key-00000001" } },
     );
+  });
+
+  it.each([
+    [{ id: "request-b", status: "cancelled" }, "another request"],
+    [{ id: "request-a", status: "under_review" }, "a non-cancelled request"],
+  ])("rejects a successful cancellation response for %s", async (returnedRequest) => {
+    const request = vi.fn(async <T>(): Promise<T> => ({ request: returnedRequest }) as T) as PortalRequest;
+    await expect(cancelPortalServiceRequest("request-a", "cancel-key-00000001", request))
+      .rejects.toThrow("The cancellation response could not be verified");
   });
 
   it("sends only the selected opaque hierarchy scope when creating an invitation", async () => {

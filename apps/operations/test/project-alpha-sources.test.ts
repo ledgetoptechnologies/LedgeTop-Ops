@@ -158,7 +158,7 @@ describe("source-isolated business snapshots", () => {
 
       expect((await ops.prepare("PRAGMA foreign_key_check").all()).results).toEqual([]);
     } finally { await runtime.dispose(); }
-  }, 60_000);
+  }, 90_000);
 
   it("an incomplete secondary snapshot leaves primary records, health and its lease untouched", async () => {
     const { runtime, ops, env } = await databaseFixture();

@@ -96,7 +96,8 @@ and migration remain separate commands; migration requires a named database and
 an explicit backup checkpoint.
 
 A deliberate staging-to-production release is: merge only after review and
-local CI; deploy the pinned commit to isolated staging; apply staging migrations;
+local CI; deploy the pinned commit to isolated staging; apply staging migrations
+at their documented expand/contract barriers rather than as one all-pending batch;
 run acceptance and fault-injection tests; record versions, bindings, flags, and
 evidence; obtain production approval; back up production D1; apply reviewed
 production migrations; deploy the same pinned commit with optional capabilities
@@ -130,10 +131,20 @@ versions are active and the drain is proven, then unfreeze only after the schema
 and canonical-event checks below pass.
 
 The current combined schema gate requires Delivery migrations `0096`–`0112`
-and `0114`–`0172` (`0113` is the reserved production-ledger gap), plus
-Operations `0014`–`0046`, with fresh staging exports and exact list/apply
+and `0114`–`0183` (`0113` is the reserved production-ledger gap), plus
+Operations `0014`–`0049`, with fresh staging exports and exact list/apply
 evidence. Migration 0172 follows the writer-first barrier above rather than the
-ordinary sequence. Operations `0019` follows `0018` for server-detected, per-file upload
+ordinary sequence. Migration `0179_service_assignment_policy_proof_v2.sql` is
+an expand-only checkpoint: apply it from a reviewed input that ends at 0179,
+deploy the compatible Client writer, shift all traffic, and drain every old
+draft/submission writer. Only then may the final input apply
+`0180_service_assignment_policy_v1_contract.sql` through
+`0183_portal_delivery_notification_direct_source_ready.sql`. Never run a
+generic all-pending apply from the combined candidate while 0179-0183 are all
+pending, and never bypass Wrangler's ledger with raw SQL. Keep assignment sync,
+assignment policy, delivery-intent, and authenticated-notification flags false
+through this sequence. Record the immutable compatible-writer version and drain
+evidence in the release packet. Operations `0019` follows `0018` for server-detected, per-file upload
 collision resolution; `0020` adds the SOP library, `0021` hardens Project Alpha
 ordering, `0022` adds bounded, leased file-operation retries, `0023` adds
 direct, immutable Project/Task SOP revision links, `0024` restores the
@@ -163,6 +174,14 @@ cannot be linked by a concurrent submit even if the application preflight is
 bypassed. Delivery `0135` persists monotonic Access-enrollment revocation
 watermarks so reordered provider callbacks cannot recreate a revoked receipt,
 and requires expired uploads to be explicitly removed before submission.
+Delivery `0179` adds the strict source/review-bound v2 assignment proof without
+rewriting historical v1 evidence; `0180` closes new v1 writes only after the
+writer drain; `0181` adds immutable source-qualified policy review; and
+`0182`/`0183` add source-fair, bounded notification scheduling. Operations
+`0048` adds recoverable business-party lifecycle and `0049` adds registered
+delivery-source rate limits. Delivery, Operations, and Ops Sync require the same
+reviewed `PROJECT_ALPHA_CONNECTOR_CREDENTIALS` envelope as independently
+provisioned secrets; source activation remains separately approved.
 These migrations are not rolled back with Worker code. The Project
 Alpha payment/billing contract is a blocking dependency, never an exception to
 local staff, client-team, account, project, delivery, request, or billing ACLs.

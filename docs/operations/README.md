@@ -12,6 +12,14 @@ See [Project Alpha service-assignment receiver foundation](project-alpha-service
 for the default-off DELIVERY_DB ingress, explicit source/workspace admission,
 tenant-containment fences, and the later coordinated enrollment boundary.
 
+See [service-assignment request policy](client-service-assignment-request-policy.md)
+for the mandatory `0179` expand, compatible-writer drain, and `0180`-`0181`
+contract/review sequence. See [delivery intent source ownership](delivery-intent-source-ownership.md)
+for registered-source Access/HMAC authority, `0182`/`0183` notification
+scheduling, Operations `0049`, and the default-off activation boundary. See
+[business-party linking](business-party-linking.md) for Operations `0048` and
+recoverable presentation lifecycle.
+
 This runbook records operator-owned controls that are not safely expressible in the application repository.
 
 ## Staging
@@ -34,7 +42,7 @@ delete could race a later upload at the same key.
 
 ## Key rotation
 
-Inventory and version every secret: Access audience/configuration, session signing key, delivery token encryption key, access-code pepper, audit HMAC secret, Stream/API credentials, Project Alpha credentials, webhook signing keys, and TrueNAS/R2 credentials. Delivery accepts `SESSION_KEY_ID` plus `PREVIOUS_SESSION_KEY_ID` and their two secrets during a 24-hour overlap. Access codes and encrypted share-link secrets support current/previous secrets with lazy re-encryption or rehashing. Project Alpha is currently HMAC-only, so `PROJECT_ALPHA_ALLOW_LEGACY_HMAC=true` is required with `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET`; LTDS still gives any presented Ed25519 header precedence and fails closed if it is invalid. Disable HMAC only after a coordinated Project Alpha Ed25519 rollout is proven. Rotate R2 signing credentials at least every 90 days; their issued URLs live only two minutes.
+Inventory and version every secret: Access audience/configuration, session signing key, delivery token encryption key, access-code pepper, audit HMAC secret, Stream/API credentials, Project Alpha credentials, webhook signing keys, and TrueNAS/R2 credentials. Delivery accepts `SESSION_KEY_ID` plus `PREVIOUS_SESSION_KEY_ID` and their two secrets during a 24-hour overlap. Access codes and encrypted share-link secrets support current/previous secrets with lazy re-encryption or rehashing. The legacy primary Project Alpha path remains HMAC-compatible, so `PROJECT_ALPHA_ALLOW_LEGACY_HMAC=true` is required with `PROJECT_ALPHA_WEBHOOK_HMAC_SECRET` until a coordinated Ed25519 rollout is proven. Registered business sources use their exact source-owned Ed25519 event authority and portal HMAC/Access authority instead of inheriting that legacy fallback. Provision the same reviewed `PROJECT_ALPHA_CONNECTOR_CREDENTIALS` envelope independently to Delivery, Operations, and Ops Sync; never store it in Wrangler `vars` or logs. Rotate R2 signing credentials at least every 90 days; their issued URLs live only two minutes.
 
 ## Alerts
 
@@ -75,10 +83,14 @@ failures correctly remain on their local file-type icon.
 - Local tests and dry-run configuration checks do not prove Cloudflare Container
   entitlement, decoder behavior, queue/DLQ existence, R2 event subscriptions,
   cron installation, or production bindings. Verify each in isolated staging.
-- Delivery migrations through `0175` (with reserved ledger gap `0113`), plus
-  Operations migrations through `0047`, are
+- Delivery migrations through `0183` (with reserved ledger gap `0113`), plus
+  Operations migrations through `0049`, are
   additive and remain after a Worker version rollback. Preserve verified D1
   exports and prior Worker version IDs before rollout.
+- Do not apply `0179`-`0183` as one pending batch. Apply `0179` from a reviewed
+  expand-only input, deploy and fully drain the compatible Client writer, then
+  apply `0180`-`0183` in order. Keep service-assignment and delivery-notification
+  flags false until their separate acceptance gates pass.
 - Folder-grant mail is at-least-once. Revocation before the final authorization
   check suppresses mail, but a provider-accepted message cannot be recalled;
   the authenticated portal route still rechecks and denies revoked access.
