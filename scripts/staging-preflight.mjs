@@ -70,7 +70,9 @@ export function validateApp(app, staging, production) {
   if (app === "operations" && vars.PUBLIC_BASE_URL !== `https://${STAGING_HOSTS.operations}`) errors.push("operations PUBLIC_BASE_URL must match the approved staging host");
   if (app === "delivery") {
     if (vars.CLIENT_PORTAL_ENABLED !== "false") errors.push("delivery CLIENT_PORTAL_ENABLED must remain false for release preparation");
-    if (vars.CLIENT_PORTAL_ORIGIN !== `https://${STAGING_HOSTS.client}` || vars.PUBLIC_BASE_URL !== vars.CLIENT_PORTAL_ORIGIN) errors.push("delivery client portal and public origins must match the approved client staging host");
+    if (vars.CLIENT_PORTAL_ORIGIN !== `https://${STAGING_HOSTS.client}`) errors.push("delivery CLIENT_PORTAL_ORIGIN must match the approved authenticated client staging host");
+    if (vars.PUBLIC_SHARE_ORIGIN !== `https://${STAGING_HOSTS.delivery}` || vars.PUBLIC_BASE_URL !== vars.PUBLIC_SHARE_ORIGIN)
+      errors.push("delivery public origins must match the approved anonymous delivery staging host");
     if (vars.CLIENT_ACCESS_TEAM_DOMAIN !== STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN) errors.push("delivery CLIENT_ACCESS_TEAM_DOMAIN must match the approved Access team");
     if (!/^[a-f0-9]{64}$/i.test(vars.CLIENT_ACCESS_AUD ?? "")) errors.push("delivery CLIENT_ACCESS_AUD must be the dedicated client portal Access audience");
     if (Object.values(STAGING_ACCESS_AUDS).includes(vars.CLIENT_ACCESS_AUD)) errors.push("delivery CLIENT_ACCESS_AUD must not reuse another staging Access audience");
@@ -91,6 +93,10 @@ export function validateApp(app, staging, production) {
     }
   }
   if (app === "operations") {
+    if (vars.DELIVERY_BASE_URL !== `https://${STAGING_HOSTS.client}`)
+      errors.push("operations DELIVERY_BASE_URL must match the approved authenticated client staging host");
+    if (vars.PUBLIC_SHARE_ORIGIN !== `https://${STAGING_HOSTS.delivery}`)
+      errors.push("operations PUBLIC_SHARE_ORIGIN must match the approved anonymous delivery staging host");
     if (vars.INCOMING_EXPECTED_HOST !== STAGING_HOSTS.incoming || vars.INCOMING_BASE_URL !== `https://${STAGING_HOSTS.incoming}`) errors.push("operations incoming host variables must match the reserved staging hostname");
     complete(vars.MAPBOX_PUBLIC_TOKEN, "operations vars.MAPBOX_PUBLIC_TOKEN", errors);
     if (!email(vars.CLIENT_REQUEST_TRIAGE_TO)) errors.push("operations CLIENT_REQUEST_TRIAGE_TO must be a valid staging recipient");
@@ -107,7 +113,7 @@ export function validateApp(app, staging, production) {
   }
   if (app === "ops-sync") for (const key of ["CF_ACCESS_GROUP_ID", "CF_ACCESS_GROUP_NAME"]) complete(vars[key], `${app} vars.${key}`, errors);
   for (const key of Object.keys(production.vars ?? {})) {
-    if (!/(?:EXPECTED_HOST|BASE_URL|_AUD)$/.test(key)) continue;
+    if (!/(?:EXPECTED_HOST|BASE_URL|_ORIGIN|_AUD)$/.test(key)) continue;
     complete(vars[key], `${app} vars.${key}`, errors);
     if (vars[key] === production.vars[key]) errors.push(`${app} vars.${key} reuses production`);
   }

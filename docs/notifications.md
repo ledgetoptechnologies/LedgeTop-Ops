@@ -8,6 +8,18 @@ Operations claims pending records with a short lease and retries sends at most t
 
 Created and updated messages may contain the delivery link. Access codes are never included. Contributor uploads do not enqueue notifications.
 
+Migration `0177_domain_neutral_delivery_notifications.sql` removes legacy
+`shareUrl` fields from the durable outbox and stores only domain-neutral share
+identity plus bounded presentation snapshots. Fragment bearers are never
+persisted in notification payloads. Immediately before the mail-provider call,
+Operations rechecks the share, recovers its encrypted bearer with the current
+delivery-token key (or the bounded previous key), rotates previous-key
+ciphertext to the current key, and materializes the link from
+`PUBLIC_SHARE_ORIGIN`. `DELIVERY_BASE_URL` remains the authenticated client
+portal origin for portal-action mail. A host cutover therefore changes only
+response/send-boundary materialization; queued rows remain portable and contain
+no fragment-bearing URL.
+
 Internal client-workspace folder grants use a separate outbox added by migration
 `0105`; they never reuse the public-share notification contract. An optional
 recipient is an exact portal identity, not an email-based authorization grant.

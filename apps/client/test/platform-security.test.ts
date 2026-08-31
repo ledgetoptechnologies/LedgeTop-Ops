@@ -8,22 +8,48 @@ import deliveryWorker, { ensurePublicId, framePolicyForPath, markUnavailableFold
 import type { ShareRow } from "../src/worker/types";
 
 describe("deployed host admission",()=>{
-  it.each(["production","staging"] as const)("admits only exact configured hosts in %s",ENVIRONMENT=>{
-    const base={ENVIRONMENT,EXPECTED_HOST:"delivery.example"} as const;
-    expect(requestHostAllowed("https://delivery.example/health",base)).toBe(true);
+  it.each(["production","staging"] as const)("enforces the exact host and namespace matrix in %s",ENVIRONMENT=>{
+    const base={ENVIRONMENT,EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",
+      PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example"} as const;
+    for(const path of ["/s/public","/client-share/public","/api/public/shares/public/manifest"]){
+      expect(requestHostAllowed(`https://delivery.example${path}`,base)).toBe(true);
+      expect(requestHostAllowed(`https://client.example${path}`,base)).toBe(false);
+    }
+    for(const path of ["/portal","/portal/projects","/api/client/me","/api/internal/project-alpha/portal-v2"]){
+      expect(requestHostAllowed(`https://client.example${path}`,base)).toBe(true);
+      expect(requestHostAllowed(`https://delivery.example${path}`,base)).toBe(false);
+    }
+    for(const path of ["/","/health"]){
+      expect(requestHostAllowed(`https://delivery.example${path}`,base)).toBe(true);
+      expect(requestHostAllowed(`https://client.example${path}`,base)).toBe(true);
+    }
     expect(requestHostAllowed("https://wrong.example/health",base)).toBe(false);
-    expect(requestHostAllowed("https://client.example/portal",{...base,CLIENT_PORTAL_ORIGIN:"https://client.example"})).toBe(true);
-    expect(requestHostAllowed("https://client.example.evil.test/portal",{...base,CLIENT_PORTAL_ORIGIN:"https://client.example"})).toBe(false);
+    expect(requestHostAllowed("https://client.example.evil.test/portal",base)).toBe(false);
+    expect(requestHostAllowed("https://client.example/unknown",base)).toBe(false);
+  });
+  it.each(["production","staging"] as const)("fails closed on invalid or divergent deployed origins in %s",ENVIRONMENT=>{
+    const base={ENVIRONMENT,EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",
+      PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example"} as const;
+    expect(requestHostAllowed("https://delivery.example/s/public",{...base,PUBLIC_BASE_URL:"https://other.example"})).toBe(false);
+    expect(requestHostAllowed("https://delivery.example/s/public",{...base,PUBLIC_SHARE_ORIGIN:"https://delivery.example/path"})).toBe(false);
     expect(requestHostAllowed("https://client.example/portal",{...base,CLIENT_PORTAL_ORIGIN:"http://client.example"})).toBe(false);
     expect(requestHostAllowed("https://client.example/portal",{...base,CLIENT_PORTAL_ORIGIN:"https://client.example/path"})).toBe(false);
   });
+  it("keeps the same-host rollout compatible without weakening a later split",()=>{
+    const env={ENVIRONMENT:"production",EXPECTED_HOST:"client.example",PUBLIC_BASE_URL:"https://client.example",
+      PUBLIC_SHARE_ORIGIN:"https://client.example",CLIENT_PORTAL_ORIGIN:"https://client.example"} as const;
+    expect(requestHostAllowed("https://client.example/s/public",env)).toBe(true);
+    expect(requestHostAllowed("https://client.example/portal",env)).toBe(true);
+  });
   it("keeps local development host-flexible",()=>{
-    expect(requestHostAllowed("http://127.0.0.1:8787/health",{ENVIRONMENT:"development",EXPECTED_HOST:"delivery.example"})).toBe(true);
+    expect(requestHostAllowed("http://127.0.0.1:8787/health",{ENVIRONMENT:"development",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"http://127.0.0.1:8787"})).toBe(true);
   });
 });
 
 describe("delivery app shell",()=>{
   it("preserves the public share path when requesting the SPA fallback",async()=>{let requestedPath="";const response=await serveAppShell(new Request("https://delivery.ledgetopdroneservices.com/s/public-id"),{fetch:async input=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("app shell",{status:200});}});expect(requestedPath).toBe("/s/public-id");expect(response.status).toBe(200);expect(response.headers.get("Location")).toBeNull();});
+  it("runs the authenticated portal path through the Worker before the SPA fallback",async()=>{let requestedPath="";const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example",ASSETS:{fetch:async(input:RequestInfo|URL)=>{requestedPath=new URL(typeof input==="string"?input:input instanceof URL?input:input.url).pathname;return new Response("portal shell");}}};const response=await deliveryWorker.fetch(new Request("https://client.example/portal/projects"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(200);expect(await response.text()).toBe("portal shell");expect(requestedPath).toBe("/portal/projects");});
+  it("redirects the public root to the configured authenticated portal origin",async()=>{const env:any={ENVIRONMENT:"production",EXPECTED_HOST:"delivery.example",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example"};const response=await deliveryWorker.fetch(new Request("https://delivery.example/"),env,{waitUntil(){},passThroughOnException(){}} as unknown as ExecutionContext);expect(response.status).toBe(302);expect(response.headers.get("Location")).toBe("https://client.example/portal");});
 });
 
 describe("inline PDF routing",()=>{
@@ -80,7 +106,7 @@ describe("inline PDF routing",()=>{
     expect(health.headers.get("Content-Security-Policy")).toContain("https://api.mapbox.com");
     expect(health.headers.get("Content-Security-Policy")).toContain("https://events.mapbox.com");
     expect(health.headers.get("Content-Security-Policy")).toContain("img-src 'self' https://ledgetopdroneservices.com https://*.cloudflarestream.com data: blob:");
-    const wrongHost=await deliveryWorker.fetch(new Request("https://wrong.example/health"),{...value.env,ENVIRONMENT:"production"},value.executionCtx);
+    const wrongHost=await deliveryWorker.fetch(new Request("https://wrong.example/health"),{...value.env,ENVIRONMENT:"production",PUBLIC_BASE_URL:"https://delivery.example",PUBLIC_SHARE_ORIGIN:"https://delivery.example",CLIENT_PORTAL_ORIGIN:"https://client.example"},value.executionCtx);
     expect(wrongHost.status).toBe(404);
     expect(wrongHost.headers.get("X-Frame-Options")).toBe("DENY");
     expect(wrongHost.headers.get("Content-Security-Policy")).toContain("frame-ancestors 'none'");
@@ -117,7 +143,7 @@ describe("shared folder unavailability grace",()=>{
 });
 
 describe("delivery sessions",()=>{
-  it("uses a host-only secure HttpOnly cookie and verifies its signature",async()=>{const secret="s".repeat(48),expires=Date.now()+60_000;const header=await createSessionCookie(secret,"v1","share-1",3,expires);expect(header).toContain("__Host-ltds_delivery=");expect(header).toContain("HttpOnly");expect(header).toContain("Secure");expect(header).toContain("SameSite=Lax");expect(header).toContain("Path=/");const value=decodeURIComponent(header.split(";")[0]!.split("=").slice(1).join("="));await expect(verifySessionCookie(secret,"v1",value)).resolves.toEqual({shareId:"share-1",shareVersion:3,expiresAt:expires});});
+  it("uses a host-only secure HttpOnly cookie and verifies its signature",async()=>{const secret="s".repeat(48),expires=Date.now()+60_000;const header=await createSessionCookie(secret,"v1","share-1",3,expires);expect(header).toContain("__Host-ltds_delivery=");expect(header).toContain("HttpOnly");expect(header).toContain("Secure");expect(header).toContain("SameSite=Lax");expect(header).toContain("Path=/");expect(header).not.toContain("Domain=");const value=decodeURIComponent(header.split(";")[0]!.split("=").slice(1).join("="));await expect(verifySessionCookie(secret,"v1",value)).resolves.toEqual({shareId:"share-1",shareVersion:3,expiresAt:expires});});
   it("rejects a modified cookie and invalidates sessions when the share version rotates",async()=>{const secret="s".repeat(48),expires=Date.now()+60_000;const header=await createSessionCookie(secret,"v1","share-1",3,expires);const value=decodeURIComponent(header.split(";")[0]!.split("=").slice(1).join("="));await expect(verifySessionCookie(secret,"v1",`${value}x`)).rejects.toThrow();const rotated=value.replace(".3.",".4.");await expect(verifySessionCookie(secret,"v1",rotated)).rejects.toThrow();});
   it("accepts the previous signing key only during the rotation window",async()=>{const expires=Date.now()+60_000;const header=await createSessionCookie("p".repeat(48),"v0","share-1",3,expires);const value=decodeURIComponent(header.split(";")[0]!.split("=").slice(1).join("="));await expect(verifyRotatingSessionCookie(value,{keyId:"v1",secret:"c".repeat(48)},{keyId:"v0",secret:"p".repeat(48)})).resolves.toMatchObject({shareId:"share-1"});await expect(verifyRotatingSessionCookie(value,{keyId:"v1",secret:"c".repeat(48)},null)).rejects.toThrow();});
 });

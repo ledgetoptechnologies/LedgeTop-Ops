@@ -242,7 +242,11 @@ export function validateEvidence(evidence, options = {}) {
   const portal = evidence.clientPortal ?? {};
   const deliveryVars = configs.delivery?.vars ?? {};
   if (portal.hostname !== STAGING_CLIENT_PORTAL.hostname) errors.push("client portal hostname must match the approved staging topology");
-  if (portal.origin !== `https://${STAGING_CLIENT_PORTAL.hostname}` || portal.origin !== deliveryVars.CLIENT_PORTAL_ORIGIN || portal.origin !== deliveryVars.PUBLIC_BASE_URL) errors.push("client portal origin must match the Delivery staging config and public origin");
+  if (portal.origin !== `https://${STAGING_CLIENT_PORTAL.hostname}` || portal.origin !== deliveryVars.CLIENT_PORTAL_ORIGIN)
+    errors.push("client portal origin must match the authenticated Delivery staging origin");
+  if (deliveryVars.PUBLIC_SHARE_ORIGIN !== `https://${STAGING_CLIENT_PORTAL.publicHostname}` ||
+    deliveryVars.PUBLIC_BASE_URL !== deliveryVars.PUBLIC_SHARE_ORIGIN)
+    errors.push("public share origin must match the anonymous Delivery staging host");
   if (portal.enabled !== false || deliveryVars.CLIENT_PORTAL_ENABLED !== "false") errors.push("client portal must remain default-off in release preparation evidence");
   if (portal.teamDomain !== STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN || portal.teamDomain !== deliveryVars.CLIENT_ACCESS_TEAM_DOMAIN) errors.push("client portal Access team domain must match Delivery staging config");
   if (portal.applicationName !== STAGING_CLIENT_PORTAL.applicationName || !populated(portal.applicationId)) errors.push("client portal needs the dedicated Access application identity");
@@ -254,7 +258,7 @@ export function validateEvidence(evidence, options = {}) {
   const publicAccess = portal.publicAccess ?? {};
   if (publicAccess.applicationName !== STAGING_CLIENT_PORTAL.publicApplicationName || !populated(publicAccess.applicationId) || !populated(publicAccess.policyId)) errors.push("client public paths need a separately identified Access Bypass application and policy");
   if (publicAccess.decision !== "bypass" || publicAccess.include !== "everyone") errors.push("client public path policy must be Bypass Everyone");
-  if (publicAccess.destination !== STAGING_CLIENT_PORTAL.hostname) errors.push("client public Bypass destination must be the client staging host root");
+  if (publicAccess.destination !== STAGING_CLIENT_PORTAL.publicHostname) errors.push("client public Bypass destination must be the public Delivery staging host root");
   if (!sameSet(publicAccess.workerPublicPaths, STAGING_CLIENT_PORTAL.publicPaths)) errors.push("client public paths must exactly match the reviewed Worker contract");
   if (!populated(portal.approvalRef)) errors.push("client portal Access setup needs an approval reference");
 

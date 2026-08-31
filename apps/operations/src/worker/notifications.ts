@@ -13,9 +13,12 @@ import { d1TablesPresent } from "./schema-readiness";
 import { resolveProjectAlphaDeliveryPrincipal } from "./share-recipients";
 import { HTTPException } from "hono/http-exception";
 import { nativeDeliveryNotificationsReady, processPortalDeliveryNotificationBatches } from "./portal-delivery-notification-batches";
+import { recoverDeliveryShareSecret } from "./delivery-secret-recovery";
+import { publicShareOrigin } from "./origins";
 
 export type NotificationKind = "share_created" | "share_updated" | "share_revoked" | "first_access" | "expiring_72h";
 export interface NotificationPayload { publicId?: string | null; shareUrl?: string; clientName?: string; projectName?: string; r2Prefix?: string; expiresAt?: string | null; }
+export type StoredNotificationPayload = Omit<NotificationPayload, "shareUrl">;
 interface NotificationRow { id: string; share_id: string; kind: NotificationKind; recipient_email: string; payload_json: string; attempts: number; }
 const MAX_ATTEMPTS = 3;
 
@@ -54,11 +57,44 @@ export function normalizeRecipientEmail(value: unknown): string | null {
 
 export function notificationDedupeKey(kind: NotificationKind, shareId: string, discriminator = ""): string { return `${kind}:${shareId}${discriminator ? `:${discriminator}` : ""}`; }
 
-export function notificationStatement(env: Env, input: { shareId: string; kind: NotificationKind; recipientEmail: string | null; payload: NotificationPayload; dedupeKey?: string }): D1PreparedStatement | null {
+export function notificationStatement(env: Env, input: { shareId: string; kind: NotificationKind; recipientEmail: string | null; payload: StoredNotificationPayload; dedupeKey?: string }): D1PreparedStatement | null {
   if (!input.recipientEmail) return null;
   return env.DELIVERY_DB.prepare(`INSERT OR IGNORE INTO delivery_notifications
     (id,dedupe_key,share_id,kind,recipient_email,payload_json) VALUES (?,?,?,?,?,?)`)
     .bind(crypto.randomUUID(), input.dedupeKey || notificationDedupeKey(input.kind, input.shareId), input.shareId, input.kind, input.recipientEmail, JSON.stringify(input.payload));
+}
+
+function storedPayload(raw: string): StoredNotificationPayload {
+  const parsed: unknown = JSON.parse(raw);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Delivery notification payload is invalid");
+  const value = parsed as Record<string, unknown>;
+  return {
+    publicId: typeof value.publicId === "string" || value.publicId === null ? value.publicId : undefined,
+    clientName: typeof value.clientName === "string" ? value.clientName : undefined,
+    projectName: typeof value.projectName === "string" ? value.projectName : undefined,
+    r2Prefix: typeof value.r2Prefix === "string" ? value.r2Prefix : undefined,
+    expiresAt: typeof value.expiresAt === "string" || value.expiresAt === null ? value.expiresAt : undefined,
+  };
+}
+
+async function materializeNotificationPayload(env: Env, row: NotificationRow): Promise<NotificationPayload> {
+  const payload = storedPayload(row.payload_json);
+  if (row.kind !== "share_created" && row.kind !== "share_updated") return payload;
+  const share = await env.DELIVERY_DB.prepare(`SELECT id,public_id,secret_ciphertext,secret_iv,revoked_at,expires_at
+    FROM shares WHERE id=?`).bind(row.share_id).first<{
+      id:string; public_id:string|null; secret_ciphertext:string|null; secret_iv:string|null;
+      revoked_at:string|null; expires_at:string|null;
+    }>();
+  if (!share || share.revoked_at || (share.expires_at && Date.parse(share.expires_at) <= Date.now()))
+    throw new HTTPException(409, { message: "Delivery link is no longer active" });
+  if (!share.public_id) throw new Error("Delivery link public identity is unavailable");
+  const secret = await recoverDeliveryShareSecret(env, share);
+  if (!secret) throw new Error("Delivery link bearer cannot be recovered");
+  return {
+    ...payload,
+    publicId: share.public_id,
+    shareUrl: `${publicShareOrigin(env)}/s/${encodeURIComponent(share.public_id)}#${secret}`,
+  };
 }
 
 function escapeHtml(value: string): string { return value.replace(/[&<>"']/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]!); }
@@ -166,7 +202,7 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
           recipient.recipients.length!==1||recipient.recipients[0]!.email!==row.recipient_email)
           throw new HTTPException(409,{message:"Delivery recipient is no longer eligible"});
       }
-      const rendered = renderNotification(row.kind, JSON.parse(row.payload_json) as NotificationPayload);
+      const rendered = renderNotification(row.kind, await materializeNotificationPayload(env, row));
       await sendNotificationMail(env, { to: row.recipient_email, fromName: "LTDS Client Delivery", subject: rendered.subject, text: rendered.text, html: rendered.html, messageIdKey: row.id });
       await env.DELIVERY_DB.prepare("UPDATE delivery_notifications SET status='sent',sent_at=datetime('now'),lease_until=NULL,updated_at=datetime('now') WHERE id=? AND status='sending'").bind(row.id).run();
       await auditNotification(env, "notification.sent", row, { attempt });

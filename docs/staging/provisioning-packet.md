@@ -116,6 +116,9 @@ Before ignored `apps/*/wrangler.staging.json` files can pass preflight:
 - create and record the distinct client portal audience and group, set
   `CLIENT_ACCESS_AUD`, `CLIENT_ACCESS_TEAM_DOMAIN`, and
   `CLIENT_PORTAL_ORIGIN`, and keep `CLIENT_PORTAL_ENABLED=false`;
+- record the anonymous delivery origin as `PUBLIC_SHARE_ORIGIN` on both
+  Workers and Client `PUBLIC_BASE_URL`; keep Operations `DELIVERY_BASE_URL`
+  pointed at the authenticated client portal origin;
 - the staging Access group ID/name and approved test identities;
 - a staging-only Project Alpha origin and service-token policy;
 - interactive staging secrets, never committed or placed in shell commands;

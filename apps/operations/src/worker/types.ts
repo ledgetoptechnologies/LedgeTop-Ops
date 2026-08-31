@@ -49,6 +49,8 @@ export type Env = Omit<
   /** Coordinated release barrier for every project-access authority mutation. Default off. */
   PROJECT_ACCESS_AUTHORITY_MUTATIONS_ENABLED?: string;
   OPERATIONS_SESSION_SECRET: string;
+  /** Anonymous public-share origin; never use the authenticated portal origin as an implicit fallback. */
+  PUBLIC_SHARE_ORIGIN: string;
   DELIVERY_TOKEN_SECRET: string;
   DELIVERY_PREVIOUS_TOKEN_SECRET?: string;
   DELIVERY_ACCESS_CODE_PEPPER: string;

@@ -30,6 +30,7 @@ import { createClientDelegatedPublicRouter } from "./client-delegated-public";
 import { handleProjectAlphaCatalogRequest } from "./project-alpha-catalog";
 import { projectAlphaPricingHintProvider } from "./client-portal/project-alpha-pricing-hint";
 import { processInvitationEmailBatch } from "./client-portal/invitation-email";
+import { requestHostAllowed, requireClientPortalOrigin, requirePublicShareOrigin } from "./origin-policy";
 import {
   classifyPublicShareLifecycle,
   logPublicShareOutcome,
@@ -59,21 +60,12 @@ function cloudProviderEnabled(env:Env,provider:CloudProvider):boolean{
  if(!env.CLOUD_TRANSFER_TOKEN_SECRET||!env.CLOUD_TRANSFER_WORKFLOW)return false;
  return provider==="dropbox"?env.CLOUD_TRANSFER_DROPBOX_ENABLED==="true"&&Boolean(env.DROPBOX_CLIENT_ID&&env.DROPBOX_CLIENT_SECRET):env.CLOUD_TRANSFER_GOOGLE_ENABLED==="true"&&env.CLOUD_TRANSFER_GOOGLE_PICKER_CLIENT_ENABLED==="true"&&Boolean(env.GOOGLE_CLIENT_ID&&env.GOOGLE_CLIENT_SECRET&&env.GOOGLE_PICKER_API_KEY&&env.GOOGLE_CLOUD_PROJECT_NUMBER);
 }
-function requireSameOrigin(request:Request,env:Env):void{const origin=request.headers.get("Origin");if(!origin||origin!==new URL(env.PUBLIC_BASE_URL).origin)throw new HTTPException(403,{message:"This request is not allowed"});}
-function cloudRedirectUri(env:Env,provider:CloudProvider):string{return`${env.PUBLIC_BASE_URL}/api/public/cloud-transfers/oauth/${provider}/callback`;}
+function requireSameOrigin(request:Request,env:Env):void{const origin=request.headers.get("Origin");if(!origin||origin!==requirePublicShareOrigin(env))throw new HTTPException(403,{message:"This request is not allowed"});}
+function cloudRedirectUri(env:Env,provider:CloudProvider):string{return`${requirePublicShareOrigin(env)}/api/public/cloud-transfers/oauth/${provider}/callback`;}
 function cloudStatus(value:string):string{return value==="partial"?"failed":value;}
 function providerPublicName(provider:CloudProvider):"dropbox"|"google-drive"{return provider==="google"?"google-drive":"dropbox";}
 
-export function requestHostAllowed(requestUrl:string,env:Pick<Env,"ENVIRONMENT"|"EXPECTED_HOST"|"CLIENT_PORTAL_ORIGIN">):boolean{
- if(env.ENVIRONMENT!=="production"&&env.ENVIRONMENT!=="staging")return true;
- const requestHost=new URL(requestUrl).host;
- if(requestHost===env.EXPECTED_HOST)return true;
- if(!env.CLIENT_PORTAL_ORIGIN)return false;
- try{
-  const portal=new URL(env.CLIENT_PORTAL_ORIGIN);
-  return portal.protocol==="https:"&&portal.origin===env.CLIENT_PORTAL_ORIGIN&&portal.pathname==="/"&&requestHost===portal.host;
- }catch{return false;}
-}
+export { requestHostAllowed } from "./origin-policy";
 
 async function googlePickerCredential(env:CloudTransferEnv,authorizationId:string,row:{credential_ciphertext:string;credential_iv:string;key_id:string}):Promise<CloudCredential>{
  let credential=await decryptWithRotation<CloudCredential>({ciphertext:row.credential_ciphertext,iv:row.credential_iv,keyId:row.key_id},env,`authorization:${authorizationId}:google`);
@@ -646,7 +638,7 @@ app.get("/api/public/shares/:publicId/items/:itemRef/download-ticket", async c =
   const sessionMaxMs = 12 * 60 * 60 * 1000;
   const shareRemainingMs = share.expires_at ? Math.max(0, new Date(share.expires_at).getTime() - Date.now()) : sessionMaxMs;
   const expiresAt = new Date(Date.now() + Math.min(sessionMaxMs, shareRemainingMs)).toISOString();
-  return c.json({ url: `${c.env.PUBLIC_BASE_URL}${base}/download`, expiresAt });
+  return c.json({ url: `${requirePublicShareOrigin(c.env)}${base}/download`, expiresAt });
 });
 app.on(["GET", "HEAD"], "/api/public/shares/:publicId/items/:itemRef/download", c => downloadItem(c));
 
@@ -818,7 +810,7 @@ app.get("/api/public/cloud-transfers/oauth/:provider/callback",async c=>{
   primaryDb(c.env).prepare(`INSERT INTO cloud_transfer_jobs(id,share_id,share_version,authorization_id,provider,selection_json,destination_json,conflict_mode,status,expires_at) VALUES(?,?,?,?,?,?,?,?, 'queued',?)`).bind(jobId,share.id,share.share_version,authorizationId,provider,row.selection_json,destination,row.conflict_mode,expiresAt),
  ]);
  if(!pendingGoogle){try{await c.env.CLOUD_TRANSFER_WORKFLOW.create({id:jobId,params:{jobId}});}catch(error){console.error(JSON.stringify({event:"cloud-transfer.workflow-create-failed",jobId,provider,error:error instanceof Error?error.message:String(error)}));await primaryDb(c.env).prepare("UPDATE cloud_transfer_jobs SET status='failed',error_code='transfer-failed',error_message=?,updated_at=datetime('now') WHERE id=?").bind(friendlyCloudFailure("transfer-failed").message,jobId).run();}}
- const url=new URL(`/s/${encodeURIComponent(share.public_id)}`,c.env.PUBLIC_BASE_URL);url.searchParams.set("cloudTransferNonce",secret.callbackNonce);url.searchParams.set("cloudTransferProvider",providerPublicName(provider));
+ const url=new URL(`/s/${encodeURIComponent(share.public_id)}`,requirePublicShareOrigin(c.env));url.searchParams.set("cloudTransferNonce",secret.callbackNonce);url.searchParams.set("cloudTransferProvider",providerPublicName(provider));
  if(pendingGoogle)url.searchParams.set("cloudTransferAuthorization",authorizationId);else url.searchParams.set("cloudTransferJob",jobId);
  return c.redirect(url.toString(),302);
 });
@@ -904,7 +896,9 @@ app.post("/api/internal/project-alpha/sources/:sourceId/service-assignments-v1",
   c => handleRegisteredProjectAlphaServiceAssignmentsRequest(c.req.raw, c.env, c.req.param("sourceId")));
 
 app.route("/api/client", createClientPortalRouter({ pricingHintProvider: projectAlphaPricingHintProvider }));
-app.get("/", c => c.redirect("/portal", 302));
+app.on(["GET", "HEAD"], "/portal", c => serveAppShell(c.req.raw, c.env.ASSETS));
+app.on(["GET", "HEAD"], "/portal/*", c => serveAppShell(c.req.raw, c.env.ASSETS));
+app.get("/", c => c.redirect(new URL("/portal", requireClientPortalOrigin(c.env)).toString(), 302));
 
 app.notFound(c => c.json({ error: "Not found" }, 404));
 app.onError((error, c) => {

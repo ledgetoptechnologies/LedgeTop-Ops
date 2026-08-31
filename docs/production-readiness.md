@@ -80,8 +80,11 @@ on the existing staging Delivery Worker. Create a dedicated path-scoped client
 Access app/audience/group and a separate public-share Bypass app/policy; do not
 reuse Delivery, Operations, Ops Sync, staff, or production client authority.
 Keep `CLIENT_PORTAL_ENABLED=false`, bind `CLIENT_PORTAL_ORIGIN` and
-`PUBLIC_BASE_URL` to the client staging origin, and prove the exact public path
-and password/session contract before any temporary activation.
+Operations `DELIVERY_BASE_URL` to the authenticated client staging origin.
+Bind `PUBLIC_SHARE_ORIGIN` on both Workers and Client `PUBLIC_BASE_URL` to the
+anonymous delivery staging origin. Prove wrong-host namespace rejection, the
+exact public path/password/session contract, and portal authentication before
+any temporary activation.
 
 Repository configuration must use explicit Wrangler staging environments or
 checked-in staging templates whose resource IDs are placeholders. Resource IDs,

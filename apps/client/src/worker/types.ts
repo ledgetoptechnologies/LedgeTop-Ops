@@ -14,6 +14,8 @@ export interface Env {
   PUBLIC_STREAM_RATE_LIMITER: RateLimit;
   PUBLIC_BULK_RATE_LIMITER: RateLimit;
   PUBLIC_BASE_URL: string;
+  /** Canonical public delivery/share origin. PUBLIC_BASE_URL remains a rollout-compatible mirror. */
+  PUBLIC_SHARE_ORIGIN?: string;
   EXPECTED_HOST: string;
   CLIENT_PORTAL_ENABLED?: string;
   CLIENT_PORTAL_ORIGIN?: string;

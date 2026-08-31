@@ -13,9 +13,10 @@
   ],
   "limits": { "cpu_ms": 300000, "subrequests": 25000 },
   "triggers": { "crons": ["*/5 * * * *", "15 * * * *"] },
-  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/", "/api/*", "/s/*", "/client-share/*", "/health"] },
+  "assets": { "binding": "ASSETS", "directory": "./dist/client", "not_found_handling": "single-page-application", "run_worker_first": ["/", "/api/*", "/s/*", "/client-share/*", "/portal", "/portal/*", "/health"] },
   "vars": {
-    "PUBLIC_BASE_URL": "https://client-staging.ledgetopdroneservices.com",
+    "PUBLIC_BASE_URL": "https://delivery-staging.ledgetopdroneservices.com",
+    "PUBLIC_SHARE_ORIGIN": "https://delivery-staging.ledgetopdroneservices.com",
     "EXPECTED_HOST": "delivery-staging.ledgetopdroneservices.com",
     "ENVIRONMENT": "staging",
     "TEAM_DOMAIN": "https://ledgetoptechnologies.cloudflareaccess.com",

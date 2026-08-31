@@ -7,6 +7,7 @@ import {
 import { z } from "zod";
 import { hashAccessCode, hmac, randomToken, sha256 } from "./crypto";
 import type { Env } from "./types";
+import { publicShareOrigin } from "./origins";
 
 const CLIENT_SHARE_PATH_PREFIX = "/client-share/";
 const SIGNER_PROTOCOL_VERSION = 1 as const;
@@ -255,9 +256,7 @@ async function bearerSecret(env: Env, shareId: string, shareVersion: number): Pr
 
 function clientShareBaseUrl(env: Env): URL | null {
   try {
-    const url = new URL(env.DELIVERY_BASE_URL);
-    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) return null;
-    return url;
+    return new URL(publicShareOrigin(env));
   } catch {
     return null;
   }

@@ -25,12 +25,11 @@ The intended public boundary is:
   staff-only.
 - `ops-sync.ledgetopdroneservices.com` remains internal/service-authenticated
   and exposes no client journey.
-- `client.ledgetopdroneservices.com` becomes the sole client-facing origin for
-  the authenticated portal, flight/service requests, quarantine-first incoming
-  uploads, password-protected public shares, and delivery browsing.
-- `delivery.ledgetopdroneservices.com` has no client traffic and is testing-only.
-  It is removed in the client-host cutover instead of becoming a redirect or a
-  compatibility origin.
+- `client.ledgetopdroneservices.com` is the authenticated client portal origin
+  for portal workspaces and flight/service requests.
+- `delivery.ledgetopdroneservices.com` remains the anonymous public-share and
+  delivery-browsing origin. The Worker enforces the host×namespace split even
+  when both custom domains point to the same Worker.
 
 The domain migration must keep the existing Worker identity and bindings stable,
 and the cutover must be independently reversible without deleting or recreating
@@ -70,22 +69,20 @@ after separate review and approval of client-host-aware runtime code:
    authorization, public shares, delivery browsing, request submission, and
    quarantine upload boundaries. Keep `client.` unattached until these checks
    pass.
-4. Attach `client.ledgetopdroneservices.com` to the existing Worker and create
-   or enable only the client-scoped Access application/policies required by the
-   authenticated portal. Do not detach `delivery.` yet.
-5. Test the real `client.` origin end to end: expected-host rejection,
+4. Attach both reviewed custom domains to the existing Worker and create or
+   enable only the client-scoped Access application/policies required by the
+   authenticated portal. Keep one human client audience; the public delivery
+   host uses a separate Bypass policy, not another human authority.
+5. Test the real `client.` origin end to end: wrong-namespace rejection,
    unauthenticated denial, client isolation, staff/client authorization,
-   password-protected public shares, preview/download browsing, request flow,
-   quarantine-only uploads, and `/health`. This brief overlap is a cutover
-   validation window, not a redirect or compatibility period.
-6. If every client-origin gate passes, remove the `delivery.` custom domain/DNS
-   record and its delivery-scoped Access administration application. Do not
-   redirect `delivery.` and do not delete the Worker, versions, bindings,
-   secrets, D1 databases, R2 buckets, Queue, Workflows, Images, Stream, or
-   rate-limit resources.
-7. Re-run `client.` health/authentication/authorization and public-share smoke
-   tests after removal, then record the final domain, Access policy, Worker
-   version, and resource inventory as cutover evidence.
+   request flow, quarantine-only uploads, and `/health`. Test the real
+   `delivery.` origin for password-protected public shares, preview/download
+   browsing, portal-namespace rejection, and absence of a human Access token.
+6. Update Client `PUBLIC_SHARE_ORIGIN`/`PUBLIC_BASE_URL`, Client
+   `CLIENT_PORTAL_ORIGIN`, Operations `PUBLIC_SHARE_ORIGIN`, and Operations
+   `DELIVERY_BASE_URL` together. Re-run both-host smoke tests and record the
+   final domain, Access policy, Worker version, variables, and resource
+   inventory as cutover evidence.
 
 ### Ordered rollback
 

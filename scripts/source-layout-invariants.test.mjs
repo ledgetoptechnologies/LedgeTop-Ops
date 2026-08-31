@@ -52,6 +52,8 @@ const expectedPublicRoutes = [
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/preview",
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/source",
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/thumbnail",
+  "GET|HEAD /portal",
+  "GET|HEAD /portal/*",
   "POST /api/internal/client-request-attachments/:attachmentId/scanned",
   "POST /api/internal/project-alpha/catalog-v2",
   "POST /api/internal/project-alpha/portal-v2",
@@ -94,7 +96,7 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "950495b576058522809450b55e5232ca05220a72cb65b0017c99314e495a5b3b");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "57b476ac2f8d69e3642d15177626f44ea3353ffaa29cce59f6433281d33523aa");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -106,9 +108,10 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     binding: "ASSETS",
     directory: "./dist/client",
     not_found_handling: "single-page-application",
-    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/health"],
+    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal", "/portal/*", "/health"],
   });
   assert.equal(config.vars.PUBLIC_BASE_URL, "https://client.ledgetopdroneservices.com");
+  assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.EXPECTED_HOST, "client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_PORTAL_ORIGIN, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.CLIENT_PORTAL_ENABLED, "true");
@@ -163,8 +166,9 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
   assert.deepEqual(config.ratelimits.map((item) => [item.name, item.namespace_id, item.simple.limit]), expectedRateLimits);
 });
 
-test("public route, host-guard, health, and isolated cookie contracts remain reviewed", () => {
+test("public route, host-namespace guard, health, and isolated cookie contracts remain reviewed", () => {
   const worker = read("apps/client/src/worker/index.ts");
+  const originPolicy = read("apps/client/src/worker/origin-policy.ts");
   const security = read("apps/client/src/worker/security.ts");
   const delegated = read("apps/client/src/worker/client-portal/delegated-shares.ts");
   const lifecycle = read("apps/client/src/worker/public-share-lifecycle.ts");
@@ -173,7 +177,9 @@ test("public route, host-guard, health, and isolated cookie contracts remain rev
   assert(worker.includes('const COOKIE_NAME = "__Host-ltds_delivery";'));
   assert(worker.includes('service: "ltds-delivery"'));
   assert(worker.includes("requestHostAllowed(c.req.url,c.env)"));
-  assert(worker.includes('requestHost===env.EXPECTED_HOST'));
+  assert(originPolicy.includes('if (namespace === "public") return request.origin === publicOrigin;'));
+  assert(originPolicy.includes('if (namespace === "portal") return request.origin === portalOrigin;'));
+  assert(originPolicy.includes('if (namespace === "shared") return request.origin === publicOrigin || request.origin === portalOrigin;'));
   assert.equal(worker.match(/12 \* 60 \* 60 \* 1000/g)?.length, 1);
   assert.equal(lifecycle.match(/12 \* 60 \* 60 \* 1000/g)?.length, 1);
   assert(security.includes('`__Host-ltds_delivery=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`'));

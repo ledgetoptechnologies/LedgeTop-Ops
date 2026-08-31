@@ -5,6 +5,7 @@ import type {
 } from "@ltds/shared";
 import type { Env } from "../types";
 import { constantTimeEqual, hmac, sha256 } from "../security";
+import { configuredPublicShareOrigin } from "../origin-policy";
 import type { VerifiedClientPrincipal } from "./types";
 import { authorizePortalWorkspaceCapability, portalHierarchyV2Enabled } from "./workspace-v2";
 import {
@@ -379,9 +380,8 @@ export async function verifyAndRecordClientDelegatedShareSignerResult(
       value.share.expiresAt !== request.expiresAt) return null;
   let url: URL;
   try { url = new URL(value.share.shareUrl); } catch { return null; }
-  const configured = env.CLIENT_PORTAL_ORIGIN || env.PUBLIC_BASE_URL;
-  let expectedOrigin: string;
-  try { expectedOrigin = new URL(configured).origin; } catch { return null; }
+  const expectedOrigin = configuredPublicShareOrigin(env);
+  if (!expectedOrigin) return null;
   const secret = url.hash.slice(1);
   if (url.origin !== expectedOrigin || url.pathname !== expectedPath || url.search ||
       !/^[A-Za-z0-9_-]{43}$/.test(secret)) return null;

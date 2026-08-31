@@ -40,8 +40,10 @@ not become active deployments.
 
 `CLIENT_PORTAL_ENABLED` and every feature listed in
 `REQUIRED_DISABLED_FEATURE_FLAGS` must be explicitly `false`;
-`CLIENT_PORTAL_ORIGIN` and
-`PUBLIC_BASE_URL` must both be the client staging origin. `CLIENT_ACCESS_AUD`
+`CLIENT_PORTAL_ORIGIN` and Operations `DELIVERY_BASE_URL` must be the client
+staging origin. `PUBLIC_SHARE_ORIGIN` on both Workers and Client
+`PUBLIC_BASE_URL` must be the anonymous delivery staging origin.
+`CLIENT_ACCESS_AUD`
 must be the new portal app audience, never `POLICY_AUD`, `OPERATIONS_AUD`, or
 `CF_ACCESS_AUD`.
 

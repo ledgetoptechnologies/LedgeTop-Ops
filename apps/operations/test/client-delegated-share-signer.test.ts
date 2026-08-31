@@ -114,6 +114,7 @@ async function fixture(): Promise<Fixture> {
   const env = {
     DELIVERY_DB: db,
     DELIVERY_BASE_URL: "https://client.example.test",
+    PUBLIC_SHARE_ORIGIN: "https://delivery.example.test",
     DELIVERY_TOKEN_SECRET: "operations-token-secret-value-that-never-leaves",
     DELIVERY_ACCESS_CODE_PEPPER: "operations-access-pepper-value-that-never-leaves",
     CLIENT_DELEGATED_SHARE_SIGNER_ENABLED: "true",
@@ -163,7 +164,7 @@ describe("private Operations client-delegated share signer", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.share.path).toMatch(/^\/client-share\/cs_[A-Za-z0-9_-]+$/);
-    expect(result.share.shareUrl).toMatch(/^https:\/\/client\.example\.test\/client-share\/cs_.+#[A-Za-z0-9_-]{43}$/);
+    expect(result.share.shareUrl).toMatch(/^https:\/\/delivery\.example\.test\/client-share\/cs_.+#[A-Za-z0-9_-]{43}$/);
     expect(result.share.shareUrl).not.toContain("/s/");
     const serialized = JSON.stringify(result);
     expect(serialized).not.toContain("clients/private/project");

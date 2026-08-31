@@ -3,6 +3,7 @@ import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { processDeliveryNotifications, processProjectAlphaDeliveryPortalNotifications } from "../src/worker/notifications";
 import { sendNotificationMail } from "../src/worker/mailer";
+import { decryptDeliveryToken, encryptDeliveryToken } from "../src/worker/crypto";
 import type { Env } from "../src/worker/types";
 
 vi.mock("../src/worker/mailer", () => ({ sendNotificationMail: vi.fn(async () => undefined) }));
@@ -10,6 +11,8 @@ const directory = new URL("../../client/migrations/", import.meta.url);
 const migrations = readdirSync(directory).filter(name => /^\d+_.+\.sql$/.test(name)).sort()
   .map(name => readFileSync(new URL(name, directory), "utf8"));
 const prefix = "jobs/shared/project/", email = "same-email@example.test";
+const currentTokenSecret = "current-delivery-token-secret-used-by-tests";
+const previousTokenSecret = "previous-delivery-token-secret-used-by-tests";
 
 // Real production SQL and full migration chain. Only mail transport is mocked;
 // the D1-shaped adapter never fabricates query or authorization results.
@@ -52,6 +55,9 @@ describe("delivery notification source and live ownership", () => {
     db = new DatabaseSync(":memory:");
     for (const sql of migrations) { db.exec("BEGIN"); db.exec(sql); db.exec("COMMIT"); }
     env = { DELIVERY_DB: asD1(db), DELIVERY_BASE_URL: "https://client.example.test",
+      PUBLIC_SHARE_ORIGIN: "https://delivery.example.test",
+      DELIVERY_TOKEN_SECRET: currentTokenSecret,
+      DELIVERY_PREVIOUS_TOKEN_SECRET: previousTokenSecret,
       CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true",
       CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true", AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true" } as Env;
     for (const name of ["primary", "secondary"]) {
@@ -81,11 +87,15 @@ describe("delivery notification source and live ownership", () => {
       (receipt_id,delivery_id,request_fingerprint,access_mode,resource_id,project_alpha_source_id)
       VALUES(?,?,?,?,?,?)`).run(`receipt-${name}`, `delivery-${name}`, "a".repeat(64), kind, resource, `project-alpha:${name}`);
   }
-  function guest(name: string) {
+  async function guest(name: string, encryptionSecret = currentTokenSecret) {
+    const shareId = `share-${name}`, publicId = `public-${name}`, bearer = `bearer-secret-${name}`;
+    const encrypted = await encryptDeliveryToken(bearer, encryptionSecret, shareId);
     db.prepare(`INSERT INTO projects(id,client_name,project_name,r2_prefix,project_alpha_source_id,project_alpha_project_id)
       VALUES(?,'Client','Project',?,?,'same-project')`).run(`project-${name}`, prefix, `project-alpha:${name}`);
-    db.prepare(`INSERT INTO shares(id,project_id,token_hash,r2_prefix,created_by_type,created_by_id,recipient_email)
-      VALUES(?,?,?,?,'integration',?,?)`).run(`share-${name}`, `project-${name}`, `hash-${name}`, prefix, `delivery-${name}`, email);
+    db.prepare(`INSERT INTO shares(id,project_id,token_hash,r2_prefix,created_by_type,created_by_id,recipient_email,
+      public_id,secret_ciphertext,secret_iv)
+      VALUES(?,?,?,?,'integration',?,?,?,?,?)`).run(shareId, `project-${name}`, `hash-${name}`, prefix,
+        `delivery-${name}`, email, publicId, encrypted.ciphertext, encrypted.iv);
     receipt(name, "guest", `share-${name}`);
     db.prepare(`INSERT INTO project_alpha_delivery_guest_authority
       (share_id,workspace_id,folder_binding_id,binding_source_version,directory_generation_id,principal_public_id,principal_source_version)
@@ -93,7 +103,8 @@ describe("delivery notification source and live ownership", () => {
       .run(`share-${name}`, `workspace-${name}`, `binding-${name}`, `generation-${name}`);
     db.prepare(`INSERT INTO delivery_notifications(id,dedupe_key,share_id,kind,recipient_email,payload_json)
       VALUES(?,?,?,'share_created',?,?)`).run(`notice-${name}`, `dedupe-${name}`, `share-${name}`, email,
-        JSON.stringify({ projectName: "Project", shareUrl: "https://delivery.example.test/r/test-only" }));
+        JSON.stringify({ projectName: "Project", publicId }));
+    return { shareId, publicId, bearer, encrypted };
   }
   function portal(name: string, attempted = true) {
     receipt(name, "portal", `grant-${name}`);
@@ -107,15 +118,33 @@ describe("delivery notification source and live ownership", () => {
   }
 
   it("sends valid primary guest mail despite another source's identical prefix, IDs and email", async () => {
-    guest("primary");
+    const share = await guest("primary");
     expect(await processDeliveryNotifications(env)).toBe(1);
     expect(sendNotificationMail).toHaveBeenCalledTimes(1);
     expect(sendNotificationMail).toHaveBeenCalledWith(env, expect.objectContaining({ to: email, messageIdKey: "notice-primary" }));
+    expect(vi.mocked(sendNotificationMail).mock.calls[0]?.[1].text)
+      .toContain(`https://delivery.example.test/s/${share.publicId}#${share.bearer}`);
+    const stored = db.prepare("SELECT payload_json FROM delivery_notifications").get()?.payload_json;
+    expect(stored).not.toContain("shareUrl");
+    expect(stored).not.toContain("#");
     expect(db.prepare("SELECT status FROM delivery_notifications").get()?.status).toBe("sent");
   });
 
+  it("recovers a previous-key bearer at send time and rotates the saved ciphertext", async () => {
+    const share = await guest("primary", previousTokenSecret);
+    expect(await processDeliveryNotifications(env)).toBe(1);
+    const saved = db.prepare("SELECT secret_ciphertext,secret_iv FROM shares WHERE id=?").get(share.shareId) as
+      { secret_ciphertext: string; secret_iv: string };
+    expect(saved.secret_ciphertext).not.toBe(share.encrypted.ciphertext);
+    expect(await decryptDeliveryToken(saved.secret_ciphertext, saved.secret_iv, currentTokenSecret, share.shareId))
+      .toBe(share.bearer);
+    expect(vi.mocked(sendNotificationMail).mock.calls[0]?.[1].text)
+      .toContain(`https://delivery.example.test/s/${share.publicId}#${share.bearer}`);
+    expect(db.prepare("SELECT payload_json FROM delivery_notifications").get()?.payload_json).not.toContain("#");
+  });
+
   it("suppresses guest mail rather than borrowing the overlapping primary recipient", async () => {
-    guest("secondary");
+    await guest("secondary");
     db.exec("UPDATE pa_portal_principals SET status='suspended' WHERE workspace_id='workspace-secondary'");
     expect(await processDeliveryNotifications(env)).toBe(1);
     expect(sendNotificationMail).not.toHaveBeenCalled();
@@ -125,7 +154,7 @@ describe("delivery notification source and live ownership", () => {
   });
 
   it("suppresses a guest notice whose exact source generation is no longer selected", async () => {
-    guest("primary");
+    await guest("primary");
     db.exec(`INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete)
       VALUES('generation-next','workspace-primary','snapshot-next',2,'active',1);
       UPDATE portal_v2_directory_checkpoints SET active_generation_id='generation-next',source_sequence=2 WHERE workspace_id='workspace-primary'`);
@@ -162,7 +191,7 @@ describe("delivery notification source and live ownership", () => {
   });
 
   it.each(["guest", "portal"] as const)("suppresses %s mail when the owner's source revision no longer matches its binding", async kind => {
-    if (kind === "guest") guest("primary"); else portal("primary");
+    if (kind === "guest") await guest("primary"); else portal("primary");
     db.exec("UPDATE portal_v2_directory_entities SET source_version='owner-v2' WHERE workspace_id='workspace-primary'");
     if (kind === "guest") await processDeliveryNotifications(env); else await processProjectAlphaDeliveryPortalNotifications(env);
     expect(sendNotificationMail).not.toHaveBeenCalled();

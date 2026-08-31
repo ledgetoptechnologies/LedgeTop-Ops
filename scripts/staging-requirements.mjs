@@ -101,6 +101,7 @@ export const STAGING_CLIENT_PORTAL = Object.freeze({
   applicationName: "LTDS Client Portal Staging",
   publicApplicationName: "LTDS Client Public Staging",
   hostname: STAGING_HOSTS.client,
+  publicHostname: STAGING_HOSTS.delivery,
   protectedPaths: Object.freeze(["/portal", "/portal/*", "/api/client", "/api/client/*"]),
   publicPaths: Object.freeze(["/", "/s/*", "/client-share/*", "/api/public/*", "/health", "/assets/*"]),
   groupName: "LTDS Client Portal Staging Testers",
@@ -174,6 +175,7 @@ export const REQUIRED_STAGING_MIGRATIONS = Object.freeze({
     "0148_single_file_delivery_shares.sql",
     "0149_portal_operations_management.sql",
     "0150_delivery_share_history_index.sql",
+    "0177_domain_neutral_delivery_notifications.sql",
   ]),
   operations: Object.freeze([
     "0014_staff_acl_controls.sql",
@@ -456,7 +458,8 @@ export const STAGING_ACCESS_AUDS = Object.freeze({
 export const STAGING_STATIC_VARS = Object.freeze({
   delivery: Object.freeze({
     TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
-    PUBLIC_BASE_URL: `https://${STAGING_HOSTS.client}`,
+    PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`,
+    PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`,
     CLIENT_PORTAL_ENABLED: "false",
     CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
     CLIENT_ACCESS_TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
@@ -499,6 +502,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
   operations: Object.freeze({
     TEAM_DOMAIN: "https://ledgetoptechnologies.cloudflareaccess.com",
     DELIVERY_BASE_URL: `https://${STAGING_HOSTS.client}`,
+    PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`,
     PROJECT_ALPHA_BASE_URL: STAGING_PROJECT_ALPHA_ORIGIN,
     R2_ACCOUNT_ID: STAGING_ACCOUNT_ID,
     R2_BUCKET_NAME: "client-data-staging",
@@ -543,7 +547,7 @@ export const STAGING_STATIC_VARS = Object.freeze({
 
 export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
   delivery: Object.freeze([
-    "PUBLIC_BASE_URL", "EXPECTED_HOST", "ENVIRONMENT", "TEAM_DOMAIN", "POLICY_AUD",
+    "PUBLIC_BASE_URL", "PUBLIC_SHARE_ORIGIN", "EXPECTED_HOST", "ENVIRONMENT", "TEAM_DOMAIN", "POLICY_AUD",
     "CLIENT_PORTAL_ENABLED", "CLIENT_PORTAL_REQUEST_V2_ENABLED",
     "PROJECT_ALPHA_CATALOG_SYNC_ENABLED", "PROJECT_ALPHA_CATALOG_APPLICATION_KEY",
     "PROJECT_ALPHA_CATALOG_ACCESS_TEAM_DOMAIN", "PROJECT_ALPHA_CATALOG_ACCESS_AUD",
@@ -572,7 +576,7 @@ export const STAGING_ALLOWED_VAR_NAMES = Object.freeze({
   operations: Object.freeze([
     "PUBLIC_BASE_URL", "EXPECTED_HOST", "DIRECT_DELIVERY_UPLOADS_ENABLED",
     "INCOMING_BASE_URL", "INCOMING_EXPECTED_HOST", "THUMBNAIL_INGEST_EXPECTED_HOST", "THUMBNAIL_RENDERER_EXPECTED_HOST",
-    "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD", "DELIVERY_BASE_URL",
+    "ENVIRONMENT", "TEAM_DOMAIN", "OPERATIONS_AUD", "DELIVERY_BASE_URL", "PUBLIC_SHARE_ORIGIN",
     "PROJECT_ALPHA_BASE_URL", "PROJECT_ALPHA_DRAFT_QUOTES_ENABLED",
     "PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED", "PROJECT_ALPHA_DELIVERY_GUEST_ENABLED",
     "CLIENT_DELEGATED_SHARE_SIGNER_ENABLED", "CLIENT_PORTAL_HIERARCHY_V2_ENABLED",
@@ -618,7 +622,7 @@ export const STAGING_INVENTORY = Object.freeze({
     queues: [],
     crons: ["*/5 * * * *", "15 * * * *"],
     limits: { cpu_ms: 300000, subrequests: 25000 },
-    assets: { binding: "ASSETS", directory: "./dist/client", not_found_handling: "single-page-application", run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/health"] },
+    assets: { binding: "ASSETS", directory: "./dist/client", not_found_handling: "single-page-application", run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal", "/portal/*", "/health"] },
     observability: { enabled: true, head_sampling_rate: 1 },
     stream: { binding: "STREAM" },
     ratelimits: [

@@ -20,7 +20,7 @@ function fixture(base) {
   fs.utimesSync(path.join(base, ".backups", "delivery.sql"), backupTime, backupTime);
   fs.utimesSync(path.join(base, ".backups", "operations.sql"), backupTime, backupTime);
   const configs = {
-    delivery: { vars: { CLIENT_PORTAL_ENABLED: "false", CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`, PUBLIC_BASE_URL: `https://${STAGING_HOSTS.client}`, CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN, CLIENT_ACCESS_AUD: "a".repeat(64) } },
+    delivery: { vars: { CLIENT_PORTAL_ENABLED: "false", CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`, PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`, PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`, CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN, CLIENT_ACCESS_AUD: "a".repeat(64) } },
     operations: { vars: { PROJECT_ALPHA_BASE_URL: "https://project-alpha-staging.ledgetopdroneservices.com" } },
     "ops-sync": { vars: { CF_ACCESS_GROUP_ID: "staging-group-id", CF_ACCESS_GROUP_NAME: "LTDS Staging Testers" } },
   };
@@ -167,7 +167,7 @@ function fixture(base) {
       groupId: "client-portal-group-id",
       groupName: STAGING_CLIENT_PORTAL.groupName,
       protectedPaths: [...STAGING_CLIENT_PORTAL.protectedPaths],
-      publicAccess: { applicationName: STAGING_CLIENT_PORTAL.publicApplicationName, applicationId: "client-public-app-id", policyId: "client-public-policy-id", decision: "bypass", include: "everyone", destination: STAGING_CLIENT_PORTAL.hostname, workerPublicPaths: [...STAGING_CLIENT_PORTAL.publicPaths] },
+      publicAccess: { applicationName: STAGING_CLIENT_PORTAL.publicApplicationName, applicationId: "client-public-app-id", policyId: "client-public-policy-id", decision: "bypass", include: "everyone", destination: STAGING_CLIENT_PORTAL.publicHostname, workerPublicPaths: [...STAGING_CLIENT_PORTAL.publicPaths] },
       approvalRef: "ticket:client-access",
       tests: { portalDisabled404: true, invalidAudienceDenied: true, unprovisionedIdentityDenied: true, crossAccountDenied: true, staffAclDenied: true, publicShareAnonymousReachable: true, publicSharePasswordRechecked: true, accessHeaderAbsentOnPublicShare: true, observedAt: "2026-07-30T12:00:00Z", evidenceRef: "ticket:client-e2e" },
     },

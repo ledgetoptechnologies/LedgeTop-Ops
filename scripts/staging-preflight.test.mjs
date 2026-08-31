@@ -26,7 +26,7 @@ function stagingConfig(app) {
       EXPECTED_HOST: inventory.routes[0].pattern,
       ...(app === "delivery" ? {
         POLICY_AUD: STAGING_ACCESS_AUDS.delivery,
-        PUBLIC_BASE_URL: `https://${STAGING_HOSTS.client}`,
+        PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`,
         CLIENT_PORTAL_ENABLED: "false",
         CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`,
         CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN,
@@ -74,7 +74,7 @@ function productionFrom(staging) {
   const production = clone(staging);
   production.name = production.name.replace("-staging", "");
   production.routes = production.routes.map((route) => ({ ...route, pattern: route.pattern.replace("-staging", "") }));
-  for (const key of Object.keys(production.vars)) if (/(?:EXPECTED_HOST|BASE_URL|_AUD)$/.test(key)) production.vars[key] = `production-${key}`;
+  for (const key of Object.keys(production.vars)) if (/(?:EXPECTED_HOST|BASE_URL|_ORIGIN|_AUD)$/.test(key)) production.vars[key] = `production-${key}`;
   production.d1_databases = production.d1_databases.map((item) => ({ ...item, database_id: `prod-${item.database_id}` }));
   production.r2_buckets = production.r2_buckets.map((item) => ({ ...item, bucket_name: `prod-${item.bucket_name}` }));
   production.workflows = production.workflows.map((item) => ({ ...item, name: `prod-${item.name}` }));
@@ -125,6 +125,12 @@ test("requires the authenticated client portal origin for Operations mail", () =
   const errors = validateApp("operations", staging, productionFrom(staging));
   assert(errors.some((error) => error.includes("DELIVERY_BASE_URL")), errors.join(" | "));
 });
+test("requires the anonymous public-share origin for Operations share links", () => {
+  const staging = stagingConfig("operations");
+  staging.vars.PUBLIC_SHARE_ORIGIN = `https://${STAGING_HOSTS.client}`;
+  const errors = validateApp("operations", staging, productionFrom(staging));
+  assert(errors.some((error) => error.includes("PUBLIC_SHARE_ORIGIN")), errors.join(" | "));
+});
 test("requires staging-only map, triage, and email bindings", () => {
   const delivery = stagingConfig("delivery");
   delivery.vars.MAPBOX_PUBLIC_TOKEN = "";
@@ -169,14 +175,16 @@ test("resolves logical delivery staging files from apps/client", () => {
   fs.renameSync(path.join(base, "apps", "client"), path.join(base, "apps", "delivery"));
   assert(validateFiles(base).some((error) => error.includes(path.join("apps", "client", "wrangler.staging.json"))));
 });
-test("fails closed on client portal activation, origin, and audience reuse", () => {
+test("fails closed on client portal activation, host namespace origins, and audience reuse", () => {
   const staging = stagingConfig("delivery");
   const production = productionFrom(staging);
   staging.vars.CLIENT_PORTAL_ENABLED = "true";
   staging.vars.CLIENT_PORTAL_ORIGIN = "https://other-staging.example";
+  staging.vars.PUBLIC_SHARE_ORIGIN = `https://${STAGING_HOSTS.client}`;
+  staging.vars.PUBLIC_BASE_URL = staging.vars.PUBLIC_SHARE_ORIGIN;
   staging.vars.CLIENT_ACCESS_AUD = STAGING_ACCESS_AUDS.operations;
   const errors = validateApp("delivery", staging, production);
-  for (const expected of ["CLIENT_PORTAL_ENABLED", "client portal and public origins", "must not reuse"]) {
+  for (const expected of ["CLIENT_PORTAL_ENABLED", "authenticated client staging host", "anonymous delivery staging host", "must not reuse"]) {
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });

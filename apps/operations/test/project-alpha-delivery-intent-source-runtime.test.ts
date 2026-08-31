@@ -87,7 +87,7 @@ describe("source-owned delivery intent runtime and transaction races", () => {
 
   it("creates distinct owned guest shares for equal producer delivery IDs and keeps retries and revocations source-bound", async () => {
     const f=await fixture("guest-collision",true);
-    const guestEnv={...env,PROJECT_ALPHA_DELIVERY_GUEST_ENABLED:"true",DELIVERY_BASE_URL:"https://delivery.example.test",DELIVERY_TOKEN_SECRET:secret};
+    const guestEnv={...env,PROJECT_ALPHA_DELIVERY_GUEST_ENABLED:"true",DELIVERY_BASE_URL:"https://client.example.test",PUBLIC_SHARE_ORIGIN:"https://delivery.example.test",DELIVERY_TOKEN_SECRET:secret};
     const payload={...f.payload,accessMode:"guest"};
     const a=await create(payload,PRIMARY_CATALOG_SOURCE,guestEnv),b=await create(payload,secondary,guestEnv);
     expect(a.receiptId).not.toBe(b.receiptId);
@@ -121,7 +121,7 @@ describe("source-owned delivery intent runtime and transaction races", () => {
 
   it("returns one secondary guest share and receipt when exact creation retries race", async () => {
     const f=await fixture("guest-retry-race",true);
-    const guestEnv={...env,PROJECT_ALPHA_DELIVERY_GUEST_ENABLED:"true",DELIVERY_BASE_URL:"https://delivery.example.test",DELIVERY_TOKEN_SECRET:secret};
+    const guestEnv={...env,PROJECT_ALPHA_DELIVERY_GUEST_ENABLED:"true",DELIVERY_BASE_URL:"https://client.example.test",PUBLIC_SHARE_ORIGIN:"https://delivery.example.test",DELIVERY_TOKEN_SECRET:secret};
     const payload={...f.payload,accessMode:"guest"};let winner:{receiptId:string;status:"accepted"}|undefined;
     const raced=interleaveBeforeBatch(database,async()=>{winner=await create(payload,secondary,guestEnv);});
     expect(await create(payload,secondary,{...guestEnv,DELIVERY_DB:raced})).toEqual(winner);

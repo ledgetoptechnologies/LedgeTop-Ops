@@ -23,10 +23,11 @@
     "binding": "ASSETS",
     "directory": "./dist/client",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/", "/api/*", "/s/*", "/client-share/*", "/health"]
+    "run_worker_first": ["/", "/api/*", "/s/*", "/client-share/*", "/portal", "/portal/*", "/health"]
   },
   "vars": {
     "PUBLIC_BASE_URL": "https://client.ledgetopdroneservices.com",
+    "PUBLIC_SHARE_ORIGIN": "https://client.ledgetopdroneservices.com",
     "EXPECTED_HOST": "client.ledgetopdroneservices.com",
     "ENVIRONMENT": "production",
     "CLIENT_PORTAL_ENABLED": "true",

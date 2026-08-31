@@ -69,16 +69,33 @@ from Operations staff ACL provisioning.
 
 For the separately authorized rollout, the production Client Portal Access app
 must target only `client.ledgetopdroneservices.com/portal`, `/portal/*`,
-`/api/client`, and `/api/client/*`. Use a dedicated client group and audience.
-Define a separate root client-host application with a narrowly reviewed Bypass
-Everyone policy so public shares do not require Access. The more-specific
-portal paths retain the portal Allow policy. Release-critical public path
-families include `/`, `/s/*`, `/api/public/*`, `/health`, and `/assets/*`; they
-remain under the Worker's own routing and authorization controls.
-Never use a host-wide client Allow policy, and verify no
+`/api/client`, and `/api/client/*`. Use one dedicated human client group and one
+audience for all of those portal destinations. Public delivery stays on
+`delivery.ledgetopdroneservices.com`; define a separately reviewed Bypass
+Everyone application/policy for its public namespaces instead of widening the
+human portal application. Release-critical public path families include `/`,
+`/s/*`, `/client-share/*`, `/api/public/*`, `/health`, and `/assets/*`; they
+remain under the Worker's own routing and authorization controls. Never use a
+host-wide client Allow policy, and verify no
 `Cf-Access-Jwt-Assertion` reaches a public share request. Cloudflare documents
 path matching and specificity in
 [Application paths](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/).
+
+Configure `PUBLIC_SHARE_ORIGIN` (and the Client Worker's compatibility
+`PUBLIC_BASE_URL`) as the exact public delivery origin. Configure
+`CLIENT_PORTAL_ORIGIN` on Client and `DELIVERY_BASE_URL` on Operations as the
+exact authenticated portal origin. The Worker rejects a public namespace on
+the portal host, a portal namespace on the public host, unknown Worker-first
+paths, and malformed origins. `/portal` and `/portal/*` must remain
+Worker-first. Session cookies remain host-local (`__Host-` or path-scoped
+`__Secure-` cookies with no `Domain` attribute), so no cookie is shared merely
+because both hosts use the same Worker or Access audience.
+
+The repository does not authorize the DNS, custom-domain, Access, or live
+variable change. Keep the checked-in same-host production values as a
+compatibility state until the separately approved rollout attaches both hosts,
+updates both Workers' origins together, applies the reviewed D1 migration, and
+passes anonymous-share plus authenticated-portal acceptance tests.
 
 The pilot must retain an exported rollback configuration. Before expanding
 beyond the pilot, prove authenticated portal access, unprovisioned denial,
