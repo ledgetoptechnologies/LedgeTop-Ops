@@ -35,7 +35,7 @@ async function mockAuthorizedPortal(
   page: Page,
   mapboxPublicToken: string | null = null,
   fixtureRequests = requests,
-  workflowEvents?: { edited?: boolean; changeRequested?: boolean; estimateAccepted?: boolean },
+  workflowEvents?: { edited?: boolean; changeRequested?: boolean; estimateAccepted?: boolean; cancelled?: boolean },
   locationFixtures: { project: DeliveryLocationCollection; past: DeliveryLocationCollection } = {
     project: { points: [], imageCount: 0, truncated: false },
     past: { points: [], imageCount: 0, truncated: false },
@@ -139,6 +139,11 @@ async function mockAuthorizedPortal(
       expect(request.postDataJSON()).toMatchObject({ estimateId: "estimate-b", response: "accept" });
       if (workflowEvents) workflowEvents.estimateAccepted = true;
       await route.fulfill({ json: { request: { ...fixtureRequests[1], operationalEstimate: { ...fixtureRequests[1]?.operationalEstimate, status: "accepted" } } } });
+    } else if (request.method() === "POST" && path === "/api/client/service-requests/request-a/cancel") {
+      expect(request.headers()["idempotency-key"]).toMatch(/^[0-9a-f-]{36}$/);
+      expect(request.postData()).toBeNull();
+      if (workflowEvents) workflowEvents.cancelled = true;
+      await route.fulfill({ json: { request: { ...fixtureRequests[0], status: "cancelled", updatedAt: "2026-08-01T14:00:00.000Z" } } });
     } else {
       await route.fulfill({ status: 404, json: { error: "Not found" } });
     }
@@ -1573,5 +1578,28 @@ test("client can edit before review, create a child change, and answer an estima
   page.once("dialog", dialog => dialog.accept());
   await page.getByRole("button", { name: "Accept estimate" }).click();
   await expect.poll(() => workflowEvents.estimateAccepted).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("client can cancel pre-work requests and sees PA draft creation without an acceptance claim", async ({ page }) => {
+  const workflowEvents: { cancelled?: boolean } = {};
+  const fixtureRequests: PortalServiceRequest[] = [
+    requests[0]!,
+    { ...requests[0]!, id: "request-pa-pending", title: "Approved mapping", status: "accepted_pending_pa_linkage" },
+    { ...requests[0]!, id: "request-pa-draft", title: "Quoted mapping", status: "accepted_linked" },
+  ];
+  await mockAuthorizedPortal(page, null, fixtureRequests, workflowEvents);
+  await page.goto("/portal/requests");
+  await expect(page.getByText("Approved · preparing PA draft quote", { exact: true })).toBeVisible();
+  await expect(page.getByText("PA draft quote created", { exact: true })).toBeVisible();
+  const submitted = page.locator("article").filter({ hasText: requests[0]!.title });
+  page.once("dialog", dialog => {
+    expect(dialog.message()).toContain("closes the request before work begins");
+    return dialog.accept();
+  });
+  await submitted.getByRole("button", { name: "Cancel request" }).click();
+  await expect.poll(() => workflowEvents.cancelled).toBe(true);
+  await expect(submitted.getByText("Cancelled", { exact: true })).toBeVisible();
+  await expect(submitted.getByRole("button", { name: "Cancel request" })).toHaveCount(0);
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

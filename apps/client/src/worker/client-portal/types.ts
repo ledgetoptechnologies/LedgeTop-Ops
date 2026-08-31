@@ -388,6 +388,7 @@ export interface ClientPortalRepository {
   getServiceRequest(env: Env, session: ClientPortalSession, requestId: string): Promise<ClientServiceRequest | null>;
   createServiceRequest(env: Env, session: ClientPortalSession, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;
   updateServiceRequest(env: Env, session: ClientPortalSession, requestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequest | null>;
+  cancelServiceRequest?(env: Env, session: ClientPortalSession, requestId: string, mutationKey: string): Promise<ClientServiceRequestCancelResult | null>;
   createChangeRequest(env: Env, session: ClientPortalSession, parentRequestId: string, input: ClientServiceRequestInput): Promise<ClientServiceRequestCreateResult | null>;
   listServiceCatalog?(env: Env, session: ClientPortalSession, input?: { projectId?: string | null }): Promise<ClientServiceCatalogItem[]>;
   listServiceCatalogPage?(env: Env, session: ClientPortalSession, input: ClientServiceCatalogPageInput): Promise<ClientServiceCatalogPage>;

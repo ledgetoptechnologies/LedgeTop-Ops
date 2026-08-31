@@ -152,6 +152,12 @@ function tone(status: string): "neutral" | "success" | "warning" | "danger" {
         : "neutral";
 }
 
+function requestStatusLabel(status: string): string {
+  if (status === "accepted_pending_pa_linkage") return "Approved · PA draft pending";
+  if (status === "accepted_linked") return "PA draft quote created";
+  return status.replaceAll("_", " ");
+}
+
 function requestQueueError(caught: unknown): string {
   if (
     caught instanceof ApiError &&
@@ -271,7 +277,7 @@ export function ClientRequestWorkflow({
                 </div>
                 <div>
                   <StatusPill tone={tone(request.status)}>
-                    {request.status.replaceAll("_", " ")}
+                    {requestStatusLabel(request.status)}
                   </StatusPill>
                   <button
                     className="button-orange button-small"
@@ -470,7 +476,7 @@ function ClientRequestDetail({
       ),
     );
   const linkQuote = () => {
-    const raw = prompt("Project Alpha accepted quote ID");
+    const raw = prompt("Project Alpha draft quote ID");
     if (!raw) return;
     return run(() =>
       api(
@@ -515,7 +521,7 @@ function ClientRequestDetail({
           </p>
         </div>
         <StatusPill tone={tone(request.status)}>
-          {request.status.replaceAll("_", " ")}
+          {requestStatusLabel(request.status)}
         </StatusPill>
       </div>
       {request.parent_request_id && (
@@ -802,7 +808,7 @@ function ClientRequestDetail({
               disabled={busy}
               onClick={() => void linkQuote()}
             >
-              Link approved Project Alpha quote manually
+              Link Project Alpha draft quote manually
             </button>
           )}
           {["submitted", "under_review"].includes(request.status) && (
@@ -869,7 +875,7 @@ function ClientRequestDetail({
         {request.status === "accepted_pending_pa_linkage" &&
           legacyPaQuoteLinkEnabled && (
           <p className="muted">
-            Manual fallback verifies an already approved Project Alpha quote; it does not create or price one in LTDS.
+            Manual fallback links an existing Project Alpha quote record; it does not create, approve, or price one in LTDS.
           </p>
         )}
         {request.quote_document_number && (
@@ -899,7 +905,7 @@ function ClientRequestDetail({
                     {child.title}
                   </button>
                   <span>
-                    {child.status.replaceAll("_", " ")} · {date(child.created_at)}
+                    {requestStatusLabel(child.status)} · {date(child.created_at)}
                   </span>
                 </li>
               ))}

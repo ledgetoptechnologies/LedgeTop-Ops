@@ -437,14 +437,14 @@ const lifecyclePresentation: Record<
     introduction: "LTDS is reviewing your service request.",
   },
   accepted_pending_pa_linkage: {
-    subject: "Service request accepted",
-    status: "Accepted — next steps being prepared",
-    introduction: "LTDS accepted your service request and is preparing the next steps.",
+    subject: "Service request approved for quote preparation",
+    status: "Approved — Project Alpha draft pending",
+    introduction: "LTDS approved the operational request and is preparing a Project Alpha draft quote.",
   },
   accepted_linked: {
-    subject: "Service request accepted",
-    status: "Accepted",
-    introduction: "Your service request is accepted.",
+    subject: "Project Alpha draft quote created",
+    status: "PA draft quote created",
+    introduction: "A Project Alpha draft quote was created. This does not mean the client accepted it.",
   },
   declined: {
     subject: "Service request declined",

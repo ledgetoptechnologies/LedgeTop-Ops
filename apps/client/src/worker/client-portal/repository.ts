@@ -24,6 +24,7 @@ import type {
   VerifiedClientPrincipal,
 } from "./types";
 import {
+  cancelServiceRequest,
   createServiceRequestDraft,
   getServiceRequestDraft,
   listServiceCatalog,
@@ -761,6 +762,10 @@ export const d1ClientPortalRepository: ClientPortalRepository = {
 
   async submitServiceRequestDraft(env, session, draftId, expectedVersion, mutationKey) {
     return submitServiceRequestDraft(env, session, draftId, expectedVersion, mutationKey);
+  },
+
+  async cancelServiceRequest(env, session, requestId, mutationKey) {
+    return cancelServiceRequest(env, session, requestId, mutationKey);
   },
 
   async resolveSession(

@@ -848,7 +848,7 @@ function ClientRequestQueue() {
     }
   };
   const linkQuote = async (request: ClientRequest) => {
-    const raw = prompt("Project Alpha accepted quote ID");
+    const raw = prompt("Project Alpha draft quote ID");
     if (!raw) return;
     const artifactId = Number(raw);
     if (!Number.isInteger(artifactId) || artifactId <= 0) {
@@ -873,8 +873,8 @@ function ClientRequestQueue() {
       <div className="notice managed-notice">
         <strong>Project Alpha remains authoritative</strong>
         <span>
-          Accepting a request moves it to pending linkage. It becomes linked
-          only after an accepted Project Alpha quote is verified.
+          Approving a request prepares a Project Alpha draft quote. Linked
+          means the PA draft was created; it does not mean the client accepted it.
         </span>
       </div>
       <ErrorLine error={error} />
@@ -916,7 +916,7 @@ function ClientRequestQueue() {
                   </small>
                   {request.quote_document_number && (
                     <small>
-                      Verified PA quote: {request.quote_document_number}
+                      Linked PA draft quote: {request.quote_document_number}
                     </small>
                   )}
                 </div>
@@ -935,7 +935,11 @@ function ClientRequestQueue() {
                             : "neutral"
                     }
                   >
-                    {request.status.replaceAll("_", " ")}
+                    {request.status === "accepted_pending_pa_linkage"
+                      ? "Approved · PA draft pending"
+                      : request.status === "accepted_linked"
+                        ? "PA draft quote created"
+                        : request.status.replaceAll("_", " ")}
                   </StatusPill>
                   {request.status === "submitted" && (
                     <button
@@ -954,7 +958,7 @@ function ClientRequestQueue() {
                         void update(request, "accepted_pending_pa_linkage")
                       }
                     >
-                      Accept pending PA quote
+                      Approve for PA draft quote
                     </button>
                   )}
                   {request.status === "accepted_pending_pa_linkage" && (
@@ -963,7 +967,7 @@ function ClientRequestQueue() {
                       disabled={busy === request.id}
                       onClick={() => void linkQuote(request)}
                     >
-                      Verify PA quote
+                      Link PA draft quote
                     </button>
                   )}
                   {["submitted", "under_review"].includes(request.status) && (

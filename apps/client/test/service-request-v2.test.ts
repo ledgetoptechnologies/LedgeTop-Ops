@@ -10,6 +10,7 @@ import { getAuthorizedRequestAttachment, getSubmittedRequestAttachment, listRequ
 import { validateRequestArea } from "../src/worker/client-portal/request-area";
 import {
   calculateRequestAreaSquareMeters,
+  cancelServiceRequest,
   createServiceRequestDraft,
   getServiceRequestDraft,
   listServiceCatalog,

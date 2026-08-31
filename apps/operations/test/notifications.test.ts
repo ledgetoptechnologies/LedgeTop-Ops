@@ -294,8 +294,8 @@ describe("client notifications", () => {
   it("renders new or one-off client lifecycle copy with a neutral coordinate fallback", () => {
     const lifecycles = [
       ["under_review", "Service request under review", "Under review"],
-      ["accepted_pending_pa_linkage", "Service request accepted", "Accepted — next steps being prepared"],
-      ["accepted_linked", "Service request accepted", "Accepted"],
+      ["accepted_pending_pa_linkage", "Service request approved for quote preparation", "Approved — Project Alpha draft pending"],
+      ["accepted_linked", "Project Alpha draft quote created", "PA draft quote created"],
       ["declined", "Service request declined", "Declined"],
       ["cancelled", "Service request cancelled", "Cancelled"],
       ["completed", "Service request completed", "Completed"],

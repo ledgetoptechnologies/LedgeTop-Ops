@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  cancelPortalServiceRequest,
   createPortalChangeRequest,
   createPortalServiceRequest,
   createPortalServiceDraft,
@@ -162,6 +163,15 @@ describe("client portal browser API boundary", () => {
     expect(request).toHaveBeenLastCalledWith("/api/client/service-requests/request%20a/change-request", expect.objectContaining({ method: "POST", headers: expect.objectContaining({ "Idempotency-Key": "change-key-0001" }) }));
     const body = JSON.parse((vi.mocked(request).mock.calls.at(-1)?.[1] as RequestInit).body as string);
     expect(body.parentRequestId).toBe("request a");
+  });
+
+  it("cancels an exact request with caller-owned retry idempotency and no body", async () => {
+    const request = vi.fn(async <T>(): Promise<T> => ({ request: { id: "request-a", status: "cancelled" } }) as T) as PortalRequest;
+    await cancelPortalServiceRequest("request a", "cancel-key-00000001", request);
+    expect(request).toHaveBeenCalledWith(
+      "/api/client/service-requests/request%20a/cancel",
+      { method: "POST", headers: { "Idempotency-Key": "cancel-key-00000001" } },
+    );
   });
 
   it("sends only the selected opaque hierarchy scope when creating an invitation", async () => {

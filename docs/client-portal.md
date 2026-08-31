@@ -84,15 +84,26 @@ adds its isolated bounded machine-rate counters. The signed wire corpus is
 6. The client accepts or requests changes through an idempotent response. This
    is operational confirmation only. Final LTDS request approval remains a
    separate staff transition.
-7. Staff manually create the financial quote in PA. LTDS verifies a supplied PA
-   quote reference read-only, checks its client/organization relationship, and
-   links the verified reference. Quote linkage is separate from final approval.
-   PA continues to own all quote, contract, invoice, and financial messaging.
+7. Staff explicitly create or link a private draft quote in PA. The compatibility
+   state `accepted_linked` means that PA draft exists; it does not mean the client
+   accepted a quote. PA continues to own quote approval, sending, contracts,
+   invoices, payments, and all financial messaging.
+8. A client may cancel only while a request is `submitted`, `under_review`, or
+   `accepted_pending_pa_linkage`. Cancellation is same-origin and idempotent,
+   rechecks the verified identity, account, workspace, exact project/root,
+   primary catalog source, reviewed service versions, and assignments, then
+   atomically appends a `status_changed` revision, staff notification, and audit
+   entry. `accepted_linked`, `declined`, `cancelled`, and `completed` requests
+   reject the client mutation because a PA draft/work artifact exists or the
+   request is already closed.
 
 Request states are `submitted`, `under_review`,
 `accepted_pending_pa_linkage`, `accepted_linked`, `declined`, `cancelled`, and
 `completed`. Revision actions are `submitted`, `client_edit`, `change_request`,
 `staff_proposal`, `client_response`, `status_changed`, and `pa_quote_linked`.
+The two legacy `accepted_*` values remain unchanged for API/database
+compatibility; UI and notification copy uses **Approved — PA draft pending** and
+**PA draft quote created** so neither value is presented as client acceptance.
 
 ## API, data, and security contracts
 

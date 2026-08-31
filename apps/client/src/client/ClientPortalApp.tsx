@@ -11,6 +11,7 @@ import { AccountMenu, Brand, Card, EmptyState, Loading, StatusPill, openViewerWi
 import type { DeliveryLocationCollection } from "@ltds/shared";
 import type { RequestError } from "./bulk-download";
 import {
+  cancelPortalServiceRequest,
   createPortalChangeRequest,
   createPortalServiceRequest,
   createPortalServiceDraft,
@@ -194,8 +195,8 @@ function formatBytes(bytes: number): string {
 
 function statusLabel(status: PortalServiceRequestStatus): string {
   if (status === "accepted_pending_pa_linkage")
-    return "Accepted · preparing paperwork";
-  if (status === "accepted_linked") return "Accepted";
+    return "Approved · preparing PA draft quote";
+  if (status === "accepted_linked") return "PA draft quote created";
   return status
     .replaceAll("_", " ")
     .replace(/\b\w/g, (character) => character.toUpperCase());
@@ -204,7 +205,7 @@ function statusLabel(status: PortalServiceRequestStatus): string {
 function statusTone(
   status: PortalServiceRequestStatus,
 ): "neutral" | "success" | "warning" | "danger" {
-  if (status === "completed" || status === "accepted_linked") return "success";
+  if (status === "completed") return "success";
   if (status === "cancelled" || status === "declined") return "danger";
   if (status === "submitted" || status === "accepted_pending_pa_linkage")
     return "warning";
@@ -709,17 +710,21 @@ function RequestList({
   limit,
   onEdit,
   onChange,
+  onCancel,
   onEstimateRespond,
+  cancellingRequestId,
 }: {
   requests: PortalServiceRequest[];
   projects: PortalProject[];
   limit?: number;
   onEdit?: (request: PortalServiceRequest) => void;
   onChange?: (request: PortalServiceRequest) => void;
+  onCancel?: (request: PortalServiceRequest) => void;
   onEstimateRespond?: (
     request: PortalServiceRequest,
     response: "accept" | "request_change",
   ) => void;
+  cancellingRequestId?: string | null;
 }) {
   const projectNames = useMemo(
     () => new Map(projects.map((project) => [project.id, project.projectName])),
@@ -766,7 +771,7 @@ function RequestList({
             </StatusPill>
             <time>{formatDate(request.createdAt)}</time>
           </div>
-          {(onEdit || onChange) && (
+          {(onEdit || onChange || onCancel) && (
             <div className="portal-request-actions">
               {request.status === "submitted" && onEdit && (
                 <button
@@ -788,6 +793,15 @@ function RequestList({
                     Request a change
                   </button>
                 )}
+              {cancellableStatuses.has(request.status) && onCancel && (
+                <button
+                  className="button-ghost button-small"
+                  disabled={cancellingRequestId === request.id}
+                  onClick={() => onCancel(request)}
+                >
+                  {cancellingRequestId === request.id ? "Cancelling…" : "Cancel request"}
+                </button>
+              )}
             </div>
           )}
         </article>
@@ -795,6 +809,12 @@ function RequestList({
     </div>
   );
 }
+
+const cancellableStatuses = new Set<PortalServiceRequestStatus>([
+  "submitted",
+  "under_review",
+  "accepted_pending_pa_linkage",
+]);
 
 const REQUEST_STEPS = ["services", "location", "details", "contact", "review"] as const;
 type RequestStep = (typeof REQUEST_STEPS)[number];
@@ -2582,6 +2602,7 @@ export function ClientPortalApp({
     change: boolean;
   } | null>(null);
   const [requestNotice, setRequestNotice] = useState<string | null>(null);
+  const [cancellingRequestId, setCancellingRequestId] = useState<string | null>(null);
   const [switchingWorkspace, setSwitchingWorkspace] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [bootstrapRevision, setBootstrapRevision] = useState(0);
@@ -2801,6 +2822,19 @@ export function ClientPortalApp({
       window.alert((caught as Error).message);
     }
   };
+  const onCancelRequest = async (request: PortalServiceRequest) => {
+    if (cancellingRequestId || !cancellableStatuses.has(request.status)) return;
+    if (!window.confirm(`Cancel “${request.title}”? This closes the request before work begins.`)) return;
+    setCancellingRequestId(request.id);
+    try {
+      onSaved(await cancelPortalServiceRequest(request.id, crypto.randomUUID()));
+      setRequestNotice("The service request was cancelled.");
+    } catch (caught) {
+      window.alert((caught as Error).message);
+    } finally {
+      setCancellingRequestId(null);
+    }
+  };
   const selectedProject = projects.find((project) => project.id === projectId);
   let content: ReactNode;
 
@@ -2895,7 +2929,7 @@ export function ClientPortalApp({
                 ).length
               }
             </span>
-            <strong>Accepted requests</strong>
+            <strong>PA draft quotes</strong>
             <button
               className="portal-text-action"
               onClick={() => navigate("requests")}
@@ -3068,7 +3102,9 @@ export function ClientPortalApp({
             projects={projects}
             onEdit={(request) => setEditing({ request, change: false })}
             onChange={(request) => setEditing({ request, change: true })}
+            onCancel={onCancelRequest}
             onEstimateRespond={onEstimateRespond}
+            cancellingRequestId={cancellingRequestId}
           />
         </Card>
       </>

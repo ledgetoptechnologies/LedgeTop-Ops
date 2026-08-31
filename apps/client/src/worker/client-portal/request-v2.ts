@@ -8,6 +8,7 @@ import type {
   ClientServiceDraftSelection,
   ClientServiceQuestion,
   ClientServiceRequest,
+  ClientServiceRequestCancelResult,
   ClientServiceRequestDraft,
   ClientServiceRequestDraftSummary,
   ClientServiceRequestDraftInput,
@@ -94,6 +95,21 @@ const draftAccess = `AND (
       AND (m.role='manager' OR EXISTS (
         SELECT 1 FROM client_member_project_grants mg
         WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=d.project_id AND mg.revoked_at IS NULL
+      ))
+  ))
+)`;
+
+const requestMutationAccess = `AND (
+  (r.project_id IS NULL AND (m.role='manager' OR r.created_by_identity_id=i.id)) OR
+  (r.project_id IS NOT NULL AND EXISTS (
+    SELECT 1 FROM client_project_grants g
+    JOIN projects p ON p.id=g.project_id AND p.active=1
+      AND (p.project_alpha_source_id IS NULL OR p.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}')
+    WHERE g.account_id=a.id AND g.project_id=r.project_id AND g.revoked_at IS NULL
+      AND g.can_request_service=1
+      AND (m.role='manager' OR EXISTS (
+        SELECT 1 FROM client_member_project_grants mg
+        WHERE mg.account_id=a.id AND mg.identity_id=i.id AND mg.project_id=r.project_id AND mg.revoked_at IS NULL
       ))
   ))
 )`;
@@ -411,14 +427,14 @@ const reviewedCatalogGuard = `NOT EXISTS (
   )
 )`;
 
-function reviewedCatalogVersions(services: ClientServiceDraftSelection[]): string {
+function reviewedCatalogVersions(services: ReadonlyArray<{ publicId: string; sourceVersion: string }>): string {
   return JSON.stringify(services.map(({ publicId, sourceVersion }) => ({ publicId, sourceVersion })));
 }
 
 async function currentAssignmentConflict(
   env: Env,
   proof: ServiceAssignmentPolicyProof | null,
-  services: ClientServiceDraftSelection[],
+  services: ReadonlyArray<{ publicId: string; sourceVersion: string }>,
 ): Promise<string[] | null> {
   if (!serviceAssignmentRequestPolicyEnabled(env)) return null;
   if (!proof || !await serviceAssignmentPolicyProofStillCurrent(env, proof))
@@ -429,7 +445,7 @@ async function currentAssignmentConflict(
 
 function reviewedServiceAssignmentGuard(
   proof: ServiceAssignmentPolicyProof | null,
-  services: ClientServiceDraftSelection[],
+  services: ReadonlyArray<{ publicId: string; sourceVersion: string }>,
 ) {
   if (!proof) return { sql: "1=1", bindings: [] as unknown[] };
   const checkpoint = serviceAssignmentPolicyCheckpointSql(proof);
@@ -592,7 +608,7 @@ function incompleteAnswerServices(draft: ClientServiceRequestDraft): string[] {
     .map(service => service.publicId);
 }
 
-async function changedCatalogServices(env: Env, services: ClientServiceDraftSelection[]): Promise<string[]> {
+async function changedCatalogServices(env: Env, services: ReadonlyArray<{ publicId: string; sourceVersion: string }>): Promise<string[]> {
   const changed: string[] = [];
   for (const service of services) {
     const current = await db(env).prepare(`SELECT source_version FROM pa_service_catalog_items WHERE source_id=? AND public_id=? AND active=1`).bind(PRIMARY_ALPHA_SOURCE_ID, service.publicId).first<{ source_version: string }>();

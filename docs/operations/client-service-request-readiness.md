@@ -112,6 +112,27 @@ versions, expiry and a non-binding disclaimer govern it. General administrative
 prices are not exposed in the library, and this increment does not invent
 fixed-price or per-client pricing rules.
 
+## Client cancellation before work begins
+
+`POST /api/client/service-requests/:requestId/cancel` accepts no browser-owned
+status or identity fields. It requires the portal origin and a 16–128 character
+`Idempotency-Key`. The mutation is available only from `submitted`,
+`under_review`, and `accepted_pending_pa_linkage`. `accepted_linked` means a
+Project Alpha draft quote has been created, so it is intentionally past the
+client-cancellation boundary; declined, cancelled, and completed requests are
+closed as well.
+
+The cancellation read and first atomic write both fence the active account,
+unrevoked verified identity/member, primary Project Alpha source, current exact
+project/root `request.create` authority, project request grant, current catalog
+versions, and current exact-target service assignments when assignment policy is
+enabled. A stale catalog, assignment, target, workspace, or membership cannot
+partially cancel a request. Exact replay returns the prior cancelled snapshot;
+key reuse with another mutation conflicts. A successful write adds one immutable
+`status_changed` client revision, one staff-triage outbox event, and one audit
+record in the same batch. No migration is required because the deployed schema
+already includes the `cancelled` state and `status_changed` action.
+
 ## Acceptance and release boundaries
 
 Verify real migrated-D1 permission intersections, deny precedence, missing

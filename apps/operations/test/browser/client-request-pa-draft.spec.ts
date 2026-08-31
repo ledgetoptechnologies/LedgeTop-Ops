@@ -85,11 +85,12 @@ test("staff explicitly creates a private Project Alpha draft and opens the PA ed
   });
 
   await page.goto("/clients/requests/request-pa-draft");
+  await expect(page.getByText("Approved · PA draft pending", { exact: true })).toBeVisible();
   const create = page.getByRole("button", { name: "Create Project Alpha draft" });
   await expect(create).toBeVisible();
   await expect(create).toBeEnabled();
-  await expect(page.getByRole("button", { name: "Link approved Project Alpha quote manually" })).toHaveCount(0);
-  await expect(page.getByText(/Manual fallback verifies an already approved Project Alpha quote/i)).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Link Project Alpha draft quote manually" })).toHaveCount(0);
+  await expect(page.getByText(/Manual fallback links an existing Project Alpha quote record/i)).toHaveCount(0);
   await create.click();
   await expect(page.getByText("Private Project Alpha draft Q-DRAFT-7")).toBeVisible();
   await expect(page.getByText(/Project Alpha owns pricing, approval, sending, invoicing, and payment/i)).toBeVisible();

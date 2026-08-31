@@ -854,6 +854,21 @@ export async function updatePortalServiceRequest(
   return response.request;
 }
 
+export async function cancelPortalServiceRequest(
+  requestId: string,
+  idempotencyKey: string,
+  request: PortalRequest = requestJson,
+): Promise<PortalServiceRequest> {
+  const response = await request<{ request: PortalServiceRequest }>(
+    `/api/client/service-requests/${encodeURIComponent(requestId)}/cancel`,
+    {
+      method: "POST",
+      headers: { "Idempotency-Key": idempotencyKey },
+    },
+  );
+  return response.request;
+}
+
 export async function createPortalChangeRequest(
   parentRequestId: string,
   input: PortalServiceRequestInput,
