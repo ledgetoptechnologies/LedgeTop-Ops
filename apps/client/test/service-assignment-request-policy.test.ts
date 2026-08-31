@@ -20,7 +20,6 @@ import type { Env } from "../src/worker/types";
 import { splitD1MigrationStatements } from "./helpers/d1-migrations";
 
 const sourceId = "project-alpha:primary";
-const secondarySourceId = "project-alpha:secondary";
 const workspaceId = "policy-workspace";
 const session: ClientPortalSession = {
   accountId: "policy-account",
@@ -32,12 +31,6 @@ const session: ClientPortalSession = {
   displayName: "Policy client",
   role: "manager",
   canViewBilling: false,
-};
-const secondarySession: ClientPortalSession = {
-  ...session,
-  accountId: "secondary-policy-account",
-  identityId: "secondary-policy-identity",
-  workspaceId: "secondary-policy-workspace",
 };
 
 describe("exact-target service-assignment request policy", { timeout: 60_000 }, () => {
@@ -51,7 +44,7 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       compatibilityDate: "2026-08-06",
       modules: true,
       script: "export default {fetch(){return new Response('ok')}}",
-      d1Databases: Object.fromEntries(Array.from({ length: 11 }, (_, index) =>
+      d1Databases: Object.fromEntries(Array.from({ length: 8 }, (_, index) =>
         [`POLICY_DB_${index}`, `service-assignment-policy-${index}`])),
     });
   });
@@ -148,13 +141,6 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
         VALUES (?,'portal.service-assignments.publish',1,'active','test')`).bind(sourceId),
       db.prepare(`INSERT INTO pa_service_assignment_receiver_workspaces(source_id,workspace_id,state,created_by)
         VALUES (?,?,'active','test')`).bind(sourceId, workspaceId),
-      db.prepare(`INSERT INTO pa_service_assignment_source_capabilities
-        (source_id,contract_version,state)
-        VALUES (?,1,'supported')`).bind(sourceId),
-      db.prepare(`INSERT INTO pa_service_assignment_request_policy_reviews
-        (source_id,revision,review_id,state,reviewed_by_type,reviewed_by_id,review_reference,rationale,reviewed_at)
-        VALUES (?,1,'policy-review-primary','enabled','staff','test-operator','TEST-PRIMARY',
-          'Explicitly approved for policy tests',datetime('now'))`).bind(sourceId),
       db.prepare(`INSERT INTO pa_service_assignment_generations
         (id,source_id,source_generation,source_sequence,snapshot_hash,page_count,item_count,status,complete)
         VALUES ('assignment-generation',?,'assignments-v1',1,?,1,3,'active',1)`)
@@ -169,79 +155,6 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
       db.prepare(`INSERT INTO pa_service_assignment_checkpoints
         (source_id,active_generation_id,source_generation,source_sequence)
         VALUES (?,'assignment-generation','assignments-v1',1)`).bind(sourceId),
-    ]);
-  }
-
-  async function seedSecondaryPolicyContext() {
-    const secondaryWorkspaceId = secondarySession.workspaceId!;
-    await db.batch([
-      db.prepare(`INSERT INTO pa_portal_source_authorities
-        (source_id,producer_binding_id,snapshot_origin,snapshot_base_path,application_key,state,
-          active_revision,version,connector_revision,connector_version)
-        VALUES (?,'secondary-policy-binding','https://secondary-policy.example',
-          '/api/internal/project-alpha/portal-v2','secondary_policy','pending',1,1,1,1)`)
-        .bind(secondarySourceId),
-      db.prepare(`INSERT INTO pa_portal_source_authority_revisions
-        (source_id,revision,credential_ref,access_issuer,access_audience,access_subject,
-          current_key_id,current_key_fingerprint,created_by)
-        VALUES (?,1,'secondary_policy_credentials','https://secondary-policy.example',
-          'operations','secondary-policy-subject','secondary-policy-key',?,'test')`)
-        .bind(secondarySourceId, "d".repeat(64)),
-      db.prepare(`UPDATE pa_portal_source_authorities
-        SET state='active',version=2,updated_at=datetime('now') WHERE source_id=?`).bind(secondarySourceId),
-      db.prepare(`INSERT INTO pa_portal_workspace_sources
-        (workspace_id,projection_source_id,source_workspace_id)
-        VALUES (?,?,'shared-source-workspace')`).bind(secondaryWorkspaceId, secondarySourceId),
-      db.prepare(`INSERT INTO portal_v2_workspaces
-        (id,root_type,pa_organization_public_id,display_name,status,project_alpha_source_id)
-        VALUES (?,'organization','pa-org-policy','Secondary policy client','active',?)`)
-        .bind(secondaryWorkspaceId, secondarySourceId),
-      db.prepare(`INSERT INTO portal_v2_directory_generations
-        (id,workspace_id,source_generation,source_sequence,status,complete,activated_at)
-        VALUES ('secondary-directory-1',?,'secondary-directory-v1',1,'active',1,datetime('now'))`)
-        .bind(secondaryWorkspaceId),
-      db.prepare(`INSERT INTO portal_v2_directory_entities
-        (workspace_id,generation_id,entity_type,public_id,display_name,source_version,active)
-        VALUES (?,'secondary-directory-1','organization','pa-org-policy',
-          'Secondary policy client','secondary-directory-v1',1)`).bind(secondaryWorkspaceId),
-      db.prepare(`INSERT INTO portal_v2_directory_checkpoints
-        (workspace_id,active_generation_id,source_sequence)
-        VALUES (?,'secondary-directory-1',1)`).bind(secondaryWorkspaceId),
-      db.prepare(`INSERT INTO pa_service_catalog_generations
-        (id,source_id,source_generation,source_sequence,snapshot_hash,page_count,item_count,status,complete)
-        VALUES ('secondary-catalog-generation',?,'secondary-catalog-v1',1,?,1,2,'active',1)`)
-        .bind(secondarySourceId, "e".repeat(64)),
-      db.prepare(`INSERT INTO pa_service_catalog_checkpoint
-        (source_id,active_generation_id,source_generation,source_sequence)
-        VALUES (?,'secondary-catalog-generation','secondary-catalog-v1',1)`).bind(secondarySourceId),
-      db.prepare(`INSERT INTO pa_service_catalog_items
-        (source_id,public_id,source_version,name,category,display_order,source_updated_at,source_generation,source_sequence)
-        VALUES (?,'root-service','service-v1','Secondary colliding service','Mapping',1,datetime('now'),'secondary-catalog-v1',1),
-          (?,'secondary-only','service-v1','Secondary-only service','Mapping',2,datetime('now'),'secondary-catalog-v1',1)`)
-        .bind(secondarySourceId, secondarySourceId),
-      db.prepare(`INSERT INTO pa_service_assignment_receiver_grants
-        (source_id,capability,contract_version,state,created_by)
-        VALUES (?,'portal.service-assignments.publish',1,'active','test')`).bind(secondarySourceId),
-      db.prepare(`INSERT INTO pa_service_assignment_receiver_workspaces
-        (source_id,workspace_id,state,created_by) VALUES (?,?,'active','test')`)
-        .bind(secondarySourceId, secondaryWorkspaceId),
-      db.prepare(`INSERT INTO pa_service_assignment_source_capabilities(source_id,contract_version,state)
-        VALUES (?,1,'supported')`).bind(secondarySourceId),
-      db.prepare(`INSERT INTO pa_service_assignment_generations
-        (id,source_id,source_generation,source_sequence,snapshot_hash,page_count,item_count,status,complete)
-        VALUES ('secondary-assignment-generation',?,'secondary-assignments-v1',1,?,1,2,'active',1)`)
-        .bind(secondarySourceId, "f".repeat(64)),
-      db.prepare(`INSERT INTO pa_service_assignments
-        (source_id,assignment_public_id,source_version,subject_type,subject_public_id,service_public_id,
-          service_source_version,active,source_updated_at,source_generation,source_sequence)
-        VALUES (?,'secondary-assignment-collision','assignment-v1','organization','pa-org-policy',
-          'root-service','service-v1',1,datetime('now'),'secondary-assignments-v1',1),
-          (?,'secondary-assignment-only','assignment-v1','organization','pa-org-policy',
-          'secondary-only','service-v1',1,datetime('now'),'secondary-assignments-v1',1)`)
-        .bind(secondarySourceId, secondarySourceId),
-      db.prepare(`INSERT INTO pa_service_assignment_checkpoints
-        (source_id,active_generation_id,source_generation,source_sequence)
-        VALUES (?,'secondary-assignment-generation','secondary-assignments-v1',1)`).bind(secondarySourceId),
     ]);
   }
 
@@ -535,60 +448,5 @@ describe("exact-target service-assignment request policy", { timeout: 60_000 }, 
     const expiresAt = new Date(Date.now() - 5 * 60_000).toISOString();
     expect(await readServiceAssignmentPolicy(env, session, "project-a", { evaluatedAt, expiresAt }))
       .toEqual({ state: "unavailable", proof: null, assignedServiceCount: null });
-  });
-
-  it("routes colliding assignments by exact source and revokes secondary authority independently", async () => {
-    await seedSecondaryPolicyContext();
-    expect(await readServiceAssignmentPolicy(env, secondarySession, null))
-      .toEqual({ state: "unavailable", proof: null, assignedServiceCount: null });
-
-    await db.prepare(`INSERT INTO pa_service_assignment_request_policy_reviews
-      (source_id,revision,review_id,state,reviewed_by_type,reviewed_by_id,review_reference,rationale,reviewed_at)
-      VALUES (?,1,'policy-review-secondary','enabled','staff','test-operator','TEST-SECONDARY',
-        'Explicitly approved secondary source',datetime('now'))`).bind(secondarySourceId).run();
-    const primary = await readServiceAssignmentPolicy(env, session, null);
-    const secondary = await readServiceAssignmentPolicy(env, secondarySession, null);
-    expect(primary).toMatchObject({ state: "ready", assignedServiceCount: 1,
-      proof: { sourceId, reviewId: "policy-review-primary", reviewRevision: 1 } });
-    expect(secondary).toMatchObject({ state: "ready", assignedServiceCount: 2,
-      proof: { sourceId: secondarySourceId, reviewId: "policy-review-secondary", reviewRevision: 1 } });
-    if (secondary.state !== "ready") throw new Error("secondary policy fixture unavailable");
-
-    await db.prepare(`UPDATE pa_portal_source_authorities
-      SET state='suspended',version=3,updated_at=datetime('now') WHERE source_id=?`).bind(secondarySourceId).run();
-    expect(await serviceAssignmentPolicyProofStillCurrent(env, secondary.proof)).toBe(false);
-    expect(await readServiceAssignmentPolicy(env, secondarySession, null))
-      .toEqual({ state: "unavailable", proof: null, assignedServiceCount: null });
-    expect(await readServiceAssignmentPolicy(env, session, null)).toMatchObject({ state: "ready", assignedServiceCount: 1 });
-  });
-
-  it("requires the latest append-only review and never turns assignments into request authority", async () => {
-    const decision = await readServiceAssignmentPolicy(env, session, null);
-    expect(decision).toMatchObject({ state: "ready", assignedServiceCount: 1 });
-    if (decision.state !== "ready") throw new Error("primary policy fixture unavailable");
-    expect(await serviceAssignmentPolicyProofStillCurrent(env,
-      { ...decision.proof, reviewId: undefined as unknown as string })).toBe(false);
-    const requestAuthority = await readEffectiveWorkspaceRequestProof(env, {
-      issuer: session.principalIssuer!, subject: session.principalSubject!, email: session.principalEmail!,
-    }, workspaceId, null);
-    expect(requestAuthority?.rootAllowed).toBe(true);
-
-    await db.prepare(`UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now')
-      WHERE id='policy-request-root'`).run();
-    expect((await readEffectiveWorkspaceRequestProof(env, {
-      issuer: session.principalIssuer!, subject: session.principalSubject!, email: session.principalEmail!,
-    }, workspaceId, null))?.rootAllowed).toBe(false);
-    expect(await readServiceAssignmentPolicy(env, session, null)).toMatchObject({ state: "ready", assignedServiceCount: 1 });
-
-    await db.prepare(`INSERT INTO pa_service_assignment_request_policy_reviews
-      (source_id,revision,review_id,state,reviewed_by_type,reviewed_by_id,review_reference,rationale,reviewed_at)
-      VALUES (?,2,'policy-review-primary-suspended','suspended','staff','test-operator','TEST-PRIMARY-SUSPEND',
-        'Policy rollout suspended',datetime('now'))`).bind(sourceId).run();
-    expect(await serviceAssignmentPolicyProofStillCurrent(env, decision.proof)).toBe(false);
-    expect(await readServiceAssignmentPolicy(env, session, null))
-      .toEqual({ state: "unavailable", proof: null, assignedServiceCount: null });
-    await expect(db.prepare(`UPDATE pa_service_assignment_request_policy_reviews SET rationale='changed'
-      WHERE source_id=? AND revision=2`).bind(sourceId).run()).rejects
-      .toThrow("service-assignment-request-policy-review-immutable");
   });
 });

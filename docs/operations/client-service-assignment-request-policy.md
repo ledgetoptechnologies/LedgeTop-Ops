@@ -6,11 +6,6 @@ not itself define request eligibility. Operations deliberately interprets an
 exact active assignment as a narrowing rule for which services may be selected
 for an already-authorized request.
 
-Each Project Alpha instance remains an independent authority. Catalog items,
-assignments, checkpoints, workspace ownership, and policy review are matched by
-the exact `project-alpha:<source>` identifier. Equal customer, project, or
-service public IDs in two instances never merge or authorize one another.
-
 ## Non-authorizing boundary
 
 An assignment never grants `request.create`, workspace membership, project
@@ -43,20 +38,10 @@ policy is usable only while all of these flags are exactly `true`:
 
 The Client Portal now sends the exact selected `projectId` on both catalog APIs,
 selects the request context before loading services, and recognizes the
-assignment readiness/error states. Keep the policy flag off until migrations
-`0174` and `0179` are applied, assignment sync and workspace enrollment are
-healthy, and an authorized operator has appended an `enabled` review for the
-exact source. Migration `0179_service_assignment_request_policy_reviews.sql`
-seeds no reviews. An active receiver grant, observed producer capability, or
-workspace enrollment alone therefore cannot enable request filtering. Backend
-writes fail closed throughout that rollout.
-
-Reviews are immutable, sequential, and source-qualified. The latest review
-must be `enabled`; suspend by appending a new `suspended` revision, never by
-editing history. A secondary source can be enabled only while its portal source
-authority and active authority revision exist. Suspending that authority, the
-receiver grant, or the exact workspace enrollment invalidates outstanding
-runtime proofs immediately without changing any other source.
+assignment readiness/error states. Keep the policy flag off until migration
+`0174` is applied, assignment sync and workspace enrollment are healthy, and
+the exact root/project workflow is ready for an observed rollout. Backend writes
+fail closed throughout that rollout.
 
 The receiver grant, exact workspace enrollment, immutable source ownership,
 active assignment checkpoint, complete assignment generation, active directory
@@ -99,24 +84,3 @@ Migration `0174_service_assignment_request_policy.sql` adds strict, bounded
 proof JSON to drafts and submitted requests plus the service-leading assignment
 lookup index. Applying the migration alone changes no behavior and grants no
 authority.
-
-## Migration and rollout order
-
-For the dual-domain client rollout, preserve this order:
-
-1. Apply `0177` (expand-only) and deploy code compatible with both domains.
-2. Drain old writers, then apply `0178` (contract).
-3. Apply `0179` (source-qualified policy review). It is additive and remains
-   default-off because it creates no review rows.
-4. Verify the exact source's portal authority (secondary sources only),
-   receiver grant, observed capability, workspace enrollment, directory and
-   assignment checkpoints.
-5. Append an explicit `enabled` review with operator provenance, enable sync,
-   and only then enable the consumer-policy flag for an observed rollout.
-
-The existing v1 draft/request proof schema remains primary-source-only. This
-slice makes policy evaluation and continuation source-safe, but does not expose
-secondary-source request submission until a source-owned request persistence
-contract is deployed. Do not advertise secondary request creation before that
-contract; assignment receipt or review must never be treated as general portal
-access.
