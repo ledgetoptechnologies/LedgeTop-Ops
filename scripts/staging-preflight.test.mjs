@@ -188,6 +188,13 @@ test("fails closed on client portal activation, host namespace origins, and audi
     assert(errors.some((error) => error.includes(expected)), `${expected}: ${errors.join(" | ")}`);
   }
 });
+test("requires EXPECTED_HOST to move atomically with the anonymous public origin", () => {
+  const staging = stagingConfig("delivery");
+  const production = productionFrom(staging);
+  staging.vars.EXPECTED_HOST = STAGING_HOSTS.client;
+  const errors = validateApp("delivery", staging, production);
+  assert(errors.some((error) => error.includes("EXPECTED_HOST")), errors.join(" | "));
+});
 test("requires the exact staging request-attachment R2 CORS policy", () => {
   assert.deepEqual(validateRequestAttachmentCors(clone(STAGING_REQUEST_ATTACHMENT_R2_CORS)), []);
   for (const drift of [

@@ -8,7 +8,9 @@ import type { Env } from "../src/worker/types";
 
 vi.mock("../src/worker/mailer", () => ({ sendNotificationMail: vi.fn(async () => undefined) }));
 const directory = new URL("../../client/migrations/", import.meta.url);
-const migrations = readdirSync(directory).filter(name => /^\d+_.+\.sql$/.test(name)).sort()
+// Exercise the rolling-deploy expand phase. The contract migration is applied
+// only after this compatible sender drains legacy fragment-bearing rows.
+const migrations = readdirSync(directory).filter(name => /^\d+_.+\.sql$/.test(name) && !name.startsWith("0178_")).sort()
   .map(name => readFileSync(new URL(name, directory), "utf8"));
 const prefix = "jobs/shared/project/", email = "same-email@example.test";
 const currentTokenSecret = "current-delivery-token-secret-used-by-tests";
@@ -141,6 +143,29 @@ describe("delivery notification source and live ownership", () => {
     expect(vi.mocked(sendNotificationMail).mock.calls[0]?.[1].text)
       .toContain(`https://delivery.example.test/s/${share.publicId}#${share.bearer}`);
     expect(db.prepare("SELECT payload_json FROM delivery_notifications").get()?.payload_json).not.toContain("#");
+  });
+
+  it("drains an expand-phase legacy URL when the historical share has no encrypted bearer", async () => {
+    const share = await guest("primary");
+    const legacyUrl = `https://delivery.example.test/s/${share.publicId}#${"L".repeat(43)}`;
+    db.prepare("UPDATE shares SET secret_ciphertext=NULL,secret_iv=NULL WHERE id=?").run(share.shareId);
+    db.prepare("UPDATE delivery_notifications SET payload_json=? WHERE id='notice-primary'")
+      .run(JSON.stringify({ projectName: "Project", publicId: share.publicId, shareUrl: legacyUrl }));
+    expect(await processDeliveryNotifications(env)).toBe(1);
+    expect(vi.mocked(sendNotificationMail).mock.calls[0]?.[1].text).toContain(legacyUrl);
+    expect(db.prepare("SELECT status FROM delivery_notifications WHERE id='notice-primary'").get()?.status).toBe("sent");
+  });
+
+  it("rejects credentials embedded in an expand-phase legacy URL", async () => {
+    const share = await guest("primary");
+    const legacyUrl = `https://user:password@delivery.example.test/s/${share.publicId}#${"L".repeat(43)}`;
+    db.prepare("UPDATE shares SET secret_ciphertext=NULL,secret_iv=NULL WHERE id=?").run(share.shareId);
+    db.prepare("UPDATE delivery_notifications SET payload_json=? WHERE id='notice-primary'")
+      .run(JSON.stringify({ projectName: "Project", publicId: share.publicId, shareUrl: legacyUrl }));
+    expect(await processDeliveryNotifications(env)).toBe(1);
+    expect(sendNotificationMail).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT status,last_error FROM delivery_notifications WHERE id='notice-primary'").get())
+      .toEqual({ status: "queued", last_error: "Delivery link bearer cannot be recovered" });
   });
 
   it("suppresses guest mail rather than borrowing the overlapping primary recipient", async () => {

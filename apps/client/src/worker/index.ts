@@ -898,6 +898,11 @@ app.post("/api/internal/project-alpha/sources/:sourceId/service-assignments-v1",
 app.route("/api/client", createClientPortalRouter({ pricingHintProvider: projectAlphaPricingHintProvider }));
 app.on(["GET", "HEAD"], "/portal", c => serveAppShell(c.req.raw, c.env.ASSETS));
 app.on(["GET", "HEAD"], "/portal/*", c => serveAppShell(c.req.raw, c.env.ASSETS));
+app.on(["GET", "HEAD"], "/assets/*", c => {
+  const path = new URL(c.req.url).pathname;
+  if (/%(?:2e|2f|5c)/i.test(path)) throw new HTTPException(404, { message: "Asset not found" });
+  return c.env.ASSETS.fetch(c.req.raw);
+});
 app.get("/", c => c.redirect(new URL("/portal", requireClientPortalOrigin(c.env)).toString(), 302));
 
 app.notFound(c => c.json({ error: "Not found" }, 404));

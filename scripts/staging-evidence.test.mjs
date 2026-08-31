@@ -20,7 +20,7 @@ function fixture(base) {
   fs.utimesSync(path.join(base, ".backups", "delivery.sql"), backupTime, backupTime);
   fs.utimesSync(path.join(base, ".backups", "operations.sql"), backupTime, backupTime);
   const configs = {
-    delivery: { vars: { CLIENT_PORTAL_ENABLED: "false", CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`, PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`, PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`, CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN, CLIENT_ACCESS_AUD: "a".repeat(64) } },
+    delivery: { vars: { CLIENT_PORTAL_ENABLED: "false", EXPECTED_HOST: STAGING_HOSTS.delivery, CLIENT_PORTAL_ORIGIN: `https://${STAGING_HOSTS.client}`, PUBLIC_SHARE_ORIGIN: `https://${STAGING_HOSTS.delivery}`, PUBLIC_BASE_URL: `https://${STAGING_HOSTS.delivery}`, CLIENT_ACCESS_TEAM_DOMAIN: STAGING_STATIC_VARS.delivery.CLIENT_ACCESS_TEAM_DOMAIN, CLIENT_ACCESS_AUD: "a".repeat(64) } },
     operations: { vars: { PROJECT_ALPHA_BASE_URL: "https://project-alpha-staging.ledgetopdroneservices.com" } },
     "ops-sync": { vars: { CF_ACCESS_GROUP_ID: "staging-group-id", CF_ACCESS_GROUP_NAME: "LTDS Staging Testers" } },
   };

@@ -5,7 +5,7 @@ type OriginEnv = Pick<Env,
   "ENVIRONMENT" | "EXPECTED_HOST" | "PUBLIC_BASE_URL" | "PUBLIC_SHARE_ORIGIN" | "CLIENT_PORTAL_ORIGIN"
 >;
 
-type RequestNamespace = "public" | "portal" | "shared" | "unknown";
+type RequestNamespace = "public" | "portal" | "shared" | "assets" | "unknown";
 
 function deployed(env: Pick<Env, "ENVIRONMENT">): boolean {
   return env.ENVIRONMENT === "production" || env.ENVIRONMENT === "staging";
@@ -26,6 +26,7 @@ function exactOrigin(value: string | undefined, requireHttps: boolean): URL | nu
 
 export function requestNamespace(path: string): RequestNamespace {
   if (path === "/" || path === "/health") return "shared";
+  if (path === "/assets" || path.startsWith("/assets/")) return "assets";
   if (path === "/s" || path.startsWith("/s/")
     || path === "/client-share" || path.startsWith("/client-share/")
     || path === "/api/public" || path.startsWith("/api/public/")) return "public";
@@ -71,6 +72,7 @@ export function requestHostAllowed(requestUrl: string, env: OriginEnv): boolean 
   const namespace = requestNamespace(request.pathname);
   if (namespace === "public") return request.origin === publicOrigin;
   if (namespace === "portal") return request.origin === portalOrigin;
-  if (namespace === "shared") return request.origin === publicOrigin || request.origin === portalOrigin;
+  if (namespace === "shared" || namespace === "assets")
+    return request.origin === publicOrigin || request.origin === portalOrigin;
   return false;
 }

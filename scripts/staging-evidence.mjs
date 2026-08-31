@@ -244,6 +244,8 @@ export function validateEvidence(evidence, options = {}) {
   if (portal.hostname !== STAGING_CLIENT_PORTAL.hostname) errors.push("client portal hostname must match the approved staging topology");
   if (portal.origin !== `https://${STAGING_CLIENT_PORTAL.hostname}` || portal.origin !== deliveryVars.CLIENT_PORTAL_ORIGIN)
     errors.push("client portal origin must match the authenticated Delivery staging origin");
+  if (deliveryVars.EXPECTED_HOST !== STAGING_CLIENT_PORTAL.publicHostname)
+    errors.push("Delivery EXPECTED_HOST must match the anonymous public-share hostname");
   if (deliveryVars.PUBLIC_SHARE_ORIGIN !== `https://${STAGING_CLIENT_PORTAL.publicHostname}` ||
     deliveryVars.PUBLIC_BASE_URL !== deliveryVars.PUBLIC_SHARE_ORIGIN)
     errors.push("public share origin must match the anonymous Delivery staging host");

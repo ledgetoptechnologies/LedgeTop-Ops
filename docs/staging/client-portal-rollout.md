@@ -47,10 +47,13 @@ and warns that Bypass disables Access enforcement in
    before publishing either hostname. Re-list their IDs, destinations, policies,
    group membership, and audience. Keep the client group invitation-owned and
    separate from staff ACL automation.
-5. Put the new human audience only in the ignored staging config. Set the exact
-   authenticated client origin/team domain, set `PUBLIC_SHARE_ORIGIN` on both
-   Workers and Client `PUBLIC_BASE_URL` to the public delivery origin, and keep
-   `CLIENT_PORTAL_ENABLED=false`.
+5. Put the single new human audience only in the ignored staging config. Set
+   the exact authenticated client origin/team domain. Treat Client
+   `EXPECTED_HOST`, Client and Operations `PUBLIC_SHARE_ORIGIN`, Client
+   `PUBLIC_BASE_URL`, Operations `DELIVERY_BASE_URL`, and Client
+   `CLIENT_PORTAL_ORIGIN` as one reviewed cutover set. The Client
+   `EXPECTED_HOST` must equal the anonymous delivery hostname; never move the
+   origins without it. Keep `CLIENT_PORTAL_ENABLED=false`.
 
 ## Ordered rollout
 
@@ -58,13 +61,26 @@ and warns that Bypass disables Access enforcement in
    the pinned commit. Record all config hashes.
 2. Export both staging D1 databases. List migrations and confirm the exact
    filename sets in `REQUIRED_STAGING_MIGRATIONS`, including
-   `0177_domain_neutral_delivery_notifications.sql`. Migration `0113` is
+   `0177_domain_neutral_delivery_notifications.sql` and
+   `0178_domain_neutral_delivery_notification_contract.sql`. Migration `0113` is
    intentionally reserved and absent. The
    release evidence validator compares the complete filename sets; do not
    shorten them to a range or infer success from a local migration run.
-3. After migration approval, apply Delivery migrations first and Operations
-   `0014`-`0023` second. Record the list/apply output and confirm production
-   migration state was not touched.
+3. Apply only Delivery migration `0177` first. It is the expand phase and keeps
+   legacy `shareUrl` writers and queued notifications compatible. Deploy the
+   reviewed domain-neutral Operations sender/writer while the existing host
+   configuration remains unchanged. Pause notification producers, drain
+   `queued`, `sending`, and retryable `failed` rows, and prove send-time URL
+   materialization with the current encryption key, the configured previous
+   key, and a valid legacy row whose encrypted secret is absent. A malformed
+   or unrecoverable row is a stop condition, not permission to discard it.
+4. Apply Delivery migration `0178` only after that drain proof. Its deterministic
+   preflight aborts before deleting any active legacy URL whose referenced
+   share lacks encrypted secret material. It then removes stored fragments and
+   rejects old writers. Do not roll application code back to an old writer
+   after `0178`; use a compatible fix-forward build. Apply the remaining
+   approved Delivery migrations and Operations `0014`-`0023`, record the
+   list/apply output, and confirm production migration state was not touched.
    In this release packet, `idempotentReapplyPassed` means rerunning
    `wrangler d1 migrations apply` against the same database and migration
    ledger returns `No migrations to apply`. It does **not** mean executing the
@@ -72,22 +88,31 @@ and warns that Bypass disables Access enforcement in
    ledger-once because SQLite does not support idempotent forms for every
    `ALTER TABLE` or `CREATE TABLE` operation. Never bypass `d1_migrations` to
    manufacture reapply evidence.
-4. Upload a version with the portal false and inspect routes, bindings, vars,
+5. Upload a version with the portal false and inspect routes, bindings, vars,
    and secret names. Deploy only that reviewed version after deployment
    approval.
-5. Verify both staging hosts' DNS/TLS and `/health`, then verify a `404` for
+6. Atomically apply the reviewed hostname/origin set from prerequisite 5 with
+   the corresponding DNS, routes, and Access applications. Verify both staging
+   hosts' DNS/TLS and `/health`, then verify a `404` for
    disabled `/api/client/*`. Prove public namespaces fail on `client-staging`
    and portal namespaces fail on `delivery-staging`. Verify public shares are
    reachable without Access, an Access assertion is
    absent, a password-protected share still requires its password, and revoked
    or expired shares remain denied.
-6. Only after a separate temporary-activation approval, create a new reviewed
+7. Verify `/assets/*` is Worker-first on both exact hosts because both SPAs use
+   the same immutable build assets. Encoded traversal must be rejected, and an
+   asset-shaped path must not reach `/portal`, `/api/client`, `/s`,
+   `/client-share`, or `/api/public`. Verify the Access cookie remains
+   host-local (no `Domain` attribute), the single human Access audience is used
+   only on the authenticated host, and persisted notification payloads contain
+   no fragment-bearing share URL.
+8. Only after a separate temporary-activation approval, create a new reviewed
    staging version with the portal true. Test valid client login, invalid
    audience, unprovisioned identity, revoked membership, cross-account/project
    denial, staff/client ACL separation, team-manager restrictions, request
    idempotency/rate limiting, request status notification outbox, delivery
    handoff, logout/session expiry, and public-share isolation.
-7. Restore the reviewed false configuration in a new staging version. Re-run
+9. Restore the reviewed false configuration in a new staging version. Re-run
    the disabled `404` and public-share checks. Complete
    `release-evidence.json.example`; it cannot pass until the final false state,
    exact Access/public-path contract, migration evidence, and test evidence are
@@ -161,9 +186,13 @@ Access assertion on a public path, schema error, notification leakage, or
 route drift.
 
 1. Preserve request IDs, logs, version IDs, Access/DNS exports, and D1 evidence.
-2. Deploy the recorded portal-false staging version. If necessary, restore the
-   prior `delivery-staging` version while leaving both D1 databases and all
-   bound resources intact.
+2. Deploy the recorded portal-false, contract-compatible staging version. If
+   necessary, restore the prior reviewed compatible version while leaving both
+   D1 databases and all bound resources intact. Restore `EXPECTED_HOST`, both
+   `PUBLIC_SHARE_ORIGIN` values, Client `PUBLIC_BASE_URL`, Operations
+   `DELIVERY_BASE_URL`, Client `CLIENT_PORTAL_ORIGIN`, routes, DNS, and Access
+   policies as one set. Never restore an old fragment-writing build after
+   migration `0178`.
 3. Remove traffic from `client-staging` only after `delivery-staging` health
    and public-share checks pass. Disable (do not silently repurpose) the client
    portal and public Bypass Access apps.

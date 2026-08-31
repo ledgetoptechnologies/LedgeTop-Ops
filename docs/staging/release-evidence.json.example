@@ -339,7 +339,8 @@
         "0148_single_file_delivery_shares.sql",
         "0149_portal_operations_management.sql",
         "0150_delivery_share_history_index.sql",
-        "0177_domain_neutral_delivery_notifications.sql"
+        "0177_domain_neutral_delivery_notifications.sql",
+        "0178_domain_neutral_delivery_notification_contract.sql"
       ],
       "appliedToStaging": false,
       "listEvidenceRef": "<EVIDENCE_REFERENCE>",

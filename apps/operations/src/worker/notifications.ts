@@ -64,21 +64,32 @@ export function notificationStatement(env: Env, input: { shareId: string; kind: 
     .bind(crypto.randomUUID(), input.dedupeKey || notificationDedupeKey(input.kind, input.shareId), input.shareId, input.kind, input.recipientEmail, JSON.stringify(input.payload));
 }
 
-function storedPayload(raw: string): StoredNotificationPayload {
+function storedPayload(raw: string): { payload: StoredNotificationPayload; legacyShareUrl: string | null } {
   const parsed: unknown = JSON.parse(raw);
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Delivery notification payload is invalid");
   const value = parsed as Record<string, unknown>;
-  return {
+  return { payload: {
     publicId: typeof value.publicId === "string" || value.publicId === null ? value.publicId : undefined,
     clientName: typeof value.clientName === "string" ? value.clientName : undefined,
     projectName: typeof value.projectName === "string" ? value.projectName : undefined,
     r2Prefix: typeof value.r2Prefix === "string" ? value.r2Prefix : undefined,
     expiresAt: typeof value.expiresAt === "string" || value.expiresAt === null ? value.expiresAt : undefined,
-  };
+  }, legacyShareUrl: typeof value.shareUrl === "string" ? value.shareUrl : null };
+}
+
+function compatibleLegacyShareUrl(env: Env, value: string | null, publicId: string): string | null {
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    if (url.username || url.password || url.origin !== publicShareOrigin(env)
+      || url.pathname !== `/s/${encodeURIComponent(publicId)}` || url.search)
+      return null;
+    return /^[A-Za-z0-9_-]{43}$/.test(url.hash.slice(1)) ? url.toString() : null;
+  } catch { return null; }
 }
 
 async function materializeNotificationPayload(env: Env, row: NotificationRow): Promise<NotificationPayload> {
-  const payload = storedPayload(row.payload_json);
+  const stored = storedPayload(row.payload_json), payload = stored.payload;
   if (row.kind !== "share_created" && row.kind !== "share_updated") return payload;
   const share = await env.DELIVERY_DB.prepare(`SELECT id,public_id,secret_ciphertext,secret_iv,revoked_at,expires_at
     FROM shares WHERE id=?`).bind(row.share_id).first<{
@@ -89,11 +100,14 @@ async function materializeNotificationPayload(env: Env, row: NotificationRow): P
     throw new HTTPException(409, { message: "Delivery link is no longer active" });
   if (!share.public_id) throw new Error("Delivery link public identity is unavailable");
   const secret = await recoverDeliveryShareSecret(env, share);
-  if (!secret) throw new Error("Delivery link bearer cannot be recovered");
+  const shareUrl = secret
+    ? `${publicShareOrigin(env)}/s/${encodeURIComponent(share.public_id)}#${secret}`
+    : compatibleLegacyShareUrl(env, stored.legacyShareUrl, share.public_id);
+  if (!shareUrl) throw new Error("Delivery link bearer cannot be recovered");
   return {
     ...payload,
     publicId: share.public_id,
-    shareUrl: `${publicShareOrigin(env)}/s/${encodeURIComponent(share.public_id)}#${secret}`,
+    shareUrl,
   };
 }
 

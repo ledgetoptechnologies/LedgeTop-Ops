@@ -54,6 +54,7 @@ const expectedPublicRoutes = [
   "GET|HEAD /api/public/shares/:publicId/items/:itemRef/thumbnail",
   "GET|HEAD /portal",
   "GET|HEAD /portal/*",
+  "GET|HEAD /assets/*",
   "POST /api/internal/client-request-attachments/:attachmentId/scanned",
   "POST /api/internal/project-alpha/catalog-v2",
   "POST /api/internal/project-alpha/portal-v2",
@@ -96,7 +97,7 @@ test("the client source directory retains the deployed delivery service identity
 });
 
 test("the deployed Client Worker keeps reviewed resources, hosts, and portal asset routing", () => {
-  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "57b476ac2f8d69e3642d15177626f44ea3353ffaa29cce59f6433281d33523aa");
+  assert.equal(normalizedSha256("apps/client/wrangler.jsonc"), "2121844f816f22db34b313416fa42e5850a9d5aa9dc1276fbc0b53de45a004bb");
   const config = readJson("apps/client/wrangler.jsonc");
   assert.equal(config.name, "ltds-clients");
   assert.equal(config.main, "src/worker/index.ts");
@@ -108,7 +109,7 @@ test("the deployed Client Worker keeps reviewed resources, hosts, and portal ass
     binding: "ASSETS",
     directory: "./dist/client",
     not_found_handling: "single-page-application",
-    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal", "/portal/*", "/health"],
+    run_worker_first: ["/", "/api/*", "/s/*", "/client-share/*", "/portal", "/portal/*", "/assets/*", "/health"],
   });
   assert.equal(config.vars.PUBLIC_BASE_URL, "https://client.ledgetopdroneservices.com");
   assert.equal(config.vars.PUBLIC_SHARE_ORIGIN, "https://client.ledgetopdroneservices.com");
@@ -179,7 +180,8 @@ test("public route, host-namespace guard, health, and isolated cookie contracts 
   assert(worker.includes("requestHostAllowed(c.req.url,c.env)"));
   assert(originPolicy.includes('if (namespace === "public") return request.origin === publicOrigin;'));
   assert(originPolicy.includes('if (namespace === "portal") return request.origin === portalOrigin;'));
-  assert(originPolicy.includes('if (namespace === "shared") return request.origin === publicOrigin || request.origin === portalOrigin;'));
+  assert(originPolicy.includes('if (namespace === "shared" || namespace === "assets")'));
+  assert(originPolicy.includes('return request.origin === publicOrigin || request.origin === portalOrigin;'));
   assert.equal(worker.match(/12 \* 60 \* 60 \* 1000/g)?.length, 1);
   assert.equal(lifecycle.match(/12 \* 60 \* 60 \* 1000/g)?.length, 1);
   assert(security.includes('`__Host-ltds_delivery=${encodeURIComponent(value)}; Path=/; Max-Age=${maxAge}; HttpOnly; Secure; SameSite=Lax`'));
