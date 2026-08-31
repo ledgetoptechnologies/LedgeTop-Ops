@@ -11,7 +11,7 @@ export const STAGING_PROJECT_ALPHA_ORIGIN = "https://project-alpha-staging.ledge
 // independent cross-repository gate; reset it before changing any pin.
 export const RELEASE_CONTRACT_FINALIZED = false;
 export const RELEASE_CANDIDATES = Object.freeze({
-  operations: "ccfd7328034721aca74b60783a5101e55269781e",
+  operations: "246160114b4ffa9e46e5bb45a87b8ccfb6ef3fed",
   viewer: "32cece808289a942ce902797535ccff6e24763e3",
   projectAlpha: "b847852bd33055e71a6dc94f80bdd6d78da5baaa",
 });

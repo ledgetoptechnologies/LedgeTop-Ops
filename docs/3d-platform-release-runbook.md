@@ -62,7 +62,7 @@ and failing the same source again.
   UID/GID `568:568`, OCI revision, the read-only source-commit stamp, and the
   pinned derivative tools. The former `cde9307` digest is rollback history only
   and must not be paired with this source candidate.
-- LTDS-Ops product code: `ccfd7328034721aca74b60783a5101e55269781e` on
+- LTDS-Ops product code: `246160114b4ffa9e46e5bb45a87b8ccfb6ef3fed` on
   `codex/3d-processing-control-plane`. This pin moves processing management to
   the dedicated Viewer workspace and leaves Operations as the aggregate Data
   overview; never substitute a mutable branch tip.
