@@ -222,6 +222,9 @@ import {
   handleProjectAlphaDeliveryIntent,
   handleProjectAlphaDeliveryIntentRevoke,
   handleProjectAlphaDeliveryPreflight,
+  handleRegisteredProjectAlphaDeliveryIntent,
+  handleRegisteredProjectAlphaDeliveryIntentRevoke,
+  handleRegisteredProjectAlphaDeliveryPreflight,
   pruneProjectAlphaDeliveryIntentRateLimits,
   projectAlphaDeliveryMachineHostRequest,
   projectAlphaDeliveryMachineRequest,
@@ -1454,6 +1457,12 @@ registerViewerProcessingRoutes(app);
 app.post("/api/internal/project-alpha/delivery-intents/preflight", handleProjectAlphaDeliveryPreflight);
 app.post("/api/internal/project-alpha/delivery-intents", handleProjectAlphaDeliveryIntent);
 app.post("/api/internal/project-alpha/delivery-intents/revoke",handleProjectAlphaDeliveryIntentRevoke);
+app.post("/api/internal/project-alpha/sources/:sourceId/delivery-intents/preflight",c=>
+  handleRegisteredProjectAlphaDeliveryPreflight(c,c.req.param("sourceId")));
+app.post("/api/internal/project-alpha/sources/:sourceId/delivery-intents",c=>
+  handleRegisteredProjectAlphaDeliveryIntent(c,c.req.param("sourceId")));
+app.post("/api/internal/project-alpha/sources/:sourceId/delivery-intents/revoke",c=>
+  handleRegisteredProjectAlphaDeliveryIntentRevoke(c,c.req.param("sourceId")));
 
 app.get("/api/tasks", async (c) => {
   const principal = c.get("principal");

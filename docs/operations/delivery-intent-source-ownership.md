@@ -1,6 +1,6 @@
 # Delivery intent and guest-link source ownership
 
-Status: implemented and locally verified, August 26, 2026. Unpublished;
+Status: implemented and locally verified, updated August 31, 2026. Unpublished;
 no production migration, connector activation, mail or access change is implied.
 This follows [native portal ownership](portal-source-ownership.md) and the
 [multi-source design](multi-source-client-design.md).
@@ -20,10 +20,25 @@ indexes and triggers. It uses deferred foreign-key validation in one atomic
 batch, without renaming the old parent or deleting grant/audit/outbox history.
 Do not split the migration into independently committed statements.
 
-Public signed HTTP remains primary-only. Current and previous HMAC keys are one
-authority's rotation pair, not separate sources. Source context is an internal
-trusted input, never an unauthenticated body/header selector. The request reader
-enforces its 16 KiB limit on actual streamed bytes as well as declared length.
+The legacy scalar-configured HTTP routes remain primary-only. A registered
+business-data source uses the source-qualified routes under
+`/api/internal/project-alpha/sources/:sourceId/delivery-intents`. Operations
+derives the source from that canonical path and an active registry revision;
+it never trusts a body or free-form source header. The request must pass both an
+RS256 Cloudflare Access assertion with the exact registered issuer, audience and
+subject and the source revision's current/previous HMAC key. Remote Access JWKS
+resolvers are cached by validated HTTPS origin and bounded to 32 issuers.
+After Access succeeds, a separate coarse source-scoped attempt budget runs
+before deploy credentials or request bodies are parsed. Invalid HMAC traffic
+therefore cannot do unlimited application work or consume the smaller accepted
+preflight/intent quota.
+
+The first statement in each create/revoke transaction rechecks the registered
+source revision, connector revision and versions. Authority changed before the
+commit aborts the whole write; authority changed after the commit does not turn
+an accepted receipt into a false failure. Current and previous HMAC keys remain
+one source authority's rotation pair. The request reader enforces its 16 KiB
+limit on actual streamed bytes as well as declared length.
 
 An exact accepted request returns its original receipt before relative expiry
 checks. Conflicting payloads under the same source/replay key fail; another
@@ -62,9 +77,19 @@ access. Ordinary approved lifecycle updates remain supported.
 Guest notices recheck receipt source, live workspace, exact binding/generation,
 directory-owner version and current recipient eligibility before sending.
 Portal notices use equivalent live owner proof and the exact returned binding.
-Secondary portal notifications remain suppressed: the public client portal is
-still primary-only, so an internal secondary test grant must not produce an
-unusable client invitation. No live messages are used for verification.
+An active registered source may produce portal notifications only when its exact
+workspace, binding, directory owner, principal, grant version and source
+authority remain live at publication. Unregistered, suspended or retired source
+rows are terminally suppressed. Historical staff records remain source-labelled
+and readable when the configured business source is still read-visible; they do
+not become proof that current send authority still exists.
+
+Migrations `0182` and `0183` add immutable notification-source provenance,
+source-leading ready indexes, global bounded orphan probes and a durable
+round-robin cursor. Each staged pass sends at most 10 batches; each direct pass
+claims at most 25 rows. A noisy source cannot consume every slot, retries stop
+after three attempts, and exhausted cleanup is capped at 100 rows per pass.
+Deploy-before-migration compatibility stays bounded and primary-compatible.
 
 These checks do not claim transactional atomicity with an external mail service.
 Source-aware outbound routing and broader notification lease/deduplication
@@ -72,21 +97,23 @@ acceptance remain separate release gates.
 
 ## Release and recovery
 
-1. Keep the secondary ingress/activation gate closed. Resolve the pending staff
-   authority choice and approve the producer/consumer release separately.
+1. Keep every unapproved secondary connector/activation gate closed. Registered
+   route availability is not permission to enroll a source. Resolve the staff
+   authority choice and approve each producer/consumer release separately.
 2. Back up the target database and record its migration/code checkpoint using
    the established release procedure. Rehearse the populated upgrade locally.
 3. Apply the full pending migration sequence and paired Operations/Client code
    in a controlled release window. Old intent writers omit the now-required
    source field; do not roll back only the application after this migration.
-4. Verify primary create/replay/revoke, recipient suppression, existing receipt
-   URLs/history and queue health before considering additional source work.
+4. Verify primary and registered-source preflight/create/replay/revoke,
+   current/previous key overlap, recipient suppression, existing receipt
+   URLs/history, fair queue progress and retry exhaustion before activation.
 5. On failure, stop new acceptance and use the approved coordinated recovery
    plan. Never drop receipts to clear retries or restore permissions by hand.
 
-Remaining gates include an authenticated connector registry, source-pinned
-outbound commands, explicit business-party linking, secondary client authority
-and browser/live acceptance. The Alpha public-ID export is still unpublished;
+Remaining gates include approved source enrollment, source-pinned outbound
+commands, secondary client authority and browser/live acceptance. The Alpha
+public-ID export is still unpublished;
 its rejected publication must not be retried without renewed approval. Viewer
 and thumbnail runtimes are unchanged.
 

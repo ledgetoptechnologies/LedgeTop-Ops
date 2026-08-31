@@ -9,6 +9,7 @@ import { adoptPortalDeliveryNotifications, authorizePortalDeliveryNotificationBa
   processPortalDeliveryNotificationBatches, stagePortalDeliveryNotificationStatements, type NativeBatch } from '../src/worker/portal-delivery-notification-batches';
 import { authorizeNativeDeliveryNotification, controlNativeDeliveryNotification, nativeNotificationCandidates,
   readNativeDeliveryNotification, readNativeDeliveryNotificationScope } from '../src/worker/native-delivery-notification-center';
+import { registerVisibleTestSource } from './helpers/project-alpha-connectors';
 import * as mailer from '../src/worker/mailer';
 import type { Env, StaffPrincipal } from '../src/worker/types';
 
@@ -86,6 +87,8 @@ describe('native delivery staging, exact authority and controls — migrated D1'
     }
     preserved=await snapshot();
     await db.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0161_portal_delivery_notification_batches.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0162_portal_source_authorities.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
+    await db.batch(splitD1MigrationStatements(readFileSync(new URL('../../client/migrations/0182_portal_delivery_notification_source_ready.sql',import.meta.url),'utf8')).map(sql=>db.prepare(sql)));
   },120_000);
   afterAll(async()=>{await mf?.dispose();});
   beforeEach(async()=>{
@@ -98,6 +101,18 @@ describe('native delivery staging, exact authority and controls — migrated D1'
 
   async function fixture(name:string,source=PRIMARY_CATALOG_SOURCE,bindingType='project_alpha',ownerType:'project'|'organization'='project'){
     const workspace=`${name}-workspace`,projectPublic=publicId(`${name}-project`),organization=publicId(`${name}-org`),owner=ownerType==='organization'?organization:projectPublic,principal=`${name}-principal`,binding=`${name}-binding`,prefix=`Deliveries/${name}/`;
+    if(source.sourceId!==PRIMARY_CATALOG_SOURCE.sourceId&&!await db.prepare('SELECT 1 ok FROM pa_portal_source_authorities WHERE source_id=?').bind(source.sourceId).first('ok')){
+      const token=fingerprint(source.sourceId).slice(0,24),keyFingerprint=fingerprint(`notification-key:${source.sourceId}`);
+      await db.batch([
+        db.prepare(`INSERT INTO pa_portal_source_authorities(source_id,producer_binding_id,snapshot_origin,snapshot_base_path,
+          application_key,state,active_revision,version,connector_revision,connector_version)
+          VALUES(?,?,?,'/','project-alpha','active',1,1,1,1)`).bind(source.sourceId,`notification-${token}`,`https://${token}.example.test`),
+        db.prepare(`INSERT INTO pa_portal_source_authority_revisions(source_id,revision,credential_ref,access_issuer,access_audience,
+          access_subject,current_key_id,current_key_fingerprint,created_by)
+          VALUES(?,1,'notification','https://access.example.test','notification-audience','notification-producer','notification-key',?,'fixture')`)
+          .bind(source.sourceId,keyFingerprint),
+      ]);
+    }
     await db.batch([
       db.prepare('INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id) VALUES(?,?,?)').bind(workspace,source.sourceId,workspace),
       db.prepare("INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,project_alpha_source_id) VALUES(?,'organization',?,?,?)").bind(workspace,organization,`Workspace ${name}`,source.sourceId),
@@ -108,9 +123,19 @@ describe('native delivery staging, exact authority and controls — migrated D1'
       db.prepare("INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version) VALUES(?,?,?,?,?,?,'v1')").bind(binding,workspace,ownerType,owner,prefix,bindingType),
       db.prepare("INSERT INTO pa_portal_principals(workspace_id,public_id,email_hint,display_name,source_version,status) VALUES(?,?,?,'Explicit recipient','pv1','active')").bind(workspace,principal,`${name}@example.test`),
     ]);
-    if(source===PRIMARY_CATALOG_SOURCE)await ops.batch([
-      ...(ownerType==='organization'?[ops.prepare("INSERT INTO pa_organizations(id,name,payload_json,last_sync_id) VALUES(?,'Organization',?,'native-fixture')").bind(`${name}-org`,JSON.stringify({public_id:organization}))]:[]),
-      ops.prepare("INSERT INTO pa_projects(id,name,payload_json,last_sync_id,organization_id) VALUES(?,?,?,'native-fixture',?)").bind(`${name}-project`,`Project ${name}`,JSON.stringify({public_id:projectPublic}),ownerType==='organization'?`${name}-org`:null),
+    if(source!==PRIMARY_CATALOG_SOURCE){
+      await registerVisibleTestSource(ops,source.sourceId,`Source ${name}`);
+      await ops.batch([
+        ops.prepare("INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id) VALUES(?,'project',?,?)")
+          .bind(source.sourceId,`${name}-project`,`${name}-project`),
+        ...(ownerType==='organization'?[ops.prepare("INSERT INTO pa_projection_record_ids(projection_source_id,record_kind,external_id,local_id) VALUES(?,'organization',?,?)")
+          .bind(source.sourceId,`${name}-org`,`${name}-org`)]:[]),
+      ]);
+    }
+    await ops.batch([
+      ...(ownerType==='organization'?[ops.prepare("INSERT INTO pa_organizations(id,name,payload_json,last_sync_id,projection_source_id) VALUES(?,'Organization',?,'native-fixture',?)").bind(`${name}-org`,JSON.stringify({public_id:organization}),source.sourceId)]:[]),
+      ops.prepare("INSERT INTO pa_projects(id,name,payload_json,last_sync_id,organization_id,projection_source_id) VALUES(?,?,?,'native-fixture',?,?)")
+        .bind(`${name}-project`,`Project ${name}`,JSON.stringify({public_id:projectPublic}),ownerType==='organization'?`${name}-org`:null,source.sourceId),
       ops.prepare("INSERT INTO project_folders(project_id,division_id,r2_prefix,match_method,confirmed_by) VALUES(?,'native-division',?,'manual',?)").bind(`${name}-project`,prefix,staff.id),
     ]);
     return {name,workspace,owner,ownerType,principal,binding,prefix,source};
@@ -176,14 +201,84 @@ describe('native delivery staging, exact authority and controls — migrated D1'
     const result=await readNativeDeliveryNotification(env,`nb_${row.id}`,staff);expect(result.item).toMatchObject({kind:'portal_delivery',workspaceName:'Workspace dispatch',canCancel:false,canSendNow:false});
     expect(result.item).not.toHaveProperty('addedCount');expect(JSON.stringify(result)).not.toContain('r2_prefix');
   });
+  it('round-robins due batches by registered source so one noisy source cannot consume the ten-send window',async()=>{
+    const noisySource=createCatalogSourceContext('project-alpha:fair-noisy');
+    const waitingSource=createCatalogSourceContext('project-alpha:fair-waiting');
+    for(let index=0;index<11;index++){
+      const f=await fixture(`fair-noisy-${index}`,noisySource);await create(f);
+    }
+    // Make the single waiting-source batch strictly newer than all eleven
+    // noisy-source batches. Per-source rank, rather than global age, must
+    // still reserve it a place in this run's bounded ten-send window.
+    await new Promise(resolve=>setTimeout(resolve,1_100));
+    const waiting=await fixture('fair-waiting',waitingSource);await create(waiting);
+    await db.prepare("UPDATE portal_delivery_notification_batches SET eligible_at=datetime('now','-1 second') WHERE source_id IN (?,?)")
+      .bind(noisySource.sourceId,waitingSource.sourceId).run();
+
+    const stats={queries:0,maxBindings:0,executed:[] as {sql:string;args:unknown[]}[]};
+    const monitored={...env,DELIVERY_DB:tracked(db,stats)};
+    expect(await processPortalDeliveryNotificationBatches(monitored)).toBe(10);
+    expect(await batch(waiting)).toMatchObject({source_id:waitingSource.sourceId,status:'sent',attempt_count:1});
+    expect(await db.prepare("SELECT count(*) n FROM portal_delivery_notification_batches WHERE source_id=? AND status='sent'")
+      .bind(noisySource.sourceId).first('n')).toBe(9);
+    expect(vi.mocked(mailer.sendNotificationMail).mock.calls.map(call=>call[1].to)).toContain('fair-waiting@example.test');
+    const probe=stats.executed.find(entry=>entry.sql.includes('idx_portal_delivery_notification_source_pending'));
+    expect(probe).toBeDefined();
+    const plan=JSON.stringify((await db.prepare(`EXPLAIN QUERY PLAN ${probe!.sql}`).bind(...probe!.args).all()).results);
+    expect(plan).toContain('idx_portal_delivery_notification_source_pending');
+    expect(plan).toContain('idx_portal_delivery_notification_source_processing');
+    expect(plan).toMatch(/eligible_at<\?/);
+    expect(plan).toMatch(/lease_expires_at<\?/);
+    expect(stats.queries).toBeLessThan(180);
+  },90_000);
+  it('advances the durable source cursor so eleven backlogged sources all receive capacity across consecutive runs',async()=>{
+    const fixtures:Fixture[]=[];
+    for(let index=0;index<11;index++)fixtures.push(await fixture(`capacity-${String(index).padStart(2,'0')}`,
+      createCatalogSourceContext(`project-alpha:capacity-${String(index).padStart(2,'0')}`)));
+    const inserts:D1PreparedStatement[]=[];
+    for(const [sourceIndex,f] of fixtures.entries())for(let item=0;item<2;item++){
+      inserts.push(db.prepare(`INSERT INTO portal_delivery_notification_batches
+        (id,source_id,workspace_id,folder_binding_id,binding_source_version,principal_public_id,principal_source_version,
+          owner_scope_type,owner_public_id,r2_prefix,status,eligible_at,sealed_at,created_at)
+        VALUES(?,?,?,?,? ,?,?, ?,?,?,'pending',datetime('now','-1 second'),datetime('now'),?)`)
+        .bind(`capacity-${sourceIndex}-${item}`,f.source.sourceId,f.workspace,f.binding,'v1',f.principal,'pv1',f.ownerType,f.owner,f.prefix,
+          `2020-01-${String(sourceIndex+1).padStart(2,'0')} 00:00:0${item}`));
+    }
+    await db.batch(inserts);
+
+    expect(await processPortalDeliveryNotificationBatches(env)).toBe(10);
+    expect(await processPortalDeliveryNotificationBatches(env)).toBe(10);
+    const sourceIds=fixtures.map(f=>f.source.sourceId),placeholders=sourceIds.map(()=>'?').join(',');
+    expect(await db.prepare(`SELECT count(DISTINCT source_id) n FROM portal_delivery_notification_batches
+      WHERE source_id IN (${placeholders}) AND status='suppressed'`).bind(...sourceIds).first('n')).toBe(11);
+    expect(await db.prepare("SELECT staged_last_source_id FROM portal_delivery_notification_scheduler WHERE id='source-round-robin'")
+      .first('staged_last_source_id')).toMatch(/^project-alpha:capacity-/);
+    expect(mailer.sendNotificationMail).not.toHaveBeenCalled();
+  },120_000);
   it.each(['operations','legacy'])('preserves previously supported %s binding notification authority',async type=>{
     const f=await fixture(`binding-${type}`,PRIMARY_CATALOG_SOURCE,type);await create(f);expect(await authorizePortalDeliveryNotificationBatch(env,await batch(f))).not.toBeNull();
   });
-  it('keeps source and principal/workspace collisions separate and never schedules secondary portal mail',async()=>{
+  it('keeps source and principal/workspace collisions separate while scheduling secondary portal mail',async()=>{
     const f=await fixture('secondary',createCatalogSourceContext('project-alpha:secondary'));await create(f);
-    expect(await db.prepare('SELECT count(*) n FROM portal_delivery_notification_batches WHERE workspace_id=?').bind(f.workspace).first('n')).toBe(0);
-    await processPortalDeliveryNotificationBatches(env);expect(mailer.sendNotificationMail).not.toHaveBeenCalled();
-    expect((await nativeNotificationCandidates(env,'pending')).some(r=>r.workspace_id===f.workspace)).toBe(false);
+    expect(await db.prepare('SELECT count(*) n FROM portal_delivery_notification_batches WHERE workspace_id=?').bind(f.workspace).first('n')).toBe(1);
+    expect((await nativeNotificationCandidates(env,'pending')).some(r=>r.workspace_id===f.workspace)).toBe(true);
+    await due(f);await processPortalDeliveryNotificationBatches(env);
+    expect(mailer.sendNotificationMail).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(mailer.sendNotificationMail).mock.calls[0]?.[1]).toMatchObject({to:'secondary@example.test'});
+    expect(await batch(f)).toMatchObject({source_id:'project-alpha:secondary',status:'sent',attempt_count:1});
+  });
+  it('suppresses a secondary notification when its registered source is suspended before send',async()=>{
+    const source=createCatalogSourceContext('project-alpha:notify-suspended'),f=await fixture('source-suspended',source);await create(f);await due(f);
+    await db.prepare("UPDATE pa_portal_source_authorities SET state='suspended',version=version+1,updated_at=datetime('now') WHERE source_id=?")
+      .bind(source.sourceId).run();
+    await processPortalDeliveryNotificationBatches(env);
+    const suppressed=await batch(f);
+    expect(suppressed).toMatchObject({source_id:source.sourceId,status:'suppressed',last_error:'publication-context-changed'});
+    expect(mailer.sendNotificationMail).not.toHaveBeenCalled();
+    const history=(await nativeNotificationCandidates(env,'history')).find(row=>row.id===`nb_${suppressed.id}`);
+    expect(history).toBeDefined();
+    expect((await readNativeDeliveryNotification(env,history!.id,staff)).item)
+      .toMatchObject({status:'suppressed',sourceName:'Source source-suspended'});
   });
   it('suppresses before send when a grant is revoked; revocation remains a direct outbox job',async()=>{
     const f=await fixture('revoked');const accepted=await create(f);await revoke(f,accepted.receiptId);await due(f);await processPortalDeliveryNotificationBatches(env);
@@ -214,6 +309,15 @@ describe('native delivery staging, exact authority and controls — migrated D1'
     const f=await fixture('publish-race');await create(f);await due(f);
     const raced=intercept(db,sql=>sql.includes('SET dispatch_fingerprint='),()=>db.prepare("UPDATE portal_v2_folder_bindings SET status='revoked',revoked_at=datetime('now') WHERE id=?").bind(f.binding).run());
     await processPortalDeliveryNotificationBatches({...env,DELIVERY_DB:raced});expect((await batch(f)).status).toBe('suppressed');expect(mailer.sendNotificationMail).not.toHaveBeenCalled();
+  });
+  it('rechecks registered source authority inside the final publication write',async()=>{
+    const source=createCatalogSourceContext('project-alpha:notify-publish-race'),f=await fixture('source-publish-race',source);await create(f);await due(f);
+    const raced=intercept(db,sql=>sql.includes('SET dispatch_fingerprint='),()=>db.prepare(
+      "UPDATE pa_portal_source_authorities SET state='suspended',version=version+1,updated_at=datetime('now') WHERE source_id=?")
+      .bind(source.sourceId).run());
+    await processPortalDeliveryNotificationBatches({...env,DELIVERY_DB:raced});
+    expect(await batch(f)).toMatchObject({source_id:source.sourceId,status:'suppressed',last_error:'publication-context-changed'});
+    expect(mailer.sendNotificationMail).not.toHaveBeenCalled();
   });
   it('requires exact primary public-ID owner mapping and current division permissions for staff',async()=>{
     const f=await fixture('staff-scope');await create(f);const row=await publicRow(f);expect(await readNativeDeliveryNotificationScope(env,row)).not.toBeNull();
@@ -332,7 +436,7 @@ describe('native delivery staging, exact authority and controls — migrated D1'
     expect(await db.prepare("SELECT count(*) n FROM audit_log WHERE entity_id=? AND action='portal.delivery.notification.failed'").bind(terminal.id).first('n')).toBe(1);
     await expect(controlNativeDeliveryNotification(env,staff,`nb_${terminal.id}`,'send-now',terminal.revision,'native-terminal-control-0001')).rejects.toMatchObject({status:409});
   },60_000);
-  it('recovers an expired third-attempt crash without a fourth send, and never cleans another source',async()=>{
+  it('recovers expired third-attempt crashes for every registered source without a fourth send',async()=>{
     const f=await fixture('final-crash');await create(f);const row=await batch(f);
     await db.prepare(`UPDATE portal_delivery_notification_batches SET status='processing',attempt_count=3,
       sealed_at=datetime('now'),lease_token='crashed-final-token',lease_expires_at=datetime('now','-1 second') WHERE id=?`).bind(row.id).run();
@@ -342,10 +446,21 @@ describe('native delivery staging, exact authority and controls — migrated D1'
       principal_public_id,principal_source_version,owner_scope_type,owner_public_id,r2_prefix,status,attempt_count,sealed_at,lease_token,lease_expires_at)
       VALUES(?,?,?,?,'v1',?,'pv1','project',?,?,'processing',3,datetime('now'),'secondary-token',datetime('now','-1 second'))`)
       .bind(secondaryId,secondary.source.sourceId,secondary.workspace,secondary.binding,secondary.principal,secondary.owner,secondary.prefix).run();
-    const before=await db.prepare('SELECT * FROM portal_delivery_notification_batches WHERE id=?').bind(secondaryId).first();
+    const pendingPlan=JSON.stringify((await db.prepare(`EXPLAIN QUERY PLAN SELECT id FROM portal_delivery_notification_batches
+      INDEXED BY idx_portal_delivery_notification_pending_exhausted
+      WHERE status='pending' AND attempt_count>=3 AND eligible_at<=datetime('now')
+      ORDER BY eligible_at,created_at,id LIMIT 50`).all()).results);
+    const processingPlan=JSON.stringify((await db.prepare(`EXPLAIN QUERY PLAN SELECT id FROM portal_delivery_notification_batches
+      INDEXED BY idx_portal_delivery_notification_processing_exhausted
+      WHERE status='processing' AND attempt_count>=3 AND lease_expires_at<=datetime('now')
+      ORDER BY lease_expires_at,created_at,id LIMIT 50`).all()).results);
+    expect(pendingPlan).toContain('idx_portal_delivery_notification_pending_exhausted');
+    expect(processingPlan).toContain('idx_portal_delivery_notification_processing_exhausted');
+    expect(pendingPlan+processingPlan).not.toContain('USE TEMP B-TREE');
     await processPortalDeliveryNotificationBatches(env);
     expect(await batch(f)).toMatchObject({status:'failed',attempt_count:3,lease_token:null,lease_expires_at:null,last_error:'attempts-exhausted'});
-    expect(await db.prepare('SELECT * FROM portal_delivery_notification_batches WHERE id=?').bind(secondaryId).first()).toEqual(before);
+    expect(await db.prepare('SELECT * FROM portal_delivery_notification_batches WHERE id=?').bind(secondaryId).first())
+      .toMatchObject({source_id:'project-alpha:secondary',status:'failed',attempt_count:3,lease_token:null,lease_expires_at:null,last_error:'attempts-exhausted'});
     expect(mailer.sendNotificationMail).not.toHaveBeenCalled();
     const terminal=await batch(f);await processPortalDeliveryNotificationBatches(env);expect(await batch(f)).toEqual(terminal);
   },30_000);

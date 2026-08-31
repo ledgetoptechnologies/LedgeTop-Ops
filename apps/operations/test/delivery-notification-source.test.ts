@@ -15,6 +15,7 @@ const migrations = readdirSync(directory).filter(name => /^\d+_.+\.sql$/.test(na
 const prefix = "jobs/shared/project/", email = "same-email@example.test";
 const currentTokenSecret = "current-delivery-token-secret-used-by-tests";
 const previousTokenSecret = "previous-delivery-token-secret-used-by-tests";
+let beforeRun:((sql:string)=>Promise<void>)|null=null,insideHook=false;
 
 // Real production SQL and full migration chain. Only mail transport is mocked;
 // the D1-shaped adapter never fabricates query or authorization results.
@@ -42,7 +43,10 @@ function asD1(db: DatabaseSync): D1Database {
           return column === undefined ? row ?? null : row?.[column] ?? null;
         },
         async all() { return { results: db.prepare(sql).all(...bindings) }; },
-        async run() { return { meta: { changes: Number(db.prepare(sql).run(...bindings).changes) } }; },
+        async run() {
+          if(beforeRun&&!insideHook){insideHook=true;try{await beforeRun(sql);}finally{insideHook=false;}}
+          return { meta: { changes: Number(db.prepare(sql).run(...bindings).changes) } };
+        },
       };
       return statement;
     },
@@ -53,6 +57,7 @@ function asD1(db: DatabaseSync): D1Database {
 describe("delivery notification source and live ownership", () => {
   let db: DatabaseSync, env: Env;
   beforeEach(() => {
+    beforeRun=null;insideHook=false;
     vi.mocked(sendNotificationMail).mockClear();
     db = new DatabaseSync(":memory:");
     for (const sql of migrations) { db.exec("BEGIN"); db.exec(sql); db.exec("COMMIT"); }
@@ -117,6 +122,14 @@ describe("delivery notification source and live ownership", () => {
     db.prepare(`INSERT INTO project_alpha_delivery_portal_notification_outbox
       (id,receipt_id,grant_id,principal_public_id,principal_source_version,event_type,attempt_count)
       VALUES(?,?,?,'same-principal','principal-v1','granted',?)`).run(`notice-${name}`, `receipt-${name}`, `grant-${name}`, attempted ? 1 : 0);
+  }
+  function activateSecondarySource(){
+    db.prepare(`INSERT INTO pa_portal_source_authorities(source_id,producer_binding_id,snapshot_origin,snapshot_base_path,
+      application_key,state,active_revision,version,connector_revision,connector_version)
+      VALUES('project-alpha:secondary','secondary-notification-source','https://secondary.example.test','/','project-alpha','active',1,1,1,1)`).run();
+    db.prepare(`INSERT INTO pa_portal_source_authority_revisions(source_id,revision,credential_ref,access_issuer,access_audience,
+      access_subject,current_key_id,current_key_fingerprint,created_by)
+      VALUES('project-alpha:secondary',1,'secondary','https://access.example.test','audience','subject','key',?,'fixture')`).run("a".repeat(64));
   }
 
   it("sends valid primary guest mail despite another source's identical prefix, IDs and email", async () => {
@@ -198,6 +211,125 @@ describe("delivery notification source and live ownership", () => {
     ]);
     expect(db.prepare("SELECT last_error FROM project_alpha_delivery_portal_notification_outbox WHERE id='notice-secondary'").get()?.last_error)
       .toBe("authorization-no-longer-live");
+  });
+
+  it("sends a registered secondary-source revocation through the source-qualified direct lane",async()=>{
+    activateSecondarySource();portal("secondary");
+    db.exec(`UPDATE project_alpha_delivery_portal_grants SET status='revoked',grant_version=grant_version+1,revoked_at=datetime('now') WHERE id='grant-secondary';
+      UPDATE project_alpha_delivery_portal_notification_outbox SET event_type='revoked' WHERE id='notice-secondary'`);
+    expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(1);
+    expect(sendNotificationMail).toHaveBeenCalledWith(env,expect.objectContaining({
+      to:email,messageIdKey:"notice-secondary",subject:"Portal delivery access revoked",
+    }));
+    expect(db.prepare("SELECT status FROM project_alpha_delivery_portal_notification_outbox WHERE id='notice-secondary'").get()?.status).toBe("sent");
+  });
+
+  it("suppresses a secondary-source direct revocation after its authority is suspended",async()=>{
+    activateSecondarySource();portal("secondary");
+    db.exec(`UPDATE project_alpha_delivery_portal_grants SET status='revoked',grant_version=grant_version+1,revoked_at=datetime('now') WHERE id='grant-secondary';
+      UPDATE project_alpha_delivery_portal_notification_outbox SET event_type='revoked' WHERE id='notice-secondary';
+      UPDATE pa_portal_source_authorities SET state='suspended',version=version+1 WHERE source_id='project-alpha:secondary'`);
+    expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(0);
+    expect(sendNotificationMail).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT status FROM project_alpha_delivery_portal_notification_outbox WHERE id='notice-secondary'").get()?.status).toBe("suppressed");
+  });
+
+  it("keeps the publication result authoritative when suspension races after its final guard",async()=>{
+    activateSecondarySource();portal("secondary");
+    db.exec(`UPDATE project_alpha_delivery_portal_grants SET status='revoked',grant_version=grant_version+1,revoked_at=datetime('now') WHERE id='grant-secondary';
+      UPDATE project_alpha_delivery_portal_notification_outbox SET event_type='revoked' WHERE id='notice-secondary'`);
+    vi.mocked(sendNotificationMail).mockImplementationOnce(async()=>{
+      db.exec("UPDATE pa_portal_source_authorities SET state='suspended',version=version+1 WHERE source_id='project-alpha:secondary'");
+      expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(0);
+    });
+    expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(1);
+    expect(sendNotificationMail).toHaveBeenCalledTimes(1);
+    expect(db.prepare("SELECT status,last_error FROM project_alpha_delivery_portal_notification_outbox WHERE id='notice-secondary'").get())
+      .toEqual({status:"sent",last_error:null});
+  });
+
+  it("does not let an expired direct-notification claimant publish after a newer claimant wins",async()=>{
+    portal("primary");
+    beforeRun=async sql=>{
+      if(!sql.includes("SET lease_expires_at=datetime('now','+15 minutes'),updated_at=datetime('now')"))return;
+      beforeRun=null;
+      db.exec("UPDATE project_alpha_delivery_portal_notification_outbox SET lease_expires_at=datetime('now','-1 second') WHERE id='notice-primary'");
+      expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(1);
+    };
+    expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(1);
+    expect(sendNotificationMail).toHaveBeenCalledTimes(1);
+    expect(db.prepare("SELECT status,attempt_count FROM project_alpha_delivery_portal_notification_outbox WHERE id='notice-primary'").get())
+      .toEqual({status:"sent",attempt_count:3});
+  });
+
+  it("terminally fails an exhausted direct notification without a fourth provider attempt",async()=>{
+    portal("primary");
+    db.exec("UPDATE project_alpha_delivery_portal_notification_outbox SET attempt_count=3 WHERE id='notice-primary'");
+    expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(0);
+    expect(sendNotificationMail).not.toHaveBeenCalled();
+    expect(db.prepare("SELECT status,attempt_count,last_error FROM project_alpha_delivery_portal_notification_outbox WHERE id='notice-primary'").get())
+      .toEqual({status:"failed",attempt_count:3,last_error:"attempts-exhausted"});
+  });
+
+  it("rotates the direct lane so a twenty-sixth registered source is handled on the next tick",async()=>{
+    for(let index=0;index<26;index+=1){
+      const name=`fair${String(index).padStart(2,"0")}`,source=`project-alpha:${name}`,workspace=`workspace-${name}`,generation=`generation-${name}`;
+      db.prepare("INSERT INTO pa_portal_workspace_sources(workspace_id,projection_source_id,source_workspace_id) VALUES(?,?,?)").run(workspace,source,workspace);
+      db.prepare(`INSERT INTO portal_v2_workspaces(id,root_type,pa_organization_public_id,display_name,project_alpha_source_id)
+        VALUES(?,'organization','same-organization',?,?)`).run(workspace,name,source);
+      db.prepare(`INSERT INTO portal_v2_directory_generations(id,workspace_id,source_generation,source_sequence,status,complete)
+        VALUES(?,?,'snapshot',1,'active',1)`).run(generation,workspace);
+      db.prepare("INSERT INTO portal_v2_directory_checkpoints(workspace_id,active_generation_id,source_sequence) VALUES(?,?,1)").run(workspace,generation);
+      db.prepare(`INSERT INTO portal_v2_directory_entities(workspace_id,generation_id,entity_type,public_id,parent_public_id,display_name,source_version)
+        VALUES(?,?,'project','same-project',NULL,'Project','binding-v1')`).run(workspace,generation);
+      db.prepare(`INSERT INTO portal_v2_folder_bindings(id,workspace_id,owner_scope_type,owner_public_id,r2_prefix,source_type,source_version)
+        VALUES(?,?,'project','same-project',?,'project_alpha','binding-v1')`).run(`binding-${name}`,workspace,prefix);
+      db.prepare(`INSERT INTO pa_portal_principals(workspace_id,public_id,email_hint,display_name,source_version,status)
+        VALUES(?,'same-principal',?,?,'principal-v1','active')`).run(workspace,email,name);
+      db.prepare(`INSERT INTO pa_portal_source_authorities(source_id,producer_binding_id,snapshot_origin,snapshot_base_path,
+        application_key,state,active_revision,version,connector_revision,connector_version)
+        VALUES(?,?,?,'/','project-alpha','active',1,1,1,1)`).run(source,`binding-${name}`,`https://${name}.example.test`);
+      db.prepare(`INSERT INTO pa_portal_source_authority_revisions(source_id,revision,credential_ref,access_issuer,access_audience,
+        access_subject,current_key_id,current_key_fingerprint,created_by)
+        VALUES(?,1,?,'https://access.example.test','audience','subject','key',?,'fixture')`).run(source,name,"a".repeat(64));
+      portal(name);
+      db.prepare("UPDATE project_alpha_delivery_portal_grants SET status='revoked',grant_version=grant_version+1,revoked_at=datetime('now') WHERE id=?")
+        .run(`grant-${name}`);
+      db.prepare("UPDATE project_alpha_delivery_portal_notification_outbox SET event_type='revoked' WHERE id=?").run(`notice-${name}`);
+    }
+    const pendingPlan=JSON.stringify(db.prepare(`EXPLAIN QUERY PLAN SELECT id,project_alpha_source_id source_id
+      FROM project_alpha_delivery_portal_notification_outbox INDEXED BY idx_project_alpha_delivery_notification_ready_pending
+      WHERE status='pending' AND attempt_count<3 AND next_attempt_at<=datetime('now')
+      ORDER BY next_attempt_at,created_at,id LIMIT 25`).all());
+    const processingPlan=JSON.stringify(db.prepare(`EXPLAIN QUERY PLAN SELECT id,project_alpha_source_id source_id
+      FROM project_alpha_delivery_portal_notification_outbox INDEXED BY idx_project_alpha_delivery_notification_ready_processing
+      WHERE status='processing' AND attempt_count<3 AND lease_expires_at<=datetime('now')
+      ORDER BY lease_expires_at,created_at,id LIMIT 25`).all());
+    const sourceDirectPlan=JSON.stringify(db.prepare(`EXPLAIN QUERY PLAN SELECT id FROM project_alpha_delivery_portal_notification_outbox
+      INDEXED BY idx_project_alpha_delivery_notification_source_direct_pending
+      WHERE project_alpha_source_id=? AND status='pending' AND attempt_count<3 AND next_attempt_at<=datetime('now')
+        AND NOT(event_type='granted' AND attempt_count=0 AND lease_expires_at IS NULL)
+      ORDER BY next_attempt_at,created_at,id LIMIT 25`).all("project-alpha:fair00"));
+    const exhaustedPendingPlan=JSON.stringify(db.prepare(`EXPLAIN QUERY PLAN SELECT id FROM project_alpha_delivery_portal_notification_outbox
+      INDEXED BY idx_project_alpha_delivery_notification_pending_exhausted
+      WHERE status='pending' AND attempt_count>=3 AND next_attempt_at<=datetime('now')
+      ORDER BY next_attempt_at,created_at,id LIMIT 50`).all());
+    const exhaustedProcessingPlan=JSON.stringify(db.prepare(`EXPLAIN QUERY PLAN SELECT id FROM project_alpha_delivery_portal_notification_outbox
+      INDEXED BY idx_project_alpha_delivery_notification_processing_exhausted
+      WHERE status='processing' AND attempt_count>=3 AND lease_expires_at<=datetime('now')
+      ORDER BY lease_expires_at,created_at,id LIMIT 50`).all());
+    expect(pendingPlan).toContain("idx_project_alpha_delivery_notification_ready_pending");
+    expect(processingPlan).toContain("idx_project_alpha_delivery_notification_ready_processing");
+    expect(sourceDirectPlan).toContain("idx_project_alpha_delivery_notification_source_direct_pending");
+    expect(exhaustedPendingPlan).toContain("idx_project_alpha_delivery_notification_pending_exhausted");
+    expect(exhaustedProcessingPlan).toContain("idx_project_alpha_delivery_notification_processing_exhausted");
+    expect(sourceDirectPlan+exhaustedPendingPlan+exhaustedProcessingPlan).not.toContain("USE TEMP B-TREE");
+    expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(25);
+    expect(sendNotificationMail).toHaveBeenCalledTimes(25);
+    expect(db.prepare("SELECT count(*) count FROM project_alpha_delivery_portal_notification_outbox WHERE status='pending'").get()?.count).toBe(1);
+    expect(await processProjectAlphaDeliveryPortalNotifications(env)).toBe(1);
+    expect(sendNotificationMail).toHaveBeenCalledTimes(26);
+    expect(db.prepare("SELECT count(*) count FROM project_alpha_delivery_portal_notification_outbox WHERE status='sent'").get()?.count).toBe(26);
   });
 
   it("stages untouched primary portal mail without borrowing another source's overlapping recipient", async () => {

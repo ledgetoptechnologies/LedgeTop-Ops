@@ -10,9 +10,10 @@ import type { Env } from "./types";
 import { sendAdminAlert } from "./alerts";
 import { sendNotificationMail } from "./mailer";
 import { d1TablesPresent } from "./schema-readiness";
-import { resolveProjectAlphaDeliveryPrincipal } from "./share-recipients";
+import { projectAlphaDeliveryPrincipalGuard, resolveProjectAlphaDeliveryPrincipal } from "./share-recipients";
 import { HTTPException } from "hono/http-exception";
-import { nativeDeliveryNotificationsReady, processPortalDeliveryNotificationBatches } from "./portal-delivery-notification-batches";
+import { advanceNotificationSourceSchedule, nativeBindingGuard, nativeDeliveryNotificationsReady,
+  processPortalDeliveryNotificationBatches, scheduledNotificationSources } from "./portal-delivery-notification-batches";
 import { recoverDeliveryShareSecret } from "./delivery-secret-recovery";
 import { publicShareOrigin } from "./origins";
 
@@ -21,6 +22,17 @@ export interface NotificationPayload { publicId?: string | null; shareUrl?: stri
 export type StoredNotificationPayload = Omit<NotificationPayload, "shareUrl">;
 interface NotificationRow { id: string; share_id: string; kind: NotificationKind; recipient_email: string; payload_json: string; attempts: number; }
 const MAX_ATTEMPTS = 3;
+type DirectPortalNotificationRow={id:string;event_type:"granted"|"revoked";principal_public_id:string;
+  principal_source_version:string;attempt_count:number;r2_prefix:string;
+  owner_scope_type:"organization"|"department"|"client"|"project";owner_public_id:string;
+  workspace_id:string;folder_binding_id:string;binding_source_version:string;grant_version:number;
+  grant_status:"active"|"revoked";revoked_at:string|null;expires_at:string|null;source_id:string};
+const DIRECT_SOURCE_INDEXES=["idx_project_alpha_delivery_notification_source_direct_pending",
+  "idx_project_alpha_delivery_notification_source_processing",
+  "idx_project_alpha_delivery_notification_ready_pending",
+  "idx_project_alpha_delivery_notification_ready_processing",
+  "idx_project_alpha_delivery_notification_pending_exhausted",
+  "idx_project_alpha_delivery_notification_processing_exhausted"] as const;
 
 type ClientPortalRequestEvent = "request_submitted" | "request_status_changed" | "request_confirmation_requested" | "request_client_response" | "request_work_area_changed";
 type ClientPortalRequestRecipient = "staff_triage" | "client_requester";
@@ -243,9 +255,19 @@ export async function processDeliveryNotifications(env: Env): Promise<number> {
 export async function processProjectAlphaDeliveryPortalNotifications(env:Env):Promise<number>{
   const staging=await nativeDeliveryNotificationsReady(env);
   const stagedProcessed=staging?await processPortalDeliveryNotificationBatches(env):0;
+  const sourceAuthoritiesReady=await d1TablesPresent(env.DELIVERY_DB,[
+    "pa_portal_source_authorities","pa_portal_source_authority_revisions",
+  ]);
   // Never let the direct sender race adoption. Already attempted/inflight jobs
   // and revocations retain their original outbox/provider identity unchanged.
   const directLane=staging?"AND NOT(outbox.event_type='granted' AND outbox.status='pending' AND outbox.attempt_count=0 AND outbox.lease_expires_at IS NULL)":"";
+  const liveSource=sourceAuthoritiesReady
+    ? `(workspace.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}' OR EXISTS(
+        SELECT 1 FROM pa_portal_source_authorities authority
+        JOIN pa_portal_source_authority_revisions revision ON revision.source_id=authority.source_id
+          AND revision.revision=authority.active_revision
+        WHERE authority.source_id=workspace.project_alpha_source_id AND authority.state='active'))`
+    : `workspace.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}'`;
   const liveOwner=`EXISTS(SELECT 1 FROM portal_v2_directory_checkpoints checkpoint
     JOIN portal_v2_directory_generations generation ON generation.id=checkpoint.active_generation_id
       AND generation.workspace_id=checkpoint.workspace_id AND generation.status='active' AND generation.complete=1
@@ -253,29 +275,83 @@ export async function processProjectAlphaDeliveryPortalNotifications(env:Env):Pr
       AND owner.entity_type=binding.owner_scope_type AND owner.public_id=binding.owner_public_id
       AND owner.active=1 AND owner.source_version=binding.source_version
     WHERE checkpoint.workspace_id=grant_record.workspace_id)`;
-  await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='suppressed',
-    last_error='authorization-no-longer-live',updated_at=datetime('now') WHERE status IN ('pending','processing') AND
-    NOT EXISTS(SELECT 1 FROM project_alpha_delivery_portal_grants grant_record
-      JOIN portal_v2_workspaces workspace ON workspace.id=grant_record.workspace_id AND workspace.status='active'
-        AND workspace.project_alpha_source_id='project-alpha:primary'
-      JOIN project_alpha_delivery_intent_receipts receipt ON receipt.receipt_id=project_alpha_delivery_portal_notification_outbox.receipt_id
-        AND receipt.access_mode='portal' AND receipt.resource_id=grant_record.id
-        AND receipt.project_alpha_source_id=workspace.project_alpha_source_id
-      JOIN portal_v2_folder_bindings binding ON binding.id=grant_record.folder_binding_id
-        AND binding.workspace_id=grant_record.workspace_id AND binding.status='active' AND binding.revoked_at IS NULL
-        AND binding.source_version=grant_record.binding_source_version
-      WHERE grant_record.id=project_alpha_delivery_portal_notification_outbox.grant_id
-        AND ${liveOwner}
-        AND (project_alpha_delivery_portal_notification_outbox.event_type='revoked' OR (grant_record.status='active' AND
-          (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now')))))`).run();
+  const placeholders=DIRECT_SOURCE_INDEXES.map(()=>"?").join(",");
+  const directSourceIndexes=await env.DELIVERY_DB.withSession("first-primary").prepare(
+    `SELECT count(*) count FROM sqlite_master WHERE type='index' AND name IN (${placeholders})`,
+  ).bind(...DIRECT_SOURCE_INDEXES).first<number>("count");
+  const indexesReady=directSourceIndexes===DIRECT_SOURCE_INDEXES.length;
+  const exhausted=indexesReady?(await Promise.all([
+    env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id FROM project_alpha_delivery_portal_notification_outbox
+      INDEXED BY idx_project_alpha_delivery_notification_pending_exhausted
+      WHERE status='pending' AND attempt_count>=3 AND next_attempt_at<=datetime('now')
+      ORDER BY next_attempt_at,created_at,id LIMIT 50`).all<{id:string}>(),
+    env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id FROM project_alpha_delivery_portal_notification_outbox
+      INDEXED BY idx_project_alpha_delivery_notification_processing_exhausted
+      WHERE status='processing' AND attempt_count>=3 AND lease_expires_at<=datetime('now')
+      ORDER BY lease_expires_at,created_at,id LIMIT 50`).all<{id:string}>(),
+  ])).flatMap(result=>result.results):[];
+  if(exhausted.length)await env.DELIVERY_DB.batch(exhausted.map(row=>env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox
+    SET status='failed',lease_expires_at=NULL,last_error='attempts-exhausted',updated_at=datetime('now')
+    WHERE id=? AND attempt_count>=? AND ((status='pending' AND datetime(next_attempt_at)<=datetime('now'))
+      OR (status='processing' AND datetime(lease_expires_at)<=datetime('now')))` ).bind(row.id,MAX_ATTEMPTS)));
+  let fairIds:string[]=[];
+  if(indexesReady){
+    const sources=await scheduledNotificationSources(env,"direct");
+    const groups=await Promise.all(sources.map(async source=>{
+      const rows=await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,created_at,source_id FROM (
+          SELECT id,created_at,project_alpha_source_id source_id FROM project_alpha_delivery_portal_notification_outbox
+            INDEXED BY idx_project_alpha_delivery_notification_source_direct_pending
+          WHERE project_alpha_source_id=?1 AND status='pending' AND attempt_count<3 AND next_attempt_at<=datetime('now')
+            AND NOT(event_type='granted' AND attempt_count=0 AND lease_expires_at IS NULL)
+          ORDER BY next_attempt_at,created_at,id LIMIT 25
+        ) UNION ALL SELECT id,created_at,source_id FROM (
+          SELECT id,created_at,project_alpha_source_id source_id FROM project_alpha_delivery_portal_notification_outbox
+            INDEXED BY idx_project_alpha_delivery_notification_source_processing
+          WHERE project_alpha_source_id=?1 AND status='processing' AND attempt_count<3 AND lease_expires_at<=datetime('now')
+          ORDER BY lease_expires_at,created_at,id LIMIT 25
+        )`).bind(source).all<{id:string;created_at:string;source_id:string}>();
+      return rows.results.sort((left,right)=>left.created_at.localeCompare(right.created_at)||left.id.localeCompare(right.id));
+    }));
+    for(let rank=0;rank<50&&fairIds.length<25;rank++){
+      const round=groups.flatMap(group=>group[rank]?[group[rank]!]:[]);
+      fairIds.push(...round.slice(0,25-fairIds.length).map(row=>row.id));
+    }
+    const lastId=fairIds.at(-1),lastSource=lastId?groups.flat().find(row=>row.id===lastId):null;
+    if(lastSource)await advanceNotificationSourceSchedule(env,"direct",lastSource.source_id);
+    // Invalid or retired provenance cannot appear in the registered-source
+    // probes. Reserve one bounded cleanup slot so old synthetic rows reach a
+    // terminal state without restoring the former whole-table sweep.
+    const [pendingProbe,processingProbe]=await Promise.all([
+      env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,project_alpha_source_id source_id
+        FROM project_alpha_delivery_portal_notification_outbox INDEXED BY idx_project_alpha_delivery_notification_ready_pending
+        WHERE status='pending' AND attempt_count<3 AND next_attempt_at<=datetime('now')
+        ORDER BY next_attempt_at,created_at,id LIMIT 25`).all<{id:string;source_id:string|null}>(),
+      env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id,project_alpha_source_id source_id
+        FROM project_alpha_delivery_portal_notification_outbox INDEXED BY idx_project_alpha_delivery_notification_ready_processing
+        WHERE status='processing' AND attempt_count<3 AND lease_expires_at<=datetime('now')
+        ORDER BY lease_expires_at,created_at,id LIMIT 25`).all<{id:string;source_id:string|null}>(),
+    ]);
+    const registered=new Set(sources),orphan=[...pendingProbe.results,...processingProbe.results]
+      .find(candidate=>!candidate.source_id||!registered.has(candidate.source_id))?.id;
+    if(orphan&&!fairIds.includes(orphan)){
+      if(fairIds.length===25)fairIds[24]=orphan;else fairIds.push(orphan);
+    }
+  }else{
+    fairIds=(await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT outbox.id
+      FROM project_alpha_delivery_portal_notification_outbox outbox
+      WHERE outbox.attempt_count<3 AND ((outbox.status='pending' AND datetime(outbox.next_attempt_at)<=datetime('now'))
+        OR (outbox.status='processing' AND datetime(outbox.lease_expires_at)<=datetime('now')))
+      ${directLane} ORDER BY outbox.created_at,outbox.id LIMIT 25`).all<{id:string}>()).results.map(row=>row.id);
+  }
   let processed=0;
-  for(;processed<25;processed+=1){
+  for(const targetId of fairIds){
     const row=await env.DELIVERY_DB.prepare(`SELECT outbox.id,outbox.event_type,outbox.principal_public_id,
-      outbox.principal_source_version,outbox.attempt_count,binding.r2_prefix,grant_record.workspace_id,grant_record.folder_binding_id
+      outbox.principal_source_version,outbox.attempt_count,binding.r2_prefix,binding.owner_scope_type,binding.owner_public_id,
+      grant_record.workspace_id,grant_record.folder_binding_id,grant_record.binding_source_version,grant_record.grant_version,
+      grant_record.status grant_status,grant_record.revoked_at,grant_record.expires_at,workspace.project_alpha_source_id source_id
       FROM project_alpha_delivery_portal_notification_outbox outbox
       JOIN project_alpha_delivery_portal_grants grant_record ON grant_record.id=outbox.grant_id
       JOIN portal_v2_workspaces workspace ON workspace.id=grant_record.workspace_id AND workspace.status='active'
-        AND workspace.project_alpha_source_id='project-alpha:primary'
       JOIN project_alpha_delivery_intent_receipts receipt ON receipt.receipt_id=outbox.receipt_id
         AND receipt.access_mode='portal' AND receipt.resource_id=grant_record.id
         AND receipt.project_alpha_source_id=workspace.project_alpha_source_id
@@ -284,31 +360,64 @@ export async function processProjectAlphaDeliveryPortalNotifications(env:Env):Pr
         AND binding.source_version=grant_record.binding_source_version
       WHERE ((outbox.status='pending' AND datetime(outbox.next_attempt_at)<=datetime('now')) OR
         (outbox.status='processing' AND datetime(outbox.lease_expires_at)<=datetime('now')))
+        AND outbox.id=? AND outbox.attempt_count<3
         ${directLane}
-        AND ${liveOwner}
-        AND (outbox.event_type='revoked' OR (grant_record.status='active' AND
+        AND ${liveSource} AND ${liveOwner}
+        AND ((outbox.event_type='revoked' AND grant_record.status='revoked' AND grant_record.revoked_at IS NOT NULL)
+          OR (outbox.event_type='granted' AND grant_record.status='active' AND
           (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))))
       ORDER BY outbox.created_at LIMIT 1`)
-      .first<{id:string;event_type:"granted"|"revoked";principal_public_id:string;principal_source_version:string;attempt_count:number;
-        r2_prefix:string;workspace_id:string;folder_binding_id:string}>();
-    if(!row)break;
+      .bind(targetId).first<DirectPortalNotificationRow>();
+    if(!row){
+      await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='suppressed',
+        lease_expires_at=NULL,last_error='authorization-no-longer-live',updated_at=datetime('now')
+        WHERE id=? AND attempt_count<3 AND ((status='pending' AND datetime(next_attempt_at)<=datetime('now'))
+          OR (status='processing' AND datetime(lease_expires_at)<=datetime('now')))` ).bind(targetId).run();
+      continue;
+    }
     const claimed=await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='processing',attempt_count=attempt_count+1,lease_expires_at=datetime('now','+15 minutes'),updated_at=datetime('now') WHERE id=? AND
-      ((status='pending' AND datetime(next_attempt_at)<=datetime('now')) OR (status='processing' AND datetime(lease_expires_at)<=datetime('now')))` ).bind(row.id).run();
-    if(!claimed.meta.changes){processed-=1;continue;}
+      attempt_count=? AND attempt_count<3 AND ((status='pending' AND datetime(next_attempt_at)<=datetime('now')) OR (status='processing' AND datetime(lease_expires_at)<=datetime('now')))` )
+      .bind(row.id,row.attempt_count).run();
+    if(!claimed.meta.changes)continue;
+    processed+=1;
+    const claimedAttempt=row.attempt_count+1;
     try{
-      const recipient=await resolveProjectAlphaDeliveryPrincipal(env,row.r2_prefix,row.principal_public_id,row.principal_source_version);
+      const source=createCatalogSourceContext(row.source_id);
+      const recipient=await resolveProjectAlphaDeliveryPrincipal(env,row.r2_prefix,row.principal_public_id,row.principal_source_version,source);
       if(recipient.workspaceId!==row.workspace_id||recipient.folderBindingId!==row.folder_binding_id)
         throw new HTTPException(409,{message:"Delivery recipient binding changed"});
       const recipientEmail=recipient.recipients[0]?.email;
       if(!recipientEmail)throw new Error("recipient-unavailable");
       const granted=row.event_type==="granted",url=`${env.DELIVERY_BASE_URL.replace(/\/$/,"")}/portal/deliveries`;
+      const bindingGuard=nativeBindingGuard({source_id:source.sourceId,workspace_id:row.workspace_id,
+        folder_binding_id:row.folder_binding_id,binding_source_version:row.binding_source_version,
+        principal_public_id:row.principal_public_id,principal_source_version:row.principal_source_version,
+        owner_scope_type:row.owner_scope_type,owner_public_id:row.owner_public_id,r2_prefix:row.r2_prefix});
+      const principalGuard=projectAlphaDeliveryPrincipalGuard({audience:recipient,
+        principalSourceVersion:row.principal_source_version,bindingSourceVersion:row.binding_source_version,
+        prefix:row.r2_prefix,allowUnclaimed:env.CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED==="true",source});
+      const grantState=granted
+        ? "grant_record.status='active' AND grant_record.revoked_at IS NULL AND (grant_record.expires_at IS NULL OR datetime(grant_record.expires_at)>datetime('now'))"
+        : "grant_record.status='revoked' AND grant_record.revoked_at IS NOT NULL";
+      const publication=await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox
+        SET lease_expires_at=datetime('now','+15 minutes'),updated_at=datetime('now')
+        WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')
+        AND EXISTS(SELECT 1 FROM project_alpha_delivery_portal_grants grant_record
+          WHERE grant_record.id=project_alpha_delivery_portal_notification_outbox.grant_id
+          AND grant_record.grant_version=? AND ${grantState})
+        AND ${bindingGuard.sql} AND ${principalGuard.sql}`)
+        .bind(row.id,claimedAttempt,row.grant_version,...bindingGuard.bindings,...principalGuard.bindings).run();
+      if(publication.meta.changes!==1)throw new HTTPException(409,{message:"Delivery publication authority changed"});
       await sendNotificationMail(env,{to:recipientEmail,fromName:"LTDS Client Delivery",
         subject:granted?"Delivery available in your portal":"Portal delivery access revoked",
         text:granted?`A delivery is available in your LTDS portal.\n\nOpen the portal: ${url}`:"Access to a delivery in your LTDS portal was revoked.",
         html:granted?`<p>A delivery is available in your LTDS portal.</p><p><a href="${escapeHtml(url)}">Open the portal</a></p>`:"<p>Access to a delivery in your LTDS portal was revoked.</p>",messageIdKey:row.id});
-      await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now') WHERE id=? AND status='processing'`).bind(row.id).run();
-    }catch(error){if(error instanceof HTTPException){await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error='recipient-no-longer-eligible',updated_at=datetime('now') WHERE id=?`).bind(row.id).run();continue;}const attempt=row.attempt_count+1,terminal=attempt>=MAX_ATTEMPTS;
-      await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status=?,next_attempt_at=datetime('now',?),lease_expires_at=NULL,last_error=?,updated_at=datetime('now') WHERE id=?`).bind(terminal?"failed":"pending",terminal?"+0 seconds":`+${2**attempt*5} minutes`,(error instanceof Error?error.message:"email-send-failed").slice(0,240),row.id).run();}
+      await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='sent',delivered_at=datetime('now'),lease_expires_at=NULL,updated_at=datetime('now')
+        WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')`).bind(row.id,claimedAttempt).run();
+    }catch(error){if(error instanceof HTTPException){await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status='suppressed',lease_expires_at=NULL,last_error='recipient-no-longer-eligible',updated_at=datetime('now')
+        WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')`).bind(row.id,claimedAttempt).run();continue;}const attempt=claimedAttempt,terminal=attempt>=MAX_ATTEMPTS;
+      await env.DELIVERY_DB.prepare(`UPDATE project_alpha_delivery_portal_notification_outbox SET status=?,next_attempt_at=datetime('now',?),lease_expires_at=NULL,last_error=?,updated_at=datetime('now')
+        WHERE id=? AND status='processing' AND attempt_count=? AND datetime(lease_expires_at)>datetime('now')`).bind(terminal?"failed":"pending",terminal?"+0 seconds":`+${2**attempt*5} minutes`,(error instanceof Error?error.message:"email-send-failed").slice(0,240),row.id,claimedAttempt).run();}
   }
   return processed+stagedProcessed;
 }

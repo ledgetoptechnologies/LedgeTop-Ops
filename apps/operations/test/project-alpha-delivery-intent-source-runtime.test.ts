@@ -1,11 +1,14 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { Miniflare } from "miniflare";
 import { Hono } from "hono";
+import { SignJWT, createLocalJWKSet, exportJWK, generateKeyPair, type JWTPayload, type JWTVerifyGetKey } from "jose";
 import { createCatalogSourceContext, PRIMARY_CATALOG_SOURCE } from "@ltds/shared";
 import { splitD1MigrationStatements } from "../../client/test/helpers/d1-migrations";
-import { applyProjectAlphaDeliveryIntent, applyProjectAlphaDeliveryIntentRevoke, handleProjectAlphaDeliveryIntent } from "../src/worker/project-alpha-delivery-intents";
+import { applyProjectAlphaDeliveryIntent, applyProjectAlphaDeliveryIntentRevoke, handleProjectAlphaDeliveryIntent,
+  handleRegisteredProjectAlphaDeliveryIntent, handleRegisteredProjectAlphaDeliveryIntentRevoke,
+  handleRegisteredProjectAlphaDeliveryPreflight, verifyRegisteredDeliveryAccess } from "../src/worker/project-alpha-delivery-intents";
 import type { Env } from "../src/worker/types";
 
 const secondary = createCatalogSourceContext("project-alpha:secondary");
@@ -27,11 +30,28 @@ function interleaveBeforeBatch(database: D1Database, action: () => Promise<unkno
   } });
   return proxy;
 }
+function interleaveAfterBatch(database:D1Database,action:()=>Promise<unknown>):D1Database{
+  let invoked=false;let proxy:D1Database;
+  proxy=new Proxy(database,{get(target,property){
+    if(property==="withSession")return()=>proxy;
+    if(property==="batch")return async(statements:D1PreparedStatement[])=>{
+      const result=await target.batch(statements);
+      if(!invoked){invoked=true;await action();}
+      return result;
+    };
+    const value=target[property as keyof D1Database];
+    return typeof value==="function"?value.bind(target):value;
+  }});
+  return proxy;
+}
 
 describe("source-owned delivery intent runtime and transaction races", () => {
   let runtime: Miniflare;
   let database: D1Database;
   let env: Env;
+  let accessPrivateKey: CryptoKey;
+  let accessJwks: JWTVerifyGetKey;
+  let accessPublicJwk:Awaited<ReturnType<typeof exportJWK>>;
   beforeAll(async () => {
     runtime = new Miniflare({ compatibilityDate: "2026-07-22", modules: true, script: "export default {fetch(){return new Response('ok')}}", d1Databases: { DELIVERY_DB: "intent-source-runtime" } });
     database = await runtime.getD1Database("DELIVERY_DB") as unknown as D1Database;
@@ -39,10 +59,17 @@ describe("source-owned delivery intent runtime and transaction races", () => {
     for (const name of readdirSync(directory).filter(value => /^\d+.*\.sql$/.test(value)).sort()) {
       await database.batch(splitD1MigrationStatements(readFileSync(new URL(name, directory), "utf8")).map(sql => database.prepare(sql)));
     }
-    await database.prepare("CREATE TABLE project_alpha_delivery_intent_rate_limits(scope TEXT,window_start TEXT,request_count INTEGER,PRIMARY KEY(scope,window_start))").run();
+    for(const name of ["0031_project_alpha_delivery_intent_rate_limits.sql","0049_project_alpha_delivery_source_rate_limits.sql"]){
+      await database.batch(splitD1MigrationStatements(readFileSync(new URL(`../migrations/${name}`,import.meta.url),"utf8")).map(sql=>database.prepare(sql)));
+    }
     env = { DELIVERY_DB: database, OPS_DB: database, PROJECT_ALPHA_DELIVERY_INTENTS_ENABLED: "true", PROJECT_ALPHA_PORTAL_APPLICATION_KEY: "project-alpha",
       PROJECT_ALPHA_PORTAL_HMAC_KEY_ID: "ops-v1", PROJECT_ALPHA_PORTAL_HMAC_SECRET: secret, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
       AUTHENTICATED_DELIVERY_GRANTS_ENABLED: "true", CLIENT_PORTAL_PA_IDENTITY_AUTO_ELIGIBILITY_ENABLED: "true" } as Env;
+    const accessKeys=await generateKeyPair("RS256",{extractable:true});
+    accessPublicJwk=await exportJWK(accessKeys.publicKey);
+    accessPublicJwk.alg="RS256";accessPublicJwk.kid="registered-delivery-access";accessPublicJwk.use="sig";
+    accessPrivateKey=accessKeys.privateKey;
+    accessJwks=createLocalJWKSet({keys:[accessPublicJwk]});
   }, 120_000);
   afterAll(async () => { await runtime?.dispose(); });
 
@@ -72,6 +99,16 @@ describe("source-owned delivery intent runtime and transaction races", () => {
   }
   function revokePayload(deliveryId: string, receiptId: string) { return { schemaVersion: 1, applicationKey: "project-alpha", deliveryId, occurredAt: "2026-08-26T12:00:00.000Z", receiptId, reasonCode: "project_alpha_delivery_revoked" }; }
   function revoke(payload: ReturnType<typeof revokePayload>, source = PRIMARY_CATALOG_SOURCE, environment = env) { return applyProjectAlphaDeliveryIntentRevoke(environment,payload,auth(payload),source); }
+  const accessIssuer="https://secondary-access.example.test";
+  const accessAudience="secondary-audience";
+  const accessSubject="secondary-producer";
+  function accessPayload(overrides:Partial<JWTPayload>={}):JWTPayload{return{
+    iss:accessIssuer,aud:accessAudience,sub:accessSubject,exp:Math.floor(Date.now()/1000)+300,...overrides,
+  };}
+  async function accessToken(payload:JWTPayload=accessPayload(),key=accessPrivateKey,kid="registered-delivery-access"):Promise<string>{
+    return new SignJWT(payload).setProtectedHeader({alg:"RS256",kid,typ:"JWT"}).sign(key);
+  }
+  const accessAuthority={accessIssuer,accessAudience,accessSubject} as Parameters<typeof verifyRegisteredDeliveryAccess>[1];
 
   it("accepts colliding producer delivery IDs independently and rejects cross-source original receipts", async () => {
     const f = await fixture("collision"), a = await create(f.payload), b = await create(f.payload,secondary);
@@ -186,4 +223,189 @@ describe("source-owned delivery intent runtime and transaction races", () => {
     expect(response.status).toBe(202);
     expect(await database.prepare("SELECT project_alpha_source_id FROM project_alpha_delivery_intent_receipts WHERE delivery_id=?").bind(f.payload.deliveryId).first("project_alpha_source_id")).toBe(PRIMARY_CATALOG_SOURCE.sourceId);
   }, 60_000);
+
+  it("accepts only a valid RS256 assertion at the registered delivery access boundary",async()=>{
+    await expect(verifyRegisteredDeliveryAccess(new Request("https://ops.example.test/registered",{headers:{
+      "Cf-Access-Jwt-Assertion":await accessToken(),
+    }}),accessAuthority,accessJwks)).resolves.toBeUndefined();
+  });
+
+  it("reuses one remote JWKS resolver per issuer and refreshes it after key rotation",async()=>{
+    const issuer="https://registered-cache.example.test";
+    const rotated=await generateKeyPair("RS256",{extractable:true});
+    const rotatedJwk=await exportJWK(rotated.publicKey);
+    rotatedJwk.alg="RS256";rotatedJwk.kid="registered-delivery-rotated";rotatedJwk.use="sig";
+    let published=[accessPublicJwk];
+    const fetchJwks=vi.fn(async()=>new Response(JSON.stringify({keys:published}),{
+      status:200,headers:{"Content-Type":"application/json"},
+    }));
+    vi.stubGlobal("fetch",fetchJwks);
+    vi.useFakeTimers({toFake:["Date"]});
+    try{
+      const authority={...accessAuthority,accessIssuer:issuer};
+      const request=(assertion:string)=>new Request("https://ops.example.test/registered",{headers:{"Cf-Access-Jwt-Assertion":assertion}});
+      const first=await accessToken(accessPayload({iss:issuer}));
+      await expect(verifyRegisteredDeliveryAccess(request(first),authority)).resolves.toBeUndefined();
+      await expect(verifyRegisteredDeliveryAccess(request(first),authority)).resolves.toBeUndefined();
+      expect(fetchJwks).toHaveBeenCalledTimes(1);
+
+      published=[rotatedJwk];
+      vi.setSystemTime(new Date(Date.now()+31_000));
+      const next=await accessToken(accessPayload({iss:issuer}),rotated.privateKey,"registered-delivery-rotated");
+      await expect(verifyRegisteredDeliveryAccess(request(next),authority)).resolves.toBeUndefined();
+      expect(fetchJwks).toHaveBeenCalledTimes(2);
+    }finally{
+      vi.useRealTimers();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("bounds the remote JWKS resolver cache to 32 validated issuers",async()=>{
+    const fetchJwks=vi.fn(async()=>new Response(JSON.stringify({keys:[accessPublicJwk]}),{
+      status:200,headers:{"Content-Type":"application/json"},
+    }));
+    vi.stubGlobal("fetch",fetchJwks);
+    try{
+      for(let index=0;index<33;index++){
+        const issuer=`https://registered-cache-${index}.example.test`;
+        const assertion=await accessToken(accessPayload({iss:issuer}));
+        await verifyRegisteredDeliveryAccess(new Request("https://ops.example.test/registered",{headers:{
+          "Cf-Access-Jwt-Assertion":assertion,
+        }}),{...accessAuthority,accessIssuer:issuer});
+      }
+      const firstIssuer="https://registered-cache-0.example.test";
+      const firstAssertion=await accessToken(accessPayload({iss:firstIssuer}));
+      await verifyRegisteredDeliveryAccess(new Request("https://ops.example.test/registered",{headers:{
+        "Cf-Access-Jwt-Assertion":firstAssertion,
+      }}),{...accessAuthority,accessIssuer:firstIssuer});
+      expect(fetchJwks).toHaveBeenCalledTimes(34);
+    }finally{vi.unstubAllGlobals();}
+  });
+
+  it.each([
+    ["issuer",{iss:"https://other-access.example.test"}],
+    ["audience",{aud:"other-audience"}],
+    ["subject",{sub:"other-producer"}],
+  ] as const)("rejects a registered delivery assertion with the wrong %s",async(_label,overrides)=>{
+    const request=new Request("https://ops.example.test/registered",{headers:{"Cf-Access-Jwt-Assertion":await accessToken(accessPayload(overrides))}});
+    await expect(verifyRegisteredDeliveryAccess(request,accessAuthority,accessJwks)).rejects.toMatchObject({status:401});
+  });
+
+  it("rejects a non-RS256 assertion and a missing registered delivery assertion",async()=>{
+    const wrongAlgorithm=await new SignJWT(accessPayload()).setProtectedHeader({alg:"HS256",kid:"registered-delivery-access"})
+      .sign(new TextEncoder().encode("not-an-rsa-signing-key"));
+    await expect(verifyRegisteredDeliveryAccess(new Request("https://ops.example.test/registered",{headers:{
+      "Cf-Access-Jwt-Assertion":wrongAlgorithm,
+    }}),accessAuthority,accessJwks)).rejects.toMatchObject({status:401});
+    await expect(verifyRegisteredDeliveryAccess(new Request("https://ops.example.test/registered"),accessAuthority,accessJwks))
+      .rejects.toMatchObject({status:401});
+  });
+
+  it("rejects expired and untrusted RS256 registered delivery assertions",async()=>{
+    const expired=await accessToken(accessPayload({exp:Math.floor(Date.now()/1000)-1}));
+    await expect(verifyRegisteredDeliveryAccess(new Request("https://ops.example.test/registered",{headers:{
+      "Cf-Access-Jwt-Assertion":expired,
+    }}),accessAuthority,accessJwks)).rejects.toMatchObject({status:401});
+    const untrusted=await generateKeyPair("RS256");
+    const unknown=await accessToken(accessPayload(),untrusted.privateKey);
+    await expect(verifyRegisteredDeliveryAccess(new Request("https://ops.example.test/registered",{headers:{
+      "Cf-Access-Jwt-Assertion":unknown,
+    }}),accessAuthority,accessJwks)).rejects.toMatchObject({status:401});
+  });
+
+  it("conceals a malformed registered source as not found instead of surfacing a runtime error",async()=>{
+    const app=new Hono<{Bindings:Env}>();
+    app.post("/api/internal/project-alpha/sources/:sourceId/delivery-intents",c=>
+      handleRegisteredProjectAlphaDeliveryIntent(c,c.req.param("sourceId")));
+    const response=await app.request("/api/internal/project-alpha/sources/not-a-source/delivery-intents",{
+      method:"POST",body:"{}",headers:{"Content-Type":"application/json"},
+    },env);
+    expect(response.status).toBe(404);
+    expect(await response.text()).toBe("Not found");
+  });
+
+  it("authenticates registered-source preflight, intent and revoke with current and previous source-owned keys", async () => {
+    const current={keyId:"secondary.current:key",value:"secondary-current-delivery-secret-at-least-thirty-two-bytes"};
+    const previous={keyId:"secondary.previous:key",value:"secondary-previous-delivery-secret-at-least-thirty-two-bytes"};
+    const digest=(value:string)=>createHash("sha256").update(value).digest("hex");
+    await database.batch([
+      database.prepare(`INSERT INTO pa_portal_source_authorities(source_id,producer_binding_id,snapshot_origin,snapshot_base_path,
+        application_key,state,active_revision,version,connector_revision,connector_version)
+        VALUES(?,'secondary-delivery','https://secondary.example.test','/','project-alpha','active',1,1,1,1)`).bind(secondary.sourceId),
+      database.prepare(`INSERT INTO pa_portal_source_authority_revisions(source_id,revision,credential_ref,access_issuer,
+        access_audience,access_subject,current_key_id,current_key_fingerprint,previous_key_id,previous_key_fingerprint,created_by)
+        VALUES(?,1,'secondary','https://secondary-access.example.test','secondary-audience','secondary-producer',?,?,?,?, 'fixture')`)
+        .bind(secondary.sourceId,current.keyId,digest(current.value),previous.keyId,digest(previous.value)),
+    ]);
+    const registeredEnv={...env,PROJECT_ALPHA_CONNECTOR_CREDENTIALS:JSON.stringify({version:1,sets:{secondary:{portalCurrent:current,portalPrevious:previous}}})};
+    const assertion=await accessToken();
+    const verifyAccess=(request:Request,authority:Parameters<typeof verifyRegisteredDeliveryAccess>[1])=>
+      verifyRegisteredDeliveryAccess(request,authority,accessJwks);
+    const base=`/api/internal/project-alpha/sources/${encodeURIComponent(secondary.sourceId)}/delivery-intents`;
+    const app=new Hono<{Bindings:Env}>();
+    app.post("/api/internal/project-alpha/sources/:sourceId/delivery-intents/preflight",c=>handleRegisteredProjectAlphaDeliveryPreflight(c,c.req.param("sourceId"),verifyAccess));
+    app.post("/api/internal/project-alpha/sources/:sourceId/delivery-intents",c=>handleRegisteredProjectAlphaDeliveryIntent(c,c.req.param("sourceId"),verifyAccess));
+    app.post("/api/internal/project-alpha/sources/:sourceId/delivery-intents/revoke",c=>handleRegisteredProjectAlphaDeliveryIntentRevoke(c,c.req.param("sourceId"),verifyAccess));
+    async function send(target:string,payload:Record<string,unknown>,key=current,canonicalTarget=target){
+      const raw=JSON.stringify(payload),timestamp=new Date().toISOString(),bodyDigest=digest(raw);
+      const imported=await crypto.subtle.importKey("raw",new TextEncoder().encode(key.value),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+      const signature=Buffer.from(await crypto.subtle.sign("HMAC",imported,new TextEncoder().encode(`${timestamp}\nPOST\n${canonicalTarget}\n${key.keyId}\n${payload.deliveryId}\n${raw}`))).toString("hex");
+      return app.request(target,{method:"POST",body:raw,headers:{"Content-Type":"application/json","Cf-Access-Jwt-Assertion":assertion,
+        "X-Portal-Integration-Application-Key":"project-alpha","X-Portal-Integration-Timestamp":timestamp,
+        "X-Portal-Integration-Body-SHA256":bodyDigest,"X-Portal-Integration-Key-Id":key.keyId,
+        "X-Portal-Integration-Delivery-Id":String(payload.deliveryId),"X-Portal-Integration-Signature":`sha256=${signature}`}},registeredEnv);
+    }
+    const f=await fixture("registered-http");
+    const preflight={schemaVersion:1,applicationKey:"project-alpha",deliveryId:"registered-preflight",occurredAt:new Date().toISOString()};
+    expect((await send(`${base}/preflight`,preflight)).status).toBe(200);
+    const accepted=await send(base,{...f.payload,deliveryId:"registered-current"});expect(accepted.status).toBe(202);
+    const currentReceipt=(await accepted.json() as {receiptId:string}).receiptId;
+    expect((await send(base,{...f.payload,deliveryId:"registered-previous"},previous)).status).toBe(202);
+    expect((await send(`${base}/revoke`,revokePayload("registered-revoke",currentReceipt))).status).toBe(202);
+    const tamperedPath=`/api/internal/project-alpha/sources/${encodeURIComponent("project-alpha:other")}/delivery-intents`;
+    expect((await send(base,{...f.payload,deliveryId:"registered-path-tamper"},current,tamperedPath)).status).toBe(401);
+    const rows=(await database.prepare("SELECT project_alpha_source_id,delivery_id FROM project_alpha_delivery_intent_receipts WHERE delivery_id LIKE 'registered-%' ORDER BY delivery_id").all()).results;
+    expect(rows).toEqual([{project_alpha_source_id:secondary.sourceId,delivery_id:"registered-current"},{project_alpha_source_id:secondary.sourceId,delivery_id:"registered-previous"}]);
+
+    // Access-authenticated but invalid HMAC attempts use a separate coarse
+    // budget and never consume the accepted-intent quota.
+    await database.prepare(`UPDATE project_alpha_delivery_intent_source_rate_limits SET request_count=299
+      WHERE source_id=? AND scope='attempt_intent' AND window_start=strftime('%Y-%m-%dT%H:%M:00Z','now')`).bind(secondary.sourceId).run();
+    const invalidKey={keyId:current.keyId,value:"incorrect-but-long-enough-signing-secret-value"};
+    expect((await send(base,{...f.payload,deliveryId:"registered-invalid-hmac"},invalidKey)).status).toBe(401);
+    expect(await database.prepare(`SELECT request_count FROM project_alpha_delivery_intent_source_rate_limits
+      WHERE source_id=? AND scope='attempt_intent' AND window_start=strftime('%Y-%m-%dT%H:%M:00Z','now')`).bind(secondary.sourceId).first("request_count")).toBe(300);
+    expect(await database.prepare(`SELECT request_count FROM project_alpha_delivery_intent_source_rate_limits
+      WHERE source_id=? AND scope='intent' AND window_start=strftime('%Y-%m-%dT%H:%M:00Z','now')`).bind(secondary.sourceId).first("request_count")).toBe(3);
+    expect((await send(base,{...f.payload,deliveryId:"registered-attempt-limit"},invalidKey)).status).toBe(429);
+
+    expect((await app.request("/api/internal/project-alpha/sources/project-alpha%3Amissing/delivery-intents",{method:"POST",body:"{}"},registeredEnv)).status).toBe(404);
+    await database.prepare("UPDATE pa_portal_source_authorities SET state='suspended',version=version+1 WHERE source_id=?").bind(secondary.sourceId).run();
+    expect((await app.request(base,{method:"POST",body:"{}"},registeredEnv)).status).toBe(404);
+  },60_000);
+
+  it("rolls back registered-source delivery when its authority changes at the write boundary",async()=>{
+    const f=await fixture("registered-authority-race"),payload={...f.payload,deliveryId:"registered-authority-race"};
+    const raced=interleaveBeforeBatch(database,()=>database.prepare(`UPDATE pa_portal_source_authorities
+      SET state='suspended',version=version+1,updated_at=datetime('now') WHERE source_id=?`).bind(secondary.sourceId).run());
+    await expect(applyProjectAlphaDeliveryIntent({...env,DELIVERY_DB:raced},payload,auth(payload),secondary,"project-alpha",
+      {sourceId:secondary.sourceId,revision:1,version:1,connectorRevision:1,connectorVersion:1})).rejects.toMatchObject({status:409});
+    expect(await database.prepare("SELECT count(*) count FROM project_alpha_delivery_intent_receipts WHERE delivery_id=?")
+      .bind(payload.deliveryId).first("count")).toBe(0);
+  },60_000);
+
+  it("returns the committed receipt when source authority changes immediately after the transaction",async()=>{
+    await database.prepare(`UPDATE pa_portal_source_authorities SET state='active',version=version+1,updated_at=datetime('now')
+      WHERE source_id=?`).bind(secondary.sourceId).run();
+    const version=await database.prepare("SELECT version FROM pa_portal_source_authorities WHERE source_id=?")
+      .bind(secondary.sourceId).first<number>("version");
+    const f=await fixture("registered-after-commit"),payload={...f.payload,deliveryId:"registered-after-commit"};
+    const raced=interleaveAfterBatch(database,()=>database.prepare(`UPDATE pa_portal_source_authorities
+      SET state='suspended',version=version+1,updated_at=datetime('now') WHERE source_id=?`).bind(secondary.sourceId).run());
+    const accepted=await applyProjectAlphaDeliveryIntent({...env,DELIVERY_DB:raced},payload,auth(payload),secondary,"project-alpha",
+      {sourceId:secondary.sourceId,revision:1,version:version!,connectorRevision:1,connectorVersion:1});
+    expect(accepted.status).toBe("accepted");
+    expect(await database.prepare("SELECT receipt_id FROM project_alpha_delivery_intent_receipts WHERE delivery_id=?")
+      .bind(payload.deliveryId).first("receipt_id")).toBe(accepted.receiptId);
+  },60_000);
 });

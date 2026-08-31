@@ -2,7 +2,8 @@ import { HTTPException } from "hono/http-exception";
 import { evaluatePermission, loadGrants } from "./acl";
 import { isAlphaPublicId, validatedUniquePublicIdExpression } from "./client-hub-source";
 import { resolveProjectAlphaDeliveryPrincipalProof } from "./share-recipients";
-import { PRIMARY_CATALOG_SOURCE } from "@ltds/shared";
+import { createCatalogSourceContext } from "@ltds/shared";
+import { projectAlphaReadVisibleSql } from "./project-alpha-read-visibility";
 import { authorizePortalDeliveryNotificationBatch, nativeBindingGuard, nativeDeliveryNotificationsReady,
   nativeNotificationHash, readNativeBinding, type NativeBatch } from "./portal-delivery-notification-batches";
 import type { Env, GrantRow, StaffPrincipal } from "./types";
@@ -24,7 +25,7 @@ function changed():never{throw new HTTPException(409,{message:"Notification or p
 async function ready(env:Env){if(!await nativeDeliveryNotificationsReady(env))throw new HTTPException(503,{message:"Native delivery notification staging is unavailable until its database upgrade finishes."});}
 
 const batchCandidatesSql=`SELECT 'nb_'||batch.id public_id,batch.id storage_id,'staged' delivery_mode,'granted' event_type,batch.*
-  FROM portal_delivery_notification_batches batch WHERE batch.source_id='project-alpha:primary'`;
+  FROM portal_delivery_notification_batches batch WHERE 1`;
 const directCandidatesSql=`SELECT 'nd_'||outbox.id public_id,outbox.id storage_id,
     CASE WHEN outbox.status='pending' AND outbox.attempt_count=0 AND outbox.lease_expires_at IS NULL AND outbox.event_type='granted'
       THEN 'awaiting_staging' ELSE 'direct_legacy' END delivery_mode,outbox.event_type,
@@ -34,7 +35,7 @@ const directCandidatesSql=`SELECT 'nd_'||outbox.id public_id,outbox.id storage_i
     outbox.last_error,outbox.created_at,outbox.updated_at
   FROM project_alpha_delivery_portal_notification_outbox outbox
   JOIN project_alpha_delivery_intent_receipts receipt ON receipt.receipt_id=outbox.receipt_id
-    AND receipt.access_mode='portal' AND receipt.resource_id=outbox.grant_id AND receipt.project_alpha_source_id='project-alpha:primary'
+    AND receipt.access_mode='portal' AND receipt.resource_id=outbox.grant_id
   JOIN project_alpha_delivery_portal_grants grant_row ON grant_row.id=outbox.grant_id
     AND grant_row.audience_public_id=outbox.principal_public_id AND grant_row.audience_source_version=outbox.principal_source_version
   JOIN portal_v2_folder_bindings binding ON binding.id=grant_row.folder_binding_id AND binding.workspace_id=grant_row.workspace_id
@@ -92,29 +93,34 @@ export async function readNativeDeliveryNotificationScope(env:Env,row:NativeNoti
     FROM project_folders pf WHERE pf.r2_prefix IN(SELECT value FROM json_each(?))
   ) SELECT matching.project_id,matching.division_id,matching.r2_prefix,
       p.active project_active,p.projection_source_id project_source,division.active division_active,
+      ${projectAlphaReadVisibleSql('p.projection_source_id')} source_visible,
+      CASE WHEN p.projection_source_id='project-alpha:primary' AND source_connector.source_id IS NULL
+        THEN 'Project Alpha' ELSE source_connector.display_name END source_name,
       ${validatedUniquePublicIdExpression('pa_projects','p')} project_public_id,
       ${validatedUniquePublicIdExpression('pa_clients','client')} client_public_id,
       ${validatedUniquePublicIdExpression('pa_organizations','org')} organization_public_id
     FROM matching LEFT JOIN divisions division ON division.id=matching.division_id
     LEFT JOIN pa_projects p ON p.id=matching.project_id
+    LEFT JOIN pa_connectors source_connector ON source_connector.source_id=p.projection_source_id
     LEFT JOIN pa_clients client ON client.id=p.client_id AND client.projection_source_id=p.projection_source_id AND client.active=1
     LEFT JOIN pa_organizations org ON org.id=p.organization_id AND org.projection_source_id=p.projection_source_id AND org.active=1
     WHERE prefix_length=(SELECT MAX(prefix_length) FROM matching) LIMIT 2`).bind(JSON.stringify(ancestors))
     .all<{project_id:string;division_id:string; r2_prefix:string;project_active:number|null;project_source:string|null;division_active:number|null;
+      source_visible:number;source_name:string|null;
       project_public_id:string|null;client_public_id:string|null;organization_public_id:string|null}>();
   if(owners.results.length!==1)return null;const owner=owners.results[0]!;
-  if(owner.project_active!==1||owner.project_source!=='project-alpha:primary'||owner.division_active!==1)return null;
+  if(owner.project_active!==1||owner.project_source!==row.source_id||owner.division_active!==1||owner.source_visible!==1)return null;
   const publicId=row.owner_scope_type==='project'?owner.project_public_id:row.owner_scope_type==='client'?owner.client_public_id:owner.organization_public_id;
   if(!owner.division_id||publicId!==row.owner_public_id)return null;
   let recipientEmail:string|null=null,recipientIdentity:unknown=null;
-  try{const current=await resolveProjectAlphaDeliveryPrincipalProof(env,row.r2_prefix,row.principal_public_id,row.principal_source_version,row.binding_source_version,PRIMARY_CATALOG_SOURCE);
+  try{const current=await resolveProjectAlphaDeliveryPrincipalProof(env,row.r2_prefix,row.principal_public_id,row.principal_source_version,row.binding_source_version,createCatalogSourceContext(row.source_id));
     if(current.audience.workspaceId===row.workspace_id&&current.audience.folderBindingId===row.folder_binding_id){recipientEmail=current.identity.email;recipientIdentity=current.identity;}
   }catch(error){if(!(error instanceof HTTPException))throw error;}
   // Do not relabel a historical send with a newly configured email address.
   // A changed/missing current recipient is redacted, not rebound for history.
   if(row.published_recipient_email&&row.published_recipient_email!==recipientEmail)recipientEmail=null;
   if(row.deliveryMode==='direct_legacy')recipientEmail=null; // Old attempts never froze their destination address.
-  return {divisionId:owner.division_id,sourceId:row.source_id,sourceName:'Project Alpha',workspaceId:row.workspace_id,
+  return {divisionId:owner.division_id,sourceId:row.source_id,sourceName:text(owner.source_name??'Project Alpha'),workspaceId:row.workspace_id,
     workspaceName:text(binding.workspace_name),folderLabel:text(binding.owner_name),recipientEmail,
     contextProof:await nativeNotificationHash(JSON.stringify([row.scopeKey,binding,owner,recipientIdentity]))};
 }

@@ -41,6 +41,10 @@ async function signedRequest(path:string,value:Record<string,unknown>,secret:str
 async function applyMigration(db:D1Database,url:URL){const sql=readFileSync(url,"utf8").replace(/\r\n/g,"\n")
   .replace(/^\s*--.*$/gm,"").replace(/^\s*PRAGMA\s+foreign_keys\s*=\s*ON;\s*/gim,"");
   for(const statement of sql.split(/;\s*(?:\n|$)/).map(value=>value.trim()).filter(Boolean))await db.prepare(statement).run();}
+async function applyRateMigrations(db:D1Database){
+  await applyMigration(db,new URL("../migrations/0031_project_alpha_delivery_intent_rate_limits.sql",import.meta.url));
+  await applyMigration(db,new URL("../migrations/0049_project_alpha_delivery_source_rate_limits.sql",import.meta.url));
+}
 async function runSqlStatements(db:D1Database,sql:string):Promise<void>{
   for(const statement of sql.split(";").map(value=>value.trim()).filter(Boolean))await db.prepare(statement).run();
 }
@@ -172,7 +176,7 @@ async function createGuestHarness(suffix:string){
     d1Databases:{OPS_DB:`pa-guest-ops-${suffix}`,DELIVERY_DB:`pa-guest-delivery-${suffix}`}});
   const ops=await mf.getD1Database("OPS_DB") as unknown as D1Database;
   const delivery=await mf.getD1Database("DELIVERY_DB") as unknown as D1Database;
-  await applyMigration(ops,new URL("../migrations/0031_project_alpha_delivery_intent_rate_limits.sql",import.meta.url));
+  await applyRateMigrations(ops);
   await prepareGuestDeliveryDatabase(delivery);
   const secret="0123456789abcdef0123456789abcdef";
   const env={OPS_DB:ops,DELIVERY_DB:delivery,PROJECT_ALPHA_PORTAL_APPLICATION_KEY:"project-alpha",PROJECT_ALPHA_PORTAL_HMAC_KEY_ID:"ops-v1",
@@ -322,16 +326,38 @@ describe("Project Alpha delivery-intent boundary", () => {
     db.close();
   });
 
+  it("adds registered-source quotas without rewriting the legacy limiter",()=>{
+    const db=new DatabaseSync(":memory:");
+    db.exec(readFileSync(new URL("../migrations/0031_project_alpha_delivery_intent_rate_limits.sql",import.meta.url),"utf8"));
+    db.prepare("INSERT INTO project_alpha_delivery_intent_rate_limits(scope,window_start,request_count) VALUES(?,?,?)")
+      .run("intent","2026-08-31T12:00:00Z",7);
+    db.exec(readFileSync(new URL("../migrations/0049_project_alpha_delivery_source_rate_limits.sql",import.meta.url),"utf8"));
+    expect(db.prepare("SELECT scope,window_start,request_count FROM project_alpha_delivery_intent_rate_limits").all())
+      .toEqual([{scope:"intent",window_start:"2026-08-31T12:00:00Z",request_count:7}]);
+    db.prepare("INSERT INTO project_alpha_delivery_intent_rate_limits(scope,window_start,request_count) VALUES(?,?,?)")
+      .run("preflight","2026-08-31T12:01:00Z",1);
+    db.prepare("INSERT INTO project_alpha_delivery_intent_source_rate_limits(source_id,scope,window_start,request_count) VALUES(?,?,?,?)")
+      .run("project-alpha:secondary","intent","2026-08-31T12:00:00Z",1);
+    expect(db.prepare("SELECT source_id FROM project_alpha_delivery_intent_source_rate_limits").all())
+      .toEqual([{source_id:"project-alpha:secondary"}]);
+    expect(()=>db.prepare("INSERT INTO project_alpha_delivery_intent_source_rate_limits(source_id,scope,window_start,request_count) VALUES('other','intent','later',1)").run()).toThrow();
+    expect(()=>db.prepare("INSERT INTO project_alpha_delivery_intent_source_rate_limits(source_id,scope,window_start,request_count) VALUES('project-alpha:secondary','other','later',1)").run()).toThrow();
+    db.close();
+  });
+
   it("prunes only expired Project Alpha delivery rate windows", async () => {
     const mf=new Miniflare({compatibilityDate:"2026-08-06",modules:true,
       script:"export default {fetch(){return new Response('ok')}}",d1Databases:{OPS_DB:"pa-rate-prune"}});
     try{
       const ops=await mf.getD1Database("OPS_DB") as unknown as D1Database;
-      await applyMigration(ops,new URL("../migrations/0031_project_alpha_delivery_intent_rate_limits.sql",import.meta.url));
+      await applyRateMigrations(ops);
       await ops.prepare("INSERT INTO project_alpha_delivery_intent_rate_limits VALUES('intent',datetime('now','-20 minutes'),2)").run();
       await ops.prepare("INSERT INTO project_alpha_delivery_intent_rate_limits VALUES('preflight',strftime('%Y-%m-%dT%H:%M:00Z','now'),1)").run();
-      expect(await pruneProjectAlphaDeliveryIntentRateLimits({OPS_DB:ops})).toBe(1);
+      await ops.prepare("INSERT INTO project_alpha_delivery_intent_source_rate_limits VALUES('project-alpha:secondary','intent',datetime('now','-20 minutes'),2)").run();
+      await ops.prepare("INSERT INTO project_alpha_delivery_intent_source_rate_limits VALUES('project-alpha:secondary','preflight',strftime('%Y-%m-%dT%H:%M:00Z','now'),1)").run();
+      expect(await pruneProjectAlphaDeliveryIntentRateLimits({OPS_DB:ops})).toBe(2);
       expect(await ops.prepare("SELECT scope FROM project_alpha_delivery_intent_rate_limits").first<string>("scope")).toBe("preflight");
+      expect(await ops.prepare("SELECT scope FROM project_alpha_delivery_intent_source_rate_limits").first<string>("scope")).toBe("preflight");
     }finally{await mf.dispose();}
   });
 
@@ -367,7 +393,7 @@ describe("Project Alpha delivery-intent boundary", () => {
 
   it("rejects a tampered preflight signature",async()=>{
     const mf=new Miniflare({compatibilityDate:"2026-08-06",modules:true,script:"export default {fetch(){return new Response('ok')}}",d1Databases:{OPS_DB:"pa-auth"}});
-    try{const ops=await mf.getD1Database("OPS_DB") as unknown as D1Database;await applyMigration(ops,new URL("../migrations/0031_project_alpha_delivery_intent_rate_limits.sql",import.meta.url));
+    try{const ops=await mf.getD1Database("OPS_DB") as unknown as D1Database;await applyRateMigrations(ops);
       const env={OPS_DB:ops,PROJECT_ALPHA_PORTAL_APPLICATION_KEY:"project-alpha",PROJECT_ALPHA_PORTAL_HMAC_KEY_ID:"ops-v1",PROJECT_ALPHA_PORTAL_HMAC_SECRET:"0123456789abcdef0123456789abcdef"} as unknown as Env;
       const app=new Hono<{Bindings:Env}>();app.post("/api/internal/project-alpha/delivery-intents/preflight",handleProjectAlphaDeliveryPreflight);
       expect((await app.fetch(await signedPreflight(env.PROJECT_ALPHA_PORTAL_HMAC_SECRET!,{"X-Portal-Integration-Signature":`sha256=${"0".repeat(64)}`}),env)).status).toBe(401);
@@ -380,7 +406,7 @@ describe("Project Alpha delivery-intent boundary", () => {
     try{
       const ops=await mf.getD1Database("OPS_DB") as unknown as D1Database;
       const delivery=await mf.getD1Database("DELIVERY_DB") as unknown as D1Database;
-      await applyMigration(ops,new URL("../migrations/0031_project_alpha_delivery_intent_rate_limits.sql",import.meta.url));
+      await applyRateMigrations(ops);
       await runSqlStatements(delivery,`
         CREATE TABLE portal_v2_workspaces(id TEXT PRIMARY KEY,status TEXT,project_alpha_source_id TEXT NOT NULL DEFAULT 'project-alpha:primary');
         CREATE TABLE portal_v2_folder_bindings(id TEXT PRIMARY KEY,workspace_id TEXT,owner_scope_type TEXT,owner_public_id TEXT,r2_prefix TEXT,source_version TEXT,status TEXT,revoked_at TEXT);

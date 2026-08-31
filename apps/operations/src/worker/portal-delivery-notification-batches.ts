@@ -1,5 +1,5 @@
 import { HTTPException } from "hono/http-exception";
-import { PRIMARY_ALPHA_SOURCE_ID, PRIMARY_CATALOG_SOURCE } from "@ltds/shared";
+import { createCatalogSourceContext, PRIMARY_ALPHA_SOURCE_ID } from "@ltds/shared";
 import { d1TablesPresent } from "./schema-readiness";
 import { sendNotificationMail } from "./mailer";
 import { resolveProjectAlphaDeliveryPrincipalProof } from "./share-recipients";
@@ -25,7 +25,12 @@ export const nativeDeliveryNotificationsReady = (env: Env) => d1TablesPresent(en
 export async function nativeNotificationHash(value: string): Promise<string> {
   return [...new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(value)))].map(v=>v.toString(16).padStart(2,"0")).join("");
 }
-export function nativeBindingGuard(row: NativeNotificationIdentity): NativeWriteGuard {
+function bindingGuard(row:NativeNotificationIdentity,requireActiveSource:boolean):NativeWriteGuard{
+  const sourceAuthority=!requireActiveSource||row.source_id===PRIMARY_ALPHA_SOURCE_ID?"1":`EXISTS(
+    SELECT 1 FROM pa_portal_source_authorities authority
+    JOIN pa_portal_source_authority_revisions revision ON revision.source_id=authority.source_id
+      AND revision.revision=authority.active_revision
+    WHERE authority.source_id=workspace.project_alpha_source_id AND authority.state='active')`;
   return { sql: `EXISTS(SELECT 1 FROM portal_v2_folder_bindings binding
     JOIN portal_v2_workspaces workspace ON workspace.id=binding.workspace_id AND workspace.status='active'
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
@@ -34,14 +39,19 @@ export function nativeBindingGuard(row: NativeNotificationIdentity): NativeWrite
     JOIN portal_v2_directory_entities owner ON owner.workspace_id=workspace.id AND owner.generation_id=generation.id
       AND owner.entity_type=binding.owner_scope_type AND owner.public_id=binding.owner_public_id
       AND owner.active=1 AND owner.source_version=binding.source_version
-    WHERE workspace.project_alpha_source_id=? AND workspace.project_alpha_source_id='project-alpha:primary'
+    WHERE workspace.project_alpha_source_id=? AND (${sourceAuthority})
       AND workspace.id=? AND binding.id=? AND binding.source_version=? AND binding.owner_scope_type=?
       AND binding.owner_public_id=? AND binding.r2_prefix=?
       AND binding.status='active' AND binding.revoked_at IS NULL)`,
     bindings: [row.source_id,row.workspace_id,row.folder_binding_id,row.binding_source_version,row.owner_scope_type,row.owner_public_id,row.r2_prefix] };
 }
+export function nativeBindingGuard(row: NativeNotificationIdentity): NativeWriteGuard {
+  return bindingGuard(row,true);
+}
 export async function readNativeBinding(env: Env,row: NativeNotificationIdentity): Promise<NativeBindingFacts|null> {
-  const guard=nativeBindingGuard(row);
+  // Staff history follows connector read visibility. Suspending ingestion must
+  // stop future publication without erasing already-projected audit records.
+  const guard=bindingGuard(row,false);
   return env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT workspace.display_name workspace_name,owner.display_name owner_name,
     checkpoint.active_generation_id generation_id FROM portal_v2_workspaces workspace
     JOIN portal_v2_directory_checkpoints checkpoint ON checkpoint.workspace_id=workspace.id
@@ -61,7 +71,6 @@ const stageTarget = `SELECT outbox.id,receipt.project_alpha_source_id source_id,
   JOIN portal_v2_workspaces workspace ON workspace.id=grant_row.workspace_id AND workspace.project_alpha_source_id=receipt.project_alpha_source_id
   JOIN portal_v2_folder_bindings binding ON binding.id=grant_row.folder_binding_id AND binding.workspace_id=workspace.id
   WHERE outbox.id=?1 AND outbox.event_type='granted' AND outbox.status='pending' AND outbox.attempt_count=0 AND outbox.lease_expires_at IS NULL
-    AND receipt.project_alpha_source_id='project-alpha:primary'
     AND NOT EXISTS(SELECT 1 FROM portal_delivery_notification_items item WHERE item.outbox_id=outbox.id)`;
 const sameBatch = `batch.source_id=target.source_id AND batch.workspace_id=target.workspace_id
   AND batch.folder_binding_id=target.folder_binding_id AND batch.binding_source_version=target.binding_source_version
@@ -92,10 +101,49 @@ export function stagePortalDeliveryNotificationStatements(db: Pick<D1Database,"p
       AND EXISTS(SELECT 1 FROM portal_delivery_notification_items item WHERE item.outbox_id=project_alpha_delivery_portal_notification_outbox.id)`).bind(outboxId),
   ];
 }
+const SOURCE_AUTHORITY_TABLES = ["pa_portal_source_authorities","pa_portal_source_authority_revisions"] as const;
+const SOURCE_READY_INDEXES = ["idx_portal_delivery_notification_source_pending","idx_portal_delivery_notification_source_processing",
+  "idx_portal_delivery_notification_pending_exhausted","idx_portal_delivery_notification_processing_exhausted"] as const;
+async function sourceReadyIndexesPresent(env:Env):Promise<boolean>{
+  const placeholders=SOURCE_READY_INDEXES.map(()=>"?").join(",");
+  const row=await env.DELIVERY_DB.withSession("first-primary").prepare(
+    `SELECT count(*) count FROM sqlite_master WHERE type='index' AND name IN (${placeholders})`,
+  ).bind(...SOURCE_READY_INDEXES).first<{count:number}>();
+  return Number(row?.count||0)===SOURCE_READY_INDEXES.length;
+}
+async function registeredNotificationSources(env:Env):Promise<string[]> {
+  if(!await d1TablesPresent(env.DELIVERY_DB,SOURCE_AUTHORITY_TABLES))return [PRIMARY_ALPHA_SOURCE_ID];
+  const registered=await env.DELIVERY_DB.withSession("first-primary")
+    .prepare("SELECT source_id FROM pa_portal_source_authorities WHERE source_id<>? ORDER BY source_id LIMIT 31")
+    .bind(PRIMARY_ALPHA_SOURCE_ID)
+    .all<{source_id:string}>();
+  return [PRIMARY_ALPHA_SOURCE_ID,...registered.results.map(row=>row.source_id)];
+}
+export async function scheduledNotificationSources(env:Env,lane:"staged"|"direct"):Promise<string[]>{
+  const sources=await registeredNotificationSources(env);
+  const column=lane==="staged"?"staged_last_source_id":"direct_last_source_id";
+  const cursor=await env.DELIVERY_DB.withSession("first-primary").prepare(
+    `SELECT ${column} value FROM portal_delivery_notification_scheduler WHERE id='source-round-robin'`,
+  ).first<string>("value");
+  if(!cursor)return sources;
+  const position=sources.indexOf(cursor);
+  return position<0?sources:[...sources.slice(position+1),...sources.slice(0,position+1)];
+}
+export async function advanceNotificationSourceSchedule(env:Env,lane:"staged"|"direct",sourceId:string):Promise<void>{
+  const column=lane==="staged"?"staged_last_source_id":"direct_last_source_id";
+  await env.DELIVERY_DB.prepare(`UPDATE portal_delivery_notification_scheduler
+    SET ${column}=?,revision=revision+1,updated_at=datetime('now') WHERE id='source-round-robin'`).bind(sourceId).run();
+}
 export async function adoptPortalDeliveryNotifications(env: Env): Promise<number> {
   const db=env.DELIVERY_DB.withSession("first-primary");
+  // Adoption is a one-way upgrade bridge for primary rows created before the
+  // native batch schema existed. Registered-source writes were introduced
+  // after this schema and stage in the same D1 transaction, so they never
+  // enter this legacy backlog. Keep the recovery scan globally indexed and
+  // bounded instead of pretending a receipt join is a source-ready index.
   const rows=await db.prepare(`SELECT outbox.id FROM project_alpha_delivery_portal_notification_outbox outbox
-    JOIN project_alpha_delivery_intent_receipts receipt ON receipt.receipt_id=outbox.receipt_id AND receipt.project_alpha_source_id='project-alpha:primary'
+    JOIN project_alpha_delivery_intent_receipts receipt ON receipt.receipt_id=outbox.receipt_id
+      AND receipt.project_alpha_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
     WHERE outbox.event_type='granted' AND outbox.status='pending' AND outbox.attempt_count=0 AND outbox.lease_expires_at IS NULL
       AND NOT EXISTS(SELECT 1 FROM portal_delivery_notification_items item WHERE item.outbox_id=outbox.id)
     ORDER BY outbox.created_at,outbox.id LIMIT 20`).all<{id:string}>();
@@ -116,10 +164,10 @@ function liveItemsSql():string { return `SELECT DISTINCT grant_row.id,grant_row.
 export async function authorizePortalDeliveryNotificationBatch(env:Env,row:NativeBatch):Promise<{
   recipientEmail:string; recipientIdentity:string; binding:NativeBindingFacts; guard:NativeWriteGuard; authorityFingerprint:string;
 }|null>{
-  if(row.source_id!==PRIMARY_ALPHA_SOURCE_ID||env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED!=="true"||env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED!=="true")return null;
+  if(env.CLIENT_PORTAL_HIERARCHY_V2_ENABLED!=="true"||env.AUTHENTICATED_DELIVERY_GRANTS_ENABLED!=="true")return null;
   const binding=await readNativeBinding(env,row);if(!binding)return null;
   let proof: Awaited<ReturnType<typeof resolveProjectAlphaDeliveryPrincipalProof>>;
-  try { proof=await resolveProjectAlphaDeliveryPrincipalProof(env,row.r2_prefix,row.principal_public_id,row.principal_source_version,row.binding_source_version,PRIMARY_CATALOG_SOURCE); }
+  try { proof=await resolveProjectAlphaDeliveryPrincipalProof(env,row.r2_prefix,row.principal_public_id,row.principal_source_version,row.binding_source_version,createCatalogSourceContext(row.source_id)); }
   catch(error){if(error instanceof HTTPException)return null;throw error;}
   if(proof.audience.workspaceId!==row.workspace_id||proof.audience.folderBindingId!==row.folder_binding_id
     ||proof.audience.directoryGenerationId!==binding.generation_id)return null;
@@ -151,16 +199,58 @@ async function finish(env:Env,row:NativeBatch,status:"sent"|"suppressed"|"pendin
 export async function processPortalDeliveryNotificationBatches(env:Env):Promise<number>{
   if(!await nativeDeliveryNotificationsReady(env))return 0;
   await adoptPortalDeliveryNotifications(env);
-  await env.DELIVERY_DB.prepare(`UPDATE portal_delivery_notification_batches SET status='failed',revision=revision+1,
-    lease_token=NULL,lease_expires_at=NULL,last_error='attempts-exhausted',updated_at=datetime('now')
-    WHERE source_id='project-alpha:primary' AND attempt_count>=3
-      AND ((status='processing' AND datetime(lease_expires_at)<=datetime('now')) OR status='pending')`).run();
+  const sourceIndexesReady=await sourceReadyIndexesPresent(env);
+  const exhausted=sourceIndexesReady?(await Promise.all([
+    env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id FROM portal_delivery_notification_batches
+      INDEXED BY idx_portal_delivery_notification_pending_exhausted
+      WHERE status='pending' AND attempt_count>=3 AND eligible_at<=datetime('now')
+      ORDER BY eligible_at,created_at,id LIMIT 50`).all<{id:string}>(),
+    env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT id FROM portal_delivery_notification_batches
+      INDEXED BY idx_portal_delivery_notification_processing_exhausted
+      WHERE status='processing' AND attempt_count>=3 AND lease_expires_at<=datetime('now')
+      ORDER BY lease_expires_at,created_at,id LIMIT 50`).all<{id:string}>(),
+  ])).flatMap(result=>result.results):[];
+  if(exhausted.length)await env.DELIVERY_DB.batch(exhausted.map(row=>env.DELIVERY_DB.prepare(`UPDATE portal_delivery_notification_batches
+    SET status='failed',revision=revision+1,lease_token=NULL,lease_expires_at=NULL,last_error='attempts-exhausted',updated_at=datetime('now')
+    WHERE id=? AND attempt_count>=3 AND ((status='processing' AND datetime(lease_expires_at)<=datetime('now'))
+      OR (status='pending' AND datetime(eligible_at)<=datetime('now')))` ).bind(row.id)));
+  const db=env.DELIVERY_DB.withSession("first-primary");
+  const candidates:NativeBatch[]=[];
+  if(!sourceIndexesReady){
+    // Safe deploy-before-migration compatibility. The bounded fair selector
+    // becomes active as soon as migration 0182 creates its source indexes.
+    const authoritiesReady=await d1TablesPresent(env.DELIVERY_DB,SOURCE_AUTHORITY_TABLES);
+    const compatibleSource=authoritiesReady?"1":`source_id='${PRIMARY_ALPHA_SOURCE_ID}'`;
+    candidates.push(...(await db.prepare(`SELECT * FROM portal_delivery_notification_batches WHERE attempt_count<3 AND ${compatibleSource}
+      AND ((status='pending' AND datetime(eligible_at)<=datetime('now'))
+      OR (status='processing' AND datetime(lease_expires_at)<=datetime('now'))) ORDER BY created_at,id LIMIT 10`)
+      .all<NativeBatch>()).results);
+  }else{
+    // Suspended sources remain in this bounded set so already-staged work can
+    // be terminally suppressed by the final authority guard. The authority
+    // table itself caps registered sources at 31; primary makes at most 32.
+    const sources=await scheduledNotificationSources(env,"staged");
+    const groups=(await Promise.all(sources.map(async source=>{
+      const rows=await db.prepare(`SELECT * FROM (
+          SELECT * FROM portal_delivery_notification_batches INDEXED BY idx_portal_delivery_notification_source_pending
+          WHERE source_id=?1 AND status='pending' AND attempt_count<3 AND eligible_at<=datetime('now')
+          ORDER BY eligible_at,created_at,id LIMIT 10
+        ) UNION ALL SELECT * FROM (
+          SELECT * FROM portal_delivery_notification_batches INDEXED BY idx_portal_delivery_notification_source_processing
+          WHERE source_id=?1 AND status='processing' AND attempt_count<3 AND lease_expires_at<=datetime('now')
+          ORDER BY lease_expires_at,created_at,id LIMIT 10
+        )`).bind(source).all<NativeBatch>();
+      return rows.results.sort((left,right)=>left.created_at.localeCompare(right.created_at)||left.id.localeCompare(right.id));
+    })));
+    for(let rank=0;rank<20&&candidates.length<10;rank++){
+      const round=groups.flatMap(group=>group[rank]?[group[rank]!]:[]);
+      candidates.push(...round.slice(0,10-candidates.length));
+    }
+    const lastSource=candidates.at(-1)?.source_id;
+    if(lastSource)await advanceNotificationSourceSchedule(env,"staged",lastSource);
+  }
   let processed=0;
-  for(let n=0;n<10;n++){
-    const row=await env.DELIVERY_DB.withSession("first-primary").prepare(`SELECT * FROM portal_delivery_notification_batches WHERE source_id='project-alpha:primary'
-      AND attempt_count<3 AND ((status='pending' AND datetime(eligible_at)<=datetime('now'))
-      OR (status='processing' AND datetime(lease_expires_at)<=datetime('now'))) ORDER BY created_at,id LIMIT 1`).first<NativeBatch>();
-    if(!row)break;
+  for(const row of candidates){
     const token=crypto.randomUUID();
     const claim=await env.DELIVERY_DB.prepare(`UPDATE portal_delivery_notification_batches SET status='processing',revision=revision+1,
       attempt_count=attempt_count+1,sealed_at=COALESCE(sealed_at,datetime('now')),lease_token=?,lease_expires_at=datetime('now','+15 minutes'),updated_at=datetime('now')
