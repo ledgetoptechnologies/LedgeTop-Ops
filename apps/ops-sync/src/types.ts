@@ -41,12 +41,14 @@ export interface EntitlementEvent {
 }
 
 export type ProjectionEntityType = "client" | "organization" | "project" | "project_assignment" | "business_unit" | "operation" | "operation_assignment" | "task" | "task_assignment";
-export interface ProjectionEvent {
+interface ProjectionEventEnvelope {
   event_id: string;
   event_type: "projection.changed";
   occurred_at: string;
-  schema_version: 1;
   application_key: string;
+}
+export type ProjectionEvent = ProjectionEventEnvelope & ({
+  schema_version: 1;
   projection: {
     entity_type: ProjectionEntityType;
     entity_id: string;
@@ -54,6 +56,17 @@ export interface ProjectionEvent {
     source_updated_at: string;
     data: Record<string, unknown>;
   };
-}
+} | {
+  schema_version: 2;
+  projection: {
+    entity_type: ProjectionEntityType;
+    entity_id: string;
+    action: "tombstone";
+    source_updated_at: string;
+    // Runtime schema is a strict empty object; keep the transport type broad
+    // enough for negative fixtures to prove that validation rejects PII.
+    data: Record<string, unknown>;
+  };
+});
 
 export type IntegrationEvent = EntitlementEvent | ProjectionEvent;

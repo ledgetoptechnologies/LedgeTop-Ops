@@ -22,6 +22,7 @@ function errorStatus(error: unknown): number {
   if (message === "payload-read-timeout") return 408;
   if (message.startsWith("project-alpha-connector-")) return 409;
   if (message === "projection-source-authority-unsupported") return 403;
+  if (message === "projection-tombstone-reconciliation-not-enabled") return 503;
   if (message === "event-id-conflict") return 409;
   if (message === "projection-entity-busy" || message === "projection-global-busy") return 503;
   if (message.startsWith("access-group-")) return 503;

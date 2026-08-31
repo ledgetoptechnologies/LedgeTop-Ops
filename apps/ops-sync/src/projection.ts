@@ -11,6 +11,7 @@ import { assertProjectAlphaConnectorProof, connectorFenceStatement, type Project
 import { businessActivityProjectionStatement } from "../../operations/src/worker/client-business-activity";
 
 export type ProjectionResult = "applied" | "duplicate" | "ignored";
+type ProjectionV1Event = Extract<ProjectionEvent,{schema_version:1}>;
 
 async function fencedBatch<T = unknown>(env: Env, proof: ProjectAlphaConnectorProof | undefined,
   statements: D1PreparedStatement[]): Promise<D1Result<T>[]> {
@@ -242,7 +243,7 @@ async function releaseProjectionEntity(env: Env, source: ProjectAlphaSourceConte
     .bind(source.sourceId,event.projection.entity_type,event.projection.entity_id,event.event_id).run();
 }
 
-async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceContext, event: ProjectionEvent, payloadHash: string, proof?: ProjectAlphaConnectorProof): Promise<ProjectionResult> {
+async function applyProjectionEventLocked(env: Env, source: ProjectAlphaSourceContext, event: ProjectionV1Event, payloadHash: string, proof?: ProjectAlphaConnectorProof): Promise<ProjectionResult> {
   const receipt=await env.OPS_DB.prepare("SELECT payload_hash,status FROM integration_event_receipts WHERE projection_source_id=? AND event_id=?").bind(source.sourceId,event.event_id).first<{payload_hash:string;status:string}>();
   if(receipt){if(receipt.payload_hash!==payloadHash)throw new Error("event-id-conflict");if(receipt.status==="completed"||receipt.status==="ignored")return "duplicate";}
   else await fencedBatch(env,proof,[env.OPS_DB.prepare("INSERT INTO integration_event_receipts (projection_source_id,event_id,integration,event_type,user_id,occurred_at,payload_hash,status) VALUES (?,?,'project-alpha',?,?,?,?, 'pending')").bind(source.sourceId,event.event_id,event.event_type,value(event.projection.data,"user_id")??event.projection.entity_id,event.occurred_at,payloadHash)]);
@@ -340,6 +341,11 @@ export async function applyProjectionEvent(env: Env, event: ProjectionEvent, pay
 }
 
 export async function applyProjectionEventForSource(env: Env, source: ProjectAlphaSourceContext, event: ProjectionEvent, payloadHash: string, proof?: ProjectAlphaConnectorProof): Promise<ProjectionResult> {
+  // Schema v2 is parsed before the producer is enabled so deployments can
+  // validate the signed contract independently. Never let an explicit
+  // tombstone acquire a lease or fall through the reversible v1 write path:
+  // the authorized exact-ID reconciliation must land first.
+  if (event.schema_version === 2) throw new Error("projection-tombstone-reconciliation-not-enabled");
   source=createProjectAlphaSourceContext(source.sourceId);
   await validateSourceProof(env,source,proof);
   await claimGlobalProjection(env,source,event.event_id);
