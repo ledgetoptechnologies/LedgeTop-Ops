@@ -1966,6 +1966,44 @@ export function createClientPortalRouter(
     return c.json({ request });
   });
 
+  router.post("/service-requests/:requestId/cancel", async (c) => {
+    const portalOrigin = configuredPortalOrigin(c.env);
+    requireSameRequestOrigin(c.req.raw, portalOrigin);
+    const requestId = opaqueId.safeParse(c.req.param("requestId"));
+    const parsedKey = idempotencyKey.safeParse(c.req.header("Idempotency-Key"));
+    if (!requestId.success)
+      throw new HTTPException(404, { message: "Service request not found" });
+    const workspace = selectedWorkspace(c);
+    if (workspace && !(await authorizeEffectiveWorkspaceRequest(
+      c.env, c.get("clientPrincipal"), workspace, requestId.data,
+    ))) throw new HTTPException(404, { message: "Service request not found" });
+    if (!parsedKey.success)
+      throw new HTTPException(400, {
+        message: "A valid Idempotency-Key header is required",
+      });
+    if (!repository.cancelServiceRequest)
+      throw new HTTPException(503, { message: "Request cancellation is not configured" });
+    const result = await repository.cancelServiceRequest(
+      c.env,
+      c.get("clientSession"),
+      requestId.data,
+      parsedKey.data,
+    );
+    if (!result)
+      throw new HTTPException(404, { message: "Service request not found" });
+    if (result.kind === "conflict") {
+      const messages = {
+        idempotency_key_reused: "This Idempotency-Key was already used for a different mutation",
+        status_not_cancellable: "This request can no longer be cancelled because work has begun or the request is already closed",
+        reconciliation_required: "This request is being reconciled with Project Alpha and cannot be cancelled yet",
+        catalog_changed: "The service catalog changed. Refresh the request before trying again",
+        service_assignments_changed: "The service assignment changed. Refresh the request before trying again",
+      } as const;
+      return c.json({ error: messages[result.reason], code: result.reason }, 409);
+    }
+    return c.json({ request: result.request });
+  });
+
   router.post("/service-requests/:requestId/change-request", async (c) => {
     const portalOrigin = configuredPortalOrigin(c.env);
     requireSameRequestOrigin(c.req.raw, portalOrigin);

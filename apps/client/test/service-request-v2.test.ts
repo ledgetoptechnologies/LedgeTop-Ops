@@ -195,8 +195,8 @@ describe("service request v2 transaction-time catalog contract", () => {
     return { ...repositoryEnv, DELIVERY_DB: wrapped };
   }
 
-  async function createdDraft(): Promise<ClientServiceRequestDraft> {
-    const result = await createServiceRequestDraft(repositoryEnv, session, input, "initial-draft-key-0001");
+  async function createdDraft(idempotencyKey = "initial-draft-key-0001"): Promise<ClientServiceRequestDraft> {
+    const result = await createServiceRequestDraft(repositoryEnv, session, input, idempotencyKey);
     expect(result?.kind).toBe("created");
     if (!result || !("draft" in result)) throw new Error("Expected a created draft");
     return result.draft;
@@ -249,6 +249,29 @@ describe("service request v2 transaction-time catalog contract", () => {
   }
 
   const otherSource = "project-alpha:other";
+  async function seedPaDraftBoundary(requestId: string, withReceipt = false) {
+    const commandId = `pa-command-${crypto.randomUUID()}`;
+    const idempotencyKey = `pa-draft-command-${crypto.randomUUID()}`;
+    await database.prepare(`INSERT INTO request_pa_draft_quote_commands
+      (id,request_id,request_revision,area_revision,source_id,command_endpoint,application_key,editor_origin,
+       destination_fingerprint,idempotency_key,payload_hash,payload_json,created_by)
+      VALUES(?, ?, (SELECT MAX(revision_number) FROM request_revisions WHERE request_id=?), 0, ?,
+        'https://alpha.example.test/api/integrations/operations/v1/request-artifacts','operations',
+        'https://alpha.example.test',?,?,?, '{}','staff-test')`)
+      .bind(commandId, requestId, requestId, PRIMARY_ALPHA_SOURCE_ID, "a".repeat(64),
+        idempotencyKey, "b".repeat(64)).run();
+    if (withReceipt) {
+      await database.prepare(`INSERT INTO request_pa_draft_quote_receipts
+        (id,request_id,request_revision,area_revision,idempotency_key,payload_hash,
+         project_alpha_receipt_id,project_alpha_artifact_public_id,document_number,artifact_status,
+         artifact_version,editor_path,created_by,source_id,command_id)
+        SELECT ?,request_id,request_revision,area_revision,idempotency_key,payload_hash,
+          'pa-receipt-public','pa-artifact-public','QUOTE-1','draft',1,
+          '/quotes/pa-artifact-public/edit','staff-test',source_id,id
+        FROM request_pa_draft_quote_commands WHERE id=?`)
+        .bind(`pa-receipt-${crypto.randomUUID()}`, commandId).run();
+    }
+  }
   async function seedOtherCatalog(publicId = service.publicId) {
     await database.prepare(`INSERT INTO pa_service_catalog_items
       (source_id,public_id,source_version,name,summary,category,display_order,geometry_requirement,question_schema_json,active,source_updated_at)
@@ -313,6 +336,113 @@ describe("service request v2 transaction-time catalog contract", () => {
     await changeCatalog("deactivated");
     expect((await createServiceRequestDraft(repositoryEnv, session, input, "initial-draft-key-0001"))?.kind).toBe("replayed");
     expect((await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, "primary-provenance-submit"))?.kind).toBe("replayed");
+    expect(await requestState()).toEqual(before);
+  });
+
+  it.each(["submitted", "under_review", "accepted_pending_pa_linkage"] as const)(
+    "atomically cancels an authorized %s request and replays the exact mutation", async status => {
+      const original = await createdDraft();
+      const submitted = await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, `cancel-submit-${status}`);
+      if (!submitted || !("request" in submitted)) throw new Error("Expected submitted request");
+      if (status !== "submitted")
+        await database.prepare("UPDATE client_service_requests SET status=? WHERE id=?").bind(status, submitted.request.id).run();
+      const key = `cancel-request-${status}-0001`;
+      const result = await cancelServiceRequest(repositoryEnv, session, submitted.request.id, key);
+      expect(result).toMatchObject({ kind: "cancelled", request: { id: submitted.request.id, status: "cancelled" } });
+      const revision = await database.prepare(`SELECT author_type,author_id,action,snapshot_json,mutation_key
+        FROM request_revisions WHERE request_id=? ORDER BY revision_number DESC LIMIT 1`)
+        .bind(submitted.request.id).first<{ author_type: string; author_id: string; action: string; snapshot_json: string; mutation_key: string }>();
+      expect(revision).toMatchObject({ author_type: "client", author_id: session.identityId, action: "status_changed", mutation_key: key });
+      expect(JSON.parse(revision!.snapshot_json)).toMatchObject({ previousStatus: status, status: "cancelled", catalogSourceId: PRIMARY_ALPHA_SOURCE_ID });
+      expect(await database.prepare(`SELECT COUNT(*) count FROM client_portal_notification_outbox
+        WHERE request_id=? AND event_type='request_status_changed' AND status_value='cancelled' AND recipient_kind='staff_triage'`)
+        .bind(submitted.request.id).first("count")).toBe(1);
+      expect(await database.prepare(`SELECT COUNT(*) count FROM audit_log
+        WHERE entity_id=? AND action='client.service_request.cancelled'`)
+        .bind(submitted.request.id).first("count")).toBe(1);
+      const after = await requestState();
+      expect(await cancelServiceRequest(repositoryEnv, session, submitted.request.id, key))
+        .toMatchObject({ kind: "replayed", request: { status: "cancelled" } });
+      expect(await requestState()).toEqual(after);
+    },
+  );
+
+  it.each(["accepted_linked", "declined", "cancelled", "completed"] as const)(
+    "rejects client cancellation after the request reaches %s", async status => {
+      const original = await createdDraft();
+      const submitted = await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, `terminal-submit-${status}`);
+      if (!submitted || !("request" in submitted)) throw new Error("Expected submitted request");
+      await database.prepare("UPDATE client_service_requests SET status=? WHERE id=?").bind(status, submitted.request.id).run();
+      const before = await requestState();
+      expect(await cancelServiceRequest(repositoryEnv, session, submitted.request.id, `terminal-cancel-${status}`))
+        .toEqual({ kind: "conflict", reason: "status_not_cancellable" });
+      expect(await requestState()).toEqual(before);
+    },
+  );
+
+  it("records the transaction-time staff status in revision, notification and audit", async () => {
+    const original = await createdDraft();
+    const submitted = await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, "cancel-status-race-submit");
+    if (!submitted || !("request" in submitted)) throw new Error("Expected submitted request");
+    const racedEnv = beforeTransaction(() => database.prepare(
+      "UPDATE client_service_requests SET status='under_review' WHERE id=?",
+    ).bind(submitted.request.id).run());
+    expect(await cancelServiceRequest(racedEnv, session, submitted.request.id, "cancel-status-race-key"))
+      .toMatchObject({ kind: "cancelled", request: { status: "cancelled" } });
+    const revision = await database.prepare(
+      "SELECT snapshot_json FROM request_revisions WHERE request_id=? AND mutation_key='cancel-status-race-key'",
+    ).bind(submitted.request.id).first<string>("snapshot_json");
+    const notification = await database.prepare(
+      "SELECT payload_json FROM client_portal_notification_outbox WHERE request_id=? AND status_value='cancelled'",
+    ).bind(submitted.request.id).first<string>("payload_json");
+    const audit = await database.prepare(
+      "SELECT details_json FROM audit_log WHERE entity_id=? AND action='client.service_request.cancelled'",
+    ).bind(submitted.request.id).first<string>("details_json");
+    expect(JSON.parse(revision!)).toMatchObject({ previousStatus: "under_review", status: "cancelled" });
+    expect(JSON.parse(notification!)).toMatchObject({ previousStatus: "under_review" });
+    expect(JSON.parse(audit!)).toMatchObject({ previousStatus: "under_review" });
+  });
+
+  it("leaves no cancellation side effects when target authority or catalog changes before the first write", async () => {
+    const original = await createdDraft();
+    const submitted = await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, "race-cancel-submit-0001");
+    if (!submitted || !("request" in submitted)) throw new Error("Expected submitted request");
+    const beforeAuthority = await requestState();
+    expect(await cancelServiceRequest(beforeTransaction(() => database.prepare("UPDATE client_project_grants SET can_request_service=0 WHERE account_id='account-a' AND project_id='project-a'").run()),
+      session, submitted.request.id, "race-cancel-authority-0001")).toBeNull();
+    expect(await requestState()).toEqual(beforeAuthority);
+    await database.prepare("UPDATE client_project_grants SET can_request_service=1 WHERE account_id='account-a' AND project_id='project-a'").run();
+    const beforeCatalog = await requestState();
+    expect(await cancelServiceRequest(beforeTransaction(() => changeCatalog("deactivated")), session,
+      submitted.request.id, "race-cancel-catalog-0001"))
+      .toEqual({ kind: "conflict", reason: "catalog_changed" });
+    expect(await requestState()).toEqual(beforeCatalog);
+  });
+
+  it("fails closed when current exact-target service assignments are unavailable", async () => {
+    const original = await createdDraft();
+    const submitted = await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, "assignment-cancel-submit-0001");
+    if (!submitted || !("request" in submitted)) throw new Error("Expected submitted request");
+    const before = await requestState();
+    const v2Session = { ...session, workspaceId: "pricing-workspace", principalIssuer: "https://issuer.test", principalSubject: "subject-a", principalEmail: "client@example.test" };
+    const assignmentEnv = { ...repositoryEnv,
+      CLIENT_PORTAL_REQUEST_V2_ENABLED: "true", CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true",
+      CLIENT_PORTAL_HIERARCHY_RELATIONS_ENABLED: "true", CLIENT_PORTAL_SERVICE_ASSIGNMENT_POLICY_ENABLED: "true",
+      PROJECT_ALPHA_SERVICE_ASSIGNMENT_SYNC_ENABLED: "true" } as Env;
+    expect(await cancelServiceRequest(assignmentEnv, v2Session, submitted.request.id, "assignment-cancel-0001"))
+      .toEqual({ kind: "conflict", reason: "service_assignments_changed" });
+    expect(await requestState()).toEqual(before);
+  });
+
+  it("fences a workspace request entitlement revoked before the cancellation write", async () => {
+    const original = await createdDraft();
+    const submitted = await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, "workspace-cancel-submit-0001");
+    if (!submitted || !("request" in submitted)) throw new Error("Expected submitted request");
+    const before = await requestState();
+    const v2Session = { ...session, workspaceId: "pricing-workspace", principalIssuer: "https://issuer.test", principalSubject: "subject-a", principalEmail: "client@example.test" };
+    const race = beforeTransaction(() => database.prepare("UPDATE portal_v2_entitlements SET status='revoked',revoked_at=datetime('now') WHERE id='pricing-request-create'").run());
+    const hierarchyEnv = { ...race, CLIENT_PORTAL_HIERARCHY_V2_ENABLED: "true" } as Env;
+    expect(await cancelServiceRequest(hierarchyEnv, v2Session, submitted.request.id, "workspace-cancel-0001")).toBeNull();
     expect(await requestState()).toEqual(before);
   });
 
@@ -460,6 +590,34 @@ describe("service request v2 transaction-time catalog contract", () => {
       .toEqual({ kind: "conflict" });
     expect(await requestState()).toEqual(before);
   });
+
+  // Keep this last: PA command/receipt ledgers are intentionally append-only,
+  // so the deployed schema correctly prevents the shared fixture from deleting
+  // these rows during a later beforeEach cleanup.
+  it("fences PA draft boundaries, including a command reserved before cancellation's first write", async () => {
+    for (const withReceipt of [false, true]) {
+      const original = await createdDraft(`cancel-pa-boundary-draft-${withReceipt}`);
+      const submitted = await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version,
+        `cancel-pa-boundary-submit-${withReceipt}`);
+      if (!submitted || !("request" in submitted)) throw new Error("Expected submitted request");
+      await seedPaDraftBoundary(submitted.request.id, withReceipt);
+      const before = await requestState();
+      expect(await cancelServiceRequest(repositoryEnv, session, submitted.request.id,
+        `cancel-pa-boundary-key-${withReceipt}`)).toEqual({
+          kind: "conflict", reason: withReceipt ? "status_not_cancellable" : "reconciliation_required",
+        });
+      expect(await requestState()).toEqual(before);
+    }
+
+    const original = await createdDraft("cancel-pa-race-draft");
+    const submitted = await submitServiceRequestDraft(repositoryEnv, session, original.id, original.version, "cancel-pa-race-submit");
+    if (!submitted || !("request" in submitted)) throw new Error("Expected submitted request");
+    const before = await requestState();
+    expect(await cancelServiceRequest(beforeTransaction(() => seedPaDraftBoundary(submitted.request.id)),
+      session, submitted.request.id, "cancel-pa-race-key"))
+      .toEqual({ kind: "conflict", reason: "reconciliation_required" });
+    expect(await requestState()).toEqual(before);
+  });
 });
 
 describe("service request v2 routes", () => {
@@ -561,6 +719,44 @@ describe("service request v2 routes", () => {
     }, env);
     expect(response.status).toBe(200);
     expect(submit).toHaveBeenCalledWith(expect.anything(), session, "draft-a", 2, "draft-submit-000001");
+  });
+
+  it("requires same-origin idempotency and returns the typed client cancellation result", async () => {
+    const request = {
+      id: "request-a", projectId: "project-a", requestType: "service" as const, title: draft.title, details: draft.details,
+      location: null, preferredStartAt: null, serviceCategory: "2D Mapping", deliverables: null, siteContactName: null,
+      siteContactEmail: null, siteContactPhone: null, desiredCompletionAt: null, latitude: null, longitude: null,
+      status: "cancelled" as const, createdAt: "2026-08-13 12:02:00", updatedAt: "2026-08-13 12:03:00",
+    };
+    const cancel = vi.fn(async () => ({ kind: "cancelled" as const, request }));
+    const app = createClientPortalRouter({ resolvePrincipal: principal, repository: repository({ cancelServiceRequest: cancel }) });
+    const response = await app.request("https://client.example/service-requests/request-a/cancel", {
+      method: "POST", headers: { Origin: "https://client.example", "Idempotency-Key": "request-cancel-000001" },
+    }, env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ request });
+    expect(cancel).toHaveBeenCalledWith(expect.anything(), session, "request-a", "request-cancel-000001");
+
+    const crossOrigin = await app.request("https://client.example/service-requests/request-a/cancel", {
+      method: "POST", headers: { Origin: "https://attacker.example", "Idempotency-Key": "request-cancel-000002" },
+    }, env);
+    expect(crossOrigin.status).toBe(403);
+    expect(cancel).toHaveBeenCalledTimes(1);
+
+    const blocked = createClientPortalRouter({
+      resolvePrincipal: principal,
+      repository: repository({ cancelServiceRequest: vi.fn(async () => ({
+        kind: "conflict" as const, reason: "reconciliation_required" as const,
+      })) }),
+    });
+    const blockedResponse = await blocked.request("https://client.example/service-requests/request-a/cancel", {
+      method: "POST", headers: { Origin: "https://client.example", "Idempotency-Key": "request-cancel-000003" },
+    }, env);
+    expect(blockedResponse.status).toBe(409);
+    expect(await blockedResponse.json()).toEqual({
+      error: "This request is being reconciled with Project Alpha and cannot be cancelled yet",
+      code: "reconciliation_required",
+    });
   });
 
   it.each([

@@ -357,6 +357,18 @@ export type ClientServiceRequestCreateResult =
   | { kind: "created" | "replayed"; request: ClientServiceRequest }
   | { kind: "conflict" };
 
+export type ClientServiceRequestCancelResult =
+  | { kind: "cancelled" | "replayed"; request: ClientServiceRequest }
+  | {
+      kind: "conflict";
+      reason:
+        | "idempotency_key_reused"
+        | "status_not_cancellable"
+        | "reconciliation_required"
+        | "catalog_changed"
+        | "service_assignments_changed";
+    };
+
 export type ResolveClientPrincipal = (request: Request, env: Env) => Promise<VerifiedClientPrincipal | null>;
 
 export interface ClientPortalRepository {

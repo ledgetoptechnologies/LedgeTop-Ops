@@ -638,6 +638,191 @@ async function loadSubmittedRequest(env: Env, session: ClientPortalSession, requ
   return row ? legacyRequestFromRow(row) : null;
 }
 
+interface CancellableRequestRow {
+  project_id: string | null;
+  status: ClientServiceRequest["status"];
+  title: string;
+}
+
+interface RequestMutationReplayRow {
+  action: string;
+  mutation_fingerprint: string | null;
+  snapshot_json: string;
+}
+
+const cancellableStatuses = new Set<ClientServiceRequest["status"]>([
+  "submitted",
+  "under_review",
+  "accepted_pending_pa_linkage",
+]);
+
+async function loadCancellationTarget(
+  env: Env,
+  session: ClientPortalSession,
+  requestId: string,
+): Promise<CancellableRequestRow | null> {
+  return db(env).prepare(`SELECT r.project_id,r.status,r.title
+    FROM client_service_requests r ${sessionJoin}
+    WHERE r.id=? AND r.account_id=a.id AND r.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
+      ${requestMutationAccess}`)
+    .bind(session.accountId, session.identityId, requestId)
+    .first<CancellableRequestRow>();
+}
+
+async function loadCancellationReplay(
+  env: Env,
+  session: ClientPortalSession,
+  requestId: string,
+  mutationKey: string,
+): Promise<RequestMutationReplayRow | null> {
+  return db(env).prepare(`SELECT revision.action,revision.mutation_fingerprint,revision.snapshot_json
+    FROM request_revisions revision
+    JOIN client_service_requests r ON r.id=revision.request_id
+    ${sessionJoin}
+    WHERE revision.request_id=? AND revision.mutation_key=? AND r.account_id=a.id
+      AND r.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}' ${requestMutationAccess}`)
+    .bind(session.accountId, session.identityId, requestId, mutationKey)
+    .first<RequestMutationReplayRow>();
+}
+
+function isCancellationReplay(row: RequestMutationReplayRow, fingerprint: string): boolean {
+  if (row.action !== "status_changed" || row.mutation_fingerprint !== fingerprint) return false;
+  try {
+    const snapshot = JSON.parse(row.snapshot_json) as { status?: unknown };
+    return snapshot.status === "cancelled";
+  } catch {
+    return false;
+  }
+}
+
+async function cancellationPaDraftConflict(
+  env: Env,
+  requestId: string,
+): Promise<"reconciliation_required" | "status_not_cancellable" | null> {
+  const row = await db(env).prepare(`SELECT
+      EXISTS(SELECT 1 FROM request_pa_draft_quote_commands command
+        WHERE command.request_id=?) command_exists,
+      EXISTS(SELECT 1 FROM request_pa_draft_quote_commands command
+        WHERE command.request_id=? AND NOT EXISTS(
+          SELECT 1 FROM request_pa_draft_quote_receipts receipt WHERE receipt.command_id=command.id
+        )) unresolved_command,
+      EXISTS(SELECT 1 FROM request_pa_draft_quote_receipts receipt
+        WHERE receipt.request_id=?) receipt_exists`)
+    .bind(requestId, requestId, requestId)
+    .first<{ command_exists: number; unresolved_command: number; receipt_exists: number }>();
+  if (row?.unresolved_command) return "reconciliation_required";
+  if (row?.command_exists || row?.receipt_exists) return "status_not_cancellable";
+  return null;
+}
+
+/**
+ * Cancels only pre-work client requests. Catalog, assignment, source, identity,
+ * workspace and exact target authority are all re-read, then fenced again in
+ * the first statement of the atomic batch. Existing terminal/linked work is
+ * deliberately immutable through this client mutation.
+ */
+export async function cancelServiceRequest(
+  env: Env,
+  session: ClientPortalSession,
+  requestId: string,
+  mutationKey: string,
+): Promise<ClientServiceRequestCancelResult | null> {
+  const target = await loadCancellationTarget(env, session, requestId);
+  if (!target) return null;
+  const fingerprint = await sha256(JSON.stringify({ action: "cancel", requestId, version: 1 }));
+  const existing = await loadCancellationReplay(env, session, requestId, mutationKey);
+  if (existing) {
+    if (!isCancellationReplay(existing, fingerprint))
+      return { kind: "conflict", reason: "idempotency_key_reused" };
+    const request = await loadSubmittedRequest(env, session, requestId);
+    return request?.status === "cancelled" ? { kind: "replayed", request } : null;
+  }
+  if (!cancellableStatuses.has(target.status))
+    return { kind: "conflict", reason: "status_not_cancellable" };
+  const paDraftConflict = await cancellationPaDraftConflict(env, requestId);
+  if (paDraftConflict) return { kind: "conflict", reason: paDraftConflict };
+
+  const serviceRows = await db(env).prepare(`SELECT service_public_id publicId,service_source_version sourceVersion
+    FROM client_service_request_services
+    WHERE request_id=? AND service_source_id='${PRIMARY_ALPHA_SOURCE_ID}' ORDER BY ordinal`)
+    .bind(requestId).all<{ publicId: string; sourceVersion: string }>();
+  const services = serviceRows.results;
+  const changed = await changedCatalogServices(env, services);
+  if (changed.length) return { kind: "conflict", reason: "catalog_changed" };
+  const policy = await resolveRequestPolicy(env, session, target.project_id, services);
+  if (policy.kind === "service_assignments_changed")
+    return { kind: "conflict", reason: "service_assignments_changed" };
+  const authority = await resolveRequestAuthority(env, session, target.project_id);
+  if (authority.kind === "unavailable") return null;
+
+  const revisionId = crypto.randomUUID();
+  const database = db(env);
+  const assignmentGuard = reviewedServiceAssignmentGuard(policy.proof, services);
+  const authorityGuard = reviewedRequestAuthorityGuard(authority.proof);
+  const revision = database.prepare(`INSERT INTO request_revisions
+      (id,request_id,revision_number,author_type,author_id,action,snapshot_json,mutation_key,mutation_fingerprint)
+    SELECT ?,r.id,COALESCE((SELECT MAX(existing.revision_number)+1 FROM request_revisions existing WHERE existing.request_id=r.id),1),
+      'client',?,'status_changed',json_object('title',r.title,'projectId',r.project_id,'previousStatus',r.status,
+        'status','cancelled','catalogSourceId',r.catalog_source_id),?,?
+    FROM client_service_requests r ${sessionJoin}
+    WHERE r.id=? AND r.account_id=a.id AND r.catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
+      AND r.status IN ('submitted','under_review','accepted_pending_pa_linkage') ${requestMutationAccess}
+      AND NOT EXISTS(SELECT 1 FROM request_pa_draft_quote_commands command WHERE command.request_id=r.id)
+      AND NOT EXISTS(SELECT 1 FROM request_pa_draft_quote_receipts receipt WHERE receipt.request_id=r.id)
+      AND ${reviewedCatalogGuard} AND ${assignmentGuard.sql} AND ${authorityGuard.sql}`)
+    .bind(revisionId, session.identityId, mutationKey, fingerprint,
+      session.accountId, session.identityId, requestId, reviewedCatalogVersions(services),
+      ...assignmentGuard.bindings, ...authorityGuard.bindings);
+  const statements = [
+    revision,
+    database.prepare(`UPDATE client_service_requests SET status='cancelled',updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now')
+      WHERE id=? AND catalog_source_id='${PRIMARY_ALPHA_SOURCE_ID}'
+        AND status IN ('submitted','under_review','accepted_pending_pa_linkage')
+        AND EXISTS (SELECT 1 FROM request_revisions WHERE id=? AND request_id=client_service_requests.id)`)
+      .bind(requestId, revisionId),
+    database.prepare(`INSERT INTO client_portal_notification_outbox
+      (id,request_id,event_type,status_value,recipient_kind,dedupe_key,payload_json)
+      SELECT ?,r.id,'request_status_changed','cancelled','staff_triage',
+        'request_status_changed:cancelled:staff_triage',json_object('title',r.title,'projectId',r.project_id,
+          'previousStatus',json_extract(revision.snapshot_json,'$.previousStatus'))
+      FROM client_service_requests r
+      JOIN request_revisions revision ON revision.id=? AND revision.request_id=r.id
+      WHERE r.id=? AND r.status='cancelled'`)
+      .bind(crypto.randomUUID(), revisionId, requestId),
+    database.prepare(`INSERT INTO audit_log(actor_type,actor_id,action,entity_type,entity_id,details_json)
+      SELECT 'client',?,'client.service_request.cancelled','client_service_request',r.id,
+        json_object('accountId',?,'projectId',r.project_id,
+          'previousStatus',json_extract(revision.snapshot_json,'$.previousStatus'),'catalogSourceId',r.catalog_source_id)
+      FROM client_service_requests r
+      JOIN request_revisions revision ON revision.id=? AND revision.request_id=r.id
+      WHERE r.id=? AND r.status='cancelled'`)
+      .bind(session.identityId, session.accountId, revisionId, requestId),
+  ];
+  try {
+    const results = await database.batch(statements);
+    if (!results[0]?.meta.changes) {
+      const racedPaDraft = await cancellationPaDraftConflict(env, requestId);
+      if (racedPaDraft) return { kind: "conflict", reason: racedPaDraft };
+      const catalogConflict = await changedCatalogServices(env, services);
+      if (catalogConflict.length) return { kind: "conflict", reason: "catalog_changed" };
+      const assignmentConflict = await currentAssignmentConflict(env, policy.proof, services);
+      if (assignmentConflict) return { kind: "conflict", reason: "service_assignments_changed" };
+      const currentAuthority = await resolveRequestAuthority(env, session, target.project_id);
+      if (currentAuthority.kind === "unavailable") return null;
+      const current = await loadCancellationTarget(env, session, requestId);
+      return current ? { kind: "conflict", reason: "status_not_cancellable" } : null;
+    }
+  } catch {
+    const raced = await loadCancellationReplay(env, session, requestId, mutationKey);
+    if (!raced || !isCancellationReplay(raced, fingerprint))
+      return raced ? { kind: "conflict", reason: "idempotency_key_reused" } : null;
+    const replay = await loadSubmittedRequest(env, session, requestId);
+    return replay?.status === "cancelled" ? { kind: "replayed", request: replay } : null;
+  }
+  const request = await loadSubmittedRequest(env, session, requestId);
+  return request?.status === "cancelled" ? { kind: "cancelled", request } : null;
+}
+
 export async function submitServiceRequestDraft(env: Env, session: ClientPortalSession, draftId: string, expectedVersion: number, mutationKey: string): Promise<ClientServiceDraftSubmitResult | null> {
   const draft = await loadDraft(env, session, draftId);
   if (!draft) return null;
