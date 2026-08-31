@@ -208,14 +208,16 @@ test("add and unlink each require a fresh preview while keeping all source recor
   await expect(page.getByRole("button", { name: "Choose Acme aerial customer" })).toHaveCount(0);
   await page.getByRole("button", { name: "Choose Acme third record" }).click();
   await page.getByRole("button", { name: "Preview link", exact: true }).click(); await confirm(page);
-  await expect(page.getByText(/3 business records belong/)).toBeVisible();
+  const sourceRecordCount = page.getByRole("region", { name: "Linked customer workspace" })
+    .locator("dt", { hasText: /^Source records$/ }).locator("..").locator("dd");
+  await expect(sourceRecordCount).toHaveText("3");
   await page.getByRole("button", { name: "Unlink Technologies record" }).click();
   await expect(page.getByRole("heading", { name: "Record to unlink" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Confirm unlink" })).toBeDisabled();
   await page.getByRole("button", { name: "Cancel review" }).click();
   expect(state.members).toHaveLength(3);
   await page.getByRole("button", { name: "Unlink Technologies record" }).click(); await confirm(page, true);
-  await expect(page.getByText(/2 business records belong/)).toBeVisible();
+  await expect(sourceRecordCount).toHaveText("2");
   await page.getByRole("link", { name: "← Client Hub" }).click();
   await expect(page.locator(".client-directory-card")).toHaveCount(2);
   await expect(page.getByRole("link", { name: "Open Acme technology customer client workspace" })).toBeVisible();
