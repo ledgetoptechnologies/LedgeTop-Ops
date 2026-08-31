@@ -214,6 +214,20 @@ async function verifyContext(env: Env, principal: StaffPrincipal, context: Clien
     throw new HTTPException(409, { message: "Client mapping or permissions changed. Refresh the client workspace to continue" });
 }
 
+/** Reuse the exact live Client Hub authorization and ownership proof for
+ * source-qualified composite workspaces. These exports do not broaden access:
+ * callers still receive a context for one exact source root and must recheck it
+ * after any independently hydrated data. */
+export async function resolveClientHubDetailContext(env: Env, principal: StaffPrincipal, kind: ClientKind, publicId: string,
+  sourceId?: string, rootNamespace?: string): Promise<ClientHubCollectionContext> {
+  return resolveDetailContext(env, principal, kind, publicId, sourceId, rootNamespace);
+}
+
+export async function verifyClientHubDetailContext(env: Env, principal: StaffPrincipal,
+  context: ClientHubCollectionContext): Promise<void> {
+  return verifyContext(env, principal, context);
+}
+
 async function clientHubDetail(env: Env, principal: StaffPrincipal, kind: ClientKind, publicId: string, sourceId?: string, rootNamespace?: string) {
   const context = await resolveDetailContext(env, principal, kind, publicId, sourceId, rootNamespace);
   const workspace = context.root, access = context.access;

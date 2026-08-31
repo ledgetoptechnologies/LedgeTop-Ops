@@ -1,6 +1,7 @@
 import type { Hono } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { mutateBusinessParty, previewBusinessParty, readBusinessParty } from "./business-parties";
+import { readBusinessPartySourceWorkspace } from "./business-party-workspace";
 import type { Env, StaffPrincipal } from "./types";
 
 type App = Hono<{ Bindings: Env; Variables: { principal: StaffPrincipal; administrator: boolean } }>;
@@ -44,4 +45,11 @@ export function registerBusinessPartyRoutes(app: App): void {
   app.post(root, async context => context.json(await mutateBusinessParty(context.env, context.get("principal"), await body(context.req.raw))));
   app.get(`${root}/:partyId`, async context => context.json({ party: await readBusinessParty(context.env,
     context.get("principal"), context.req.param("partyId")) }));
+  app.get(`${root}/:partyId/sources/:linkId`, async context => {
+    const rawVersion = context.req.query("expectedVersion");
+    if (!rawVersion || !/^\d+$/.test(rawVersion))
+      throw new HTTPException(400, { message: "Expected customer version is required" });
+    return context.json(await readBusinessPartySourceWorkspace(context.env, context.get("principal"),
+      context.req.param("partyId"), context.req.param("linkId"), Number(rawVersion)));
+  });
 }

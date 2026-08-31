@@ -459,6 +459,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
       contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} onRefresh={refresh} />
     <p className="client-hub-inventory-note">{data.businessProjects ? "Business projects are separate from the work shared with this client and their portal access." : "These sections show work shared with this client. Full business project history is separate."}</p>
     <div className="dashboard-grid client-hub-detail-grid" key={revision}>
+      <span id="client-business-contacts" className="client-hub-anchor" aria-hidden="true" />
       <Card title="Business contacts">
         <ClientCollection {...collectionProps} collection="businessContacts" label="Business contacts" initial={data.contacts.filter(contact => contact.record_type === "business_contact")} page={data.pages?.businessContacts}
           emptyTitle="No business contacts" emptyDetail="Synchronized business contact records will appear here. They do not grant login access.">
@@ -468,6 +469,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
       {data.client.source_id && data.client.root_namespace === "business" && data.client.kind === "organization" && data.contextVersion &&
         <OrganizationOperationalContacts root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: "organization", publicId: data.client.public_id }}
           contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
+      <span id="client-portal-access" className="client-hub-anchor" aria-hidden="true" />
       {data.externalAccess && portalBasePath && data.client.source_id && data.client.root_namespace && <div className="client-hub-audit-panel">
         <ClientExternalAccessRoster initialPage={data.externalAccess} basePath={portalBasePath}
           contextVersion={data.contextVersion || data.externalAccess.contextVersion}
@@ -490,18 +492,19 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
         emptyTitle="No accounts" emptyDetail="No linked portal account is active.">
         {items => <div className="simple-rows">{items.map(account => <div key={collectionKey("accounts", account)}><div><strong>{account.display_name}</strong><small>Explicit account record</small>{canReviewFeedback && <a href={`/operations/feedback?accountId=${encodeURIComponent(account.id)}`}>View client feedback</a>}</div><StatusPill tone={tone(account.status)}>{account.status}</StatusPill></div>)}</div>}
       </ClientCollection></Card>
+      <span id="client-business-projects" className="client-hub-anchor" aria-hidden="true" />
       {data.businessProjects && <BusinessProjects {...collectionProps} initial={data.businessProjects} page={data.pages?.businessProjects} onWorkspaceRefresh={refresh} />}
       {data.client.root_namespace === "business" && data.client.source_id && data.contextVersion && <ClientBusinessActivity
         root={{ sourceId: data.client.source_id, rootNamespace: "business", kind: data.client.kind, publicId: data.client.public_id }}
         contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} />}
-      {data.client.source_id && data.client.root_namespace && data.contextVersion && <div className="client-hub-audit-panel"><ClientAuditTimeline
+      {data.client.source_id && data.client.root_namespace && data.contextVersion && <div id="client-audit" className="client-hub-audit-panel"><ClientAuditTimeline
         root={{ sourceId: data.client.source_id, rootNamespace: data.client.root_namespace, kind: data.client.kind, publicId: data.client.public_id }}
         contextVersion={data.contextVersion} contextSignal={collectionProps.contextSignal} onInvalidated={invalidate} /></div>}
       <Card title="Shared projects"><ClientCollection {...collectionProps} collection="projects" label="Shared projects" initial={data.projects} page={data.pages?.projects}
         emptyTitle="No project access" emptyDetail="Projects remain unavailable until explicitly granted.">
         {items => <div className="simple-rows">{items.map(project => <div key={collectionKey("projects", project)}><div><strong>{project.project_name}</strong><small>{project.client_name} · {project.can_request_service ? "Requests allowed" : "View access only"}</small></div><StatusPill tone={project.active ? "success" : "neutral"}>{project.active ? "active" : "inactive"}</StatusPill></div>)}</div>}
       </ClientCollection></Card>
-      {data.capabilities.delivery && <Card title="Delivery access">
+      {data.capabilities.delivery && <><span id="client-delivery-access" className="client-hub-anchor" aria-hidden="true" /><Card title="Delivery access">
         <h3 className="client-hub-subheading">Delivery links</h3>
         <ClientCollection {...collectionProps} collection="deliveryGrants" label="Delivery links" initial={data.deliveryGrants} page={data.pages?.deliveryGrants}
           emptyTitle="No delivery links" emptyDetail="Folders and files remain unavailable until explicitly shared.">
@@ -512,7 +515,7 @@ function ClientWorkspace({ route, canReviewFeedback, invitationAccess }: { route
           emptyTitle="No client portal deliveries" emptyDetail="No delivery content has been shared through this client's portal.">
           {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("authenticatedDeliveryGrants", grant)}><div><strong>{grant.r2_prefix}</strong><small>{grant.audience_type} audience · {date(grant.expires_at)}</small></div><GrantStatus status={grant.status} expiresAt={grant.expires_at} /></div>)}</div>}
         </ClientCollection>
-      </Card>}
+      </Card></>}
       {data.capabilities.viewer && <Card title="Shared models"><ClientCollection {...collectionProps} collection="viewerGrants" label="Shared models" initial={data.viewerGrants} page={data.pages?.viewerGrants}
         emptyTitle="No Viewer access" emptyDetail="Models remain unavailable until explicitly granted.">
         {items => <div className="simple-rows">{items.map(grant => <div key={collectionKey("viewerGrants", grant)}><div><strong>{grant.model_title || grant.project_name}</strong><small>{grant.scope_type} access · {date(grant.authorization_expires_at)}</small></div><GrantStatus status={grant.status} expiresAt={grant.authorization_expires_at} /></div>)}</div>}

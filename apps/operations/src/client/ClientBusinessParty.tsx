@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
-import { Card } from "@ltds/ui";
+import { Card, StatusPill } from "@ltds/ui";
 import { api, ApiError } from "./api";
 import { clientDirectoryReturnPath, type ClientKind, type ClientSummary } from "./ClientDirectory";
 
@@ -7,6 +7,20 @@ interface BusinessRoot { sourceId: string; kind: ClientKind; recordId: string }
 interface PartyMember { linkId: string | null; root: BusinessRoot; displayName: string; sourceName: string; detailPath: string | null; availability: "available" | "unavailable" }
 export interface BusinessPartyReference { id: string; displayName: string; version: number; canManage: boolean; needsReview?: boolean }
 interface BusinessParty extends BusinessPartyReference { kind: ClientKind; status: "active"; members: PartyMember[] }
+interface SourceProject { row_key?: string; id: string; name: string; status: string | null; start_date: string | null; end_date: string | null; manager_name: string | null }
+interface SourceContact { row_key?: string; public_id: string; display_name: string; email: string | null; phone: string | null }
+interface SourcePage { available: boolean; reason: string | null; hasMore: boolean; returned: number; limit: number; nextCursor: string | null }
+interface SourceWorkspace {
+  partyId: string; partyVersion: number; member: PartyMember;
+  canonicalRoot: { sourceId: string; rootNamespace: string; kind: ClientKind; publicId: string };
+  contextVersion: string;
+  source: { portalStatus: string; mappingStatus: string; workspaceAvailable: boolean;
+    capabilities: { directory: boolean; requests: boolean; delivery: boolean; viewer: boolean } };
+  projects: { items: SourceProject[]; page: SourcePage };
+  contacts: { items: SourceContact[]; page: SourcePage };
+  entryPoints: { source: string; projects: string; contacts: string; access: string; delivery: string; audit: string };
+}
+interface SourceWorkspaceState { busy: boolean; error: string; data: SourceWorkspace | null }
 type Operation = { action: "create"; displayName: string; roots: BusinessRoot[] }
   | { action: "add"; partyId: string; expectedVersion: number; root: BusinessRoot }
   | { action: "unlink"; partyId: string; expectedVersion: number; linkId: string };
@@ -41,7 +55,48 @@ function previewMatchesOperation(preview: Preview, operation: Operation): boolea
 function sourcePath(member: PartyMember): string {
   return `/clients/sources/${encodeURIComponent(member.root.sourceId)}/business/${member.root.kind === "organization" ? "organizations" : "standalone"}/${encodeURIComponent(member.root.recordId)}`;
 }
+function sameRoot(left: BusinessRoot, right: BusinessRoot): boolean {
+  return left.sourceId === right.sourceId && left.kind === right.kind && left.recordId === right.recordId;
+}
+function validPage(value: SourcePage): boolean {
+  return Boolean(value && typeof value.available === "boolean" && typeof value.hasMore === "boolean"
+    && Number.isInteger(value.returned) && value.returned >= 0 && Number.isInteger(value.limit) && value.limit > 0
+    && (value.nextCursor === null || typeof value.nextCursor === "string"));
+}
+function validSourceWorkspace(value: SourceWorkspace, party: BusinessParty, member: PartyMember): boolean {
+  const base = sourcePath(member);
+  return Boolean(value && value.partyId === party.id && value.partyVersion === party.version && value.member
+    && value.member.linkId === member.linkId && sameRoot(value.member.root, member.root) && value.member.availability === "available"
+    && value.canonicalRoot?.sourceId === member.root.sourceId && value.canonicalRoot.rootNamespace === "business"
+    && value.canonicalRoot.kind === member.root.kind && value.canonicalRoot.publicId === member.root.recordId
+    && typeof value.contextVersion === "string" && value.contextVersion.length > 0 && value.source
+    && typeof value.source.portalStatus === "string" && typeof value.source.mappingStatus === "string"
+    && typeof value.source.workspaceAvailable === "boolean" && value.source.capabilities
+    && typeof value.source.capabilities.directory === "boolean" && typeof value.source.capabilities.requests === "boolean"
+    && typeof value.source.capabilities.delivery === "boolean" && typeof value.source.capabilities.viewer === "boolean"
+    && Array.isArray(value.projects?.items) && validPage(value.projects.page)
+    && value.projects.items.every(row => row && typeof row.id === "string" && typeof row.name === "string"
+      && (row.status === null || typeof row.status === "string"))
+    && Array.isArray(value.contacts?.items) && validPage(value.contacts.page)
+    && value.contacts.items.every(row => row && typeof row.public_id === "string" && typeof row.display_name === "string"
+      && (row.email === null || typeof row.email === "string") && (row.phone === null || typeof row.phone === "string"))
+    && value.entryPoints?.source === base && value.entryPoints.projects === `${base}#client-business-projects`
+    && value.entryPoints.contacts === `${base}#client-business-contacts`
+    && value.entryPoints.access === `${base}#client-portal-access`
+    && value.entryPoints.delivery === `${base}#client-delivery-access`
+    && value.entryPoints.audit === `${base}#client-audit`);
+}
+function sourceStatus(value: string): "neutral" | "success" | "warning" | "danger" {
+  if (["active", "mapped"].includes(value)) return "success";
+  if (["mapping_conflict", "blocked", "closed"].includes(value)) return "danger";
+  if (["projection_pending", "mapping_unavailable", "pending"].includes(value)) return "warning";
+  return "neutral";
+}
 function directoryFilters(): string { return clientDirectoryReturnPath().replace(/^\/clients/, ""); }
+function sourceEntryPath(path: string): string {
+  const hashAt = path.indexOf("#"), base = hashAt === -1 ? path : path.slice(0, hashAt), hash = hashAt === -1 ? "" : path.slice(hashAt);
+  return `${base}${directoryFilters()}${hash}`;
+}
 export function businessPartyHref(id: string): string { return `/clients/parties/${encodeURIComponent(id)}${directoryFilters()}`; }
 function goToParty(id: string, status: "active" | "closed") {
   history.pushState(null, "", status === "closed" ? clientDirectoryReturnPath() : businessPartyHref(id));
@@ -233,10 +288,12 @@ function LinkEditor({ anchor, party, contextSignal, onCancel, onInvalidated, onS
 
 export function ClientBusinessParty({ partyId }: { partyId: string }) {
   const [party, setParty] = useState<BusinessParty | null>(null), [error, setError] = useState("");
-  const [revision, setRevision] = useState(0), [editing, setEditing] = useState(false), [operation, setOperation] = useState<Operation | null>(null);
+  const [revision, setRevision] = useState(0), [sourceRevision, setSourceRevision] = useState(0);
+  const [editing, setEditing] = useState(false), [operation, setOperation] = useState<Operation | null>(null);
+  const [sourceStates, setSourceStates] = useState<Record<string, SourceWorkspaceState>>({});
   const pending = useRef<AbortController | null>(null);
-  const invalidate = (message: string) => { pending.current?.abort(); setParty(null); setEditing(false); setOperation(null); setError(message); };
-  const refresh = () => { pending.current?.abort(); setParty(null); setEditing(false); setOperation(null); setError(""); setRevision(value => value + 1); };
+  const invalidate = (message: string) => { pending.current?.abort(); setParty(null); setSourceStates({}); setEditing(false); setOperation(null); setError(message); };
+  const refresh = () => { pending.current?.abort(); setParty(null); setSourceStates({}); setEditing(false); setOperation(null); setError(""); setRevision(value => value + 1); };
   useEffect(() => {
     const controller = new AbortController(); pending.current = controller; setParty(null); setError("");
     void api<{ party: BusinessParty }>(`${ENDPOINT}/${encodeURIComponent(partyId)}`, { signal: controller.signal }).then(result => {
@@ -250,7 +307,41 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
     }).catch(caught => { if (!controller.signal.aborted) setError(errorText(caught)); });
     return () => controller.abort();
   }, [partyId, revision]);
+  useEffect(() => {
+    if (!party) { setSourceStates({}); return; }
+    const members = party.members.filter(member => member.availability === "available" && member.linkId);
+    const controller = new AbortController(), parentSignal = pending.current?.signal;
+    const abort = () => controller.abort();
+    parentSignal?.addEventListener("abort", abort);
+    setSourceStates(Object.fromEntries(members.map(member => [member.linkId!, { busy: true, error: "", data: null }])));
+    let next = 0;
+    const hydrate = async () => {
+      while (!controller.signal.aborted && next < members.length) {
+        const member = members[next++]!;
+        try {
+          const value = await api<SourceWorkspace>(`${ENDPOINT}/${encodeURIComponent(party.id)}/sources/${encodeURIComponent(member.linkId!)}?expectedVersion=${party.version}`,
+            { signal: controller.signal });
+          if (controller.signal.aborted) return;
+          if (!validSourceWorkspace(value, party, member)) throw new Error("This source workspace response could not be verified. Refresh to try again.");
+          setSourceStates(current => ({ ...current, [member.linkId!]: { busy: false, error: "", data: value } }));
+        } catch (caught) {
+          if (controller.signal.aborted) return;
+          if (isContextError(caught)) { invalidate(errorText(caught)); return; }
+          setSourceStates(current => ({ ...current, [member.linkId!]: { busy: false, error: errorText(caught), data: null } }));
+        }
+      }
+    };
+    void Promise.all(Array.from({ length: Math.min(3, members.length) }, () => hydrate()));
+    return () => { parentSignal?.removeEventListener("abort", abort); controller.abort(); };
+  }, [party, sourceRevision]);
+  useEffect(() => {
+    if (!party || !/^#customer-(?:sources|projects|contacts|access)$/.test(location.hash)) return;
+    const target = document.getElementById(location.hash.slice(1));
+    if (target) requestAnimationFrame(() => target.scrollIntoView({ block: "start" }));
+  }, [party]);
   const saved = (id: string, status: "active" | "closed") => { if (status === "closed") goToParty(id, status); else refresh(); };
+  const loaded = Object.values(sourceStates).filter(state => state.data).map(state => state.data!);
+  const sectionHref = (section: string) => `${location.pathname}${location.search}#${section}`;
   return <section className="business-party-workspace" aria-label="Linked customer workspace">
     <a className="button button-ghost client-hub-back" href={clientDirectoryReturnPath()}>← Client Hub</a>
     {!party && !error && <p role="status">Loading linked customer…</p>}
@@ -259,18 +350,79 @@ export function ClientBusinessParty({ partyId }: { partyId: string }) {
     {party && <>
       <header><div><small>{party.kind === "organization" ? "Organization" : "Individual client"} · Linked customer</small><h2>{party.displayName}</h2></div>
         <button type="button" className="button-ghost" onClick={refresh}>Refresh customer</button></header>
-      <p>{party.members.length} business records belong to this customer. Open a source workspace for its contacts and history. Portal logins, access, billing and notifications remain separate.</p>
+      <p>This customer combines reviewed source records for day-to-day navigation. Project Alpha still owns each record, and access is checked independently for every source.</p>
+      <dl className="business-party-summary" aria-label="Customer summary">
+        <div><dt>Source records</dt><dd>{party.members.length}</dd></div>
+        <div><dt>Available now</dt><dd>{party.members.filter(member => member.availability === "available").length}</dd></div>
+        <div><dt>Project previews</dt><dd>{loaded.reduce((count, source) => count + source.projects.items.length, 0)}</dd></div>
+        <div><dt>Contact previews</dt><dd>{loaded.reduce((count, source) => count + source.contacts.items.length, 0)}</dd></div>
+      </dl>
+      <nav className="business-party-section-nav" aria-label="Customer workspace sections">
+        <a href={sectionHref("customer-sources")}>Source records</a><a href={sectionHref("customer-projects")}>Projects</a>
+        <a href={sectionHref("customer-contacts")}>Contacts</a><a href={sectionHref("customer-access")}>Access, delivery, and audit</a>
+      </nav>
       {party.needsReview && <p role="status">A linked source record is no longer available. Review and unlink that record before adding another. Unavailable record details are not shown.</p>}
       {operation ? <Card><PartyReview operation={operation} contextSignal={pending.current!.signal} onCancel={refresh} onInvalidated={invalidate} onSaved={saved} /></Card>
         : editing ? <Card><LinkEditor party={party} contextSignal={pending.current!.signal} onCancel={refresh} onInvalidated={invalidate} onSaved={saved} /></Card>
         : <>
+          <section id="customer-sources" className="business-party-section" aria-labelledby="customer-sources-title"><h3 id="customer-sources-title">Source records</h3>
+          <p>Names and record identifiers stay source-qualified. An unavailable record is never silently replaced or inferred from another source.</p>
           <div className="business-party-sources">{party.members.map(member => <Card key={member.linkId}>
             <article aria-label={`${member.sourceName} business record`}><h3>{member.displayName}</h3><p>{member.sourceName}</p>
               <small>{member.root.sourceId} · Record {member.root.recordId}</small>
+              <StatusPill tone={member.availability === "available" ? "success" : "warning"}>{member.availability === "available" ? "Available" : "Needs review"}</StatusPill>
+              {member.availability === "unavailable" && <p>The original record is unavailable. Its reviewed link remains visible to an administrator for repair; no source data was deleted here.</p>}
               <div className="business-party-actions">{member.availability !== "unavailable" && member.detailPath && <a className="button button-orange" href={`${sourcePath(member)}${directoryFilters()}`}>Open {member.sourceName} workspace</a>}
                 {party.canManage && member.linkId && <button type="button" className="button-ghost" onClick={() => setOperation({ action: "unlink", partyId: party.id, expectedVersion: party.version, linkId: member.linkId! })}>Unlink {member.sourceName} record</button>}</div>
             </article>
           </Card>)}</div>
+          </section>
+          <section id="customer-projects" className="business-party-section" aria-labelledby="customer-projects-title"><h3 id="customer-projects-title">Projects</h3>
+            <p>Authorized project previews from every available source. Open the owning source workspace to continue or load its full history.</p>
+            <div className="business-party-sources">{party.members.map(member => {
+              const state = member.linkId ? sourceStates[member.linkId] : undefined;
+              return <Card key={`projects:${member.linkId}`} title={member.sourceName}>
+                {member.availability === "unavailable" ? <p>Project history is unavailable until this source link is reviewed.</p>
+                  : state?.busy ? <p role="status">Loading {member.sourceName} projects…</p>
+                    : state?.error ? <div role="alert"><p>{state.error}</p><button type="button" className="button-ghost" onClick={() => setSourceRevision(value => value + 1)}>Retry source details</button></div>
+                      : state?.data ? <><ul className="business-party-preview-list">{state.data.projects.items.map(project => <li key={project.row_key || project.id}>
+                        <div><strong>{project.name}</strong><small>{member.sourceName}{project.manager_name ? ` · Manager: ${project.manager_name}` : ""}</small></div>
+                        <StatusPill tone={project.status === "active" ? "success" : sourceStatus(project.status || "")}>{project.status?.replaceAll("_", " ") || "Status not recorded"}</StatusPill>
+                      </li>)}</ul>{!state.data.projects.items.length && <p>No projects are visible from this source.</p>}
+                        <a className="button button-ghost" href={sourceEntryPath(state.data.entryPoints.projects)}>Open {member.sourceName} projects</a></> : null}
+              </Card>;
+            })}</div>
+          </section>
+          <section id="customer-contacts" className="business-party-section" aria-labelledby="customer-contacts-title"><h3 id="customer-contacts-title">Contacts</h3>
+            <p>Business contacts are informational source records. They do not grant portal or delivery access.</p>
+            <div className="business-party-sources">{party.members.map(member => {
+              const state = member.linkId ? sourceStates[member.linkId] : undefined;
+              return <Card key={`contacts:${member.linkId}`} title={member.sourceName}>
+                {member.availability === "unavailable" ? <p>Contacts are unavailable until this source link is reviewed.</p>
+                  : state?.busy ? <p role="status">Loading {member.sourceName} contacts…</p>
+                    : state?.error ? <p role="alert">{state.error}</p>
+                      : state?.data ? <><ul className="business-party-preview-list">{state.data.contacts.items.map(contact => <li key={contact.row_key || contact.public_id}>
+                        <div><strong>{contact.display_name}</strong><small>{contact.email || contact.phone || "No contact details provided"}</small></div>
+                      </li>)}</ul>{!state.data.contacts.items.length && <p>No business contacts are visible from this source.</p>}
+                        <a className="button button-ghost" href={sourceEntryPath(state.data.entryPoints.contacts)}>Open {member.sourceName} contacts</a></> : null}
+              </Card>;
+            })}</div>
+          </section>
+          <section id="customer-access" className="business-party-section" aria-labelledby="customer-access-title"><h3 id="customer-access-title">Access, delivery, and audit</h3>
+            <p>These links open the exact source workspace. The customer grouping never combines permissions or creates access implicitly.</p>
+            <div className="business-party-sources">{party.members.map(member => {
+              const state = member.linkId ? sourceStates[member.linkId] : undefined;
+              return <Card key={`access:${member.linkId}`} title={member.sourceName}>
+                {member.availability === "unavailable" ? <p>Access details are unavailable until this source link is reviewed.</p>
+                  : state?.busy ? <p role="status">Loading {member.sourceName} access entry points…</p>
+                    : state?.error ? <p role="alert">{state.error}</p>
+                      : state?.data ? <><div className="business-party-access-status"><span>Portal mapping</span><StatusPill tone={sourceStatus(state.data.source.portalStatus)}>{state.data.source.portalStatus.replaceAll("_", " ")}</StatusPill></div>
+                        <div className="business-party-actions"><a className="button button-ghost" href={sourceEntryPath(state.data.entryPoints.access)}>Portal and access</a>
+                          {state.data.source.capabilities.delivery && <a className="button button-ghost" href={sourceEntryPath(state.data.entryPoints.delivery)}>Delivery and shared work</a>}
+                          <a className="button button-ghost" href={sourceEntryPath(state.data.entryPoints.audit)}>Activity and audit</a></div></> : null}
+              </Card>;
+            })}</div>
+          </section>
           {party.canManage && <button type="button" className="button-ghost" disabled={party.members.length >= 32 || party.needsReview} onClick={() => setEditing(true)}>Link another source record</button>}
         </>}
     </>}

@@ -32,6 +32,26 @@ async function fixture(page: Page, options: { linked?: number; manage?: boolean;
     const call: Call = { path, query: url.searchParams, method: request.method(), body: request.postData() ? request.postDataJSON() : null, csrf: request.headers()["x-csrf-token"] };
     state.calls.push(call);
     if (options.handler && await options.handler(route, call)) return;
+    const sourceMember = state.members.find(row => row.linkId
+      && path === `${apiBase}/${partyId}/sources/${encodeURIComponent(row.linkId)}`);
+    if (sourceMember) {
+      const base = sourcePath(sourceMember.root);
+      return route.fulfill({ json: {
+        partyId, partyVersion: state.version, member: sourceMember,
+        canonicalRoot: { sourceId: sourceMember.root.sourceId, rootNamespace: "business", kind: sourceMember.root.kind, publicId: sourceMember.root.recordId },
+        contextVersion: `source-${sourceMember.root.sourceId}`,
+        source: { portalStatus: sourceMember.root.sourceId === primary ? "active" : "not_supported", mappingStatus: "mapped",
+          workspaceAvailable: sourceMember.root.sourceId === primary, capabilities },
+        projects: { items: [{ row_key: `project:${sourceMember.root.sourceId}`, id: `project-${sourceMember.root.sourceId}`,
+          name: `${sourceName(sourceMember.root.sourceId)} project`, status: "active", start_date: null, end_date: null, manager_name: null }],
+          page: { available: true, reason: null, nextCursor: "more-projects", hasMore: true, returned: 1, limit: 5 } },
+        contacts: { items: [{ row_key: `contact:${sourceMember.root.sourceId}`, public_id: `contact-${sourceMember.root.sourceId}`,
+          display_name: `${sourceName(sourceMember.root.sourceId)} contact`, email: `${sourceMember.root.sourceId.split(":").at(-1)}@example.test`, phone: null }],
+          page: { available: true, reason: null, nextCursor: null, hasMore: false, returned: 1, limit: 5 } },
+        entryPoints: { source: base, projects: `${base}#client-business-projects`, contacts: `${base}#client-business-contacts`,
+          access: `${base}#client-portal-access`, delivery: `${base}#client-delivery-access`, audit: `${base}#client-audit` },
+      } });
+    }
     if (path === "/api/client-hub") {
       const records = activeRoots.map(root => ({ ...summary(root), ...(state.members.some(row => row.root.sourceId === root.sourceId) ? {
         business_party_id: partyId, business_party_name: state.name, business_party_member_count: state.members.length,
@@ -144,6 +164,26 @@ test("source workspaces, party links and directory filters survive refresh and b
   await page.goBack(); await expect(page.getByRole("searchbox", { name: "Search clients" })).toHaveValue("Acme");
   await expect(page.getByRole("combobox", { name: "Sort clients" })).toHaveValue("name");
   await page.goForward(); await expect(page.getByRole("heading", { name: "Acme combined customer", exact: true })).toBeVisible();
+});
+
+test("linked customer progressively combines exact-source projects and contacts with refresh-safe section links", async ({ page }) => {
+  const state = await fixture(page, { linked: 2 });
+  await page.goto(`/clients/parties/${partyId}?q=acme&kind=organization#customer-projects`);
+  await expect(page.getByRole("heading", { name: "Projects", exact: true })).toBeVisible();
+  await expect(page.getByText("Drone Services project", { exact: true })).toBeVisible();
+  await expect(page.getByText("Technologies project", { exact: true })).toBeVisible();
+  await expect(page.getByText("Drone Services contact", { exact: true })).toBeVisible();
+  await expect(page.getByText("Technologies contact", { exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "Open Technologies projects" })).toHaveAttribute("href",
+    `${sourcePath(roots[1]!)}?q=acme&kind=organization#client-business-projects`);
+  await expect(page.getByRole("link", { name: "Activity and audit" })).toHaveCount(2);
+  const sourceCalls = state.calls.filter(call => call.path.includes(`${apiBase}/${partyId}/sources/`));
+  expect(sourceCalls).toHaveLength(2);
+  expect(sourceCalls.map(call => call.query.get("expectedVersion"))).toEqual(["1", "1"]);
+  await page.getByRole("link", { name: "Contacts", exact: true }).click();
+  await expect(page).toHaveURL(new RegExp("#customer-contacts$"));
+  await page.goBack();
+  await expect(page).toHaveURL(new RegExp("#customer-projects$"));
 });
 
 test("add and unlink each require a fresh preview while keeping all source records", async ({ page }) => {
