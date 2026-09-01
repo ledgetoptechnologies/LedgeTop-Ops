@@ -132,6 +132,20 @@ describe("Project Alpha snapshot synchronization", () => {
     expect(db.allSql()).toContain("status='failed'");
   });
 
+  it("normalizes surrounding secret-entry whitespace and rejects header control characters before fetch", async () => {
+    const db = new Database(), fetchMock = repeatingSnapshot({});
+    vi.stubGlobal("fetch", fetchMock);
+    await syncProjectAlpha({ ...environment(db), PROJECT_ALPHA_API_KEY: "  secret\r\n" });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls.every(([, init]) => new Headers(init?.headers).get("Authorization") === "Bearer secret")).toBe(true);
+
+    const invalidFetch = vi.fn<typeof fetch>();
+    vi.stubGlobal("fetch", invalidFetch);
+    await expect(syncProjectAlpha({ ...environment(new Database()), PROJECT_ALPHA_API_KEY: "secret\nvalue" }))
+      .rejects.toThrow("project-alpha-api-key-invalid");
+    expect(invalidFetch).not.toHaveBeenCalled();
+  });
+
   it.each([
     [Object.assign(new TypeError("fetch failed"),{cause:{code:"ENOTFOUND",message:"host lookup failed"}}),"project-alpha-network-dns"],
     [Object.assign(new TypeError("fetch failed"),{cause:{code:"CERT_HAS_EXPIRED",message:"certificate expired"}}),"project-alpha-network-tls"],

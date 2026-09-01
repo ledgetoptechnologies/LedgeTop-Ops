@@ -158,7 +158,7 @@ describe("registered source snapshot end-to-end", () => {
       const url = new URL(String(input));
       expect(url.origin).toBe(source.origin); expect(url.pathname).toBe("/tenant-alpha/api/v1/ops/snapshot");
       expect(url.searchParams.get("limit")).toBe("500");
-      expect(new Headers(init?.headers).get("Authorization")).toBe(`Bearer ${source.apiKey}`); expect(init?.redirect).toBe("error");
+      expect(new Headers(init?.headers).get("Authorization")).toBe(`Bearer ${source.apiKey}`); expect(init?.redirect).toBe("manual");
     }
     expect(await snapshotRows(ops, preservedOpsTables)).toEqual(beforeStaff);
     expect(await snapshotRows(delivery, preservedDeliveryTables)).toEqual(beforeDelivery);
@@ -236,5 +236,20 @@ describe("registered source snapshot end-to-end", () => {
     expect(health).toMatchObject({ status: "error", last_error_code: "project-alpha-network-error" });
     expect(runs).toHaveLength(1); expect(runs[0]).toMatchObject({ status: "failed", error_code: "project-alpha-network-error" });
     expect(JSON.stringify([health, runs])).not.toContain(source.origin); expect(JSON.stringify([health, runs])).not.toContain(source.apiKey);
+  }, 30_000);
+
+  it.each([301, 302, 303, 307, 308])("rejects snapshot redirects without following or projecting (%s)", async status => {
+    const source = await secondary(`sync-redirect-${status}`), cancelled = vi.fn();
+    const fetcher = vi.fn<typeof fetch>(async () => new Response(new ReadableStream<Uint8Array>({ cancel: cancelled }), {
+      status, headers: { location: "https://elsewhere.example.test/snapshot" },
+    }));
+    vi.stubGlobal("fetch", fetcher);
+    await expect(syncRegisteredProjectAlpha(env, source.sourceId)).rejects.toThrow("project-alpha-network-redirect");
+    expect(fetcher).toHaveBeenCalledTimes(3);
+    expect(fetcher.mock.calls.every(([, init]) => init?.redirect === "manual")).toBe(true);
+    expect(cancelled).toHaveBeenCalledTimes(3);
+    await assertNoProjection(source.sourceId);
+    expect(await ops.prepare("SELECT last_error_code FROM integration_health WHERE projection_source_id=? AND integration='project-alpha'")
+      .bind(source.sourceId).first("last_error_code")).toBe("project-alpha-network-redirect");
   }, 30_000);
 });

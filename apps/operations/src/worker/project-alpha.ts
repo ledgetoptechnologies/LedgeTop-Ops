@@ -244,6 +244,17 @@ function projectAlphaNetworkError(error:unknown):Error{
   if(detail.includes("redirect"))return new Error("project-alpha-network-redirect");
   return new Error("project-alpha-network-error");
 }
+
+function configuredSnapshotApiKey(value: unknown): string {
+  if (typeof value !== "string") throw new Error("project-alpha-api-key-required");
+  // Secret-entry tools commonly append one trailing line break. Normalize only
+  // surrounding whitespace; reject control characters anywhere in the value
+  // that will actually be sent so header construction cannot fail opaquely.
+  const key = value.trim();
+  if (!key) throw new Error("project-alpha-api-key-required");
+  if (key.length > 8192 || /[\u0000-\u001f\u007f]/.test(key)) throw new Error("project-alpha-api-key-invalid");
+  return key;
+}
 async function cancelSnapshotBody(response:Response,budget?:RecoveryBudget):Promise<void>{
   if(!budget){await response.body?.cancel();return;}
   let timer:ReturnType<typeof setTimeout>|undefined;
@@ -256,7 +267,15 @@ async function fetchSnapshotPage(url: URL, connection: ProjectAlphaSourceConnect
   for(let attempt=1;attempt<=SNAPSHOT_FETCH_ATTEMPTS;attempt+=1){
     try {
       await beforeAttempt?.();
-      const response=await fetch(url,{headers:{Authorization:`Bearer ${connection.apiKey}`,Accept:"application/json"},signal:AbortSignal.timeout(budget?.timeout()??SNAPSHOT_TIMEOUT_MS),redirect:"error"});
+      // Workers rejects redirect:"error" before returning a Response, which
+      // collapses an upstream redirect into an opaque TypeError. Manual mode
+      // preserves the no-follow security boundary while letting us record a
+      // bounded redirect category instead of an unhelpful network failure.
+      const response=await fetch(url,{headers:{Authorization:`Bearer ${connection.apiKey}`,Accept:"application/json"},signal:AbortSignal.timeout(budget?.timeout()??SNAPSHOT_TIMEOUT_MS),redirect:"manual"});
+      if(response.redirected||(response.status>=300&&response.status<400)){
+        await cancelSnapshotBody(response,budget);
+        throw new Error("project-alpha-network-redirect");
+      }
       if(!retryableSnapshotResponse(response)||attempt===SNAPSHOT_FETCH_ATTEMPTS)return response;
       lastError=new Error(`project-alpha-http-${response.status}`);
       await cancelSnapshotBody(response,budget);
@@ -765,8 +784,8 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     await assertProjectAlphaConnectorProof(env,proof);
   }
   const applicationKey = configuredApplicationKey(connection.applicationKey);
+  const snapshotConnection = { ...connection, apiKey: configuredSnapshotApiKey(connection.apiKey) };
   snapshotBaseUrl(connection.baseUrl);
-  if (typeof connection.apiKey !== "string" || !connection.apiKey.trim()) throw new Error("project-alpha-api-key-required");
   const syncId = crypto.randomUUID();
   const runId = crypto.randomUUID();
   const leaseOwner=`snapshot:${runId}`;
@@ -789,13 +808,13 @@ export async function syncProjectAlphaForSource(env: Env, context: ProjectAlphaS
     // Fetch and validate every page before touching projection data. A failed or partial
     // snapshot therefore leaves the last known good projection entirely intact.
     const refreshLease=()=>{budget?.check();return refreshSnapshotLease(env.OPS_DB,leaseOwner,source,proof);};
-    const snapshot = await fetchCompleteSnapshot(connection,refreshLease,budget);
+    const snapshot = await fetchCompleteSnapshot(snapshotConnection,refreshLease,budget);
     await refreshLease();
     // Project Alpha uses OFFSET pagination and assigns generated_at per page.
     // Require two complete, byte-bounded passes to produce identical logical
     // collection fingerprints before any projection or deactivation is allowed.
     const firstFingerprints=await collectionFingerprints(snapshot.data);
-    const stableSnapshot=await fetchCompleteSnapshot(connection,refreshLease,budget);
+    const stableSnapshot=await fetchCompleteSnapshot(snapshotConnection,refreshLease,budget);
     await refreshLease();
     const stableFingerprints=await collectionFingerprints(stableSnapshot.data);
     if(SNAPSHOT_COLLECTIONS.some((collection)=>firstFingerprints[collection]!==stableFingerprints[collection]))throw new Error("project-alpha-snapshot-unstable");

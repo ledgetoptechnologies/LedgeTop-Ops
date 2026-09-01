@@ -135,7 +135,7 @@ describe("source-isolated business snapshots", () => {
       expect(JSON.parse(calendar!.payload_json).source_id).toBe(9);
       expect(await ops.prepare("SELECT id FROM pa_calendar_events WHERE projection_source_id=?").bind(PRIMARY_PROJECT_ALPHA_SOURCE.sourceId).first("id")).toBe("operation:9");
       expect(requests.filter(r => r.host.startsWith("secondary")).every(r => r.authorization === "Bearer secondary-secret")).toBe(true);
-      expect(requests.every(r => r.redirect === "error")).toBe(true);
+      expect(requests.every(r => r.redirect === "manual")).toBe(true);
       const principal = { id: "staff-pa-1", projectAlphaUserId: "1" } as StaffPrincipal;
       const scope = { deniedGlobal: false, global: false, divisions: [], deniedDivisions: [], assigned: true, own: false };
       for (const [table, filter, expectedId] of [
